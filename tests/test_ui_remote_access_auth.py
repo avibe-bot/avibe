@@ -134,6 +134,26 @@ def test_login_redirect_sets_persistent_handshake_cookie(monkeypatch, tmp_path):
     assert f"Max-Age={ui_server.REMOTE_OAUTH_HANDSHAKE_TTL_SECONDS}" in set_cookie
 
 
+def test_login_redirect_sets_stable_device_binding_cookie(monkeypatch, tmp_path):
+    # The store-fallback recovery is bound to this persistent per-browser device
+    # cookie, which (unlike the per-flow handshake state) survives the iOS authorize
+    # excursion. The login redirect must seed it, long-lived.
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+
+    with app.test_request_context("/dashboard", base_url="https://alex.avibe.bot"):
+        response = ui_server._redirect_to_vibe_cloud_login(config)
+
+    device_cookies = [
+        c for c in response.headers.getlist("Set-Cookie")
+        if c.startswith(f"{ui_server.REMOTE_OAUTH_DEVICE_COOKIE_NAME}=")
+    ]
+    assert len(device_cookies) == 1
+    assert f"Max-Age={ui_server.REMOTE_OAUTH_DEVICE_TTL_SECONDS}" in device_cookies[0]
+    assert "HttpOnly" in device_cookies[0]
+    assert "Secure" in device_cookies[0]
+
+
 def test_remote_setup_route_requires_vibe_cloud_login(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
@@ -1122,11 +1142,17 @@ def test_remote_callback_recovers_via_store_when_cookie_state_desyncs(monkeypatc
     secret = config.remote_access.vibe_cloud.session_secret
     client = app.test_client()
 
-    # The flow the user actually approved: a signed state plus its server-side record.
+    # The flow the user actually approved: a signed state plus its server-side record,
+    # bound to this browser's stable device id.
     rid = "approvedrid000"
+    device_id = "device-abc-123"
     state_url = ui_server._make_oauth_state(secret, next_target="/dashboard", rid=rid)
     remote_access.store_oauth_handshake(
-        rid, nonce="nonce-approved", code_verifier="verifier-approved", next_target="/dashboard"
+        rid,
+        nonce="nonce-approved",
+        code_verifier="verifier-approved",
+        next_target="/dashboard",
+        device_hash=ui_server._oauth_device_hash(secret, device_id),
     )
 
     # A stale-but-valid cookie from a *different* GET / generation (different state).
@@ -1141,6 +1167,8 @@ def test_remote_callback_recovers_via_store_when_cookie_state_desyncs(monkeypatc
         },
     )
     client.set_cookie(ui_server.REMOTE_OAUTH_COOKIE_NAME, stale_cookie, domain="alex.avibe.bot")
+    # The device cookie is stable across the excursion and matches the record's bind.
+    client.set_cookie(ui_server.REMOTE_OAUTH_DEVICE_COOKIE_NAME, device_id, domain="alex.avibe.bot")
 
     captured = {}
 
@@ -1189,11 +1217,11 @@ def test_oauth_handshake_store_is_single_use_and_expires(monkeypatch, tmp_path):
     assert remote_access.pop_oauth_handshake(None) is None
 
 
-def test_remote_callback_refuses_store_fallback_without_cookie(monkeypatch, tmp_path):
-    # Defense-in-depth: a callback URL (code+state) must not become a cross-browser
-    # bearer login. With NO same-origin handshake cookie present, the server-side
-    # store must not be used to complete login, even though a record exists for the
-    # signed state. The PWA fix only relaxes the *state-equality* of a present cookie.
+def test_remote_callback_refuses_store_fallback_without_device_binding(monkeypatch, tmp_path):
+    # Login-CSRF block: a code+state callback URL must not complete in a browser that
+    # isn't the one that started the flow. The store record is bound to the attacker's
+    # device id; the victim's browser presents its own (different) device cookie plus a
+    # stale handshake cookie, so the store-fallback must refuse — no token exchange.
     monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     secret = config.remote_access.vibe_cloud.session_secret
@@ -1201,14 +1229,33 @@ def test_remote_callback_refuses_store_fallback_without_cookie(monkeypatch, tmp_
 
     rid = "victimrid0001"
     state_url = ui_server._make_oauth_state(secret, next_target="/dashboard", rid=rid)
-    remote_access.store_oauth_handshake(rid, nonce="n", code_verifier="v", next_target="/dashboard")
+    remote_access.store_oauth_handshake(
+        rid,
+        nonce="n",
+        code_verifier="v",
+        next_target="/dashboard",
+        device_hash=ui_server._oauth_device_hash(secret, "attacker-device"),
+    )
+
+    # Victim browser: a valid-but-stale handshake cookie and its OWN device cookie.
+    stale_cookie = ui_server._make_oauth_cookie(
+        secret,
+        {
+            "state": ui_server._make_oauth_state(secret, next_target="/", rid="victimst0000"),
+            "nonce": "x",
+            "code_verifier": "x",
+            "next": "/",
+            "exp": int(ui_server.datetime.now().timestamp()) + 300,
+        },
+    )
+    client.set_cookie(ui_server.REMOTE_OAUTH_COOKIE_NAME, stale_cookie, domain="alex.avibe.bot")
+    client.set_cookie(ui_server.REMOTE_OAUTH_DEVICE_COOKIE_NAME, "victim-device", domain="alex.avibe.bot")
 
     exchanged = []
     monkeypatch.setattr(
         remote_access, "exchange_oauth_code", lambda *a, **k: exchanged.append(a) or {"claims": {}}
     )
 
-    # No oauth handshake cookie on the client.
     response = client.get(
         f"/auth/callback?code=test-code&state={state_url}",
         base_url="https://alex.avibe.bot",

@@ -120,6 +120,14 @@ REMOTE_OAUTH_RETRY_PARAM = "__vibe_oauth_retry"
 # backgrounding, which silently breaks the callback. A persistent cookie with a
 # short TTL survives. The signed payload's own `exp` enforces the real validity.
 REMOTE_OAUTH_HANDSHAKE_TTL_SECONDS = 300
+# Stable, per-browser binding id. Unlike the per-flow handshake state (which the
+# iOS standalone PWA desyncs), this cookie is set once and reused, so it stays
+# consistent across the cross-origin authorize excursion. The callback's
+# server-side store-fallback is bound to hmac(secret, device_id), which an
+# attacker cannot supply for a victim's browser — this closes the login-CSRF that
+# a bare code+state callback URL would otherwise allow.
+REMOTE_OAUTH_DEVICE_COOKIE_NAME = "__Host-vibe_oauth_device"
+REMOTE_OAUTH_DEVICE_TTL_SECONDS = 180 * 24 * 60 * 60
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 LOG_SOURCES = (
     ("service", "vibe_remote.log", lambda: paths.get_logs_dir() / "vibe_remote.log"),
@@ -1077,6 +1085,30 @@ def _oauth_cookie_signature(secret: str, payload: str) -> str:
     return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def _oauth_device_hash(secret: str, device_id: str) -> str:
+    return hmac.new(secret.encode("utf-8"), f"device:{device_id}".encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _oauth_device_id() -> str:
+    """The caller's stable per-browser binding id from its device cookie (or None)."""
+    return request.cookies.get(REMOTE_OAUTH_DEVICE_COOKIE_NAME) or ""
+
+
+def _oauth_store_record_device_bound(secret: str, record: dict[str, Any] | None) -> bool:
+    """True when the request's device cookie matches the handshake record's binding.
+
+    The store-fallback (cookie-state desync path) is only safe when we can prove the
+    callback comes from the same browser that started the flow. The device cookie is
+    that proof: it is stable across the iOS authorize excursion and an attacker
+    cannot present a victim's value.
+    """
+    expected = (record or {}).get("device_hash")
+    device_id = _oauth_device_id()
+    if not expected or not device_id:
+        return False
+    return hmac.compare_digest(str(expected), _oauth_device_hash(secret, device_id))
+
+
 def _make_oauth_cookie(secret: str, payload: dict[str, Any]) -> str:
     payload_text = quote(json.dumps(payload, separators=(",", ":")), safe="")
     signature = _oauth_cookie_signature(secret, payload_text)
@@ -1206,11 +1238,22 @@ def _redirect_to_vibe_cloud_login(config: V2Config):
         rid=rid,
     )
     nonce = secrets.token_urlsafe(24)
+    # Stable per-browser binding id: reuse the existing device cookie so it stays
+    # consistent across the iOS authorize excursion (it is NOT regenerated per flow,
+    # unlike the handshake state), generating one only on first use.
+    device_id = _oauth_device_id() or secrets.token_urlsafe(24)
     # Persist the handshake server-side keyed by the state id, so the callback can
     # recover the PKCE secrets by the signed URL state even when the cookie desyncs
     # (iOS standalone PWA runs authorize in a separate in-app-browser context). The
-    # cookie below is kept as the strong per-browser binding for normal browsers.
-    remote_access.store_oauth_handshake(rid, nonce=nonce, code_verifier=code_verifier, next_target=next_target)
+    # device_hash binds that recovery to this browser; the cookie below stays the
+    # strong per-browser binding for normal browsers.
+    remote_access.store_oauth_handshake(
+        rid,
+        nonce=nonce,
+        code_verifier=code_verifier,
+        next_target=next_target,
+        device_hash=_oauth_device_hash(cloud.session_secret, device_id),
+    )
     oauth_cookie = _make_oauth_cookie(
         cloud.session_secret,
         {
@@ -1231,6 +1274,15 @@ def _redirect_to_vibe_cloud_login(config: V2Config):
         samesite="Lax",
         path="/",
         max_age=REMOTE_OAUTH_HANDSHAKE_TTL_SECONDS,
+    )
+    response.set_cookie(
+        REMOTE_OAUTH_DEVICE_COOKIE_NAME,
+        device_id,
+        httponly=True,
+        secure=True,
+        samesite="Lax",
+        path="/",
+        max_age=REMOTE_OAUTH_DEVICE_TTL_SECONDS,
     )
     return response
 
@@ -2532,14 +2584,14 @@ def remote_access_auth_callback():
         code_verifier = cookie_state["code_verifier"]
         handshake_nonce = cookie_state.get("nonce")
         next_target = cookie_state.get("next")
-    elif cookie_state is not None and store_record is not None:
-        # Store-fallback for the iOS standalone PWA case. Require a *valid* same-origin
-        # handshake cookie to be present (even though its state differs): that proves
-        # this browser actually started a login on this instance, so the callback URL
-        # alone can't be replayed in a browser that never did (closes the cookie-absent
-        # bearer-login vector). The PWA always carries such a cookie — only its state
-        # desyncs because authorize ran in a separate in-app-browser context.
-        logger.info("oauth callback recovered via server-side handshake (cookie-less or desynced context)")
+    elif store_record is not None and _oauth_store_record_device_bound(cloud.session_secret, store_record):
+        # Store-fallback for the iOS standalone PWA case, where the handshake cookie's
+        # state desyncs (authorize ran in a separate in-app-browser context). Gated on
+        # the stable device cookie matching the handshake record, which proves this is
+        # the same browser that started the flow — so a bare code+state callback URL
+        # can't be replayed in another browser (closes login-CSRF). The PWA carries the
+        # device cookie unchanged across the excursion, so recovery still succeeds.
+        logger.info("oauth callback recovered via server-side handshake (device-bound, desynced cookie context)")
         code_verifier = store_record["code_verifier"]
         handshake_nonce = store_record.get("nonce")
         next_target = store_record.get("next")

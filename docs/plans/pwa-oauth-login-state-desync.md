@@ -76,21 +76,27 @@ Codex review (gpt-5.5, xhigh) hardening applied:
   private name before reading, so concurrent callbacks for one `rid` can't both
   consume the same record.
 
-### Known limitation / follow-up
+### Per-browser binding for the store-fallback (login-CSRF closed)
 
-The fallback still binds finalization to *a* same-origin login attempt, not to the
-*specific* browser tab that approved consent (the cookie/jar that would provide
-that binding is exactly what desyncs on iOS). On an instance that authorizes
-**multiple** identities, an attacker who holds a valid `code+state` for their own
-authorized identity could induce a victim's browser (which has visited the
-instance) to hit that callback and be logged in as the attacker — a login-CSRF.
+A bare `code+state` callback URL must not log a *different* browser in. The
+store-fallback is therefore bound to a **stable per-browser device cookie**
+(`__Host-vibe_oauth_device`):
 
-Bounded today: Avibe instances are single-identity (one authorized email), so no
-second identity exists to mount this. The complete fix, for when multi-identity
-matters, is a same-origin binding the desync can't break: the login-start page
-writes a random nonce to `localStorage`, the store keeps its hash, and a JS
-finalizer on the callback page POSTs `{code, state, nonce}` — tracked as a
-follow-up rather than blocking this PWA fix.
+- The login redirect sets it once (reused on later flows, 180-day TTL). Unlike the
+  per-flow handshake *state*, it is not regenerated per `GET /`, so it stays
+  consistent across the iOS authorize excursion.
+- The handshake record stores `hmac(session_secret, device_id)`. The callback's
+  store-fallback only proceeds when the request's device cookie hashes to that
+  value — proving it is the same browser that started the flow.
+- An attacker cannot present a victim's device cookie (HttpOnly, Secure,
+  per-browser), so inducing a victim to hit an attacker's `code+state` callback no
+  longer logs the victim in as the attacker.
+
+This was chosen over a `localStorage`-nonce + JS-finalizer flow because it needs no
+interstitial pages, no client JS, and no change to the normal-browser login UX —
+while giving the same binding. Its one assumption (iOS keeps the persistent device
+cookie stable across the excursion) is verified on the regression PWA; if that ever
+fails, the `localStorage`-nonce variant is the fallback.
 
 ## Testing
 

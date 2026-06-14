@@ -892,11 +892,14 @@ def _prune_oauth_handshakes(directory: Path) -> None:
             pass
 
 
-def store_oauth_handshake(rid: str, *, nonce: str, code_verifier: str, next_target: str) -> None:
+def store_oauth_handshake(
+    rid: str, *, nonce: str, code_verifier: str, next_target: str, device_hash: str | None = None
+) -> None:
     """Persist a login handshake keyed by the signed state's random id ``rid``.
 
     Single-use, ``OAUTH_HANDSHAKE_TTL_SECONDS`` TTL. Written atomically with
     owner-only permissions under the runtime dir. Invalid ids are ignored.
+    ``device_hash`` binds a later store-fallback recovery to the originating browser.
     """
     if not _OAUTH_HANDSHAKE_RID_RE.match(rid or ""):
         return
@@ -911,6 +914,7 @@ def store_oauth_handshake(rid: str, *, nonce: str, code_verifier: str, next_targ
         "nonce": nonce,
         "code_verifier": code_verifier,
         "next": next_target,
+        "device_hash": device_hash,
         "exp": int(time.time()) + OAUTH_HANDSHAKE_TTL_SECONDS,
     }
     final = directory / f"{rid}.json"
