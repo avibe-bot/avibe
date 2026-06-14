@@ -1,10 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
-import { Check, ChevronUp, Loader2, Pencil, RotateCw } from 'lucide-react';
+import { Check, ChevronUp, Loader2, Pencil } from 'lucide-react';
 
 import { useApi } from '@/context/ApiContext';
-import { useStatus } from '@/context/StatusContext';
 import { useToast } from '@/context/ToastContext';
 import {
   getEnabledPlatforms,
@@ -53,7 +52,6 @@ const tileStyle = (id: string) =>
 export const SettingsPlatformsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
-  const { control } = useStatus();
   const { showToast } = useToast();
   const [config, setConfig] = useState<any>(null);
   // Platforms the user revealed to configure but has NOT enabled yet (no creds
@@ -65,7 +63,7 @@ export const SettingsPlatformsPage: React.FC = () => {
   const [busyPlatform, setBusyPlatform] = useState<string | null>(null);
   // The platform pending a disable confirmation (null = no dialog open).
   const [confirmDisableId, setConfirmDisableId] = useState<string | null>(null);
-  const [restartPhase, setRestartPhase] = useState<'idle' | 'saving' | 'restarting'>('idle');
+  const [restartPhase, setRestartPhase] = useState<'idle' | 'saving'>('idle');
 
   useEffect(() => {
     api.getConfig().then(setConfig).catch(() => {});
@@ -104,44 +102,37 @@ export const SettingsPlatformsPage: React.FC = () => {
     }
   };
 
-  // Persist the enabled set and restart. ``primary`` is intentionally omitted:
+  // Persist the enabled set. ``primary`` is intentionally omitted:
   // the backend normalizes it from ``enabled`` (first enabled, or the workbench
   // when empty), so the UI never chooses or sends one.
-  // Restart only the service (scope:'service') so the open Web UI survives the
-  // config change. If a prior restart is still in flight, the change is saved
-  // but the running restart may have already read the OLD config — so don't
-  // claim success; retry until this save gets its OWN dedicated restart
-  // (service-only restarts are quick, so a few short retries cover it). Only if
-  // it stays busy do we tell the user it's saved while a restart runs.
-  const requestServiceRestart = async (): Promise<boolean> => {
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      try {
-        await control('restart', { scope: 'service' });
-        showToast(t('platform.restartedSuccess'), 'success');
-        return true;
-      } catch (e) {
-        if ((e as { code?: string })?.code !== 'restart_in_progress') {
-          showToast(t('platform.restartFailed'), 'error');
-          return false;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-      }
+  const showApplyResult = (savedConfig: any) => {
+    const runtime = savedConfig?.platform_runtime;
+    if (runtime?.hot_reconciled) {
+      showToast(t('platform.appliedSuccess'), 'success');
+      return true;
     }
-    showToast(t('platform.restartInProgress'), 'warning');
-    return false;
+    if (runtime?.restart_scheduled) {
+      showToast(t('platform.restartedSuccess'), 'success');
+      return true;
+    }
+    if (runtime && runtime.hot_reconciled === false) {
+      showToast(t('platform.restartFailed'), 'error');
+      return false;
+    }
+    showToast(t('common.saved'), 'success');
+    return true;
   };
 
   const persistEnabled = async (nextEnabled: string[]) => {
     setRestartPhase('saving');
     try {
       try {
-        await saveConfig({ ...config, platforms: { enabled: nextEnabled } });
+        const savedConfig = await saveConfig({ ...config, platforms: { enabled: nextEnabled } });
+        showApplyResult(savedConfig);
       } catch {
         showToast(t('common.saveFailed'), 'error');
         return false;
       }
-      setRestartPhase('restarting');
-      await requestServiceRestart();
       return true;
     } finally {
       setRestartPhase('idle');
@@ -213,15 +204,21 @@ export const SettingsPlatformsPage: React.FC = () => {
         showToast(t('common.saved'), 'success');
         return;
       }
-      const nextEnabled = wasEnabled ? enabledPlatforms : [...enabledPlatforms, platform];
-      setRestartPhase('restarting');
+      if (wasEnabled) {
+        if (showApplyResult(savedConfig)) {
+          setRevealed((prev) => prev.filter((p) => p !== platform));
+          setOpenConfig((prev) => (prev === platform ? null : prev));
+        }
+        return;
+      }
+      const nextEnabled = [...enabledPlatforms, platform];
       try {
-        await saveConfig({ ...savedConfig, platforms: { enabled: nextEnabled } });
+        savedConfig = await saveConfig({ ...savedConfig, platforms: { enabled: nextEnabled } });
       } catch {
         showToast(t('platform.restartFailed'), 'error');
         return;
       }
-      if (await requestServiceRestart()) {
+      if (showApplyResult(savedConfig)) {
         setRevealed((prev) => prev.filter((p) => p !== platform));
         setOpenConfig((prev) => (prev === platform ? null : prev));
       }
@@ -256,18 +253,12 @@ export const SettingsPlatformsPage: React.FC = () => {
             aria-live="polite"
             className="sticky top-2 z-10 flex items-center gap-3 rounded-xl border border-cyan/35 bg-cyan/[0.08] px-4 py-3 shadow-[0_8px_24px_-8px_rgba(0,212,255,0.35)]"
           >
-            {restartPhase === 'saving' ? (
-              <Loader2 size={16} className="shrink-0 animate-spin text-cyan" />
-            ) : (
-              <RotateCw size={16} className="shrink-0 animate-spin text-cyan" strokeWidth={2.25} />
-            )}
+            <Loader2 size={16} className="shrink-0 animate-spin text-cyan" />
             <div className="min-w-0 flex-1">
               <div className="text-[13px] font-semibold text-foreground">
-                {restartPhase === 'saving' ? t('platform.applyingConfig') : t('platform.restartingService')}
+                {t('platform.applyingConfig')}
               </div>
-              <div className="mt-0.5 text-[11px] text-muted">
-                {restartPhase === 'saving' ? t('common.saving') : t('dashboard.restarting')}
-              </div>
+              <div className="mt-0.5 text-[11px] text-muted">{t('common.saving')}</div>
             </div>
           </div>
         )}

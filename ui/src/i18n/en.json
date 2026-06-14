@@ -739,6 +739,7 @@
     "configureBeforeEnable": "Configure and save this platform before enabling it.",
     "applyingConfig": "Applying configuration...",
     "restartingService": "Restarting service to apply changes...",
+    "appliedSuccess": "Configuration applied",
     "restartedSuccess": "Configuration applied and service restarted",
     "restartFailed": "Configuration saved, but service restart failed",
     "restartInProgress": "Saved. The service is busy restarting — toggle again shortly to make sure it takes effect.",

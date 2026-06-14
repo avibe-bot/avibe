@@ -106,6 +106,7 @@ class TelegramBot(BaseIMClient):
         self._bot_user: Optional[dict[str, Any]] = None
         self._on_ready: Optional[Callable] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._poll_task: Optional[asyncio.Task[Any]] = None
         self._update_tasks: set[asyncio.Task[Any]] = set()
         self._message_callback_tasks: set[asyncio.Task[Any]] = set()
         self._update_scope_gates: dict[str, _TelegramUpdateScopeGate] = {}
@@ -166,9 +167,13 @@ class TelegramBot(BaseIMClient):
 
     def stop(self):
         self._stop_event.set()
+        loop = self._loop
+        poll_task = self._poll_task
+        if loop is not None and loop.is_running() and poll_task is not None and not poll_task.done():
+            loop.call_soon_threadsafe(poll_task.cancel)
 
     async def shutdown(self) -> None:
-        self._stop_event.set()
+        self.stop()
 
     async def _run(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -180,19 +185,30 @@ class TelegramBot(BaseIMClient):
 
             while not self._stop_event.is_set():
                 try:
-                    updates = await telegram_api.get_updates(
+                    self._poll_task = asyncio.create_task(telegram_api.get_updates(
                         self.config.bot_token,
                         self._offset,
                         proxy_url=self._proxy_url,
-                    )
+                    ))
+                    try:
+                        updates = await self._poll_task
+                    except asyncio.CancelledError:
+                        if self._stop_event.is_set():
+                            break
+                        raise
+                    finally:
+                        self._poll_task = None
                     for update in updates.get("result", []):
                         await self._wait_for_update_capacity()
                         self._offset = int(update["update_id"]) + 1
                         self._spawn_update_task(update)
                 except Exception as err:
+                    if self._stop_event.is_set():
+                        break
                     logger.warning("Telegram poll loop error: %s", err, exc_info=True)
                     await asyncio.sleep(2)
         finally:
+            self._poll_task = None
             await self._drain_background_tasks()
 
     def _spawn_update_task(self, update: dict[str, Any]) -> None:
@@ -302,6 +318,9 @@ class TelegramBot(BaseIMClient):
             await self._handle_message(message)
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
+        if self._controller and hasattr(self._controller, "_refresh_config_from_disk"):
+            self._controller._refresh_config_from_disk()
+
         context = self._build_message_context(message)
         if context is None:
             return

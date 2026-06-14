@@ -739,6 +739,7 @@
     "configureBeforeEnable": "请先配置并保存该平台，再启用它。",
     "applyingConfig": "正在应用配置...",
     "restartingService": "正在重启服务以使配置生效...",
+    "appliedSuccess": "配置已应用",
     "restartedSuccess": "配置已应用，服务已重启",
     "restartFailed": "配置已保存，但服务重启失败",
     "restartInProgress": "更改已保存。服务正忙于重启——请稍后再次切换以确保生效。",

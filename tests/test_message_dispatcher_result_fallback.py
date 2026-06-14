@@ -53,6 +53,20 @@ class _StubIMClient:
         return self._upload_id
 
 
+class _DropClient(_StubIMClient):
+    async def send_message(self, context, text, parse_mode=None, reply_to=None):
+        self.sent_messages.append((context.channel_id, text, parse_mode))
+        return None
+
+    async def send_message_with_buttons(self, context, text, keyboard, parse_mode=None):
+        self.sent_messages.append((context.channel_id, text, parse_mode))
+        return None
+
+    async def upload_markdown(self, context, title, content, filetype="markdown"):
+        self.uploaded_markdowns.append((context.channel_id, title, content, filetype))
+        return None
+
+
 class _NativeMarkdownIMClient(_StubIMClient):
     def __init__(self):
         super().__init__()
@@ -207,6 +221,28 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
         context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
         with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
             result = await dispatcher.emit_agent_message(context, "notify", "heads up")
+        self.assertIsNone(result)
+        persist.assert_not_called()
+
+    async def test_removed_platform_notify_drop_is_not_persisted(self):
+        controller = _StubController(platform="discord", im_client=_DropClient())
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(user_id="U1", channel_id="C1", platform="discord")
+
+        with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
+            result = await dispatcher.emit_agent_message(context, "notify", "late notify")
+
+        self.assertIsNone(result)
+        persist.assert_not_called()
+
+    async def test_removed_platform_result_drop_is_not_persisted(self):
+        controller = _StubController(platform="discord", im_client=_DropClient())
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(user_id="U1", channel_id="C1", platform="discord")
+
+        with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
+            result = await dispatcher.emit_agent_message(context, "result", "late result")
+
         self.assertIsNone(result)
         persist.assert_not_called()
 

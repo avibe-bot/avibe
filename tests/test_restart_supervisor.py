@@ -188,6 +188,56 @@ def test_restart_job_prepares_show_runtime_after_service_start(monkeypatch, tmp_
     assert runtime.read_json(runtime.get_restart_status_path())["state"] == "succeeded"
 
 
+def test_restart_job_schedules_pending_followup_after_success(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    paths.get_runtime_pid_path().write_text("111", encoding="utf-8")
+    calls = []
+    scheduled: list[dict] = []
+
+    monkeypatch.setattr(restart_supervisor, "_stop_runtime_for_restart", lambda stop_ui=True: _fake_stop_runtime(calls))
+    monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", lambda start_ui=True: _fake_start_runtime(calls))
+    monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
+
+    original_schedule_restart = restart_supervisor.schedule_restart
+
+    def _schedule_restart(**kwargs):
+        scheduled.append(kwargs)
+        return {"job_id": "followup"}
+
+    restart_supervisor.mark_pending_restart(
+        trigger="web-ui-config-pending",
+        scope="service",
+        reason="restart_in_progress",
+        restart_job_id="jobpending",
+    )
+    monkeypatch.setattr(restart_supervisor, "schedule_restart", _schedule_restart)
+
+    try:
+        rc = restart_supervisor._run_restart_job(
+            job_id="jobpending",
+            delay_seconds=0,
+            vibe_path="/bin/vibe",
+            trigger="web-ui",
+            scope="service",
+        )
+    finally:
+        monkeypatch.setattr(restart_supervisor, "schedule_restart", original_schedule_restart)
+
+    assert rc == 0
+    assert scheduled == [
+        {
+            "delay_seconds": 0.0,
+            "vibe_path": "/bin/vibe",
+            "trigger": "web-ui-config-pending",
+            "scope": "service",
+        }
+    ]
+    assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
+
+
 def test_restart_job_aborts_when_stop_fails(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
     paths.ensure_data_dirs()

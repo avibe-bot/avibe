@@ -99,6 +99,36 @@ def test_dispatch_async_missing_socket_raises_unavailable(tmp_path):
         asyncio.run(internal_client.dispatch_async({"session_id": "s", "text": "x"}, socket_path=sock))
 
 
+def test_reconcile_platforms_round_trip(tmp_path):
+    app = FastAPI()
+    calls: list[bool] = []
+
+    @app.post("/internal/reconcile-platforms")
+    async def _reconcile():
+        calls.append(True)
+        return {"ok": True, "rebuilt": ["slack"]}
+
+    sock = tmp_path / "dispatch.sock"
+    sock.touch()
+
+    async def _go():
+        fake_transport = httpx.ASGITransport(app=app)
+        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=fake_transport):
+            return await internal_client.reconcile_platforms(socket_path=sock)
+
+    result = asyncio.run(_go())
+
+    assert calls == [True]
+    assert result["status_code"] == 200
+    assert result["body"] == {"ok": True, "rebuilt": ["slack"]}
+
+
+def test_reconcile_platforms_missing_socket_raises_unavailable(tmp_path):
+    sock = tmp_path / "missing.sock"
+    with pytest.raises(internal_client.InternalServerUnavailable):
+        asyncio.run(internal_client.reconcile_platforms(socket_path=sock))
+
+
 def test_turn_state_os_error_raises_unavailable(tmp_path):
     """Socket files can exist on Docker Desktop bind mounts while connection
     operations raise platform ``OSError`` values (for example errno 95). The UI

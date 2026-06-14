@@ -38,6 +38,7 @@ class PlatformDescriptor:
     formatter_class: str
     credential_fields: tuple[str, ...]
     capabilities: PlatformCapabilities
+    runtime_reconcile_fields: tuple[str, ...] = ()
     # Structural distinction between real IM transports ("im") and the
     # always-on in-process Avibe Workbench ("workbench"), which lives in the
     # same registry but is never a configurable IM platform. IM-only code paths
@@ -88,6 +89,9 @@ class PlatformDescriptor:
         formatter_cls = _load_attr(self.formatter_module, self.formatter_class)
         return formatter_cls()
 
+    def runtime_reconcile_field_names(self) -> tuple[str, ...]:
+        return self.runtime_reconcile_fields or self.credential_fields
+
     def to_public_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -127,6 +131,7 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
         formatter_module="modules.im.formatters",
         formatter_class="SlackFormatter",
         credential_fields=("bot_token",),
+        runtime_reconcile_fields=("bot_token", "app_token", "proxy_url"),
         capabilities=PlatformCapabilities(
             supports_channels=True,
             supports_threads=True,
@@ -148,6 +153,7 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
         formatter_module="modules.im.formatters",
         formatter_class="DiscordFormatter",
         credential_fields=("bot_token",),
+        runtime_reconcile_fields=("bot_token", "proxy_url"),
         capabilities=PlatformCapabilities(
             supports_channels=True,
             supports_threads=True,
@@ -169,6 +175,7 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
         formatter_module="modules.im.formatters",
         formatter_class="TelegramFormatter",
         credential_fields=("bot_token",),
+        runtime_reconcile_fields=("bot_token", "use_webhook", "webhook_url", "webhook_secret_token", "proxy_url"),
         capabilities=PlatformCapabilities(
             supports_channels=True,
             supports_threads=False,
@@ -192,6 +199,7 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
         formatter_module="modules.im.formatters",
         formatter_class="FeishuFormatter",
         credential_fields=("app_id", "app_secret"),
+        runtime_reconcile_fields=("app_id", "app_secret", "domain", "proxy_url"),
         capabilities=PlatformCapabilities(
             supports_channels=True,
             supports_threads=True,
@@ -214,6 +222,7 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
         formatter_module="modules.im.formatters",
         formatter_class="WeChatFormatter",
         credential_fields=("bot_token",),
+        runtime_reconcile_fields=("bot_token", "base_url", "cdn_base_url", "proxy_url"),
         capabilities=PlatformCapabilities(
             supports_channels=False,
             supports_threads=False,

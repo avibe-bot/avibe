@@ -313,6 +313,247 @@ def test_config_routes_redact_platform_and_gateway_secrets(monkeypatch, tmp_path
         assert "client_secret" not in data["gateway"]
 
 
+def test_config_post_hot_reconciles_platform_enablement(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    from vibe import api
+    from vibe import internal_client
+
+    payload = _full_config_payload()
+    payload["platforms"] = {"enabled": ["discord"], "primary": "discord"}
+    api.save_config(payload)
+
+    reconcile_calls = []
+    restart_calls = []
+
+    async def _reconcile_platforms():
+        reconcile_calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "added": ["slack"]}}
+
+    monkeypatch.setattr(internal_client, "reconcile_platforms", _reconcile_platforms)
+    monkeypatch.setattr(ui_server, "_schedule_service_restart_for_config_fallback", lambda: restart_calls.append(True) or {"ok": True})
+
+    next_payload = {
+        **payload,
+        "platforms": {"enabled": ["discord", "slack"], "primary": "discord"},
+        "slack": {"bot_token": "xoxb-hot-token", "app_token": "xapp-hot-token"},
+    }
+    client = app.test_client()
+    response = client.post("/api/config", json=next_payload, headers=csrf_headers(client))
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["platform_runtime"]["hot_reconciled"] is True
+    assert reconcile_calls == [True]
+    assert restart_calls == []
+
+
+def test_config_post_hot_reconciles_platform_runtime_credential_change(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    from vibe import api
+    from vibe import internal_client
+
+    payload = _full_config_payload()
+    payload["platforms"] = {"enabled": ["discord"], "primary": "discord"}
+    api.save_config(payload)
+
+    reconcile_calls = []
+
+    async def _reconcile_platforms():
+        reconcile_calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "rebuilt": ["discord"]}}
+
+    monkeypatch.setattr(internal_client, "reconcile_platforms", _reconcile_platforms)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/config",
+        json={"discord": {"bot_token": "discord-new-token-12345"}},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["platform_runtime"]["body"]["rebuilt"] == ["discord"]
+    assert reconcile_calls == [True]
+
+
+def test_platform_runtime_fields_changed_detects_primary_only_change():
+    from config.v2_config import V2Config
+
+    payload = _full_config_payload()
+    payload["platforms"] = {"enabled": ["discord", "slack"], "primary": "discord"}
+    payload["slack"] = {"bot_token": "xoxb-hot-token", "app_token": "xapp-hot-token"}
+    previous = V2Config.from_payload(payload)
+    current = V2Config.from_payload(
+        {
+            **payload,
+            "platform": "slack",
+            "platforms": {"enabled": ["discord", "slack"], "primary": "slack"},
+        }
+    )
+
+    assert (
+        ui_server._platform_runtime_fields_changed(
+            previous,
+            current,
+            {"platforms": {"enabled": ["discord", "slack"], "primary": "slack"}},
+        )
+        is True
+    )
+
+
+def test_config_post_non_platform_change_does_not_reconcile_platforms(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    from vibe import api
+    from vibe import internal_client
+
+    payload = _full_config_payload()
+    payload["platforms"] = {"enabled": ["discord"], "primary": "discord"}
+    api.save_config(payload)
+
+    async def _reconcile_platforms():
+        raise AssertionError("platform reconcile should not run")
+
+    monkeypatch.setattr(internal_client, "reconcile_platforms", _reconcile_platforms)
+
+    client = app.test_client()
+    response = client.post("/api/config", json={"show_duration": False}, headers=csrf_headers(client))
+
+    assert response.status_code == 200
+    assert "platform_runtime" not in response.get_json()
+
+
+def test_config_post_schedules_service_restart_when_hot_reconcile_unavailable(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    from vibe import api
+    from vibe import internal_client
+
+    payload = _full_config_payload()
+    payload["platforms"] = {"enabled": ["discord"], "primary": "discord"}
+    api.save_config(payload)
+
+    async def _reconcile_platforms():
+        raise internal_client.InternalServerUnavailable("missing socket")
+
+    restart_calls = []
+    monkeypatch.setattr(internal_client, "reconcile_platforms", _reconcile_platforms)
+    monkeypatch.setattr(
+        ui_server,
+        "_schedule_service_restart_for_config_fallback",
+        lambda: restart_calls.append(True) or {"ok": True, "restart": {"job_id": "job-hot-fallback"}},
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/config",
+        json={"platforms": {"enabled": ["discord", "slack"], "primary": "discord"}, "slack": {"bot_token": "xoxb-hot-token", "app_token": "xapp-hot-token"}},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    runtime = response.get_json()["platform_runtime"]
+    assert runtime["hot_reconciled"] is False
+    assert runtime["restart_scheduled"] is True
+    assert restart_calls == [True]
+
+
+def test_config_post_schedules_service_restart_when_hot_reconcile_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    from vibe import api
+    from vibe import internal_client
+
+    payload = _full_config_payload()
+    payload["platforms"] = {"enabled": ["discord"], "primary": "discord"}
+    api.save_config(payload)
+
+    async def _reconcile_platforms():
+        return {
+            "status_code": 500,
+            "body": {"ok": False, "error": "IM thread for discord did not stop within timeout"},
+        }
+
+    restart_calls = []
+    monkeypatch.setattr(internal_client, "reconcile_platforms", _reconcile_platforms)
+    monkeypatch.setattr(
+        ui_server,
+        "_schedule_service_restart_for_config_fallback",
+        lambda: restart_calls.append(True) or {"ok": True, "restart": {"job_id": "job-hot-failure"}},
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/config",
+        json={"discord": {"bot_token": "discord-new-token-12345"}},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    runtime = response.get_json()["platform_runtime"]
+    assert runtime["hot_reconciled"] is False
+    assert runtime["restart_scheduled"] is True
+    assert runtime["body"]["error"] == "IM thread for discord did not stop within timeout"
+    assert restart_calls == [True]
+
+
+def test_config_restart_fallback_marks_pending_restart_when_restart_in_flight(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+    restart_status = {
+        "ok": None,
+        "state": "running",
+        "job_id": "job-in-flight",
+        "supervisor_pid": 4242,
+    }
+    runtime.write_json(runtime.get_restart_status_path(), restart_status)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: True)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "schedule_restart",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("must not overlap restart jobs")),
+    )
+
+    result = ui_server._schedule_service_restart_for_config_fallback()
+
+    assert result["ok"] is True
+    assert result["code"] == "restart_pending_after_in_progress"
+    assert result["restart"] == restart_status
+    pending = runtime.read_json(restart_supervisor._pending_restart_path())
+    assert pending["restart_job_id"] == "job-in-flight"
+    assert pending["trigger"] == "web-ui-config-pending"
+    assert pending["scope"] == "service"
+
+
+def test_config_restart_fallback_schedules_when_in_flight_finishes_after_marker(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+    restart_status = {
+        "ok": None,
+        "state": "running",
+        "job_id": "job-in-flight",
+        "supervisor_pid": 4242,
+    }
+    runtime.write_json(runtime.get_restart_status_path(), restart_status)
+    in_flight_results = iter([True, False])
+    scheduled: list[dict] = []
+
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: next(in_flight_results))
+    monkeypatch.setattr(restart_supervisor, "schedule_restart", lambda **kwargs: scheduled.append(kwargs) or {"job_id": "followup"})
+    monkeypatch.setattr(runtime, "read_status", lambda: {"service_pid": 11, "ui_pid": 22})
+
+    result = ui_server._schedule_service_restart_for_config_fallback()
+
+    assert result["ok"] is True
+    assert result["code"] == "restart_scheduled_after_in_flight_finished"
+    assert result["restart"] == {"job_id": "followup"}
+    assert scheduled == [{"delay_seconds": 0.0, "trigger": "web-ui-config", "scope": "service"}]
+    assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
+
+
 def test_static_ui_assets_use_cache_headers(monkeypatch, tmp_path):
     ui_dist = tmp_path / "dist"
     assets_dir = ui_dist / "assets"

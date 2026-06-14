@@ -156,6 +156,7 @@ def test_create_app_exposes_minimal_endpoints():
     # flow re-publishes its SSE chunks as ``show.dispatch``).
     assert ("/internal/health", ("GET",)) in routes
     assert ("/internal/dispatch_async", ("POST",)) in routes
+    assert ("/internal/reconcile-platforms", ("POST",)) in routes
     assert ("/internal/cancel/{session_id}", ("POST",)) in routes
     assert ("/internal/dispatch", ("POST",)) in routes
 
@@ -177,6 +178,53 @@ def test_health_endpoint():
     resp = asyncio.run(_health_round_trip())
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "service": "vibe-remote-internal", "version": 1}
+
+
+def test_reconcile_platforms_endpoint_calls_controller(monkeypatch):
+    controller = _build_controller_double()
+    calls = []
+
+    async def reconcile_platforms(config):
+        calls.append(config)
+        return {"ok": True, "added": ["discord"]}
+
+    controller.reconcile_platforms = reconcile_platforms
+    monkeypatch.setattr("config.v2_config.V2Config.load", lambda: "v2-config")
+    monkeypatch.setattr("config.v2_compat.to_app_config", lambda config: f"compat:{config}")
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post("/internal/reconcile-platforms")
+
+    resp = asyncio.run(_go())
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "added": ["discord"]}
+    assert calls == ["compat:v2-config"]
+
+
+def test_reconcile_platforms_endpoint_reports_controller_failure(monkeypatch):
+    controller = _build_controller_double()
+
+    async def reconcile_platforms(config):
+        raise RuntimeError("IM thread for discord did not stop within timeout")
+
+    controller.reconcile_platforms = reconcile_platforms
+    monkeypatch.setattr("config.v2_config.V2Config.load", lambda: "v2-config")
+    monkeypatch.setattr("config.v2_compat.to_app_config", lambda config: f"compat:{config}")
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post("/internal/reconcile-platforms")
+
+    resp = asyncio.run(_go())
+
+    assert resp.status_code == 500
+    assert resp.json() == {"ok": False, "error": "IM thread for discord did not stop within timeout"}
 
 
 async def _dispatch_round_trip(body: dict) -> httpx.Response:

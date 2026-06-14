@@ -618,18 +618,30 @@ def test_config_post_does_not_call_init_sessions():
     source = Path("vibe/ui_server.py").read_text(encoding="utf-8")
     module = ast.parse(source)
 
-    config_post = next(
-        node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "config_post"
-    )
+    function_types = (ast.FunctionDef, ast.AsyncFunctionDef)
+    functions = {node.name: node for node in module.body if isinstance(node, function_types)}
+    pending = ["config_post"]
+    save_path_nodes = {}
+    while pending:
+        name = pending.pop()
+        if name in save_path_nodes:
+            continue
+        node = functions[name]
+        save_path_nodes[name] = node
+        for child in ast.walk(node):
+            if isinstance(child, ast.Name) and child.id in functions and child.id != name:
+                pending.append(child.id)
 
-    calls_init_sessions = False
-    for node in ast.walk(config_post):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            if isinstance(node.func.value, ast.Name) and node.func.value.id == "api" and node.func.attr == "init_sessions":
-                calls_init_sessions = True
-                break
+    assert "_save_config_and_runtime_decisions" in save_path_nodes
 
-    assert calls_init_sessions is False
+    calls_init_sessions = []
+    for name, function_node in save_path_nodes.items():
+        for node in ast.walk(function_node):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                if isinstance(node.func.value, ast.Name) and node.func.value.id == "api" and node.func.attr == "init_sessions":
+                    calls_init_sessions.append(name)
+
+    assert calls_init_sessions == []
 
 
 def test_settings_platforms_apply_uses_parent_platform_identity():

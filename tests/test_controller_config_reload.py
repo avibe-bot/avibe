@@ -1,16 +1,18 @@
 from types import SimpleNamespace
 
-from config.v2_config import DiscordConfig, V2Config
+from config.v2_config import DiscordConfig, TelegramConfig, V2Config
 from core.controller import Controller
 
 
-def _config_payload(discord_payload: dict) -> dict:
+def _config_payload(discord_payload: dict | None = None, telegram_payload: dict | None = None) -> dict:
+    platform = "telegram" if telegram_payload is not None else "discord"
     return {
-        "platform": "discord",
-        "platforms": {"enabled": ["discord"], "primary": "discord"},
+        "platform": platform,
+        "platforms": {"enabled": [platform], "primary": platform},
         "mode": "self_host",
         "version": "v2",
-        "discord": discord_payload,
+        "discord": discord_payload or {},
+        "telegram": telegram_payload or {},
         "runtime": {"default_cwd": "_tmp", "log_level": "INFO"},
         "agents": {
             "default_backend": "opencode",
@@ -28,7 +30,7 @@ def test_refresh_config_updates_platform_message_settings(tmp_path, monkeypatch)
     controller = Controller.__new__(Controller)
     controller.config = V2Config.from_payload(
         _config_payload(
-            {
+            discord_payload={
                 "bot_token": "discord-token",
                 "require_mention": stale_discord_config.require_mention,
             }
@@ -39,7 +41,7 @@ def test_refresh_config_updates_platform_message_settings(tmp_path, monkeypatch)
 
     latest_config = V2Config.from_payload(
         _config_payload(
-            {
+            discord_payload={
                 "bot_token": "discord-token",
                 "require_mention": False,
             }
@@ -50,6 +52,44 @@ def test_refresh_config_updates_platform_message_settings(tmp_path, monkeypatch)
     controller._refresh_config_from_disk()
 
     assert stale_discord_config.require_mention is False
+
+
+def test_refresh_config_updates_telegram_option_only_settings(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+
+    stale_telegram_config = TelegramConfig(
+        bot_token="123456:test-token",
+        require_mention=True,
+        forum_auto_topic=True,
+    )
+    controller = Controller.__new__(Controller)
+    controller.config = V2Config.from_payload(
+        _config_payload(
+            telegram_payload={
+                "bot_token": "123456:test-token",
+                "require_mention": stale_telegram_config.require_mention,
+                "forum_auto_topic": stale_telegram_config.forum_auto_topic,
+            }
+        )
+    )
+    controller.im_clients = {"telegram": SimpleNamespace(config=stale_telegram_config)}
+    controller._config_mtime = None
+
+    latest_config = V2Config.from_payload(
+        _config_payload(
+            telegram_payload={
+                "bot_token": "123456:test-token",
+                "require_mention": False,
+                "forum_auto_topic": False,
+            }
+        )
+    )
+    latest_config.save()
+
+    controller._refresh_config_from_disk()
+
+    assert stale_telegram_config.require_mention is False
+    assert stale_telegram_config.forum_auto_topic is False
 
 
 def test_refresh_config_updates_remote_access_for_audio_asr(tmp_path, monkeypatch) -> None:

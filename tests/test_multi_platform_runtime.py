@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.im.base import BaseIMClient, BaseIMConfig, MessageContext
-from modules.im.multi import MultiIMClient
+from modules.im.multi import IMClientRemovalError, MultiIMClient
 from modules.settings_manager import MultiSettingsManager
 from config.v2_sessions import ActivePollInfo
 from core.processing_indicator import ProcessingIndicatorService
@@ -24,13 +26,18 @@ class _StubConfig(BaseIMConfig):
 
 
 class _StubClient(BaseIMClient):
-    def __init__(self, name: str, *, supports_editing: bool = True):
+    def __init__(self, name: str, *, supports_editing: bool = True, run_until_stopped: bool = False):
         super().__init__(_StubConfig())
         self.name = name
         self._supports_editing = supports_editing
+        self._run_until_stopped = run_until_stopped
+        self._stop_event = threading.Event()
+        self.started = threading.Event()
         self.sent = []
         self.removed = []
         self.dismissed = []
+        self.question_modals = []
+        self.stopped = False
 
     async def send_message(self, context, text, parse_mode=None, reply_to=None):
         self.sent.append((context.platform, context.channel_id, text))
@@ -52,6 +59,10 @@ class _StubClient(BaseIMClient):
     async def dismiss_form_message(self, context):
         self.dismissed.append((context.platform, context.message_id))
 
+    async def open_question_modal(self, trigger_id, context, pending, callback_prefix="claude_question"):
+        self.question_modals.append((trigger_id, context.platform, pending, callback_prefix))
+        return self.name
+
     async def answer_callback(self, callback_id, text=None, show_alert=False):
         return True
 
@@ -59,7 +70,14 @@ class _StubClient(BaseIMClient):
         return None
 
     def run(self):
+        self.started.set()
+        if self._run_until_stopped:
+            self._stop_event.wait()
         return None
+
+    def stop(self):
+        self.stopped = True
+        self._stop_event.set()
 
     async def get_user_info(self, user_id: str):
         return {"id": user_id, "name": self.name}
@@ -93,6 +111,33 @@ class _StubClient(BaseIMClient):
         return text
 
 
+class _ModalLessClient(_StubClient):
+    open_question_modal = None
+
+
+class _SlowStopClient(_StubClient):
+    def __init__(self, name: str):
+        super().__init__(name, run_until_stopped=True)
+        self.stop_entered = threading.Event()
+        self.finish_stop = threading.Event()
+
+    def stop(self):
+        self.stopped = True
+        self.stop_entered.set()
+        self._stop_event.set()
+        self.finish_stop.wait(timeout=5)
+
+
+class _CrashingClient(_StubClient):
+    def __init__(self, name: str, exc: BaseException):
+        super().__init__(name)
+        self.exc = exc
+
+    def run(self):
+        self.started.set()
+        raise self.exc
+
+
 def test_multi_settings_manager_routes_scoped_keys(tmp_path):
     manager = MultiSettingsManager(
         ["slack", "wechat"], settings_file=str(tmp_path / "settings.json"), primary_platform="slack"
@@ -116,6 +161,268 @@ def test_multi_im_client_routes_send_by_context_platform():
 
     assert slack.sent == []
     assert wechat.sent == [("wechat", "c", "hello")]
+
+
+def test_multi_im_client_delegates_question_modal_by_context_platform():
+    slack = _StubClient("slack")
+    discord = _StubClient("discord")
+    client = MultiIMClient({"slack": slack, "discord": discord}, primary_platform="slack")
+    context = MessageContext(user_id="u", channel_id="c", platform="discord")
+    pending = {"questions": [{"header": "H", "question": "Q", "options": ["A"]}]}
+
+    assert hasattr(client, "open_question_modal")
+    result = asyncio.run(
+        client.open_question_modal(
+            trigger_id="trigger-1",
+            context=context,
+            pending=pending,
+            callback_prefix="test_question",
+        )
+    )
+
+    assert result == "discord"
+    assert slack.question_modals == []
+    assert discord.question_modals == [("trigger-1", "discord", pending, "test_question")]
+
+
+def test_multi_im_client_question_modal_falls_back_for_modal_less_platform():
+    wechat = _ModalLessClient("wechat")
+    client = MultiIMClient({"wechat": wechat}, primary_platform="wechat")
+    context = MessageContext(user_id="u", channel_id="c", platform="wechat")
+
+    result = asyncio.run(client.open_question_modal("trigger-1", context, {"questions": []}, "test_question"))
+
+    assert wechat.question_modals == []
+    assert result == "wechat"
+    assert wechat.sent == [("wechat", "c", "Modal UI is not available. Please reply with a custom message.")]
+
+
+def test_multi_im_client_add_client_registers_callbacks_before_start():
+    client = MultiIMClient({}, primary_platform="avibe")
+    added = _StubClient("slack")
+    captured: list[str | None] = []
+
+    async def on_message(context: MessageContext, text: str):
+        captured.append(context.platform)
+
+    client.register_callbacks(on_message=on_message)
+    client.add_client("slack", added)
+
+    assert client.clients["slack"] is added
+    assert added.on_message_callback is not None
+    asyncio.run(added.on_message_callback(MessageContext(user_id="u", channel_id="c"), "hello"))
+    assert captured == ["slack"]
+
+
+def test_multi_im_client_remove_client_stops_and_drops_platform():
+    slack = _StubClient("slack")
+    wechat = _StubClient("wechat")
+    client = MultiIMClient({"slack": slack, "wechat": wechat}, primary_platform="slack")
+
+    removed = client.remove_client("slack")
+
+    assert removed is slack
+    assert slack.stopped is True
+    assert "slack" not in client.clients
+    assert client.primary_platform == "wechat"
+
+
+def test_multi_im_client_remove_last_client_restores_workbench_formatter():
+    slack = _StubClient("slack")
+    client = MultiIMClient({"slack": slack}, primary_platform="slack")
+
+    removed = client.remove_client("slack")
+
+    assert removed is slack
+    assert client.clients == {}
+    assert client.primary_platform == "avibe"
+    assert client.formatter is not None
+    assert "Warning" in client.formatter.format_warning("heads up")
+
+
+def test_multi_im_client_remove_pending_platform_completes_ready():
+    slack = _StubClient("slack")
+    discord = _StubClient("discord")
+    client = MultiIMClient({"slack": slack, "discord": discord}, primary_platform="slack")
+    ready_calls: list[bool] = []
+
+    async def on_ready():
+        ready_calls.append(True)
+
+    client.register_callbacks(on_ready=on_ready)
+
+    assert slack.on_ready_callback is not None
+    asyncio.run(slack.on_ready_callback())
+    assert ready_calls == []
+
+    removed = client.remove_client("discord")
+
+    assert removed is discord
+    assert ready_calls == [True]
+
+
+def test_multi_im_client_remove_last_pending_platform_completes_empty_ready():
+    slack = _StubClient("slack")
+    client = MultiIMClient({"slack": slack}, primary_platform="slack")
+    ready_calls: list[bool] = []
+
+    async def on_ready():
+        ready_calls.append(True)
+
+    client.register_callbacks(on_ready=on_ready)
+
+    removed = client.remove_client("slack")
+
+    assert removed is slack
+    assert ready_calls == [True]
+
+
+def test_multi_im_client_run_returns_when_all_enabled_threads_exit():
+    client = MultiIMClient({"slack": _StubClient("slack")}, primary_platform="slack")
+    returned: list[bool] = []
+
+    def _run() -> None:
+        client.run()
+        returned.append(True)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    thread.join(timeout=2)
+
+    assert thread.is_alive() is False
+    assert returned == [True]
+
+
+def test_multi_im_client_run_raises_single_platform_runtime_crash():
+    boom = RuntimeError("slack failed")
+    client = MultiIMClient({"slack": _CrashingClient("slack", boom)}, primary_platform="slack")
+
+    try:
+        client.run()
+    except RuntimeError as exc:
+        assert exc is boom
+    else:
+        raise AssertionError("MultiIMClient.run should raise the platform runtime crash")
+
+
+def test_multi_im_client_run_raises_multi_platform_runtime_crash_when_all_exit():
+    boom = RuntimeError("discord failed")
+    client = MultiIMClient(
+        {"slack": _StubClient("slack"), "discord": _CrashingClient("discord", boom)},
+        primary_platform="slack",
+    )
+
+    try:
+        client.run()
+    except RuntimeError as exc:
+        assert exc is boom
+    else:
+        raise AssertionError("MultiIMClient.run should raise the captured platform runtime crash")
+
+
+def test_multi_im_client_remove_client_keeps_maps_when_thread_will_not_stop():
+    stuck = _StubClient("slack", run_until_stopped=True)
+    client = MultiIMClient({"slack": stuck}, primary_platform="slack")
+    never_stop = threading.Event()
+    thread = threading.Thread(target=never_stop.wait, daemon=True)
+    thread.start()
+    client._threads["slack"] = thread
+
+    try:
+        try:
+            client.remove_client("slack")
+        except IMClientRemovalError:
+            pass
+        else:
+            raise AssertionError("remove_client should fail when the old runtime thread stays alive")
+
+        assert client.clients["slack"] is stuck
+        assert client._threads["slack"] is thread
+    finally:
+        never_stop.set()
+        thread.join(timeout=2)
+
+
+def test_multi_im_client_hot_remove_last_client_does_not_return_runtime():
+    slow = _SlowStopClient("slack")
+    client = MultiIMClient({"slack": slow}, primary_platform="slack")
+    returned: list[bool] = []
+    removal_errors: list[BaseException] = []
+
+    def _run() -> None:
+        client.run()
+        returned.append(True)
+
+    runtime_thread = threading.Thread(target=_run, daemon=True)
+    runtime_thread.start()
+    assert client._run_started.wait(timeout=2)
+    assert slow.started.wait(timeout=2)
+
+    def _remove() -> None:
+        try:
+            client.remove_client("slack")
+        except BaseException as exc:
+            removal_errors.append(exc)
+
+    remover = threading.Thread(target=_remove, daemon=True)
+    remover.start()
+    assert slow.stop_entered.wait(timeout=2)
+
+    deadline = time.monotonic() + 2
+    dead_platform_thread = False
+    while time.monotonic() < deadline:
+        with client._clients_lock:
+            platform_thread = client._threads.get("slack")
+        if platform_thread is not None and not platform_thread.is_alive():
+            dead_platform_thread = True
+            break
+        time.sleep(0.01)
+    assert dead_platform_thread is True
+
+    time.sleep(0.7)
+    assert runtime_thread.is_alive() is True
+    assert returned == []
+
+    slow.finish_stop.set()
+    remover.join(timeout=2)
+    assert remover.is_alive() is False
+    assert removal_errors == []
+    assert client.clients == {}
+    assert client.primary_platform == "avibe"
+    assert runtime_thread.is_alive() is True
+    assert returned == []
+
+    client.stop()
+    runtime_thread.join(timeout=2)
+    assert runtime_thread.is_alive() is False
+    assert returned == [True]
+
+
+def test_multi_im_client_empty_runtime_stays_alive_until_stop():
+    client = MultiIMClient({}, primary_platform="avibe")
+    returned: list[bool] = []
+
+    assert client.formatter is not None
+    assert "Error" in client.formatter.format_error("boom")
+
+    def _run() -> None:
+        client.run()
+        returned.append(True)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+    assert client._run_started.wait(timeout=2)
+    time.sleep(0.05)
+    assert thread.is_alive() is True
+    assert returned == []
+
+    client.stop()
+    thread.join(timeout=2)
+
+    assert thread.is_alive() is False
+    assert returned == [True]
 
 
 def test_multi_im_client_routes_message_edit_capability_by_context_platform():

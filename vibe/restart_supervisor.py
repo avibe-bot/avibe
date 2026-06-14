@@ -30,6 +30,46 @@ def _restart_log_path(job_id: str) -> Path:
     return paths.get_logs_dir() / f"restart-{timestamp}-{job_id}.log"
 
 
+def _pending_restart_path() -> Path:
+    return paths.get_runtime_dir() / "pending_restart.json"
+
+
+def mark_pending_restart(
+    *,
+    trigger: str,
+    scope: str = "service",
+    reason: str = "restart_in_progress",
+    restart_job_id: str | None = None,
+) -> dict:
+    payload = {
+        "trigger": trigger,
+        "scope": scope,
+        "reason": reason,
+        "restart_job_id": restart_job_id,
+        "created_at": _now_iso(),
+        "created_at_epoch": time.time(),
+    }
+    path = _pending_restart_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_json(path, payload)
+    return payload
+
+
+def _consume_pending_restart_for_job(job_id: str) -> dict | None:
+    path = _pending_restart_path()
+    payload = runtime.read_json(path)
+    if not isinstance(payload, dict):
+        return None
+    restart_job_id = payload.get("restart_job_id")
+    if restart_job_id and restart_job_id != job_id:
+        return None
+    try:
+        path.unlink()
+    except OSError:
+        logger.debug("Failed to remove pending restart marker", exc_info=True)
+    return payload
+
+
 def _prune_restart_logs(limit: int = _RESTART_LOG_RETENTION) -> None:
     try:
         logs = sorted(
@@ -339,6 +379,24 @@ def _run_restart_job(
                 write(f"Show Runtime preparation skipped: {exc}")
             finally:
                 mark_duration("prepare_show_runtime_seconds", prepare_started_at)
+
+        pending_restart = _consume_pending_restart_for_job(job_id)
+        if pending_restart is not None:
+            write(
+                "scheduling pending follow-up restart "
+                f"trigger={pending_restart.get('trigger')!r} scope={pending_restart.get('scope')!r}"
+            )
+            try:
+                schedule_restart(
+                    delay_seconds=0.0,
+                    vibe_path=vibe_path,
+                    trigger=str(pending_restart.get("trigger") or "pending-restart"),
+                    scope=str(pending_restart.get("scope") or "service"),
+                )
+            except Exception as exc:
+                payload["pending_restart"] = {"scheduled": False, "error": str(exc)}
+                _write_status(payload)
+                write(f"failed to schedule pending follow-up restart: {exc}")
 
         return 0
 

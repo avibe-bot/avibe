@@ -484,6 +484,7 @@ class MultiSettingsManager:
     """Route settings operations to per-platform managers using scoped keys."""
 
     def __init__(self, platforms: list[str], settings_file: Optional[str] = None, primary_platform: str = "slack"):
+        self.settings_file = settings_file
         self.platform = primary_platform
         self.primary_platform = primary_platform
         self.sessions_store = SessionsStore()
@@ -500,6 +501,34 @@ class MultiSettingsManager:
             )
             for platform in platforms
         }
+        if primary_platform not in self.managers:
+            self.managers[primary_platform] = self._create_platform_manager(primary_platform)
+
+    def _create_platform_manager(self, platform: str) -> SettingsManager:
+        return SettingsManager(
+            settings_file=self.settings_file,
+            platform=platform,
+            sessions_store=self.sessions_store,
+            sessions_facade=self.sessions,
+        )
+
+    def add_platform(self, platform: str) -> SettingsManager:
+        manager = self.managers.get(platform)
+        if manager is None:
+            manager = self._create_platform_manager(platform)
+            self.managers[platform] = manager
+        return manager
+
+    def remove_platform(self, platform: str) -> None:
+        if platform == self.primary_platform:
+            return
+        self.managers.pop(platform, None)
+
+    def set_primary_platform(self, platform: str) -> None:
+        if platform not in self.managers:
+            self.add_platform(platform)
+        self.platform = platform
+        self.primary_platform = platform
 
     def get_store(self) -> SettingsStore:
         return self.managers[self.primary_platform].get_store()

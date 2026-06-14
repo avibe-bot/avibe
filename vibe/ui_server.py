@@ -1014,6 +1014,36 @@ def _should_rotate_remote_session_secret(previous: V2Config | None, current: V2C
     return bool(previous_cloud.enabled and not current_cloud.enabled and current_cloud.session_secret)
 
 
+def _platform_runtime_signature(config: V2Config) -> dict[str, tuple[Any, ...]]:
+    from config.platform_registry import get_platform_descriptor
+
+    signatures: dict[str, tuple[Any, ...]] = {}
+    for platform in config.platforms.enabled:
+        descriptor = get_platform_descriptor(platform)
+        platform_config = descriptor.get_config(config)
+        signatures[platform] = (
+            tuple(getattr(platform_config, field, None) for field in descriptor.runtime_reconcile_field_names())
+            if platform_config is not None
+            else ()
+        )
+    return signatures
+
+
+def _platform_runtime_fields_changed(previous: V2Config | None, current: V2Config, payload: dict) -> bool:
+    from config.platform_registry import im_platform_descriptors
+
+    if previous is None:
+        return False
+    platform_config_keys = {descriptor.config_key for descriptor in im_platform_descriptors()}
+    if "platforms" not in payload and "platform" not in payload and not any(key in payload for key in platform_config_keys):
+        return False
+    return (
+        set(previous.platforms.enabled) != set(current.platforms.enabled)
+        or previous.platforms.primary != current.platforms.primary
+        or _platform_runtime_signature(previous) != _platform_runtime_signature(current)
+    )
+
+
 # Static PWA / icon assets must be reachable WITHOUT the remote-access auth
 # cookie. iOS "Add to Home Screen" fetches the apple-touch-icon + manifest in a
 # context that doesn't carry the session, so gating them makes the installed app
@@ -2199,6 +2229,64 @@ def _restart_in_flight() -> bool:
     return age < _RESTART_SEED_GRACE_SECONDS
 
 
+def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
+    from vibe import runtime
+    from vibe.restart_supervisor import mark_pending_restart, schedule_restart
+
+    def _schedule_restart() -> dict[str, Any]:
+        status = runtime.read_status()
+        runtime.write_status("restarting", "restarting", status.get("service_pid"), status.get("ui_pid"))
+        return schedule_restart(delay_seconds=0.0, trigger="web-ui-config", scope="service")
+
+    with _RESTART_CONTROL_LOCK:
+        if _restart_in_flight():
+            restart_status = runtime.read_json(runtime.get_restart_status_path()) or {}
+            pending = mark_pending_restart(
+                trigger="web-ui-config-pending",
+                scope="service",
+                reason="restart_in_progress",
+                restart_job_id=restart_status.get("job_id"),
+            )
+            if not _restart_in_flight():
+                try:
+                    from vibe.restart_supervisor import _pending_restart_path
+
+                    _pending_restart_path().unlink(missing_ok=True)
+                except OSError:
+                    logger.debug("Failed to remove stale pending restart marker", exc_info=True)
+                restart = _schedule_restart()
+                return {
+                    "ok": True,
+                    "restart": restart,
+                    "code": "restart_scheduled_after_in_flight_finished",
+                }
+            return {
+                "ok": True,
+                "pending_restart": pending,
+                "restart": restart_status,
+                "code": "restart_pending_after_in_progress",
+            }
+        restart = _schedule_restart()
+    return {"ok": True, "restart": restart}
+
+
+def _save_config_and_runtime_decisions(payload: dict) -> tuple[V2Config, bool, bool]:
+    from vibe import api
+    from vibe import remote_access
+
+    with CONFIG_LOCK:
+        previous_config = _load_remote_access_config()
+        config = api.save_config(payload)
+        should_reconcile_remote_access = False
+        if _remote_access_settings_changed(previous_config, config, payload):
+            if _should_rotate_remote_session_secret(previous_config, config, payload):
+                remote_access.rotate_session_secret(config)
+                config = V2Config.load()
+            should_reconcile_remote_access = True
+        should_reconcile_platforms = _platform_runtime_fields_changed(previous_config, config, payload)
+        return config, should_reconcile_remote_access, should_reconcile_platforms
+
+
 @app.route("/api/control", methods=["POST"])
 def control():
     from vibe import runtime
@@ -2253,29 +2341,47 @@ def control():
 
 
 @app.route("/api/config", methods=["POST"])
-def config_post():
+async def config_post():
     from vibe import api
+    from vibe import internal_client
     from vibe import remote_access
 
     payload = request.json or {}
     remote_access_runtime = None
-    should_reconcile_remote_access = False
-    with CONFIG_LOCK:
-        previous_config = _load_remote_access_config() if "remote_access" in payload else None
-        try:
-            config = api.save_config(payload)
-        except ValueError as exc:
-            message = str(exc)
-            return jsonify({"ok": False, "error": message, "message": message}), 400
-        if _remote_access_settings_changed(previous_config, config, payload):
-            if _should_rotate_remote_session_secret(previous_config, config, payload):
-                remote_access.rotate_session_secret(config)
-            should_reconcile_remote_access = True
+    try:
+        config, should_reconcile_remote_access, should_reconcile_platforms = await asyncio.to_thread(
+            _save_config_and_runtime_decisions,
+            payload,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        return jsonify({"ok": False, "error": message, "message": message}), 400
     if should_reconcile_remote_access:
-        remote_access_runtime = remote_access.reconcile()
+        remote_access_runtime = await asyncio.to_thread(remote_access.reconcile)
+    platform_runtime = None
+    if should_reconcile_platforms:
+        try:
+            result = await internal_client.reconcile_platforms()
+            platform_runtime = {
+                "ok": result.get("status_code") == 200 and bool((result.get("body") or {}).get("ok")),
+                "hot_reconciled": result.get("status_code") == 200 and bool((result.get("body") or {}).get("ok")),
+                "body": result.get("body") or {},
+            }
+        except internal_client.InternalServerUnavailable as exc:
+            platform_runtime = {"ok": False, "hot_reconciled": False, "error": str(exc)}
+        if not platform_runtime.get("ok"):
+            restart_result = await asyncio.to_thread(_schedule_service_restart_for_config_fallback)
+            platform_runtime["restart_scheduled"] = bool(restart_result.get("ok"))
+            if restart_result.get("ok"):
+                platform_runtime["restart"] = restart_result.get("restart")
+            else:
+                platform_runtime["restart_error"] = restart_result.get("error")
+                platform_runtime["restart_code"] = restart_result.get("code")
     response_payload = api.config_to_payload(config)
     if remote_access_runtime is not None:
         response_payload["remote_access_runtime"] = remote_access_runtime
+    if platform_runtime is not None:
+        response_payload["platform_runtime"] = platform_runtime
     return jsonify(response_payload)
 
 
