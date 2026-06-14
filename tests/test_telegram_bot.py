@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import paths
 from core import chat_discovery
 from modules.agents.native_sessions import NativeResumeSession
-from modules.im import MessageContext
+from modules.im import InlineButton, InlineKeyboard, MessageContext
 from modules.im.multi import MultiIMClient
 from modules.im.telegram import TelegramBot
 from config.v2_config import TelegramConfig
@@ -598,6 +598,96 @@ def test_send_message_uses_html_parse_mode() -> None:
     payload = call_mock.await_args.args[2]
     assert payload["parse_mode"] == "HTML"
     assert payload["text"] == "Hello <b>world</b>"
+
+
+def test_send_markdown_message_keeps_plain_markdown_on_html_path() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = MessageContext(user_id="42", channel_id="-100123", platform="telegram")
+
+    with patch(
+        "modules.im.telegram.telegram_api.call_api",
+        new=AsyncMock(return_value={"result": {"message_id": 77}}),
+    ) as call_mock:
+        asyncio.run(bot.send_markdown_message(context, "Hello **world**"))
+
+    assert call_mock.await_args.args[1] == "sendMessage"
+    payload = call_mock.await_args.args[2]
+    assert payload["parse_mode"] == "HTML"
+    assert payload["text"] == "Hello <b>world</b>"
+
+
+def test_send_markdown_message_uses_rich_message_for_structured_markdown() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = MessageContext(user_id="42", channel_id="-100123", thread_id="8", platform="telegram")
+    keyboard = InlineKeyboard(buttons=[[InlineButton(text="Inspect", callback_data="quick_reply:Inspect")]])
+    markdown = "# Summary\n\n- shipped\n- verified"
+
+    with patch(
+        "modules.im.telegram.telegram_api.call_api",
+        new=AsyncMock(return_value={"result": {"message_id": 88}}),
+    ) as call_mock:
+        result = asyncio.run(bot.send_markdown_message(context, markdown, keyboard=keyboard, reply_to="77"))
+
+    assert result == "88"
+    assert call_mock.await_args.args[1] == "sendRichMessage"
+    payload = call_mock.await_args.args[2]
+    assert payload["chat_id"] == "-100123"
+    assert payload["message_thread_id"] == 8
+    assert payload["reply_parameters"] == {"message_id": 77}
+    assert payload["rich_message"] == {"markdown": markdown}
+    assert payload["reply_markup"] == {
+        "inline_keyboard": [[{"text": "Inspect", "callback_data": "quick_reply:Inspect"}]]
+    }
+
+
+def test_send_markdown_message_falls_back_when_rich_message_is_rejected() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = MessageContext(user_id="42", channel_id="-100123", platform="telegram")
+    markdown = "# Summary\n\n- shipped"
+
+    with patch(
+        "modules.im.telegram.telegram_api.call_api",
+        new=AsyncMock(
+            side_effect=[
+                RuntimeError("Bad Request: method not found"),
+                {"result": {"message_id": 89}},
+            ]
+        ),
+    ) as call_mock:
+        result = asyncio.run(bot.send_markdown_message(context, markdown))
+
+    assert result == "89"
+    assert [call.args[1] for call in call_mock.await_args_list] == ["sendRichMessage", "sendMessage"]
+    fallback_payload = call_mock.await_args_list[1].args[2]
+    assert fallback_payload["parse_mode"] == "HTML"
+    assert fallback_payload["text"] == "# Summary\n\n- shipped"
+
+
+def test_send_markdown_message_disables_rich_path_after_method_missing() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = MessageContext(user_id="42", channel_id="-100123", platform="telegram")
+    markdown = "# Summary\n\n- shipped"
+
+    with patch(
+        "modules.im.telegram.telegram_api.call_api",
+        new=AsyncMock(
+            side_effect=[
+                RuntimeError("Bad Request: method not found"),
+                {"result": {"message_id": 89}},
+                {"result": {"message_id": 90}},
+            ]
+        ),
+    ) as call_mock:
+        first = asyncio.run(bot.send_markdown_message(context, markdown))
+        second = asyncio.run(bot.send_markdown_message(context, markdown))
+
+    assert first == "89"
+    assert second == "90"
+    assert [call.args[1] for call in call_mock.await_args_list] == [
+        "sendRichMessage",
+        "sendMessage",
+        "sendMessage",
+    ]
 
 
 def test_add_reaction_uses_telegram_message_reactions() -> None:

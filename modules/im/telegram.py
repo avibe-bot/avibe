@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -93,6 +94,11 @@ class TelegramBot(BaseIMClient):
 
     _MAX_IN_FLIGHT_UPDATE_TASKS = 100
     _MAX_IN_FLIGHT_MESSAGE_CALLBACK_TASKS = 100
+    _RICH_MARKDOWN_BLOCK_RE = re.compile(
+        r"(?m)^(?:#{1,6}\s+\S|[-*+]\s+\S|\d+\.\s+\S|>\s?\S|---\s*$|\|.*\|\s*$|\$\$)"
+        r"|```|<details\b|<tg-|!\[[^\]]*\]\(https?://",
+        re.IGNORECASE,
+    )
 
     def __init__(self, config: TelegramConfig):
         super().__init__(config)
@@ -115,6 +121,7 @@ class TelegramBot(BaseIMClient):
         self._routing_states: dict[str, _TelegramRoutingState] = {}
         self._question_states: dict[str, _TelegramQuestionState] = {}
         self._settings_states: dict[str, _TelegramSettingsState] = {}
+        self._rich_markdown_supported: Optional[bool] = None
 
     def set_settings_manager(self, settings_manager):
         self.settings_manager = settings_manager
@@ -832,6 +839,81 @@ class TelegramBot(BaseIMClient):
                 ]
             }
         return payload
+
+    def _build_rich_message_payload(
+        self,
+        context: MessageContext,
+        text: str,
+        keyboard: Optional[InlineKeyboard] = None,
+        *,
+        reply_to: Optional[str] = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "chat_id": context.channel_id,
+            "rich_message": {
+                "markdown": text,
+            },
+        }
+        if context.thread_id:
+            payload["message_thread_id"] = int(context.thread_id)
+        if reply_to:
+            payload["reply_parameters"] = {"message_id": int(reply_to)}
+        if keyboard is not None:
+            payload["reply_markup"] = {
+                "inline_keyboard": [
+                    [{"text": button.text, "callback_data": button.callback_data} for button in row]
+                    for row in keyboard.buttons
+                ]
+            }
+        return payload
+
+    def _should_send_rich_markdown(self, text: str) -> bool:
+        if not text or not text.strip():
+            return False
+        if self._rich_markdown_supported is False:
+            return False
+        return bool(self._RICH_MARKDOWN_BLOCK_RE.search(text))
+
+    @staticmethod
+    def _is_rich_message_method_unavailable(err: Exception) -> bool:
+        description = str(err).lower()
+        return "method not found" in description
+
+    async def send_markdown_message(
+        self,
+        context: MessageContext,
+        text: str,
+        keyboard: Optional[InlineKeyboard] = None,
+        reply_to: Optional[str] = None,
+    ) -> str:
+        """Send LLM-authored Markdown through Telegram Rich Messages when useful.
+
+        Bot API 10.1 rich messages understand GFM-like block structure. Plain
+        short markdown still uses the legacy HTML conversion path because it is
+        older, broadly deployed, and sufficient for simple emphasis/links/code.
+        """
+        if not self._should_send_rich_markdown(text):
+            if keyboard is not None:
+                return await self.send_message_with_buttons(context, text, keyboard, parse_mode="markdown")
+            return await self.send_message(context, text, parse_mode="markdown", reply_to=reply_to)
+
+        payload = self._build_rich_message_payload(context, text, keyboard=keyboard, reply_to=reply_to)
+        try:
+            result = await telegram_api.call_api(
+                self.config.bot_token,
+                "sendRichMessage",
+                payload,
+                proxy_url=self._proxy_url,
+            )
+        except Exception as err:
+            if self._is_rich_message_method_unavailable(err):
+                self._rich_markdown_supported = False
+            logger.warning("Telegram sendRichMessage failed; falling back to sendMessage", exc_info=True)
+            if keyboard is not None:
+                return await self.send_message_with_buttons(context, text, keyboard, parse_mode="markdown")
+            return await self.send_message(context, text, parse_mode="markdown", reply_to=reply_to)
+        self._rich_markdown_supported = True
+        return str(result["result"]["message_id"])
 
     async def send_message(
         self, context: MessageContext, text: str, parse_mode: Optional[str] = None, reply_to: Optional[str] = None
