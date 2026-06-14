@@ -16,6 +16,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -1498,13 +1499,23 @@ _AUTH_RATELIMIT_WINDOW_SECONDS = 60.0
 _AUTH_RATELIMIT_MAX_PER_WINDOW = 60  # a real login spends a handful; this only stops floods
 _AUTH_RATELIMIT_MAX_TRACKED_CLIENTS = 4096
 _auth_ratelimit_lock = threading.Lock()
-_auth_ratelimit: dict[str, list[float]] = {}  # client -> [window_start_monotonic, count]
+# Bounded LRU of client -> [window_start_monotonic, count]; the least-recently-seen
+# entry is evicted once the table is full, so the table can't grow without bound.
+_auth_ratelimit: OrderedDict[str, list[float]] = OrderedDict()
 
 
 def _auth_client_id() -> str:
-    """Client identity for rate limiting: the Cloudflare-forwarded IP when present
-    (remote traffic always arrives via the tunnel), else the connecting peer."""
-    return (request.headers.get("CF-Connecting-IP") or request.remote_addr or "unknown").strip()
+    """Client identity for rate limiting.
+
+    Trust the Cloudflare-forwarded client IP only when the request arrived via the
+    local tunnel (loopback peer = cloudflared). A direct peer reaching the origin
+    port could otherwise set/rotate ``CF-Connecting-IP`` to dodge the limit, so for
+    such peers we key on the real connecting address instead.
+    """
+    forwarded = (request.headers.get("CF-Connecting-IP") or "").strip()
+    if forwarded and _is_loopback_peer():
+        return f"cf:{forwarded}"
+    return f"peer:{(request.remote_addr or 'unknown').strip()}"
 
 
 def _auth_rate_limited() -> bool:
@@ -1512,16 +1523,20 @@ def _auth_rate_limited() -> bool:
     client = _auth_client_id()
     now = time.monotonic()
     with _auth_ratelimit_lock:
-        if len(_auth_ratelimit) > _AUTH_RATELIMIT_MAX_TRACKED_CLIENTS:
-            for stale in [c for c, (ws, _c) in _auth_ratelimit.items() if now - ws >= _AUTH_RATELIMIT_WINDOW_SECONDS]:
-                _auth_ratelimit.pop(stale, None)
-        window_start, count = _auth_ratelimit.get(client, (0.0, 0))
-        if now - window_start >= _AUTH_RATELIMIT_WINDOW_SECONDS:
+        bucket = _auth_ratelimit.get(client)
+        if bucket is None or now - bucket[0] >= _AUTH_RATELIMIT_WINDOW_SECONDS:
+            # New or rolled-over window. Hard-bound the table before admitting a
+            # genuinely new client (evict the least-recently-seen).
+            if client not in _auth_ratelimit:
+                while len(_auth_ratelimit) >= _AUTH_RATELIMIT_MAX_TRACKED_CLIENTS:
+                    _auth_ratelimit.popitem(last=False)
             _auth_ratelimit[client] = [now, 1]
+            _auth_ratelimit.move_to_end(client)
             return False
-        if count >= _AUTH_RATELIMIT_MAX_PER_WINDOW:
+        if bucket[1] >= _AUTH_RATELIMIT_MAX_PER_WINDOW:
             return True
-        _auth_ratelimit[client] = [window_start, count + 1]
+        bucket[1] += 1
+        _auth_ratelimit.move_to_end(client)
         return False
 
 

@@ -1277,6 +1277,47 @@ def test_unauthenticated_auth_requests_are_rate_limited(monkeypatch, tmp_path):
     assert statuses[3:] == [429, 429]  # over budget -> throttled
 
 
+def test_auth_rate_limit_ignores_untrusted_forwarded_ip(monkeypatch, tmp_path):
+    # A direct (non-loopback) peer can't dodge the limit by rotating CF-Connecting-IP:
+    # the forwarded IP is trusted only from the loopback tunnel peer, so such a peer
+    # is keyed by its real address and the rotating header is ignored.
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    monkeypatch.setattr(ui_server, "_AUTH_RATELIMIT_MAX_PER_WINDOW", 3)
+    client = app.test_client()
+
+    statuses = [
+        client.get(
+            "/dashboard",
+            base_url="https://alex.avibe.bot",
+            environ_base={"REMOTE_ADDR": "203.0.113.90"},
+            headers={"CF-Connecting-IP": f"9.9.9.{i}"},  # rotated each request
+            follow_redirects=False,
+        ).status_code
+        for i in range(5)
+    ]
+    assert statuses[:3] == [302, 302, 302]
+    assert statuses[3:] == [429, 429]  # still limited despite the rotating header
+
+
+def test_auth_rate_limit_table_is_bounded(monkeypatch, tmp_path):
+    # The limiter's own table is hard-capped (LRU eviction), so a burst of distinct
+    # clients can't drive unbounded in-process memory growth.
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    monkeypatch.setattr(ui_server, "_AUTH_RATELIMIT_MAX_TRACKED_CLIENTS", 3)
+    client = app.test_client()
+
+    for i in range(10):  # 10 distinct peers
+        client.get(
+            "/dashboard",
+            base_url="https://alex.avibe.bot",
+            environ_base={"REMOTE_ADDR": f"198.51.100.{i}"},
+            follow_redirects=False,
+        )
+    assert len(ui_server._auth_ratelimit) <= 3
+
+
 def test_oauth_diag_log_is_rate_limited(monkeypatch):
     # The unauthenticated callback failure path must not grow the log without bound:
     # repeated hits within the window emit once, with the suppressed count folded in.
