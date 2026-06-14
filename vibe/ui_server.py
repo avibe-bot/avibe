@@ -1432,6 +1432,31 @@ def _render_oauth_error_html(error: str, *, retry_href: str, lang: str = "en") -
 """
 
 
+_OAUTH_DIAG_LOG_INTERVAL_SECONDS = 60.0
+_oauth_diag_log_lock = threading.Lock()
+# key -> [window_start_monotonic, suppressed_count]
+_oauth_diag_log_state: dict[str, list[float]] = {}
+
+
+def _log_oauth_diag(key: str, message: str, *args: Any) -> None:
+    """Emit an unauthenticated-reachable OAuth diagnostic at WARNING, rate-limited
+    per ``key`` (~once / ``_OAUTH_DIAG_LOG_INTERVAL_SECONDS``).
+
+    The OAuth callback is reachable without auth, so a flood of invalid callbacks
+    would otherwise grow the (unrotated) service log without bound. Suppressed hits
+    are counted and folded into the next emitted line so the signal isn't lost.
+    """
+    now = time.monotonic()
+    with _oauth_diag_log_lock:
+        window_start, suppressed = _oauth_diag_log_state.get(key, (0.0, 0))
+        if window_start and now - window_start < _OAUTH_DIAG_LOG_INTERVAL_SECONDS:
+            _oauth_diag_log_state[key] = [window_start, suppressed + 1]
+            return
+        _oauth_diag_log_state[key] = [now, 0]
+    extra = f" [+{int(suppressed)} suppressed in {int(_OAUTH_DIAG_LOG_INTERVAL_SECONDS)}s]" if suppressed else ""
+    logger.warning(message + extra, *args)
+
+
 def _oauth_callback_error_response(error: str, *, next_target: Any, status: int = 400):
     """Build the HTML re-login response for a failed OAuth callback.
 
@@ -1441,8 +1466,10 @@ def _oauth_callback_error_response(error: str, *, next_target: Any, status: int 
     """
     # Diagnostic only: whether the handshake cookie reached us at all is the key
     # signal for cookie-loss cases (e.g. iOS standalone PWA). No token values are
-    # logged — only presence and a few non-secret request hints.
-    logger.warning(
+    # logged — only presence and a few non-secret request hints. Rate-limited
+    # because this path is unauthenticated and could be flooded.
+    _log_oauth_diag(
+        "callback_rejected",
         "oauth callback rejected: error=%s handshake_cookie_present=%s ua=%r sec_fetch_site=%s",
         error,
         bool(request.cookies.get(REMOTE_OAUTH_COOKIE_NAME)),
@@ -2598,7 +2625,9 @@ def remote_access_auth_callback():
         next_target = store_record.get("next")
     else:
         # Neither the cookie nor the server-side store yielded the handshake.
-        logger.warning(
+        # Rate-limited: this branch is unauthenticated-reachable.
+        _log_oauth_diag(
+            "state_check_failed",
             "oauth state check failed: cookie_parsed=%s cookie_state_rid=%s url_state_rid=%s url_state_valid=%s",
             cookie_state is not None,
             _peek_oauth_state_rid(cookie_state.get("state")) if cookie_state else None,

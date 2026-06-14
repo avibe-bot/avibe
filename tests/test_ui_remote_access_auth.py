@@ -1233,6 +1233,26 @@ def test_oauth_handshake_store_caps_entries(monkeypatch, tmp_path):
     assert remote_access.pop_oauth_handshake("rid-0") is not None
 
 
+def test_oauth_diag_log_is_rate_limited(monkeypatch):
+    # The unauthenticated callback failure path must not grow the log without bound:
+    # repeated hits within the window emit once, with the suppressed count folded in.
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(ui_server.time, "monotonic", lambda: clock["t"])
+    ui_server._oauth_diag_log_state.pop("test_key", None)
+
+    emitted = []
+    monkeypatch.setattr(ui_server.logger, "warning", lambda msg, *a: emitted.append(msg % a if a else msg))
+
+    for _ in range(5):
+        ui_server._log_oauth_diag("test_key", "boom x=%s", 1)
+    assert len(emitted) == 1  # only the first hit in the window is logged
+
+    clock["t"] += ui_server._OAUTH_DIAG_LOG_INTERVAL_SECONDS + 1
+    ui_server._log_oauth_diag("test_key", "boom x=%s", 1)
+    assert len(emitted) == 2
+    assert "suppressed" in emitted[1]  # the 4 suppressed hits are reported
+
+
 def test_oauth_error_page_localizes_from_accept_language(monkeypatch, tmp_path):
     # The re-login page copy must come from vibe/i18n and honor the browser's
     # Accept-Language (the only server-readable locale signal pre-auth).
