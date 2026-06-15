@@ -1,18 +1,25 @@
 # Vaults — secret management for agents
 
-Status: **v6 draft for discussion** (no implementation yet)
+Status: **v7 draft for discussion** (no implementation yet)
 Owner: Alex + agent session `sestvmy6e5c8e`
-Date: 2026-06-16 (v6, after review round 5 — group authorization designed)
+Date: 2026-06-16 (v7, after review round 6 — scope-typed grants)
 
-v6 changes (round 5): **group authorization (unlock-scope grants) designed**
-(§9.5) — the anti-approval-fatigue feature. Per-group key derived from the VMK via
-HKDF (`GMK_group`); a grant hands the daemon **one group's GMK, in memory, for a
-bounded TTL + session scope**, so headless `vault run` in that group stops
-re-prompting during the window. Blast radius = exactly one group (HKDF is one-way);
-GMK never persisted; `keypair`/signing **never grantable**; opt-in, revocable,
-audited — a conscious, bounded relaxation of §8.4, not a silent one. Adds
-`vault_groups` (policy) + `vault_grants` (audit) tables (§4.4), the GMK derivation
-(§7.1), the second approval-card action + grants API (§9.5, §11). Closes open Q #6.
+v7 changes (round 6): **grants are now scope-typed** — a grant covers a set of
+secrets defined by its scope: **`secret:NAME` (per-key) · `skill:S` · `group:G`**
+(§9.5). This unifies two requests: a per-key "don't re-ask for N min" grant (the
+smallest standing grant, the default on approve for normal secrets) **and** "unlock
+a skill's secrets together" (a skill-scoped grant — the natural per-task unit).
+Mechanism simplified from v6: drop the per-group `GMK` (it was group-specific and
+couldn't span a skill's cross-group secrets); a grant instead caches the **set of
+unwrapped DEKs** for the covered secrets in daemon memory for the TTL — uniform
+across all three scopes, and tighter (daemon holds only the covered DEKs, never the
+VMK). Note on Q "unify group & vault_link": the two data shapes stay distinct
+(group = 1:1 partition; link = M:N dependency) — the unification is at the **grant**
+layer, not the data model. `vault_grants` gains `scope_type`+`scope_ref` (§4.4).
+
+v6 (round 5): group authorization first cut (per-group GMK) — **superseded by v7's
+scope-typed DEK-set grants**; the bounds/lifecycle/keypair-exclusion/audit all carry
+over.
 
 v5 (round 4): layered auth (VMK + password-always + passkeys-on-top); data model
 settled (flat `name` + `group` + `tags`; skills via `vault_links` relation, no
@@ -138,10 +145,12 @@ pointing here, names stay global): `name` (unique), `description`, `grantable`
 `provision`/`access`/`sign`/`proxy`/`keygen`, `secret_name`, `requester`,
 `delivery`, `status`, `expires_at`, `message_id`.
 
-**`vault_grants`** (metadata + audit of active unlock-scope grants; the key
-material — the GMK — is **never** stored here, only held in daemon memory, §9.5):
-`id`, `group`, `session_id` (nullable = any-session), `created_at`, `expires_at`,
-`revoked_at`, `created_by_request_id`, `status` (`active`/`expired`/`revoked`).
+**`vault_grants`** (metadata + audit of active scope-typed grants; the key material
+— the cached DEK set — is **never** stored here, only held in daemon memory, §9.5):
+`id`, `scope_type` (`secret`/`skill`/`group`), `scope_ref` (the name), `session_id`
+(nullable = any-session), `created_at`, `expires_at`, `revoked_at`,
+`created_by_request_id`, `status` (`active`/`expired`/`revoked`). The resolved
+member set may be snapshotted for audit; it's frozen at grant time.
 
 **`vault_audit`**: append-only, values never appear. Vault config (VMK wraps, KDF
 params, machine-key mode, key-check) in `state_meta` under `vault:*`. `vibe data
@@ -217,17 +226,14 @@ envelope (the Bitwarden model):
 VMK  = Vault Master Key (random 32B), the protected-tier root
   wrapped by KEK_password = Argon2id(vault password, salt)   ← always present (recovery root)
   wrapped by KEK_passkey_i = HKDF(WebAuthn PRF_i)            ← 0..N, added on top
-GMK_group = HKDF(VMK, info="vault-group:" + group_name)   ← per-group key, derived, one-way
-protected secret in group G:  value --AES-256-GCM(DEK)--> ciphertext;  DEK --wrapped by--> GMK_G
+protected secret:  value --AES-256-GCM(DEK)--> ciphertext;  DEK --wrapped by--> VMK
 standard secret:   value --AES-256-GCM(DEK)--> ciphertext;  DEK --wrapped by--> KEK_machine (§7.2, daemon-side)
 ```
 
-Per-group keys: each protected secret's DEK is wrapped by its group's `GMK_G`
-(derived deterministically from the VMK), not the VMK directly. This is invisible
-in normal use (the browser unwraps VMK → derives GMK_G → unwraps DEK) but it's what
-lets a **group grant** hand the daemon exactly one group's key without exposing the
-VMK or any other group (§9.5). HKDF is one-way: GMK_G never yields the VMK or a
-sibling GMK.
+Each protected DEK is wrapped directly by the VMK. (v6 introduced a per-group
+`GMK = HKDF(VMK, group)` layer; v7 drops it — see §9.5: grants now cache the
+covered **DEK set**, which works for any scope and never exposes the VMK, so the
+extra key layer earns nothing.)
 
 Because the **VMK is wrapped independently by each factor**, any one factor
 unwraps it. So:
@@ -351,62 +357,78 @@ flips in place. `ApprovalCard` branch in `ChatPage.tsx`. Web session → inline;
 notify + deep link; headless → persists, Vaults inbox fallback. Same
 `vault_requests` row.
 
-### 9.5 Group authorization — unlock-scope grants (anti-fatigue)
+### 9.5 Scope-typed authorization — per-key / skill / group grants (anti-fatigue)
 
-Problem: every use of a `protected` secret triggers approval + unlock. A deploy
-task touching five protected secrets, or repeated `STRIPE_KEY` use in a session,
-prompts every time. The 1Password ergonomic: unlock once, stay unlocked for a
-bounded window. Designed now (your call, closing open Q #6).
+Problem: every use of a `protected` secret triggers approval + unlock. An agent
+that uses `STRIPE_KEY` five times in a task, or a skill that needs several secrets,
+prompts every time. The fix is a **grant**: approve once, stay unlocked for a
+bounded window. Two requests shaped this (round 6): a **per-key** "don't re-ask for
+N min" grant, and **"unlock a skill's secrets together."**
 
-**Mechanism — a per-group key + an in-memory, bounded grant:**
+**One mechanism, three scopes.** A grant covers a *set* of secrets defined by its
+`scope`:
 
-- **Per-group key (derived, one-way):** `GMK_G = HKDF(VMK, "vault-group:"+G)`; each
-  protected DEK is wrapped by its group's GMK (§7.1). VMK + factor-layering
-  unchanged; the GMK is derived, not separately stored.
-- **A grant hands the daemon one group's GMK, in memory, for a bounded window.** On
-  approval the browser (holding the unlocked VMK) computes `GMK_G` and POSTs *only
-  that* over TLS. The daemon caches it in a runtime map `{group → (GMK, expires_at,
-  session_binding)}` and, while live, decrypts that group's secrets on headless
-  `vault run` calls **with no browser and no prompt**. Because HKDF is one-way,
-  `GMK_G` unwraps only group-G DEKs — the daemon can't derive the VMK or any sibling
-  group's key. **Blast radius during a grant = exactly one group.**
+- **`secret:NAME`** — just that one key (the smallest standing grant; the default on
+  approve for normal secrets, so rapid re-use of the same key doesn't re-prompt).
+- **`skill:S`** — every secret linked to skill S (resolved via `vault_links` at grant
+  time). This is the natural per-task unit: an agent about to run a skill gets *one*
+  approval for the whole bundle, then all its `vault run` calls are silent.
+- **`group:G`** — every secret in a manual org group G.
+
+(On "should `group` and `vault_link` be unified?" — the two data shapes stay
+distinct, because they *are* distinct: `group` is a 1:1 partition for organization,
+`vault_links` is an M:N dependency relation. The unification belongs at the **grant**
+layer — a grant can target a key, a skill, or a group — not by collapsing two
+different relations into one.)
+
+**How a grant decrypts (uniform, tighter than v6's GMK).** On approval the browser
+(holding the unlocked VMK) unwraps the DEK of each covered secret and POSTs that
+**set of DEKs** to the daemon over TLS. The daemon caches `{secret_id → DEK}` for
+the grant's window and, while live, decrypts those secrets on headless `vault run`
+with no browser and no prompt. **Blast radius = exactly the covered set** — the
+daemon holds only those DEKs, never the VMK, so nothing outside the set is
+reachable. The covered set is **frozen at grant time** (a secret added to the
+group/skill afterward isn't auto-covered — you'd re-approve), which is the
+conservative, predictable behavior.
 
 **Bounds (all shown on the card, all enforced):**
 
-- **TTL**: 15 min (default) · 1 hour · until-revoked (cleared on daemon restart);
-  capped by the group's `max_grant_ttl_seconds`.
-- **Session binding**: this-session-only (default — only the originating session's
-  runs ride it) · any-session (explicit opt-in).
-- **Group scope**: exactly the one group's `protected` *static* secrets.
+- **TTL**: per-key default short (proposed **5 min**); skill/group default **15 min**;
+  options 1 h and until-revoked (cleared on daemon restart); capped by the group's
+  `max_grant_ttl_seconds`.
+- **Session binding**: this-session-only (default) · any-session (explicit opt-in).
 - **Hard exclusion: `keypair`/signing is never grantable.** A standing grant that
   lets an agent sign ETH unattended is the catastrophic case — every signature stays
-  per-use approval with the decoded preview. Keypair-containing groups are
-  non-grantable; a sensitive static secret can opt out via per-secret `always_ask`.
+  per-use approval with the decoded preview. A skill/group grant covers only the
+  **grantable (static) subset**; any keypair in the set is excluded and still
+  per-signature (the card says e.g. "covers 3 of 4 — ETH_KEY still asks each time").
+  A sensitive static secret opts out via per-secret `always_ask`.
 
 **Lifecycle & honesty:**
 
-- The **GMK is held in daemon memory only, never persisted.** `vault_grants` records
-  that a grant exists + its bounds for UI/audit, not the key. Restart → all grants
+- The cached **DEK set lives in daemon memory only, never persisted.** `vault_grants`
+  records the grant + its bounds for UI/audit, not key material. Restart → all grants
   gone (re-approve). Safe default, not a bug.
-- This is a **conscious, scoped relaxation of §8.4.** Default (no grant): the daemon
-  never holds key material; every protected use is browser-decrypted. With a grant:
-  the user *explicitly* trades safety for convenience — bounded by time + one group +
-  (default) one session, in-memory, revocable, audited. Same tradeoff every password
-  manager makes on "unlock", made opt-in and visible, not silent. (Python can't
-  truly zeroize; the in-window GMK is the same exposure class as any in-memory
-  secret, time-bounded — noted, accepted.)
-- **The approval card gains a second action.** Default stays "Approve once" (browser
-  unwraps just this DEK). The grant action — "Unlock group **crypto** for **this
-  session** · **15 min** (covers N secrets)" — shows the group, the covered count, a
-  TTL control, and the session toggle, so the blast radius is explicit.
-- **Revocation & visibility.** The Vaults page lists active grants (group,
-  expires-in, bound session) with one-click **Revoke** (drops the GMK from memory at
-  once). Auto-revoke on TTL expiry, daemon restart, explicit revoke, and (if
-  session-bound) session archive. Grants + each use under them are audited
-  (`granted` / `delivered-under-grant` / `grant-expired` / `grant-revoked`).
+- A **conscious, scoped relaxation of §8.4.** Default (no grant): the daemon never
+  holds key material; every protected use is browser-decrypted. With a grant: the
+  user *explicitly* trades safety for convenience — bounded by time + an explicit
+  secret set + (default) one session, in-memory, revocable, audited. Same tradeoff a
+  password manager makes on "unlock", made opt-in and visible. (Python can't truly
+  zeroize; cached DEKs are the same exposure class as any in-memory secret,
+  time-bounded — noted, accepted.)
+- **The approval card offers the ladder.** "Approve once" (strict; the only option
+  for `always_ask` secrets) · "…and don't re-ask this key for 5 min" (per-key,
+  default) · "Unlock **skill deploy-aws** · 15 min (covers 3 of 4)" · "Unlock
+  **group crypto** · 15 min." Each shows the covered count, TTL control, and session
+  toggle, so the blast radius is explicit (rubber-stamping stays visibly risky).
+- **Revocation & visibility.** The Vaults page lists active grants (scope, covered
+  secrets, expires-in, bound session) with one-click **Revoke** (drops the cached
+  DEKs at once). Auto-revoke on TTL expiry, restart, explicit revoke, and (if
+  session-bound) session archive. Grants + each use are audited (`granted` /
+  `delivered-under-grant` / `grant-expired` / `grant-revoked`).
 - **Resolve path:** `/internal/vault/resolve` checks for an active, in-scope grant
-  for the secret's group → if present, decrypt headlessly via the in-memory GMK; else
-  fall back to the `access` request + inline approval.
+  covering the secret → if present, decrypt headlessly from the cached DEK; else fall
+  back to the `access` request + inline approval card (which offers the ladder).
 
 ## 10. Outbound redaction (tripwire)
 
@@ -540,13 +562,17 @@ R4 (06-14):
 5. **1Password import** is feasible — `op` CLI one-time import first (covers Personal
    vault), service-account for headless, live `op://` reference later (§13.5).
 
-R5 (06-16): **group authorization designed** (§9.5). Per-group key `GMK_G =
-HKDF(VMK, group)`; a grant hands the daemon one group's GMK in memory for a bounded
-TTL (15 min default / 1 h / until-revoke) + session binding (this-session default);
-blast radius = one group; GMK never persisted; **`keypair`/signing never
-grantable**; opt-in second action on the approval card; revocable + audited;
-`vault_groups` (policy) + `vault_grants` (audit) tables. A bounded, visible
-relaxation of §8.4, not silent.
+R5 (06-16): group authorization first cut (per-group `GMK = HKDF(VMK, group)`) —
+**superseded by R6**.
+R6 (06-16): **grants are scope-typed** — `secret:NAME` (per-key, default-on-approve,
+proposed 5 min) / `skill:S` (unlock a skill's secrets together, the per-task unit,
+15 min) / `group:G` (manual bundle). One mechanism: a grant caches the covered
+**DEK set** in daemon memory (drop v6's per-group GMK — too group-specific, can't
+span a skill's cross-group secrets; DEK-set is uniform + tighter, never exposes the
+VMK). Set frozen at grant time. `group` and `vault_link` stay distinct data shapes;
+the unification is at the grant layer. `keypair` never grantable (skill/group grants
+cover only the grantable static subset). `vault_grants` gains
+`scope_type`+`scope_ref`. Bounds/lifecycle/audit from R5 carry over.
 
 ## 17. Open questions
 
@@ -558,9 +584,11 @@ relaxation of §8.4, not silent.
 4. askill `secrets:` frontmatter — confirm we own it + file the issue.
 5. ETH preview depth: selector + raw calldata to start, or ABI-decode +
    dangerous-selector warnings day one?
-6. ~~`group` unlock-scoping — design now or defer?~~ **Designed (§9.5, R5).**
-   Remaining sub-decisions: default TTL (proposed 15 min) and default binding
-   (proposed this-session-only) — confirm; and whether "until-revoked" TTL is
-   allowed at launch or held back as too broad.
+6. ~~unlock-scoping — design now or defer?~~ **Designed as scope-typed grants
+   (§9.5, R6).** Remaining sub-decisions: per-key default TTL (proposed 5 min) +
+   skill/group default TTL (proposed 15 min); default binding (proposed
+   this-session-only); whether "until-revoked" TTL ships at launch or is held back
+   as too broad; and whether "Approve once" auto-applies a per-key window by default
+   (proposed yes, except `always_ask` secrets).
 7. 1Password: one-time import only, or also build the live `op://` reference mode
    (single-source-of-truth, but a hard `op` runtime dependency)?
