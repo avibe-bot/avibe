@@ -410,8 +410,7 @@ jobs:
               messages: [
                 {role: "system", content: "You are a senior developer-relations writer for a developer tool. You read commit logs and PR intent, synthesize them into the few themes that matter to users, and write release notes developers actually want to read: lead with impact, be specific and concrete, never invent changes. When asked for Chinese, you write natural, idiomatic Chinese — never machine-translated."},
                 {role: "user", content: $prompt}
-              ],
-              temperature: 0.2
+              ]
             }' > request.json
 
           HTTP_CODE=$(curl -sS -w '%{http_code}' \
@@ -458,7 +457,14 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Permissive form for DETECTING intent to be silent (tag annotation or
+          # existing body may carry the marker bare or as a comment).
           MARKER_RE='(avibe|vibe-remote):update-notification[[:space:]]*=[[:space:]]*none'
+          # Strict HTML-comment form — this is the ONLY shape clients actually
+          # parse (core/update_checker.py). Use it for the idempotence check so a
+          # mere prose/inline-code mention of the marker (e.g. a release ABOUT
+          # this workflow) does not trick us into skipping the real comment.
+          MARKER_COMMENT_RE='<!--[[:space:]]*(avibe|vibe-remote):update-notification[[:space:]]*=[[:space:]]*none[[:space:]]*-->'
           has_marker="false"
 
           # Source 1: the tag annotation (annotated-tag release flow).
@@ -487,7 +493,7 @@ jobs:
           # already-installed updaters, and a pre-rebrand client only understands
           # the legacy 'vibe-remote' marker — dropping it would notify exactly the
           # old-version users a silent release is meant not to disturb.
-          if [ "$has_marker" = "true" ] && ! grep -qE "$MARKER_RE" release.md; then
+          if [ "$has_marker" = "true" ] && ! grep -qE "$MARKER_COMMENT_RE" release.md; then
             echo "Prepending silent-update markers (current + legacy) to the generated release notes."
             { printf '<!-- avibe:update-notification=none -->\n<!-- vibe-remote:update-notification=none -->\n\n'; cat release.md; } > release.md.tmp
             mv release.md.tmp release.md
