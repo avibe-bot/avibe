@@ -12,10 +12,10 @@ on:
         required: true
         type: string
       model:
-        description: "OpenAI model (default: gpt-5.2)"
+        description: "OpenAI model (default: gpt-5.5)"
         required: false
         type: string
-        default: "gpt-5.4"
+        default: "gpt-5.5"
       max_commits:
         description: "Max commits to summarize"
         required: false
@@ -312,7 +312,7 @@ jobs:
         id: notes
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: ${{ github.event.inputs.model || 'gpt-5.4' }}
+          OPENAI_MODEL: ${{ github.event.inputs.model || 'gpt-5.5' }}
           TAG: ${{ steps.tag.outputs.tag }}
           RANGE: ${{ steps.commits.outputs.range }}
           COMMIT_COUNT: ${{ steps.commits.outputs.commit_count }}
@@ -338,7 +338,10 @@ jobs:
             COMPARE_URL="https://github.com/${REPO}/commits/${TAG}"
           fi
 
-          # Best-effort PR enrichment: fetch PR titles/labels if we can detect PR numbers.
+          # Best-effort PR enrichment: fetch PR title + labels + a short body
+          # excerpt ("intent") so the model understands WHY each change shipped,
+          # not just the one-line title. The excerpt is newline-flattened and
+          # length-capped to keep the prompt bounded.
           PRS_SUMMARY=""
           if [ -s prs.txt ] && command -v gh >/dev/null 2>&1; then
             : > prs_summary.txt
@@ -346,7 +349,9 @@ jobs:
             head -n 80 prs.txt | while read -r pr; do
               [ -z "$pr" ] && continue
               gh api -H "Accept: application/vnd.github+json" "repos/${REPO}/pulls/${pr}" \
-                --jq '"- #\(.number) \(.title) (@\(.user.login))" + (if (.labels|length) > 0 then " [" + ([.labels[].name]|join(", ")) + "]" else "" end)' \
+                --jq '"- #\(.number) \(.title) (@\(.user.login))"
+                  + (if (.labels|length) > 0 then " [" + ([.labels[].name]|join(", ")) + "]" else "" end)
+                  + ((.body // "") | gsub("\r";"") | gsub("\n";" ") | gsub("  +";" ") | .[0:600] | if . == "" then "" else "\n  intent: " + . end)' \
                 >> prs_summary.txt || true
             done
             if [ -s prs_summary.txt ]; then
@@ -358,34 +363,36 @@ jobs:
           COMMITS=$(cat commits.txt 2>/dev/null || true)
 
           cat > prompt.txt <<PROMPT
-          Generate GitHub Release Notes (Markdown) for version ${TAG}.
+          You are writing the GitHub Release Notes (Markdown) for ${REPO} ${TAG}.
 
-          ## Source priority
-          - Commits are the PRIMARY source of truth — they show what actually shipped.
-          - PR titles/labels are SUPPLEMENTARY context for grouping and attribution.
-          - Do NOT skip commits just because a PR list exists.
-          - Do NOT hallucinate. Use only the provided data.
+          ## What this product is (frame the highlights in these terms)
+          Avibe is a local-first "Agent OS": one install turns a machine into the runtime an AI agent lives in, operated through a Web workbench and IM surfaces (Slack, Discord, Telegram, Feishu/Lark, WeChat), routing across multiple agent backends (Claude Code, Codex, OpenCode). The readers are developers and power users running their own Avibe — write for someone deciding whether this upgrade is worth installing.
 
-          ## Highlights (most important)
-          Write a ## Highlights section (2-4 bullets) that answers: "Why should I upgrade?"
-          - Focus on USER-FACING impact: new capabilities, meaningful UX improvements, important fixes.
-          - Use action-oriented language: "You can now ...", "X is now Y% faster", "Fixed a bug where ...".
-          - Skip internal refactors, CI tweaks, and dependency bumps — those go in Changes.
-          - If a change is significant but technical, translate it into user benefit.
+          ## How to read the input
+          - Commits are the PRIMARY source of truth for WHAT shipped. PR titles, labels, and the "intent:" excerpts explain WHY — use them to understand and group, never to invent.
+          - SYNTHESIZE THEMES, do not transcribe. Many commits usually serve one user-facing change (e.g. a dozen "fix(im): ..." commits hardening one capability = ONE highlight about that capability, not a dozen bullets). Find the few themes that actually matter to a user and lead with the biggest.
+          - Do NOT hallucinate. Use only the provided data. When unsure whether something is user-facing, put it in Changes, not Highlights.
+
+          ## Highlights (the part people actually read)
+          Write a ## Highlights section (2-4 bullets) that answers "why should I upgrade?":
+          - Lead with the single most impactful change.
+          - Each bullet states the concrete, user-visible behavior AND why it matters. Action-oriented: "You can now ...", "X now works without ...", "Fixed a case where ...".
+          - Translate significant-but-technical work into the user benefit (what they can now do, or what no longer breaks).
+          - Keep internal refactors, CI, and dependency bumps OUT of Highlights.
           - Omit Highlights entirely only if the release is purely internal housekeeping.
 
           ## Changes
-          Group remaining items under ### Added / ### Changed / ### Fixed / ### Security / ### Breaking.
-          - Omit empty groups.
-          - Each bullet: one line, start with a verb, reference PR number if available.
-          - Minor/internal items (deps, CI, refactor) can be collapsed into a single "Internal" bullet or omitted.
+          Group the remaining items under ### Added / ### Changed / ### Fixed / ### Security / ### Breaking (omit empty groups).
+          - One line per bullet, start with a verb, reference the PR number when available.
+          - Collapse minor/internal items (deps, CI, refactor) into a single "Internal" bullet, or omit them.
 
           ## Format
-          - Output MUST be bilingual in this exact order:
+          - Output MUST be bilingual, in EXACTLY this order:
             1) English release notes
-            2) A single Markdown horizontal rule: ---
-            3) Chinese release notes (natural Chinese, not machine-translated)
-          - Final line in each language section: **Full Changelog**: ${COMPARE_URL}
+            2) a single Markdown horizontal rule: ---
+            3) Chinese release notes
+          - The Chinese version must read like a human engineer wrote it, NOT a machine translation: natural and concise, no translationese, no filler buzzwords, at most one em-dash per section. Convey the same meaning rather than mirroring the English word for word.
+          - End each language section with a final line: **Full Changelog**: ${COMPARE_URL}
 
           Context: ${REPO} ${RANGE}
           PROMPT
@@ -401,10 +408,9 @@ jobs:
             '{
               model: $model,
               messages: [
-                {role: "system", content: "You are a developer-relations writer who distills commit logs into release notes that developers actually want to read. Lead with impact, be specific, never invent changes."},
+                {role: "system", content: "You are a senior developer-relations writer for a developer tool. You read commit logs and PR intent, synthesize them into the few themes that matter to users, and write release notes developers actually want to read: lead with impact, be specific and concrete, never invent changes. When asked for Chinese, you write natural, idiomatic Chinese — never machine-translated."},
                 {role: "user", content: $prompt}
-              ],
-              temperature: 0.2
+              ]
             }' > request.json
 
           HTTP_CODE=$(curl -sS -w '%{http_code}' \
@@ -445,14 +451,52 @@ jobs:
             printf "\n\nFull Changelog: %s\n" "$COMPARE_URL" >> release.md
           fi
 
-      - name: Apply silent-update marker from tag annotation
+      - name: Preserve silent-update marker (tag annotation or existing release body)
         shell: bash
         env:
           TAG: ${{ steps.tag.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          # Permissive form for DETECTING intent to be silent (tag annotation or
+          # existing body may carry the marker bare or as a comment).
+          MARKER_RE='(avibe|vibe-remote):update-notification[[:space:]]*=[[:space:]]*none'
+          # Strict HTML-comment form — this is the ONLY shape clients actually
+          # parse (core/update_checker.py). Use it for the idempotence check so a
+          # mere prose/inline-code mention of the marker (e.g. a release ABOUT
+          # this workflow) does not trick us into skipping the real comment.
+          MARKER_COMMENT_RE='<!--[[:space:]]*(avibe|vibe-remote):update-notification[[:space:]]*=[[:space:]]*none[[:space:]]*-->'
+          has_marker="false"
+
+          # Source 1: the tag annotation (annotated-tag release flow).
           TAG_MSG=$(git tag -l --format='%(contents)' "$TAG")
-          if echo "$TAG_MSG" | grep -qE '(avibe|vibe-remote):update-notification[[:space:]]*=[[:space:]]*none'; then
-            echo "Silent update marker found in tag annotation; prepending to release notes."
+          if echo "$TAG_MSG" | grep -qE "$MARKER_RE"; then
+            echo "Silent update marker found in tag annotation."
+            has_marker="true"
+          fi
+
+          # Source 2: an already-created release body. A silent release is often
+          # set up by pre-creating the release with the marker comment in its body
+          # (e.g. via 'gh release create --notes-file'). Both this job (official
+          # tags) and the later softprops step (gh-v* tags) replace the body with
+          # release.md, which would otherwise STRIP that marker — so this applies
+          # to ALL tags, not just official ones. Require the STRICT HTML-comment
+          # form here: a body that merely DOCUMENTS the marker text as prose
+          # (e.g. notes about this workflow) is not an intent to go silent.
+          if [ "$has_marker" != "true" ]; then
+            EXISTING_BODY=$(gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json body --jq '.body' 2>/dev/null || true)
+            if echo "$EXISTING_BODY" | grep -qE "$MARKER_COMMENT_RE"; then
+              echo "Silent update marker (HTML comment) found in the existing release body."
+              has_marker="true"
+            fi
+          fi
+
+          # Prepend once (idempotent — never double-add if the notes already carry it).
+          # Emit BOTH the current and legacy markers: the release body is read by
+          # already-installed updaters, and a pre-rebrand client only understands
+          # the legacy 'vibe-remote' marker — dropping it would notify exactly the
+          # old-version users a silent release is meant not to disturb.
+          if [ "$has_marker" = "true" ] && ! grep -qE "$MARKER_COMMENT_RE" release.md; then
+            echo "Prepending silent-update markers (current + legacy) to the generated release notes."
             { printf '<!-- avibe:update-notification=none -->\n<!-- vibe-remote:update-notification=none -->\n\n'; cat release.md; } > release.md.tmp
             mv release.md.tmp release.md
           fi
