@@ -96,9 +96,37 @@ class TelegramBot(BaseIMClient):
     _MAX_IN_FLIGHT_MESSAGE_CALLBACK_TASKS = 100
     _RICH_MARKDOWN_BLOCK_RE = re.compile(
         r"(?m)^(?:#{1,6}\s+\S|[-*+]\s+\S|\d+\.\s+\S|>\s?\S|---\s*$|\|.*\|\s*$|\$\$)"
-        r"|```|<details\b|<tg-|!\[[^\]]*\]\(https?://",
+        r"|```|<details\b|<tg-|!\[[^\]]*\]\(\s*<?https?://",
         re.IGNORECASE,
     )
+    _REMOTE_MARKDOWN_IMAGE_RE = re.compile(
+        r"!\[([^\]]*)\]\(\s*(?:<(?P<angle_url>https?://[^>\n]+)>|"
+        r"(?P<bare_url>https?://(?:[^()\\\s]|\([^()]*\))+))"
+        r"(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^()]*\)))?\s*\)",
+        re.IGNORECASE,
+    )
+    _REMOTE_MARKDOWN_LINKED_IMAGE_RE = re.compile(
+        r"\[!\[([^\]]*)\]\(\s*(?:<(?P<image_angle_url>https?://[^>\n]+)>|"
+        r"(?P<image_bare_url>https?://(?:[^()\\\s]|\([^()]*\))+))"
+        r"(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^()]*\)))?\s*\)\]"
+        r"\(\s*(?P<link_destination><[^>\n]+>|(?:[^()\\\s]|\([^()]*\))+)"
+        r"(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^()]*\)))?\s*\)",
+        re.IGNORECASE,
+    )
+    _MARKDOWN_REFERENCE_DEFINITION_RE = re.compile(
+        r"^[ \t]{0,3}\[(?P<label>[^\]]+)\]:[ \t]*(?:<(?P<angle_url>https?://[^>\n]+)>|"
+        r"(?P<bare_url>https?://\S+))",
+        re.IGNORECASE,
+    )
+    _MARKDOWN_REFERENCE_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\[(?P<label>[^\]]+)\]")
+    _MARKDOWN_REFERENCE_LINKED_IMAGE_RE = re.compile(
+        r"\[!\[([^\]]*)\]\(\s*(?:<(?P<image_angle_url>https?://[^>\n]+)>|"
+        r"(?P<image_bare_url>https?://(?:[^()\\\s]|\([^()]*\))+))"
+        r"(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^()]*\)))?\s*\)\]\[(?P<label>[^\]]+)\]",
+        re.IGNORECASE,
+    )
+    _MARKDOWN_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+    _MARKDOWN_LIST_ITEM_RE = re.compile(r"^(?P<indent>[ \t]*)(?:[-*+]|\d+\.)(?P<marker_space>\s+)")
 
     def __init__(self, config: TelegramConfig):
         super().__init__(config)
@@ -879,6 +907,152 @@ class TelegramBot(BaseIMClient):
         description = str(err).lower()
         return "method not found" in description
 
+    @staticmethod
+    def _is_rich_message_remote_media_error(err: Exception) -> bool:
+        description = str(err)
+        return "RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND" in description
+
+    @classmethod
+    def _degrade_remote_markdown_images(cls, text: str) -> str:
+        reference_urls: dict[str, str] = {}
+        for line in text.splitlines():
+            match = cls._MARKDOWN_REFERENCE_DEFINITION_RE.match(line)
+            if match:
+                label = " ".join(match.group("label").casefold().split())
+                angle_url = match.group("angle_url")
+                reference_urls[label] = f"<{angle_url}>" if angle_url is not None else match.group("bare_url")
+
+        def is_escaped(segment: str, pos: int) -> bool:
+            backslashes = 0
+            cursor = pos - 1
+            while cursor >= 0 and segment[cursor] == "\\":
+                backslashes += 1
+                cursor -= 1
+            return backslashes % 2 == 1
+
+        def replace(match: re.Match[str]) -> str:
+            if is_escaped(match.string, match.start()):
+                return match.group(0)
+            angle_url = match.group("angle_url")
+            url = angle_url or match.group("bare_url")
+            label = match.group(1).strip() or url
+            destination = f"<{angle_url}>" if angle_url is not None else url
+            return f"[{label}]({destination})"
+
+        def replace_linked(match: re.Match[str]) -> str:
+            if is_escaped(match.string, match.start()):
+                return match.group(0)
+            image_url = match.group("image_angle_url") or match.group("image_bare_url")
+            label = match.group(1).strip() or image_url
+            destination = match.group("link_destination")
+            return f"[{label}]({destination})"
+
+        def replace_reference_linked(match: re.Match[str]) -> str:
+            if is_escaped(match.string, match.start()):
+                return match.group(0)
+            image_url = match.group("image_angle_url") or match.group("image_bare_url")
+            label = match.group(1).strip() or image_url
+            destination_label = match.group("label")
+            return f"[{label}][{destination_label}]"
+
+        def replace_reference(match: re.Match[str]) -> str:
+            if is_escaped(match.string, match.start()):
+                return match.group(0)
+            destination_label = " ".join(match.group("label").casefold().split())
+            destination = reference_urls.get(destination_label)
+            if destination is None:
+                return match.group(0)
+            label = match.group(1).strip() or destination
+            return f"[{label}]({destination})"
+
+        def degrade_images(segment: str) -> str:
+            segment = cls._MARKDOWN_REFERENCE_LINKED_IMAGE_RE.sub(replace_reference_linked, segment)
+            segment = cls._REMOTE_MARKDOWN_LINKED_IMAGE_RE.sub(replace_linked, segment)
+            segment = cls._REMOTE_MARKDOWN_IMAGE_RE.sub(replace, segment)
+            return cls._MARKDOWN_REFERENCE_IMAGE_RE.sub(replace_reference, segment)
+
+        def replace_outside_inline_code(segment: str) -> str:
+            parts: list[str] = []
+            pos = 0
+            while pos < len(segment):
+                if segment[pos] != "`":
+                    next_code = segment.find("`", pos)
+                    end = len(segment) if next_code == -1 else next_code
+                    parts.append(degrade_images(segment[pos:end]))
+                    pos = end
+                    continue
+
+                marker_end = pos + 1
+                while marker_end < len(segment) and segment[marker_end] == "`":
+                    marker_end += 1
+                marker = segment[pos:marker_end]
+                close = segment.find(marker, marker_end)
+                if close == -1:
+                    parts.append(segment[pos])
+                    pos += 1
+                    continue
+                close_end = close + len(marker)
+                parts.append(segment[pos:close_end])
+                pos = close_end
+            return "".join(parts)
+
+        parts: list[str] = []
+        fence_char: Optional[str] = None
+        fence_len = 0
+        list_content_indent: Optional[int] = None
+        for line in text.splitlines(keepends=True):
+            fence_match = cls._MARKDOWN_FENCE_RE.match(line)
+            if fence_char is not None:
+                parts.append(line)
+                if fence_match:
+                    marker = fence_match.group(1)
+                    if marker[0] == fence_char and len(marker) >= fence_len:
+                        fence_char = None
+                        fence_len = 0
+                continue
+
+            if fence_match:
+                marker = fence_match.group(1)
+                fence_char = marker[0]
+                fence_len = len(marker)
+                parts.append(line)
+                continue
+
+            list_match = cls._MARKDOWN_LIST_ITEM_RE.match(line)
+            if list_match:
+                list_content_indent = len(line[: list_match.end()].replace("\t", "    "))
+            elif line.strip():
+                indent = len(line) - len(line.lstrip(" \t"))
+                if list_content_indent is not None and indent < list_content_indent:
+                    list_content_indent = None
+
+            indent = len(line) - len(line.lstrip(" \t"))
+            is_list_continuation = list_content_indent is not None and indent >= list_content_indent
+            is_list_code = list_content_indent is not None and indent >= list_content_indent + 4
+            if line.startswith(("    ", "\t")) and (not is_list_continuation or is_list_code):
+                parts.append(line)
+                continue
+
+            parts.append(replace_outside_inline_code(line))
+        return "".join(parts)
+
+    async def _send_rich_markdown_payload(
+        self,
+        context: MessageContext,
+        text: str,
+        keyboard: Optional[InlineKeyboard] = None,
+        *,
+        reply_to: Optional[str] = None,
+    ) -> str:
+        payload = self._build_rich_message_payload(context, text, keyboard=keyboard, reply_to=reply_to)
+        result = await telegram_api.call_api(
+            self.config.bot_token,
+            "sendRichMessage",
+            payload,
+            proxy_url=self._proxy_url,
+        )
+        return str(result["result"]["message_id"])
+
     async def _send_message_with_buttons_payload(
         self,
         context: MessageContext,
@@ -922,17 +1096,26 @@ class TelegramBot(BaseIMClient):
                 )
             return await self.send_message(context, text, parse_mode="markdown", reply_to=reply_to)
 
-        payload = self._build_rich_message_payload(context, text, keyboard=keyboard, reply_to=reply_to)
         try:
-            result = await telegram_api.call_api(
-                self.config.bot_token,
-                "sendRichMessage",
-                payload,
-                proxy_url=self._proxy_url,
-            )
+            message_id = await self._send_rich_markdown_payload(context, text, keyboard=keyboard, reply_to=reply_to)
         except Exception as err:
             if self._is_rich_message_method_unavailable(err):
                 self._rich_markdown_supported = False
+            elif self._is_rich_message_remote_media_error(err):
+                degraded = self._degrade_remote_markdown_images(text)
+                if degraded != text:
+                    try:
+                        message_id = await self._send_rich_markdown_payload(
+                            context,
+                            degraded,
+                            keyboard=keyboard,
+                            reply_to=reply_to,
+                        )
+                    except Exception:
+                        logger.warning("Telegram sendRichMessage retry without remote image media failed", exc_info=True)
+                    else:
+                        self._rich_markdown_supported = True
+                        return message_id
             logger.warning("Telegram sendRichMessage failed; falling back to sendMessage", exc_info=True)
             if keyboard is not None:
                 return await self._send_message_with_buttons_payload(
@@ -944,7 +1127,7 @@ class TelegramBot(BaseIMClient):
                 )
             return await self.send_message(context, text, parse_mode="markdown", reply_to=reply_to)
         self._rich_markdown_supported = True
-        return str(result["result"]["message_id"])
+        return message_id
 
     async def send_message(
         self, context: MessageContext, text: str, parse_mode: Optional[str] = None, reply_to: Optional[str] = None

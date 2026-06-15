@@ -684,6 +684,80 @@ def test_send_markdown_message_falls_back_when_rich_message_is_rejected() -> Non
     assert fallback_payload["text"] == "# Summary\n\n- shipped"
 
 
+def test_send_markdown_message_retries_rich_without_remote_image_media() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = MessageContext(user_id="42", channel_id="-100123", platform="telegram")
+    markdown = (
+        "# Summary\n\n"
+        "![示例图片](https://via.placeholder.com/120x80.png?text=Markdown)\n\n"
+        '![captioned](https://host/img.png "caption")\n\n'
+        "![angle](<https://host/img space.png>)\n\n"
+        "![upper](HTTPS://host/upper.png)\n\n"
+        "![](https://host/no-alt.png)\n\n"
+        "\\![escaped](https://host/escaped.png)\n\n"
+        "[![badge](https://img.shields.io/x.svg)](https://example.com)\n\n"
+        "- screenshot:\n"
+        "    ![shot](https://host/list.png)\n\n"
+        "1. ordered screenshot:\n"
+        "      ![ordered](https://host/ordered.png)\n\n"
+        "- sample:\n"
+        "      ![literal](https://host/code.png)\n\n"
+        "![diagram][img]\n\n"
+        "[![refbadge](https://img.example/x.svg)][badge-url]\n\n"
+        "[img]: https://host/diagram.png\n"
+        "[badge-url]: https://example.com/ref\n\n"
+        "`![inline](https://host/inline.png)`\n\n"
+        "```md\n"
+        "![fenced](https://host/fenced.png)\n"
+        "```\n\n"
+        "    ![indented](https://host/indented.png)\n\n"
+        "- shipped"
+    )
+
+    with patch(
+        "modules.im.telegram.telegram_api.call_api",
+        new=AsyncMock(
+            side_effect=[
+                RuntimeError("Bad Request: RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND"),
+                {"result": {"message_id": 89}},
+            ]
+        ),
+    ) as call_mock:
+        result = asyncio.run(bot.send_markdown_message(context, markdown))
+
+    assert result == "89"
+    assert [call.args[1] for call in call_mock.await_args_list] == ["sendRichMessage", "sendRichMessage"]
+    retry_payload = call_mock.await_args_list[1].args[2]
+    assert retry_payload["rich_message"] == {
+        "markdown": (
+            "# Summary\n\n"
+            "[示例图片](https://via.placeholder.com/120x80.png?text=Markdown)\n\n"
+            "[captioned](https://host/img.png)\n\n"
+            "[angle](<https://host/img space.png>)\n\n"
+            "[upper](HTTPS://host/upper.png)\n\n"
+            "[https://host/no-alt.png](https://host/no-alt.png)\n\n"
+            "\\![escaped](https://host/escaped.png)\n\n"
+            "[badge](https://example.com)\n\n"
+            "- screenshot:\n"
+            "    [shot](https://host/list.png)\n\n"
+            "1. ordered screenshot:\n"
+            "      [ordered](https://host/ordered.png)\n\n"
+            "- sample:\n"
+            "      ![literal](https://host/code.png)\n\n"
+            "[diagram](https://host/diagram.png)\n\n"
+            "[refbadge][badge-url]\n\n"
+            "[img]: https://host/diagram.png\n"
+            "[badge-url]: https://example.com/ref\n\n"
+            "`![inline](https://host/inline.png)`\n\n"
+            "```md\n"
+            "![fenced](https://host/fenced.png)\n"
+            "```\n\n"
+            "    ![indented](https://host/indented.png)\n\n"
+            "- shipped"
+        )
+    }
+
+
 def test_send_markdown_message_preserves_reply_to_on_rejected_rich_button_fallback() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
     context = MessageContext(user_id="42", channel_id="-100123", platform="telegram")
