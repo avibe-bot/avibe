@@ -108,31 +108,36 @@ export const ChatPage: React.FC = () => {
     { disabled: !sessionId },
   );
 
-  // Publish this chat's composer to the ComposerBridge while it's mounted, so
-  // the sidebar's "reference this session" action can insert a #<session>
-  // mention into the open chat's input. Null target (no sessionId) = no chat
-  // open, which hides that sidebar action.
+  // Show Page toggle: swap the chat surface (transcript + composer, NOT the
+  // header bar) for this session's Show Page in an iframe, and back. Declared
+  // before the composer bridge target, which depends on showPageMode.
+  const [showPageMode, setShowPageMode] = useState(false);
+  const [showPageBusy, setShowPageBusy] = useState(false);
+  const [showPageUrl, setShowPageUrl] = useState<string | null>(null);
+  useEffect(() => {
+    // ChatPage is reused across :sessionId — clear all show-page state so the
+    // next chat starts in chat view with a live (not stuck-busy) toggle.
+    setShowPageMode(false);
+    setShowPageUrl(null);
+    setShowPageBusy(false);
+  }, [sessionId]);
+
+  // Publish this chat's composer to the ComposerBridge so the sidebar's
+  // "reference this session" action can insert a #<session> mention into the
+  // open chat's input.
   const insertSessionReference = useCallback(
     (refSessionId: string, title?: string | null) =>
       composerRef.current?.insertSessionReference(refSessionId, title),
     [],
   );
+  // Null target hides that sidebar action — when no chat is open (no sessionId)
+  // OR while the Show Page iframe has replaced the composer (it's unmounted, so
+  // an insert would silently no-op).
   const composerTarget = useMemo<ComposerInsertTarget | null>(
-    () => (sessionId ? { sessionId, insertSessionReference } : null),
-    [sessionId, insertSessionReference],
+    () => (sessionId && !showPageMode ? { sessionId, insertSessionReference } : null),
+    [sessionId, showPageMode, insertSessionReference],
   );
   useRegisterComposerTarget(composerTarget);
-
-  // Show Page toggle: swap the chat surface (transcript + composer, NOT the
-  // header bar) for this session's Show Page in an iframe, and back. Resets to
-  // chat view on session change so a freshly-opened chat starts in chat mode.
-  const [showPageMode, setShowPageMode] = useState(false);
-  const [showPageBusy, setShowPageBusy] = useState(false);
-  const [showPageUrl, setShowPageUrl] = useState<string | null>(null);
-  useEffect(() => {
-    setShowPageMode(false);
-    setShowPageUrl(null);
-  }, [sessionId]);
 
   // Back returns to the page the user came from, not a hardcoded inbox.
   // location.key === 'default' means /chat was the first history entry (deep
@@ -757,16 +762,19 @@ export const ChatPage: React.FC = () => {
         );
         // Only a freshly-created page needs the agent to build the visualization.
         if (res.existed === false) {
-          void sendMessage('Please visualize this session as a Show Page.');
+          void sendMessage(t('chat.showPage.prompt'));
         }
         setShowPageMode(true);
       }
     } catch {
       // apiFetch already surfaced a toast; stay in chat view.
     } finally {
-      if (sessionIdRef.current === sid) setShowPageBusy(false);
+      // Always clear — the in-flight request is done regardless of which chat is
+      // now mounted (ChatPage is reused across sessions; a guarded clear would
+      // strand the shared busy flag on a session the user switched to).
+      setShowPageBusy(false);
     }
-  }, [sessionId, showPageMode, api, sendMessage]);
+  }, [sessionId, showPageMode, api, sendMessage, t]);
 
   // A quick-reply click sends the chosen label as a normal user turn, tagged with
   // the agent message it answers so the group can lock + highlight the choice on

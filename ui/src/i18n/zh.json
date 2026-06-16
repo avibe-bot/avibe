@@ -1757,7 +1757,8 @@
     "showPage": {
       "open": "查看 Show Page",
       "backToChat": "返回对话",
-      "title": "Show Page"
+      "title": "Show Page",
+      "prompt": "Please visualize this session as a Show Page."
     },
     "titlePlaceholder": "会话标题",
     "pickAgent": "选择 Agent",

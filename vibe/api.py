@@ -1008,26 +1008,20 @@ def ensure_show_page(session_id: str) -> dict:
     workbench can ALSO send the "visualize this session" prompt only on first
     creation. Mirrors the CLI ``vibe show path`` (ensure + return).
     """
-    from core.show_pages import ShowPageError, ShowPageStore, show_page_payload
+    from core.show_pages import ShowPageStore, show_page_payload
 
     config = V2Config.load()
     store = ShowPageStore()
     try:
-        existed = store.get(session_id) is not None
-        # Don't materialize a fresh page row for an archived (terminal) session —
-        # /show/<id>/ serves private pages without re-checking archived state, so
-        # creating one would resurrect it. Mirrors update_visibility's guard. An
-        # already-existing page is returned as-is (archive took it offline).
-        if not existed and store._is_archived(session_id):
-            raise ShowPageError(
-                "Cannot create a Show Page for an archived session.",
-                code="session_archived",
-            )
-        page = store.ensure(session_id)
+        # Atomic: refuses to create a page for an archived session and reports
+        # whether IT created the row (so the UI only prompts the agent on a real
+        # first creation, not a concurrent ensure). Raises ShowPageError for an
+        # archived session — the route maps it to a 4xx.
+        page, created = store.ensure_active(session_id)
         payload = show_page_payload(page, config=config)
     finally:
         store.close()
-    return {"ok": True, "existed": existed, **_apply_session_meta([payload])[0]}
+    return {"ok": True, "existed": not created, **_apply_session_meta([payload])[0]}
 
 
 def rotate_show_page_share(session_id: str) -> dict:

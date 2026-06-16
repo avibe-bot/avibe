@@ -245,6 +245,54 @@ class ShowPageStore:
             )
         return page
 
+    def ensure_active(self, session_id: str) -> tuple[ShowPage, bool]:
+        """Atomically ensure a page for a NON-archived session; return (page, created).
+
+        The existing-row check, the archived check and the insert all run in ONE
+        transaction so (a) a concurrent archive can't race the create (TOCTOU),
+        and (b) ``created`` is derived from the insert itself — concurrent
+        first-ensures don't both report "created" (which would otherwise double-
+        send the visualize prompt or collide on the unique key). An existing page
+        is returned untouched (archive already took it offline).
+        """
+        session_id = validate_session_id(session_id)
+        now = _utc_now_iso()
+        with self.engine.begin() as conn:
+            existing = (
+                conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
+                .mappings()
+                .first()
+            )
+            if existing is not None:
+                return _page_from_row(existing), False
+            status = conn.execute(
+                select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
+            ).scalar_one_or_none()
+            if status == "archived":
+                raise ShowPageError(
+                    "Cannot create a Show Page for an archived session.",
+                    code="session_archived",
+                )
+            result = conn.execute(
+                insert(show_pages)
+                .prefix_with("OR IGNORE")
+                .values(
+                    session_id=session_id,
+                    visibility=VISIBILITY_PRIVATE,
+                    share_id=None,
+                    offline_at=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            created = bool(result.rowcount and result.rowcount > 0)
+            row = (
+                conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
+                .mappings()
+                .first()
+            )
+        return _page_from_row(row), created
+
     def _is_archived(self, session_id: str) -> bool:
         with self.engine.connect() as conn:
             status = conn.execute(

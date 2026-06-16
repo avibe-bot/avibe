@@ -1758,7 +1758,8 @@
     "showPage": {
       "open": "View Show Page",
       "backToChat": "Back to chat",
-      "title": "Show Page"
+      "title": "Show Page",
+      "prompt": "Please visualize this session as a Show Page."
     },
     "titlePlaceholder": "Session title",
     "pickAgent": "Pick an agent",
