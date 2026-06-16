@@ -1853,7 +1853,11 @@ const Transcript: React.FC<TranscriptProps> = ({
     // resumes once hasNewer clears (the transcript has caught up to the tail).
     const pinned = distance < 80 && !hasNewer;
     pinnedRef.current = pinned;
-    setShowJump(distance > 240);
+    // Keep the jump-to-latest button visible while an around-window is active
+    // (hasNewer) even near the window's bottom, so a failed loadNewer (which
+    // leaves newerCursor set with no further scroll event) still has a visible
+    // retry/way-out instead of stranding the user on history (Codex P2).
+    setShowJump(distance > 240 || hasNewer);
     // Only track an anchor while reading history; following needs none (the bottom
     // is free to grow). Re-capturing here keeps it current as the user scrolls.
     if (pinned) anchorRef.current = null;
@@ -1897,6 +1901,18 @@ const Transcript: React.FC<TranscriptProps> = ({
     if (!jumpTarget) return;
     const el = scrollRef.current;
     if (!el) return;
+    // If the target is already the newest loaded row (a recent search hit, or a
+    // just-sent message after an around-mode catch-up), pin to the bottom and keep
+    // following instead of centering+unpinning — otherwise the next agent reply
+    // wouldn't auto-scroll into view (Codex P2). The mint highlight still applies
+    // via ``highlightedId``, independent of the scroll.
+    if (messages.length > 0 && messages[messages.length - 1]?.id === jumpTarget) {
+      const rafTail = requestAnimationFrame(() => {
+        scrollToBottom();
+        onJumpHandled();
+      });
+      return () => cancelAnimationFrame(rafTail);
+    }
     let raf2 = 0;
     suppressAnchorRef.current = true;
     pinnedRef.current = false;
@@ -1921,7 +1937,7 @@ const Transcript: React.FC<TranscriptProps> = ({
       if (raf2) cancelAnimationFrame(raf2);
       suppressAnchorRef.current = false;
     };
-  }, [jumpTarget, messages, captureAnchor, onJumpHandled]);
+  }, [jumpTarget, messages, captureAnchor, onJumpHandled, scrollToBottom]);
 
   // The one place scroll position reacts to content size changes — two modes,
   // never conflated. (Conflating them WAS the bug: any resize while "at bottom"
