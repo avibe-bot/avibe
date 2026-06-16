@@ -6557,7 +6557,21 @@ def _rewrite_public_show_runtime_private_paths(
         return content
     private_prefix = f"/show/{quote(session_id, safe='')}/"
     public_prefix = f"{external_prefix.rstrip('/')}/"
-    rewritten = text.replace(private_prefix, public_prefix)
+    # Only rewrite the private prefix where it is a genuine URL reference, not
+    # where the same "/show/<session>/" substring is embedded inside an absolute
+    # Vite /@fs/<realpath> filesystem path (e.g.
+    # /@fs/<home>/.avibe/show/<session>/src/App.tsx). A blind str.replace would
+    # also corrupt that fs path -> the module 404s and is served as index.html
+    # -> MIME error -> the app never mounts (blank public Show Page). A genuine
+    # URL reference of the prefix is preceded by a quote / paren / = / comma /
+    # whitespace / start, whereas the embedded fs occurrence is preceded by an
+    # alphanumeric path-component char (the "e" in ".avibe"); the negative
+    # lookbehind (note: "/" is deliberately NOT excluded) skips only the latter.
+    rewritten = re.sub(
+        r"(?<![A-Za-z0-9._~-])" + re.escape(private_prefix),
+        public_prefix,
+        text,
+    )
     if rewritten == text:
         return content
     _mark_show_runtime_document_no_store(headers)
