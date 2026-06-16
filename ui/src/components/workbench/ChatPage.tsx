@@ -1064,6 +1064,7 @@ export const ChatPage: React.FC = () => {
           title={t('chat.showPage.title')}
           src={showPageUrl}
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
+          allow="clipboard-write"
           className="min-h-0 w-full flex-1 border-0 bg-background"
         />
       )}

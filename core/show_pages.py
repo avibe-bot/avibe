@@ -721,11 +721,13 @@ createRoot(document.getElementById("root")!).render(
 
 
 def _default_app_tsx() -> str:
-    # Placeholder shown while the agent has not authored the page yet. The Vite
-    # runtime hot-swaps this with the real page as soon as the agent rewrites
-    # src/App.tsx, so the copy reassures the user it will update automatically
-    # and offers the same prompt we auto-send, in case they want to nudge.
-    return """import { useState } from "react"
+    # Placeholder shown while the agent has not authored the page yet. On the
+    # private /show/ surface the Vite runtime hot-swaps this with the real page
+    # as soon as the agent rewrites src/App.tsx, so the copy says it appears
+    # automatically; the public /p/ surface serves a static build with HMR
+    # disabled, so there the copy asks the viewer to refresh instead. We also
+    # offer the same prompt we auto-send, in case the user wants to nudge.
+    return """import { useEffect, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { ThemeProvider } from "@avibe/show-ui/theme"
 
@@ -733,17 +735,21 @@ const NUDGE_PROMPT = "Please visualize this session as a Show Page."
 
 const COPY = {
   en: {
+    lang: "en",
     badge: "Show Page",
     title: "Building your Show Page",
-    body: "Your agent is turning this session into a visual page. It will appear here automatically once it is ready, no refresh needed.",
+    bodyLive: "Your agent is turning this session into a visual page. It will appear here automatically once it is ready.",
+    bodyStatic: "Your agent is turning this session into a visual page. Refresh this page once it is ready to see it.",
     nudge: "Taking a while? Send this to your agent:",
     copy: "Copy",
     copied: "Copied",
   },
   zh: {
+    lang: "zh",
     badge: "Show Page",
     title: "正在生成 Show Page",
-    body: "Agent 正在把这次会话整理成一个可视化页面，完成后会自动显示在这里，不用刷新。",
+    bodyLive: "Agent 正在把这次会话整理成一个可视化页面，完成后会自动显示在这里，不用刷新。",
+    bodyStatic: "Agent 正在把这次会话整理成一个可视化页面，完成后刷新一下页面就能看到。",
     nudge: "等太久了？把这句话发给 Agent 催一下：",
     copy: "复制",
     copied: "已复制",
@@ -755,20 +761,35 @@ function pickCopy() {
   return lang.toLowerCase().startsWith("zh") ? COPY.zh : COPY.en
 }
 
+// The private /show/ surface keeps Vite HMR, so the real page hot-swaps in on
+// its own. The public /p/ surface serves a static build (HMR disabled), so a
+// viewer there has to refresh to pick up the agent's page.
+function isLiveSurface() {
+  return typeof window !== "undefined" && window.location.pathname.includes("/show/")
+}
+
 export default function App() {
   const t = pickCopy()
   const [copied, setCopied] = useState(false)
+  const live = isLiveSurface()
+
+  useEffect(() => {
+    document.documentElement.lang = t.lang
+  }, [t.lang])
 
   async function copyPrompt() {
+    let ok = false
     try {
       await navigator.clipboard.writeText(NUDGE_PROMPT)
+      ok = true
     } catch {
       const field = document.getElementById("show-nudge-prompt")
       if (field instanceof HTMLInputElement) {
         field.select()
-        document.execCommand("copy")
+        ok = document.execCommand("copy")
       }
     }
+    if (!ok) return
     setCopied(true)
     window.setTimeout(() => setCopied(false), 2000)
   }
@@ -784,7 +805,7 @@ export default function App() {
           </div>
           <span className="show-badge">{t.badge}</span>
           <h1 className="show-title">{t.title}</h1>
-          <p className="show-body">{t.body}</p>
+          <p className="show-body">{live ? t.bodyLive : t.bodyStatic}</p>
           <div className="show-nudge">
             <label className="show-nudge-label" htmlFor="show-nudge-prompt">
               {t.nudge}
