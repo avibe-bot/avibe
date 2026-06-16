@@ -128,8 +128,10 @@ export const ChatPage: React.FC = () => {
   // chat view on session change so a freshly-opened chat starts in chat mode.
   const [showPageMode, setShowPageMode] = useState(false);
   const [showPageBusy, setShowPageBusy] = useState(false);
+  const [showPageUrl, setShowPageUrl] = useState<string | null>(null);
   useEffect(() => {
     setShowPageMode(false);
+    setShowPageUrl(null);
   }, [sessionId]);
 
   // Back returns to the page the user came from, not a hardcoded inbox.
@@ -734,22 +736,35 @@ export const ChatPage: React.FC = () => {
   // ensures the page exists; if it was just created, ask the agent to build the
   // visualization. Errors surface via the apiFetch toast layer.
   const toggleShowPage = useCallback(async () => {
-    if (!sessionId) return;
+    const sid = sessionId;
+    if (!sid) return;
     if (showPageMode) {
       setShowPageMode(false);
       return;
     }
     setShowPageBusy(true);
     try {
-      const res = await api.ensureShowPage(sessionId);
-      if (res?.ok && res.existed === false) {
-        void sendMessage('Please visualize this session as a Show Page.');
+      const res = await api.ensureShowPage(sid);
+      // Bail if the user switched chats while ensure was in flight — otherwise a
+      // stale resolve would flip the NEW chat into iframe mode + send its prompt.
+      if (sessionIdRef.current !== sid) return;
+      if (res?.ok) {
+        // Public pages are served under /p/<share_id>/; private under /show/<id>/.
+        setShowPageUrl(
+          res.visibility === 'public' && res.share_id
+            ? `/p/${encodeURIComponent(res.share_id)}/`
+            : `/show/${encodeURIComponent(sid)}/`,
+        );
+        // Only a freshly-created page needs the agent to build the visualization.
+        if (res.existed === false) {
+          void sendMessage('Please visualize this session as a Show Page.');
+        }
+        setShowPageMode(true);
       }
-      setShowPageMode(true);
     } catch {
       // apiFetch already surfaced a toast; stay in chat view.
     } finally {
-      setShowPageBusy(false);
+      if (sessionIdRef.current === sid) setShowPageBusy(false);
     }
   }, [sessionId, showPageMode, api, sendMessage]);
 
@@ -1009,12 +1024,13 @@ export const ChatPage: React.FC = () => {
           onToggleShowPage={toggleShowPage}
         />
 
-      {showPageMode && sessionId ? (
+      {showPageMode && showPageUrl ? (
         // The session's Show Page replaces the transcript + composer (the header
-        // bar stays). Same-origin /show/<id>/ inherits the workbench's auth.
+        // bar stays). Same-origin (/show/<id>/ private or /p/<share>/ public) so
+        // it inherits the workbench's auth; URL is resolved from ensureShowPage.
         <iframe
           title={t('chat.showPage.title')}
-          src={`/show/${encodeURIComponent(sessionId)}/`}
+          src={showPageUrl}
           className="min-h-0 w-full flex-1 border-0 bg-background"
         />
       ) : (
