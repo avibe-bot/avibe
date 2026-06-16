@@ -13,6 +13,7 @@ from storage.migrations import run_migrations
 from storage.models import scope_settings, scopes
 from storage.sessions_service import SQLiteSessionsService
 from storage.settings_service import SQLiteSettingsService, upsert_scope
+from modules.settings_manager import SettingsManager
 
 
 def test_settings_store_uses_sqlite_without_rewriting_legacy_json(tmp_path: Path) -> None:
@@ -56,6 +57,47 @@ def test_channel_require_bind_persists(tmp_path: Path) -> None:
         assert reloaded.find_channel("C-open", platform="slack").require_bind in (None, False)
     finally:
         reloaded.close()
+
+
+def test_is_bound_user_requires_enabled_user(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    store.set_users_for_platform(
+        "slack",
+        {
+            "U-enabled": UserSettings(display_name="Enabled", enabled=True),
+            "U-disabled": UserSettings(display_name="Disabled", enabled=False),
+        },
+    )
+
+    assert store.is_bound_user("U-enabled", platform="slack") is True
+    assert store.is_bound_user("U-disabled", platform="slack") is False
+
+    store.close()
+
+
+def test_settings_manager_runtime_save_preserves_require_bind(tmp_path: Path, monkeypatch) -> None:
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(paths, "ensure_data_dirs", lambda: None)
+
+    manager = SettingsManager(settings_file=str(settings_path), platform="slack")
+    try:
+        manager.store.update_channel(
+            "C-bind",
+            ChannelSettings(enabled=True, require_mention=True, require_bind=True, custom_cwd="/old"),
+            platform="slack",
+        )
+        settings = manager.get_user_settings("C-bind")
+        settings.custom_cwd = "/new"
+        manager.update_user_settings("C-bind", settings)
+
+        reloaded = manager.store.find_channel("C-bind", platform="slack")
+        assert reloaded is not None
+        assert reloaded.custom_cwd == "/new"
+        assert reloaded.require_mention is True
+        assert reloaded.require_bind is True
+    finally:
+        manager.store.close()
 
 
 def test_settings_store_reloads_external_sqlite_writes(tmp_path: Path) -> None:

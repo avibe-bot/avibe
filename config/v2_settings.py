@@ -589,11 +589,12 @@ class SettingsStore:
 
     def is_bound_user(self, user_id: str, platform: Optional[str] = None) -> bool:
         if platform:
-            return self._user_key(user_id, platform) in self.settings.users
+            user = self.settings.users.get(self._user_key(user_id, platform))
+            return user is not None and user.enabled
         if user_id in self.settings.users:
-            return True
+            return self.settings.users[user_id].enabled
         suffix = f"{SCOPED_KEY_SEP}{user_id}"
-        return any(key.endswith(suffix) for key in self.settings.users.keys())
+        return any(key.endswith(suffix) and user.enabled for key, user in self.settings.users.items())
 
     def is_admin(self, user_id: str, platform: Optional[str] = None) -> bool:
         if platform:

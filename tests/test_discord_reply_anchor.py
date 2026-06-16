@@ -4,11 +4,13 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.im import MessageContext
 from modules.im.discord import DiscordBot
+from core.auth import AuthResult
 
 
 class _FakeSessions:
@@ -63,3 +65,23 @@ class DiscordReplyAnchorTests(unittest.IsolatedAsyncioTestCase):
         allowed = DiscordBot._is_thread_reply_allowed(bot, "U123", "C123", "777")
 
         self.assertTrue(allowed)
+
+    async def test_send_auth_denial_acknowledges_silent_interaction_denial(self):
+        bot = object.__new__(DiscordBot)
+        bot.build_auth_denial_text = lambda denial, channel_id=None: None
+        interaction = SimpleNamespace(
+            response=SimpleNamespace(
+                is_done=lambda: False,
+                defer=AsyncMock(),
+            )
+        )
+
+        await DiscordBot._send_auth_denial(
+            bot,
+            "C123",
+            "U-disabled",
+            AuthResult(allowed=False, denial="not_bound_channel"),
+            interaction=interaction,
+        )
+
+        interaction.response.defer.assert_awaited_once_with(ephemeral=True)

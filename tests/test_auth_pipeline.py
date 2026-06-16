@@ -13,13 +13,14 @@ class _Store:
         self.reload_calls = 0
         self.settings = SimpleNamespace(channels={})
         self._bound_users = set()
+        self._disabled_users = set()
         self._admins = set()
 
     def maybe_reload(self):
         self.reload_calls += 1
 
     def is_bound_user(self, user_id: str) -> bool:
-        return user_id in self._bound_users
+        return user_id in self._bound_users and user_id not in self._disabled_users
 
     def has_any_admin(self) -> bool:
         return bool(self._admins)
@@ -141,6 +142,24 @@ def test_require_bind_channel_allows_bound_user():
     )
 
     assert result.allowed is True
+
+
+def test_require_bind_channel_denies_disabled_bound_user():
+    store = _Store()
+    store.settings.channels["C1"] = SimpleNamespace(enabled=True, require_bind=True)
+    store._bound_users.add("U-disabled")
+    store._disabled_users.add("U-disabled")
+
+    result = check_auth(
+        user_id="U-disabled",
+        channel_id="C1",
+        is_dm=False,
+        action="",
+        store=store,
+    )
+
+    assert result.allowed is False
+    assert result.denial == "not_bound_channel"
 
 
 def test_require_bind_off_allows_any_channel_member():

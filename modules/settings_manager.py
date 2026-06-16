@@ -239,6 +239,7 @@ class SettingsManager:
                 if existing is not None:
                     cs.enabled = existing.enabled
                     cs.require_mention = existing.require_mention
+                    cs.require_bind = existing.require_bind
                 channels[cid] = cs
             self.store.set_channels_for_platform(self.platform, channels)
             for uid, s in self.dm_user_settings.items():

@@ -822,6 +822,12 @@ class DiscordBot(BaseIMClient):
         """Send denial message for failed auth check."""
         msg = self.build_auth_denial_text(auth_result.denial, channel_id)
         if not msg:
+            if interaction:
+                try:
+                    if not interaction.response.is_done():
+                        await interaction.response.defer(ephemeral=True)
+                except Exception as err:
+                    logger.debug("Failed to acknowledge silent interaction auth denial: %s", err)
             return
 
         if interaction:
