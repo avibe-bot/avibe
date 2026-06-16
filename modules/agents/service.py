@@ -36,7 +36,7 @@ class AgentService:
 
     async def handle_message(self, agent_name: str, request: AgentRequest):
         agent = self.get(agent_name)
-        runtime_key = agent.runtime_turn_key(request)
+        runtime_key = self._runtime_turn_key(agent, request)
         gate = self._get_turn_gate(runtime_key)
         await gate.lock.acquire()
         gate.token = uuid.uuid4().hex
@@ -86,7 +86,7 @@ class AgentService:
 
     async def handle_stop(self, agent_name: str, request: AgentRequest) -> bool:
         agent = self.get(agent_name)
-        runtime_key = agent.runtime_turn_key(request)
+        runtime_key = self._runtime_turn_key(agent, request)
         gate = self._turn_gates.get(runtime_key)
         if gate is not None and gate.token:
             self._stamp_runtime_turn(request, runtime_key, gate.token)
@@ -129,6 +129,17 @@ class AgentService:
         if runtime_key not in self._turn_gates:
             self._turn_gates[runtime_key] = _RuntimeTurnGate()
         return self._turn_gates[runtime_key]
+
+    @staticmethod
+    def _runtime_turn_key(agent: BaseAgent, request: AgentRequest) -> str:
+        runtime_key = getattr(agent, "runtime_turn_key", None)
+        if callable(runtime_key):
+            return runtime_key(request)
+        return (
+            str(getattr(request, "composite_session_id", "") or "").strip()
+            or str(getattr(request, "base_session_id", "") or "").strip()
+            or "default"
+        )
 
     def _runtime_turn_tokens(self, runtime_keys: set[str]) -> dict[str, str]:
         tokens = {}

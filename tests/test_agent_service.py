@@ -130,6 +130,26 @@ def test_agent_service_allows_distinct_runtime_keys_in_parallel() -> None:
     asyncio.run(_run())
 
 
+def test_agent_service_falls_back_to_request_runtime_key_for_legacy_agent_stubs() -> None:
+    async def _run():
+        service = AgentService(controller=_Controller())
+        handled = []
+
+        async def _handle_message(request):
+            handled.append(request)
+
+        service.register(SimpleNamespace(name="legacy", handle_message=_handle_message))
+        request = _request("hello", "legacy:/repo")
+
+        await service.handle_message("legacy", request)
+
+        assert handled == [request]
+        assert request.context.platform_specific["agent_runtime_turn_key"] == "legacy:/repo"
+        service.release_runtime_turn(request.context)
+
+    asyncio.run(_run())
+
+
 def test_agent_service_runtime_guard_drops_stale_emits_after_next_turn_starts() -> None:
     async def _run():
         service = AgentService(controller=_Controller())
