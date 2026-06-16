@@ -8,7 +8,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Switch } from '../ui/switch';
 import { useApi } from '../../context/ApiContext';
 import { copyTextToClipboard } from '../../lib/utils';
-import { copyHref, displayLink, type ShowPageLinkInfo } from '../../lib/showPageLinks';
+import { copyHref, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 
 type ShowPagePayload = ShowPageLinkInfo & {
   url_available: boolean;
@@ -44,9 +44,10 @@ export const ShowPageShareControl: React.FC<{
 
   const offline = payload?.visibility === 'offline' || payload?.offline === true;
   const isPublic = payload?.visibility === 'public';
-  // Falls back to the same-origin route when Avibe Cloud is off (payload urls null).
+  // Absolute, copyable href; falls back to the same-origin route when Avibe
+  // Cloud is off (payload urls null). The field shows this full url so a manual
+  // select/copy yields the same link as the Copy button.
   const link = payload ? copyHref(payload) ?? '' : '';
-  const shownLink = payload ? displayLink(payload) ?? '' : '';
   const canNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
 
   // Re-fetch on every open so a visibility/share change made elsewhere (e.g. the
@@ -122,6 +123,8 @@ export const ShowPageShareControl: React.FC<{
             <Loader2 className="size-4 animate-spin" />
             {t('common.loading')}
           </div>
+        ) : !payload ? (
+          <p className="py-1 text-sm text-muted">{t('chat.showPage.loadError')}</p>
         ) : offline ? (
           <p className="py-1 text-sm text-muted">{t('chat.showPage.offlineNote')}</p>
         ) : (
@@ -130,7 +133,7 @@ export const ShowPageShareControl: React.FC<{
               <Input
                 id="show-share-link"
                 readOnly
-                value={shownLink}
+                value={link}
                 onFocus={(e) => e.currentTarget.select()}
                 className="h-8 flex-1 text-xs"
               />
@@ -179,9 +182,9 @@ export const ShowPageShareControl: React.FC<{
               />
             </div>
 
-            {isPublic && payload && !payload.url_available && payload.url_guidance && (
+            {payload && isPublic && !payload.url_available && (
               <div className="rounded-md border border-border px-2.5 py-2 text-xs text-muted">
-                {payload.url_guidance}
+                {t('chat.showPage.publicUnavailable')}
               </div>
             )}
           </>
