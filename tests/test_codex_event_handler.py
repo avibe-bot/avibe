@@ -303,6 +303,33 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         agent.emit_result_message.assert_not_awaited()
         agent._remove_ack_reaction.assert_not_awaited()
 
+    async def test_interrupted_completion_releases_runtime_gate_without_result(self):
+        agent = _StubAgent()
+        release_runtime_turn = Mock()
+        agent.controller.agent_service = SimpleNamespace(release_runtime_turn=release_runtime_turn)
+        handler = CodexEventHandler(agent)
+        context = SimpleNamespace(
+            platform_specific={
+                "agent_runtime_turn_key": "session-1:/repo",
+                "agent_runtime_turn_token": "R1",
+            }
+        )
+        request = SimpleNamespace(base_session_id="session-1", context=context, started_at=0)
+        agent._turn_registry.register_turn("turn-1", request)
+
+        await handler._on_turn_completed(
+            {
+                "turn": {
+                    "id": "turn-1",
+                    "status": "interrupted",
+                }
+            },
+            request,
+        )
+
+        agent.emit_result_message.assert_not_awaited()
+        release_runtime_turn.assert_called_once_with(context)
+
     async def test_auth_recovery_message_suppresses_plain_notify(self):
         agent = _StubAgent()
         agent.controller.agent_auth_service.maybe_emit_auth_recovery_message = AsyncMock(return_value=True)

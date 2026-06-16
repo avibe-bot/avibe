@@ -121,6 +121,23 @@ class ConsolidatedMessageDispatcher:
         if callable(mark):
             mark(context)
 
+    def _release_runtime_turn(self, context: MessageContext) -> None:
+        service = getattr(self.controller, "agent_service", None)
+        release = getattr(service, "release_runtime_turn", None)
+        if callable(release):
+            release(context)
+
+    def _is_current_runtime_turn(self, context: MessageContext) -> bool:
+        service = getattr(self.controller, "agent_service", None)
+        matches = getattr(service, "emit_matches_runtime_turn", None)
+        if not callable(matches):
+            return True
+        try:
+            return bool(matches(context))
+        except Exception:
+            logger.debug("runtime turn guard failed open", exc_info=True)
+            return True
+
     def _t(self, key: str, **kwargs) -> str:
         translator = getattr(self.controller, "_t", None)
         if callable(translator):
@@ -479,6 +496,9 @@ class ConsolidatedMessageDispatcher:
         # ``getattr`` keeps it a no-op for controllers without the hook (mirrors
         # ``_signal_turn_complete``).
         if canonical_type == "result":
+            if not self._is_current_runtime_turn(context):
+                logger.info("Dropping stale result emit for superseded runtime turn in %s", self._get_session_key(context))
+                return None
             # Settle the avibe dot for the ACTIVE turn's terminal result (idle, or
             # failed on is_error) via the turn owner, which applies the active-turn
             # guard + skips non-avibe contexts. ``getattr`` keeps it a no-op for stub
@@ -486,6 +506,7 @@ class ConsolidatedMessageDispatcher:
             manager = getattr(self.controller, "session_turns", None)
             if manager is not None:
                 manager.on_terminal_result(context, is_error=is_error)
+            self._release_runtime_turn(context)
         text = strip_silent_blocks(text)
         # ``level="silent"`` is the explicit visibility control (orthogonal to type):
         # the message already settled the dot above (for a terminal result), so here
@@ -765,6 +786,14 @@ class ConsolidatedMessageDispatcher:
 
         if canonical_type not in {"system", "assistant", "toolcall"}:
             canonical_type = "assistant"
+
+        if not self._is_current_runtime_turn(context):
+            logger.info(
+                "Dropping stale %s emit for superseded runtime turn in %s",
+                canonical_type,
+                self._get_session_key(context),
+            )
+            return None
 
         # Persist the intermediate log row BEFORE the mute filter so muted
         # assistant / tool_call messages still land in the store (product

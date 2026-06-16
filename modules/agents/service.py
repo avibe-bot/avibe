@@ -1,7 +1,16 @@
 import logging
+import asyncio
+import uuid
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-from .base import AgentRequest, BaseAgent
+from .base import (
+    AGENT_RUNTIME_TURN_KEY,
+    AGENT_RUNTIME_TURN_TOKEN,
+    AGENT_TURN_TOKEN,
+    AgentRequest,
+    BaseAgent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +22,7 @@ class AgentService:
         self.controller = controller
         self.agents: Dict[str, BaseAgent] = {}
         self.default_agent = "claude"
+        self._turn_gates: dict[str, _RuntimeTurnGate] = {}
 
     def register(self, agent: BaseAgent):
         self.agents[agent.name] = agent
@@ -26,6 +36,11 @@ class AgentService:
 
     async def handle_message(self, agent_name: str, request: AgentRequest):
         agent = self.get(agent_name)
+        runtime_key = agent.runtime_turn_key(request)
+        gate = self._get_turn_gate(runtime_key)
+        await gate.lock.acquire()
+        gate.token = uuid.uuid4().hex
+        self._stamp_runtime_turn(request, runtime_key, gate.token)
         # INBOUND status chokepoint (one of exactly two — the other is the outbound
         # MessageDispatcher.emit_agent_message). Every turn, every source (chat /
         # scheduled / Show Page), every backend funnels through here, so this is the
@@ -35,7 +50,17 @@ class AgentService:
         manager = getattr(self.controller, "session_turns", None)
         if manager is not None:
             manager.on_running(request.context)
-        await agent.handle_message(request)
+        try:
+            await agent.handle_message(request)
+        except asyncio.CancelledError:
+            self.release_runtime_turn(request.context)
+            raise
+        except Exception:
+            # The message handler converts backend exceptions into a terminal
+            # error result using the same context. Keep the gate current so that
+            # result is delivered and releases the runtime turn through the
+            # shared dispatcher path.
+            raise
 
     async def clear_sessions(self, session_key: str) -> Dict[str, int]:
         cleared: Dict[str, int] = {}
@@ -47,7 +72,48 @@ class AgentService:
 
     async def handle_stop(self, agent_name: str, request: AgentRequest) -> bool:
         agent = self.get(agent_name)
+        runtime_key = agent.runtime_turn_key(request)
+        gate = self._turn_gates.get(runtime_key)
+        if gate is not None and gate.token:
+            self._stamp_runtime_turn(request, runtime_key, gate.token)
         return await agent.handle_stop(request)
+
+    def release_runtime_turn(self, context: Any) -> None:
+        payload = getattr(context, "platform_specific", None) or {}
+        runtime_key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip()
+        runtime_token = str(payload.get(AGENT_RUNTIME_TURN_TOKEN) or "").strip()
+        if not runtime_key or not runtime_token:
+            return
+        gate = self._turn_gates.get(runtime_key)
+        if gate is None or gate.token != runtime_token:
+            return
+        gate.token = ""
+        if gate.lock.locked():
+            gate.lock.release()
+
+    def emit_matches_runtime_turn(self, context: Any) -> bool:
+        payload = getattr(context, "platform_specific", None) or {}
+        runtime_key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip()
+        runtime_token = str(payload.get(AGENT_RUNTIME_TURN_TOKEN) or "").strip()
+        if not runtime_key or not runtime_token:
+            return True
+        gate = self._turn_gates.get(runtime_key)
+        return gate is not None and gate.token == runtime_token
+
+    def _get_turn_gate(self, runtime_key: str) -> "_RuntimeTurnGate":
+        if runtime_key not in self._turn_gates:
+            self._turn_gates[runtime_key] = _RuntimeTurnGate()
+        return self._turn_gates[runtime_key]
+
+    @staticmethod
+    def _stamp_runtime_turn(request: AgentRequest, runtime_key: str, runtime_token: str) -> None:
+        if request.context.platform_specific is None:
+            request.context.platform_specific = {}
+        request.context.platform_specific[AGENT_RUNTIME_TURN_KEY] = runtime_key
+        request.context.platform_specific[AGENT_RUNTIME_TURN_TOKEN] = runtime_token
+        if request.context.platform_specific.get(AGENT_TURN_TOKEN):
+            return
+        request.context.platform_specific[AGENT_TURN_TOKEN] = runtime_token
 
     async def refresh_runtime_config(self, agent_name: str, runtime_config: Any) -> bool:
         """Refresh a backend's live runtime state from the latest config.
@@ -65,3 +131,9 @@ class AgentService:
             return False
         await refresh(runtime_config)
         return True
+
+
+@dataclass
+class _RuntimeTurnGate:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    token: str = ""

@@ -15,6 +15,10 @@ from core.reply_enhancer import strip_silent_blocks
 
 logger = logging.getLogger(__name__)
 
+AGENT_RUNTIME_TURN_KEY = "agent_runtime_turn_key"
+AGENT_RUNTIME_TURN_TOKEN = "agent_runtime_turn_token"
+AGENT_TURN_TOKEN = "turn_token"
+
 
 @dataclass
 class AgentRequest:
@@ -94,6 +98,12 @@ class BaseAgent(ABC):
 
     def _get_formatter(self, context: MessageContext):
         return getattr(self._get_im_client(context), "formatter", self.im_client.formatter)
+
+    def runtime_turn_key(self, request: AgentRequest) -> str:
+        """Return the backend runtime identity that must run one turn at a time."""
+        payload = getattr(request.context, "platform_specific", None) or {}
+        backend_key = str(payload.get("backend_composite_session_id") or "").strip()
+        return backend_key or request.composite_session_id
 
     def ensure_agent_session_id(
         self,
@@ -407,7 +417,10 @@ class BaseAgent(ABC):
         should NOT override it.  The guard (check-then-clear) is idempotent so
         calling it more than once is harmless.
         """
-        await self.controller.processing_indicator.finish(request)
+        service = getattr(self.controller, "processing_indicator", None)
+        if service is None:
+            return
+        await service.finish(request)
 
     async def emit_result_message(
         self,

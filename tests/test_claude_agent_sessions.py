@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.agents.base import BaseAgent
 from modules.agents.claude_agent import ClaudeAgent
+from modules.agents.service import AgentService
 
 
 class _StubSessions:
@@ -139,9 +140,15 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         agent = ClaudeAgent(controller)
+        service = AgentService(controller)
+        service.register(agent)
+        controller.agent_service = service
         agent._prepare_message_with_files = lambda request: request.message
         agent._delete_ack = AsyncMock()
-        agent.emit_result_message = AsyncMock()
+        async def _emit_result(context, *_args, **_kwargs):
+            service.release_runtime_turn(context)
+
+        agent.emit_result_message = AsyncMock(side_effect=_emit_result)
 
         def _request(message: str):
             return SimpleNamespace(
@@ -164,10 +171,10 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                 files=None,
             )
 
-        first = asyncio.create_task(agent.handle_message(_request("first")))
+        first = asyncio.create_task(service.handle_message("claude", _request("first")))
         await asyncio.wait_for(first_query_started.wait(), timeout=3)
         await asyncio.sleep(0)
-        second = asyncio.create_task(agent.handle_message(_request("second")))
+        second = asyncio.create_task(service.handle_message("claude", _request("second")))
         await asyncio.sleep(0.05)
 
         self.assertEqual(
@@ -222,9 +229,15 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         agent = ClaudeAgent(controller)
+        service = AgentService(controller)
+        service.register(agent)
+        controller.agent_service = service
         agent._prepare_message_with_files = lambda request: request.message
         agent._delete_ack = AsyncMock()
-        agent.emit_result_message = AsyncMock()
+        async def _emit_result(context, *_args, **_kwargs):
+            service.release_runtime_turn(context)
+
+        agent.emit_result_message = AsyncMock(side_effect=_emit_result)
 
         def _request(message: str):
             return SimpleNamespace(
@@ -243,9 +256,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                 files=None,
             )
 
-        first = asyncio.create_task(agent.handle_message(_request("first")))
+        first = asyncio.create_task(service.handle_message("claude", _request("first")))
         await asyncio.wait_for(first_query_started.wait(), timeout=3)
-        blocked = asyncio.create_task(agent.handle_message(_request("cancelled")))
+        blocked = asyncio.create_task(service.handle_message("claude", _request("cancelled")))
         await asyncio.sleep(0.05)
         blocked.cancel()
         with self.assertRaises(asyncio.CancelledError):
@@ -254,7 +267,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         release_result.set()
         await asyncio.wait_for(first, timeout=3)
 
-        third = asyncio.create_task(agent.handle_message(_request("third")))
+        third = asyncio.create_task(service.handle_message("claude", _request("third")))
         await asyncio.wait_for(third, timeout=3)
 
         self.assertEqual(queries, [("first", runtime_key), ("third", runtime_key)])
@@ -262,7 +275,6 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_handle_stop_releases_runtime_turn_gate(self):
         controller = _StubController()
-        controller.emit_agent_message = AsyncMock()
         runtime_key = "wechat_o9:/tmp/work"
         interrupted = False
 
@@ -275,19 +287,41 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                 return None
 
         agent = ClaudeAgent(controller)
-        pending_request = SimpleNamespace(context=SimpleNamespace(platform_specific={"turn_token": "T1"}))
+        service = AgentService(controller)
+        service.register(agent)
+        controller.agent_service = service
+
+        async def _emit(context, message_type, text, **_kwargs):
+            if message_type == "result":
+                service.release_runtime_turn(context)
+
+        controller.emit_agent_message = AsyncMock(side_effect=_emit)
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "T1",
+                    "agent_runtime_turn_key": runtime_key,
+                    "agent_runtime_turn_token": "R1",
+                }
+            )
+        )
         agent._pending_requests[runtime_key] = [pending_request]
-        await agent._acquire_runtime_turn_lock(runtime_key)
-        agent._runtime_turn_lock_keys[runtime_key] = (runtime_key,)
+        gate = service._get_turn_gate(runtime_key)
+        await gate.lock.acquire()
+        gate.token = "R1"
         controller.claude_sessions[runtime_key] = _Client()
 
         request = SimpleNamespace(
             context=SimpleNamespace(platform_specific={}),
+            message="stop",
+            working_path="/tmp/work",
+            base_session_id="wechat_o9",
             composite_session_id=runtime_key,
+            session_key="wechat-user",
             stop_failure_reason=None,
         )
 
-        handled = await agent.handle_stop(request)
+        handled = await service.handle_stop("claude", request)
 
         self.assertTrue(handled)
         self.assertTrue(interrupted)
@@ -297,8 +331,9 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             runtime_key,
             current_receiver_task=None,
         )
-        self.assertFalse(agent._runtime_turn_locks[runtime_key].locked())
+        self.assertFalse(service._turn_gates[runtime_key].lock.locked())
         self.assertEqual(request.context.platform_specific["turn_token"], "T1")
+        self.assertEqual(request.context.platform_specific["agent_runtime_turn_token"], "R1")
 
     async def test_result_keeps_claude_session_active_when_requests_are_queued(self):
         controller = _StubController()
@@ -359,9 +394,21 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         context = SimpleNamespace(
             user_id="U1",
             channel_id="C1",
-            platform_specific={"turn_token": "T1"},
+            platform_specific={
+                "turn_token": "T1",
+                "agent_runtime_turn_key": composite_key,
+                "agent_runtime_turn_token": "R1",
+            },
         )
-        pending_request = SimpleNamespace(context=SimpleNamespace(platform_specific={"turn_token": "T2"}))
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "T2",
+                    "agent_runtime_turn_key": composite_key,
+                    "agent_runtime_turn_token": "R2",
+                }
+            )
+        )
         agent._pending_requests[composite_key] = [pending_request]
 
         class FakeToolUseBlock:
@@ -398,6 +445,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             parse_mode="markdown",
         )
         self.assertEqual(context.platform_specific["turn_token"], "T2")
+        self.assertEqual(context.platform_specific["agent_runtime_turn_key"], composite_key)
+        self.assertEqual(context.platform_specific["agent_runtime_turn_token"], "R2")
         self.assertEqual(agent._pending_requests[composite_key], [pending_request])
 
     async def test_handle_message_uses_runtime_session_key_for_claude_tracking(self):

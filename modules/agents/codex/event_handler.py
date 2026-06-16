@@ -79,13 +79,20 @@ class CodexEventHandler:
             logger.debug("Unhandled Codex notification: %s", method)
 
     def _release_stream_turn(self, context) -> None:
-        """Release any web-Chat SSE stream waiting on this turn so it closes
-        promptly. Token-guarded in the controller (a superseded turn won't
-        close a newer turn's stream); no-op for IM/CLI turns and for
-        controllers that don't expose streaming completion."""
+        """Release turn state for terminal paths that do not emit a result.
+
+        Result emits settle both the web-Chat SSE stream and the shared backend
+        runtime gate through the outbound dispatcher. Interrupted/stale backend
+        notifications intentionally skip a visible result, so they need the same
+        release here. Both release calls are token-guarded by their owners.
+        """
         mark = getattr(self._agent.controller, "mark_turn_complete", None)
         if callable(mark):
             mark(context)
+        service = getattr(self._agent.controller, "agent_service", None)
+        release = getattr(service, "release_runtime_turn", None)
+        if callable(release):
+            release(context)
 
     # ------------------------------------------------------------------
     # Notification handlers

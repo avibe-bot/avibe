@@ -6,7 +6,13 @@ from typing import Callable, Optional
 from core.agent_auth_service import classify_auth_error
 from modules.claude_sdk_compat import TextBlock, ToolUseBlock, is_claude_sdk_buffer_error
 
-from modules.agents.base import AgentRequest, BaseAgent
+from modules.agents.base import (
+    AGENT_RUNTIME_TURN_KEY,
+    AGENT_RUNTIME_TURN_TOKEN,
+    AGENT_TURN_TOKEN,
+    AgentRequest,
+    BaseAgent,
+)
 
 # NOTE: AskUserQuestion support is disabled because Claude Code SDK cannot
 # respond to it programmatically. See: https://github.com/anthropics/claude-code/issues/10168
@@ -37,13 +43,6 @@ class ClaudeAgent(BaseAgent):
         self._pending_assistant_message: dict[str, str] = {}
         self._native_session_ids: dict[str, str] = {}
         self._suppressed_synthetic_results: set[str] = set()
-        # A Claude SDK client is a single streaming transport.  It does not attach
-        # a turn id to ResultMessage events, so Avibe must not write a second
-        # prompt into the same runtime session until the first prompt reaches a
-        # terminal result.  Web Chat has its own gate, but IM/scheduled callers can
-        # reach this adapter directly; keep the invariant at the backend boundary.
-        self._runtime_turn_locks: dict[str, asyncio.Lock] = {}
-        self._runtime_turn_lock_keys: dict[str, tuple[str, ...]] = {}
         # Store reaction info per runtime session for cleanup after terminal
         # result. Under the runtime turn gate there is normally one active entry;
         # the list shape remains for defensive cleanup of older queued state.
@@ -76,9 +75,6 @@ class ClaudeAgent(BaseAgent):
         context = request.context
         runtime_base_session_id = request.base_session_id
         runtime_session_key = request.composite_session_id
-        expected_runtime_key = self._expected_runtime_session_key(request)
-        held_expected_key: str | None = None
-        active_runtime_key: str | None = None
         turn_registered = False
 
         # Question callback handling (disabled - SDK doesn't support AskUserQuestion response)
@@ -87,8 +83,6 @@ class ClaudeAgent(BaseAgent):
         #     return
 
         try:
-            await self._acquire_runtime_turn_lock(expected_runtime_key)
-            held_expected_key = expected_runtime_key
             client = await self.session_handler.get_or_create_claude_session(
                 context,
                 subagent_name=request.subagent_name,
@@ -101,13 +95,6 @@ class ClaudeAgent(BaseAgent):
             )
             runtime_base_session_id = getattr(client, "_vibe_runtime_base_session_id", runtime_base_session_id)
             runtime_session_key = getattr(client, "_vibe_runtime_session_key", runtime_session_key)
-            if runtime_session_key != expected_runtime_key:
-                await self._acquire_runtime_turn_lock(runtime_session_key)
-            active_runtime_key = runtime_session_key
-            self._runtime_turn_lock_keys[runtime_session_key] = tuple(
-                dict.fromkeys((expected_runtime_key, runtime_session_key))
-            )
-            held_expected_key = None
             mark_session_active = getattr(self.session_handler, "mark_session_active", None)
             if callable(mark_session_active):
                 mark_session_active(runtime_session_key)
@@ -149,17 +136,12 @@ class ClaudeAgent(BaseAgent):
                 self._remove_pending_request(runtime_session_key, request)
                 self._mark_session_idle_if_no_pending_requests(runtime_session_key)
                 await self._delete_ack(context, request)
-                if active_runtime_key:
-                    self._release_runtime_turn(active_runtime_key)
-                elif held_expected_key:
-                    self._release_runtime_turn_lock(held_expected_key)
+                self._release_service_runtime_turn(context)
             raise
         except Exception as e:
             logger.error(f"Error processing Claude message: {e}", exc_info=True)
-            if not turn_registered and active_runtime_key:
-                self._release_runtime_turn(active_runtime_key or runtime_session_key)
-            elif not turn_registered and held_expected_key:
-                self._release_runtime_turn_lock(held_expected_key)
+            if not turn_registered:
+                self._release_service_runtime_turn(context)
             # Clean up the specific reaction for this request (not FIFO)
             await self._remove_specific_pending_reaction(runtime_session_key, context, request)
             self._remove_pending_request(runtime_session_key, request)
@@ -194,32 +176,11 @@ class ClaudeAgent(BaseAgent):
         finally:
             await self._delete_ack(context, request)
 
-    async def _acquire_runtime_turn_lock(self, composite_key: str) -> None:
-        if not composite_key:
-            return
-        lock = self._runtime_turn_locks.get(composite_key)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._runtime_turn_locks[composite_key] = lock
-        await lock.acquire()
-
-    def _release_runtime_turn(self, composite_key: str) -> None:
-        if not composite_key:
-            return
-        lock_keys = self._runtime_turn_lock_keys.pop(composite_key, None) or (composite_key,)
-        for lock_key in reversed(lock_keys):
-            self._release_runtime_turn_lock(lock_key)
-
-    def _release_runtime_turn_lock(self, composite_key: str) -> None:
-        lock = self._runtime_turn_locks.get(composite_key)
-        if lock is not None and lock.locked():
-            lock.release()
-
-    @staticmethod
-    def _expected_runtime_session_key(request: AgentRequest) -> str:
-        payload = getattr(request.context, "platform_specific", None) or {}
-        backend_key = str(payload.get("backend_composite_session_id") or "").strip()
-        return backend_key or request.composite_session_id
+    def _release_service_runtime_turn(self, context: MessageContext) -> None:
+        service = getattr(self.controller, "agent_service", None)
+        release = getattr(service, "release_runtime_turn", None)
+        if callable(release):
+            release(context)
 
     async def _handle_question_callback(self, request: AgentRequest) -> None:
         """Handle question-related callbacks (button clicks, modal submissions).
@@ -372,7 +333,6 @@ class ClaudeAgent(BaseAgent):
         if not preserve_pending_request_state:
             self._pending_reactions.pop(composite_key, None)
             self._pending_requests.pop(composite_key, None)
-            self._release_runtime_turn(composite_key)
         cleanup = getattr(self.session_handler, "cleanup_session", None)
         if callable(cleanup):
             await cleanup(composite_key, current_receiver_task=current_receiver_task)
@@ -523,7 +483,6 @@ class ClaudeAgent(BaseAgent):
                             if callable(mark_session_idle):
                                 mark_session_idle(composite_key)
                             await self._clear_pending_reactions(composite_key, context)
-                            self._release_runtime_turn(composite_key)
                             self._last_assistant_text.pop(composite_key, None)
                             self._pending_assistant_message.pop(composite_key, None)
                             return
@@ -607,7 +566,6 @@ class ClaudeAgent(BaseAgent):
                             if callable(mark_session_idle):
                                 mark_session_idle(composite_key)
                             await self._clear_pending_reactions(composite_key, context)
-                            self._release_runtime_turn(composite_key)
                             return
                         continue
 
@@ -635,7 +593,6 @@ class ClaudeAgent(BaseAgent):
                             if callable(mark_session_idle):
                                 mark_session_idle(composite_key)
                             await self._clear_pending_reactions(composite_key, context)
-                            self._release_runtime_turn(composite_key)
                             self._last_assistant_text.pop(composite_key, None)
                             self._pending_assistant_message.pop(composite_key, None)
                             return
@@ -681,7 +638,6 @@ class ClaudeAgent(BaseAgent):
                         session = await self.session_manager.get_or_create_session(context.user_id, context.channel_id)
                         if session and is_idle:
                             session.session_active[composite_key] = False
-                        self._release_runtime_turn(composite_key)
                         continue
 
                     # Ignore UserMessage/tool results; toolcalls are emitted from ToolUseBlock.
@@ -699,7 +655,7 @@ class ClaudeAgent(BaseAgent):
                 mark_session_idle(composite_key)
             logger.info("Claude receiver cancelled for session %s", composite_key)
             await self._clear_pending_reactions(composite_key, context)
-            self._release_runtime_turn(composite_key)
+            self._release_service_runtime_turn(context)
             raise
         except Exception as e:
             composite_key = composite_key or f"{base_session_id}:{working_path}"
@@ -748,7 +704,7 @@ class ClaudeAgent(BaseAgent):
                 # the 600s stream timeout and then settle idle. No-op off-workbench
                 # (Codex P2).
                 await self.controller.emit_agent_message(context, "result", "", is_error=True)
-            self._release_runtime_turn(composite_key)
+            self._release_service_runtime_turn(context)
         # NOTE: no `finally` cleanup of pending reactions here.
         # When the receiver ends normally (stream exhausted after a result),
         # new messages may have already queued their reactions via
@@ -787,7 +743,6 @@ class ClaudeAgent(BaseAgent):
         self._suppressed_synthetic_results.add(composite_key)
         self._discard_pending_reaction(composite_key)
         self._mark_session_idle_if_no_pending_requests(composite_key)
-        self._release_runtime_turn(composite_key)
         return True
 
     def _consume_suppressed_synthetic_result(self, composite_key: str, message, text: Optional[str]) -> bool:
@@ -857,24 +812,31 @@ class ClaudeAgent(BaseAgent):
 
     @staticmethod
     def _adopt_pending_turn_token(context: MessageContext, pending_request: Optional[AgentRequest]) -> None:
-        """Copy the pending turn's ``turn_token`` onto the reused receiver context.
+        """Copy the pending turn tokens onto the reused receiver context.
 
         Claude runs one long-lived receiver per runtime session, so the context
-        captured when it started can carry an older turn's ``turn_token``. The
-        streaming completion guard in ``core.message_dispatcher._stream_chunk``
-        correlates a ``result`` emit to the live turn sink by that token; without
-        this, later turns could be rejected as stale. Pulling the token from the
-        current pending request realigns it. No-op when there's no pending request
-        or it carries no token (fail-open: completion stays ungated)."""
+        captured when it started can carry an older turn's tokens. The web stream
+        guard uses ``turn_token`` and the shared backend runtime gate uses
+        ``agent_runtime_turn_token``; both must follow the FIFO-matched pending
+        request before any assistant/tool/result emit.
+        """
         if pending_request is None:
             return
         src = getattr(pending_request, "context", None)
-        token = (getattr(src, "platform_specific", None) or {}).get("turn_token") if src is not None else None
-        if not token:
+        src_payload = (getattr(src, "platform_specific", None) or {}) if src is not None else {}
+        token = src_payload.get(AGENT_TURN_TOKEN)
+        runtime_key = src_payload.get(AGENT_RUNTIME_TURN_KEY)
+        runtime_token = src_payload.get(AGENT_RUNTIME_TURN_TOKEN)
+        if not (token or runtime_key or runtime_token):
             return
         if context.platform_specific is None:
             context.platform_specific = {}
-        context.platform_specific["turn_token"] = token
+        if token:
+            context.platform_specific[AGENT_TURN_TOKEN] = token
+        if runtime_key:
+            context.platform_specific[AGENT_RUNTIME_TURN_KEY] = runtime_key
+        if runtime_token:
+            context.platform_specific[AGENT_RUNTIME_TURN_TOKEN] = runtime_token
 
     def _retire_failed_auth_turn(self, composite_key: str, context: MessageContext) -> None:
         """Retire a terminal auth-failure turn from the pending FIFO.
