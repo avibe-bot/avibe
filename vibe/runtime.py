@@ -569,17 +569,22 @@ def spawn_background(args, pid_path, stdout_name: str, stderr_name: str, env: di
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stdout = stdout_path.open("ab")
     stderr = stderr_path.open("ab")
-    process = subprocess.Popen(
-        args,
-        stdout=stdout,
-        stderr=stderr,
-        start_new_session=True,
-        cwd=str(get_working_dir()),
-        close_fds=True,
-        env=env,
-    )
-    stdout.close()
-    stderr.close()
+    stdin = open(os.devnull, "rb")
+    try:
+        process = subprocess.Popen(
+            args,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            start_new_session=True,
+            cwd=str(get_working_dir()),
+            close_fds=True,
+            env=env,
+        )
+    finally:
+        stdin.close()
+        stdout.close()
+        stderr.close()
     pid_path.write_text(str(process.pid), encoding="utf-8")
     return process.pid
 
@@ -595,9 +600,11 @@ def spawn_service_background_process(
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stdout = stdout_path.open("ab")
     stderr = stderr_path.open("ab")
+    stdin = open(os.devnull, "rb")
     try:
         process = subprocess.Popen(
             args,
+            stdin=stdin,
             stdout=stdout,
             stderr=stderr,
             start_new_session=True,
@@ -606,6 +613,7 @@ def spawn_service_background_process(
             env=env,
         )
     finally:
+        stdin.close()
         stdout.close()
         stderr.close()
     return process
