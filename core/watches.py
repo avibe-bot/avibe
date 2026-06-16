@@ -659,6 +659,7 @@ class ManagedWatchService:
             process = await asyncio.create_subprocess_shell(
                 watch.shell_command,
                 cwd=watch.cwd or None,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 **isolated_subprocess_kwargs(),
@@ -667,6 +668,7 @@ class ManagedWatchService:
             process = await asyncio.create_subprocess_exec(
                 *watch.command,
                 cwd=watch.cwd or None,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 **isolated_subprocess_kwargs(),

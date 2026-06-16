@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import subprocess
 import sys
@@ -58,6 +59,29 @@ def test_start_service_disables_stdout_logging_for_background_process(monkeypatc
     assert captured["stderr_name"] == "service_stderr.log"
     assert isinstance(captured["env"], dict)
     assert captured["env"]["VIBE_DISABLE_STDOUT_LOGGING"] == "1"
+
+
+def test_spawn_background_detaches_stdin(monkeypatch, tmp_path):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(runtime.paths, "get_runtime_dir", lambda: tmp_path)
+
+    class FakePopen:
+        pid = 12345
+
+        def __init__(self, args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+
+    process = runtime.spawn_service_background_process(["python3", "service.py"], "stdout.log", "stderr.log")
+
+    assert process.pid == 12345
+    stdin = captured["kwargs"]["stdin"]
+    assert stdin.name == os.devnull
+    assert stdin.closed is True
+    assert captured["kwargs"]["start_new_session"] is True
 
 
 def test_main_import_does_not_load_controller() -> None:
