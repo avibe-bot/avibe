@@ -53,6 +53,10 @@ class CodexSessionManager:
         """Return base_session_ids associated with a given working directory."""
         return [bid for bid, stored_cwd in self._cwds.items() if stored_cwd == cwd]
 
+    def get_cwd(self, base_session_id: str) -> Optional[str]:
+        """Return the working directory tracked for a base session."""
+        return self._cwds.get(base_session_id)
+
     def get_sessions_by_session_key(self, session_key: str) -> list[str]:
         """Return base_session_ids associated with a given session_key."""
         return [bid for bid, sk in self._session_keys.items() if sk == session_key]

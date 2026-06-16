@@ -263,6 +263,21 @@ def test_hook_send_help_includes_examples_and_threadless_guidance(capsys) -> Non
     assert "vibe agent run --async --session-id sesk8m4q2p7x" in captured.out
 
 
+def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["agent", "run", "--help"])
+
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    assert "--fork-session FORK_SESSION" in captured.out
+    assert "Use --fork-session to create a new Session by forking an existing Session's native backend context." in captured.out
+    assert "Forks keep the same backend as the source Session." in captured.out
+    assert "vibe agent run --async --fork-session sesk8m4q2p7x" in captured.out
+    assert "Do not combine --fork-session with --session-id, --create-session, --create-session-per-run, --deliver-key, or --post-to." in captured.out
+
+
 def test_task_add_parse_error_is_structured_json(capsys) -> None:
     parser = cli.build_parser()
 

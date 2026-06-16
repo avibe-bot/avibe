@@ -1,6 +1,7 @@
 """Core controller that coordinates between modules and handlers"""
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import threading
@@ -677,7 +678,7 @@ class Controller:
 
         # Register callbacks with the IM client
         self.im_client.register_callbacks(
-            on_message=self._dispatch_to_controller_loop(_on_im_message),
+            on_message=self._dispatch_im_message_to_controller_loop(_on_im_message),
             on_command=command_handlers,
             on_callback_query=self._dispatch_to_controller_loop(self.message_handler.handle_callback_query),
             on_settings_update=self._dispatch_to_controller_loop(self.settings_handler.handle_settings_update),
@@ -708,6 +709,91 @@ class Controller:
             return await asyncio.wrap_future(future)
 
         return _wrapped
+
+    def _dispatch_im_message_to_controller_loop(self, callback):
+        tracked_platforms = {"telegram", "wechat"}
+
+        async def _wrapped(context, *args, **kwargs):
+            platform = self._platform_for_im_callback_context(context)
+            if platform in tracked_platforms:
+                return await self._run_on_controller_loop(callback, context, *args, **kwargs)
+            self._schedule_controller_callback(callback, context, *args, **kwargs)
+            return None
+
+        return _wrapped
+
+    def _platform_for_im_callback_context(self, context) -> str:
+        platform = str(
+            getattr(context, "platform", None)
+            or (getattr(context, "platform_specific", None) or {}).get("platform")
+            or ""
+        ).strip()
+        if platform:
+            return platform
+        im_client = getattr(self, "im_client", None)
+        primary_platform = str(getattr(im_client, "primary_platform", "") or "").strip()
+        if primary_platform:
+            return primary_platform
+        module = str(getattr(type(im_client), "__module__", "") or "")
+        if module.startswith("modules.im.wechat"):
+            return "wechat"
+        if module.startswith("modules.im.telegram"):
+            return "telegram"
+        return ""
+
+    def _dispatch_to_controller_loop_background(self, callback):
+        async def _wrapped(*args, **kwargs):
+            self._schedule_controller_callback(callback, *args, **kwargs)
+
+        return _wrapped
+
+    async def _run_on_controller_loop(self, callback, *args, **kwargs):
+        loop = self._loop
+        if loop is None:
+            return await callback(*args, **kwargs)
+
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if current_loop is loop:
+            return await callback(*args, **kwargs)
+
+        future = asyncio.run_coroutine_threadsafe(callback(*args, **kwargs), loop)
+        return await asyncio.wrap_future(future)
+
+    def _schedule_controller_callback(self, callback, *args, **kwargs) -> None:
+        async def _runner():
+            await callback(*args, **kwargs)
+
+        loop = self._loop
+        if loop is None:
+            task = asyncio.create_task(_runner())
+            task.add_done_callback(self._log_background_callback_result)
+            return
+
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if current_loop is loop:
+            task = loop.create_task(_runner())
+            task.add_done_callback(self._log_background_callback_result)
+            return
+
+        future = asyncio.run_coroutine_threadsafe(_runner(), loop)
+        future.add_done_callback(self._log_background_callback_result)
+
+    @staticmethod
+    def _log_background_callback_result(future) -> None:
+        try:
+            future.result()
+        except (asyncio.CancelledError, concurrent.futures.CancelledError):
+            return
+        except Exception:
+            logger.error("Background IM message callback failed", exc_info=True)
 
     def _run_im_runtime(self) -> None:
         try:
@@ -1038,7 +1124,10 @@ class Controller:
     def _agent_run_target_payload(context: MessageContext) -> dict[str, Any]:
         payload = context.platform_specific or {}
         target = payload.get("agent_run_target")
-        return target if isinstance(target, dict) else {}
+        if isinstance(target, dict):
+            return target
+        session_target = payload.get("agent_session_target")
+        return session_target if isinstance(session_target, dict) else {}
 
     def get_opencode_overrides(self, context: MessageContext) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """Get OpenCode agent, model, and reasoning effort overrides for this channel.

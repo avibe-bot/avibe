@@ -97,6 +97,7 @@ class _StubController:
         )()
         self.session_handler = _StubSessionHandler()
         self.im_client = im_client or _StubIMClient(fail_first_send=fail_first_send, upload_id=upload_id)
+        self.agent_service = None
 
     def _get_settings_key(self, context):
         return context.channel_id
@@ -245,6 +246,63 @@ class MessageDispatcherResultFallbackTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
         persist.assert_not_called()
+
+    async def test_stale_runtime_result_is_dropped_before_delivery_and_persistence(self):
+        controller = _StubController(platform="slack")
+        controller.agent_service = type(
+            "AgentService",
+            (),
+            {
+                "emit_matches_runtime_turn": staticmethod(lambda _context: False),
+                "release_runtime_turn": staticmethod(lambda _context: None),
+            },
+        )()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={"agent_runtime_turn_key": "s:/repo", "agent_runtime_turn_token": "old"},
+        )
+
+        with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
+            message_id = await dispatcher.emit_agent_message(context, "result", "late result")
+
+        self.assertIsNone(message_id)
+        self.assertEqual(controller.im_client.sent_messages, [])
+        persist.assert_not_called()
+
+    async def test_result_releases_runtime_gate_after_result_cleanup(self):
+        controller = _StubController(platform="slack")
+        events = []
+
+        class _AgentService:
+            @staticmethod
+            def emit_matches_runtime_turn(_context):
+                return True
+
+            @staticmethod
+            def release_runtime_turn(_context):
+                events.append("release")
+
+        controller.agent_service = _AgentService()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+
+        async def _clear_consolidated_state(_context):
+            events.append("clear")
+
+        dispatcher._clear_consolidated_state = _clear_consolidated_state
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={"agent_runtime_turn_key": "s:/repo", "agent_runtime_turn_token": "tok"},
+        )
+
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await dispatcher.emit_agent_message(context, "result", "done")
+
+        self.assertEqual(events, ["clear", "release"])
 
     async def test_muted_log_message_still_persists(self):
         """assistant / tool_call rows persist BEFORE the mute filter, so a muted

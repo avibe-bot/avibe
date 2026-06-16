@@ -21,6 +21,7 @@ import clsx from 'clsx';
 import { useApi } from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
 import { copyTextToClipboard } from '../lib/utils';
+import { copyHref, displayLink } from '../lib/showPageLinks';
 import { SearchField } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
@@ -58,28 +59,6 @@ const STATUS: Record<
   offline: { Icon: CloudOff, badge: 'secondary', tone: 'muted', dot: 'bg-muted', tile: 'border-border-strong bg-foreground/[0.04]', iconColor: 'text-muted' },
 };
 
-// Same-origin path a Show Page is served at locally — usable even when Avibe
-// Cloud is off, where the cloud-qualified urls in the payload are null.
-function localPath(page: ShowPage): string | null {
-  if (page.visibility === 'private') return `/show/${encodeURIComponent(page.session_id)}/`;
-  if (page.visibility === 'public' && page.share_id) return `/p/${encodeURIComponent(page.share_id)}/`;
-  return null;
-}
-
-function liveHref(page: ShowPage): string | null {
-  return page.active_url || localPath(page);
-}
-
-function copyHref(page: ShowPage): string | null {
-  const href = liveHref(page);
-  if (!href) return null;
-  return href.startsWith('http') ? href : window.location.origin + href;
-}
-
-function displayLink(page: ShowPage): string | null {
-  const href = liveHref(page);
-  return href ? href.replace(/^https?:\/\//, '') : null;
-}
 
 interface RowProps {
   page: ShowPage;

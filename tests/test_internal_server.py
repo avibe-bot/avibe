@@ -335,6 +335,12 @@ def test_dispatch_forwards_session_routing_into_platform_specific(monkeypatch, t
             agent_name="contract-bot",
             model="claude-sonnet-4-6",
             reasoning_effort="high",
+            metadata={
+                "created_via": "session_fork",
+                "fork_source_session_id": "ses-source",
+                "fork_source_native_session_id": "thread-source",
+                "fork_source_backend": "claude",
+            },
         )
     session_id = session["id"]
 
@@ -373,6 +379,7 @@ def test_dispatch_forwards_session_routing_into_platform_specific(monkeypatch, t
     # restart instead of a computed avibe_<id> (Codex P2). Workbench sessions
     # self-anchor to their id.
     assert target.get("session_anchor") == session_id
+    assert target.get("metadata", {}).get("fork_source_native_session_id") == "thread-source"
 
 
 def test_dispatch_async_starts_turn_and_returns_202(monkeypatch, tmp_path):

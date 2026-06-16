@@ -970,7 +970,8 @@ class WeChatBot(BaseIMClient):
             channel_id=user_id,
             thread_id=None,
             message_id=None,
-            platform_specific={"is_dm": True, "context_token": context_token},
+            platform="wechat",
+            platform_specific={"platform": "wechat", "is_dm": True, "context_token": context_token},
         )
         try:
             return await self.send_message(context, text)
@@ -1294,7 +1295,9 @@ class WeChatBot(BaseIMClient):
             channel_id=from_user,  # WeChat DM: channel == user
             thread_id=None,  # No threads in WeChat
             message_id=message_id,
+            platform="wechat",
             platform_specific={
+                "platform": "wechat",
                 "message": msg,
                 "is_dm": True,  # Always DM for personal messaging
                 "context_token": context_token,

@@ -743,6 +743,19 @@ class OpenCodeServerManager:
                     raise RuntimeError(f"Failed to create session: {resp.status} {text}")
                 return await resp.json()
 
+    async def fork_session(self, source_session_id: str, directory: str) -> Dict[str, Any]:
+        async with self._request_scope():
+            session = await self._get_http_session()
+            async with session.post(
+                f"{self.base_url}/session/{source_session_id}/fork",
+                json={},
+                headers={"x-opencode-directory": directory},
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    raise RuntimeError(f"Failed to fork session: {resp.status} {text}")
+                return await resp.json()
+
     async def send_message(
         self,
         session_id: str,

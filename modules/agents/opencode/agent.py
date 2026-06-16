@@ -312,6 +312,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             )
             await server.mark_run_active(session_id)
             run_registered = True
+            self.mark_runtime_turn_started(request.context)
 
             logger.info(
                 "Starting OpenCode poll loop for %s (thread=%s, cwd=%s)",
@@ -479,6 +480,18 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                     terminated += 1
                 self.sessions.remove_active_poll(opencode_session_id)
         return terminated
+
+    def runtime_turn_keys_for_session_key(self, session_key: str) -> set[str]:
+        return {
+            f"{base_id}:{req_info[1]}"
+            for base_id, req_info in self._session_manager.list_for_session_key(session_key).items()
+        }
+
+    def runtime_turn_keys(self) -> set[str]:
+        return {
+            f"{base_id}:{req_info[1]}"
+            for base_id, req_info in self._session_manager.list_all().items()
+        }
 
     async def _delete_ack(self, request: AgentRequest) -> None:
         service = getattr(self.controller, "processing_indicator", None)

@@ -594,6 +594,7 @@ def _build_session_context(
             "reasoning_effort": session_row.get("reasoning_effort"),
             "native_session_id": session_row.get("native_session_id"),
             "workdir": session_row.get("workdir"),
+            "metadata": session_row.get("metadata") or {},
             # Carry the stored anchor so SessionHandler.get_base_session_id reuses it
             # instead of computing ``avibe_<id>`` — otherwise, after a restart, new
             # dispatches look up the native-session map under the wrong anchor and

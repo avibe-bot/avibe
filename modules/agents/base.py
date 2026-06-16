@@ -15,6 +15,10 @@ from core.reply_enhancer import strip_silent_blocks
 
 logger = logging.getLogger(__name__)
 
+AGENT_RUNTIME_TURN_KEY = "agent_runtime_turn_key"
+AGENT_RUNTIME_TURN_TOKEN = "agent_runtime_turn_token"
+AGENT_TURN_TOKEN = "turn_token"
+
 
 @dataclass
 class AgentRequest:
@@ -94,6 +98,32 @@ class BaseAgent(ABC):
 
     def _get_formatter(self, context: MessageContext):
         return getattr(self._get_im_client(context), "formatter", self.im_client.formatter)
+
+    def runtime_turn_key(self, request: AgentRequest) -> str:
+        """Return the backend runtime identity that must run one turn at a time."""
+        payload = getattr(request.context, "platform_specific", None) or {}
+        backend_key = str(payload.get("backend_composite_session_id") or "").strip()
+        return backend_key or request.composite_session_id
+
+    def runtime_turn_keys(self) -> set[str]:
+        """Return all currently known runtime identities for this backend."""
+        return set()
+
+    def runtime_turn_keys_for_session_key(self, session_key: str) -> set[str]:
+        """Return runtime identities scoped to a persisted Avibe settings key."""
+        return set()
+
+    def mark_runtime_turn_started(self, context: Any) -> None:
+        """Mark the current gated turn as accepted by the backend runtime.
+
+        AgentService uses this to distinguish a startup-window stop (backend has
+        not accepted the turn yet) from a stale stop after the backend lost an
+        accepted turn.
+        """
+        service = getattr(self.controller, "agent_service", None)
+        mark_started = getattr(service, "mark_runtime_turn_started", None)
+        if callable(mark_started):
+            mark_started(context)
 
     def ensure_agent_session_id(
         self,
@@ -407,7 +437,10 @@ class BaseAgent(ABC):
         should NOT override it.  The guard (check-then-clear) is idempotent so
         calling it more than once is harmless.
         """
-        await self.controller.processing_indicator.finish(request)
+        service = getattr(self.controller, "processing_indicator", None)
+        if service is None:
+            return
+        await service.finish(request)
 
     async def emit_result_message(
         self,
@@ -482,6 +515,10 @@ class BaseAgent(ABC):
     async def clear_sessions(self, session_key: str) -> int:
         """Clear session state for a given session scope key. Returns cleared count."""
         return 0
+
+    def runtime_turn_keys_for_session_key(self, session_key: str) -> set[str]:
+        """Return runtime turn gate keys owned by the session scope."""
+        return set()
 
     async def prepare_resume_binding(
         self,

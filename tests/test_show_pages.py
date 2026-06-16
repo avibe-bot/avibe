@@ -244,7 +244,9 @@ def test_show_page_dir_creates_default_index(monkeypatch, tmp_path):
     assert 'eventsPath: injected.eventsPath ?? "__show/events"' in main_tsx
     assert 'streamPath: injected.streamPath ?? "__show/events?stream=1"' in main_tsx
     assert 'writeToken: injected.writeToken ?? readCookie("vibe_show_event_token")' in main_tsx
-    assert "Ready to visualize" in (page_dir / "src" / "App.tsx").read_text(encoding="utf-8")
+    app_tsx = (page_dir / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert "Building your Show Page" in app_tsx
+    assert "Please visualize this session as a Show Page." in app_tsx
     assert (page_dir / "api" / "health.ts").exists()
 
 

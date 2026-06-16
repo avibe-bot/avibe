@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.agents.base import BaseAgent
 from modules.agents.claude_agent import ClaudeAgent
+from modules.agents.service import AgentService
 
 
 class _StubSessions:
@@ -99,6 +100,426 @@ class _StubController:
 
 
 class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_handle_message_serializes_queries_for_same_runtime_session(self):
+        controller = _StubController()
+        runtime_key = "wechat_o9:/tmp/work"
+        first_query_started = asyncio.Event()
+        release_result = asyncio.Event()
+        queries: list[tuple[str, str]] = []
+
+        class ResultMessage:
+            subtype = "success"
+            result = "done"
+            duration_ms = 1
+
+        class _Client:
+            _vibe_runtime_base_session_id = "wechat_o9"
+            _vibe_runtime_session_key = runtime_key
+
+            async def query(self, message, *, session_id):
+                queries.append((message, session_id))
+                if len(queries) == 1:
+                    first_query_started.set()
+
+            def receive_messages(self):
+                async def _iterate():
+                    await release_result.wait()
+                    yield ResultMessage()
+
+                return _iterate()
+
+        client = _Client()
+        controller._get_session_key = lambda _context: "wechat-user"
+        controller.emit_agent_message = AsyncMock()
+        controller.session_handler = SimpleNamespace(
+            get_or_create_claude_session=AsyncMock(return_value=client),
+            mark_session_active=lambda _key: None,
+            mark_session_idle=lambda _key: None,
+            handle_session_error=AsyncMock(),
+            capture_session_id=lambda *_args, **_kwargs: None,
+        )
+
+        agent = ClaudeAgent(controller)
+        service = AgentService(controller)
+        service.register(agent)
+        controller.agent_service = service
+        agent._prepare_message_with_files = lambda request: request.message
+        agent._delete_ack = AsyncMock()
+        async def _emit_result(context, *_args, **_kwargs):
+            service.release_runtime_turn(context)
+
+        agent.emit_result_message = AsyncMock(side_effect=_emit_result)
+
+        def _request(message: str):
+            return SimpleNamespace(
+                context=SimpleNamespace(
+                    user_id="U1",
+                    channel_id="C1",
+                    platform_specific={"turn_token": message},
+                ),
+                message=message,
+                working_path="/tmp/work",
+                base_session_id="wechat_o9",
+                composite_session_id=runtime_key,
+                session_key="wechat-user",
+                subagent_name=None,
+                subagent_model=None,
+                subagent_reasoning_effort=None,
+                ack_message_id=None,
+                ack_reaction_message_id=None,
+                ack_reaction_emoji=None,
+                files=None,
+            )
+
+        first = asyncio.create_task(service.handle_message("claude", _request("first")))
+        await asyncio.wait_for(first_query_started.wait(), timeout=3)
+        await asyncio.sleep(0)
+        second = asyncio.create_task(service.handle_message("claude", _request("second")))
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(
+            queries,
+            [("first", runtime_key)],
+            "the second prompt must not be written into the same Claude runtime before the first result",
+        )
+
+        release_result.set()
+        await asyncio.wait_for(first, timeout=3)
+        await asyncio.wait_for(second, timeout=3)
+
+        self.assertEqual(queries, [("first", runtime_key), ("second", runtime_key)])
+
+    async def test_cancelled_waiter_does_not_leak_runtime_session_lock(self):
+        controller = _StubController()
+        runtime_key = "wechat_o9:/tmp/work"
+        first_query_started = asyncio.Event()
+        release_result = asyncio.Event()
+        queries: list[tuple[str, str]] = []
+
+        class ResultMessage:
+            subtype = "success"
+            result = "done"
+            duration_ms = 1
+
+        class _Client:
+            _vibe_runtime_base_session_id = "wechat_o9"
+            _vibe_runtime_session_key = runtime_key
+
+            async def query(self, message, *, session_id):
+                queries.append((message, session_id))
+                if len(queries) == 1:
+                    first_query_started.set()
+
+            def receive_messages(self):
+                async def _iterate():
+                    await release_result.wait()
+                    yield ResultMessage()
+
+                return _iterate()
+
+        client = _Client()
+        controller._get_session_key = lambda _context: "wechat-user"
+        controller.emit_agent_message = AsyncMock()
+        controller.session_handler = SimpleNamespace(
+            get_or_create_claude_session=AsyncMock(return_value=client),
+            mark_session_active=lambda _key: None,
+            mark_session_idle=lambda _key: None,
+            handle_session_error=AsyncMock(),
+            capture_session_id=lambda *_args, **_kwargs: None,
+        )
+
+        agent = ClaudeAgent(controller)
+        service = AgentService(controller)
+        service.register(agent)
+        controller.agent_service = service
+        agent._prepare_message_with_files = lambda request: request.message
+        agent._delete_ack = AsyncMock()
+        async def _emit_result(context, *_args, **_kwargs):
+            service.release_runtime_turn(context)
+
+        agent.emit_result_message = AsyncMock(side_effect=_emit_result)
+
+        def _request(message: str):
+            return SimpleNamespace(
+                context=SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={}),
+                message=message,
+                working_path="/tmp/work",
+                base_session_id="wechat_o9",
+                composite_session_id=runtime_key,
+                session_key="wechat-user",
+                subagent_name=None,
+                subagent_model=None,
+                subagent_reasoning_effort=None,
+                ack_message_id=None,
+                ack_reaction_message_id=None,
+                ack_reaction_emoji=None,
+                files=None,
+            )
+
+        first = asyncio.create_task(service.handle_message("claude", _request("first")))
+        await asyncio.wait_for(first_query_started.wait(), timeout=3)
+        blocked = asyncio.create_task(service.handle_message("claude", _request("cancelled")))
+        await asyncio.sleep(0.05)
+        blocked.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await blocked
+
+        release_result.set()
+        await asyncio.wait_for(first, timeout=3)
+
+        third = asyncio.create_task(service.handle_message("claude", _request("third")))
+        await asyncio.wait_for(third, timeout=3)
+
+        self.assertEqual(queries, [("first", runtime_key), ("third", runtime_key)])
+        self.assertNotIn(runtime_key, agent._pending_requests)
+
+    async def test_handle_stop_releases_runtime_turn_gate(self):
+        controller = _StubController()
+        runtime_key = "wechat_o9:/tmp/work"
+        interrupted = False
+
+        class _Client:
+            async def interrupt(self):
+                nonlocal interrupted
+                interrupted = True
+
+            async def disconnect(self):
+                return None
+
+        agent = ClaudeAgent(controller)
+        service = AgentService(controller)
+        service.register(agent)
+        controller.agent_service = service
+        controller.processing_indicator = SimpleNamespace(finish=AsyncMock())
+
+        async def _emit(context, message_type, text, **_kwargs):
+            if message_type == "result":
+                service.release_runtime_turn(context)
+
+        controller.emit_agent_message = AsyncMock(side_effect=_emit)
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "T1",
+                    "agent_runtime_turn_key": runtime_key,
+                    "agent_runtime_turn_token": "R1",
+                }
+            ),
+            ack_reaction_message_id="m1",
+            ack_reaction_emoji=":eyes:",
+        )
+        agent._pending_requests[runtime_key] = [pending_request]
+        agent._pending_reactions[runtime_key] = [("m1", ":eyes:")]
+        gate = service._get_turn_gate(runtime_key)
+        await gate.lock.acquire()
+        gate.token = "R1"
+        controller.claude_sessions[runtime_key] = _Client()
+
+        request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            message="stop",
+            working_path="/tmp/work",
+            base_session_id="wechat_o9",
+            composite_session_id=runtime_key,
+            session_key="wechat-user",
+            stop_failure_reason=None,
+        )
+
+        handled = await service.handle_stop("claude", request)
+
+        self.assertTrue(handled)
+        self.assertTrue(interrupted)
+        self.assertNotIn(runtime_key, agent._pending_requests)
+        self.assertNotIn(runtime_key, controller.claude_sessions)
+        controller.session_handler.cleanup_session.assert_awaited_once_with(
+            runtime_key,
+            current_receiver_task=None,
+        )
+        self.assertFalse(service._turn_gates[runtime_key].lock.locked())
+        self.assertEqual(request.context.platform_specific["turn_token"], "T1")
+        self.assertEqual(request.context.platform_specific["agent_runtime_turn_token"], "R1")
+        controller.processing_indicator.finish.assert_awaited_once_with(pending_request)
+
+    async def test_handle_stop_cleans_up_when_silent_result_emit_fails(self):
+        controller = _StubController()
+        runtime_key = "wechat_o9:/tmp/work"
+
+        class _Client:
+            async def interrupt(self):
+                return None
+
+            async def disconnect(self):
+                return None
+
+        agent = ClaudeAgent(controller)
+        service = AgentService(controller)
+        service.register(agent)
+        controller.agent_service = service
+        controller.processing_indicator = SimpleNamespace(finish=AsyncMock())
+        controller.emit_agent_message = AsyncMock(side_effect=RuntimeError("send failed"))
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "T1",
+                    "agent_runtime_turn_key": runtime_key,
+                    "agent_runtime_turn_token": "R1",
+                }
+            ),
+            ack_reaction_message_id="m1",
+            ack_reaction_emoji=":eyes:",
+        )
+        agent._pending_requests[runtime_key] = [pending_request]
+        agent._pending_reactions[runtime_key] = [("m1", ":eyes:")]
+        gate = service._get_turn_gate(runtime_key)
+        await gate.lock.acquire()
+        gate.token = "R1"
+        controller.claude_sessions[runtime_key] = _Client()
+
+        request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            message="stop",
+            working_path="/tmp/work",
+            base_session_id="wechat_o9",
+            composite_session_id=runtime_key,
+            session_key="wechat-user",
+            stop_failure_reason=None,
+        )
+
+        handled = await service.handle_stop("claude", request)
+
+        self.assertTrue(handled)
+        self.assertIsNone(request.stop_failure_reason)
+        self.assertNotIn(runtime_key, controller.claude_sessions)
+        self.assertFalse(service._turn_gates[runtime_key].lock.locked())
+        controller.session_handler.cleanup_session.assert_awaited_once_with(
+            runtime_key,
+            current_receiver_task=None,
+        )
+        controller.processing_indicator.finish.assert_awaited_once_with(pending_request)
+
+    async def test_handle_stop_keeps_runtime_gate_until_cleanup_finishes(self):
+        controller = _StubController()
+        runtime_key = "wechat_o9:/tmp/work"
+        disconnect_started = asyncio.Event()
+        allow_disconnect = asyncio.Event()
+        emit_called = asyncio.Event()
+
+        class _Client:
+            async def interrupt(self):
+                return None
+
+            async def disconnect(self):
+                disconnect_started.set()
+                await allow_disconnect.wait()
+
+        async def _receiver():
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                raise
+
+        agent = ClaudeAgent(controller)
+        service = AgentService(controller)
+        service.register(agent)
+        controller.agent_service = service
+        controller.processing_indicator = SimpleNamespace(finish=AsyncMock())
+
+        async def _emit(context, message_type, text, **_kwargs):
+            emit_called.set()
+            if message_type == "result":
+                service.release_runtime_turn(context)
+
+        controller.emit_agent_message = AsyncMock(side_effect=_emit)
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "T1",
+                    "agent_runtime_turn_key": runtime_key,
+                    "agent_runtime_turn_token": "R1",
+                }
+            ),
+            ack_reaction_message_id="m1",
+            ack_reaction_emoji=":eyes:",
+        )
+        agent._pending_requests[runtime_key] = [pending_request]
+        agent._pending_reactions[runtime_key] = [("m1", ":eyes:")]
+        gate = service._get_turn_gate(runtime_key)
+        await gate.lock.acquire()
+        gate.token = "R1"
+        controller.claude_sessions[runtime_key] = _Client()
+        controller.receiver_tasks[runtime_key] = asyncio.create_task(_receiver())
+
+        request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            message="stop",
+            working_path="/tmp/work",
+            base_session_id="wechat_o9",
+            composite_session_id=runtime_key,
+            session_key="wechat-user",
+            stop_failure_reason=None,
+        )
+
+        stop_task = asyncio.create_task(service.handle_stop("claude", request))
+        await asyncio.wait_for(disconnect_started.wait(), timeout=3)
+        await asyncio.sleep(0)
+
+        self.assertTrue(service._turn_gates[runtime_key].lock.locked())
+        self.assertFalse(emit_called.is_set())
+
+        allow_disconnect.set()
+        handled = await asyncio.wait_for(stop_task, timeout=3)
+
+        self.assertTrue(handled)
+        self.assertTrue(emit_called.is_set())
+        self.assertFalse(service._turn_gates[runtime_key].lock.locked())
+
+    async def test_setup_failure_emits_terminal_result_before_runtime_gate_release(self):
+        controller = _StubController()
+        runtime_key = "wechat_o9:/tmp/work"
+        controller.emit_agent_message = AsyncMock()
+        controller.session_handler = SimpleNamespace(
+            get_or_create_claude_session=AsyncMock(side_effect=RuntimeError("setup failed")),
+            mark_session_active=lambda _key: None,
+            mark_session_idle=lambda _key: None,
+            handle_session_error=AsyncMock(),
+            capture_session_id=lambda *_args, **_kwargs: None,
+        )
+        agent = ClaudeAgent(controller)
+        service = AgentService(controller)
+        service.register(agent)
+        controller.agent_service = service
+        agent._delete_ack = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+
+        observed_gate_current = []
+
+        async def _emit(context, message_type, text, **_kwargs):
+            if message_type == "result":
+                observed_gate_current.append(service.emit_matches_runtime_turn(context))
+                service.release_runtime_turn(context)
+
+        controller.emit_agent_message.side_effect = _emit
+        request = SimpleNamespace(
+            context=SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={}),
+            message="hello",
+            working_path="/tmp/work",
+            base_session_id="wechat_o9",
+            composite_session_id=runtime_key,
+            session_key="wechat-user",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            ack_message_id=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+            files=None,
+        )
+
+        await service.handle_message("claude", request)
+
+        self.assertEqual(observed_gate_current, [True])
+        self.assertFalse(service._turn_gates[runtime_key].lock.locked())
+
     async def test_result_keeps_claude_session_active_when_requests_are_queued(self):
         controller = _StubController()
         mark_idle_calls = []
@@ -158,9 +579,21 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         context = SimpleNamespace(
             user_id="U1",
             channel_id="C1",
-            platform_specific={"turn_token": "T1"},
+            platform_specific={
+                "turn_token": "T1",
+                "agent_runtime_turn_key": composite_key,
+                "agent_runtime_turn_token": "R1",
+            },
         )
-        pending_request = SimpleNamespace(context=SimpleNamespace(platform_specific={"turn_token": "T2"}))
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "T2",
+                    "agent_runtime_turn_key": composite_key,
+                    "agent_runtime_turn_token": "R2",
+                }
+            )
+        )
         agent._pending_requests[composite_key] = [pending_request]
 
         class FakeToolUseBlock:
@@ -190,14 +623,12 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             agent._get_formatter = lambda _context: _Formatter()
             await agent._receive_messages(_Client(), "session-1", "/tmp/work", context, composite_key=composite_key)
 
-        controller.emit_agent_message.assert_awaited_once_with(
-            context,
-            "toolcall",
-            "Bash(pwd)",
-            parse_mode="markdown",
-        )
+        first_emit = controller.emit_agent_message.await_args_list[0]
+        self.assertEqual(first_emit.args, (context, "toolcall", "Bash(pwd)"))
+        self.assertEqual(first_emit.kwargs, {"parse_mode": "markdown"})
         self.assertEqual(context.platform_specific["turn_token"], "T2")
-        self.assertEqual(agent._pending_requests[composite_key], [pending_request])
+        self.assertEqual(context.platform_specific["agent_runtime_turn_key"], composite_key)
+        self.assertEqual(context.platform_specific["agent_runtime_turn_token"], "R2")
 
     async def test_handle_message_uses_runtime_session_key_for_claude_tracking(self):
         controller = _StubController()
@@ -333,6 +764,29 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(session_key, controller.receiver_tasks)
         self.assertNotIn(session_key, controller.claude_sessions)
         self.assertEqual(controller.session_manager.cleared, ["wechat-user"])
+
+    async def test_clear_sessions_cancels_subagent_runtime_keys_for_cleared_session(self):
+        controller = _StubController()
+        agent = ClaudeAgent(controller)
+        session_key = "wechat_o9:reviewer:/tmp/work"
+        client = _StubClient()
+        controller.claude_sessions[session_key] = client
+
+        cleared = await agent.clear_sessions("wechat-user")
+
+        self.assertEqual(cleared, 1)
+        self.assertTrue(client.disconnected)
+        self.assertNotIn(session_key, controller.claude_sessions)
+
+    async def test_runtime_turn_keys_for_session_key_matches_subagent_runtime_keys(self):
+        controller = _StubController()
+        agent = ClaudeAgent(controller)
+        controller.claude_sessions["wechat_o9:reviewer:/tmp/work"] = _StubClient()
+        controller.claude_sessions["other:/tmp/work"] = _StubClient()
+
+        keys = agent.runtime_turn_keys_for_session_key("wechat-user")
+
+        self.assertEqual(keys, {"wechat_o9:reviewer:/tmp/work"})
 
     async def test_clear_sessions_swallows_receiver_task_failure(self):
         controller = _StubController()
@@ -948,6 +1402,198 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once()
         self.assertNotIn(composite_key, controller.receiver_tasks)
         self.assertNotIn(composite_key, controller.claude_sessions)
+
+    async def test_receiver_eof_without_result_releases_runtime_gate(self):
+        controller = _StubController()
+        controller._get_session_key = lambda context: "telegram::user::U1"
+        agent = ClaudeAgent(controller)
+        service = AgentService(controller)
+        service.register(agent)
+        controller.agent_service = service
+
+        async def _emit(context, message_type, text, **_kwargs):
+            if message_type == "result":
+                service.release_runtime_turn(context)
+
+        controller.emit_agent_message = AsyncMock(side_effect=_emit)
+        composite_key = "session-1:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={
+                "agent_runtime_turn_key": composite_key,
+                "agent_runtime_turn_token": "R1",
+            },
+        )
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "T1",
+                    "agent_runtime_turn_key": composite_key,
+                    "agent_runtime_turn_token": "R1",
+                }
+            ),
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        gate = service._get_turn_gate(composite_key)
+        await gate.lock.acquire()
+        gate.token = "R1"
+
+        class _Client:
+            async def disconnect(self):
+                return None
+
+            def receive_messages(self):
+                async def _iterate():
+                    if False:
+                        yield None
+
+                return _iterate()
+
+        client = _Client()
+        controller.claude_sessions[composite_key] = client
+        receiver_task = asyncio.create_task(
+            agent._receive_messages(client, "session-1", "/tmp/work", context, composite_key=composite_key)
+        )
+        controller.receiver_tasks[composite_key] = receiver_task
+
+        await asyncio.wait_for(receiver_task, timeout=1)
+
+        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True)
+        self.assertFalse(service._turn_gates[composite_key].lock.locked())
+        self.assertNotIn(composite_key, controller.claude_sessions)
+        self.assertNotIn(composite_key, agent._pending_requests)
+
+    async def test_receiver_eof_cleans_runtime_before_terminal_emit_releases_gate(self):
+        controller = _StubController()
+        controller._get_session_key = lambda context: "telegram::user::U1"
+        agent = ClaudeAgent(controller)
+        service = AgentService(controller)
+        service.register(agent)
+        controller.agent_service = service
+        composite_key = "session-1:/tmp/work"
+        release_seen_state: dict[str, bool] = {}
+
+        async def _emit(context, message_type, text, **_kwargs):
+            if message_type == "result":
+                release_seen_state["client_present"] = composite_key in controller.claude_sessions
+                release_seen_state["receiver_present"] = composite_key in controller.receiver_tasks
+                service.release_runtime_turn(context)
+
+        controller.emit_agent_message = AsyncMock(side_effect=_emit)
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={
+                "agent_runtime_turn_key": composite_key,
+                "agent_runtime_turn_token": "R1",
+            },
+        )
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "T1",
+                    "agent_runtime_turn_key": composite_key,
+                    "agent_runtime_turn_token": "R1",
+                }
+            ),
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        gate = service._get_turn_gate(composite_key)
+        await gate.lock.acquire()
+        gate.token = "R1"
+
+        class _Client:
+            async def disconnect(self):
+                return None
+
+            def receive_messages(self):
+                async def _iterate():
+                    if False:
+                        yield None
+
+                return _iterate()
+
+        client = _Client()
+        controller.claude_sessions[composite_key] = client
+        receiver_task = asyncio.create_task(
+            agent._receive_messages(client, "session-1", "/tmp/work", context, composite_key=composite_key)
+        )
+        controller.receiver_tasks[composite_key] = receiver_task
+
+        await asyncio.wait_for(receiver_task, timeout=1)
+
+        self.assertEqual(release_seen_state, {"client_present": False, "receiver_present": False})
+        self.assertFalse(service._turn_gates[composite_key].lock.locked())
+
+    async def test_receiver_eof_adopts_pending_turn_token_when_context_is_stale(self):
+        controller = _StubController()
+        controller._get_session_key = lambda context: "telegram::user::U1"
+        agent = ClaudeAgent(controller)
+        service = AgentService(controller)
+        service.register(agent)
+        controller.agent_service = service
+
+        async def _emit(context, message_type, text, **_kwargs):
+            if message_type == "result":
+                service.release_runtime_turn(context)
+
+        controller.emit_agent_message = AsyncMock(side_effect=_emit)
+        composite_key = "session-1:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={
+                "turn_token": "old-turn",
+                "agent_runtime_turn_key": composite_key,
+                "agent_runtime_turn_token": "old-runtime",
+            },
+        )
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "current-turn",
+                    "agent_runtime_turn_key": composite_key,
+                    "agent_runtime_turn_token": "current-runtime",
+                }
+            ),
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        gate = service._get_turn_gate(composite_key)
+        await gate.lock.acquire()
+        gate.token = "current-runtime"
+
+        class _Client:
+            async def disconnect(self):
+                return None
+
+            def receive_messages(self):
+                async def _iterate():
+                    if False:
+                        yield None
+
+                return _iterate()
+
+        client = _Client()
+        controller.claude_sessions[composite_key] = client
+        receiver_task = asyncio.create_task(
+            agent._receive_messages(client, "session-1", "/tmp/work", context, composite_key=composite_key)
+        )
+        controller.receiver_tasks[composite_key] = receiver_task
+
+        await asyncio.wait_for(receiver_task, timeout=1)
+
+        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True)
+        self.assertEqual(context.platform_specific["turn_token"], "current-turn")
+        self.assertEqual(context.platform_specific["agent_runtime_turn_token"], "current-runtime")
+        self.assertFalse(service._turn_gates[composite_key].lock.locked())
+        self.assertNotIn(composite_key, agent._pending_requests)
 
     async def test_assistant_auth_error_prefers_oauth_recovery_message(self):
         controller = _StubController()

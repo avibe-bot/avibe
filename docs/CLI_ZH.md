@@ -185,9 +185,17 @@ vibe task remove <task-id>
 ```bash
 vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
 vibe agent run --async --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
+vibe agent run --async --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --async --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
 vibe agent run --async --create-session --deliver-key slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
 ```
+
+当一个新 Agent Session 需要从现有 Session 的 native backend 上下文分叉，而不是空白开始时，
+使用 `--fork-session <session-id>`。新 Session 会保持源 Session 的 backend。
+只有 backend 不变时，才可以通过 `--agent`、`--model`、`--reasoning-effort`
+覆盖 fork 后 Session 的 Agent、模型或推理强度；跨 backend fork 会被拒绝。
+不要把 `--fork-session` 和 `--session-id`、`--create-session`、`--deliver-key`
+或 `--post-to` 混用。
 
 当异步 run 的最终结果文本需要回到调用方 Session 时，使用
 `--callback-session-id`。这个 callback 与普通投递相互独立：即使目标 run 已经把

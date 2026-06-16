@@ -654,6 +654,111 @@ def test_build_context_avibe_keys_on_session_id_not_project() -> None:
     assert context.platform_specific["session_key_external"] == "avibe::project::proj_890721e64fc8"
 
 
+def test_build_context_carries_pending_native_fork_metadata() -> None:
+    controller = SimpleNamespace(
+        platform_settings_managers={},
+        im_clients={"avibe": SimpleNamespace()},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+    )
+    service = ScheduledTaskService(controller=controller, store=ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json")))
+    target = ParsedSessionKey(platform="avibe", scope_type="project", scope_id="proj_890721e64fc8")
+    target_info = SimpleNamespace(
+        session_id="ses-target",
+        agent_id="agent-1",
+        agent_name="worker",
+        agent_backend="codex",
+        agent_variant="codex",
+        model="gpt-5",
+        reasoning_effort="high",
+        native_session_id="",
+        workdir="/tmp/work",
+        session_anchor="ses-target",
+        suppress_delivery=False,
+    )
+
+    context = asyncio.run(
+        service._build_context(
+            target,
+            execution_id="exec-1",
+            trigger_kind="agent_run",
+            session_id="ses-target",
+            agent_name="worker",
+            target_info=target_info,
+            metadata={
+                "session_fork": {
+                    "source_session_id": "ses-source",
+                    "source_native_session_id": "thread-source",
+                    "source_backend": "codex",
+                }
+            },
+        )
+    )
+
+    session_target = context.platform_specific["agent_session_target"]
+    assert session_target["native_session_id"] == ""
+    assert session_target["metadata"] == {}
+    assert session_target["native_session_fork"] == {
+        "source_session_id": "ses-source",
+        "source_native_session_id": "thread-source",
+        "source_backend": "codex",
+    }
+
+
+def test_build_context_restores_pending_fork_from_session_metadata_when_run_metadata_missing() -> None:
+    controller = SimpleNamespace(
+        platform_settings_managers={},
+        im_clients={"avibe": SimpleNamespace()},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+    )
+    service = ScheduledTaskService(controller=controller, store=ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json")))
+    target = ParsedSessionKey(platform="avibe", scope_type="project", scope_id="proj_890721e64fc8")
+    target_info = SimpleNamespace(
+        session_id="ses-target",
+        agent_id="agent-1",
+        agent_name="worker",
+        agent_backend="codex",
+        agent_variant="codex",
+        model="gpt-5",
+        reasoning_effort="high",
+        native_session_id="",
+        workdir="/tmp/work",
+        session_anchor="ses-target",
+        metadata={
+            "created_via": "session_fork",
+            "fork_source_session_id": "ses-source",
+            "fork_source_native_session_id": "thread-source",
+            "fork_source_backend": "codex",
+        },
+        suppress_delivery=False,
+    )
+
+    context = asyncio.run(
+        service._build_context(
+            target,
+            execution_id="exec-1",
+            trigger_kind="agent_run",
+            session_id="ses-target",
+            agent_name="worker",
+            target_info=target_info,
+            metadata={},
+        )
+    )
+
+    session_target = context.platform_specific["agent_session_target"]
+    assert session_target["metadata"]["fork_source_native_session_id"] == "thread-source"
+    assert session_target["native_session_fork"] == {
+        "source_session_id": "ses-source",
+        "source_native_session_id": "thread-source",
+        "source_backend": "codex",
+    }
+
+
 def test_build_context_clears_provisional_anchor_for_cross_scope_delivery() -> None:
     settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None))
     controller = SimpleNamespace(
@@ -1580,6 +1685,88 @@ def test_busy_avibe_agent_run_returns_to_queued_and_is_held_by_workbench_queue(m
     assert (run.get("metadata") or {}).get("workbench_queue_holds_run") is True
     assert submitted == [(session_id, "run behind active workbench turn", request.id)]
     assert handler_calls == []
+
+
+def test_busy_avibe_agent_run_requeue_preserves_session_fork_metadata(monkeypatch, tmp_path) -> None:
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="run behind active workbench turn",
+        agent_name="codex",
+        metadata={
+            "session_fork": {
+                "source_session_id": "ses-source",
+                "source_native_session_id": "thread-source",
+                "source_backend": "codex",
+            }
+        },
+    )
+    submitted: list[tuple] = []
+
+    async def _submit_scheduled(sid, ctx, text):
+        submitted.append((sid, text, ctx.platform_specific["agent_session_target"]["native_session_fork"]))
+        return "enqueued"
+
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        raise AssertionError("busy workbench runs should not dispatch directly")
+
+    gate = SimpleNamespace(submit_scheduled=_submit_scheduled, in_flight={session_id: object()})
+    controller = _avibe_controller_double(gate=gate, handle_scheduled_message=_handle_scheduled_message)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        execution = service._inflight_executions.get(request.id)
+        assert execution is not None
+        await execution
+
+    asyncio.run(_exercise())
+
+    run = request_store.get_run(request.id)
+    assert run is not None
+    assert run["metadata"]["session_fork"]["source_native_session_id"] == "thread-source"
+    assert run["metadata"]["workbench_queue_holds_run"] is True
+    assert submitted[0][2]["source_native_session_id"] == "thread-source"
+
+
+def test_workbench_queue_flush_recovery_preserves_session_fork_metadata(monkeypatch, tmp_path) -> None:
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="recover fork after queue flush",
+        agent_name="codex",
+        metadata={
+            "session_fork": {
+                "source_session_id": "ses-source",
+                "source_native_session_id": "thread-source",
+                "source_backend": "codex",
+            },
+            "workbench_queue_holds_run": True,
+        },
+    )
+
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    assert sqlite_store.claim_queued_run_for_workbench(request.id) is True
+
+    flushed = request_store.get_run(request.id)
+    assert flushed is not None
+    assert flushed["status"] == "running"
+    assert flushed["metadata"]["workbench_queue_holds_run"] is False
+    assert flushed["metadata"]["session_fork"]["source_native_session_id"] == "thread-source"
+
+    request_store.recover_processing()
+    claimed = request_store.claim(request.id)
+
+    assert claimed is not None
+    assert claimed.metadata["workbench_queue_holds_run"] is False
+    assert claimed.metadata["session_fork"]["source_native_session_id"] == "thread-source"
 
 
 def test_drain_requests_reserves_watch_create_per_run_before_session_validation(tmp_path: Path) -> None:

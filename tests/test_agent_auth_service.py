@@ -998,6 +998,35 @@ class AgentAuthServiceTests(unittest.IsolatedAsyncioTestCase):
         agent.refresh_runtime_config.assert_awaited_once_with(runtime_config)
         agent.refresh_auth_state.assert_not_awaited()
 
+    async def test_refresh_backend_runtime_releases_runtime_tokens_after_refresh(self):
+        controller = _StubController()
+        runtime_tokens = {"session:/repo": "token-1"}
+        controller.agent_service.runtime_turn_tokens_for_backend = Mock(return_value=runtime_tokens)
+        controller.agent_service.release_runtime_turn_tokens = Mock()
+        controller.agent_service.refresh_runtime_config = AsyncMock(return_value=True)
+        controller.agent_service.agents["codex"] = SimpleNamespace()
+        service = AgentAuthService(controller)
+        runtime_config = object()
+        service._load_backend_runtime_config = Mock(return_value=runtime_config)
+
+        await service._refresh_backend_runtime("codex")
+
+        controller.agent_service.runtime_turn_tokens_for_backend.assert_called_once_with("codex")
+        controller.agent_service.refresh_runtime_config.assert_awaited_once_with("codex", runtime_config)
+        controller.agent_service.release_runtime_turn_tokens.assert_called_once_with(runtime_tokens)
+
+    async def test_clear_backend_sessions_for_context_routes_through_agent_service(self):
+        controller = _StubController()
+        controller.agent_service.clear_backend_sessions = AsyncMock(return_value=1)
+        controller.agent_service.agents["codex"] = SimpleNamespace(clear_sessions=AsyncMock())
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        await service._clear_backend_sessions_for_context("codex", context)
+
+        controller.agent_service.clear_backend_sessions.assert_awaited_once_with("codex", "C1")
+        controller.agent_service.agents["codex"].clear_sessions.assert_not_awaited()
+
     async def test_refresh_backend_runtime_registers_codex_when_enabled_after_startup(self):
         from config.v2_compat import CodexCompatConfig
         from modules.agents.service import AgentService

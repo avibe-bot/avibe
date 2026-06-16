@@ -772,6 +772,7 @@ Preferred CLI shape:
 
 - one-shot direct run: `vibe agent run --agent '<agent-name>' --message '...'`
 - one-shot async run: `vibe agent run --async --session-id '<session-id>' --message '...'`
+- fork a Session for an alternate path: `vibe agent run --fork-session '<source-session-id>' --message '...'`
 - recurring task: `vibe task add --session-id '<session-id>' --cron '<expr>' --message '...'`
 - one-off task: `vibe task add --session-id '<session-id>' --at '<ISO-8601>' --message '...'`
 - immediate rerun: `vibe task run <id>`
@@ -791,6 +792,9 @@ Delivery controls (apply to `vibe agent run --create-session`, `vibe task add`, 
 - `--message` and `--message-file` are the current user-message flags for task, watch, and agent-run commands
 - `vibe task add` stores the message template and creates Agent Runs when the time trigger fires
 - `vibe agent run --async` queues one Agent Run immediately without storing a task definition
+- `--fork-session` creates a new Agent Session by forking the source Session's native backend context. Use it when work should branch from an existing context without mutating that source Session.
+- fork overrides are intentionally narrow: `--agent`, `--model`, and `--reasoning-effort` can override the forked Session only if the backend stays the same; cross-backend forks are rejected.
+- do not combine `--fork-session` with `--session-id`, `--create-session`, `--deliver-key`, or `--post-to`.
 - `vibe watch add` uses `--message` as the instruction template for the Agent Run created after the waiter reaches a reportable state
 
 Legacy compatibility:

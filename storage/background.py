@@ -651,7 +651,10 @@ class SQLiteBackgroundTaskStore:
         if cancel_requested_at is not None:
             values["cancel_requested_at"] = cancel_requested_at
         if metadata is not None:
-            values["metadata_json"] = _json_dumps(metadata)
+            existing = self.get_run(run_id) or {}
+            merged = dict(existing.get("metadata") or {})
+            merged.update(metadata)
+            values["metadata_json"] = _json_dumps(merged)
         if callback_status is not None:
             values["callback_status"] = callback_status
         if callback_error is not None:
@@ -698,7 +701,10 @@ class SQLiteBackgroundTaskStore:
             "updated_at": now,
         }
         if metadata is not None:
-            values["metadata_json"] = _json_dumps(metadata)
+            existing = self.get_run(run_id) or {}
+            merged = dict(existing.get("metadata") or {})
+            merged.update(metadata)
+            values["metadata_json"] = _json_dumps(merged)
         with self.engine.begin() as conn:
             result = conn.execute(
                 update(agent_runs)
@@ -726,6 +732,10 @@ class SQLiteBackgroundTaskStore:
                     .values(status="canceled", completed_at=now, updated_at=now)
                 )
                 return False
+            metadata = _json_loads(row["metadata_json"], {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata["workbench_queue_holds_run"] = False
             result = conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.id == run_id)
@@ -734,7 +744,7 @@ class SQLiteBackgroundTaskStore:
                     status="running",
                     started_at=now,
                     updated_at=now,
-                    metadata_json=_json_dumps({"workbench_queue_holds_run": False}),
+                    metadata_json=_json_dumps(metadata),
                 )
             )
             return bool(result.rowcount)
@@ -1026,6 +1036,7 @@ class SQLiteBackgroundTaskStore:
 
     @staticmethod
     def _run_from_row(row: Any) -> dict[str, Any]:
+        metadata = _json_loads(row["metadata_json"], {})
         return {
             "id": row["id"],
             "request_type": row["run_type"],
@@ -1068,7 +1079,8 @@ class SQLiteBackgroundTaskStore:
             "started_at": row["started_at"],
             "completed_at": row["completed_at"],
             "updated_at": row["updated_at"],
-            "metadata": _json_loads(row["metadata_json"], {}),
+            "metadata": metadata,
+            "session_fork": metadata.get("session_fork") if isinstance(metadata, dict) else None,
             "ok": None if row["completed_at"] is None else normalize_run_status(row["status"]) == "succeeded",
         }
 

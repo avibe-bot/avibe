@@ -1509,38 +1509,55 @@ class AgentAuthService:
 
     async def _refresh_backend_runtime(self, backend: str) -> None:
         agent_service = getattr(self.controller, "agent_service", None)
-        refresh_runtime_config = getattr(agent_service, "refresh_runtime_config", None)
-        runtime_config = None
-        if callable(refresh_runtime_config):
-            runtime_config = self._load_backend_runtime_config(backend)
-            if runtime_config is None:
-                await self._unregister_disabled_backend_agent(backend)
-                return
-            if runtime_config is not None and self._register_missing_backend_agent(backend, runtime_config):
-                return
-            if runtime_config is not None and await refresh_runtime_config(backend, runtime_config):
-                active_default = self._revalidate_runtime_default_backend(self._load_saved_default_backend())
-                self._sync_builtin_default_agents(active_default)
-                return
-
-        agent = getattr(agent_service, "agents", {}).get(backend) if agent_service else None
-        refresh_config = getattr(agent, "refresh_runtime_config", None)
-        if callable(refresh_config):
-            if runtime_config is None:
+        runtime_tokens: dict[str, str] = {}
+        snapshot_tokens = getattr(agent_service, "runtime_turn_tokens_for_backend", None)
+        if callable(snapshot_tokens):
+            runtime_tokens = snapshot_tokens(backend)
+        try:
+            refresh_runtime_config = getattr(agent_service, "refresh_runtime_config", None)
+            runtime_config = None
+            if callable(refresh_runtime_config):
                 runtime_config = self._load_backend_runtime_config(backend)
-            if runtime_config is None:
+                if runtime_config is None:
+                    await self._unregister_disabled_backend_agent(backend)
+                    return
+                if runtime_config is not None and self._register_missing_backend_agent(backend, runtime_config):
+                    return
+                if runtime_config is not None and await refresh_runtime_config(backend, runtime_config):
+                    active_default = self._revalidate_runtime_default_backend(self._load_saved_default_backend())
+                    self._sync_builtin_default_agents(active_default)
+                    return
+
+            agent = getattr(agent_service, "agents", {}).get(backend) if agent_service else None
+            refresh_config = getattr(agent, "refresh_runtime_config", None)
+            if callable(refresh_config):
+                if runtime_config is None:
+                    runtime_config = self._load_backend_runtime_config(backend)
+                if runtime_config is None:
+                    return
+                await refresh_config(runtime_config)
                 return
-            await refresh_config(runtime_config)
-            return
-        if backend == "opencode":
-            await self._refresh_opencode_server()
-            return
-        refresh = getattr(agent, "refresh_auth_state", None)
-        if callable(refresh):
-            await refresh()
+            if backend == "opencode":
+                await self._refresh_opencode_server()
+                return
+            refresh = getattr(agent, "refresh_auth_state", None)
+            if callable(refresh):
+                await refresh()
+        finally:
+            release_tokens = getattr(agent_service, "release_runtime_turn_tokens", None)
+            if callable(release_tokens):
+                release_tokens(runtime_tokens)
+            else:
+                release_turns = getattr(agent_service, "release_runtime_turns_for_backend", None)
+                if callable(release_turns):
+                    release_turns(backend)
 
     async def _clear_backend_sessions_for_context(self, backend: str, context: MessageContext) -> None:
         agent_service = getattr(self.controller, "agent_service", None)
+        clear_backend_sessions = getattr(agent_service, "clear_backend_sessions", None)
+        if callable(clear_backend_sessions):
+            await clear_backend_sessions(backend, self._get_settings_key(context))
+            return
         agent = getattr(agent_service, "agents", {}).get(backend) if agent_service else None
         clear_sessions = getattr(agent, "clear_sessions", None)
         if not callable(clear_sessions):
