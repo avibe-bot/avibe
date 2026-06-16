@@ -589,12 +589,15 @@ class SettingsStore:
 
     def is_bound_user(self, user_id: str, platform: Optional[str] = None) -> bool:
         if platform:
-            user = self.settings.users.get(self._user_key(user_id, platform))
-            return user is not None and user.enabled
+            return self._user_key(user_id, platform) in self.settings.users
         if user_id in self.settings.users:
-            return self.settings.users[user_id].enabled
+            return True
         suffix = f"{SCOPED_KEY_SEP}{user_id}"
-        return any(key.endswith(suffix) and user.enabled for key, user in self.settings.users.items())
+        return any(key.endswith(suffix) for key in self.settings.users.keys())
+
+    def is_enabled_user(self, user_id: str, platform: Optional[str] = None) -> bool:
+        user = self.get_user(user_id, platform=platform)
+        return user is not None and user.enabled
 
     def is_admin(self, user_id: str, platform: Optional[str] = None) -> bool:
         if platform:
@@ -610,14 +613,21 @@ class SettingsStore:
         return False
 
     def has_any_admin(self, platform: Optional[str] = None) -> bool:
-        """Return True if at least one admin exists."""
+        """Return True if at least one admin record exists."""
+        if platform:
+            prefix = f"{platform}{SCOPED_KEY_SEP}"
+            return any(u.is_admin for key, u in self.settings.users.items() if key.startswith(prefix))
+        return any(u.is_admin for u in self.settings.users.values())
+
+    def has_enabled_admin(self, platform: Optional[str] = None) -> bool:
+        """Return True if at least one enabled admin exists."""
         if platform:
             prefix = f"{platform}{SCOPED_KEY_SEP}"
             return any(u.enabled and u.is_admin for key, u in self.settings.users.items() if key.startswith(prefix))
         return any(u.enabled and u.is_admin for u in self.settings.users.values())
 
     def get_admins(self, platform: Optional[str] = None) -> Dict[str, UserSettings]:
-        """Return all admin users."""
+        """Return enabled admin users."""
         if platform:
             prefix = f"{platform}{SCOPED_KEY_SEP}"
             return {
@@ -664,7 +674,7 @@ class SettingsStore:
                 return False, False
 
             # Auto-admin for first user
-            is_admin = not self.has_any_admin(platform=platform)
+            is_admin = not self.has_enabled_admin(platform=platform)
 
             # Create user
             user = UserSettings(

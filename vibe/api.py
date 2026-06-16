@@ -6793,7 +6793,7 @@ def auto_bind_wechat_user(user_id: str) -> dict:
         }
 
     config = load_config()
-    is_admin = not store.has_any_admin(platform=platform)
+    is_admin = not store.has_enabled_admin(platform=platform)
     user = UserSettings(
         display_name=user_id,
         is_admin=is_admin,

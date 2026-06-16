@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { Combobox } from '../ui/combobox';
 import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
 import { BackendIcon } from '../visual';
 import { CompactSelect } from '../settings/SettingsPrimitives';
 import { modelOptionLabel } from '../../lib/backendModels';
@@ -395,21 +396,23 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
                 {segs.map((seg) => {
                   const active = (seg.id === 'on') === on;
                   return (
-                    <button
+                    <Button
                       key={seg.id}
                       type="button"
+                      variant="ghost"
+                      size="sm"
                       role="radio"
                       aria-checked={active}
                       onClick={() => setBind(seg.id === 'on')}
                       className={clsx(
-                        'flex-1 rounded-[4px] px-2.5 text-[12px] transition-colors',
+                        'h-auto flex-1 rounded-[4px] px-2.5 text-[12px] shadow-none focus-visible:ring-1',
                         active
                           ? 'border border-mint/30 bg-mint-soft font-bold text-mint'
                           : 'font-medium text-muted hover:text-foreground'
                       )}
                     >
                       {seg.label}
-                    </button>
+                    </Button>
                   );
                 })}
               </div>

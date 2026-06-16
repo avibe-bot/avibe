@@ -59,7 +59,7 @@ def test_channel_require_bind_persists(tmp_path: Path) -> None:
         reloaded.close()
 
 
-def test_is_bound_user_requires_enabled_user(tmp_path: Path) -> None:
+def test_bound_and_enabled_user_checks_are_separate(tmp_path: Path) -> None:
     settings_path = tmp_path / "settings.json"
     store = SettingsStore(settings_path)
     store.set_users_for_platform(
@@ -71,7 +71,9 @@ def test_is_bound_user_requires_enabled_user(tmp_path: Path) -> None:
     )
 
     assert store.is_bound_user("U-enabled", platform="slack") is True
-    assert store.is_bound_user("U-disabled", platform="slack") is False
+    assert store.is_enabled_user("U-enabled", platform="slack") is True
+    assert store.is_bound_user("U-disabled", platform="slack") is True
+    assert store.is_enabled_user("U-disabled", platform="slack") is False
 
     store.close()
 
@@ -91,6 +93,7 @@ def test_admin_helpers_require_enabled_user(tmp_path: Path) -> None:
         assert store.is_admin("U-enabled-admin", platform="slack") is True
         assert store.is_admin("U-disabled-admin", platform="slack") is False
         assert store.has_any_admin(platform="slack") is True
+        assert store.has_enabled_admin(platform="slack") is True
         assert set(store.get_admins(platform="slack")) == {"slack::U-enabled-admin"}
 
         store.update_user(
@@ -99,7 +102,8 @@ def test_admin_helpers_require_enabled_user(tmp_path: Path) -> None:
             platform="slack",
         )
 
-        assert store.has_any_admin(platform="slack") is False
+        assert store.has_any_admin(platform="slack") is True
+        assert store.has_enabled_admin(platform="slack") is False
         assert store.get_admins(platform="slack") == {}
     finally:
         store.close()
@@ -122,6 +126,27 @@ def test_bind_user_promotes_when_only_admin_is_disabled(tmp_path: Path) -> None:
         assert success is True
         assert is_admin is True
         assert store.get_user("U-new", platform="slack").is_admin is True
+    finally:
+        store.close()
+
+
+def test_disabled_user_cannot_rebind_with_active_code(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    try:
+        store.set_users_for_platform(
+            "slack",
+            {
+                "U-disabled": UserSettings(display_name="Disabled", enabled=False),
+            },
+        )
+        code = store.create_bind_code()
+
+        success, is_admin = store.bind_user_with_code("U-disabled", "Rebound", code.code, platform="slack")
+
+        assert success is False
+        assert is_admin is False
+        assert store.get_user("U-disabled", platform="slack").enabled is False
     finally:
         store.close()
 
