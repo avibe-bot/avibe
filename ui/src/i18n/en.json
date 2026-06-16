@@ -1777,6 +1777,7 @@
     "transcriptEmpty": "Type a message below to start the conversation",
     "forkedEmptyTitle": "Forked session ready",
     "forkedEmptyBody": "The native agent context was forked from the source session. This transcript starts clean and will only show new messages sent here.",
+    "forkedFromPrefix": "Forked from",
     "forkedSource": "Open source session",
     "scrollToBottom": "Scroll to latest",
     "streaming": "Streaming",

@@ -180,6 +180,7 @@ def test_fork_session_creates_new_workbench_session(isolated_state, tmp_path):
 
     from sqlalchemy import update
 
+    from storage import messages_service
     from storage.db import create_sqlite_engine
     from storage.models import agent_sessions
     from vibe.ui_server import app
@@ -191,6 +192,15 @@ def test_fork_session_creates_new_workbench_session(isolated_state, tmp_path):
             update(agent_sessions)
             .where(agent_sessions.c.id == session_id)
             .values(native_session_id="native-source-1", title="Source session")
+        )
+        source_message = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            message_type="user",
+            text="fork from here",
         )
 
     with patch("vibe.sse_broker.broker.publish") as publish:
@@ -209,6 +219,8 @@ def test_fork_session_creates_new_workbench_session(isolated_state, tmp_path):
     assert payload["native_session_id"] == ""
     assert payload["metadata"]["created_via"] == "session_fork"
     assert payload["metadata"]["fork_source_session_id"] == session_id
+    assert payload["metadata"]["fork_source_session_title"] == "Source session"
+    assert payload["metadata"]["fork_source_message_id"] == source_message["id"]
     assert payload["metadata"]["fork_source_native_session_id"] == "native-source-1"
     publish.assert_called_with(
         "session.activity",

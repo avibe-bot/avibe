@@ -25,13 +25,17 @@ class SessionForkSpec:
     source_session_id: str
     source_native_session_id: str
     source_backend: str
+    source_message_id: Optional[str] = None
 
     def to_metadata(self) -> dict[str, Any]:
-        return {
+        metadata = {
             "source_session_id": self.source_session_id,
             "source_native_session_id": self.source_native_session_id,
             "source_backend": self.source_backend,
         }
+        if self.source_message_id:
+            metadata["source_message_id"] = self.source_message_id
+        return metadata
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,7 @@ def reserve_forked_session(
                 raise SessionForkError(
                     f"agent session has no native session id to fork: {source_session_id}"
                 )
+            source_message_id = _latest_source_message_id(conn, str(row["id"]))
 
             override_agent = agent_store.require_enabled(agent_name) if agent_name else None
             if override_agent is not None and override_agent.backend != source_backend:
@@ -118,6 +123,8 @@ def reserve_forked_session(
                 {
                     "created_via": "session_fork",
                     "fork_source_session_id": str(row["id"]),
+                    "fork_source_session_title": str(row["title"] or ""),
+                    "fork_source_message_id": source_message_id,
                     "fork_source_native_session_id": source_native,
                     "fork_source_backend": source_backend,
                     "fork_created_at": now,
@@ -148,6 +155,7 @@ def reserve_forked_session(
             source_session_id=str(source_session_id),
             source_native_session_id=source_native,
             source_backend=source_backend,
+            source_message_id=source_message_id,
         )
         return SessionForkResult(
             session_id=session_id,
@@ -236,6 +244,27 @@ def _clean_optional(value: Any) -> Optional[str]:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _latest_source_message_id(conn: Any, source_session_id: str) -> Optional[str]:
+    from sqlalchemy import func, or_, select
+
+    from storage.messages_service import TRANSCRIPT_TYPES
+    from storage.models import messages
+
+    row = conn.execute(
+        select(messages.c.id)
+        .where(
+            messages.c.session_id == source_session_id,
+            or_(
+                messages.c.type.in_(list(TRANSCRIPT_TYPES)),
+                func.json_extract(messages.c.metadata_json, "$.source") == "show_page",
+            ),
+        )
+        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    return str(row) if row else None
 
 
 def _fork_session_anchor(value: Any, *, source_session_id: str, now: str) -> Optional[str]:
