@@ -332,11 +332,14 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("### Choosing the right Harness shape", prompt)
         self.assertIn("| Independent Agent delegation | `vibe agent run --create-session` |", prompt)
         self.assertIn("| Same-session follow-up | `vibe agent run --session-id ...` |", prompt)
+        self.assertIn("| Branch from existing Session context | `vibe agent run --fork-session ...` |", prompt)
         self.assertIn("`vibe task add` creates a time-triggered saved Agent message", prompt)
         self.assertIn("`vibe watch add` creates a managed monitor", prompt)
         self.assertIn("product signals, business events, files, logs, CI/reviews/deploys", prompt)
         self.assertIn("vibe agent run --async --callback-session-id sesk8m4q2p7x", prompt)
         self.assertIn("final result text should return to this caller Session", prompt)
+        self.assertIn("vibe agent run --fork-session <source-session-id> --message ...", prompt)
+        self.assertIn("Forks keep the source Session backend", prompt)
         self.assertIn(
             "`--post-to` changes the delivery target, not the session scope. Use `--post-to channel` when the session should stay thread-scoped but the follow-up message should be posted to the parent channel.",
             prompt,
@@ -357,9 +360,11 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Use the `Agent Name` value exactly as listed in shell commands", prompt)
         self.assertIn("`--session-id <id>` resumes that exact Agent Session and its transcript, backend identity, Show Page, and routing", prompt)
         self.assertIn("`--create-session` creates a separate Session for the target Agent", prompt)
+        self.assertIn("`--fork-session <id>` creates a new Agent Session from that source Session's native backend context", prompt)
         self.assertIn("vibe agent run --agent <agent-name> --create-session --message ...", prompt)
         self.assertIn("vibe agent run --agent <agent-name> --session-id ... --message ...", prompt)
         self.assertIn("Reuse the current session id only with Agents whose `Backend` matches `codex`; otherwise use `--create-session`", prompt)
+        self.assertIn("With `--fork-session`, pass `--agent`, `--model`, or `--reasoning-effort` only as forked-Session overrides", prompt)
         self.assertIn("`--async` changes waiting behavior, not session identity", prompt)
         self.assertIn("inspected later with `vibe runs`", prompt)
         self.assertNotIn("--create-session-per-run", prompt)

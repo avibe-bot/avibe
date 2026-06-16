@@ -817,15 +817,18 @@ point back to this command.
 ### `vibe agent run`
 
 ```bash
-vibe agent run (--session-id <session_id> | --create-session)? (--message <text> | --message-file <file>) [options]
+vibe agent run (--session-id <session_id> | --create-session | --fork-session <session_id>)? (--message <text> | --message-file <file>) [options]
 ```
 
 Important options:
 
 - `--agent`
 - `--session-id`
+- `--fork-session`
 - `--create-session`
 - `--deliver-key`
+- `--model`
+- `--reasoning-effort`
 - `--async`
 - `--message`
 - `--message-file`
@@ -833,6 +836,14 @@ Important options:
 If neither `--session-id` nor `--create-session` is provided, the run uses a
 private no-delivery session and is best suited for sub-agent style calls.
 `--deliver-key` is only meaningful with `--create-session`.
+
+`--fork-session <session_id>` creates a new Agent Session by forking the source
+Session's native backend context. It is for alternate investigations or
+delegated work that should keep the source context without mutating the source
+Session. Forks keep the same backend as the source; `--agent`, `--model`, and
+`--reasoning-effort` may override the forked Session only when the backend does
+not change. Do not combine `--fork-session` with `--session-id`,
+`--create-session`, `--deliver-key`, or `--post-to`.
 
 ## 5.4 `vibe runs`
 

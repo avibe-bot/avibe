@@ -621,6 +621,29 @@ def _watch_add_examples_text() -> str:
     )
 
 
+def _agent_run_examples_text() -> str:
+    return dedent(
+        """\
+        Session target:
+          Use --session-id to continue an existing Agent Session.
+          Use --create-session to start a new blank Session.
+          Use --fork-session to create a new Session by forking an existing Session's native backend context.
+
+        Forking:
+          --fork-session <session-id> creates a new Avibe Agent Session and asks the native backend to fork the source native session on the first turn.
+          Forks keep the same backend as the source Session. Passing --agent is allowed only when that Agent uses the same backend.
+          --agent, --model, and --reasoning-effort may override the forked Session's Agent/model/effort.
+          Do not combine --fork-session with --session-id, --create-session, --create-session-per-run, --deliver-key, or --post-to.
+
+        Examples:
+          vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
+          vibe agent run --async --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
+          vibe agent run --async --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
+          vibe agent run --fork-session sesk8m4q2p7x --agent reviewer --model gpt-5.4 --reasoning-effort high --message 'Review the forked context.'
+        """
+    )
+
+
 def _add_hidden_task_alias(task_subparsers, alias: str, parser) -> None:
     alias_parser = task_subparsers.add_parser(
         alias,
@@ -5883,6 +5906,7 @@ def build_parser():
         "run",
         help="Run an Avibe Agent",
         description="Run an Avibe Agent turn. Use --async to queue it as a background run.",
+        epilog=_agent_run_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe agent run --help",
     )
