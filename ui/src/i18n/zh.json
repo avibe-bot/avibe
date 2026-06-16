@@ -582,6 +582,7 @@
     "projectRenamePlaceholder": "新名字",
     "sessionRename": "重命名",
     "sessionRenamePlaceholder": "会话名称",
+    "sessionReference": "引用该会话",
     "sessionArchive": "归档会话",
     "archiveSession": {
       "title": "永久归档此会话？",

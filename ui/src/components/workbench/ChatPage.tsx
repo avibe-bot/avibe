@@ -6,6 +6,7 @@ import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
+import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import type { VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
@@ -106,6 +107,21 @@ export const ChatPage: React.FC = () => {
     (files) => composerRef.current?.addFiles(files),
     { disabled: !sessionId },
   );
+
+  // Publish this chat's composer to the ComposerBridge while it's mounted, so
+  // the sidebar's "reference this session" action can insert a #<session>
+  // mention into the open chat's input. Null target (no sessionId) = no chat
+  // open, which hides that sidebar action.
+  const insertSessionReference = useCallback(
+    (refSessionId: string, title?: string | null) =>
+      composerRef.current?.insertSessionReference(refSessionId, title),
+    [],
+  );
+  const composerTarget = useMemo<ComposerInsertTarget | null>(
+    () => (sessionId ? { sessionId, insertSessionReference } : null),
+    [sessionId, insertSessionReference],
+  );
+  useRegisterComposerTarget(composerTarget);
 
   // Back returns to the page the user came from, not a hardcoded inbox.
   // location.key === 'default' means /chat was the first history entry (deep

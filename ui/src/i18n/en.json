@@ -582,6 +582,7 @@
     "projectRenamePlaceholder": "New name",
     "sessionRename": "Rename",
     "sessionRenamePlaceholder": "Session name",
+    "sessionReference": "Reference this session",
     "sessionArchive": "Archive session",
     "archiveSession": {
       "title": "Archive this session permanently?",
