@@ -1036,9 +1036,20 @@ export const ChatPage: React.FC = () => {
         // The session's Show Page replaces the transcript + composer (the header
         // bar stays). Same-origin (/show/<id>/ private or /p/<share>/ public) so
         // it inherits the workbench's auth; URL is resolved from ensureShowPage.
+        //
+        // Sandbox is deliberately LIGHT: `allow-same-origin` is required (the page
+        // authenticates with the workbench cookie + runs its own same-origin
+        // fetches/WebSocket), and it intentionally also keeps the page able to
+        // reach the parent — a Show Page interacting with the surrounding
+        // workbench is a wanted (if not-yet-promoted) capability. Real isolation
+        // would need a separate origin, which we won't do (Show Pages are part of
+        // the product). The agent already has full machine access, so frontend
+        // isolation isn't the security boundary anyway. We still drop the exotic
+        // capabilities the page never needs (top navigation, pointer lock, etc.).
         <iframe
           title={t('chat.showPage.title')}
           src={showPageUrl}
+          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
           className="min-h-0 w-full flex-1 border-0 bg-background"
         />
       ) : (
