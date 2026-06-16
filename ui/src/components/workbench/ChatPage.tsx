@@ -1,11 +1,12 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Bell, Bot, ChevronDown, Clock, Info, Loader2, MessageSquare, Pencil, UploadCloud, X } from 'lucide-react';
+import { AppWindow, ArrowLeft, Bell, Bot, ChevronDown, Clock, Info, Loader2, MessageSquare, Pencil, UploadCloud, X } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
+import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import type { VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
@@ -107,6 +108,46 @@ export const ChatPage: React.FC = () => {
     { disabled: !sessionId },
   );
 
+  // Loaded session (null while bootstrapping — ChatPage renders a loader until
+  // it's set). Lifted above the composer bridge + show-page logic that gate on it.
+  const [session, setSession] = useState<WorkbenchSession | null>(null);
+
+  // Show Page toggle: swap the chat surface (transcript + composer, NOT the
+  // header bar) for this session's Show Page in an iframe, and back. Declared
+  // before the composer bridge target, which depends on showPageMode.
+  const [showPageMode, setShowPageMode] = useState(false);
+  const [showPageBusy, setShowPageBusy] = useState(false);
+  // Sessions whose first-open visualize prompt failed to send — retry it on the
+  // next toggle (the page row already exists, so `existed` alone won't re-prompt).
+  const showPagePromptRetryRef = useRef<Set<string>>(new Set());
+  const [showPageUrl, setShowPageUrl] = useState<string | null>(null);
+  useEffect(() => {
+    // ChatPage is reused across :sessionId — clear all show-page state so the
+    // next chat starts in chat view with a live (not stuck-busy) toggle.
+    setShowPageMode(false);
+    setShowPageUrl(null);
+    setShowPageBusy(false);
+  }, [sessionId]);
+
+  // Publish this chat's composer to the ComposerBridge so the sidebar's
+  // "reference this session" action can insert a #<session> mention into the
+  // open chat's input.
+  const insertSessionReference = useCallback(
+    (refSessionId: string, title?: string | null) =>
+      composerRef.current?.insertSessionReference(refSessionId, title),
+    [],
+  );
+  // Null target hides that sidebar action unless the composer is actually
+  // mounted + insertable: a chat is open (sessionId), its session has loaded
+  // (before that ChatPage shows a loader — the composer isn't rendered yet), and
+  // the Show Page iframe hasn't replaced the composer. Otherwise an insert would
+  // silently no-op against a null composerRef.
+  const composerTarget = useMemo<ComposerInsertTarget | null>(
+    () => (sessionId && session != null && !showPageMode ? { sessionId, insertSessionReference } : null),
+    [sessionId, session, showPageMode, insertSessionReference],
+  );
+  useRegisterComposerTarget(composerTarget);
+
   // Back returns to the page the user came from, not a hardcoded inbox.
   // location.key === 'default' means /chat was the first history entry (deep
   // link / refresh) with nothing to pop back to — fall back to the inbox then.
@@ -115,7 +156,6 @@ export const ChatPage: React.FC = () => {
     else navigate('/inbox');
   }, [location.key, navigate]);
 
-  const [session, setSession] = useState<WorkbenchSession | null>(null);
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [defaultAgentName, setDefaultAgentName] = useState<string | null>(null);
   const [messages, setMessages] = useState<WorkbenchMessage[]>([]);
@@ -705,6 +745,51 @@ export const ChatPage: React.FC = () => {
     [api, sessionId],
   );
 
+  // Toggle the chat surface ↔ the session's Show Page (iframe). The first open
+  // ensures the page exists; if it was just created, ask the agent to build the
+  // visualization. Errors surface via the apiFetch toast layer.
+  const toggleShowPage = useCallback(async () => {
+    const sid = sessionId;
+    if (!sid) return;
+    if (showPageMode) {
+      setShowPageMode(false);
+      return;
+    }
+    setShowPageBusy(true);
+    try {
+      const res = await api.ensureShowPage(sid);
+      // Bail if the user switched chats while ensure was in flight — otherwise a
+      // stale resolve would flip the NEW chat into iframe mode + send its prompt.
+      if (sessionIdRef.current !== sid) return;
+      if (res?.ok) {
+        // Public pages are served under /p/<share_id>/; private under /show/<id>/.
+        setShowPageUrl(
+          res.visibility === 'public' && res.share_id
+            ? `/p/${encodeURIComponent(res.share_id)}/`
+            : `/show/${encodeURIComponent(sid)}/`,
+        );
+        setShowPageMode(true);
+        // First open (or a prior prompt that failed to send) asks the agent to
+        // build the visualization. sendMessage returns false on a failed send;
+        // track it so the NEXT toggle retries — the page row exists after this,
+        // so `existed` alone would never re-prompt a created-but-unprompted page.
+        if (res.existed === false || showPagePromptRetryRef.current.has(sid)) {
+          void sendMessage(t('chat.showPage.prompt')).then((sent) => {
+            if (sent === false) showPagePromptRetryRef.current.add(sid);
+            else showPagePromptRetryRef.current.delete(sid);
+          });
+        }
+      }
+    } catch {
+      // apiFetch already surfaced a toast; stay in chat view.
+    } finally {
+      // Always clear — the in-flight request is done regardless of which chat is
+      // now mounted (ChatPage is reused across sessions; a guarded clear would
+      // strand the shared busy flag on a session the user switched to).
+      setShowPageBusy(false);
+    }
+  }, [sessionId, showPageMode, api, sendMessage, t]);
+
   // A quick-reply click sends the chosen label as a normal user turn, tagged with
   // the agent message it answers so the group can lock + highlight the choice on
   // reload (the answered state is derived from this metadata).
@@ -956,39 +1041,69 @@ export const ChatPage: React.FC = () => {
           onPatch={patch}
           onBack={goBack}
           working={working}
+          showPageMode={showPageMode}
+          showPageBusy={showPageBusy}
+          onToggleShowPage={toggleShowPage}
         />
 
-      {error && (
-        <div className="mx-auto mt-3 w-full max-w-[1080px] rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
-          {error}
-        </div>
+      {showPageMode && showPageUrl && (
+        // The session's Show Page (same-origin /show/<id>/ private or /p/<share>/
+        // public; URL resolved from ensureShowPage) fills the chat area while the
+        // header bar stays. The chat surface below is kept mounted but hidden.
+        //
+        // Sandbox is deliberately LIGHT: `allow-same-origin` is required (the page
+        // authenticates with the workbench cookie + runs its own same-origin
+        // fetches/WebSocket), and it intentionally also keeps the page able to
+        // reach the parent — a Show Page interacting with the surrounding
+        // workbench is a wanted (if not-yet-promoted) capability. Real isolation
+        // would need a separate origin, which we won't do (Show Pages are part of
+        // the product). The agent already has full machine access, so frontend
+        // isolation isn't the security boundary anyway. We still drop the exotic
+        // capabilities the page never needs (top navigation, pointer lock, etc.).
+        <iframe
+          title={t('chat.showPage.title')}
+          src={showPageUrl}
+          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
+          className="min-h-0 w-full flex-1 border-0 bg-background"
+        />
       )}
 
-      <Transcript
-        messages={messages}
-        session={session}
-        working={working}
-        hasOlder={!!olderCursor}
-        loadingOlder={loadingOlder}
-        onLoadOlder={loadOlderMessages}
-        messageFontSize={messageFontSize}
-        onQuickReply={handleQuickReply}
-      />
-      <QueueStrip queue={queue} onRemove={removeQueued} onSendNow={sendQueueNow} />
-      {/* key by session so the composer remounts per session — its draft-seeding
-          + local value reset, instead of carrying across sessions (Codex P2). */}
-      <Compose
-        key={sessionId}
-        composerRef={composerRef}
-        onSend={(text, attachments, references) => sendMessage(text, attachments, undefined, references)}
-        onStop={stopMessage}
-        busy={working}
-        sessionId={sessionId ?? ''}
-        initialDraft={initialDraft}
-        onDraftChange={onDraftChange}
-        onSearchAgents={searchAgents}
-        onSearchSessions={searchSessions}
-      />
+      {/* Chat surface stays MOUNTED while the Show Page is shown — just hidden —
+          so unsent composer text + staged attachments survive the toggle instead
+          of being discarded on unmount. */}
+      <div className={clsx('flex min-h-0 flex-1 flex-col', showPageMode && 'hidden')}>
+        {error && (
+          <div className="mx-auto mt-3 w-full max-w-[1080px] rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
+            {error}
+          </div>
+        )}
+
+        <Transcript
+          messages={messages}
+          session={session}
+          working={working}
+          hasOlder={!!olderCursor}
+          loadingOlder={loadingOlder}
+          onLoadOlder={loadOlderMessages}
+          messageFontSize={messageFontSize}
+          onQuickReply={handleQuickReply}
+        />
+        <QueueStrip queue={queue} onRemove={removeQueued} onSendNow={sendQueueNow} />
+        {/* key by session so the composer remounts per session — its draft-seeding
+            + local value reset, instead of carrying across sessions (Codex P2). */}
+        <Compose
+          key={sessionId}
+          composerRef={composerRef}
+          onSend={(text, attachments, references) => sendMessage(text, attachments, undefined, references)}
+          onStop={stopMessage}
+          busy={working}
+          sessionId={sessionId ?? ''}
+          initialDraft={initialDraft}
+          onDraftChange={onDraftChange}
+          onSearchAgents={searchAgents}
+          onSearchSessions={searchSessions}
+        />
+      </div>
       </div>
       </FileViewerProvider>
     </ImageViewerProvider>
@@ -998,6 +1113,39 @@ export const ChatPage: React.FC = () => {
 // Pending send-while-busy messages, shown between the transcript and the
 // composer (Codex-GUI style). Each can be dropped; "立即发送" interrupts the
 // running turn and flushes the whole queue now (the queue flushes merged).
+// One queued message. Its text is a single truncated line by default; clicking
+// it expands to the full wrapped text (and clicking again collapses it) so a
+// long queued prompt can be read without sending it.
+const QueueRow: React.FC<{ item: WorkbenchMessage; onRemove: (id: string) => void }> = ({ item, onRemove }) => {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="flex items-start gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className={clsx(
+          'min-w-0 flex-1 text-left text-[12px] text-foreground',
+          expanded ? 'whitespace-pre-wrap break-words' : 'truncate',
+        )}
+      >
+        {item.text}
+      </button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        onClick={() => onRemove(item.id)}
+        aria-label={t('chat.queue.remove')}
+        className="size-6 shrink-0 text-muted hover:text-destructive"
+      >
+        <X className="size-3.5" />
+      </Button>
+    </div>
+  );
+};
+
 const QueueStrip: React.FC<{
   queue: WorkbenchMessage[];
   onRemove: (id: string) => void;
@@ -1019,19 +1167,7 @@ const QueueStrip: React.FC<{
         </div>
         <div className="flex max-h-32 flex-col gap-1 overflow-y-auto">
           {queue.map((item) => (
-            <div key={item.id} className="flex items-center gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5">
-              <span className="flex-1 truncate text-[12px] text-foreground">{item.text}</span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => onRemove(item.id)}
-                aria-label={t('chat.queue.remove')}
-                className="size-6 shrink-0 text-muted hover:text-destructive"
-              >
-                <X className="size-3.5" />
-              </Button>
-            </div>
+            <QueueRow key={item.id} item={item} onRemove={onRemove} />
           ))}
         </div>
       </div>
@@ -1082,9 +1218,12 @@ interface ChatHeaderBarProps {
   onPatch: (changes: Partial<WorkbenchSession>) => Promise<void>;
   onBack: () => void;
   working: boolean;
+  showPageMode: boolean;
+  showPageBusy: boolean;
+  onToggleShowPage: () => void;
 }
 
-const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working }) => {
+const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage }) => {
   const { t } = useTranslation();
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   // Backend locks once a NATIVE conversation exists — a native can only be
@@ -1155,6 +1294,27 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
             IM-launched users often land straight in a chat. Renders only on iOS
             Safari + not-installed; null otherwise. */}
         <InstallHint />
+        {/* Show Page toggle: swaps the chat surface for the session's Show Page
+            (the header bar stays). First open initializes the page + prompts the
+            agent. Pushed to the far right of the header row. */}
+        <Button
+          type="button"
+          variant={showPageMode ? 'secondary' : 'ghost'}
+          size="icon"
+          onClick={onToggleShowPage}
+          disabled={showPageBusy}
+          aria-label={showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
+          title={showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
+          className="ml-auto size-7 shrink-0"
+        >
+          {showPageBusy ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : showPageMode ? (
+            <MessageSquare className="size-3.5" />
+          ) : (
+            <AppWindow className="size-3.5" />
+          )}
+        </Button>
       </div>
     </div>
   );
@@ -1560,21 +1720,19 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
 
   // Agent / system replies AND the user's own messages render as markdown (users
   // routinely type lists / code / **emphasis** and expect it formatted). Only
-  // harness-triggered prompts (scheduled task / watch / webhook) stay verbatim —
-  // that row is a collapsed technical preview where the raw text is the point.
+  // Every message body renders as Markdown — including the expanded harness row
+  // (scheduled task / watch / webhook prompt), which used to stay verbatim.
+  // Harness prompts and the user's own messages keep soft breaks so their
+  // original line breaks stay visible (a harness prompt often mixes authored
+  // Markdown with line-oriented waiter output); agent/system replies are
+  // authored Markdown and must not get stray hard breaks.
   const bodyNode = message.text ? (
-    isHarness ? (
-      <div className="whitespace-pre-wrap break-words text-[13px] text-foreground">{message.text}</div>
-    ) : (
-      // Keep the user's own newlines visible (soft-break → <br>); agent/system
-      // replies are authored markdown and must not get stray hard breaks.
-      <Markdown
-        content={message.text}
-        softBreaks={isUser}
-        references={(message.content as { references?: MentionReference[] } | null)?.references}
-        className="vr-markdown--inherit-size"
-      />
-    )
+    <Markdown
+      content={message.text}
+      softBreaks={isUser || isHarness}
+      references={(message.content as { references?: MentionReference[] } | null)?.references}
+      className="vr-markdown--inherit-size"
+    />
   ) : messageAttachments.length === 0 ? (
     <div className="text-[13px] text-muted">—</div>
   ) : null;

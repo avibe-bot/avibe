@@ -816,7 +816,9 @@ def test_private_show_page_sets_show_event_write_cookie(monkeypatch, tmp_path):
     cookies = "\n".join(response.headers.getlist("set-cookie"))
     assert "vibe_show_event_token=token-ses123" in cookies
     assert "Path=/show/ses123/" in cookies
-    assert response.headers["content-security-policy"] == "frame-ancestors 'none'"
+    # 'self' (not 'none'): the workbench frames a private Show Page in the chat
+    # view (same origin); cross-origin framing stays blocked.
+    assert response.headers["content-security-policy"] == "frame-ancestors 'self'"
 
 
 def test_public_show_page_clears_show_event_write_cookie(monkeypatch, tmp_path):

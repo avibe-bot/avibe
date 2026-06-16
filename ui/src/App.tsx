@@ -30,6 +30,7 @@ import { ToastProvider } from './context/ToastContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { WorkbenchInboxProvider } from './context/WorkbenchInboxContext';
 import { WorkbenchProjectsProvider } from './context/WorkbenchProjectsContext';
+import { ComposerBridgeProvider } from './context/ComposerBridgeContext';
 import { AgentationToggle } from './components/AgentationToggle';
 import { useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
@@ -326,10 +327,12 @@ function App() {
           <ApiProvider>
             <WorkbenchInboxProvider>
               <WorkbenchProjectsProvider>
-                <BrowserRouter>
-                  <AppRoutes />
-                </BrowserRouter>
-                <AgentationToggle />
+                <ComposerBridgeProvider>
+                  <BrowserRouter>
+                    <AppRoutes />
+                  </BrowserRouter>
+                  <AgentationToggle />
+                </ComposerBridgeProvider>
               </WorkbenchProjectsProvider>
             </WorkbenchInboxProvider>
           </ApiProvider>

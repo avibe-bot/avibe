@@ -2298,6 +2298,17 @@ def show_page_visibility_post(session_id):
         return _show_page_error_response(exc)
 
 
+@app.route("/api/show-pages/<session_id>/ensure", methods=["POST"])
+def show_page_ensure_post(session_id):
+    from core.show_pages import ShowPageError
+    from vibe import api
+
+    try:
+        return jsonify(api.ensure_show_page(session_id))
+    except ShowPageError as exc:
+        return _show_page_error_response(exc)
+
+
 @app.route("/api/show-pages/<session_id>/rotate-share", methods=["POST"])
 def show_page_rotate_share_post(session_id):
     from core.show_pages import ShowPageError
@@ -6701,7 +6712,11 @@ def _rewrite_show_runtime_location(session_id: str, location: str, *, external_p
 
 def _with_show_event_write_cookie(response: Response, session_id: str, *, enabled: bool) -> Response:
     if enabled:
-        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+        # 'self' (not 'none') so the workbench can frame a private Show Page in the
+        # chat view — same origin as the page — while cross-origin clickjacking
+        # stays blocked. Direct navigation is unaffected (frame-ancestors only
+        # governs framing).
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'self'"
         response.set_cookie(
             SHOW_EVENT_WRITE_TOKEN_COOKIE,
             show_event_write_token(session_id),

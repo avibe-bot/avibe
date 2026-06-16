@@ -536,7 +536,7 @@
   },
   "appShell": {
     "title": "Avibe OS",
-    "subtitle": "Agent 操作系统",
+    "subtitle": "Agent操作系统 · 工作台",
     "workspaceLabel": "工作区",
     "openControlPanel": "控制面板",
     "backToWorkbench": "返回工作台",
@@ -582,6 +582,7 @@
     "projectRenamePlaceholder": "新名字",
     "sessionRename": "重命名",
     "sessionRenamePlaceholder": "会话名称",
+    "sessionReference": "引用该会话",
     "sessionArchive": "归档会话",
     "archiveSession": {
       "title": "永久归档此会话？",
@@ -1756,6 +1757,12 @@
   "chat": {
     "back": "返回",
     "untitled": "未命名会话",
+    "showPage": {
+      "open": "查看 Show Page",
+      "backToChat": "返回对话",
+      "title": "Show Page",
+      "prompt": "Please visualize this session as a Show Page."
+    },
     "titlePlaceholder": "会话标题",
     "pickAgent": "选择 Agent",
     "noAgents": "暂无已启用的 Agent。请先在 Agents 页创建。",

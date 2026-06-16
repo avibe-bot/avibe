@@ -536,7 +536,7 @@
   },
   "appShell": {
     "title": "Avibe OS",
-    "subtitle": "Agent OS",
+    "subtitle": "Agent OS · Workbench",
     "workspaceLabel": "Workspace",
     "openControlPanel": "Control Panel",
     "backToWorkbench": "Back to Workbench",
@@ -582,6 +582,7 @@
     "projectRenamePlaceholder": "New name",
     "sessionRename": "Rename",
     "sessionRenamePlaceholder": "Session name",
+    "sessionReference": "Reference this session",
     "sessionArchive": "Archive session",
     "archiveSession": {
       "title": "Archive this session permanently?",
@@ -1757,6 +1758,12 @@
   "chat": {
     "back": "Back",
     "untitled": "Untitled session",
+    "showPage": {
+      "open": "View Show Page",
+      "backToChat": "Back to chat",
+      "title": "Show Page",
+      "prompt": "Please visualize this session as a Show Page."
+    },
     "titlePlaceholder": "Session title",
     "pickAgent": "Pick an agent",
     "noAgents": "No enabled agents. Create one on the Agents page.",

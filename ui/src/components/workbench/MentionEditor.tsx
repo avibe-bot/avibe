@@ -30,6 +30,7 @@ import {
   BeautifulMentionsPlugin,
   BeautifulMentionNode,
   $isBeautifulMentionNode,
+  useBeautifulMentions,
   type BeautifulMentionsItem,
   type BeautifulMentionsMenuProps,
   type BeautifulMentionsMenuItemProps,
@@ -55,6 +56,14 @@ export interface MentionEditorHandle {
   append: (text: string) => void;
   /** Replace the whole editor with plain text (restore on a failed send). */
   setText: (text: string) => void;
+  /** Insert a mention chip at the current cursor — same node a picker-selected
+   *  `@`/`#` yields — when triggered from outside the editor (e.g. "reference
+   *  this session" in the sidebar). */
+  insertMention: (
+    trigger: string,
+    value: string,
+    data?: Record<string, string | number | boolean | null>,
+  ) => void;
 }
 
 export interface MentionEditorProps {
@@ -223,6 +232,7 @@ function BootstrapPlugin({
   bridgeRef: Ref<MentionEditorHandle>;
 }) {
   const [editor] = useLexicalComposerContext();
+  const { insertMention: insertBeautifulMention } = useBeautifulMentions();
   const seeded = useRef(false);
 
   useImperativeHandle(
@@ -250,8 +260,13 @@ function BootstrapPlugin({
           root.append(paragraph);
           if (text) paragraph.selectStart().insertText(text);
         }),
+      // Insert at the live selection (Lexical keeps it across DOM blur), then
+      // focus so the user can keep typing. Produces the same node a typed
+      // `#`/`@` pick does, so serialization (#<id> + references) is identical.
+      insertMention: (trigger, value, data) =>
+        insertBeautifulMention({ trigger, value, data: data ?? {}, focus: true }),
     }),
-    [editor],
+    [editor, insertBeautifulMention],
   );
 
   useEffect(() => {

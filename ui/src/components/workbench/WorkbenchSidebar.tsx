@@ -13,6 +13,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  Hash,
   Inbox,
   KeyRound,
   Loader2,
@@ -26,6 +27,7 @@ import type { LucideIcon } from 'lucide-react';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { useComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../ui/popover';
@@ -200,6 +202,10 @@ const SessionRow: React.FC<{
   const navigate = useNavigate();
   const location = useLocation();
   const active = location.pathname === `/chat/${session.id}`;
+  // "Reference this session" shows only when a chat composer is mounted (a chat
+  // is open) AND this row isn't that open session — you can't reference yourself.
+  const insertTarget = useComposerInsertTarget();
+  const canReference = insertTarget != null && insertTarget.sessionId !== session.id;
   const [menuOpen, setMenuOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -303,6 +309,19 @@ const SessionRow: React.FC<{
         </button>
       </PopoverAnchor>
       <PopoverContent align="start" className="w-[176px] p-1">
+        {canReference && (
+          <button
+            type="button"
+            onClick={() => {
+              setMenuOpen(false);
+              insertTarget?.insertSessionReference(session.id, session.title);
+            }}
+            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04]"
+          >
+            <Hash className="size-3 text-muted" />
+            {t('workbench.sessionReference')}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => {
