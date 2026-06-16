@@ -8,6 +8,7 @@ import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import type { InboxSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { Markdown } from '../ui/markdown';
+import { Button } from '../ui/button';
 import { WebPushControl } from './WebPushControl';
 
 type FilterMode = 'unread' | 'all';
@@ -100,17 +101,18 @@ export const InboxPage: React.FC = () => {
           full-screen search page (design.pen S5H9R "M · Inbox · Search entry";
           SearchField). Mobile-only: desktop searches via the sidebar field + ⌘K
           (md:hidden). */}
-      <button
+      <Button
         type="button"
+        variant="ghost"
         onClick={() => navigate('/search')}
-        className="flex w-full items-center gap-2.5 rounded-xl border border-border-strong bg-foreground/[0.04] px-3.5 py-2.5 text-left transition hover:bg-foreground/[0.06] md:hidden"
+        className="h-auto w-full justify-start gap-2.5 rounded-xl border border-border-strong bg-foreground/[0.04] px-3.5 py-2.5 text-left font-normal transition hover:bg-foreground/[0.06] md:hidden"
       >
         <Search className="size-4 shrink-0 text-muted" />
         <span className="flex-1 truncate text-[14px] text-muted">
           {t('workbench.search.entry')}
         </span>
         <span className="shrink-0 text-[11px] text-muted">{t('workbench.search.scopeAll')}</span>
-      </button>
+      </Button>
 
       {/* Toolbar */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-2">
