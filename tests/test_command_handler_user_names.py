@@ -56,6 +56,12 @@ def _load_command_handlers_class():
 CommandHandlers = _load_command_handlers_class()
 
 
+class _StubFormatter:
+    @staticmethod
+    def format_code_inline(text):
+        return f"`{text}`"
+
+
 class _StubIMClient:
     def __init__(self, user_info):
         self.user_info = user_info
@@ -63,7 +69,7 @@ class _StubIMClient:
         self.sent_contexts = []
         self.sent_button_messages = []
         self.channel_info_calls = []
-        self.formatter = None
+        self.formatter = _StubFormatter()
         self.started_topic_context = None
 
     async def get_user_info(self, user_id):
@@ -89,6 +95,7 @@ class _StubIMClient:
 class _StubSettingsManager:
     def __init__(self):
         self.bind_calls = []
+        self.custom_cwd_calls = []
 
     def is_bound_user(self, user_id, platform=None):
         return False
@@ -96,6 +103,9 @@ class _StubSettingsManager:
     def bind_user_with_code(self, user_id, display_name, code, dm_chat_id="", platform=None):
         self.bind_calls.append((user_id, display_name, code, dm_chat_id, platform))
         return True, False
+
+    def set_custom_cwd(self, settings_key, cwd):
+        self.custom_cwd_calls.append((settings_key, cwd))
 
 
 class _StubController:
@@ -107,7 +117,17 @@ class _StubController:
         self.session_handler = None
         self.session_manager = object()
         self.receiver_tasks = {}
-        self.agent_service = type("AgentService", (), {"default_agent": "codex"})()
+        self.cleared_sessions = []
+
+        async def _clear_sessions(session_key):
+            self.cleared_sessions.append(session_key)
+            return {"claude": 1}
+
+        self.agent_service = type(
+            "AgentService",
+            (),
+            {"default_agent": "codex", "clear_sessions": staticmethod(_clear_sessions)},
+        )()
 
     def _get_settings_key(self, context: MessageContext) -> str:
         return context.user_id if context.channel_id.startswith("D") else context.channel_id
@@ -211,6 +231,19 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             controller.im_client.sent_messages,
             [("wx-chat", "🆕 已开启新的会话。你下一条消息会从全新对话开始。")],
         )
+
+    async def test_setcwd_clears_current_scope_sessions(self):
+        controller = _StubController({"display_name": "小王"})
+        handler = CommandHandlers(controller)
+        context = MessageContext(user_id="wx-user", channel_id="wx-chat", platform="wechat")
+
+        await handler.handle_set_cwd(context, ".")
+
+        self.assertEqual(controller.settings_manager.custom_cwd_calls, [("wx-chat", str(ROOT))])
+        self.assertEqual(controller.cleared_sessions, ["wechat::wx-chat"])
+        self.assertEqual(len(controller.im_client.sent_messages), 1)
+        self.assertIn("✅", controller.im_client.sent_messages[0][1])
+        self.assertIn(str(ROOT), controller.im_client.sent_messages[0][1])
 
     async def test_telegram_dm_new_command_clears_user_and_legacy_channel_scopes(self):
         controller = _StubController({"display_name": "Alex"})

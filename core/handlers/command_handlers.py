@@ -625,6 +625,7 @@ class CommandHandlers(BaseHandler):
             # Save to user settings
             settings_key = self._get_settings_key(context)
             settings_manager.set_custom_cwd(settings_key, absolute_path)
+            await self.controller.agent_service.clear_sessions(self._get_session_key(context))
 
             logger.info(f"User {context.user_id} changed cwd to: {absolute_path}")
 
