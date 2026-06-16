@@ -245,7 +245,11 @@ def test_web_title_prompt_is_fixed_and_uses_session_id():
     out = _injection_for("sesweb")
     assert "## Session Title" in out
     # the command carries the REAL session id (not a <id> placeholder)
+    assert "vibe session get sesweb" in out
     assert 'vibe session update sesweb --title "<short title>"' in out
+    assert "metadata.title_source" in out
+    assert "`user` or `agent`" in out
+    assert "leave the title unchanged" in out
     assert "may silently set one concise, human-scannable title" in out
     assert "do not repeatedly rename the same Session" in out
     assert "not set yet" not in out

@@ -220,7 +220,10 @@ Current session id: `{default_session_id}`. Before using Show Page or Harness co
 _SESSION_TITLE_PROMPT = """\
 
 ## Session Title
-When the topic of this conversation is clear, you may silently set one concise, human-scannable title for the current Session:
+When the topic of this Web conversation is clear, you may silently set one concise, human-scannable title for the current Session once. Before setting it, inspect the Session:
+`vibe session get {default_session_id}`
+
+If `metadata.title_source` is `user` or `agent`, leave the title unchanged; that means the title was deliberately set or cleared. Otherwise, set it once:
 `vibe session update {default_session_id} --title "<short title>"`
 
 Do not mention the title update unless the user asks, and do not repeatedly rename the same Session.
