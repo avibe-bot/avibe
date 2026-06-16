@@ -685,6 +685,18 @@ class ClaudeAgent(BaseAgent):
         # inside the loop.
         finally:
             self._suppressed_synthetic_results.discard(composite_key)
+            # Guaranteed release of the per-turn "active" flag. The success path
+            # only marks idle when a ResultMessage arrives AND no pending request
+            # remains; the except blocks cover cancel/error. But if the receiver
+            # generator is simply exhausted (stream closed without a terminal
+            # ResultMessage, or a pending request was never drained), none of
+            # those run and the session stays pinned in ``active_sessions``
+            # forever — which permanently exempts it from idle eviction. This
+            # guard is safe because ``_mark_session_idle_if_no_pending_requests``
+            # is a no-op while a turn is still queued, so an in-flight follow-up
+            # is never wrongly demoted to idle.
+            if composite_key:
+                self._mark_session_idle_if_no_pending_requests(composite_key)
 
     async def _handle_synthetic_api_error_message(
         self,

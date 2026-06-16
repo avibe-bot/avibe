@@ -116,23 +116,3 @@ class SessionManager:
         if user_id not in self.sessions:
             return False
         return self.sessions[user_id].is_executing
-    
-    async def cleanup_inactive_sessions(self, inactive_hours: int = 24):
-        """Clean up inactive sessions"""
-        async with self._lock:
-            current_time = datetime.now()
-            to_remove = []
-            
-            for user_id, session in self.sessions.items():
-                time_diff = current_time - session.last_activity
-                if time_diff.total_seconds() > inactive_hours * 3600:
-                    to_remove.append(user_id)
-            
-            for user_id in to_remove:
-                session = self.sessions[user_id]
-                # Cleanup Claude SDK clients before removing session
-                await session.cleanup_clients()
-                del self.sessions[user_id]
-                logger.info(f"Cleaned up inactive session for user {user_id}")
-            
-            return len(to_remove)
