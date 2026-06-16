@@ -1038,7 +1038,10 @@ class Controller:
     def _agent_run_target_payload(context: MessageContext) -> dict[str, Any]:
         payload = context.platform_specific or {}
         target = payload.get("agent_run_target")
-        return target if isinstance(target, dict) else {}
+        if isinstance(target, dict):
+            return target
+        session_target = payload.get("agent_session_target")
+        return session_target if isinstance(session_target, dict) else {}
 
     def get_opencode_overrides(self, context: MessageContext) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """Get OpenCode agent, model, and reasoning effort overrides for this channel.

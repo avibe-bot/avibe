@@ -169,6 +169,57 @@ def test_session_handler_keeps_sdk_default_for_default_claude_binary(monkeypatch
     assert captured["options"].cli_path is None
 
 
+def test_session_handler_sets_claude_fork_session_for_pending_native_fork(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self) -> None:
+            captured["connected"] = True
+
+    class _ForkSessions(_Sessions):
+        @staticmethod
+        def get_claude_session_id(settings_key, base_session_id):
+            return None
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    controller.settings_manager.sessions = _ForkSessions()
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="scheduled",
+        channel_id="ses-target",
+        platform="avibe",
+        platform_specific={
+            "agent_session_target": {
+                "id": "ses-target",
+                "agent_backend": "claude",
+                "native_session_id": "",
+                "model": "claude-sonnet-4-5",
+                "reasoning_effort": "high",
+                "native_session_fork": {
+                    "source_session_id": "ses-source",
+                    "source_native_session_id": "claude-source",
+                    "source_backend": "claude",
+                },
+            }
+        },
+    )
+
+    client = _run_session(handler, context)
+
+    assert captured["connected"] is True
+    assert captured["options"].resume == "claude-source"
+    assert captured["options"].fork_session is True
+    assert captured["options"].extra_args == {"model": "claude-sonnet-4-5"}
+    assert captured["options"].effort == "high"
+    assert not hasattr(client, "_vibe_native_session_id")
+
+
 def test_session_handler_disallows_remote_unsafe_claude_tools(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 

@@ -1219,6 +1219,64 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(method, "thread/resume")
         self.assertEqual(params["threadId"], "native-reserved")
 
+    async def test_start_or_resume_thread_forks_pending_native_source(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_id=Mock(return_value=None),
+            ensure_agent_session_id=Mock(return_value="ses-target"),
+            bind_agent_session=Mock(return_value="ses-target"),
+        )
+        agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            context=SimpleNamespace(
+                platform="avibe",
+                platform_specific={
+                    "agent_session_target": {
+                        "id": "ses-target",
+                        "agent_backend": "codex",
+                        "native_session_id": "",
+                        "native_session_fork": {
+                            "source_session_id": "ses-source",
+                            "source_native_session_id": "thread-source",
+                            "source_backend": "codex",
+                        },
+                    }
+                },
+                user_id="scheduled",
+                channel_id="ses-target",
+                thread_id=None,
+            ),
+            base_session_id="ses-target",
+            session_key="avibe::project::proj_1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_model="gpt-5.2",
+            vibe_agent_reasoning_effort="high",
+        )
+        transport = SimpleNamespace(send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}}))
+
+        thread_id = await agent._start_or_resume_thread(transport, request)
+
+        self.assertEqual(thread_id, "thread-fork")
+        method, params = transport.send_request.await_args.args
+        self.assertEqual(method, "thread/fork")
+        self.assertEqual(params["threadId"], "thread-source")
+        self.assertEqual(params["cwd"], "/tmp/work")
+        self.assertEqual(params["approvalPolicy"], "never")
+        self.assertEqual(params["sandbox"], "danger-full-access")
+        self.assertEqual(params["model"], "gpt-5.2")
+        self.assertNotIn("effort", params)
+        agent.sessions.bind_agent_session.assert_called_once_with(
+            "avibe::project::proj_1",
+            "codex",
+            "ses-target",
+            "thread-fork",
+        )
+
     async def test_resume_thread_skips_reserved_native_for_explicit_subagent(self):
         # Explicit per-turn subagent: it has its own thread; must NOT resume the
         # reserved MAIN native.

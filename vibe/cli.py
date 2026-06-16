@@ -2565,6 +2565,7 @@ def cmd_agent_import(args):
 
 def _validate_run_session_policy(args, *, help_command: str) -> str:
     session_id = (getattr(args, "session_id", None) or "").strip()
+    fork_session = (getattr(args, "fork_session", None) or "").strip()
     create_session = bool(getattr(args, "create_session", False))
     create_per_run = bool(getattr(args, "create_session_per_run", False))
     if bool(getattr(args, "async_run", False)) and getattr(args, "wait_timeout", None) is not None:
@@ -2579,6 +2580,23 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             "--callback-session-id requires --async",
             code="callback_requires_async",
             hint="Callback delivery happens after an asynchronous run completes.",
+            help_command=help_command,
+        )
+    if fork_session and (session_id or create_session or create_per_run):
+        raise TaskCliError(
+            "use --fork-session without --session-id or session creation flags",
+            code="conflicting_session_policy",
+            hint="Fork creates a new Session from the source Session.",
+            help_command=help_command,
+        )
+    if not fork_session and (
+        (getattr(args, "model", None) or "").strip()
+        or (getattr(args, "reasoning_effort", None) or "").strip()
+    ):
+        raise TaskCliError(
+            "--model and --reasoning-effort are only valid with --fork-session",
+            code="fork_override_without_fork",
+            hint="Use --agent, --model, and --reasoning-effort as overrides when forking a Session.",
             help_command=help_command,
         )
     if session_id and (create_session or create_per_run):
@@ -2600,6 +2618,8 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="Use --create-session for a one-shot agent run.",
             help_command=help_command,
         )
+    if fork_session:
+        return "fork"
     if create_session:
         return "create"
     if session_id:
@@ -2793,6 +2813,33 @@ def _reserve_cli_session(*, agent, deliver_key: Optional[str], workdir: Optional
     return session_id
 
 
+def _reserve_forked_cli_session(
+    *,
+    source_session_id: str,
+    agent_name: Optional[str],
+    model: Optional[str],
+    reasoning_effort: Optional[str],
+):
+    from core.services.session_fork import SessionForkError, reserve_forked_session
+
+    try:
+        return reserve_forked_session(
+            source_session_id=source_session_id,
+            agent_name=agent_name or None,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            db_path=paths.get_sqlite_state_path(),
+        )
+    except SessionForkError as exc:
+        raise TaskCliError(
+            str(exc),
+            code="session_fork_failed",
+            hint="Fork requires a bound source Session and, when overriding --agent, the same backend.",
+            help_command="vibe agent run --help",
+            details={"source_session_id": source_session_id},
+        ) from exc
+
+
 def _reserve_definition_session(*, agent_name: Optional[str], deliver_key: str, help_command: str) -> str:
     from core.services import sessions as sessions_service
 
@@ -2838,7 +2885,7 @@ def cmd_agent_run(args):
                 hint="Pass --agent with the Avibe Agent name to run.",
                 help_command="vibe agent run --help",
             )
-        if session_policy == "none" and (args.deliver_key or args.post_to):
+        if session_policy in {"none", "fork"} and (args.deliver_key or args.post_to):
             raise TaskCliError(
                 "delivery options require --session-id or --create-session",
                 code="delivery_target_without_session_policy",
@@ -2847,12 +2894,30 @@ def cmd_agent_run(args):
             )
         session_id = (args.session_id or "").strip() or None
         session_key = ""
+        if session_policy == "fork" and (args.cwd or "").strip():
+            raise TaskCliError(
+                "--cwd only applies when this run creates a blank session",
+                code="cwd_with_fork_session",
+                hint="A fork copies the source Session working directory.",
+                help_command="vibe agent run --help",
+            )
         run_cwd = _resolve_run_cwd(args, session_policy=session_policy, help_command="vibe agent run --help")
         agent = _agent_store().require_enabled(agent_name) if agent_name else None
+        fork_result = None
         if session_policy == "create":
             session_id = _reserve_cli_session(agent=agent, deliver_key=args.deliver_key, workdir=run_cwd)
         elif session_policy == "none":
             session_id = _reserve_cli_session(agent=agent, deliver_key=None, workdir=run_cwd)
+        elif session_policy == "fork":
+            fork_result = _reserve_forked_cli_session(
+                source_session_id=(args.fork_session or "").strip(),
+                agent_name=agent_name or None,
+                model=args.model,
+                reasoning_effort=args.reasoning_effort,
+            )
+            session_id = fork_result.session_id
+            if agent_name:
+                agent = _agent_store().require_enabled(agent_name)
         if session_id:
             target = resolve_session_id_target(session_id)
             session_key = target.session_key.to_key()
@@ -2878,8 +2943,10 @@ def cmd_agent_run(args):
             agent_name=agent.name if agent else None,
             agent_id=agent.id if agent else None,
             agent_backend=agent.backend if agent else None,
-            model=agent.model if agent else None,
-            reasoning_effort=agent.reasoning_effort if agent else None,
+            model=fork_result.model if fork_result else (agent.model if agent else None),
+            reasoning_effort=(
+                fork_result.reasoning_effort if fork_result else (agent.reasoning_effort if agent else None)
+            ),
             session_policy=session_policy,
             session_key=session_key,
             session_id=session_id,
@@ -2887,6 +2954,11 @@ def cmd_agent_run(args):
             deliver_key=args.deliver_key,
             message=message,
             callback_session_id=callback_session_id,
+            metadata={
+                "session_fork": fork_result.fork.to_metadata(),
+            }
+            if fork_result
+            else None,
         )
         payload = {
             "accepted": True,
@@ -2908,6 +2980,10 @@ def cmd_agent_run(args):
                 "callback_session_id": callback_session_id,
             },
         }
+        if fork_result:
+            payload["forked_from_session_id"] = fork_result.fork.source_session_id
+        if fork_result:
+            payload["run"]["forked_from_session_id"] = fork_result.fork.source_session_id
         if not args.async_run:
             payload["run"] = _wait_for_run_result(request_store, request.id, wait_timeout=args.wait_timeout)
         _print_cli_payload("agent_run", **payload)
@@ -5812,9 +5888,12 @@ def build_parser():
     )
     agent_run_parser.add_argument("--agent", help="Avibe Agent name")
     agent_run_parser.add_argument("--session-id", help="Existing Agent Session ID to continue")
+    agent_run_parser.add_argument("--fork-session", help="Existing Agent Session ID to fork into a new Session")
     agent_run_parser.add_argument("--create-session", action="store_true", help="Create a new Avibe Session ID before running")
     agent_run_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID for each definition run")
     agent_run_parser.add_argument("--deliver-key", help="Scope ID used as delivery target when creating or sending to a target")
+    agent_run_parser.add_argument("--model", help="Model override for the new forked Session")
+    agent_run_parser.add_argument("--reasoning-effort", help="Reasoning effort override for the new forked Session")
     agent_run_parser.add_argument(
         "--cwd",
         help=(

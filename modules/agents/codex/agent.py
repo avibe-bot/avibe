@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from core.avibe_cloud import avibe_cloud_url_available
+from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.subagent_router import SubagentDefinition, load_codex_subagent
@@ -586,6 +587,42 @@ class CodexAgent(BaseAgent):
         self._remember_thread_developer_instructions(request.base_session_id, thread_id, developer_instructions)
         return thread_id
 
+    async def _fork_thread(
+        self,
+        transport: CodexTransport,
+        request: AgentRequest,
+        source_thread_id: str,
+    ) -> str:
+        """Fork an existing Codex thread and bind the new thread id."""
+        self.ensure_agent_session_id(request)
+        _, effective_model, _, _ = self._resolve_codex_agent_settings(request)
+        params: Dict[str, Any] = {
+            "threadId": source_thread_id,
+            "cwd": request.working_path,
+            "approvalPolicy": "never",
+            "sandbox": "danger-full-access",
+        }
+        developer_instructions = self._build_thread_developer_instructions(request)
+        if developer_instructions:
+            params["developerInstructions"] = developer_instructions
+        if effective_model:
+            params["model"] = effective_model
+
+        resp = await transport.send_request("thread/fork", params)
+        thread_id = resp.get("id", "")
+        if not thread_id:
+            thread_obj = resp.get("thread")
+            if isinstance(thread_obj, dict):
+                thread_id = thread_obj.get("id", "")
+        if not thread_id:
+            raise RuntimeError("Codex thread/fork returned no thread id")
+
+        self._session_mgr.set_thread_id(request.base_session_id, thread_id)
+        self.bind_agent_session_id(request, thread_id)
+        self._remember_thread_developer_instructions(request.base_session_id, thread_id, developer_instructions)
+        logger.info("Forked Codex thread %s from %s for session %s", thread_id, source_thread_id, request.base_session_id)
+        return thread_id
+
     def _resolve_codex_agent_settings(
         self,
         request: AgentRequest,
@@ -704,6 +741,10 @@ class CodexAgent(BaseAgent):
             )
             logger.info("Resumed Codex thread %s for session %s", thread_id, request.base_session_id)
             return thread_id
+
+        fork_source = pending_native_fork_source(request.context, self.name)
+        if fork_source:
+            return await self._fork_thread(transport, request, fork_source)
 
         # No associated thread yet (genuinely first turn) — start fresh.
         return await self._start_thread(transport, request)

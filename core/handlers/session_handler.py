@@ -22,6 +22,7 @@ from modules.agents.claude_process_reaper import (
     reap_duplicate_claude_resume_processes,
 )
 from core.avibe_cloud import avibe_cloud_url_available
+from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 
 from .base import BaseHandler
@@ -589,6 +590,9 @@ class SessionHandler(BaseHandler):
         stored_claude_session_id = self.sessions.get_claude_session_id(session_key, base_session_id)
         if not subagent_name and not routing_subagent:
             stored_claude_session_id = self._reserved_native_session_id(context) or stored_claude_session_id
+        fork_source_claude_session_id: Optional[str] = None
+        if not stored_claude_session_id and not subagent_name and not routing_subagent:
+            fork_source_claude_session_id = pending_native_fork_source(context, "claude")
 
         # Read routing overrides via get_channel_routing which correctly
         # resolves DM users from the users store (not the stale channels store).
@@ -602,6 +606,10 @@ class SessionHandler(BaseHandler):
 
         explicit_model = subagent_model or routing_model_for_backend(routing, "claude")
         explicit_effort = subagent_reasoning_effort or routing_reasoning_effort_for_backend(routing, "claude")
+        session_target = payload.get("agent_session_target")
+        if isinstance(session_target, dict):
+            explicit_model = subagent_model or session_target.get("model") or explicit_model
+            explicit_effort = subagent_reasoning_effort or session_target.get("reasoning_effort") or explicit_effort
 
         if not effective_agent:
             # Claude SDK model changes are control requests; only send one when
@@ -678,11 +686,12 @@ class SessionHandler(BaseHandler):
                 base_session_id=base_session_id,
                 working_path=working_path,
                 session_key=session_key,
-                stored_claude_session_id=stored_claude_session_id,
+                stored_claude_session_id=fork_source_claude_session_id or stored_claude_session_id,
                 effective_agent=effective_agent,
                 explicit_model=explicit_model,
                 explicit_effort=explicit_effort,
                 agent_system_prompt=agent_system_prompt,
+                fork_session=bool(fork_source_claude_session_id),
             )
             if not create_future.done():
                 create_future.set_result(client)
@@ -711,6 +720,7 @@ class SessionHandler(BaseHandler):
         explicit_model: Optional[str],
         explicit_effort: Optional[str],
         agent_system_prompt: Optional[str],
+        fork_session: bool = False,
     ) -> ClaudeSDKClient:
 
         # Ensure working directory exists
@@ -794,6 +804,7 @@ class SessionHandler(BaseHandler):
             "cwd": working_path,
             "system_prompt": final_system_prompt,
             "resume": stored_claude_session_id if stored_claude_session_id else None,
+            "fork_session": bool(fork_session and stored_claude_session_id),
             "extra_args": extra_args,
             "setting_sources": ["user", "project", "local"],  # Load all setting sources (user, project CLAUDE.md, local overrides)
             "sandbox": CLAUDE_REMOTE_SANDBOX,
@@ -822,6 +833,7 @@ class SessionHandler(BaseHandler):
         logger.info(f"  Working directory: {working_path}")
         logger.info(f"  Resume session ID: {stored_claude_session_id}")
         logger.info(f"  Options.resume: {options.resume}")
+        logger.info(f"  Options.fork_session: {getattr(options, 'fork_session', False)}")
         if effective_agent:
             logger.info(f"  Subagent: {effective_agent}")
         if effective_model:
@@ -872,7 +884,12 @@ class SessionHandler(BaseHandler):
         self.claude_sessions[composite_key] = client
         self.claude_system_prompts[composite_key] = final_system_prompt
         setattr(client, "_vibe_current_model", effective_model)
-        self.bind_claude_runtime_session(client, base_session_id, composite_key, stored_claude_session_id)
+        self.bind_claude_runtime_session(
+            client,
+            base_session_id,
+            composite_key,
+            None if fork_session else stored_claude_session_id,
+        )
         self.touch_session_activity(composite_key)
         logger.info(f"Created new Claude SDK client for {base_session_id} at {working_path}")
 

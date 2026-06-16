@@ -12,6 +12,7 @@ import os
 import time
 from typing import Dict, Optional, Tuple
 
+from core.services.session_fork import pending_native_fork_source
 from modules.agents.base import AgentRequest, BaseAgent
 
 from .server import OpenCodeServerManager
@@ -248,14 +249,29 @@ class OpenCodeSessionManager:
         )
 
         if not session_id:
+            fork_source = pending_native_fork_source(request.context, self._agent_name)
             try:
-                session_data = await server.create_session(
-                    directory=request.working_path,
-                )
+                if fork_source:
+                    session_data = await server.fork_session(
+                        fork_source,
+                        directory=request.working_path,
+                    )
+                else:
+                    session_data = await server.create_session(
+                        directory=request.working_path,
+                    )
                 session_id = session_data.get("id")
                 if session_id:
                     self.bind_agent_session_id(request, anchor, session_id)
-                    logger.info(f"Created OpenCode session {session_id} for {request.base_session_id}")
+                    if fork_source:
+                        logger.info(
+                            "Forked OpenCode session %s from %s for %s",
+                            session_id,
+                            fork_source,
+                            request.base_session_id,
+                        )
+                    else:
+                        logger.info(f"Created OpenCode session {session_id} for {request.base_session_id}")
             except Exception as e:
                 logger.error(f"Failed to create OpenCode session: {e}", exc_info=True)
                 return None
