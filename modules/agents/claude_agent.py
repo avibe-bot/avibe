@@ -360,31 +360,17 @@ class ClaudeAgent(BaseAgent):
             return False
 
         client = self.claude_sessions[composite_key]
+        if not hasattr(client, "interrupt"):
+            request.stop_failure_reason = "unsupported"
+            await self.controller.emit_agent_message(
+                request.context,
+                "notify",
+                "⚠️ This Claude session cannot be interrupted; consider /new.",
+            )
+            return False
+
         try:
-            if hasattr(client, "interrupt"):
-                await client.interrupt()
-                stopped_request = self._pop_pending_request(composite_key)
-                self._adopt_pending_turn_token(request.context, stopped_request)
-                # A user-initiated stop is terminal but intentional, so it carries
-                # NO user-facing message: a single SILENT result settles the dot to
-                # idle + releases the SSE waiter through the outbound chokepoint
-                # WITHOUT a bubble. Done HERE, before /internal/cancel cancels the
-                # _run_turn task (the cancelled branch can't safely emit during
-                # cancellation). A genuine interrupt FAILURE below still notifies.
-                await self.controller.emit_agent_message(
-                    request.context, "result", "", level="silent"
-                )
-                self._mark_session_idle_if_no_pending_requests(composite_key)
-                await self._cleanup_runtime_session(composite_key)
-                return True
-            else:
-                request.stop_failure_reason = "unsupported"
-                await self.controller.emit_agent_message(
-                    request.context,
-                    "notify",
-                    "⚠️ This Claude session cannot be interrupted; consider /new.",
-                )
-                return False
+            await client.interrupt()
         except Exception as err:
             request.stop_failure_reason = "interrupt_failed"
             logger.error(f"Failed to interrupt Claude session {composite_key}: {err}")
@@ -394,6 +380,32 @@ class ClaudeAgent(BaseAgent):
                 "⚠️ Failed to interrupt Claude session. Please try /new.",
             )
             return False
+
+        stopped_request = self._pop_pending_request(composite_key)
+        self._adopt_pending_turn_token(request.context, stopped_request)
+        if stopped_request is not None:
+            try:
+                await self._remove_specific_pending_reaction(composite_key, request.context, stopped_request)
+                await self._remove_ack_reaction(stopped_request)
+            except Exception:
+                logger.debug("Failed to clear Claude stop processing indicator", exc_info=True)
+
+        try:
+            # A user-initiated stop is terminal but intentional, so it carries
+            # NO user-facing message: a single SILENT result settles the dot to
+            # idle + releases the SSE waiter through the outbound chokepoint
+            # WITHOUT a bubble. Done HERE, before /internal/cancel cancels the
+            # _run_turn task (the cancelled branch can't safely emit during
+            # cancellation).
+            await self.controller.emit_agent_message(request.context, "result", "", level="silent")
+        except Exception as err:
+            logger.error("Failed to emit Claude stop result for session %s: %s", composite_key, err, exc_info=True)
+            self._release_service_runtime_turn(request.context)
+        finally:
+            self._mark_session_idle_if_no_pending_requests(composite_key)
+            await self._cleanup_runtime_session(composite_key)
+
+        return True
 
     async def _receive_messages(
         self,
@@ -645,6 +657,7 @@ class ClaudeAgent(BaseAgent):
                 except Exception as e:
                     logger.error(f"Error processing message from Claude: {e}", exc_info=True)
                     continue
+            await self._handle_receiver_eof(composite_key, context)
         except asyncio.CancelledError:
             # Receiver task was explicitly cancelled (e.g. /stop, /clear,
             # or a new message replacing the session).  Clean up reactions
@@ -715,6 +728,45 @@ class ClaudeAgent(BaseAgent):
         # inside the loop.
         finally:
             self._suppressed_synthetic_results.discard(composite_key)
+
+    async def _handle_receiver_eof(self, composite_key: str, context: MessageContext) -> None:
+        """Settle a Claude receiver that ended without a ResultMessage."""
+        pending_requests = self._pending_requests.get(composite_key) or []
+        if not pending_requests:
+            return
+
+        pending_request = pending_requests[0]
+        context_token = str((getattr(context, "platform_specific", None) or {}).get(AGENT_RUNTIME_TURN_TOKEN) or "")
+        pending_token = str(
+            (getattr(getattr(pending_request, "context", None), "platform_specific", None) or {}).get(
+                AGENT_RUNTIME_TURN_TOKEN
+            )
+            or ""
+        )
+        if not context_token or not pending_token:
+            return
+        if context_token and pending_token and context_token != pending_token:
+            logger.info(
+                "Ignoring Claude receiver EOF for %s because a newer runtime turn is pending",
+                composite_key,
+            )
+            return
+        logger.warning("Claude receiver ended without a result for session %s", composite_key)
+        self._adopt_pending_turn_token(context, pending_request)
+        await self._clear_pending_reactions(composite_key, context)
+        self._last_assistant_text.pop(composite_key, None)
+        self._pending_assistant_message.pop(composite_key, None)
+        self._mark_session_idle_if_no_pending_requests(composite_key)
+
+        try:
+            await self.controller.emit_agent_message(context, "result", "", is_error=True)
+        finally:
+            self._release_service_runtime_turn(context)
+            await self._cleanup_runtime_session(
+                composite_key,
+                current_receiver_task=asyncio.current_task(),
+                preserve_pending_request_state=True,
+            )
 
     async def _handle_synthetic_api_error_message(
         self,
@@ -882,14 +934,14 @@ class ClaudeAgent(BaseAgent):
 
         Used on error paths to remove the current request's reaction instead of FIFO.
         """
-        if not request.ack_reaction_message_id:
+        target_id = getattr(request, "ack_reaction_message_id", None)
+        target_emoji = getattr(request, "ack_reaction_emoji", None)
+        if not target_id:
             return
         reactions = self._pending_reactions.get(composite_key)
         if not reactions:
             return
         # Find and remove the matching reaction
-        target_id = request.ack_reaction_message_id
-        target_emoji = request.ack_reaction_emoji
         for i, (msg_id, emoji) in enumerate(reactions):
             if msg_id == target_id and emoji == target_emoji:
                 reactions.pop(i)

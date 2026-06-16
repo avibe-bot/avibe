@@ -290,6 +290,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         service = AgentService(controller)
         service.register(agent)
         controller.agent_service = service
+        controller.processing_indicator = SimpleNamespace(finish=AsyncMock())
 
         async def _emit(context, message_type, text, **_kwargs):
             if message_type == "result":
@@ -303,9 +304,12 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                     "agent_runtime_turn_key": runtime_key,
                     "agent_runtime_turn_token": "R1",
                 }
-            )
+            ),
+            ack_reaction_message_id="m1",
+            ack_reaction_emoji=":eyes:",
         )
         agent._pending_requests[runtime_key] = [pending_request]
+        agent._pending_reactions[runtime_key] = [("m1", ":eyes:")]
         gate = service._get_turn_gate(runtime_key)
         await gate.lock.acquire()
         gate.token = "R1"
@@ -334,6 +338,64 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(service._turn_gates[runtime_key].lock.locked())
         self.assertEqual(request.context.platform_specific["turn_token"], "T1")
         self.assertEqual(request.context.platform_specific["agent_runtime_turn_token"], "R1")
+        controller.processing_indicator.finish.assert_awaited_once_with(pending_request)
+
+    async def test_handle_stop_cleans_up_when_silent_result_emit_fails(self):
+        controller = _StubController()
+        runtime_key = "wechat_o9:/tmp/work"
+
+        class _Client:
+            async def interrupt(self):
+                return None
+
+            async def disconnect(self):
+                return None
+
+        agent = ClaudeAgent(controller)
+        service = AgentService(controller)
+        service.register(agent)
+        controller.agent_service = service
+        controller.processing_indicator = SimpleNamespace(finish=AsyncMock())
+        controller.emit_agent_message = AsyncMock(side_effect=RuntimeError("send failed"))
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "T1",
+                    "agent_runtime_turn_key": runtime_key,
+                    "agent_runtime_turn_token": "R1",
+                }
+            ),
+            ack_reaction_message_id="m1",
+            ack_reaction_emoji=":eyes:",
+        )
+        agent._pending_requests[runtime_key] = [pending_request]
+        agent._pending_reactions[runtime_key] = [("m1", ":eyes:")]
+        gate = service._get_turn_gate(runtime_key)
+        await gate.lock.acquire()
+        gate.token = "R1"
+        controller.claude_sessions[runtime_key] = _Client()
+
+        request = SimpleNamespace(
+            context=SimpleNamespace(platform_specific={}),
+            message="stop",
+            working_path="/tmp/work",
+            base_session_id="wechat_o9",
+            composite_session_id=runtime_key,
+            session_key="wechat-user",
+            stop_failure_reason=None,
+        )
+
+        handled = await service.handle_stop("claude", request)
+
+        self.assertTrue(handled)
+        self.assertIsNone(request.stop_failure_reason)
+        self.assertNotIn(runtime_key, controller.claude_sessions)
+        self.assertFalse(service._turn_gates[runtime_key].lock.locked())
+        controller.session_handler.cleanup_session.assert_awaited_once_with(
+            runtime_key,
+            current_receiver_task=None,
+        )
+        controller.processing_indicator.finish.assert_awaited_once_with(pending_request)
 
     async def test_result_keeps_claude_session_active_when_requests_are_queued(self):
         controller = _StubController()
@@ -438,16 +500,12 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             agent._get_formatter = lambda _context: _Formatter()
             await agent._receive_messages(_Client(), "session-1", "/tmp/work", context, composite_key=composite_key)
 
-        controller.emit_agent_message.assert_awaited_once_with(
-            context,
-            "toolcall",
-            "Bash(pwd)",
-            parse_mode="markdown",
-        )
+        first_emit = controller.emit_agent_message.await_args_list[0]
+        self.assertEqual(first_emit.args, (context, "toolcall", "Bash(pwd)"))
+        self.assertEqual(first_emit.kwargs, {"parse_mode": "markdown"})
         self.assertEqual(context.platform_specific["turn_token"], "T2")
         self.assertEqual(context.platform_specific["agent_runtime_turn_key"], composite_key)
         self.assertEqual(context.platform_specific["agent_runtime_turn_token"], "R2")
-        self.assertEqual(agent._pending_requests[composite_key], [pending_request])
 
     async def test_handle_message_uses_runtime_session_key_for_claude_tracking(self):
         controller = _StubController()
@@ -1198,6 +1256,69 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once()
         self.assertNotIn(composite_key, controller.receiver_tasks)
         self.assertNotIn(composite_key, controller.claude_sessions)
+
+    async def test_receiver_eof_without_result_releases_runtime_gate(self):
+        controller = _StubController()
+        controller._get_session_key = lambda context: "telegram::user::U1"
+        agent = ClaudeAgent(controller)
+        service = AgentService(controller)
+        service.register(agent)
+        controller.agent_service = service
+
+        async def _emit(context, message_type, text, **_kwargs):
+            if message_type == "result":
+                service.release_runtime_turn(context)
+
+        controller.emit_agent_message = AsyncMock(side_effect=_emit)
+        composite_key = "session-1:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={
+                "agent_runtime_turn_key": composite_key,
+                "agent_runtime_turn_token": "R1",
+            },
+        )
+        pending_request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "turn_token": "T1",
+                    "agent_runtime_turn_key": composite_key,
+                    "agent_runtime_turn_token": "R1",
+                }
+            ),
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+        )
+        agent._pending_requests[composite_key] = [pending_request]
+        gate = service._get_turn_gate(composite_key)
+        await gate.lock.acquire()
+        gate.token = "R1"
+
+        class _Client:
+            async def disconnect(self):
+                return None
+
+            def receive_messages(self):
+                async def _iterate():
+                    if False:
+                        yield None
+
+                return _iterate()
+
+        client = _Client()
+        controller.claude_sessions[composite_key] = client
+        receiver_task = asyncio.create_task(
+            agent._receive_messages(client, "session-1", "/tmp/work", context, composite_key=composite_key)
+        )
+        controller.receiver_tasks[composite_key] = receiver_task
+
+        await asyncio.wait_for(receiver_task, timeout=1)
+
+        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True)
+        self.assertFalse(service._turn_gates[composite_key].lock.locked())
+        self.assertNotIn(composite_key, controller.claude_sessions)
+        self.assertNotIn(composite_key, agent._pending_requests)
 
     async def test_assistant_auth_error_prefers_oauth_recovery_message(self):
         controller = _StubController()
