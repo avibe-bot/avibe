@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { AppWindow, ArrowLeft, Bell, Bot, ChevronDown, Clock, Info, Loader2, MessageSquare, Pencil, UploadCloud, X } from 'lucide-react';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { AppWindow, ArrowLeft, Bell, Bot, ChevronDown, Clock, GitFork, Info, Loader2, MessageSquare, Pencil, UploadCloud, X } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
@@ -1404,6 +1404,11 @@ const Transcript: React.FC<TranscriptProps> = ({
   onQuickReply,
 }) => {
   const { t } = useTranslation();
+  const forkSourceSessionId =
+    typeof session.metadata?.fork_source_session_id === 'string'
+      ? session.metadata.fork_source_session_id
+      : null;
+  const isForkedSession = session.metadata?.created_via === 'session_fork';
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   // ``true`` while the viewport is FOLLOWING the bottom (at/near it) — drives the
@@ -1535,6 +1540,21 @@ const Transcript: React.FC<TranscriptProps> = ({
   }, [empty]);
 
   if (empty) {
+    if (isForkedSession && forkSourceSessionId) {
+      return (
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-muted">
+          <GitFork className="size-8 opacity-70" />
+          <div className="max-w-[360px] text-[13px] font-semibold text-foreground">{t('chat.forkedEmptyTitle')}</div>
+          <div className="max-w-[440px] text-[12px] leading-relaxed">{t('chat.forkedEmptyBody')}</div>
+          <Link
+            to={`/chat/${encodeURIComponent(forkSourceSessionId)}`}
+            className="text-[12px] font-medium text-cyan hover:underline"
+          >
+            {t('chat.forkedSource')}
+          </Link>
+        </div>
+      );
+    }
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-muted">
         <MessageSquare className="size-8 opacity-60" />

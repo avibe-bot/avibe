@@ -583,6 +583,7 @@
     "sessionRename": "重命名",
     "sessionRenamePlaceholder": "会话名称",
     "sessionReference": "引用该会话",
+    "sessionFork": "Fork 会话",
     "sessionArchive": "归档会话",
     "archiveSession": {
       "title": "永久归档此会话？",
@@ -1772,6 +1773,9 @@
     "notFound": "未找到该会话。",
     "missingSessionId": "URL 缺少 session id。",
     "transcriptEmpty": "在下方输入消息开始对话",
+    "forkedEmptyTitle": "Fork 会话已创建",
+    "forkedEmptyBody": "底层 Agent 上下文已从源会话 fork 过来。这里的聊天记录从空白开始，只显示此会话里的新消息。",
+    "forkedSource": "打开源会话",
     "scrollToBottom": "回到最新",
     "streaming": "实时输出中",
     "thinking": "思考中…",
