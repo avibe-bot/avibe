@@ -2298,6 +2298,17 @@ def show_page_visibility_post(session_id):
         return _show_page_error_response(exc)
 
 
+@app.route("/api/show-pages/<session_id>/ensure", methods=["POST"])
+def show_page_ensure_post(session_id):
+    from core.show_pages import ShowPageError
+    from vibe import api
+
+    try:
+        return jsonify(api.ensure_show_page(session_id))
+    except ShowPageError as exc:
+        return _show_page_error_response(exc)
+
+
 @app.route("/api/show-pages/<session_id>/rotate-share", methods=["POST"])
 def show_page_rotate_share_post(session_id):
     from core.show_pages import ShowPageError

@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Bell, Bot, ChevronDown, Clock, Info, Loader2, MessageSquare, Pencil, UploadCloud, X } from 'lucide-react';
+import { AppWindow, ArrowLeft, Bell, Bot, ChevronDown, Clock, Info, Loader2, MessageSquare, Pencil, UploadCloud, X } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
@@ -122,6 +122,15 @@ export const ChatPage: React.FC = () => {
     [sessionId, insertSessionReference],
   );
   useRegisterComposerTarget(composerTarget);
+
+  // Show Page toggle: swap the chat surface (transcript + composer, NOT the
+  // header bar) for this session's Show Page in an iframe, and back. Resets to
+  // chat view on session change so a freshly-opened chat starts in chat mode.
+  const [showPageMode, setShowPageMode] = useState(false);
+  const [showPageBusy, setShowPageBusy] = useState(false);
+  useEffect(() => {
+    setShowPageMode(false);
+  }, [sessionId]);
 
   // Back returns to the page the user came from, not a hardcoded inbox.
   // location.key === 'default' means /chat was the first history entry (deep
@@ -721,6 +730,29 @@ export const ChatPage: React.FC = () => {
     [api, sessionId],
   );
 
+  // Toggle the chat surface ↔ the session's Show Page (iframe). The first open
+  // ensures the page exists; if it was just created, ask the agent to build the
+  // visualization. Errors surface via the apiFetch toast layer.
+  const toggleShowPage = useCallback(async () => {
+    if (!sessionId) return;
+    if (showPageMode) {
+      setShowPageMode(false);
+      return;
+    }
+    setShowPageBusy(true);
+    try {
+      const res = await api.ensureShowPage(sessionId);
+      if (res?.ok && res.existed === false) {
+        void sendMessage('Please visualize this session as a Show Page.');
+      }
+      setShowPageMode(true);
+    } catch {
+      // apiFetch already surfaced a toast; stay in chat view.
+    } finally {
+      setShowPageBusy(false);
+    }
+  }, [sessionId, showPageMode, api, sendMessage]);
+
   // A quick-reply click sends the chosen label as a normal user turn, tagged with
   // the agent message it answers so the group can lock + highlight the choice on
   // reload (the answered state is derived from this metadata).
@@ -972,39 +1004,54 @@ export const ChatPage: React.FC = () => {
           onPatch={patch}
           onBack={goBack}
           working={working}
+          showPageMode={showPageMode}
+          showPageBusy={showPageBusy}
+          onToggleShowPage={toggleShowPage}
         />
 
-      {error && (
-        <div className="mx-auto mt-3 w-full max-w-[1080px] rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
-          {error}
-        </div>
-      )}
+      {showPageMode && sessionId ? (
+        // The session's Show Page replaces the transcript + composer (the header
+        // bar stays). Same-origin /show/<id>/ inherits the workbench's auth.
+        <iframe
+          title={t('chat.showPage.title')}
+          src={`/show/${encodeURIComponent(sessionId)}/`}
+          className="min-h-0 w-full flex-1 border-0 bg-background"
+        />
+      ) : (
+        <>
+          {error && (
+            <div className="mx-auto mt-3 w-full max-w-[1080px] rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
+              {error}
+            </div>
+          )}
 
-      <Transcript
-        messages={messages}
-        session={session}
-        working={working}
-        hasOlder={!!olderCursor}
-        loadingOlder={loadingOlder}
-        onLoadOlder={loadOlderMessages}
-        messageFontSize={messageFontSize}
-        onQuickReply={handleQuickReply}
-      />
-      <QueueStrip queue={queue} onRemove={removeQueued} onSendNow={sendQueueNow} />
-      {/* key by session so the composer remounts per session — its draft-seeding
-          + local value reset, instead of carrying across sessions (Codex P2). */}
-      <Compose
-        key={sessionId}
-        composerRef={composerRef}
-        onSend={(text, attachments, references) => sendMessage(text, attachments, undefined, references)}
-        onStop={stopMessage}
-        busy={working}
-        sessionId={sessionId ?? ''}
-        initialDraft={initialDraft}
-        onDraftChange={onDraftChange}
-        onSearchAgents={searchAgents}
-        onSearchSessions={searchSessions}
-      />
+          <Transcript
+            messages={messages}
+            session={session}
+            working={working}
+            hasOlder={!!olderCursor}
+            loadingOlder={loadingOlder}
+            onLoadOlder={loadOlderMessages}
+            messageFontSize={messageFontSize}
+            onQuickReply={handleQuickReply}
+          />
+          <QueueStrip queue={queue} onRemove={removeQueued} onSendNow={sendQueueNow} />
+          {/* key by session so the composer remounts per session — its draft-seeding
+              + local value reset, instead of carrying across sessions (Codex P2). */}
+          <Compose
+            key={sessionId}
+            composerRef={composerRef}
+            onSend={(text, attachments, references) => sendMessage(text, attachments, undefined, references)}
+            onStop={stopMessage}
+            busy={working}
+            sessionId={sessionId ?? ''}
+            initialDraft={initialDraft}
+            onDraftChange={onDraftChange}
+            onSearchAgents={searchAgents}
+            onSearchSessions={searchSessions}
+          />
+        </>
+      )}
       </div>
       </FileViewerProvider>
     </ImageViewerProvider>
@@ -1098,9 +1145,12 @@ interface ChatHeaderBarProps {
   onPatch: (changes: Partial<WorkbenchSession>) => Promise<void>;
   onBack: () => void;
   working: boolean;
+  showPageMode: boolean;
+  showPageBusy: boolean;
+  onToggleShowPage: () => void;
 }
 
-const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working }) => {
+const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage }) => {
   const { t } = useTranslation();
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   // Backend locks once a NATIVE conversation exists — a native can only be
@@ -1171,6 +1221,27 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
             IM-launched users often land straight in a chat. Renders only on iOS
             Safari + not-installed; null otherwise. */}
         <InstallHint />
+        {/* Show Page toggle: swaps the chat surface for the session's Show Page
+            (the header bar stays). First open initializes the page + prompts the
+            agent. Pushed to the far right of the header row. */}
+        <Button
+          type="button"
+          variant={showPageMode ? 'secondary' : 'ghost'}
+          size="icon"
+          onClick={onToggleShowPage}
+          disabled={showPageBusy}
+          aria-label={showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
+          title={showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
+          className="ml-auto size-7 shrink-0"
+        >
+          {showPageBusy ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : showPageMode ? (
+            <MessageSquare className="size-3.5" />
+          ) : (
+            <AppWindow className="size-3.5" />
+          )}
+        </Button>
       </div>
     </div>
   );

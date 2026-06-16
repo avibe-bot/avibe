@@ -1754,6 +1754,11 @@
   "chat": {
     "back": "返回",
     "untitled": "未命名会话",
+    "showPage": {
+      "open": "查看 Show Page",
+      "backToChat": "返回对话",
+      "title": "Show Page"
+    },
     "titlePlaceholder": "会话标题",
     "pickAgent": "选择 Agent",
     "noAgents": "暂无已启用的 Agent。请先在 Agents 页创建。",

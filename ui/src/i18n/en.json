@@ -1755,6 +1755,11 @@
   "chat": {
     "back": "Back",
     "untitled": "Untitled session",
+    "showPage": {
+      "open": "View Show Page",
+      "backToChat": "Back to chat",
+      "title": "Show Page"
+    },
     "titlePlaceholder": "Session title",
     "pickAgent": "Pick an agent",
     "noAgents": "No enabled agents. Create one on the Agents page.",
