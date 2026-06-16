@@ -1770,7 +1770,8 @@
       "visibilityPublic": "Public",
       "visibilityPrivate": "Private",
       "publicDesc": "Anyone with the link can view",
-      "privateDesc": "Only you can view"
+      "privateDesc": "Only you can view",
+      "offlineNote": "This Show Page is offline and can't be shared right now."
     },
     "titlePlaceholder": "Session title",
     "pickAgent": "Pick an agent",

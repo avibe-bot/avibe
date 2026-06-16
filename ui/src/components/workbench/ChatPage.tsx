@@ -12,6 +12,7 @@ import { apiFetch } from '../../lib/apiFetch';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
+import { localPath, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 import { formatLocalDateTime } from '../../lib/relativeTime';
 import { useFileDrop } from '../../lib/useFileDrop';
 import { AgentRoutePicker } from './AgentRoutePicker';
@@ -791,6 +792,14 @@ export const ChatPage: React.FC = () => {
     }
   }, [sessionId, showPageMode, api, sendMessage, t]);
 
+  // When the share control resolves the page (open) or flips its visibility, the
+  // serving route changes (private → /show/, public → /p/). Re-point the iframe
+  // so it never stays on a route that now 404s.
+  const handleShowPagePayload = useCallback((next: ShowPageLinkInfo) => {
+    const path = localPath(next);
+    if (path) setShowPageUrl(path);
+  }, []);
+
   // A quick-reply click sends the chosen label as a normal user turn, tagged with
   // the agent message it answers so the group can lock + highlight the choice on
   // reload (the answered state is derived from this metadata).
@@ -1045,6 +1054,7 @@ export const ChatPage: React.FC = () => {
           showPageMode={showPageMode}
           showPageBusy={showPageBusy}
           onToggleShowPage={toggleShowPage}
+          onShowPageVisibilityChange={handleShowPagePayload}
         />
 
       {showPageMode && showPageUrl && (
@@ -1223,9 +1233,10 @@ interface ChatHeaderBarProps {
   showPageMode: boolean;
   showPageBusy: boolean;
   onToggleShowPage: () => void;
+  onShowPageVisibilityChange?: (payload: ShowPageLinkInfo) => void;
 }
 
-const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage }) => {
+const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onShowPageVisibilityChange }) => {
   const { t } = useTranslation();
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   // Backend locks once a NATIVE conversation exists — a native can only be
@@ -1304,8 +1315,9 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
             the page + prompts the agent. It shows its label on desktop and stays
             icon-only on mobile. In Show Page mode a Share control sits beside the
             back-to-chat button. */}
+        {/* Back-to-chat (or Visualize when in chat) stays leftmost; the Share
+            control sits to its right, only while the Show Page is open. */}
         <div className="ml-auto flex items-center gap-1.5">
-          {showPageMode && <ShowPageShareControl sessionId={session.id} />}
           <Button
             type="button"
             variant={showPageMode ? 'secondary' : 'ghost'}
@@ -1326,6 +1338,9 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
               {showPageMode ? t('chat.showPage.backToChat') : t('chat.showPage.open')}
             </span>
           </Button>
+          {showPageMode && (
+            <ShowPageShareControl sessionId={session.id} onPayloadChange={onShowPageVisibilityChange} />
+          )}
         </div>
       </div>
     </div>

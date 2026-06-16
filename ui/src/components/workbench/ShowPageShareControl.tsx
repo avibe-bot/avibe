@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Check, Copy, Loader2, Share2 } from 'lucide-react';
 
@@ -7,21 +7,24 @@ import { Input } from '../ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Switch } from '../ui/switch';
 import { useApi } from '../../context/ApiContext';
+import { copyTextToClipboard } from '../../lib/utils';
+import { copyHref, displayLink, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 
-type ShowPagePayload = {
-  visibility: string;
-  active_url: string | null;
-  public_url: string | null;
-  private_url: string | null;
+type ShowPagePayload = ShowPageLinkInfo & {
   url_available: boolean;
   url_guidance: string | null;
-  share_id: string | null;
+  offline: boolean;
 };
 
 // Share affordance shown only while the Show Page is open (the in-chat view).
 // A popover with the page link (copy + native share) and a public/private
 // toggle that flips visibility in place via the existing show-pages API.
-export const ShowPageShareControl: React.FC<{ sessionId: string }> = ({ sessionId }) => {
+export const ShowPageShareControl: React.FC<{
+  sessionId: string;
+  // Lets the chat view re-point the iframe at the route that now serves the
+  // page when visibility flips (private↔public swap the serving route).
+  onPayloadChange?: (payload: ShowPageLinkInfo) => void;
+}> = ({ sessionId, onPayloadChange }) => {
   const { t } = useTranslation();
   const api = useApi();
   const [open, setOpen] = useState(false);
@@ -30,22 +33,32 @@ export const ShowPageShareControl: React.FC<{ sessionId: string }> = ({ sessionI
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
 
+  useEffect(() => {
+    if (payload) onPayloadChange?.(payload);
+  }, [payload, onPayloadChange]);
+
+  const offline = payload?.visibility === 'offline' || payload?.offline === true;
   const isPublic = payload?.visibility === 'public';
-  const link = payload?.active_url ?? payload?.private_url ?? '';
+  // Falls back to the same-origin route when Avibe Cloud is off (payload urls null).
+  const link = payload ? copyHref(payload) ?? '' : '';
+  const shownLink = payload ? displayLink(payload) ?? '' : '';
   const canNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+
+  // Re-fetch on every open so a visibility/share change made elsewhere (e.g. the
+  // admin Show Pages page) is reflected; keep the last payload visible while
+  // refreshing so reopening doesn't flash a spinner.
+  const refresh = () => {
+    setLoading(!payload);
+    api
+      .ensureShowPage(sessionId)
+      .then((res: ShowPagePayload) => setPayload(res))
+      .catch(() => undefined)
+      .finally(() => setLoading(false));
+  };
 
   const handleOpenChange = (next: boolean) => {
     setOpen(next);
-    // Lazily resolve the page (idempotent ensure) the first time the popover
-    // opens, so the link + current visibility are always fresh.
-    if (next && !payload && !loading) {
-      setLoading(true);
-      api
-        .ensureShowPage(sessionId)
-        .then((res: ShowPagePayload) => setPayload(res))
-        .catch(() => undefined)
-        .finally(() => setLoading(false));
-    }
+    if (next) refresh();
   };
 
   const toggleVisibility = (nextPublic: boolean) => {
@@ -59,20 +72,10 @@ export const ShowPageShareControl: React.FC<{ sessionId: string }> = ({ sessionI
 
   const copyLink = async () => {
     if (!link) return;
-    let ok = false;
-    try {
-      await navigator.clipboard.writeText(link);
-      ok = true;
-    } catch {
-      const field = document.getElementById('show-share-link');
-      if (field instanceof HTMLInputElement) {
-        field.select();
-        ok = document.execCommand('copy');
-      }
+    if (await copyTextToClipboard(link)) {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
     }
-    if (!ok) return;
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 2000);
   };
 
   const nativeShare = async () => {
@@ -106,13 +109,15 @@ export const ShowPageShareControl: React.FC<{ sessionId: string }> = ({ sessionI
             <Loader2 className="size-4 animate-spin" />
             {t('common.loading')}
           </div>
+        ) : offline ? (
+          <p className="py-1 text-sm text-muted">{t('chat.showPage.offlineNote')}</p>
         ) : (
           <>
             <div className="flex items-center gap-1.5">
               <Input
                 id="show-share-link"
                 readOnly
-                value={link}
+                value={shownLink}
                 onFocus={(e) => e.currentTarget.select()}
                 className="h-8 flex-1 text-xs"
               />
@@ -121,6 +126,7 @@ export const ShowPageShareControl: React.FC<{ sessionId: string }> = ({ sessionI
                 variant="outline"
                 size="icon"
                 className="size-8 shrink-0"
+                disabled={!link}
                 onClick={copyLink}
                 aria-label={t('chat.showPage.copyLink')}
                 title={t('chat.showPage.copyLink')}
@@ -133,6 +139,7 @@ export const ShowPageShareControl: React.FC<{ sessionId: string }> = ({ sessionI
                   variant="outline"
                   size="icon"
                   className="size-8 shrink-0"
+                  disabled={!link}
                   onClick={nativeShare}
                   aria-label={t('chat.showPage.nativeShare')}
                   title={t('chat.showPage.nativeShare')}
