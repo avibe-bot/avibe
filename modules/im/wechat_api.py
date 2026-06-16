@@ -267,7 +267,8 @@ async def get_upload_url(
     and optionally thumbnail fields.
 
     Returns:
-        Parsed JSON dict with ``upload_param`` (and possibly ``thumb_upload_param``).
+        Parsed JSON dict with either ``upload_full_url`` or ``upload_param``
+        (and possibly thumbnail upload fields).
     """
     return await _api_fetch(
         base_url,

@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import logging
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urljoin
 
 from config.platform_registry import get_platform_descriptor
 from modules.im import MessageContext
@@ -302,6 +304,13 @@ class ConsolidatedMessageDispatcher:
 
     def _supports_quick_replies(self, context: MessageContext) -> bool:
         return self._capabilities(context).supports_quick_replies
+
+    def _is_wechat_context(self, context: MessageContext) -> bool:
+        return (
+            context.platform
+            or (context.platform_specific or {}).get("platform")
+            or self.controller.config.platform
+        ) == "wechat"
 
     def _supports_message_editing(self, im_client, context: MessageContext) -> bool:
         supports_editing = getattr(im_client, "supports_message_editing", None)
@@ -989,6 +998,8 @@ class ConsolidatedMessageDispatcher:
             logger.debug("IM client does not support upload_file_from_path; skipping file uploads")
             return
 
+        notify_wechat_failure = self._is_wechat_context(context)
+
         for fl in files:
             if not os.path.isfile(fl.path):
                 logger.warning("File not found, skipping upload: %s", fl.path)
@@ -1008,38 +1019,127 @@ class ConsolidatedMessageDispatcher:
                 upload_title = f"{upload_title}{src_ext}"
 
             try:
+                upload_result = None
                 if self._is_video_path(str(resolved)):
-                    await im_client.upload_video_from_path(
+                    upload_result = await im_client.upload_video_from_path(
                         context,
                         file_path=str(resolved),
                         title=upload_title,
                     )
                 elif getattr(fl, "is_image", False):
                     try:
-                        await im_client.upload_image_from_path(
+                        upload_result = await im_client.upload_image_from_path(
                             context,
                             file_path=str(resolved),
                             title=upload_title,
                         )
+                        if notify_wechat_failure and not upload_result:
+                            raise RuntimeError("image upload returned no message id")
                     except Exception as image_err:
                         logger.warning(
                             "Image upload failed for %s, fallback to file upload: %r",
                             fl.path,
                             image_err,
                         )
-                        await im_client.upload_file_from_path(
+                        upload_result = await im_client.upload_file_from_path(
                             context,
                             file_path=str(resolved),
                             title=upload_title,
                         )
                 else:
-                    await im_client.upload_file_from_path(
+                    upload_result = await im_client.upload_file_from_path(
                         context,
                         file_path=str(resolved),
                         title=upload_title,
+                    )
+                if notify_wechat_failure and not upload_result:
+                    await self._send_file_upload_failure_notice(
+                        im_client,
+                        context,
+                        file_path=str(resolved),
+                        file_name=upload_title,
                     )
             except NotImplementedError:
                 logger.debug("IM client does not implement file uploads; skipping")
                 return
             except Exception as err:
                 logger.warning("Failed to upload file %s: %r", fl.path, err)
+                if notify_wechat_failure:
+                    await self._send_file_upload_failure_notice(
+                        im_client,
+                        context,
+                        file_path=str(resolved),
+                        file_name=upload_title,
+                    )
+
+    def _register_public_file_download_url(
+        self,
+        context: MessageContext,
+        *,
+        file_path: str,
+        file_name: str,
+    ) -> Optional[str]:
+        """Register a local file under the existing media proxy and return a public URL."""
+        try:
+            from core.avibe_cloud import base_public_url
+            from core.message_mirror import DEFAULT_SCOPE_TYPE
+            from core.workbench_media import register_agent_reply_media
+            from storage import settings_service
+            from storage.db import create_sqlite_engine
+            from sqlalchemy import select
+            from storage.models import agent_sessions
+
+            base = base_public_url(getattr(self.controller, "config", None))
+            if not base:
+                return None
+
+            engine = create_sqlite_engine()
+            with engine.begin() as conn:
+                scope_id = settings_service.upsert_scope(
+                    conn,
+                    platform=context.platform or "wechat",
+                    scope_type=DEFAULT_SCOPE_TYPE,
+                    native_id=context.channel_id or context.user_id or "wechat",
+                    now=datetime.now(timezone.utc).isoformat(),
+                    supports_threads=bool(context.thread_id),
+                )
+                session_id = (context.platform_specific or {}).get("agent_session_id")
+                if session_id:
+                    existing_session_id = conn.execute(
+                        select(agent_sessions.c.id).where(agent_sessions.c.id == str(session_id))
+                    ).scalar_one_or_none()
+                    session_id = existing_session_id
+                token = register_agent_reply_media(
+                    conn,
+                    scope_id=scope_id,
+                    session_id=session_id,
+                    kind="file",
+                    local_path=file_path,
+                    file_name=file_name,
+                )
+        except Exception:
+            logger.warning("Failed to register fallback download link for %s", file_path, exc_info=True)
+            return None
+
+        return urljoin(base.rstrip("/") + "/", f"api/media/{token}?download=1")
+
+    async def _send_file_upload_failure_notice(
+        self,
+        im_client,
+        context: MessageContext,
+        *,
+        file_path: str,
+        file_name: str,
+    ) -> None:
+        """Tell WeChat users when native file upload failed instead of leaving only a filename."""
+        public_url = self._register_public_file_download_url(
+            context,
+            file_path=file_path,
+            file_name=file_name,
+        )
+        key = "error.fileAttachmentUploadFailedWithLink" if public_url else "error.fileAttachmentUploadFailedNoLink"
+        message = self._t(key, filename=file_name, url=public_url or "")
+        try:
+            await im_client.send_message(context, message, parse_mode="plain")
+        except Exception:
+            logger.warning("Failed to send file upload failure notice for %s", file_path, exc_info=True)

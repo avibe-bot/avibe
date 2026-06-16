@@ -29,6 +29,27 @@ from storage import media_service
 logger = logging.getLogger(__name__)
 
 
+def register_agent_reply_media(
+    conn: Connection,
+    *,
+    scope_id: str,
+    session_id: str | None,
+    kind: str,
+    local_path: str,
+    file_name: str,
+) -> str:
+    """Register a local agent-reply file under the shared media proxy."""
+    return media_service.register(
+        conn,
+        scope_id=scope_id,
+        session_id=session_id,
+        kind=kind,
+        source="agent_reply",
+        local_path=local_path,
+        file_name=file_name,
+    )
+
+
 def rewrite_agent_media(conn: Connection, *, scope_id: str, session_id: str, text: str) -> str:
     """Return *text* with ``file://`` links rewritten to media-proxy URLs.
 
@@ -62,12 +83,11 @@ def rewrite_agent_media(conn: Connection, *, scope_id: str, session_id: str, tex
             logger.warning("workbench_media: could not resolve file link: %s", url)
             return match.group(0)
         try:
-            token = media_service.register(
+            token = register_agent_reply_media(
                 conn,
                 scope_id=scope_id,
                 session_id=session_id,
                 kind="image" if bang == "!" else "file",
-                source="agent_reply",
                 local_path=safe_path,
                 file_name=label or os.path.basename(safe_path),
             )

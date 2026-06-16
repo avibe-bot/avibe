@@ -49,6 +49,8 @@
     "sessionGeneric": "发生错误：{error}",
     "resultAttachmentUploadFailed": "附件上传失败。要我改成拆分成多条消息发送吗？",
     "resultDeliveryFailed": "⚠️ 消息投递失败，内容可能过长或格式不兼容。你可以让我重新发送一次。",
+    "fileAttachmentUploadFailedWithLink": "⚠️ {filename} 没能作为微信文件直接发送。你可以通过 Avibe 下载；如提示登录，请先登录：\n{url}",
+    "fileAttachmentUploadFailedNoLink": "⚠️ {filename} 没能作为微信文件直接发送。请让我重新发送，或换一个渠道接收这个文件。",
     "opencodeQuestionToolDisabled": "OpenCode 发起了交互式提问，但 Avibe 已禁用 OpenCode 的 question 工具。请直接发送一条新消息，告诉我你的答案或下一步方向。",
     "opencodeQuestionToolDisabledRestored": "恢复中的 OpenCode 会话发起了交互式提问，但 Avibe 已禁用 OpenCode 的 question 工具。请直接发送一条新消息，告诉我你的答案或下一步方向。"
   },

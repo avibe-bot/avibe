@@ -49,6 +49,8 @@
     "sessionGeneric": "An error occurred: {error}",
     "resultAttachmentUploadFailed": "Failed to upload attachment. Want me to split the result into multiple messages?",
     "resultDeliveryFailed": "⚠️ Message delivery failed. The content may be too long or incompatible. Ask me to resend it.",
+    "fileAttachmentUploadFailedWithLink": "⚠️ I could not deliver {filename} as a WeChat file. You can download it from Avibe after signing in if prompted:\n{url}",
+    "fileAttachmentUploadFailedNoLink": "⚠️ I could not deliver {filename} as a WeChat file. Please ask me to resend it or use another channel.",
     "opencodeQuestionToolDisabled": "OpenCode asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction.",
     "opencodeQuestionToolDisabledRestored": "Restored OpenCode session asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction."
   },
