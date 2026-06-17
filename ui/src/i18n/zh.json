@@ -1803,7 +1803,7 @@
     "missingSessionId": "URL 缺少 session id。",
     "transcriptEmpty": "在下方输入消息开始对话",
     "forkedEmptyTitle": "Fork 会话已创建",
-    "forkedEmptyBody": "已从原会话上下文分叉，历史消息均已保留，继续对话即可",
+    "forkedEmptyBody": "已从原会话上下文分叉，当前对话记录从空白开始，原会话上下文已保留，继续对话即可",
     "forkedFromPrefix": "Fork 自",
     "forkedSource": "打开源会话",
     "scrollToBottom": "回到最新",

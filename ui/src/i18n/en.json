@@ -1804,7 +1804,7 @@
     "missingSessionId": "Missing session id in the URL.",
     "transcriptEmpty": "Type a message below to start the conversation",
     "forkedEmptyTitle": "Forked session ready",
-    "forkedEmptyBody": "This session has been forked from the source context. The previous messages are preserved, so you can continue the conversation here.",
+    "forkedEmptyBody": "This session has been forked from the source context. The visible transcript starts clean, and the source context is preserved so you can continue the conversation here.",
     "forkedFromPrefix": "Forked from",
     "forkedSource": "Open source session",
     "scrollToBottom": "Scroll to latest",

@@ -213,7 +213,7 @@ def test_fork_session_creates_new_workbench_session(isolated_state, tmp_path):
     assert payload["id"] != session_id
     assert payload["scope_id"] == scope_id
     assert payload["project_id"] == "proj_stream"
-    assert payload["title"] == "Source session"
+    assert payload["title"] == "Fork Source session"
     assert payload["agent_backend"] == "claude"
     assert payload["agent_name"] == "worker"
     assert payload["native_session_id"] == ""
