@@ -130,6 +130,11 @@ export const ChatPage: React.FC = () => {
   // next toggle (the page row already exists, so `existed` alone won't re-prompt).
   const showPagePromptRetryRef = useRef<Set<string>>(new Set());
   const [showPageUrl, setShowPageUrl] = useState<string | null>(null);
+  // True while the share popover is open. The popover floats over the Show Page
+  // iframe; making the iframe inert lets an outside tap there reach the parent
+  // document so the (non-modal) popover dismisses, without modal-blocking the
+  // sibling header buttons (which would then need two taps).
+  const [shareOpen, setShareOpen] = useState(false);
   useEffect(() => {
     // ChatPage is reused across :sessionId — clear all show-page state so the
     // next chat starts in chat view with a live (not stuck-busy) toggle.
@@ -1333,6 +1338,7 @@ export const ChatPage: React.FC = () => {
           showPageBusy={showPageBusy}
           onToggleShowPage={toggleShowPage}
           onShowPageVisibilityChange={handleShowPagePayload}
+          onShareOpenChange={setShareOpen}
         />
 
       {showPageMode && showPageUrl && (
@@ -1354,7 +1360,7 @@ export const ChatPage: React.FC = () => {
           src={showPageUrl}
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
           allow="clipboard-write"
-          className="min-h-0 w-full flex-1 border-0 bg-background"
+          className={clsx('min-h-0 w-full flex-1 border-0 bg-background', shareOpen && 'pointer-events-none')}
         />
       )}
 
@@ -1519,9 +1525,10 @@ interface ChatHeaderBarProps {
   showPageBusy: boolean;
   onToggleShowPage: () => void;
   onShowPageVisibilityChange?: (payload: ShowPageLinkInfo) => void;
+  onShareOpenChange?: (open: boolean) => void;
 }
 
-const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onShowPageVisibilityChange }) => {
+const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onShowPageVisibilityChange, onShareOpenChange }) => {
   const { t } = useTranslation();
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   // Backend locks once a NATIVE conversation exists — a native can only be
@@ -1630,7 +1637,11 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
             </span>
           </Button>
           {showPageMode && (
-            <ShowPageShareControl sessionId={session.id} onPayloadChange={onShowPageVisibilityChange} />
+            <ShowPageShareControl
+              sessionId={session.id}
+              onPayloadChange={onShowPageVisibilityChange}
+              onOpenChange={onShareOpenChange}
+            />
           )}
         </div>
       </div>

@@ -24,7 +24,11 @@ export const ShowPageShareControl: React.FC<{
   // Lets the chat view re-point the iframe at the route that now serves the
   // page when visibility flips (private↔public swap the serving route).
   onPayloadChange?: (payload: ShowPageLinkInfo) => void;
-}> = ({ sessionId, onPayloadChange }) => {
+  // The popover floats over the Show Page iframe; the chat view makes the iframe
+  // inert while it is open so an outside tap there falls through to the parent
+  // document and Radix can dismiss (a tap inside an iframe never reaches us).
+  onOpenChange?: (open: boolean) => void;
+}> = ({ sessionId, onPayloadChange, onOpenChange }) => {
   const { t } = useTranslation();
   const api = useApi();
   const [open, setOpen] = useState(false);
@@ -67,6 +71,7 @@ export const ShowPageShareControl: React.FC<{
 
   const handleOpenChange = (next: boolean) => {
     setOpen(next);
+    onOpenChange?.(next);
     if (next) refresh();
   };
 
@@ -101,13 +106,8 @@ export const ShowPageShareControl: React.FC<{
     }
   };
 
-  // modal: the popover floats over the Show Page iframe; without it an outside
-  // tap lands inside the iframe (a separate browsing context) and never reaches
-  // the parent document, so Radix can't detect it to dismiss. modal adds a
-  // viewport guard above the iframe that captures the tap (mobile, where the
-  // iframe fills most of the screen, hit this; desktop has parent chrome around).
   return (
-    <Popover open={open} onOpenChange={handleOpenChange} modal>
+    <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
         <Button
           type="button"
