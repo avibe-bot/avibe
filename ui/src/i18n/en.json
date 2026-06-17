@@ -638,6 +638,7 @@
       "placeholder": "Search messages",
       "hint": "Search your messages",
       "empty": "No messages found",
+      "error": "Search failed — try again.",
       "kbdEsc": "Esc",
       "kbdNavigate": "Navigate",
       "kbdOpen": "Open",

@@ -1921,12 +1921,19 @@ const Transcript: React.FC<TranscriptProps> = ({
     if (!jumpTarget) return;
     const el = scrollRef.current;
     if (!el) return;
-    // If the target is already the newest loaded row (a recent search hit, or a
-    // just-sent message after an around-mode catch-up), pin to the bottom and keep
+    // If the target is the newest loaded row AND we're genuinely at the live tail
+    // (no around-window gap above the latest), pin to the bottom and keep
     // following instead of centering+unpinning — otherwise the next agent reply
-    // wouldn't auto-scroll into view (Codex P2). The mint highlight still applies
-    // via ``highlightedId``, independent of the scroll.
-    if (messages.length > 0 && messages[messages.length - 1]?.id === jumpTarget) {
+    // wouldn't auto-scroll into view. The mint highlight still applies via
+    // ``highlightedId``, independent of the scroll.
+    //
+    // The ``!hasNewer`` guard matters: in an around-window from a prior jump the
+    // last LOADED row is NOT the real tail (newer rows aren't fetched yet).
+    // Pinning here would hide the catch-up affordance while the around-mode
+    // onMessageNew guard still drops live rows, stranding the reader on history —
+    // so when hasNewer we fall through to the centering path, which keeps the
+    // jump-to-latest button visible.
+    if (!hasNewer && messages.length > 0 && messages[messages.length - 1]?.id === jumpTarget) {
       const rafTail = requestAnimationFrame(() => {
         scrollToBottom();
         onJumpHandled();
@@ -1957,7 +1964,7 @@ const Transcript: React.FC<TranscriptProps> = ({
       if (raf2) cancelAnimationFrame(raf2);
       suppressAnchorRef.current = false;
     };
-  }, [jumpTarget, messages, captureAnchor, onJumpHandled, scrollToBottom]);
+  }, [jumpTarget, messages, hasNewer, captureAnchor, onJumpHandled, scrollToBottom]);
 
   // The one place scroll position reacts to content size changes — two modes,
   // never conflated. (Conflating them WAS the bug: any resize while "at bottom"

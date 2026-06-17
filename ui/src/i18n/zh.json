@@ -638,6 +638,7 @@
       "placeholder": "搜索消息",
       "hint": "搜索你的消息",
       "empty": "未找到消息",
+      "error": "搜索失败，请重试。",
       "kbdEsc": "Esc",
       "kbdNavigate": "切换",
       "kbdOpen": "打开",

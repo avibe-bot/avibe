@@ -2,10 +2,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import * as DialogPrimitive from '@radix-ui/react-dialog';
-import { Loader2, Search } from 'lucide-react';
+import { AlertCircle, Loader2, Search } from 'lucide-react';
 
 import { useMessageSearch } from '../../../lib/useMessageSearch';
 import { Dialog, DialogOverlay, DialogPortal, DialogTitle } from '../../ui/dialog';
+import { Input } from '../../ui/input';
 import { SearchResultGroup } from './SearchResultGroup';
 
 type SearchPaletteProps = {
@@ -35,7 +36,7 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
-  const { results, loading } = useMessageSearch(query);
+  const { results, loading, error } = useMessageSearch(query);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
 
@@ -121,6 +122,7 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
 
   const trimmed = query.trim();
   const hasResults = (results?.sessions.length ?? 0) > 0;
+  const showError = trimmed.length > 0 && !loading && !!error;
   const showEmpty = trimmed.length > 0 && !loading && results !== null && !hasResults;
   const showHint = trimmed.length === 0;
 
@@ -144,12 +146,13 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
           {/* Query row — mint search glyph + input + Esc pill. */}
           <div className="flex shrink-0 items-center gap-3 border-b border-border px-[18px] py-4">
             <Search className="size-[18px] shrink-0 text-mint" />
-            <input
+            <Input
               ref={inputRef}
+              variant="bare"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder={t('workbench.search.placeholder')}
-              className="min-w-0 flex-1 bg-transparent text-[17px] text-foreground outline-none placeholder:text-muted"
+              className="min-w-0 flex-1 text-[17px]"
               aria-label={t('workbench.search.placeholder')}
               spellCheck={false}
               autoComplete="off"
@@ -170,6 +173,14 @@ export const SearchPalette: React.FC<SearchPaletteProps> = ({ open, onClose }) =
             {showEmpty && (
               <div className="px-2.5 py-10 text-center text-[13px] text-muted">
                 {t('workbench.search.empty')}
+              </div>
+            )}
+            {showError && (
+              <div className="px-2.5 py-10">
+                <div className="mx-auto flex max-w-sm items-center gap-2 rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[13px] text-destructive">
+                  <AlertCircle className="size-4 shrink-0" />
+                  <span>{t('workbench.search.error')}</span>
+                </div>
               </div>
             )}
             {hasResults && (
