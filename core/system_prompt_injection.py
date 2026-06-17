@@ -62,6 +62,11 @@ Current session id: `{default_session_id}`. Treat this as the authoritative Avib
 
 """
 
+_FORKED_SESSION_PROMPT = """\
+This Agent Session was forked from `{source_session_id}`. The authoritative Avibe session id for this fork is `{default_session_id}`. If copied source context mentions another Avibe session id, treat it as historical source-context only and use `{default_session_id}` for Show Pages, Harness commands, tasks, watches, callbacks, and session updates.
+
+"""
+
 _SHOW_PAGES_PROMPT = """\
 
 ## Show Pages
@@ -257,6 +262,27 @@ def _extract_default_session_id(context: MessageContext) -> str:
     return str(default_session_id)
 
 
+def _extract_fork_source_session_id(context: MessageContext) -> Optional[str]:
+    platform_specific = context.platform_specific or {}
+    target = platform_specific.get("agent_session_target")
+    if not isinstance(target, dict):
+        return None
+
+    fork = target.get("native_session_fork")
+    if isinstance(fork, dict):
+        source_session_id = str(fork.get("source_session_id") or "").strip()
+        if source_session_id:
+            return source_session_id
+
+    metadata = target.get("metadata")
+    if isinstance(metadata, dict):
+        source_session_id = str(metadata.get("fork_source_session_id") or "").strip()
+        if source_session_id:
+            return source_session_id
+
+    return None
+
+
 def _is_web_platform(platform: str) -> bool:
     return platform.strip().lower() in {"avibe", "web"}
 
@@ -339,7 +365,15 @@ def get_enabled_agents_for_prompt(controller: Any) -> Optional[list[AgentPromptI
 
 
 def _build_session_start_prompt(context: MessageContext) -> str:
-    return _SESSION_START_PROMPT.format(default_session_id=_extract_default_session_id(context))
+    default_session_id = _extract_default_session_id(context)
+    prompt = _SESSION_START_PROMPT.format(default_session_id=default_session_id)
+    source_session_id = _extract_fork_source_session_id(context)
+    if source_session_id and source_session_id != default_session_id:
+        prompt += _FORKED_SESSION_PROMPT.format(
+            default_session_id=default_session_id,
+            source_session_id=source_session_id,
+        )
+    return prompt
 
 
 def _build_harness_prompt(

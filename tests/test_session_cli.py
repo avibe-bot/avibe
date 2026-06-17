@@ -230,13 +230,17 @@ def test_link_inbound_is_noop_when_already_linked(monkeypatch, tmp_path):
 # ------------------------------------------------------------ title prompt
 
 
-def _injection_for(session_id, *, platform="avibe"):
+def _injection_for(session_id, *, platform="avibe", platform_specific=None):
     from core.system_prompt_injection import build_system_prompt_injection
     from modules.im.base import MessageContext
 
+    payload = {"agent_session_id": session_id}
+    if platform_specific:
+        payload.update(platform_specific)
+
     ctx = MessageContext(
         user_id="u", channel_id="c", platform=platform,
-        platform_specific={"agent_session_id": session_id},
+        platform_specific=payload,
     )
     return build_system_prompt_injection(context=ctx)
 
@@ -261,6 +265,48 @@ def test_im_title_prompt_is_not_injected():
     assert "## Session Title" not in out
     assert "vibe session update sesim --title" not in out
     assert "Current Session Reminder" in out  # the reminder itself still renders
+
+
+def test_forked_session_prompt_marks_target_session_id_authoritative():
+    out = _injection_for(
+        "sestarget",
+        platform_specific={
+            "agent_session_target": {
+                "id": "sestarget",
+                "native_session_fork": {
+                    "source_session_id": "sessource",
+                    "source_native_session_id": "native-source",
+                    "source_backend": "codex",
+                },
+            },
+        },
+    )
+
+    assert "Current session id: `sestarget`" in out
+    assert "This Agent Session was forked from `sessource`." in out
+    assert "The authoritative Avibe session id for this fork is `sestarget`." in out
+    assert "If copied source context mentions another Avibe session id" in out
+    assert "use `sestarget` for Show Pages, Harness commands, tasks, watches, callbacks, and session updates" in out
+
+
+def test_forked_session_prompt_can_use_persisted_metadata():
+    out = _injection_for(
+        "sestarget",
+        platform_specific={
+            "agent_session_target": {
+                "id": "sestarget",
+                "metadata": {
+                    "created_via": "session_fork",
+                    "fork_source_session_id": "sessource",
+                    "fork_source_native_session_id": "native-source",
+                    "fork_source_backend": "opencode",
+                },
+            },
+        },
+    )
+
+    assert "This Agent Session was forked from `sessource`." in out
+    assert "The authoritative Avibe session id for this fork is `sestarget`." in out
 
 
 # ------------------------------------------------ live session.activity endpoint

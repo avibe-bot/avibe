@@ -674,6 +674,145 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     assert calls[0]["reasoning_effort"] == "high"
 
 
+def test_opencode_fork_prompt_marks_target_session_id_authoritative():
+    calls = []
+
+    class _Server:
+        async def ensure_running(self):
+            return None
+
+        async def list_messages(self, session_id, directory):
+            return []
+
+        async def prompt_async(self, **kwargs):
+            calls.append(kwargs)
+
+        async def mark_run_active(self, session_id):
+            return None
+
+        async def mark_run_inactive(self, session_id):
+            return None
+
+        def get_default_agent_from_config(self):
+            return None
+
+        def get_agent_model_from_config(self, _agent):
+            return None
+
+        def get_agent_reasoning_effort_from_config(self, _agent):
+            return None
+
+    class _SessionManager:
+        async def ensure_working_dir(self, path):
+            return None
+
+        async def get_or_create_session_id(self, request, server):
+            return "oc-fork"
+
+        def set_request_session(self, *args):
+            return None
+
+        def mark_initialized(self, session_id):
+            return False
+
+    class _Sessions:
+        def add_active_poll(self, **kwargs):
+            return None
+
+        def remove_active_poll(self, session_id):
+            return None
+
+    class _PollLoop:
+        async def run_prompt_poll(self, *args, **kwargs):
+            return "done", True
+
+    async def _get_server():
+        return _Server()
+
+    async def _async_noop():
+        return None
+
+    class _Controller:
+        def __init__(self):
+            self.config = type(
+                "Config",
+                (),
+                {
+                    "platform": "avibe",
+                    "reply_enhancements": True,
+                    "show_pages_prompt": True,
+                    "remote_access": None,
+                    "language": "en",
+                    "opencode": type(
+                        "OpenCodeConfig",
+                        (),
+                        {
+                            "default_model": None,
+                            "default_provider": None,
+                            "default_reasoning_effort": None,
+                        },
+                    )(),
+                },
+            )()
+            self.im_client = _StubClient("avibe")
+            self.settings_manager = type("Settings", (), {"sessions": _Sessions()})()
+            self.sessions = self.settings_manager.sessions
+            self.processing_indicator = type("Processing", (), {"snapshot_request": lambda self, request: {}})()
+
+        def get_opencode_overrides(self, context):
+            return None, None, None
+
+    agent = OpenCodeAgent.__new__(OpenCodeAgent)
+    agent.controller = _Controller()
+    agent.config = agent.controller.config
+    agent.im_client = agent.controller.im_client
+    agent.settings_manager = agent.controller.settings_manager
+    agent.sessions = agent.controller.sessions
+    agent.opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+    agent._session_manager = _SessionManager()
+    agent._poll_loop = _PollLoop()
+    agent._get_server = _get_server
+    agent._delete_ack = lambda request: _async_noop()
+    agent._remove_ack_reaction = lambda request: _async_noop()
+    agent.emit_result_message = lambda *args, **kwargs: _async_noop()
+
+    async def _run():
+        request = AgentRequest(
+            context=MessageContext(
+                user_id="u",
+                channel_id="ses-target",
+                platform="avibe",
+                platform_specific={
+                    "agent_session_id": "ses-target",
+                    "agent_session_target": {
+                        "id": "ses-target",
+                        "agent_backend": "opencode",
+                        "native_session_id": "",
+                        "native_session_fork": {
+                            "source_session_id": "ses-source",
+                            "source_native_session_id": "oc-source",
+                            "source_backend": "opencode",
+                        },
+                    },
+                },
+            ),
+            message="hello",
+            working_path="/tmp/work",
+            base_session_id="ses-target",
+            composite_session_id="ses-target:/tmp/work",
+            session_key="avibe::ses-target",
+        )
+        await agent._process_message(request)
+
+    asyncio.run(_run())
+
+    system = calls[0]["system"]
+    assert "Current session id: `ses-target`" in system
+    assert "This Agent Session was forked from `ses-source`." in system
+    assert "The authoritative Avibe session id for this fork is `ses-target`." in system
+    assert "use `ses-target` for Show Pages" in system
+
+
 def test_opencode_normal_text_matching_legacy_question_prefix_is_processed():
     processed = []
 

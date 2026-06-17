@@ -218,6 +218,12 @@ def test_session_handler_sets_claude_fork_session_for_pending_native_fork(monkey
     assert captured["options"].extra_args == {"model": "claude-sonnet-4-5"}
     assert captured["options"].effort == "high"
     assert not hasattr(client, "_vibe_native_session_id")
+    prompt_value = captured["options"].system_prompt
+    prompt = prompt_value["append"] if isinstance(prompt_value, dict) else prompt_value
+    assert "Current session id: `ses-target`" in prompt
+    assert "This Agent Session was forked from `ses-source`." in prompt
+    assert "The authoritative Avibe session id for this fork is `ses-target`." in prompt
+    assert "use `ses-target` for Show Pages" in prompt
 
 
 def test_session_handler_disallows_remote_unsafe_claude_tools(monkeypatch, tmp_path: Path) -> None:

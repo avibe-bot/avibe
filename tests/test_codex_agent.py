@@ -1270,6 +1270,14 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["sandbox"], "danger-full-access")
         self.assertEqual(params["model"], "gpt-5.2")
         self.assertNotIn("effort", params)
+        developer_instructions = params["developerInstructions"]
+        self.assertIn("Current session id: `ses-target`", developer_instructions)
+        self.assertIn("This Agent Session was forked from `ses-source`.", developer_instructions)
+        self.assertIn(
+            "The authoritative Avibe session id for this fork is `ses-target`.",
+            developer_instructions,
+        )
+        self.assertIn("use `ses-target` for Show Pages", developer_instructions)
         agent.sessions.bind_agent_session.assert_called_once_with(
             "avibe::project::proj_1",
             "codex",
