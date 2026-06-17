@@ -46,6 +46,11 @@ export const ShowPageShareControl: React.FC<{
     if (payload) onPayloadChange?.(payload);
   }, [payload, onPayloadChange]);
 
+  // If we unmount while open (a route/session change tears down Show Page mode),
+  // Radix won't fire onOpenChange, so report closed here — otherwise the chat
+  // view would keep the iframe inert (pointer-events:none) on the next Show Page.
+  useEffect(() => () => onOpenChange?.(false), [onOpenChange]);
+
   const offline = payload?.visibility === 'offline' || payload?.offline === true;
   const isPublic = payload?.visibility === 'public';
   // Absolute, copyable href; falls back to the same-origin route when Avibe
