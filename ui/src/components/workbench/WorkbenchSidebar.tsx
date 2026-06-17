@@ -723,11 +723,11 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         type="button"
         variant="ghost"
         onClick={onOpenSearch}
-        className="h-auto w-full justify-start gap-2 rounded-lg border border-border-strong bg-foreground/[0.03] px-[11px] py-[9px] text-left font-normal transition hover:bg-foreground/[0.05]"
+        className="h-auto w-full justify-start gap-2 rounded-lg border border-border-strong bg-foreground/[0.03] px-3 py-2.5 text-left font-normal transition hover:bg-foreground/[0.05]"
       >
         <Search className="size-3.5 shrink-0 text-muted" />
         <span className="flex-1 truncate text-[13px] text-muted">{t('workbench.search.entry')}</span>
-        <kbd className="shrink-0 rounded-[5px] border border-border bg-foreground/[0.06] px-1.5 py-0.5 font-mono text-[11px] font-medium text-muted">
+        <kbd className="shrink-0 rounded-[5px] border border-border bg-foreground/[0.06] px-1.5 py-0.5 font-mono text-[11px] font-medium leading-none text-muted">
           ⌘K
         </kbd>
       </Button>
