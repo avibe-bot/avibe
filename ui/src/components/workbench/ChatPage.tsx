@@ -2062,7 +2062,13 @@ const Transcript: React.FC<TranscriptProps> = ({
   }
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
-      <SelectionQuoteToolbar containerRef={scrollRef} onQuote={onQuoteSelection} onAskInNew={onAskInNewSession} />
+      <SelectionQuoteToolbar
+        containerRef={scrollRef}
+        onQuote={onQuoteSelection}
+        // Forking needs a bound native session (mirrors the sidebar's fork gate);
+        // omit the action otherwise so it isn't offered just to 409.
+        onAskInNew={session.native_session_id ? onAskInNewSession : undefined}
+      />
       {/* [-webkit-touch-callout:none] suppresses the iOS selection callout so our
           toolbar is the selection UI on mobile (we re-offer Copy there). */}
       <div ref={scrollRef} onScroll={handleScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-5 [overflow-anchor:none] [-webkit-touch-callout:none] md:px-8">

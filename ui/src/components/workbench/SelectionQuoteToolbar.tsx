@@ -1,27 +1,40 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { Check, Copy, GitFork, TextQuote } from 'lucide-react';
 
+import { Button } from '../ui/button';
 import { copyTextToClipboard } from '../../lib/utils';
 
 type SelectionState = { text: string; top: number; bottom: number; left: number };
 
-const TOOLBAR_H = 38;
+const TOOLBAR_H = 36;
 const GAP = 8;
+const EDGE = 8;
 
 // A floating toolbar that appears over a text selection inside the chat
 // transcript. "Quote" appends the (quoted) selection to the current composer;
-// "Ask in a new session" forks + prefills the fork's draft; "Copy" (mobile
-// only) replaces the native callout that the transcript suppresses there.
+// "Ask in a new session" forks + prefills the fork's draft (only offered when
+// the session is forkable); "Copy" replaces the native callout that the
+// transcript suppresses on touch devices.
 export const SelectionQuoteToolbar: React.FC<{
   containerRef: React.RefObject<HTMLDivElement | null>;
   onQuote: (text: string) => void;
-  onAskInNew: (text: string) => void;
+  // Omitted when the session can't be forked yet (no native id) — the action is
+  // hidden rather than offered just to 409.
+  onAskInNew?: (text: string) => void;
 }> = ({ containerRef, onQuote, onAskInNew }) => {
   const { t } = useTranslation();
   const [sel, setSel] = useState<SelectionState | null>(null);
   const [copied, setCopied] = useState(false);
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(0);
+  // Touch devices get a Copy action because the transcript suppresses the native
+  // selection callout there (a coarse pointer covers phones AND tablets/iPads,
+  // unlike a width breakpoint).
+  const [isTouch] = useState(
+    () => typeof window !== 'undefined' && !!window.matchMedia?.('(pointer: coarse)').matches,
+  );
 
   useEffect(() => {
     const container = containerRef.current;
@@ -66,6 +79,12 @@ export const SelectionQuoteToolbar: React.FC<{
     };
   }, [containerRef]);
 
+  // Measure the rendered toolbar so we can clamp it on-screen by its real width
+  // (the label widths vary by locale + how many actions are shown).
+  useLayoutEffect(() => {
+    if (sel && toolbarRef.current) setWidth(toolbarRef.current.offsetWidth);
+  }, [sel, onAskInNew, isTouch]);
+
   if (!sel) return null;
 
   const dismiss = () => {
@@ -77,8 +96,8 @@ export const SelectionQuoteToolbar: React.FC<{
     onQuote(sel.text);
     dismiss();
   };
-  const runAskInNew = () => {
-    onAskInNew(sel.text);
+  const runAsk = () => {
+    onAskInNew?.(sel.text);
     dismiss();
   };
   const runCopy = () => {
@@ -91,15 +110,16 @@ export const SelectionQuoteToolbar: React.FC<{
     });
   };
 
-  const above = sel.top > TOOLBAR_H + GAP + 8;
+  const above = sel.top > TOOLBAR_H + GAP + EDGE;
   const top = above ? sel.top - TOOLBAR_H - GAP : sel.bottom + GAP;
-  const left = Math.min(Math.max(sel.left, 96), window.innerWidth - 96);
+  const half = width / 2;
+  const left = Math.min(Math.max(sel.left, EDGE + half), window.innerWidth - EDGE - half);
 
-  const itemClass =
-    'flex items-center gap-1.5 px-3 py-2 text-[13px] font-medium text-foreground transition-colors hover:bg-foreground/[0.06]';
+  const itemClass = 'h-9 gap-1.5 rounded-none px-3 text-[13px] font-medium';
 
   return createPortal(
     <div
+      ref={toolbarRef}
       role="toolbar"
       // Keep the selection alive when the toolbar is pressed (desktop). On touch
       // the handlers use the captured `sel.text`, so a collapse is harmless too.
@@ -107,22 +127,28 @@ export const SelectionQuoteToolbar: React.FC<{
       style={{ position: 'fixed', top, left, transform: 'translateX(-50%)', zIndex: 60 }}
       className="flex items-center overflow-hidden rounded-lg border border-border-strong bg-surface-2 shadow-[0_12px_30px_-8px_rgba(0,0,0,0.7)]"
     >
-      <button type="button" className={itemClass} onClick={runQuote}>
+      <Button variant="ghost" className={itemClass} onClick={runQuote}>
         <TextQuote className="size-3.5 text-muted" />
         {t('chat.selection.quote')}
-      </button>
-      <span className="h-5 w-px bg-border" />
-      <button type="button" className={itemClass} onClick={runAskInNew}>
-        <GitFork className="size-3.5 text-muted" />
-        {t('chat.selection.askInNew')}
-      </button>
-      {/* Copy is mobile-only: the transcript suppresses the native iOS callout
-          there, so we re-offer copy ourselves. Desktop keeps Cmd/Ctrl+C. */}
-      <span className="h-5 w-px bg-border md:hidden" />
-      <button type="button" className={`${itemClass} md:hidden`} onClick={runCopy}>
-        {copied ? <Check className="size-3.5 text-mint" /> : <Copy className="size-3.5 text-muted" />}
-        {t('chat.selection.copy')}
-      </button>
+      </Button>
+      {onAskInNew && (
+        <>
+          <span className="h-5 w-px bg-border" />
+          <Button variant="ghost" className={itemClass} onClick={runAsk}>
+            <GitFork className="size-3.5 text-muted" />
+            {t('chat.selection.askInNew')}
+          </Button>
+        </>
+      )}
+      {isTouch && (
+        <>
+          <span className="h-5 w-px bg-border" />
+          <Button variant="ghost" className={itemClass} onClick={runCopy}>
+            {copied ? <Check className="size-3.5 text-mint" /> : <Copy className="size-3.5 text-muted" />}
+            {t('chat.selection.copy')}
+          </Button>
+        </>
+      )}
     </div>,
     document.body,
   );
