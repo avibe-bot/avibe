@@ -1523,15 +1523,8 @@ class FeishuBot(BaseIMClient):
                         logger.debug("Ignoring non-mention message in channel")
                         return
                 else:
-                    if self.settings_manager:
-                        thread_active = self.sessions.is_thread_active(user_id, chat_id, root_id) if self.sessions else False
-                        scheduled_thread_active = (
-                            self.sessions.is_thread_active("scheduled", chat_id, root_id) if self.sessions else False
-                        )
-                        if not thread_active and not scheduled_thread_active:
-                            logger.debug("Ignoring message in inactive thread %s", root_id)
-                            return
-                    else:
+                    if not bot_mentioned and not self.is_scheduled_thread_active(chat_id, root_id):
+                        logger.debug("Ignoring non-mention message in thread %s", root_id)
                         return
 
             auth_result = self.check_authorization(

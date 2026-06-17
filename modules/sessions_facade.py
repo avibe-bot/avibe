@@ -321,6 +321,12 @@ class SessionsFacade:
             return True
         return self._is_thread_active_for_any_user(channel_id, thread_ts)
 
+    def is_thread_active_for_user(self, user_id: Union[int, str], channel_id: str, thread_ts: str) -> bool:
+        user_key = self._normalize_user_id(user_id)
+        self._cleanup_expired_threads_for_channel(user_id, channel_id)
+        channel_map = self.sessions_store.get_thread_map(user_key, channel_id)
+        return thread_ts in channel_map
+
     def _is_thread_active_for_any_user(self, channel_id: str, thread_ts: str) -> bool:
         """Return whether a channel thread is active for any participant.
 
