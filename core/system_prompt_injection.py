@@ -12,6 +12,7 @@ from typing import Any, Iterable, Optional
 
 from config import paths
 from core.avibe_cloud import AVIBE_CLOUD_CONNECT_GUIDANCE
+from core.message_context import resolve_context_platform
 from modules.im import MessageContext
 
 logger = logging.getLogger(__name__)
@@ -217,14 +218,16 @@ _SESSION_END_PROMPT = """\
 Current session id: `{default_session_id}`. Before using Show Page or Harness commands, target this exact session unless the user explicitly asks to target a different one.
 """
 
-# Appended to the session reminder ONLY when the session has no user-chosen title
-# (empty, or a title_source other than "user" — i.e. auto-generated or not yet set).
-# Nudges the agent to set a short, human-scannable title via the CLI so sessions are
-# easy to find in `vibe session list`. A CLI update lands as title_source="user", so
-# the nudge stops on the next turn — it naturally fires at most once per session.
-_SESSION_TITLE_NUDGE = """\
-This session's title is {title_state}. If you can tell what it's about, set a concise title (≤10 chars) once, silently — don't mention it to the user:
+_SESSION_TITLE_PROMPT = """\
+
+## Session Title
+When the topic of this Web conversation is clear, you may silently set one concise, human-scannable title for the current Session once. Before setting it, inspect the Session:
+`vibe session get {default_session_id}`
+
+If `metadata.title_source` is `user` or `agent`, leave the title unchanged; that means the title was deliberately set or cleared. Otherwise, set it once:
 `vibe session update {default_session_id} --title "<short title>"`
+
+Do not mention the title update unless the user asks, and do not repeatedly rename the same Session.
 """
 
 
@@ -252,6 +255,10 @@ def _extract_default_session_id(context: MessageContext) -> str:
     if not default_session_id:
         raise ValueError("agent_session_id is required before building avibe capability prompt")
     return str(default_session_id)
+
+
+def _is_web_platform(platform: str) -> bool:
+    return platform.strip().lower() in {"avibe", "web"}
 
 
 def _coerce_agent_prompt_info(agent: Any) -> AgentPromptInfo:
@@ -357,46 +364,16 @@ def _build_show_pages_prompt(context: MessageContext, *, avibe_cloud_guidance: s
     )
 
 
-def _lookup_session_title(session_id: str) -> Optional[tuple[str, Optional[str]]]:
-    """Return ``(title, title_source)`` for a session, or ``None`` if it can't be
-    read. Best-effort: a lookup failure must never break prompt injection."""
-    try:
-        from core.services import sessions as sessions_service
-        from storage.db import create_sqlite_engine
-
-        engine = create_sqlite_engine(paths.get_sqlite_state_path())
-        with engine.connect() as conn:
-            row = sessions_service.get_session(conn, session_id)
-        title = str(row.get("title") or "").strip()
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-        return title, metadata.get("title_source")
-    except Exception:
-        logger.debug("session title lookup for prompt nudge failed", exc_info=True)
-        return None
-
-
-def _build_session_end_prompt(context: MessageContext) -> str:
+def _build_session_end_prompt(
+    context: MessageContext,
+    *,
+    fallback_platform: Optional[str] = None,
+) -> str:
     default_session_id = _extract_default_session_id(context)
     prompt = _SESSION_END_PROMPT.format(default_session_id=default_session_id)
-    looked_up = _lookup_session_title(default_session_id)
-    if looked_up is not None:
-        # Lazy import: keep this module's load storage-free so the agent-setup /
-        # session-handler import chain never transitively pulls in sqlite
-        # (test_native_session_lightweight_imports_do_not_require_sqlite).
-        from storage.workbench_sessions_service import DELIBERATE_TITLE_SOURCES
-
-        title, title_source = looked_up
-        # Nudge only when the title is NOT deliberately owned. DELIBERATE_TITLE_SOURCES
-        # = {"user", "agent"} covers a title set OR cleared on purpose (update_session
-        # stamps the source even for an empty title) — never re-nudge those, or we'd
-        # undo a deliberate clear / re-prompt an agent that already named it. Auto
-        # sources ("backend", "derived_first_prompt") and a never-touched session (no
-        # title_source) still nudge.
-        if title_source not in DELIBERATE_TITLE_SOURCES:
-            title_state = "not set yet" if not title else f'"{title}" (auto-generated)'
-            prompt += "\n" + _SESSION_TITLE_NUDGE.format(
-                title_state=title_state, default_session_id=default_session_id
-            )
+    platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
+    if _is_web_platform(platform):
+        prompt += _SESSION_TITLE_PROMPT.format(default_session_id=default_session_id)
     return prompt
 
 
@@ -405,10 +382,7 @@ def _build_user_preferences_prompt(
     *,
     fallback_platform: Optional[str] = None,
 ) -> str:
-    platform = fallback_platform or "<platform>"
-    if context is not None:
-        platform_specific = context.platform_specific or {}
-        platform = context.platform or platform_specific.get("platform") or fallback_platform or "<platform>"
+    platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
     return _USER_PREFERENCES_PROMPT.format(
         preferences_path=f"`{paths.get_user_preferences_path()}`",
         platform=platform,
@@ -451,7 +425,7 @@ def build_system_prompt_injection(
     if include_user_preferences:
         prompt += _build_user_preferences_prompt(context, fallback_platform=fallback_platform)
     if context is not None:
-        prompt += _build_session_end_prompt(context)
+        prompt += _build_session_end_prompt(context, fallback_platform=fallback_platform)
     return prompt
 
 

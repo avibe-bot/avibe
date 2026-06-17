@@ -227,61 +227,40 @@ def test_link_inbound_is_noop_when_already_linked(monkeypatch, tmp_path):
     assert sid == "sesim"
 
 
-# ------------------------------------------------------------ title nudge prompt
+# ------------------------------------------------------------ title prompt
 
 
-def _injection_for(session_id):
+def _injection_for(session_id, *, platform="avibe"):
     from core.system_prompt_injection import build_system_prompt_injection
     from modules.im.base import MessageContext
 
     ctx = MessageContext(
-        user_id="u", channel_id="c", platform="avibe",
+        user_id="u", channel_id="c", platform=platform,
         platform_specific={"agent_session_id": session_id},
     )
     return build_system_prompt_injection(context=ctx)
 
 
-def test_title_nudge_when_empty(monkeypatch, tmp_path):
-    engine = _setup(monkeypatch, tmp_path)
-    _seed(engine, "sesnone", title="")
-    out = _injection_for("sesnone")
+def test_web_title_prompt_is_fixed_and_uses_session_id():
+    out = _injection_for("sesweb")
+    assert "## Session Title" in out
     # the command carries the REAL session id (not a <id> placeholder)
-    assert 'vibe session update sesnone --title "<short title>"' in out
-    assert "not set yet" in out
-    assert "silently" in out  # only update once, without disturbing the user
+    assert "vibe session get sesweb" in out
+    assert 'vibe session update sesweb --title "<short title>"' in out
+    assert "metadata.title_source" in out
+    assert "`user` or `agent`" in out
+    assert "leave the title unchanged" in out
+    assert "may silently set one concise, human-scannable title" in out
+    assert "do not repeatedly rename the same Session" in out
+    assert "not set yet" not in out
+    assert "auto-generated" not in out
 
 
-def test_title_nudge_when_auto_generated(monkeypatch, tmp_path):
-    engine = _setup(monkeypatch, tmp_path)
-    _seed(engine, "sesauto", title="Some auto title", title_source="backend")
-    out = _injection_for("sesauto")
-    assert "vibe session update sesauto --title" in out
-    assert "auto-generated" in out
-
-
-def test_no_title_nudge_when_user_set(monkeypatch, tmp_path):
-    engine = _setup(monkeypatch, tmp_path)
-    _seed(engine, "sesuser", title="Release review", title_source="user")
-    out = _injection_for("sesuser")
-    assert "vibe session update sesuser --title" not in out
+def test_im_title_prompt_is_not_injected():
+    out = _injection_for("sesim", platform="slack")
+    assert "## Session Title" not in out
+    assert "vibe session update sesim --title" not in out
     assert "Current Session Reminder" in out  # the reminder itself still renders
-
-
-def test_no_title_nudge_when_user_cleared(monkeypatch, tmp_path):
-    # A user who deliberately cleared the title (empty + title_source="user") must
-    # NOT be nudged, or the agent would undo the clear next turn (Codex P2).
-    engine = _setup(monkeypatch, tmp_path)
-    _seed(engine, "sescleared", title="", title_source="user")
-    out = _injection_for("sescleared")
-    assert "vibe session update sescleared --title" not in out
-
-
-def test_no_title_nudge_when_agent_set(monkeypatch, tmp_path):
-    # Once the agent names it (title_source="agent"), the nudge stops — fires once.
-    engine = _setup(monkeypatch, tmp_path)
-    _seed(engine, "sesagent", title="CLI design", title_source="agent")
-    out = _injection_for("sesagent")
-    assert "vibe session update sesagent --title" not in out
 
 
 # ------------------------------------------------ live session.activity endpoint
