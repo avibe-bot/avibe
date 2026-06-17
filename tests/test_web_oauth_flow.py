@@ -18,7 +18,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from core.agent_auth_service import AgentAuthService, WebAuthFlow
+from core.agent_auth_service import (
+    AgentAuthService,
+    ClaudeOAuthAttempt,
+    ClaudeOAuthBatch,
+    WebAuthFlow,
+)
 from modules.agents.opencode.message_processor import extract_opencode_response_text
 
 
@@ -261,55 +266,64 @@ def test_claude_web_oauth_failures_restore_settings_after_batch_finishes(
     service: AgentAuthService,
 ) -> None:
     backup = {"ANTHROPIC_API_KEY": "sk-old", "ANTHROPIC_BASE_URL": "https://old.example"}
-    first_flow = WebAuthFlow(
-        flow_id="claude-first",
-        backend="claude",
-        state="verifying",
-        claude_settings_env_backup=backup,
-        claude_oauth_generation=service._next_claude_web_oauth_generation(),
+    service._temporarily_clear_claude_settings_env_for_oauth = AsyncMock(
+        side_effect=[backup, None],
     )
-    second_flow = WebAuthFlow(
-        flow_id="claude-second",
-        backend="claude",
-        state="verifying",
-        claude_oauth_generation=service._next_claude_web_oauth_generation(),
-    )
-    service._remember_claude_web_oauth_settings_backup(backup)
     service._restore_claude_settings_env_after_oauth_failure = AsyncMock()
 
-    _run(service._finish_claude_web_oauth_flow(first_flow, succeeded=False))
+    first_attempt = _run(service._begin_claude_oauth_attempt())
+    second_attempt = _run(service._begin_claude_oauth_attempt())
+
+    _run(service._finish_claude_oauth_attempt(first_attempt, succeeded=False))
     service._restore_claude_settings_env_after_oauth_failure.assert_not_awaited()
 
-    _run(service._finish_claude_web_oauth_flow(second_flow, succeeded=False))
+    _run(service._finish_claude_oauth_attempt(second_attempt, succeeded=False))
     service._restore_claude_settings_env_after_oauth_failure.assert_awaited_once_with(backup)
-    assert first_flow.claude_settings_env_backup is None
+    assert first_attempt.settings_backup is None
+    assert second_attempt.settings_backup is None
 
 
 def test_stale_claude_web_oauth_failure_ignores_backup_after_newer_success(
     service: AgentAuthService,
 ) -> None:
     stale_backup = {"ANTHROPIC_API_KEY": "sk-old", "ANTHROPIC_BASE_URL": "https://old.example"}
-    stale_flow = WebAuthFlow(
-        flow_id="claude-stale",
-        backend="claude",
-        state="verifying",
-        claude_settings_env_backup=stale_backup,
-        claude_oauth_generation=service._next_claude_web_oauth_generation(),
+    service._temporarily_clear_claude_settings_env_for_oauth = AsyncMock(
+        side_effect=[stale_backup, None],
     )
-    newer_flow = WebAuthFlow(
-        flow_id="claude-newer",
-        backend="claude",
-        state="success",
-        claude_oauth_generation=service._next_claude_web_oauth_generation(),
-    )
-    service._remember_claude_web_oauth_settings_backup(stale_backup)
     service._restore_claude_settings_env_after_oauth_failure = AsyncMock()
 
-    _run(service._finish_claude_web_oauth_flow(newer_flow, succeeded=True))
-    _run(service._finish_claude_web_oauth_flow(stale_flow, succeeded=False))
+    stale_attempt = _run(service._begin_claude_oauth_attempt())
+    newer_attempt = _run(service._begin_claude_oauth_attempt())
+
+    _run(service._finish_claude_oauth_attempt(newer_attempt, succeeded=True))
+    _run(service._finish_claude_oauth_attempt(stale_attempt, succeeded=False))
 
     service._restore_claude_settings_env_after_oauth_failure.assert_not_awaited()
-    assert stale_flow.claude_settings_env_backup is None
+    assert stale_attempt.settings_backup is None
+    assert newer_attempt.settings_backup is None
+
+
+def test_claude_oauth_new_batch_restores_after_previous_batch_success(
+    service: AgentAuthService,
+) -> None:
+    first_backup = {"ANTHROPIC_API_KEY": "sk-old"}
+    second_backup = {"ANTHROPIC_API_KEY": "sk-second"}
+    service._temporarily_clear_claude_settings_env_for_oauth = AsyncMock(
+        side_effect=[first_backup, None, second_backup],
+    )
+    service._restore_claude_settings_env_after_oauth_failure = AsyncMock()
+
+    stale_attempt = _run(service._begin_claude_oauth_attempt())
+    winning_attempt = _run(service._begin_claude_oauth_attempt())
+    _run(service._finish_claude_oauth_attempt(winning_attempt, succeeded=True))
+    _run(service._finish_claude_oauth_attempt(stale_attempt, succeeded=False))
+
+    next_attempt = _run(service._begin_claude_oauth_attempt())
+    _run(service._finish_claude_oauth_attempt(next_attempt, succeeded=False))
+
+    service._restore_claude_settings_env_after_oauth_failure.assert_awaited_once_with(
+        second_backup
+    )
 
 
 def test_post_web_success_hook_unset_is_safe(
@@ -689,6 +703,10 @@ def test_verify_web_login_claude_forces_oauth_env(
     monkeypatch.setattr(_Backend, "base_url", "https://configured-relay.example", raising=False)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
     original_backup = {"ANTHROPIC_API_KEY": "sk-original"}
+    attempt = ClaudeOAuthAttempt(
+        attempt_id=1,
+        batch=ClaudeOAuthBatch(backup=original_backup),
+    )
     clear_calls: list[str] = []
     observed_backup_after_probe: list[dict[str, str] | None] = []
 
@@ -699,15 +717,20 @@ def test_verify_web_login_claude_forces_oauth_env(
     original_verify_login = service._verify_login
 
     async def verify_login_with_existing_backup(flow):
-        flow.claude_settings_env_backup = original_backup
         result = await original_verify_login(flow)
-        observed_backup_after_probe.append(flow.claude_settings_env_backup)
+        observed_backup_after_probe.append(flow.claude_oauth_attempt.settings_backup)
         return result
 
     monkeypatch.setattr(service, "_verify_login", verify_login_with_existing_backup)
     monkeypatch.setattr(service, "_temporarily_clear_claude_settings_env_for_oauth", clear_settings)
 
-    ok, detail = _run(service._verify_web_login("claude", force_oauth=True))
+    ok, detail = _run(
+        service._verify_web_login(
+            "claude",
+            force_oauth=True,
+            claude_oauth_attempt=attempt,
+        )
+    )
 
     assert ok is True
     assert detail == '{"loggedIn": true}'
@@ -715,6 +738,7 @@ def test_verify_web_login_claude_forces_oauth_env(
     assert "ANTHROPIC_BASE_URL" not in captured["env"]
     assert clear_calls == ["called"]
     assert observed_backup_after_probe == [original_backup]
+    assert attempt.settings_backup == original_backup
 
 
 def test_test_web_auth_claude_oauth_env_removes_stale_anthropic_vars(

@@ -288,11 +288,30 @@ class AgentAuthFlow:
     provider: str | None = None
     last_status_text: str | None = None
     force_oauth: bool = False
-    claude_settings_env_backup: dict[str, str] | None = None
+    claude_oauth_attempt: "ClaudeOAuthAttempt | None" = None
 
     @property
     def flow_key(self) -> str:
         return f"{self.settings_key}:{self.backend}"
+
+
+@dataclass
+class ClaudeOAuthBatch:
+    backup: dict[str, str] | None
+    attempts: dict[int, "ClaudeOAuthAttempt"] = field(default_factory=dict)
+    committed: bool = False
+
+
+@dataclass
+class ClaudeOAuthAttempt:
+    attempt_id: int
+    batch: ClaudeOAuthBatch
+    active: bool = True
+    succeeded: bool = False
+
+    @property
+    def settings_backup(self) -> dict[str, str] | None:
+        return self.batch.backup
 
 
 # Web Settings → Backends OAuth flows live alongside the IM ``AgentAuthFlow``
@@ -322,8 +341,7 @@ class WebAuthFlow:
     # — accessing a runtime-assigned attribute on Claude/Codex flows
     # would AttributeError out and 500 the start endpoint.
     provider: str | None = None
-    claude_settings_env_backup: dict[str, str] | None = None
-    claude_oauth_generation: int | None = None
+    claude_oauth_attempt: ClaudeOAuthAttempt | None = None
     created_at: float = field(default_factory=time.time)
     # Timestamp the flow first entered a terminal state (success /
     # failed / cancelled). ``None`` while the flow is still in
@@ -347,10 +365,8 @@ class AgentAuthService:
         # context exists for them, so they cannot live in ``_flows``.
         self._web_flows: dict[str, WebAuthFlow] = {}
         self._web_flow_lock = asyncio.Lock()
-        self._claude_web_oauth_generation = 0
-        self._claude_web_oauth_success_generation = 0
-        self._claude_web_oauth_active_generations: set[int] = set()
-        self._claude_web_oauth_settings_backup: dict[str, str] | None = None
+        self._claude_oauth_attempt_counter = 0
+        self._claude_oauth_batch: ClaudeOAuthBatch | None = None
         # Optional callable invoked after a successful *web* auth flow so
         # the UI-server process can ask the long-running controller to
         # reload V2Config-backed credentials. The hook receives ``(backend,)``
@@ -628,7 +644,7 @@ class AgentAuthService:
                     waiter_task=asyncio.create_task(asyncio.sleep(0)),
                 )
             elif resolved_backend == "claude":
-                client, manual_url, settings_backup = await self._start_claude_control_flow(
+                client, manual_url, attempt = await self._start_claude_control_flow(
                     context,
                     force_reset=force_reset,
                     login_with_claude_ai=claude_login_method != "console",
@@ -645,7 +661,7 @@ class AgentAuthService:
                     claude_client=client,
                     login_prompt_sent=True,
                     url=manual_url,
-                    claude_settings_env_backup=settings_backup,
+                    claude_oauth_attempt=attempt,
                 )
             else:
                 provider = await self._resolve_opencode_provider(context)
@@ -892,7 +908,7 @@ class AgentAuthService:
         *,
         force_reset: bool,
         login_with_claude_ai: bool,
-    ) -> tuple[ClaudeSDKClient, str, dict[str, str] | None]:
+    ) -> tuple[ClaudeSDKClient, str, ClaudeOAuthAttempt]:
         if not CLAUDE_SDK_AVAILABLE:
             raise ModuleNotFoundError("claude_agent_sdk is required for Claude setup flows")
 
@@ -901,7 +917,7 @@ class AgentAuthService:
         # Claude Code re-applies ``settings.json`` env at startup, so an
         # OAuth flow must clear stale API-key settings before the control
         # client or follow-up probes launch.
-        settings_backup = await self._temporarily_clear_claude_settings_env_for_oauth()
+        attempt = await self._begin_claude_oauth_attempt()
         client = None
         try:
             client = await self._create_claude_control_client(context)
@@ -913,18 +929,18 @@ class AgentAuthService:
                 },
             )
         except Exception:
-            await self._restore_claude_settings_env_after_oauth_failure(settings_backup)
+            await self._finish_claude_oauth_attempt(attempt, succeeded=False)
             if client is not None:
                 await self._disconnect_claude_client(client)
             raise
 
         manual_url = str(response.get("manualUrl") or "").strip()
         if not manual_url:
-            await self._restore_claude_settings_env_after_oauth_failure(settings_backup)
+            await self._finish_claude_oauth_attempt(attempt, succeeded=False)
             if client is not None:
                 await self._disconnect_claude_client(client)
             raise RuntimeError("Claude auth flow did not return a manual login URL")
-        return client, manual_url, settings_backup
+        return client, manual_url, attempt
 
     async def _create_claude_control_client(
         self, context: Optional[MessageContext] = None
@@ -1281,16 +1297,14 @@ class AgentAuthService:
             ok, detail = await self._verify_login(flow)
             if ok:
                 await self._persist_backend_auth_mode(flow.backend, "oauth")
-                flow.claude_settings_env_backup = None
+                await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=True)
                 await self._refresh_backend_runtime(flow.backend)
                 await self._send_message(
                     flow.context,
                     f"✅ {self._t('command.setup.success', backend=flow.backend)}",
                 )
             else:
-                await self._restore_claude_settings_env_after_oauth_failure(
-                    flow.claude_settings_env_backup
-                )
+                await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
                 detail_text = detail or self._t("command.setup.unknownFailure")
                 await self._send_message_with_button(
                     flow.context,
@@ -1299,9 +1313,7 @@ class AgentAuthService:
                     callback_data=f"auth_setup:{flow.backend}",
                 )
         except asyncio.TimeoutError:
-            await self._restore_claude_settings_env_after_oauth_failure(
-                flow.claude_settings_env_backup
-            )
+            await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
             await self._send_message_with_button(
                 flow.context,
                 f"❌ {self._t('command.setup.failed', backend=flow.backend, detail=self._t('command.setup.timedOut', backend=flow.backend))}",
@@ -1309,14 +1321,10 @@ class AgentAuthService:
                 callback_data=f"auth_setup:{flow.backend}",
             )
         except asyncio.CancelledError:
-            await self._restore_claude_settings_env_after_oauth_failure(
-                flow.claude_settings_env_backup
-            )
+            await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
             raise
         except Exception as err:  # noqa: BLE001
-            await self._restore_claude_settings_env_after_oauth_failure(
-                flow.claude_settings_env_backup
-            )
+            await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
             logger.error("Claude auth flow failed: %s", err, exc_info=True)
             await self._send_message_with_button(
                 flow.context,
@@ -1362,11 +1370,7 @@ class AgentAuthService:
         force_oauth = bool(getattr(flow, "force_oauth", False))
         settings_backup: dict[str, str] | None = None
         if force_oauth:
-            settings_backup = getattr(flow, "claude_settings_env_backup", None)
-            fresh_settings_backup = await self._temporarily_clear_claude_settings_env_for_oauth()
-            if settings_backup is None:
-                settings_backup = fresh_settings_backup
-                flow.claude_settings_env_backup = settings_backup
+            settings_backup = await self._prepare_claude_oauth_probe(flow.claude_oauth_attempt)
         binary = self._get_cli_binary("claude")
         process = await asyncio.create_subprocess_exec(
             binary,
@@ -1382,11 +1386,11 @@ class AgentAuthService:
         try:
             payload = json.loads(text)
         except json.JSONDecodeError:
-            if force_oauth:
+            if force_oauth and flow.claude_oauth_attempt is None:
                 await self._restore_claude_settings_env_after_oauth_failure(settings_backup)
             return False, text
         logged_in = bool(payload.get("loggedIn"))
-        if force_oauth and not logged_in:
+        if force_oauth and not logged_in and flow.claude_oauth_attempt is None:
             await self._restore_claude_settings_env_after_oauth_failure(settings_backup)
         return (logged_in, text)
 
@@ -1714,9 +1718,7 @@ class AgentAuthService:
         return mapped if mapped in CLAUDE_LOGIN_METHODS else None
 
     async def _terminate_flow(self, flow: AgentAuthFlow) -> None:
-        await self._restore_claude_settings_env_after_oauth_failure(
-            flow.claude_settings_env_backup
-        )
+        await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
         if flow.waiter_task and not flow.waiter_task.done():
             flow.waiter_task.cancel()
             try:
@@ -1822,15 +1824,13 @@ class AgentAuthService:
                 flow.reader_task = asyncio.create_task(self._read_codex_output_web(flow))
                 flow.waiter_task = asyncio.create_task(self._wait_for_codex_completion_web(flow))
             elif backend == "claude":
-                flow.claude_oauth_generation = self._next_claude_web_oauth_generation()
-                client, manual_url, settings_backup = await self._start_claude_control_flow(
+                client, manual_url, attempt = await self._start_claude_control_flow(
                     context=None,
                     force_reset=force_reset,
                     login_with_claude_ai=True,
                 )
-                self._remember_claude_web_oauth_settings_backup(settings_backup)
                 flow.claude_client = client
-                flow.claude_settings_env_backup = settings_backup
+                flow.claude_oauth_attempt = attempt
                 flow.url = manual_url
                 flow.awaiting_code = True
                 flow.state = "awaiting_code"
@@ -1842,7 +1842,7 @@ class AgentAuthService:
         except Exception as err:  # noqa: BLE001
             logger.error("Web auth start failed for %s: %s", backend, err, exc_info=True)
             if backend == "claude":
-                await self._finish_claude_web_oauth_flow(flow, succeeded=False)
+                await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
             flow.state = "failed"
             flow.error = str(err)
         return flow
@@ -2690,25 +2690,29 @@ class AgentAuthService:
                 timeout=self.setup_timeout_seconds,
             )
             flow.state = "verifying"
-            ok, detail = await self._verify_web_login(flow.backend, force_oauth=True)
+            ok, detail = await self._verify_web_login(
+                flow.backend,
+                force_oauth=True,
+                claude_oauth_attempt=flow.claude_oauth_attempt,
+            )
             if ok:
                 await self._invoke_post_web_success_hook(flow.backend)
-                await self._finish_claude_web_oauth_flow(flow, succeeded=True)
+                await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=True)
                 await self._refresh_backend_runtime(flow.backend)
                 flow.state = "success"
             else:
-                await self._finish_claude_web_oauth_flow(flow, succeeded=False)
+                await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
                 flow.state = "failed"
                 flow.error = detail or "unknown_failure"
         except asyncio.TimeoutError:
-            await self._finish_claude_web_oauth_flow(flow, succeeded=False)
+            await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
             flow.state = "failed"
             flow.error = "timed_out"
         except asyncio.CancelledError:
-            await self._finish_claude_web_oauth_flow(flow, succeeded=False)
+            await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
             raise
         except Exception as err:  # noqa: BLE001
-            await self._finish_claude_web_oauth_flow(flow, succeeded=False)
+            await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
             logger.error("Web Claude auth flow failed: %s", err, exc_info=True)
             flow.state = "failed"
             flow.error = str(err)
@@ -2717,7 +2721,13 @@ class AgentAuthService:
                 await self._disconnect_claude_client(flow.claude_client)
                 flow.claude_client = None
 
-    async def _verify_web_login(self, backend: str, *, force_oauth: bool = False) -> tuple[bool, str]:
+    async def _verify_web_login(
+        self,
+        backend: str,
+        *,
+        force_oauth: bool = False,
+        claude_oauth_attempt: ClaudeOAuthAttempt | None = None,
+    ) -> tuple[bool, str]:
         """Re-run the same CLI status probes ``_verify_login`` uses for IM.
 
         Builds a temporary IM-shaped ``AgentAuthFlow`` shell so the existing
@@ -2736,6 +2746,7 @@ class AgentAuthService:
             waiter_task=asyncio.create_task(asyncio.sleep(0)),
         )
         dummy.force_oauth = force_oauth
+        dummy.claude_oauth_attempt = claude_oauth_attempt
         try:
             return await self._verify_login(dummy)
         finally:
@@ -2809,48 +2820,62 @@ class AgentAuthService:
         except Exception as err:  # noqa: BLE001
             logger.warning("Failed to restore Claude settings env after OAuth failure: %s", err)
 
-    def _next_claude_web_oauth_generation(self) -> int:
-        self._claude_web_oauth_generation += 1
-        generation = self._claude_web_oauth_generation
-        self._claude_web_oauth_active_generations.add(generation)
-        return generation
+    async def _begin_claude_oauth_attempt(self) -> ClaudeOAuthAttempt:
+        settings_backup = await self._temporarily_clear_claude_settings_env_for_oauth()
+        batch = self._claude_oauth_batch
+        if batch is None or batch.committed or not batch.attempts:
+            batch = ClaudeOAuthBatch(
+                backup=dict(settings_backup or {}) or None,
+            )
+            self._claude_oauth_batch = batch
+        elif batch.backup is None and settings_backup:
+            batch.backup = dict(settings_backup)
 
-    def _remember_claude_web_oauth_settings_backup(
+        self._claude_oauth_attempt_counter += 1
+        attempt = ClaudeOAuthAttempt(
+            attempt_id=self._claude_oauth_attempt_counter,
+            batch=batch,
+        )
+        batch.attempts[attempt.attempt_id] = attempt
+        return attempt
+
+    async def _prepare_claude_oauth_probe(
         self,
-        settings_backup: dict[str, str] | None,
+        attempt: ClaudeOAuthAttempt | None,
+    ) -> dict[str, str] | None:
+        settings_backup = await self._temporarily_clear_claude_settings_env_for_oauth()
+        if attempt is None:
+            return settings_backup
+        if attempt.batch.backup is None and settings_backup:
+            attempt.batch.backup = dict(settings_backup)
+        return attempt.settings_backup
+
+    async def _finish_claude_oauth_attempt(
+        self,
+        attempt: ClaudeOAuthAttempt | None,
+        *,
+        succeeded: bool,
     ) -> None:
-        if settings_backup and self._claude_web_oauth_settings_backup is None:
-            self._claude_web_oauth_settings_backup = dict(settings_backup)
-
-    async def _finish_claude_web_oauth_flow(self, flow: WebAuthFlow, *, succeeded: bool) -> None:
-        if flow.backend != "claude":
-            return
-        generation = flow.claude_oauth_generation
-        if generation is None:
-            if not succeeded:
-                await self._restore_claude_settings_env_after_oauth_failure(
-                    flow.claude_settings_env_backup
-                )
-            flow.claude_settings_env_backup = None
+        if attempt is None or not attempt.active:
             return
 
-        self._claude_web_oauth_active_generations.discard(generation)
+        attempt.active = False
+        attempt.succeeded = succeeded
+        batch = attempt.batch
+        batch.attempts.pop(attempt.attempt_id, None)
         if succeeded:
-            self._claude_web_oauth_success_generation = max(
-                self._claude_web_oauth_success_generation,
-                generation,
-            )
-            self._claude_web_oauth_settings_backup = None
-        elif (
-            self._claude_web_oauth_success_generation < generation
-            and not self._claude_web_oauth_active_generations
-        ):
-            await self._restore_claude_settings_env_after_oauth_failure(
-                self._claude_web_oauth_settings_backup
-                or flow.claude_settings_env_backup
-            )
-            self._claude_web_oauth_settings_backup = None
-        flow.claude_settings_env_backup = None
+            batch.committed = True
+            batch.backup = None
+            if self._claude_oauth_batch is batch and not batch.attempts:
+                self._claude_oauth_batch = None
+            return
+
+        if not batch.attempts:
+            if not batch.committed:
+                await self._restore_claude_settings_env_after_oauth_failure(batch.backup)
+            batch.backup = None
+            if self._claude_oauth_batch is batch:
+                self._claude_oauth_batch = None
 
     async def _clear_claude_settings_env_for_logout(self) -> str | None:
         try:
@@ -2925,7 +2950,7 @@ class AgentAuthService:
         final_state: WebFlowState,
         error: str | None = None,
     ) -> None:
-        await self._finish_claude_web_oauth_flow(flow, succeeded=False)
+        await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
         if flow.reader_task and not flow.reader_task.done():
             flow.reader_task.cancel()
             try:
