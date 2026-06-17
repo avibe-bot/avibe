@@ -172,6 +172,110 @@ def test_create_session_without_backend_defers_to_default_agent(isolated_state, 
     assert not response.get_json().get("agent_backend")
 
 
+def test_fork_session_creates_new_workbench_session(isolated_state, tmp_path):
+    """POST /api/sessions/<id>/fork reserves a new Avibe Session row that is
+    ready for the native backend fork on the first turn, and returns the row the
+    sidebar needs to prepend/navigate immediately.
+    """
+
+    from sqlalchemy import update
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+    from vibe.ui_server import app
+
+    scope_id, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == session_id)
+            .values(native_session_id="native-source-1", title="Source session")
+        )
+        source_message = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            message_type="user",
+            text="fork from here",
+        )
+
+    with patch("vibe.sse_broker.broker.publish") as publish:
+        client = app.test_client()
+        headers = csrf_headers(client)
+        response = client.post(f"/api/sessions/{session_id}/fork", json={}, headers=headers)
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["id"] != session_id
+    assert payload["scope_id"] == scope_id
+    assert payload["project_id"] == "proj_stream"
+    assert payload["title"] == "Source session"
+    assert payload["agent_backend"] == "claude"
+    assert payload["agent_name"] == "worker"
+    assert payload["native_session_id"] == ""
+    assert payload["metadata"]["created_via"] == "session_fork"
+    assert payload["metadata"]["fork_source_session_id"] == session_id
+    assert payload["metadata"]["fork_source_session_title"] == "Source session"
+    assert payload["metadata"]["fork_source_message_id"] == source_message["id"]
+    assert payload["metadata"]["fork_source_native_session_id"] == "native-source-1"
+    publish.assert_called_with(
+        "session.activity",
+        {"session_id": payload["id"], "scope_id": scope_id, "event": "created"},
+    )
+
+
+def test_fork_session_rejects_unbound_source_session(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    response = client.post(f"/api/sessions/{session_id}/fork", json={}, headers=headers)
+
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "session_not_bound"
+
+
+def test_patch_rejects_backend_switch_for_pending_fork(isolated_state, tmp_path):
+    from sqlalchemy import update
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == session_id)
+            .values(native_session_id="native-source-1")
+        )
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    fork_response = client.post(f"/api/sessions/{session_id}/fork", json={}, headers=headers)
+    assert fork_response.status_code == 201
+    forked_id = fork_response.get_json()["id"]
+
+    response = client.patch(
+        f"/api/sessions/{forked_id}",
+        json={"agent_backend": "codex", "agent_name": "codex"},
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["code"] == "backend_locked"
+    assert body["current_backend"] == "claude"
+    assert body["requested_backend"] == "codex"
+
+
 def test_chat_bootstrap_returns_first_screen_payload(isolated_state, tmp_path):
     from storage import messages_service
     from storage.db import create_sqlite_engine

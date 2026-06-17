@@ -4208,6 +4208,41 @@ def sessions_create():
     return jsonify(session), 201
 
 
+def _session_fork_error_response(err: Exception):
+    message = str(err)
+    if "id not found" in message:
+        return jsonify({"error": message, "code": "session_not_found"}), 404
+    if "is archived" in message:
+        return jsonify({"error": message, "code": "session_archived"}), 409
+    if "no native session id" in message:
+        return jsonify({"error": message, "code": "session_not_bound"}), 409
+    if "backend cannot be forked" in message:
+        return jsonify({"error": message, "code": "session_backend_unsupported"}), 409
+    if "backend does not match" in message:
+        return jsonify({"error": message, "code": "session_backend_mismatch"}), 409
+    return jsonify({"error": message, "code": "session_fork_failed"}), 400
+
+
+@app.route("/api/sessions/<session_id>/fork", methods=["POST"])
+def sessions_fork(session_id: str):
+    from core.services import sessions as workbench_sessions_service
+    from core.services.session_fork import SessionForkError, reserve_forked_session
+    from vibe.sse_broker import broker
+
+    try:
+        result = reserve_forked_session(source_session_id=session_id)
+        engine = _projects_engine()
+        with engine.connect() as conn:
+            session = workbench_sessions_service.get_session(conn, result.session_id)
+    except SessionForkError as err:
+        return _session_fork_error_response(err)
+    except LookupError as err:
+        return jsonify({"error": str(err), "code": "session_not_found"}), 404
+
+    broker.publish("session.activity", {"session_id": session["id"], "scope_id": session["scope_id"], "event": "created"})
+    return jsonify(session), 201
+
+
 @app.route("/api/sessions/<session_id>", methods=["GET"])
 def sessions_get(session_id: str):
     from core.services import sessions as workbench_sessions_service

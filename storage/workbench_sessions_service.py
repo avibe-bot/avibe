@@ -363,8 +363,11 @@ def update_session(
     # after a crash is reset to ``idle`` on startup). Before the first turn
     # nothing is strandable — a fresh session may carry a project-default
     # backend (see ``create_session``) and the user can still re-route it to ANY
-    # backend or clear back to the default. Within the same backend,
-    # agent/model/effort changes stay allowed for the session's whole life.
+    # backend or clear back to the default. A pending fork is the exception: it
+    # has no native id yet, but its saved source-native id belongs to exactly
+    # one backend, so the fork target must stay on that source backend until the
+    # native fork binds. Within the same backend, agent/model/effort changes
+    # stay allowed for the session's whole life.
     # Legacy agent-less rows whose native predates the bind-time backend
     # backfill keep the old empty -> concrete "initial pin" escape (while idle)
     # — the row doesn't know which backend owns its native, and locking them
@@ -372,9 +375,16 @@ def update_session(
     backend_changes = agent_backend is not _UNSET and str(agent_backend or "") != str(
         existing.agent_backend or ""
     )
+    existing_metadata = _load_metadata(existing.metadata_json)
+    pending_fork = bool(
+        existing_metadata.get("created_via") == "session_fork"
+        and not str(existing.native_session_id or "")
+        and str(existing_metadata.get("fork_source_backend") or "")
+    )
     if backend_changes and (
         (str(existing.native_session_id or "") and str(existing.agent_backend or ""))
         or str(existing.agent_status or "") == "running"
+        or pending_fork
     ):
         raise SessionBackendLockedError(
             session_id=session_id,
@@ -386,11 +396,10 @@ def update_session(
     if title is not _UNSET:
         cleaned = str(title or "").strip()
         values["title"] = cleaned or None
-        metadata = _load_metadata(existing.metadata_json)
         # "user" (Web UI / human) or "agent" (vibe session update) — both deliberate.
-        metadata["title_source"] = str(title_source or "user")
-        metadata["title_user_modified_at"] = values["updated_at"]
-        values["metadata_json"] = _dumps_metadata(metadata)
+        existing_metadata["title_source"] = str(title_source or "user")
+        existing_metadata["title_user_modified_at"] = values["updated_at"]
+        values["metadata_json"] = _dumps_metadata(existing_metadata)
     if agent_id is not _UNSET:
         values["agent_id"] = agent_id or None
     if agent_name is not _UNSET:

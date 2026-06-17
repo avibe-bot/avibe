@@ -13,6 +13,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  GitFork,
   Hash,
   Inbox,
   KeyRound,
@@ -187,17 +188,17 @@ const STATUS_DOT_CLASS: Record<string, string> = {
 };
 
 // One session row under a project. Left-click opens the chat; right-click opens
-// a small menu whose action is Rename — an inline edit equivalent to the chat
-// header's title field. Rename calls api.updateSession({ title }); the live
+// the session action menu. Rename calls api.updateSession({ title }); the live
 // session.activity 'updated' event then patches the title in this list (see the
 // onSessionActivity handler in WorkbenchSidebar), so no manual local patch here.
 const SessionRow: React.FC<{
   session: WorkbenchSession;
   unread: number;
   onSessionMarkRead: (sessionId: string) => void;
+  onForkSession: (sessionId: string) => Promise<WorkbenchSession | null>;
   onRenameSession: (sessionId: string, title: string) => Promise<void>;
   onArchiveSession: (sessionId: string) => Promise<void>;
-}> = ({ session, unread, onSessionMarkRead, onRenameSession, onArchiveSession }) => {
+}> = ({ session, unread, onSessionMarkRead, onForkSession, onRenameSession, onArchiveSession }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
@@ -208,6 +209,7 @@ const SessionRow: React.FC<{
   const canReference = insertTarget != null && insertTarget.sessionId !== session.id;
   const [menuOpen, setMenuOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const [forking, setForking] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(session.title ?? '');
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -265,6 +267,7 @@ const SessionRow: React.FC<{
   }
 
   const displayName = session.title?.trim() || t('workbench.untitledSession');
+  const canFork = !!session.native_session_id && !forking;
   return (
     <>
     <Popover open={menuOpen} onOpenChange={setMenuOpen}>
@@ -322,6 +325,26 @@ const SessionRow: React.FC<{
             {t('workbench.sessionReference')}
           </button>
         )}
+        <button
+          type="button"
+          disabled={!canFork}
+          title={!session.native_session_id ? t('workbench.sessionForkUnavailable') : undefined}
+          onClick={async () => {
+            if (!canFork) return;
+            setMenuOpen(false);
+            setForking(true);
+            try {
+              const forked = await onForkSession(session.id);
+              if (forked) navigate(`/chat/${encodeURIComponent(forked.id)}`);
+            } finally {
+              setForking(false);
+            }
+          }}
+          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04] disabled:cursor-not-allowed disabled:text-muted disabled:hover:bg-transparent"
+        >
+          {forking ? <Loader2 className="size-3 animate-spin text-muted" /> : <GitFork className="size-3 text-muted" />}
+          {t('workbench.sessionFork')}
+        </button>
         <button
           type="button"
           onClick={() => {
@@ -383,6 +406,7 @@ const ProjectRow: React.FC<{
   onSessionMarkRead: (sessionId: string) => void;
   onRename: (next: string) => Promise<void>;
   onArchive: () => Promise<void>;
+  onForkSession: (sessionId: string) => Promise<WorkbenchSession | null>;
   onRenameSession: (sessionId: string, title: string) => Promise<void>;
   onArchiveSession: (sessionId: string) => Promise<void>;
 }> = ({
@@ -400,6 +424,7 @@ const ProjectRow: React.FC<{
   onSessionMarkRead,
   onRename,
   onArchive,
+  onForkSession,
   onRenameSession,
   onArchiveSession,
 }) => {
@@ -580,6 +605,7 @@ const ProjectRow: React.FC<{
                 session={session}
                 unread={unreadBySession[session.id] || 0}
                 onSessionMarkRead={onSessionMarkRead}
+                onForkSession={onForkSession}
                 onRenameSession={onRenameSession}
                 onArchiveSession={onArchiveSession}
               />
@@ -628,6 +654,7 @@ export const WorkbenchSidebar: React.FC = () => {
     loadMore,
     creatingSession,
     createSessionForProject,
+    forkSession,
     renameProject,
     archiveProject,
     renameSession,
@@ -827,6 +854,7 @@ export const WorkbenchSidebar: React.FC = () => {
                   onSessionMarkRead={markRead}
                   onRename={(next) => renameProject(project.id, next)}
                   onArchive={() => archiveProject(project.id)}
+                  onForkSession={(sessionId) => forkSession(project.id, sessionId)}
                   onRenameSession={(sessionId, title) => renameSession(project.id, sessionId, title)}
                   onArchiveSession={(sessionId) => archiveSession(project.id, sessionId)}
                 />

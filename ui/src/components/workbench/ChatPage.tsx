@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useLocation, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Bell, Bot, ChevronDown, Clock, Info, Loader2, MessageSquare, Pencil, Presentation, UploadCloud, X } from 'lucide-react';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { ArrowLeft, Bell, Bot, ChevronDown, Clock, GitFork, Info, Loader2, MessageSquare, Pencil, Presentation, UploadCloud, X } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
@@ -1251,10 +1251,16 @@ const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultA
   // Idle blank-backend rows with a native (legacy, pre-backfill) stay enabled:
   // the server allows their one-time "initial pin".
   const concreteBackend = session.agent_backend?.trim() || null;
-  const backendLocked = Boolean(session.native_session_id) || working;
-  const pinnedBackend = backendLocked ? concreteBackend : null;
+  const pendingForkBackend =
+    !session.native_session_id &&
+    session.metadata?.created_via === 'session_fork' &&
+    typeof session.metadata?.fork_source_backend === 'string'
+      ? session.metadata.fork_source_backend.trim() || null
+      : null;
+  const backendLocked = Boolean(session.native_session_id) || working || Boolean(pendingForkBackend);
+  const pinnedBackend = pendingForkBackend ?? (backendLocked ? concreteBackend : null);
   const canClearToDefault = !backendLocked;
-  const pickerDisabled = working && !concreteBackend;
+  const pickerDisabled = working && !concreteBackend && !pendingForkBackend;
   const defaultRoute = defaultAgent
     ? {
         agent_name: defaultAgent.name,
@@ -1430,6 +1436,20 @@ const Transcript: React.FC<TranscriptProps> = ({
   onQuickReply,
 }) => {
   const { t } = useTranslation();
+  const forkSourceSessionId =
+    typeof session.metadata?.fork_source_session_id === 'string'
+      ? session.metadata.fork_source_session_id
+      : null;
+  const forkSourceSessionTitle =
+    typeof session.metadata?.fork_source_session_title === 'string' &&
+    session.metadata.fork_source_session_title.trim()
+      ? session.metadata.fork_source_session_title.trim()
+      : null;
+  const isForkedSession = session.metadata?.created_via === 'session_fork';
+  const forkSourceBanner =
+    isForkedSession && forkSourceSessionId ? (
+      <ForkSourceBanner sourceSessionId={forkSourceSessionId} sourceTitle={forkSourceSessionTitle} />
+    ) : null;
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   // ``true`` while the viewport is FOLLOWING the bottom (at/near it) — drives the
@@ -1561,6 +1581,20 @@ const Transcript: React.FC<TranscriptProps> = ({
   }, [empty]);
 
   if (empty) {
+    if (isForkedSession && forkSourceSessionId) {
+      return (
+        <div className="flex min-h-0 flex-1 flex-col px-4 py-5 md:px-8">
+          <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-3">
+            {forkSourceBanner}
+          </div>
+          <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-muted">
+            <GitFork className="size-8 opacity-70" />
+            <div className="max-w-[360px] text-[13px] font-semibold text-foreground">{t('chat.forkedEmptyTitle')}</div>
+            <div className="max-w-[440px] text-[12px] leading-relaxed">{t('chat.forkedEmptyBody')}</div>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-muted">
         <MessageSquare className="size-8 opacity-60" />
@@ -1572,6 +1606,7 @@ const Transcript: React.FC<TranscriptProps> = ({
     <div className="relative flex min-h-0 flex-1 flex-col">
       <div ref={scrollRef} onScroll={handleScroll} className="min-h-0 flex-1 overflow-y-auto px-4 py-5 [overflow-anchor:none] md:px-8">
         <div ref={contentRef} className="mx-auto flex w-full max-w-[1080px] flex-col gap-3">
+          {forkSourceBanner}
           {loadingOlder && (
             <div className="flex h-8 items-center justify-center text-muted">
               <Loader2 className="size-4 animate-spin" />
@@ -1603,6 +1638,32 @@ const Transcript: React.FC<TranscriptProps> = ({
           <ChevronDown className="size-4" />
         </Button>
       )}
+    </div>
+  );
+};
+
+const formatForkSourceLabel = (sourceSessionId: string, sourceTitle: string | null): string => {
+  if (sourceTitle) return sourceTitle;
+  if (sourceSessionId.length <= 14) return sourceSessionId;
+  return `${sourceSessionId.slice(0, 8)}...${sourceSessionId.slice(-4)}`;
+};
+
+const ForkSourceBanner: React.FC<{ sourceSessionId: string; sourceTitle: string | null }> = ({
+  sourceSessionId,
+  sourceTitle,
+}) => {
+  const { t } = useTranslation();
+  const sourceLabel = formatForkSourceLabel(sourceSessionId, sourceTitle);
+  return (
+    <div className="flex w-full justify-center">
+      <Link
+        to={`/chat/${encodeURIComponent(sourceSessionId)}`}
+        className="inline-flex max-w-full items-center gap-2 rounded-full border border-cyan/30 bg-cyan/[0.08] px-3 py-1.5 text-[12px] text-cyan transition-colors hover:border-cyan/50 hover:bg-cyan/[0.12]"
+      >
+        <GitFork className="size-3.5 shrink-0" />
+        <span className="shrink-0">{t('chat.forkedFromPrefix')}</span>
+        <span className="min-w-0 truncate font-semibold text-foreground">{sourceLabel}</span>
+      </Link>
     </div>
   );
 };

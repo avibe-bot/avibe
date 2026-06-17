@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from core.vibe_agents import VibeAgentStore
 from modules.im import MessageContext
 from storage.agent_session_rows import create_agent_session_row
 from storage.db import create_sqlite_engine
+from storage import messages_service
 from storage.models import agent_sessions, scope_settings
 from storage.sessions_service import SQLiteSessionsService
 from storage.settings_service import upsert_scope
@@ -73,6 +75,32 @@ def _seed_source_session(db_path: Path, tmp_path: Path) -> str:
 def test_reserve_forked_session_copies_row_and_applies_overrides(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            source_row = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).mappings().one()
+            visible_message = messages_service.append(
+                conn,
+                scope_id=source_row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                text="source answer",
+            )
+            messages_service.append(
+                conn,
+                scope_id=source_row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="assistant",
+                text="hidden process log",
+            )
+    finally:
+        engine.dispose()
     store = VibeAgentStore(db_path)
     try:
         store.create(name="reviewer", backend="codex", model="gpt-5.1", reasoning_effort="high")
@@ -89,6 +117,7 @@ def test_reserve_forked_session_copies_row_and_applies_overrides(tmp_path: Path)
 
     assert result.session_id != source_id
     assert result.fork.source_native_session_id == "thread-source"
+    assert result.fork.source_message_id == visible_message["id"]
     engine = create_sqlite_engine(db_path)
     try:
         with engine.connect() as conn:
@@ -98,6 +127,7 @@ def test_reserve_forked_session_copies_row_and_applies_overrides(tmp_path: Path)
     finally:
         engine.dispose()
 
+    metadata = json.loads(row["metadata_json"])
     assert row["agent_name"] == "reviewer"
     assert row["agent_backend"] == "codex"
     assert row["agent_variant"] == "codex"
@@ -107,6 +137,8 @@ def test_reserve_forked_session_copies_row_and_applies_overrides(tmp_path: Path)
     assert row["native_session_id"] == ""
     assert row["session_anchor"] == result.session_id
     assert row["title"] == "Source"
+    assert metadata["fork_source_message_id"] == visible_message["id"]
+    assert metadata["fork_source_session_title"] == "Source"
 
 
 def test_reserve_forked_session_keeps_im_anchor_and_resets_variant_for_agent_override(tmp_path: Path) -> None:

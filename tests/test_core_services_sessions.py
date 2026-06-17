@@ -451,6 +451,38 @@ def test_update_session_backend_is_free_until_native_bind(isolated_state):
         assert not sessions_service.get_session(conn, sid)["agent_backend"]
 
 
+def test_update_session_pending_fork_locks_backend_until_native_bind(isolated_state):
+    """A fork target has no native id yet, but its pending fork metadata points
+    at a source native session owned by one backend. Cross-backend changes would
+    make the first turn fall back to a fresh native session, so the backend is
+    locked until the fork binds. Same-backend agent/model overrides stay allowed.
+    """
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_avibe_scope(conn)
+        sid = sessions_service.create_session(
+            conn,
+            scope_id=scope_id,
+            agent_backend="claude",
+            agent_name="claude",
+            metadata={
+                "created_via": "session_fork",
+                "fork_source_session_id": "source-session",
+                "fork_source_native_session_id": "source-native",
+                "fork_source_backend": "claude",
+            },
+        )["id"]
+
+        sessions_service.update_session(conn, sid, agent_backend="claude", agent_name="claude-pro", model="opus")
+        assert sessions_service.get_session(conn, sid)["agent_name"] == "claude-pro"
+
+        with pytest.raises(sessions_service.SessionBackendLockedError):
+            sessions_service.update_session(conn, sid, agent_backend="codex", agent_name="codex")
+        with pytest.raises(sessions_service.SessionBackendLockedError):
+            sessions_service.update_session(conn, sid, agent_backend=None, agent_name=None)
+
+
 def test_update_session_locks_backend_once_native_exists(isolated_state):
     """Once the first turn bound a native conversation the backend is pinned for
     life — the native can only be resumed by the backend that created it.
