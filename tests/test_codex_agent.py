@@ -1229,6 +1229,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             bind_agent_session=Mock(return_value="ses-target"),
         )
         agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent._fork_correction_pending_base_sessions = set()
         request = SimpleNamespace(
             working_path="/tmp/work",
             context=SimpleNamespace(
@@ -1262,7 +1263,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         thread_id = await agent._start_or_resume_thread(transport, request)
 
         self.assertEqual(thread_id, "thread-fork")
-        method, params = transport.send_request.await_args.args
+        method, params = transport.send_request.await_args_list[0].args
         self.assertEqual(method, "thread/fork")
         self.assertEqual(params["threadId"], "thread-source")
         self.assertEqual(params["cwd"], "/tmp/work")
@@ -1278,12 +1279,79 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             developer_instructions,
         )
         self.assertIn("use `ses-target` for Show Pages", developer_instructions)
+        inject_method, inject_params = transport.send_request.await_args_list[1].args
+        self.assertEqual(inject_method, "thread/inject_items")
+        self.assertEqual(inject_params["threadId"], "thread-fork")
+        self.assertEqual(inject_params["items"][0]["type"], "message")
+        self.assertEqual(inject_params["items"][0]["role"], "developer")
+        correction_text = inject_params["items"][0]["content"][0]["text"]
+        self.assertIn("This Agent Session was forked from `ses-source`.", correction_text)
+        self.assertIn(
+            "The authoritative Avibe session id for this fork is `ses-target`.",
+            correction_text,
+        )
         agent.sessions.bind_agent_session.assert_called_once_with(
             "avibe::project::proj_1",
             "codex",
             "ses-target",
             "thread-fork",
         )
+
+    async def test_start_or_resume_thread_does_not_bind_failed_fork_correction(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_id=Mock(return_value=None),
+            ensure_agent_session_id=Mock(return_value="ses-target"),
+            bind_agent_session=Mock(return_value="ses-target"),
+        )
+        agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent._fork_correction_pending_base_sessions = set()
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            context=SimpleNamespace(
+                platform="avibe",
+                platform_specific={
+                    "agent_session_target": {
+                        "id": "ses-target",
+                        "agent_backend": "codex",
+                        "native_session_id": "",
+                        "native_session_fork": {
+                            "source_session_id": "ses-source",
+                            "source_native_session_id": "thread-source",
+                            "source_backend": "codex",
+                        },
+                    }
+                },
+                user_id="scheduled",
+                channel_id="ses-target",
+                thread_id=None,
+            ),
+            base_session_id="ses-target",
+            session_key="avibe::project::proj_1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_model=None,
+            vibe_agent_reasoning_effort=None,
+        )
+        transport = SimpleNamespace(
+            send_request=AsyncMock(
+                side_effect=[
+                    {"thread": {"id": "thread-fork"}},
+                    RuntimeError("inject failed"),
+                ]
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "inject failed"):
+            await agent._start_or_resume_thread(transport, request)
+
+        self.assertEqual(transport.send_request.await_count, 2)
+        agent._session_mgr.set_thread_id.assert_not_called()
+        agent.sessions.bind_agent_session.assert_not_called()
+        self.assertFalse(agent.is_fork_correction_pending("ses-target"))
 
     async def test_resume_thread_skips_reserved_native_for_explicit_subagent(self):
         # Explicit per-turn subagent: it has its own thread; must NOT resume the

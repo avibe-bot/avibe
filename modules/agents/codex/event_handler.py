@@ -101,6 +101,14 @@ class CodexEventHandler:
     async def _on_thread_started(self, params: dict[str, Any], request: AgentRequest) -> None:
         thread_obj = params.get("thread", {})
         thread_id = thread_obj.get("id", "") if isinstance(thread_obj, dict) else ""
+        is_fork_correction_pending = getattr(self._agent, "is_fork_correction_pending", None)
+        if callable(is_fork_correction_pending) and is_fork_correction_pending(request.base_session_id):
+            logger.debug(
+                "Skipping Codex thread/started auto-bind for pending fork correction: session=%s thread=%s",
+                request.base_session_id,
+                thread_id,
+            )
+            return
         if thread_id:
             self._agent._session_mgr.set_thread_id(request.base_session_id, thread_id)
             self._agent.bind_agent_session_id(request, thread_id)

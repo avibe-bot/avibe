@@ -124,6 +124,25 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.context.platform_specific["agent_session_id"], "sesk8m4q2p7x")
         agent.controller.emit_agent_message.assert_not_awaited()
 
+    async def test_thread_started_does_not_bind_while_fork_correction_is_pending(self):
+        agent = _StubAgent()
+        agent.is_fork_correction_pending = Mock(return_value=True)
+        agent.bind_agent_session_id = Mock(wraps=agent.bind_agent_session_id)
+        handler = CodexEventHandler(agent)
+        request = SimpleNamespace(
+            base_session_id="session-1",
+            session_key="slack::channel::C1",
+            working_path="/repo",
+            context=SimpleNamespace(platform_specific={}),
+        )
+
+        await handler._on_thread_started({"thread": {"id": "thread-1"}}, request)
+
+        agent.is_fork_correction_pending.assert_called_once_with("session-1")
+        agent._session_mgr.set_thread_id.assert_not_called()
+        agent.bind_agent_session_id.assert_not_called()
+        self.assertNotIn("agent_session_id", request.context.platform_specific)
+
     async def test_retrying_error_is_suppressed(self):
         agent = _StubAgent()
         handler = CodexEventHandler(agent)

@@ -11,7 +11,11 @@ from typing import Any, Dict, Optional
 
 from core.avibe_cloud import avibe_cloud_url_available
 from core.services.session_fork import pending_native_fork_source
-from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
+from core.system_prompt_injection import (
+    build_forked_session_correction_prompt,
+    build_system_prompt_injection,
+    get_enabled_agents_for_prompt,
+)
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.subagent_router import SubagentDefinition, load_codex_subagent
 from modules.agents.codex.event_handler import CodexEventHandler
@@ -75,6 +79,7 @@ class CodexAgent(BaseAgent):
         self._session_locks: Dict[str, asyncio.Lock] = {}
         # base_session_id → (thread_id, developer_instructions)
         self._thread_developer_instructions: Dict[str, tuple[str, str]] = {}
+        self._fork_correction_pending_base_sessions: set[str] = set()
 
     # ------------------------------------------------------------------
     # BaseAgent interface
@@ -624,15 +629,20 @@ class CodexAgent(BaseAgent):
         if effective_model:
             params["model"] = effective_model
 
-        resp = await transport.send_request("thread/fork", params)
-        thread_id = resp.get("id", "")
-        if not thread_id:
-            thread_obj = resp.get("thread")
-            if isinstance(thread_obj, dict):
-                thread_id = thread_obj.get("id", "")
-        if not thread_id:
-            raise RuntimeError("Codex thread/fork returned no thread id")
+        self._mark_fork_correction_pending(request.base_session_id)
+        try:
+            resp = await transport.send_request("thread/fork", params)
+            thread_id = resp.get("id", "")
+            if not thread_id:
+                thread_obj = resp.get("thread")
+                if isinstance(thread_obj, dict):
+                    thread_id = thread_obj.get("id", "")
+            if not thread_id:
+                raise RuntimeError("Codex thread/fork returned no thread id")
 
+            await self._inject_forked_session_correction(transport, request, thread_id)
+        finally:
+            self._clear_fork_correction_pending(request.base_session_id)
         self._session_mgr.set_thread_id(request.base_session_id, thread_id)
         self.bind_agent_session_id(request, thread_id)
         self._remember_thread_developer_instructions(request.base_session_id, thread_id, developer_instructions)
@@ -873,6 +883,36 @@ class CodexAgent(BaseAgent):
 
         return "\n\n".join(part for part in instruction_parts if part) or None
 
+    async def _inject_forked_session_correction(
+        self,
+        transport: CodexTransport,
+        request: AgentRequest,
+        thread_id: str,
+    ) -> None:
+        """Append a fork correction as Codex model-visible developer history.
+
+        Codex accepts ``developerInstructions`` on ``thread/fork``, but the fork
+        also copies the source thread's previous developer messages. Appending a
+        fresh developer item makes the target session id authoritative without
+        creating a user turn.
+        """
+        correction = build_forked_session_correction_prompt(request.context)
+        if not correction:
+            return
+        await transport.send_request(
+            "thread/inject_items",
+            {
+                "threadId": thread_id,
+                "items": [
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": correction}],
+                    }
+                ],
+            },
+        )
+
     async def _refresh_thread_developer_instructions_if_needed(
         self,
         transport: CodexTransport,
@@ -925,6 +965,20 @@ class CodexAgent(BaseAgent):
     def _clear_thread_developer_instructions(self, base_session_id: str) -> None:
         if hasattr(self, "_thread_developer_instructions"):
             self._thread_developer_instructions.pop(base_session_id, None)
+
+    def _fork_correction_pending_sessions(self) -> set[str]:
+        if not hasattr(self, "_fork_correction_pending_base_sessions"):
+            self._fork_correction_pending_base_sessions = set()
+        return self._fork_correction_pending_base_sessions
+
+    def _mark_fork_correction_pending(self, base_session_id: str) -> None:
+        self._fork_correction_pending_sessions().add(base_session_id)
+
+    def _clear_fork_correction_pending(self, base_session_id: str) -> None:
+        self._fork_correction_pending_sessions().discard(base_session_id)
+
+    def is_fork_correction_pending(self, base_session_id: str) -> bool:
+        return base_session_id in self._fork_correction_pending_sessions()
 
     async def _start_turn(
         self,

@@ -283,6 +283,17 @@ def _extract_fork_source_session_id(context: MessageContext) -> Optional[str]:
     return None
 
 
+def build_forked_session_correction_prompt(context: MessageContext) -> Optional[str]:
+    default_session_id = _extract_default_session_id(context)
+    source_session_id = _extract_fork_source_session_id(context)
+    if source_session_id and source_session_id != default_session_id:
+        return _FORKED_SESSION_PROMPT.format(
+            default_session_id=default_session_id,
+            source_session_id=source_session_id,
+        )
+    return None
+
+
 def _is_web_platform(platform: str) -> bool:
     return platform.strip().lower() in {"avibe", "web"}
 
@@ -367,12 +378,9 @@ def get_enabled_agents_for_prompt(controller: Any) -> Optional[list[AgentPromptI
 def _build_session_start_prompt(context: MessageContext) -> str:
     default_session_id = _extract_default_session_id(context)
     prompt = _SESSION_START_PROMPT.format(default_session_id=default_session_id)
-    source_session_id = _extract_fork_source_session_id(context)
-    if source_session_id and source_session_id != default_session_id:
-        prompt += _FORKED_SESSION_PROMPT.format(
-            default_session_id=default_session_id,
-            source_session_id=source_session_id,
-        )
+    fork_correction = build_forked_session_correction_prompt(context)
+    if fork_correction:
+        prompt += fork_correction
     return prompt
 
 
