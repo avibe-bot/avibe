@@ -127,6 +127,16 @@ class ConsolidatedMessageDispatcher:
         if callable(release):
             release(context)
 
+    async def _finish_processing_indicator_turn(self, context: MessageContext) -> None:
+        service = getattr(self.controller, "processing_indicator", None)
+        finish_terminal = getattr(service, "finish_terminal_turn", None)
+        if not callable(finish_terminal):
+            return
+        try:
+            await finish_terminal(context)
+        except Exception:
+            logger.debug("terminal processing-indicator cleanup failed", exc_info=True)
+
     def _is_current_runtime_turn(self, context: MessageContext) -> bool:
         service = getattr(self.controller, "agent_service", None)
         matches = getattr(service, "emit_matches_runtime_turn", None)
@@ -529,6 +539,7 @@ class ConsolidatedMessageDispatcher:
                 return None
             finally:
                 if canonical_type == "result":
+                    await self._finish_processing_indicator_turn(context)
                     self._release_runtime_turn(context)
 
         # Resolve the delivery target once. Routed / post_to / thread replies
@@ -583,6 +594,7 @@ class ConsolidatedMessageDispatcher:
                 return message_id
             finally:
                 if canonical_type == "result":
+                    await self._finish_processing_indicator_turn(context)
                     self._release_runtime_turn(context)
 
         if canonical_type == "notify":
@@ -792,6 +804,7 @@ class ConsolidatedMessageDispatcher:
 
                 return primary_message_id
             finally:
+                await self._finish_processing_indicator_turn(context)
                 self._release_runtime_turn(context)
 
         if canonical_type not in {"system", "assistant", "toolcall"}:

@@ -55,6 +55,7 @@ class AgentService:
             manager = getattr(self.controller, "session_turns", None)
             if manager is not None:
                 manager.on_running(request.context)
+            self._track_processing_indicator_turn(request)
             await agent.handle_message(request)
         except asyncio.CancelledError:
             self.release_runtime_turn(request.context)
@@ -209,6 +210,15 @@ class AgentService:
         if request.context.platform_specific.get(AGENT_TURN_TOKEN):
             return
         request.context.platform_specific[AGENT_TURN_TOKEN] = runtime_token
+
+    def _track_processing_indicator_turn(self, request: AgentRequest) -> None:
+        handle = getattr(request, "processing_indicator", None)
+        if handle is None:
+            return
+        service = getattr(self.controller, "processing_indicator", None)
+        track = getattr(service, "track_turn", None)
+        if callable(track):
+            track(request.context, request)
 
     async def refresh_runtime_config(self, agent_name: str, runtime_config: Any) -> bool:
         """Refresh a backend's live runtime state from the latest config.
