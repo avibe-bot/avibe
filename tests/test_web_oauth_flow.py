@@ -382,7 +382,7 @@ def test_claude_oauth_restarts_restore_interrupted_durable_backup(
     assert read_claude_oauth_settings_backup() is None
 
 
-def test_committed_claude_oauth_ignores_leftover_durable_backup(
+def test_claude_oauth_restarts_restore_pending_backup_even_when_config_is_oauth(
     service: AgentAuthService,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -394,12 +394,15 @@ def test_committed_claude_oauth_ignores_leftover_durable_backup(
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
     monkeypatch.setattr(_Backend, "auth_mode", "oauth", raising=False)
     monkeypatch.setattr(_Backend, "auth_mode_set", True, raising=False)
-    write_claude_oauth_settings_backup({"ANTHROPIC_API_KEY": "sk-old"})
+    backup = {
+        "ANTHROPIC_API_KEY": "sk-old",
+        "ANTHROPIC_BASE_URL": "https://relay.example",
+    }
+    write_claude_oauth_settings_backup(backup)
+
     service._recover_interrupted_claude_oauth_settings_backup()
 
-    attempt = _run(service._begin_claude_oauth_attempt())
-
-    assert attempt.settings_backup is None
+    assert read_claude_settings_env() == backup
     assert read_claude_oauth_settings_backup() is None
 
 

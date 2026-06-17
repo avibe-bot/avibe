@@ -2824,13 +2824,6 @@ class AgentAuthService:
             logger.warning("Failed to read pending Claude OAuth settings backup: %s", err)
             return None
 
-    def _claude_oauth_mode_committed(self) -> bool:
-        claude_cfg = self._resolve_backend_config("claude")
-        return (
-            getattr(claude_cfg, "auth_mode", None) == "oauth"
-            and bool(getattr(claude_cfg, "auth_mode_set", False))
-        )
-
     def _recover_interrupted_claude_oauth_settings_backup(self) -> None:
         try:
             from vibe.claude_config import (
@@ -2842,9 +2835,6 @@ class AgentAuthService:
             backup = read_claude_oauth_settings_backup()
             if not backup:
                 return
-            if self._claude_oauth_mode_committed():
-                clear_claude_oauth_settings_backup()
-                return
             restore_claude_settings_env(backup)
             clear_claude_oauth_settings_backup()
         except Exception as err:  # noqa: BLE001
@@ -2853,11 +2843,7 @@ class AgentAuthService:
     async def _read_rollback_claude_oauth_settings_backup(
         self,
     ) -> dict[str, str] | None:
-        backup = await self._read_pending_claude_oauth_settings_backup()
-        if backup and self._claude_oauth_mode_committed():
-            await self._clear_pending_claude_oauth_settings_backup()
-            return None
-        return backup
+        return await self._read_pending_claude_oauth_settings_backup()
 
     async def _write_pending_claude_oauth_settings_backup(
         self,
