@@ -675,7 +675,7 @@ def _origin_host_for_pairing(config: V2Config) -> str:
     # "localhost" is ambiguous: cloudflared and the UI server resolve it
     # independently, so on a dual-stack host they can land on different
     # families (::1 vs 127.0.0.1) and surface as a 502. Hand cloudflared
-    # a literal loopback IP whose family matches the wildcard
+    # a literal loopback IP whose family matches the bind host that
     # ``effective_ui_bind_host`` chooses, so the two sides never disagree
     # and IPv6-only hosts still work.
     if host.lower() == "localhost":

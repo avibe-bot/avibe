@@ -956,9 +956,25 @@ def test_effective_ui_bind_host_preserves_loopback_when_tunnel_disabled() -> Non
     assert runtime.effective_ui_bind_host(config) == "127.0.0.1"
 
 
+def test_effective_ui_bind_host_preserves_loopback_when_tunnel_enabled() -> None:
+    config = _config()
+    assert config.remote_access.vibe_cloud.enabled is True
+    config.ui.setup_host = "127.0.0.1"
+
+    assert runtime.effective_ui_bind_host(config) == "127.0.0.1"
+
+
 def test_effective_ui_bind_host_falls_back_to_loopback_when_setup_host_blank() -> None:
     config = _config()
     config.remote_access.vibe_cloud.enabled = False
+    config.ui.setup_host = ""
+
+    assert runtime.effective_ui_bind_host(config) == "127.0.0.1"
+
+
+def test_effective_ui_bind_host_falls_back_to_loopback_when_tunnel_enabled_and_setup_host_blank() -> None:
+    config = _config()
+    assert config.remote_access.vibe_cloud.enabled is True
     config.ui.setup_host = ""
 
     assert runtime.effective_ui_bind_host(config) == "127.0.0.1"
@@ -972,12 +988,20 @@ def test_effective_ui_bind_host_uses_v6_wildcard_for_ipv6_setup_host() -> None:
     assert runtime.effective_ui_bind_host(config) == "::"
 
 
+def test_effective_ui_bind_host_preserves_v6_loopback_when_tunnel_enabled() -> None:
+    config = _config()
+    assert config.remote_access.vibe_cloud.enabled is True
+    config.ui.setup_host = "::1"
+
+    assert runtime.effective_ui_bind_host(config) == "::1"
+
+
 def test_effective_ui_bind_host_uses_v6_wildcard_for_bracketed_ipv6_loopback() -> None:
     config = _config()
     assert config.remote_access.vibe_cloud.enabled is True
     config.ui.setup_host = "[::1]"
 
-    assert runtime.effective_ui_bind_host(config) == "::"
+    assert runtime.effective_ui_bind_host(config) == "::1"
 
 
 def test_effective_ui_bind_host_prefers_requested_host_over_persisted_setup_host() -> None:
@@ -1000,13 +1024,13 @@ def test_effective_ui_bind_host_overrides_to_ipv4_wildcard_when_localhost_resolv
     monkeypatch,
 ) -> None:
     # Pairs with _origin_host_for_pairing returning 127.0.0.1 for "localhost":
-    # the bind family must be IPv4 so cloudflared can reach the UI.
+    # the bind host must be the same IPv4 loopback so cloudflared can reach the UI.
     monkeypatch.setattr(runtime, "resolve_localhost_family", lambda: "inet")
     config = _config()
     assert config.remote_access.vibe_cloud.enabled is True
     config.ui.setup_host = "localhost"
 
-    assert runtime.effective_ui_bind_host(config) == "0.0.0.0"
+    assert runtime.effective_ui_bind_host(config) == "127.0.0.1"
 
 
 def test_effective_ui_bind_host_overrides_to_ipv6_wildcard_when_localhost_resolves_v6_only(
@@ -1020,7 +1044,7 @@ def test_effective_ui_bind_host_overrides_to_ipv6_wildcard_when_localhost_resolv
     assert config.remote_access.vibe_cloud.enabled is True
     config.ui.setup_host = "localhost"
 
-    assert runtime.effective_ui_bind_host(config) == "::"
+    assert runtime.effective_ui_bind_host(config) == "::1"
 
 
 def test_resolve_localhost_family_prefers_ipv4_when_both_resolve(monkeypatch) -> None:
