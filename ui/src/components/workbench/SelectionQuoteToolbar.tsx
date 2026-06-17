@@ -112,7 +112,9 @@ export const SelectionQuoteToolbar: React.FC<{
 
   const above = sel.top > TOOLBAR_H + GAP + EDGE;
   const top = above ? sel.top - TOOLBAR_H - GAP : sel.bottom + GAP;
-  const half = width / 2;
+  // Clamp by the on-screen (capped) width so a toolbar wider than the viewport
+  // centers + scrolls internally instead of pushing an edge off-screen.
+  const half = Math.min(width, window.innerWidth - 2 * EDGE) / 2;
   const left = Math.min(Math.max(sel.left, EDGE + half), window.innerWidth - EDGE - half);
 
   const itemClass = 'h-9 gap-1.5 rounded-none px-3 text-[13px] font-medium';
@@ -121,20 +123,17 @@ export const SelectionQuoteToolbar: React.FC<{
     <div
       ref={toolbarRef}
       role="toolbar"
-      // Keep the selection alive when the toolbar is pressed (desktop). On touch
-      // the handlers use the captured `sel.text`, so a collapse is harmless too.
-      onMouseDown={(e) => e.preventDefault()}
-      style={{ position: 'fixed', top, left, transform: 'translateX(-50%)', zIndex: 60 }}
-      className="flex items-center overflow-hidden rounded-lg border border-border-strong bg-surface-2 shadow-[0_12px_30px_-8px_rgba(0,0,0,0.7)]"
+      style={{ position: 'fixed', top, left, maxWidth: 'calc(100vw - 16px)', transform: 'translateX(-50%)', zIndex: 60 }}
+      className="flex items-center overflow-x-auto rounded-lg border border-border-strong bg-surface-2 shadow-[0_12px_30px_-8px_rgba(0,0,0,0.7)]"
     >
-      <Button variant="ghost" className={itemClass} onClick={runQuote}>
+      <Button variant="ghost" className={itemClass} onPointerDown={(e) => { e.preventDefault(); runQuote(); }}>
         <TextQuote className="size-3.5 text-muted" />
         {t('chat.selection.quote')}
       </Button>
       {onAskInNew && (
         <>
           <span className="h-5 w-px bg-border" />
-          <Button variant="ghost" className={itemClass} onClick={runAsk}>
+          <Button variant="ghost" className={itemClass} onPointerDown={(e) => { e.preventDefault(); runAsk(); }}>
             <GitFork className="size-3.5 text-muted" />
             {t('chat.selection.askInNew')}
           </Button>
@@ -143,7 +142,7 @@ export const SelectionQuoteToolbar: React.FC<{
       {isTouch && (
         <>
           <span className="h-5 w-px bg-border" />
-          <Button variant="ghost" className={itemClass} onClick={runCopy}>
+          <Button variant="ghost" className={itemClass} onPointerDown={(e) => { e.preventDefault(); runCopy(); }}>
             {copied ? <Check className="size-3.5 text-mint" /> : <Copy className="size-3.5 text-muted" />}
             {t('chat.selection.copy')}
           </Button>

@@ -1779,7 +1779,8 @@
     "selection": {
       "quote": "引用",
       "askInNew": "在新会话询问",
-      "copy": "复制"
+      "copy": "复制",
+      "askFailed": "无法从选中内容新建会话，请重试。"
     },
     "showPage": {
       "open": "可视化",

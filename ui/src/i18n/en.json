@@ -1780,7 +1780,8 @@
     "selection": {
       "quote": "Quote",
       "askInNew": "Ask in a new session",
-      "copy": "Copy"
+      "copy": "Copy",
+      "askFailed": "Couldn't start a new session from the selection."
     },
     "showPage": {
       "open": "Visualize",

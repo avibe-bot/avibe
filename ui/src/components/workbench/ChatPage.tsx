@@ -5,6 +5,7 @@ import { ArrowLeft, Bell, Bot, ChevronDown, Clock, GitFork, Info, Loader2, Messa
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
+import { useToast } from '../../context/ToastContext';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import type { VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
@@ -94,6 +95,7 @@ export const ChatPage: React.FC = () => {
   const { sessionId } = useParams<{ sessionId: string }>();
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const { showToast } = useToast();
   const location = useLocation();
   // Deep-link target: the search palette routes to /chat/<session>?msg=<message>
   // (P3 contract). When set, the jump effect below scrolls to + briefly
@@ -162,13 +164,20 @@ export const ChatPage: React.FC = () => {
       try {
         const forked = await api.forkSession(sessionId);
         if (!forked?.id) return;
-        await api.setSessionDraft(forked.id, quoteText(text));
+        // setSessionDraft returns {ok:false} for a non-OK response (it doesn't
+        // throw), so check it before navigating — don't strand the user in a
+        // fork with an empty composer and a lost selection.
+        const saved = await api.setSessionDraft(forked.id, quoteText(text));
+        if (!saved?.ok) {
+          showToast(t('chat.selection.askFailed'), 'error');
+          return;
+        }
         navigate(`/chat/${encodeURIComponent(forked.id)}`);
       } catch {
-        // forkSession / setSessionDraft surface their own errors via the toast layer.
+        showToast(t('chat.selection.askFailed'), 'error');
       }
     },
-    [sessionId, api, navigate],
+    [sessionId, api, navigate, showToast, t],
   );
   // Null target hides that sidebar action unless the composer is actually
   // mounted + insertable: a chat is open (sessionId), its session has loaded
