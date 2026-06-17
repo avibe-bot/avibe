@@ -204,6 +204,19 @@ def test_build_session_key_for_context_uses_fallback_platform() -> None:
     assert parsed.to_key(include_thread=False) == "slack::channel::C123"
 
 
+def test_build_session_key_for_context_uses_platform_specific_platform() -> None:
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        thread_id="171717.123",
+        platform_specific={"platform": "telegram", "is_dm": False},
+    )
+
+    parsed = build_session_key_for_context(context, fallback_platform="slack")
+
+    assert parsed.to_key(include_thread=False) == "telegram::channel::C123"
+
+
 def test_scheduled_task_store_uses_sqlite_when_path_is_default(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
     store = ScheduledTaskStore()

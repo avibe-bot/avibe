@@ -12,6 +12,7 @@ from typing import Any, Iterable, Optional
 
 from config import paths
 from core.avibe_cloud import AVIBE_CLOUD_CONNECT_GUIDANCE
+from core.message_context import resolve_context_platform
 from modules.im import MessageContext
 
 logger = logging.getLogger(__name__)
@@ -256,18 +257,6 @@ def _extract_default_session_id(context: MessageContext) -> str:
     return str(default_session_id)
 
 
-def _resolve_context_platform(
-    context: Optional[MessageContext],
-    *,
-    fallback_platform: Optional[str] = None,
-) -> str:
-    platform = fallback_platform or "<platform>"
-    if context is not None:
-        platform_specific = context.platform_specific or {}
-        platform = context.platform or platform_specific.get("platform") or platform
-    return str(platform or "<platform>")
-
-
 def _is_web_platform(platform: str) -> bool:
     return platform.strip().lower() in {"avibe", "web"}
 
@@ -382,7 +371,7 @@ def _build_session_end_prompt(
 ) -> str:
     default_session_id = _extract_default_session_id(context)
     prompt = _SESSION_END_PROMPT.format(default_session_id=default_session_id)
-    platform = _resolve_context_platform(context, fallback_platform=fallback_platform)
+    platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
     if _is_web_platform(platform):
         prompt += _SESSION_TITLE_PROMPT.format(default_session_id=default_session_id)
     return prompt
@@ -393,7 +382,7 @@ def _build_user_preferences_prompt(
     *,
     fallback_platform: Optional[str] = None,
 ) -> str:
-    platform = _resolve_context_platform(context, fallback_platform=fallback_platform)
+    platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
     return _USER_PREFERENCES_PROMPT.format(
         preferences_path=f"`{paths.get_user_preferences_path()}`",
         platform=platform,

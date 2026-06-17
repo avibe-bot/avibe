@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from config import paths
+from core.message_context import resolve_context_platform
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine
 from storage.background import SQLiteBackgroundTaskStore
@@ -292,7 +293,7 @@ def build_session_key_for_context(
     fallback_platform: Optional[str] = None,
 ) -> ParsedSessionKey:
     payload = context.platform_specific or {}
-    platform = context.platform or payload.get("platform") or fallback_platform or ""
+    platform = resolve_context_platform(context, fallback_platform=fallback_platform)
     is_dm = bool(payload.get("is_dm", False))
     scope_type = "user" if is_dm else "channel"
     scope_id = context.user_id if is_dm else context.channel_id
