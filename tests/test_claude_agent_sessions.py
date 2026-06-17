@@ -273,6 +273,86 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queries, [("first", runtime_key), ("third", runtime_key)])
         self.assertNotIn(runtime_key, agent._pending_requests)
 
+    async def test_handle_message_receiver_eof_without_result_settles_current_turn(self):
+        controller = _StubController()
+        runtime_key = "wechat_o9:/tmp/work"
+        mark_active_calls = []
+        mark_idle_calls = []
+        queries = []
+
+        class _Client:
+            _vibe_runtime_base_session_id = "wechat_o9"
+            _vibe_runtime_session_key = runtime_key
+
+            async def query(self, message, *, session_id):
+                queries.append((message, session_id))
+
+            async def disconnect(self):
+                return None
+
+            def receive_messages(self):
+                async def _iterate():
+                    if False:
+                        yield None
+
+                return _iterate()
+
+        client = _Client()
+        controller._get_session_key = lambda _context: "wechat-user"
+        controller.emit_agent_message = AsyncMock()
+        controller.session_handler = SimpleNamespace(
+            get_or_create_claude_session=AsyncMock(return_value=client),
+            mark_session_active=lambda key: mark_active_calls.append(key),
+            mark_session_idle=lambda key: mark_idle_calls.append(key),
+            handle_session_error=AsyncMock(),
+            capture_session_id=lambda *_args, **_kwargs: None,
+            clear_session_tracking=lambda key: mark_idle_calls.append(f"clear:{key}"),
+        )
+
+        agent = ClaudeAgent(controller)
+        service = AgentService(controller)
+        service.register(agent)
+        controller.agent_service = service
+        agent._prepare_message_with_files = lambda request: request.message
+        agent._delete_ack = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+
+        async def _emit(context, message_type, text, **_kwargs):
+            if message_type == "result":
+                service.release_runtime_turn(context)
+
+        controller.emit_agent_message = AsyncMock(side_effect=_emit)
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        request = SimpleNamespace(
+            context=context,
+            message="first",
+            working_path="/tmp/work",
+            base_session_id="wechat_o9",
+            composite_session_id=runtime_key,
+            session_key="wechat-user",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            ack_message_id=None,
+            ack_reaction_message_id=None,
+            ack_reaction_emoji=None,
+            files=None,
+        )
+
+        await service.handle_message("claude", request)
+        receiver_task = controller.receiver_tasks.get(runtime_key)
+        if receiver_task is not None:
+            await asyncio.wait_for(receiver_task, timeout=1)
+
+        self.assertEqual(queries, [("first", runtime_key)])
+        self.assertEqual(mark_active_calls, [runtime_key])
+        self.assertIn(runtime_key, mark_idle_calls)
+        controller.emit_agent_message.assert_awaited_once_with(context, "result", "", is_error=True)
+        agent._remove_ack_reaction.assert_awaited_once_with(request)
+        self.assertNotIn(runtime_key, agent._pending_requests)
+        self.assertNotIn(runtime_key, controller.claude_sessions)
+        self.assertFalse(service._turn_gates[runtime_key].lock.locked())
+
     async def test_handle_stop_releases_runtime_turn_gate(self):
         controller = _StubController()
         runtime_key = "wechat_o9:/tmp/work"

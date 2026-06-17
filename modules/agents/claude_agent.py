@@ -761,11 +761,10 @@ class ClaudeAgent(BaseAgent):
 
     async def _handle_receiver_eof(self, composite_key: str, context: MessageContext) -> None:
         """Settle a Claude receiver that ended without a ResultMessage."""
-        pending_requests = self._pending_requests.get(composite_key) or []
-        if not pending_requests:
+        pending_request = self._pop_pending_request(composite_key)
+        if pending_request is None:
             return
 
-        pending_request = pending_requests[0]
         pending_token = str(
             (getattr(getattr(pending_request, "context", None), "platform_specific", None) or {}).get(
                 AGENT_RUNTIME_TURN_TOKEN
@@ -773,10 +772,12 @@ class ClaudeAgent(BaseAgent):
             or ""
         )
         if not pending_token:
+            self._pending_requests.setdefault(composite_key, []).insert(0, pending_request)
             return
         logger.warning("Claude receiver ended without a result for session %s", composite_key)
         self._adopt_pending_turn_token(context, pending_request)
-        await self._clear_pending_reactions(composite_key, context)
+        await self._remove_specific_pending_reaction(composite_key, context, pending_request)
+        await self._remove_ack_reaction(pending_request)
         self._last_assistant_text.pop(composite_key, None)
         self._pending_assistant_message.pop(composite_key, None)
         self._mark_session_idle_if_no_pending_requests(composite_key)
