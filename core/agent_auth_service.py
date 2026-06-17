@@ -300,6 +300,7 @@ class ClaudeOAuthBatch:
     backup: dict[str, str] | None
     attempts: dict[int, "ClaudeOAuthAttempt"] = field(default_factory=dict)
     committed: bool = False
+    durable_backup: bool = False
 
 
 @dataclass
@@ -367,6 +368,8 @@ class AgentAuthService:
         self._web_flow_lock = asyncio.Lock()
         self._claude_oauth_attempt_counter = 0
         self._claude_oauth_batch: ClaudeOAuthBatch | None = None
+        self._claude_oauth_lock = asyncio.Lock()
+        self._recover_interrupted_claude_oauth_settings_backup()
         # Optional callable invoked after a successful *web* auth flow so
         # the UI-server process can ask the long-running controller to
         # reload V2Config-backed credentials. The hook receives ``(backend,)``
@@ -1405,11 +1408,11 @@ class AgentAuthService:
             payload = json.loads(text)
         except json.JSONDecodeError:
             if force_oauth and flow.claude_oauth_attempt is None:
-                await self._restore_claude_settings_env_after_oauth_failure(settings_backup)
+                await self._restore_transient_claude_oauth_probe_backup(settings_backup)
             return False, text
         logged_in = bool(payload.get("loggedIn"))
         if force_oauth and not logged_in and flow.claude_oauth_attempt is None:
-            await self._restore_claude_settings_env_after_oauth_failure(settings_backup)
+            await self._restore_transient_claude_oauth_probe_backup(settings_backup)
         return (logged_in, text)
 
     def _describe_opencode_cli_failure(self, returncode: int, text: str) -> str:
@@ -2810,7 +2813,83 @@ class AgentAuthService:
                 "stale ANTHROPIC_* values may still override OAuth."
             ) from err
 
-    async def _temporarily_clear_claude_settings_env_for_oauth(self) -> dict[str, str] | None:
+    async def _read_pending_claude_oauth_settings_backup(
+        self,
+    ) -> dict[str, str] | None:
+        try:
+            from vibe.claude_config import read_claude_oauth_settings_backup
+
+            return await asyncio.to_thread(read_claude_oauth_settings_backup)
+        except Exception as err:  # noqa: BLE001
+            logger.warning("Failed to read pending Claude OAuth settings backup: %s", err)
+            return None
+
+    def _claude_oauth_mode_committed(self) -> bool:
+        claude_cfg = self._resolve_backend_config("claude")
+        return (
+            getattr(claude_cfg, "auth_mode", None) == "oauth"
+            and bool(getattr(claude_cfg, "auth_mode_set", False))
+        )
+
+    def _recover_interrupted_claude_oauth_settings_backup(self) -> None:
+        try:
+            from vibe.claude_config import (
+                clear_claude_oauth_settings_backup,
+                read_claude_oauth_settings_backup,
+                restore_claude_settings_env,
+            )
+
+            backup = read_claude_oauth_settings_backup()
+            if not backup:
+                return
+            if self._claude_oauth_mode_committed():
+                clear_claude_oauth_settings_backup()
+                return
+            restore_claude_settings_env(backup)
+            clear_claude_oauth_settings_backup()
+        except Exception as err:  # noqa: BLE001
+            logger.warning("Failed to recover interrupted Claude OAuth settings backup: %s", err)
+
+    async def _read_rollback_claude_oauth_settings_backup(
+        self,
+    ) -> dict[str, str] | None:
+        backup = await self._read_pending_claude_oauth_settings_backup()
+        if backup and self._claude_oauth_mode_committed():
+            await self._clear_pending_claude_oauth_settings_backup()
+            return None
+        return backup
+
+    async def _write_pending_claude_oauth_settings_backup(
+        self,
+        settings_backup: dict[str, str] | None,
+    ) -> bool:
+        if not settings_backup:
+            return False
+        try:
+            from vibe.claude_config import write_claude_oauth_settings_backup
+
+            await asyncio.to_thread(write_claude_oauth_settings_backup, settings_backup)
+            return True
+        except Exception as err:  # noqa: BLE001
+            raise RuntimeError(
+                "Failed to persist Claude Code settings backup before OAuth flow; "
+                "existing API-key settings were not changed."
+            ) from err
+
+    async def _clear_pending_claude_oauth_settings_backup(self) -> None:
+        try:
+            from vibe.claude_config import clear_claude_oauth_settings_backup
+
+            await asyncio.to_thread(clear_claude_oauth_settings_backup)
+        except Exception as err:  # noqa: BLE001
+            logger.warning("Failed to clear pending Claude OAuth settings backup: %s", err)
+
+    async def _temporarily_clear_claude_settings_env_for_oauth(
+        self,
+        *,
+        persist_backup: bool = False,
+        existing_backup: dict[str, str] | None = None,
+    ) -> dict[str, str] | None:
         try:
             from vibe.claude_config import read_claude_settings_env
 
@@ -2820,14 +2899,17 @@ class AgentAuthService:
                 "Failed to read Claude Code settings env before OAuth flow; "
                 "stale ANTHROPIC_* values may still override OAuth."
             ) from err
+        effective_backup = existing_backup or settings_backup or None
+        if persist_backup and settings_backup and not existing_backup:
+            await self._write_pending_claude_oauth_settings_backup(settings_backup)
         await self._clear_claude_settings_env_for_oauth()
-        return settings_backup or None
+        return effective_backup
 
     async def _restore_claude_settings_env_after_oauth_failure(
         self, settings_backup: dict[str, str] | None
-    ) -> None:
+    ) -> bool:
         if not settings_backup:
-            return
+            return True
         try:
             from vibe.claude_config import restore_claude_settings_env
 
@@ -2835,38 +2917,61 @@ class AgentAuthService:
                 restore_claude_settings_env,
                 settings_backup,
             )
+            return True
         except Exception as err:  # noqa: BLE001
             logger.warning("Failed to restore Claude settings env after OAuth failure: %s", err)
+            return False
+
+    async def _restore_transient_claude_oauth_probe_backup(
+        self,
+        settings_backup: dict[str, str] | None,
+    ) -> None:
+        if not settings_backup:
+            return
+        async with self._claude_oauth_lock:
+            if self._claude_oauth_batch is not None:
+                return
+            await self._restore_claude_settings_env_after_oauth_failure(settings_backup)
 
     async def _begin_claude_oauth_attempt(self) -> ClaudeOAuthAttempt:
-        settings_backup = await self._temporarily_clear_claude_settings_env_for_oauth()
-        batch = self._claude_oauth_batch
-        if batch is None or batch.committed or not batch.attempts:
-            batch = ClaudeOAuthBatch(
-                backup=dict(settings_backup or {}) or None,
+        async with self._claude_oauth_lock:
+            batch = self._claude_oauth_batch
+            new_batch = batch is None or batch.committed or not batch.attempts
+            existing_backup = None
+            if new_batch:
+                existing_backup = await self._read_rollback_claude_oauth_settings_backup()
+            settings_backup = await self._temporarily_clear_claude_settings_env_for_oauth(
+                persist_backup=new_batch,
+                existing_backup=existing_backup,
             )
-            self._claude_oauth_batch = batch
-        elif batch.backup is None and settings_backup:
-            batch.backup = dict(settings_backup)
+            if new_batch:
+                batch = ClaudeOAuthBatch(
+                    backup=dict(settings_backup or {}) or None,
+                    durable_backup=bool(existing_backup or settings_backup),
+                )
+                self._claude_oauth_batch = batch
+            elif batch.backup is None and settings_backup:
+                batch.backup = dict(settings_backup)
 
-        self._claude_oauth_attempt_counter += 1
-        attempt = ClaudeOAuthAttempt(
-            attempt_id=self._claude_oauth_attempt_counter,
-            batch=batch,
-        )
-        batch.attempts[attempt.attempt_id] = attempt
-        return attempt
+            self._claude_oauth_attempt_counter += 1
+            attempt = ClaudeOAuthAttempt(
+                attempt_id=self._claude_oauth_attempt_counter,
+                batch=batch,
+            )
+            batch.attempts[attempt.attempt_id] = attempt
+            return attempt
 
     async def _prepare_claude_oauth_probe(
         self,
         attempt: ClaudeOAuthAttempt | None,
     ) -> dict[str, str] | None:
-        settings_backup = await self._temporarily_clear_claude_settings_env_for_oauth()
-        if attempt is None:
-            return settings_backup
-        if attempt.batch.backup is None and settings_backup:
-            attempt.batch.backup = dict(settings_backup)
-        return attempt.settings_backup
+        async with self._claude_oauth_lock:
+            settings_backup = await self._temporarily_clear_claude_settings_env_for_oauth()
+            if attempt is None:
+                return settings_backup
+            if attempt.batch.backup is None and settings_backup:
+                attempt.batch.backup = dict(settings_backup)
+            return attempt.settings_backup
 
     async def _finish_claude_oauth_attempt(
         self,
@@ -2874,26 +2979,38 @@ class AgentAuthService:
         *,
         succeeded: bool,
     ) -> None:
-        if attempt is None or not attempt.active:
-            return
+        async with self._claude_oauth_lock:
+            if attempt is None or not attempt.active:
+                return
 
-        attempt.active = False
-        attempt.succeeded = succeeded
-        batch = attempt.batch
-        batch.attempts.pop(attempt.attempt_id, None)
-        if succeeded:
-            batch.committed = True
-            batch.backup = None
-            if self._claude_oauth_batch is batch and not batch.attempts:
-                self._claude_oauth_batch = None
-            return
+            attempt.active = False
+            attempt.succeeded = succeeded
+            batch = attempt.batch
+            batch.attempts.pop(attempt.attempt_id, None)
+            if succeeded:
+                had_durable_backup = batch.durable_backup
+                batch.committed = True
+                batch.backup = None
+                batch.durable_backup = False
+                if self._claude_oauth_batch is batch and not batch.attempts:
+                    self._claude_oauth_batch = None
+                if had_durable_backup:
+                    await self._clear_pending_claude_oauth_settings_backup()
+                return
 
-        if not batch.attempts:
-            if not batch.committed:
-                await self._restore_claude_settings_env_after_oauth_failure(batch.backup)
-            batch.backup = None
-            if self._claude_oauth_batch is batch:
-                self._claude_oauth_batch = None
+            if not batch.attempts:
+                backup = batch.backup
+                had_durable_backup = batch.durable_backup
+                should_restore = not batch.committed
+                batch.backup = None
+                batch.durable_backup = False
+                if self._claude_oauth_batch is batch:
+                    self._claude_oauth_batch = None
+                restore_ok = True
+                if should_restore:
+                    restore_ok = await self._restore_claude_settings_env_after_oauth_failure(backup)
+                if restore_ok and had_durable_backup:
+                    await self._clear_pending_claude_oauth_settings_backup()
 
     async def _clear_claude_settings_env_for_logout(self) -> str | None:
         try:

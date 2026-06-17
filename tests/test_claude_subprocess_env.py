@@ -16,7 +16,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from vibe.claude_config import build_claude_subprocess_env, read_claude_settings_env, restore_claude_settings_env
+from vibe.claude_config import (
+    build_claude_subprocess_env,
+    clear_claude_oauth_settings_backup,
+    get_claude_oauth_settings_backup_path,
+    read_claude_oauth_settings_backup,
+    read_claude_settings_env,
+    restore_claude_settings_env,
+    write_claude_oauth_settings_backup,
+)
 
 
 def _cfg(**kwargs) -> SimpleNamespace:
@@ -91,6 +99,31 @@ def test_restore_claude_settings_env_preserves_base_url_only(tmp_path, monkeypat
     assert read_claude_settings_env() == {
         "ANTHROPIC_BASE_URL": "https://relay.example",
     }
+
+
+def test_claude_oauth_settings_backup_round_trips_relevant_env_only(
+    tmp_path, monkeypatch
+) -> None:
+    _empty_claude_home(tmp_path, monkeypatch)
+
+    write_claude_oauth_settings_backup(
+        {
+            "ANTHROPIC_API_KEY": " sk-old ",
+            "ANTHROPIC_BASE_URL": "https://relay.example",
+            "UNRELATED": "ignored",
+        }
+    )
+
+    assert read_claude_oauth_settings_backup() == {
+        "ANTHROPIC_API_KEY": "sk-old",
+        "ANTHROPIC_BASE_URL": "https://relay.example",
+    }
+    assert get_claude_oauth_settings_backup_path().exists()
+
+    clear_claude_oauth_settings_backup()
+
+    assert read_claude_oauth_settings_backup() is None
+    assert not get_claude_oauth_settings_backup_path().exists()
 
 
 def test_api_key_mode_injects_configured_key_and_drops_bearer(tmp_path, monkeypatch) -> None:

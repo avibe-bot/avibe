@@ -39,6 +39,7 @@ RELEVANT_ENV_KEYS = (
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
 )
+OAUTH_SETTINGS_ENV_BACKUP_NAME = ".avibe-oauth-settings-env-backup.json"
 
 
 def get_claude_home(home: Path | None = None) -> Path:
@@ -72,6 +73,11 @@ def get_claude_credentials_path(home: Path | None = None) -> Path:
     macOS keychain is not portably introspectable.
     """
     return get_claude_home(home) / "credentials.json"
+
+
+def get_claude_oauth_settings_backup_path(home: Path | None = None) -> Path:
+    """Return Avibe's durable rollback file for Claude OAuth setup."""
+    return get_claude_home(home) / OAUTH_SETTINGS_ENV_BACKUP_NAME
 
 
 def read_claude_oauth_signed_in(home: Path | None = None) -> bool:
@@ -151,6 +157,69 @@ def _atomic_write(path: Path, content: str, *, mode: int = 0o600) -> None:
         path.chmod(mode)
     except OSError as exc:  # pragma: no cover - non-POSIX
         logger.debug("chmod %s failed: %s", path, exc)
+
+
+def _clean_relevant_env_values(env_values: Dict[str, str]) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for key in RELEVANT_ENV_KEYS:
+        raw = env_values.get(key)
+        if isinstance(raw, str) and raw.strip():
+            out[key] = raw.strip()
+    return out
+
+
+def write_claude_oauth_settings_backup(
+    env_values: Dict[str, str], home: Path | None = None
+) -> None:
+    """Persist a rollback copy of Claude settings env before OAuth cleanup.
+
+    OAuth setup has to remove API-key/base-url overrides from Claude Code's
+    ``settings.json`` before launching the OAuth control client. The rollback
+    state must survive an Avibe process restart, so it lives next to Claude's
+    settings file and uses the same private-file permissions.
+    """
+    cleaned = _clean_relevant_env_values(env_values)
+    if not cleaned:
+        clear_claude_oauth_settings_backup(home)
+        return
+    payload = {"version": 1, "env": cleaned}
+    _atomic_write(
+        get_claude_oauth_settings_backup_path(home),
+        json.dumps(payload, indent=2) + "\n",
+        mode=0o600,
+    )
+
+
+def read_claude_oauth_settings_backup(
+    home: Path | None = None,
+) -> Dict[str, str] | None:
+    """Read Avibe's pending Claude OAuth rollback backup, if present."""
+    path = get_claude_oauth_settings_backup_path(home)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Claude OAuth settings backup read failed (%s)", exc)
+        return None
+    if not isinstance(data, dict):
+        return None
+    env_values = data.get("env")
+    if not isinstance(env_values, dict):
+        return None
+    cleaned = _clean_relevant_env_values(env_values)
+    return cleaned or None
+
+
+def clear_claude_oauth_settings_backup(home: Path | None = None) -> None:
+    """Remove Avibe's pending Claude OAuth rollback backup."""
+    path = get_claude_oauth_settings_backup_path(home)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:  # pragma: no cover - best effort cleanup
+        logger.warning("Claude OAuth settings backup cleanup failed (%s)", exc)
 
 
 def apply_claude_auth(

@@ -25,6 +25,11 @@ from core.agent_auth_service import (
     WebAuthFlow,
 )
 from modules.agents.opencode.message_processor import extract_opencode_response_text
+from vibe.claude_config import (
+    read_claude_oauth_settings_backup,
+    read_claude_settings_env,
+    restore_claude_settings_env,
+)
 
 
 class _Backend:
@@ -49,6 +54,13 @@ class _StubController:
     session_handler = None
     im_client = None
     config = _Config()
+
+
+@pytest.fixture(autouse=True)
+def isolated_claude_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude_home = tmp_path / "default-claude"
+    claude_home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
 
 
 @pytest.fixture
@@ -324,6 +336,116 @@ def test_claude_oauth_new_batch_restores_after_previous_batch_success(
     service._restore_claude_settings_env_after_oauth_failure.assert_awaited_once_with(
         second_backup
     )
+
+
+def test_claude_oauth_begin_persists_backup_before_clearing_settings(
+    service: AgentAuthService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claude_home = tmp_path / ".claude"
+    claude_home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+    backup = {
+        "ANTHROPIC_API_KEY": "sk-old",
+        "ANTHROPIC_BASE_URL": "https://relay.example",
+    }
+    restore_claude_settings_env(backup)
+
+    attempt = _run(service._begin_claude_oauth_attempt())
+
+    assert attempt.settings_backup == backup
+    assert read_claude_settings_env() == {}
+    assert read_claude_oauth_settings_backup() == backup
+
+
+def test_claude_oauth_restarts_restore_interrupted_durable_backup(
+    service: AgentAuthService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claude_home = tmp_path / ".claude"
+    claude_home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+    backup = {
+        "ANTHROPIC_API_KEY": "sk-old",
+        "ANTHROPIC_BASE_URL": "https://relay.example",
+    }
+    restore_claude_settings_env(backup)
+
+    _run(service._begin_claude_oauth_attempt())
+    assert read_claude_settings_env() == {}
+
+    AgentAuthService(_StubController())
+
+    assert read_claude_settings_env() == backup
+    assert read_claude_oauth_settings_backup() is None
+
+
+def test_committed_claude_oauth_ignores_leftover_durable_backup(
+    service: AgentAuthService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe.claude_config import write_claude_oauth_settings_backup
+
+    claude_home = tmp_path / ".claude"
+    claude_home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+    monkeypatch.setattr(_Backend, "auth_mode", "oauth", raising=False)
+    monkeypatch.setattr(_Backend, "auth_mode_set", True, raising=False)
+    write_claude_oauth_settings_backup({"ANTHROPIC_API_KEY": "sk-old"})
+    service._recover_interrupted_claude_oauth_settings_backup()
+
+    attempt = _run(service._begin_claude_oauth_attempt())
+
+    assert attempt.settings_backup is None
+    assert read_claude_oauth_settings_backup() is None
+
+
+def test_claude_oauth_rollback_serializes_before_retry(
+    service: AgentAuthService,
+) -> None:
+    first_backup = {"ANTHROPIC_API_KEY": "sk-old"}
+    retry_backup = {"ANTHROPIC_API_KEY": "sk-retry"}
+    service._temporarily_clear_claude_settings_env_for_oauth = AsyncMock(
+        side_effect=[first_backup, retry_backup],
+    )
+    service._clear_pending_claude_oauth_settings_backup = AsyncMock()
+    restore_started = asyncio.Event()
+    release_restore = asyncio.Event()
+    order: list[str] = []
+
+    async def restore(_backup):
+        order.append("restore-start")
+        restore_started.set()
+        await release_restore.wait()
+        order.append("restore-end")
+        return True
+
+    service._restore_claude_settings_env_after_oauth_failure = restore
+
+    async def scenario():
+        first_attempt = await service._begin_claude_oauth_attempt()
+        finish_task = asyncio.create_task(
+            service._finish_claude_oauth_attempt(first_attempt, succeeded=False)
+        )
+        await restore_started.wait()
+        retry_task = asyncio.create_task(service._begin_claude_oauth_attempt())
+        await asyncio.sleep(0)
+
+        assert not retry_task.done()
+        assert service._temporarily_clear_claude_settings_env_for_oauth.await_count == 1
+
+        release_restore.set()
+        retry_attempt = await retry_task
+        await finish_task
+        return retry_attempt
+
+    retry_attempt = _run(scenario())
+
+    assert order == ["restore-start", "restore-end"]
+    assert retry_attempt.settings_backup == retry_backup
 
 
 def test_post_web_success_hook_unset_is_safe(

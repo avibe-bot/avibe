@@ -21,6 +21,22 @@ from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE
 from modules.im import MessageContext
 
 
+class _IsolatedClaudeConfigDirMixin:
+    def setUp(self):
+        super().setUp()
+        self._claude_config_dir_tmp = tempfile.TemporaryDirectory()
+        self._previous_claude_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self._claude_config_dir_tmp.name) / ".claude")
+
+    def tearDown(self):
+        if self._previous_claude_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = self._previous_claude_config_dir
+        self._claude_config_dir_tmp.cleanup()
+        super().tearDown()
+
+
 @contextmanager
 def _temporary_vibe_home(tmp_path: Path):
     previous_home = os.environ.get("VIBE_REMOTE_HOME")
@@ -96,7 +112,7 @@ class _StubController:
         return (None, None, None)
 
 
-class AgentAuthServiceTests(unittest.IsolatedAsyncioTestCase):
+class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyncioTestCase):
     async def test_handle_setup_command_submits_code(self):
         controller = _StubController()
         service = AgentAuthService(controller)
