@@ -77,6 +77,33 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         ScenarioExpect.button_callback_contains(harness, "auth_setup:codex")
         ScenarioExpect.flow_missing(harness, "C1:codex")
 
+    async def test_claude_startup_cleanup_failure_emits_reset_path(self):
+        """Scenario: AUTH-SETUP-208"""
+        harness = AuthSetupScenarioHarness()
+        runner = ScenarioRunner(harness)
+        harness.service._start_claude_control_flow = AsyncMock(
+            side_effect=RuntimeError("Failed to clear Claude Code settings env")
+        )
+
+        await runner.run(
+            ScenarioStep(
+                "start_setup",
+                lambda h: h.service.start_setup(
+                    h.context,
+                    backend="claude",
+                    force_reset=True,
+                    claude_login_method="console",
+                ),
+            ),
+        )
+
+        ScenarioExpect.step_history(runner, ["start_setup"])
+        ScenarioExpect.text_contains(harness, "starting claude", index=0)
+        ScenarioExpect.text_contains(harness, "failed", index=1)
+        ScenarioExpect.text_contains(harness, "Failed to clear Claude Code settings env", index=1)
+        ScenarioExpect.button_callback_contains(harness, "auth_setup:claude")
+        ScenarioExpect.flow_missing(harness, "C1:claude")
+
     async def test_codex_reentry_scenario_replaces_existing_flow(self):
         """Scenario: AUTH-SETUP-201"""
         harness = AuthSetupScenarioHarness()

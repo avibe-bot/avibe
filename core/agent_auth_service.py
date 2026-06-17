@@ -631,58 +631,9 @@ class AgentAuthService:
                 f"⏳ {self._t('command.setup.starting', backend=resolved_backend)}",
             )
 
-            if resolved_backend == "codex":
-                process = await self._start_codex_process(force_reset=force_reset)
-                flow = AgentAuthFlow(
-                    flow_id=uuid.uuid4().hex[:12],
-                    backend=resolved_backend,
-                    settings_key=self._get_settings_key(context),
-                    initiator_user_id=context.user_id,
-                    context=context,
-                    process=process,
-                    reader_task=asyncio.create_task(asyncio.sleep(0)),
-                    waiter_task=asyncio.create_task(asyncio.sleep(0)),
-                )
-            elif resolved_backend == "claude":
-                client, manual_url, attempt = await self._start_claude_control_flow(
-                    context,
-                    force_reset=force_reset,
-                    login_with_claude_ai=claude_login_method != "console",
-                )
-                flow = AgentAuthFlow(
-                    flow_id=uuid.uuid4().hex[:12],
-                    backend=resolved_backend,
-                    settings_key=self._get_settings_key(context),
-                    initiator_user_id=context.user_id,
-                    context=context,
-                    process=None,
-                    reader_task=asyncio.create_task(asyncio.sleep(0)),
-                    waiter_task=asyncio.create_task(asyncio.sleep(0)),
-                    claude_client=client,
-                    login_prompt_sent=True,
-                    url=manual_url,
-                    claude_oauth_attempt=attempt,
-                )
-            else:
-                provider = await self._resolve_opencode_provider(context)
-                if self._supports_direct_opencode_api_key_setup(provider):
-                    flow = AgentAuthFlow(
-                        flow_id=uuid.uuid4().hex[:12],
-                        backend=resolved_backend,
-                        settings_key=self._get_settings_key(context),
-                        initiator_user_id=context.user_id,
-                        context=context,
-                        process=None,
-                        reader_task=asyncio.create_task(asyncio.sleep(0)),
-                        waiter_task=asyncio.create_task(asyncio.sleep(0)),
-                        provider=provider,
-                        awaiting_code=True,
-                        login_prompt_sent=True,
-                        code_prompt_sent=True,
-                        url=self._get_opencode_setup_url(provider),
-                    )
-                else:
-                    process, master_fd, provider = await self._start_opencode_process(context, force_reset=force_reset)
+            try:
+                if resolved_backend == "codex":
+                    process = await self._start_codex_process(force_reset=force_reset)
                     flow = AgentAuthFlow(
                         flow_id=uuid.uuid4().hex[:12],
                         backend=resolved_backend,
@@ -692,9 +643,63 @@ class AgentAuthService:
                         process=process,
                         reader_task=asyncio.create_task(asyncio.sleep(0)),
                         waiter_task=asyncio.create_task(asyncio.sleep(0)),
-                        pty_master_fd=master_fd,
-                        provider=provider,
                     )
+                elif resolved_backend == "claude":
+                    client, manual_url, attempt = await self._start_claude_control_flow(
+                        context,
+                        force_reset=force_reset,
+                        login_with_claude_ai=claude_login_method != "console",
+                    )
+                    flow = AgentAuthFlow(
+                        flow_id=uuid.uuid4().hex[:12],
+                        backend=resolved_backend,
+                        settings_key=self._get_settings_key(context),
+                        initiator_user_id=context.user_id,
+                        context=context,
+                        process=None,
+                        reader_task=asyncio.create_task(asyncio.sleep(0)),
+                        waiter_task=asyncio.create_task(asyncio.sleep(0)),
+                        claude_client=client,
+                        login_prompt_sent=True,
+                        url=manual_url,
+                        claude_oauth_attempt=attempt,
+                    )
+                else:
+                    provider = await self._resolve_opencode_provider(context)
+                    if self._supports_direct_opencode_api_key_setup(provider):
+                        flow = AgentAuthFlow(
+                            flow_id=uuid.uuid4().hex[:12],
+                            backend=resolved_backend,
+                            settings_key=self._get_settings_key(context),
+                            initiator_user_id=context.user_id,
+                            context=context,
+                            process=None,
+                            reader_task=asyncio.create_task(asyncio.sleep(0)),
+                            waiter_task=asyncio.create_task(asyncio.sleep(0)),
+                            provider=provider,
+                            awaiting_code=True,
+                            login_prompt_sent=True,
+                            code_prompt_sent=True,
+                            url=self._get_opencode_setup_url(provider),
+                        )
+                    else:
+                        process, master_fd, provider = await self._start_opencode_process(context, force_reset=force_reset)
+                        flow = AgentAuthFlow(
+                            flow_id=uuid.uuid4().hex[:12],
+                            backend=resolved_backend,
+                            settings_key=self._get_settings_key(context),
+                            initiator_user_id=context.user_id,
+                            context=context,
+                            process=process,
+                            reader_task=asyncio.create_task(asyncio.sleep(0)),
+                            waiter_task=asyncio.create_task(asyncio.sleep(0)),
+                            pty_master_fd=master_fd,
+                            provider=provider,
+                        )
+            except Exception as err:  # noqa: BLE001
+                logger.error("Agent auth setup failed to start for %s: %s", resolved_backend, err, exc_info=True)
+                await self._send_setup_start_failure(context, resolved_backend, str(err))
+                return
 
             self._flows[flow_key] = flow
             self._flows_by_id[flow.flow_id] = flow
@@ -875,6 +880,19 @@ class AgentAuthService:
             return await im_client.send_message_with_buttons(context, button_text, keyboard)
         fallback = fallback_text or text
         return await im_client.send_message(context, fallback)
+
+    async def _send_setup_start_failure(
+        self,
+        context: MessageContext,
+        backend: str,
+        detail: str,
+    ) -> None:
+        await self._send_message_with_button(
+            context,
+            f"❌ {self._t('command.setup.failed', backend=backend, detail=detail)}",
+            button_text=self._t("button.resetOAuth"),
+            callback_data=f"auth_setup:{backend}",
+        )
 
     async def _prompt_claude_login_method(self, context: MessageContext) -> None:
         text = self._t("command.setup.claudeMethodPrompt")

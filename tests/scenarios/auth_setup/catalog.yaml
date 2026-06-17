@@ -119,6 +119,13 @@ scenarios:
     layer: scenario
     backend: codex
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_failed_codex_setup_does_not_leave_stale_runtime_for_next_attempt
+  - id: AUTH-SETUP-208
+    name: Claude startup cleanup failure emits a reset path
+    status: covered
+    kind: retry
+    layer: scenario
+    backend: claude
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_claude_startup_cleanup_failure_emits_reset_path
   - id: AUTH-SETUP-901
     name: Codex setup success refreshes runtime before the next turn
     status: covered
@@ -135,5 +142,4 @@ scenarios:
     test: tests/test_claude_agent_sessions.py::test_assistant_auth_error_without_is_api_error_flag_still_triggers_recovery
 next_priority:
   - AUTH-SETUP-106
-  - AUTH-SETUP-208
   - AUTH-SETUP-301

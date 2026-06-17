@@ -278,6 +278,24 @@ class AgentAuthServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(flow.claude_client, mock_client)
         self.assertTrue(flow.login_prompt_sent)
 
+    async def test_start_setup_reports_claude_start_failure(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+        service._start_claude_control_flow = AsyncMock(
+            side_effect=RuntimeError("Failed to clear Claude Code settings env")
+        )
+
+        await service.start_setup(context, backend="claude", force_reset=True, claude_login_method="console")
+
+        self.assertEqual(len(controller.im_client.sent_messages), 1)
+        self.assertEqual(len(controller.im_client.sent_button_messages), 1)
+        _, text, keyboard = controller.im_client.sent_button_messages[0]
+        self.assertIn("failed", text.lower())
+        self.assertIn("Failed to clear Claude Code settings env", text)
+        self.assertEqual(keyboard.buttons[0][0].callback_data, "auth_setup:claude")
+        self.assertNotIn("C1:claude", service._flows)
+
     async def test_start_claude_control_flow_restores_settings_on_auth_start_failure(self):
         controller = _StubController()
         service = AgentAuthService(controller)
