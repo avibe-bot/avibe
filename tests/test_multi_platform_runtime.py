@@ -13,8 +13,10 @@ from modules.im.base import BaseIMClient, BaseIMConfig, MessageContext
 from modules.im.multi import IMClientRemovalError, MultiIMClient
 from modules.settings_manager import MultiSettingsManager
 from config.v2_sessions import ActivePollInfo
+from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.processing_indicator import ProcessingIndicatorService
 from modules.agents.base import AgentRequest
+from modules.agents.service import AgentService
 from modules.agents.opencode.agent import OpenCodeAgent
 from modules.agents.opencode.poll_loop import OpenCodePollLoop
 
@@ -101,6 +103,10 @@ class _StubClient(BaseIMClient):
 
     async def clear_typing_indicator(self, context):
         self.sent.append(("clear_typing", context.platform, context.user_id, (context.platform_specific or {}).get("context_token")))
+        return True
+
+    async def send_typing_indicator(self, context):
+        self.sent.append(("typing", context.platform, context.user_id))
         return True
 
     async def delete_message(self, context, message_id):
@@ -1238,6 +1244,86 @@ def test_processing_indicator_message_delete_policy_comes_from_platform_registry
     assert request.ack_message_id is None
     assert handle.ack_message_id is None
     assert telegram.sent == [("delete", "telegram", "chat-1", "ack-1")]
+
+
+class _TerminalCleanupSettings:
+    def _canonicalize_message_type(self, message_type):
+        return message_type
+
+    def is_message_type_hidden(self, settings_key, canonical_type):
+        return False
+
+
+class _TerminalCleanupController:
+    def __init__(self, platform: str, client: _StubClient):
+        self.config = type(
+            "Config",
+            (),
+            {"platform": platform, "ack_mode": "typing", "language": "en", "reply_enhancements": False},
+        )()
+        self.im_client = client
+        self.session_handler = type("SessionHandler", (), {"finalize_scheduled_delivery": lambda *args: None})()
+        self.processing_indicator = ProcessingIndicatorService(self)
+        self.agent_service = AgentService(self)
+
+    def get_im_client_for_context(self, context):
+        return self.im_client
+
+    def get_settings_manager_for_context(self, context):
+        return _TerminalCleanupSettings()
+
+    def _get_settings_key(self, context):
+        return context.channel_id
+
+    def _get_session_key(self, context):
+        return f"{context.platform}::{context.channel_id}"
+
+
+async def _run_terminal_result_cleanup(platform: str, *, platform_specific=None):
+    client = _StubClient(platform)
+    controller = _TerminalCleanupController(platform, client)
+    dispatcher = ConsolidatedMessageDispatcher(controller)
+    context = MessageContext(
+        user_id="user-1",
+        channel_id="chan-1",
+        platform=platform,
+        platform_specific=platform_specific,
+    )
+    handle = await controller.processing_indicator.start(context, "claude")
+    request = AgentRequest(
+        context=context,
+        message="hello",
+        working_path="/tmp",
+        base_session_id="base",
+        composite_session_id="base:/tmp",
+        session_key=f"{platform}::chan-1",
+        processing_indicator=handle,
+    )
+    controller.processing_indicator.apply_to_request(request, handle)
+    controller.agent_service._stamp_runtime_turn(request, "base:/tmp", "turn-1")
+    gate = controller.agent_service._get_turn_gate("base:/tmp")
+    gate.token = "turn-1"
+    gate.backend = "claude"
+    controller.processing_indicator.track_turn(context, request)
+
+    await dispatcher.emit_agent_message(context, "result", "done")
+
+    assert request.typing_indicator_active is False
+    assert request.typing_indicator_task is None
+    assert handle.typing_indicator_active is False
+    return client
+
+
+def test_terminal_result_finishes_registered_telegram_typing_turn():
+    client = asyncio.run(_run_terminal_result_cleanup("telegram"))
+
+    assert client.sent == [("typing", "telegram", "user-1"), ("telegram", "chan-1", "done")]
+
+
+def test_terminal_result_finishes_registered_wechat_typing_turn():
+    client = asyncio.run(_run_terminal_result_cleanup("wechat", platform_specific={"context_token": "ctx-1"}))
+
+    assert ("clear_typing", "wechat", "user-1", "ctx-1") in client.sent
 
 
 def test_multi_im_client_routes_download_by_file_info_platform():
