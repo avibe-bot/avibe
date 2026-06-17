@@ -110,6 +110,21 @@ export const SelectionQuoteToolbar: React.FC<{
     });
   };
 
+  // Activate on pointerup (mouse + touch) and Enter/Space (keyboard). The
+  // pointerdown preventDefault keeps the text selection alive (and on touch
+  // cancels the synthetic click we don't use), so onClick is intentionally
+  // avoided — it wouldn't fire on touch yet would double-fire on mouse.
+  const activate = (run: () => void) => ({
+    onPointerDown: (e: React.PointerEvent) => e.preventDefault(),
+    onPointerUp: () => run(),
+    onKeyDown: (e: React.KeyboardEvent) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        run();
+      }
+    },
+  });
+
   const above = sel.top > TOOLBAR_H + GAP + EDGE;
   const top = above ? sel.top - TOOLBAR_H - GAP : sel.bottom + GAP;
   // Clamp by the on-screen (capped) width so a toolbar wider than the viewport
@@ -126,14 +141,14 @@ export const SelectionQuoteToolbar: React.FC<{
       style={{ position: 'fixed', top, left, maxWidth: 'calc(100vw - 16px)', transform: 'translateX(-50%)', zIndex: 60 }}
       className="flex items-center overflow-x-auto rounded-lg border border-border-strong bg-surface-2 shadow-[0_12px_30px_-8px_rgba(0,0,0,0.7)]"
     >
-      <Button variant="ghost" className={itemClass} onPointerDown={(e) => { e.preventDefault(); runQuote(); }}>
+      <Button variant="ghost" className={itemClass} {...activate(runQuote)}>
         <TextQuote className="size-3.5 text-muted" />
         {t('chat.selection.quote')}
       </Button>
       {onAskInNew && (
         <>
           <span className="h-5 w-px bg-border" />
-          <Button variant="ghost" className={itemClass} onPointerDown={(e) => { e.preventDefault(); runAsk(); }}>
+          <Button variant="ghost" className={itemClass} {...activate(runAsk)}>
             <GitFork className="size-3.5 text-muted" />
             {t('chat.selection.askInNew')}
           </Button>
@@ -142,7 +157,7 @@ export const SelectionQuoteToolbar: React.FC<{
       {isTouch && (
         <>
           <span className="h-5 w-px bg-border" />
-          <Button variant="ghost" className={itemClass} onPointerDown={(e) => { e.preventDefault(); runCopy(); }}>
+          <Button variant="ghost" className={itemClass} {...activate(runCopy)}>
             {copied ? <Check className="size-3.5 text-mint" /> : <Copy className="size-3.5 text-muted" />}
             {t('chat.selection.copy')}
           </Button>
