@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vibe.claude_config import build_claude_subprocess_env
+from vibe.claude_config import build_claude_subprocess_env, read_claude_settings_env, restore_claude_settings_env
 
 
 def _cfg(**kwargs) -> SimpleNamespace:
@@ -46,6 +46,51 @@ def test_oauth_strips_inherited_api_key_and_auth_token() -> None:
     # inherit only the namespaced ones, never PATH.
     assert out["CLAUDE_CONFIG_DIR"] == "/keep"
     assert "PATH" not in out
+
+
+def test_force_oauth_bypasses_api_key_mode_settings_and_config(
+    tmp_path, monkeypatch
+) -> None:
+    claude_home = tmp_path / ".claude"
+    claude_home.mkdir()
+    (claude_home / "settings.json").write_text(
+        '{"env":{"ANTHROPIC_API_KEY":"sk-settings","ANTHROPIC_AUTH_TOKEN":"bearer-settings","ANTHROPIC_BASE_URL":"https://settings.example"}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+
+    env = {
+        "ANTHROPIC_API_KEY": "sk-shell",
+        "ANTHROPIC_AUTH_TOKEN": "bearer-shell",
+        "ANTHROPIC_BASE_URL": "https://shell.example",
+        "CLAUDE_CONFIG_DIR": str(claude_home),
+    }
+
+    out = build_claude_subprocess_env(
+        _cfg(
+            auth_mode="api_key",
+            auth_mode_set=True,
+            api_key="sk-configured",
+            base_url="https://configured.example",
+        ),
+        base_env=env,
+        force_oauth=True,
+    )
+
+    assert "ANTHROPIC_API_KEY" not in out
+    assert "ANTHROPIC_AUTH_TOKEN" not in out
+    assert "ANTHROPIC_BASE_URL" not in out
+    assert out["CLAUDE_CONFIG_DIR"] == str(claude_home)
+
+
+def test_restore_claude_settings_env_preserves_base_url_only(tmp_path, monkeypatch) -> None:
+    _empty_claude_home(tmp_path, monkeypatch)
+
+    restore_claude_settings_env({"ANTHROPIC_BASE_URL": "https://relay.example"})
+
+    assert read_claude_settings_env() == {
+        "ANTHROPIC_BASE_URL": "https://relay.example",
+    }
 
 
 def test_api_key_mode_injects_configured_key_and_drops_bearer(tmp_path, monkeypatch) -> None:

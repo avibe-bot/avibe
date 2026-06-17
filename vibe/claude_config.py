@@ -220,6 +220,33 @@ def read_claude_settings_env(home: Path | None = None) -> Dict[str, str]:
     return out
 
 
+def restore_claude_settings_env(env_values: Dict[str, str], home: Path | None = None) -> None:
+    """Restore Anthropic-relevant Claude settings env values exactly.
+
+    OAuth setup temporarily removes these keys so Claude Code cannot route
+    the OAuth handshake through stale API-key settings. If that setup does
+    not complete, the caller needs to put the previous settings back without
+    changing header semantics or dropping a base-url-only relay setting.
+    """
+    path = get_claude_settings_path(home)
+    settings = _load_settings_for_write(path)
+    env_block = settings.setdefault("env", {})
+    if not isinstance(env_block, dict):
+        env_block = {}
+        settings["env"] = env_block
+
+    for key in RELEVANT_ENV_KEYS:
+        env_block.pop(key, None)
+        raw = env_values.get(key)
+        if isinstance(raw, str) and raw.strip():
+            env_block[key] = raw.strip()
+
+    if not env_block:
+        settings.pop("env", None)
+
+    _atomic_write(path, json.dumps(settings, indent=2) + "\n", mode=0o600)
+
+
 def read_claude_auth_state(home: Path | None = None) -> Dict[str, Any]:
     """Return the user-visible Claude auth state for the Settings UI.
 
@@ -321,7 +348,10 @@ def build_claude_subprocess_env(
     if claude_cfg is None and not force_oauth:
         return claude_env
 
-    auth_mode = getattr(claude_cfg, "auth_mode", "oauth") if claude_cfg is not None else "oauth"
+    configured_auth_mode = (
+        getattr(claude_cfg, "auth_mode", "oauth") if claude_cfg is not None else "oauth"
+    )
+    auth_mode = "oauth" if force_oauth else configured_auth_mode
     configured_key_raw = (getattr(claude_cfg, "api_key", None) or "").strip() if claude_cfg is not None else ""
     configured_base = (getattr(claude_cfg, "base_url", None) or "").strip() if claude_cfg is not None else ""
     settings_env = read_claude_settings_env()
