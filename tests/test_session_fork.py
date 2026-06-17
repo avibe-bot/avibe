@@ -136,9 +136,39 @@ def test_reserve_forked_session_copies_row_and_applies_overrides(tmp_path: Path)
     assert row["workdir"] == str(tmp_path)
     assert row["native_session_id"] == ""
     assert row["session_anchor"] == result.session_id
-    assert row["title"] == "Source"
+    assert row["title"] == "Fork Source"
     assert metadata["fork_source_message_id"] == visible_message["id"]
     assert metadata["fork_source_session_title"] == "Source"
+
+
+def test_reserve_forked_session_uses_generic_title_for_untitled_source(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == source_id)
+                .values(title=None)
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(agent_sessions).where(agent_sessions.c.id == result.session_id)
+            ).mappings().one()
+    finally:
+        engine.dispose()
+
+    metadata = json.loads(row["metadata_json"])
+    assert row["title"] == "Fork"
+    assert metadata["fork_source_session_title"] == ""
 
 
 def test_reserve_forked_session_keeps_im_anchor_and_resets_variant_for_agent_override(tmp_path: Path) -> None:

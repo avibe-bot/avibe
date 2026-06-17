@@ -117,13 +117,15 @@ def reserve_forked_session(
                 if reasoning_effort is not None
                 else row["reasoning_effort"]
             )
+            source_title = str(row["title"] or "").strip()
+            target_title = _forked_session_title(source_title)
 
             metadata = _load_metadata(row["metadata_json"])
             metadata.update(
                 {
                     "created_via": "session_fork",
                     "fork_source_session_id": str(row["id"]),
-                    "fork_source_session_title": str(row["title"] or ""),
+                    "fork_source_session_title": source_title,
                     "fork_source_message_id": source_message_id,
                     "fork_source_native_session_id": source_native,
                     "fork_source_backend": source_backend,
@@ -145,7 +147,7 @@ def reserve_forked_session(
                 reasoning_effort=target_effort,
                 workdir=row["workdir"],
                 native_session_id="",
-                title=row["title"],
+                title=target_title,
                 metadata=metadata,
                 now=now,
                 require_workdir=False,
@@ -244,6 +246,10 @@ def _clean_optional(value: Any) -> Optional[str]:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _forked_session_title(source_title: str) -> str:
+    return f"Fork {source_title}" if source_title else "Fork"
 
 
 def _latest_source_message_id(conn: Any, source_session_id: str) -> Optional[str]:
