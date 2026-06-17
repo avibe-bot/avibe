@@ -42,6 +42,8 @@ def test_active_thread_is_shared_across_users(tmp_path, monkeypatch):
     sessions.mark_thread_active("U1", "C1", "123.456")
 
     assert sessions.is_thread_active("U2", "C1", "123.456")
+    assert not sessions.is_thread_active_for_user("U2", "C1", "123.456")
+    assert sessions.is_thread_active_for_user("U1", "C1", "123.456")
 
 
 def test_shared_active_thread_ignores_expired_entries(tmp_path, monkeypatch):

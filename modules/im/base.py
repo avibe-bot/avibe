@@ -170,6 +170,16 @@ class BaseIMClient(ABC):
         """Whether non-thread channel messages should default to per-message sessions."""
         return True
 
+    def is_scheduled_thread_active(self, channel_id: Optional[str], thread_id: Optional[str]) -> bool:
+        """Return whether a thread is active for the synthetic scheduled owner."""
+        sessions = getattr(self, "sessions", None)
+        if not sessions or not channel_id or not thread_id:
+            return False
+        exact_checker = getattr(sessions, "is_thread_active_for_user", None)
+        if callable(exact_checker):
+            return bool(exact_checker("scheduled", channel_id, thread_id))
+        return False
+
     async def prepare_turn_context(self, context: MessageContext, source: str) -> MessageContext:
         """Allow IM adapters to adjust reply topology for a turn source.
 
