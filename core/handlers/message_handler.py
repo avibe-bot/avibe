@@ -236,11 +236,8 @@ class MessageHandler(BaseHandler):
                     override_agent_name=requested_vibe_agent,
                     required=False,
                 )
-            elif callable(resolve_vibe_agent):
-                routing_agent_backend = getattr(routing, "agent_backend", None) if routing else None
-                routing_agent_name = getattr(routing, "agent_name", None) if routing else None
-                if not session_agent_backend and (routing_agent_name or not routing_agent_backend):
-                    vibe_agent = resolve_vibe_agent(context, required=False)
+            elif callable(resolve_vibe_agent) and not session_agent_backend:
+                vibe_agent = resolve_vibe_agent(context, required=False)
             if vibe_agent:
                 agent_name = vibe_agent.backend
             elif session_agent_backend:

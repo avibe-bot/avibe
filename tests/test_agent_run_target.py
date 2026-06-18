@@ -188,6 +188,45 @@ def test_new_im_session_uses_resolved_vibe_agent(tmp_path):
     assert session["reasoning_effort"] == "high"
 
 
+def test_new_im_session_ignores_legacy_scope_backend(tmp_path):
+    workdir = tmp_path / "channel"
+    controller = _controller(tmp_path)
+    with controller.sqlite_engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="slack",
+            scope_type="channel",
+            native_id="C123",
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(
+            conn,
+            scope_id,
+            workdir=str(workdir),
+            agent_backend="opencode",
+            agent_variant="reviewer",
+        )
+
+    ctx = MessageContext(user_id="U1", channel_id="C123", platform="slack", thread_id="171717.123")
+
+    target = resolve_agent_run_target(
+        ctx,
+        controller=controller,
+        base_session_id="slack_171717.123",
+    )
+
+    assert target.agent_id == "agent-codex-default"
+    assert target.agent_name == "codex"
+    assert target.agent_backend == "codex"
+    assert target.agent_variant == "codex"
+    with controller.sqlite_engine.connect() as conn:
+        session = sessions_service.get_session(conn, target.agent_session_id)
+    assert session["agent_id"] == "agent-codex-default"
+    assert session["agent_name"] == "codex"
+    assert session["agent_backend"] == "codex"
+    assert session["agent_variant"] == "codex"
+
+
 def test_new_im_session_falls_back_to_default_vibe_agent(tmp_path):
     workdir = tmp_path / "channel"
     controller = _controller(tmp_path)
@@ -264,6 +303,18 @@ def test_new_im_session_without_scope_settings_snapshots_default_cwd(tmp_path):
 def test_opencode_bind_reuses_scoped_agent_variant_session(tmp_path):
     workdir = tmp_path / "channel"
     controller = _controller(tmp_path)
+    opencode_agent = SimpleNamespace(
+        id="agent-opencode-reviewer",
+        name="Code Reviewer",
+        backend="opencode",
+        model=None,
+        reasoning_effort=None,
+    )
+
+    default_resolver = controller.resolve_vibe_agent_for_context
+    controller.resolve_vibe_agent_for_context = lambda _context, override_agent_name=None, required=False: (
+        opencode_agent if override_agent_name == "Code Reviewer" else default_resolver(_context, required=required)
+    )
     with controller.sqlite_engine.begin() as conn:
         scope_id = upsert_scope(
             conn,

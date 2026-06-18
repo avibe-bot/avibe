@@ -138,7 +138,9 @@ channels["C123"] = {
     "require_mention": channels.get("C123", {}).get("require_mention"),
     "routing": {
         **(channels.get("C123", {}).get("routing") or {}),
-        "agent_backend": "codex",
+        "agent_name": "codex",
+        "model": "gpt-5.4",
+        "reasoning_effort": "high",
         "codex_model": "gpt-5.4",
         "codex_reasoning_effort": "high",
     },
@@ -252,7 +254,6 @@ Important config payload shape:
     "log_level": "INFO"
   },
   "agents": {
-    "default_backend": "opencode",
     "opencode": {
       "enabled": true,
       "cli_path": "opencode",
@@ -313,6 +314,9 @@ Important config payload shape:
   "reply_enhancements": true
 }
 ```
+
+`agents.default_backend` may still appear in legacy read-back payloads. Do not
+set it for new default-Agent changes; use the Agent catalog/default Agent instead.
 
 Discord server access belongs to `/settings`, not `/config`. Store enabled
 servers under `guilds`, next to channel settings:
@@ -388,7 +392,7 @@ Channel entry shape:
   "require_mention": null,
   "require_bind": null,
   "routing": {
-    "agent_backend": "codex",
+    "agent_name": "codex",
     "model": "gpt-5.4",
     "reasoning_effort": "high",
     "opencode_agent": null,
@@ -411,9 +415,10 @@ Field meanings:
 - `custom_cwd`: scope-level working directory override; empty string or `null` means use global default
 - `require_mention`: `null` inherits the platform default, `true` requires mention, `false` disables mention gating for that channel
 - `require_bind`: `null`/`false` lets any channel member use the bot (current default); `true` gates the channel to bound users only — messages from unbound senders are silently ignored (no denial reply), while the bot's own replies stay visible to everyone. Enforced in the shared auth pipeline, so it applies on every platform. Bind is platform-wide, so `require_bind` means "is this sender a bound user", not a per-channel allowlist.
-- `routing.agent_backend`: `opencode`, `claude`, `codex`, or `null` to inherit default
-- `routing.model`: canonical scope-level model override for the selected backend
-- `routing.reasoning_effort`: canonical scope-level reasoning override for the selected backend
+- `routing.agent_name`: Vibe Agent name for this scope, or `null` to inherit the default Agent
+- `routing.agent_backend`: legacy compatibility field accepted on input/read-back; do not use it as the route selector for new changes
+- `routing.model`: canonical scope-level model override for the selected Agent backend
+- `routing.reasoning_effort`: canonical scope-level reasoning override for the selected Agent backend
 - `routing.<backend>_agent`: backend-specific subagent
 - `routing.<backend>_model` / `routing.<backend>_reasoning_effort`: legacy aliases accepted on input and derived on read-back; do not treat them as independent state
 
@@ -450,7 +455,7 @@ User entry shape:
   "show_message_types": ["assistant"],
   "custom_cwd": "/path/to/repo",
   "routing": {
-    "agent_backend": "claude",
+    "agent_name": "claude",
     "model": "claude-sonnet-4-6",
     "reasoning_effort": "high",
     "opencode_agent": null,
@@ -561,15 +566,16 @@ When the restart is initiated by an agent from an active conversation, use the C
 
 ## Scope and Precedence Rules
 
-### Backend selection
+### Agent selection
 
-Backend resolution priority is:
+Agent resolution priority is:
 
-1. scope-level routing override from `/settings` or `/api/users`
-2. platform router fallback
-3. global default backend from `/config`
+1. existing Agent Session backend snapshot, when the message belongs to an existing session/thread
+2. scope-level `routing.agent_name` from `/settings` or `/api/users`, for new sessions
+3. global default Vibe Agent from the Agent catalog
+4. registered backend compatibility fallback, only when no enabled default Agent is available
 
-If the user names a specific channel or DM and wants a specific backend, use the scope API, not global `/config`.
+If the user names a specific channel or DM and wants a specific Agent, use the scope API, not global `/config`. Do not set a global default backend; new routing is Agent-based.
 
 ### Working directory
 
@@ -620,7 +626,7 @@ Merged channel entry:
   "custom_cwd": null,
   "require_mention": null,
   "routing": {
-    "agent_backend": "codex",
+    "agent_name": "codex",
     "model": "gpt-5.4",
     "reasoning_effort": "high",
     "opencode_agent": null,
@@ -640,7 +646,7 @@ Merged channel entry:
 
 Use `/settings` and set:
 
-- `routing.agent_backend = "opencode"`
+- `routing.agent_name = "opencode"`
 - `routing.opencode_agent = "<agent>"`
 - `routing.model = "<model>"` if requested
 - `routing.reasoning_effort = "<effort>"` if requested
@@ -651,7 +657,7 @@ If the user wants OpenCode-native defaults, providers, MCP servers, skills, plug
 
 Use `/settings` for a channel or `/api/users` for a DM user and set:
 
-- `routing.agent_backend = "claude"`
+- `routing.agent_name = "claude"`
 - `routing.claude_agent = "<agent>"` if requested
 - `routing.model = "<model>"`
 - `routing.reasoning_effort = "<effort>"`
@@ -815,11 +821,11 @@ Operational guidance:
 - use `vibe task pause` / `vibe task resume` and `vibe watch pause` / `vibe watch resume` to disable a task or watch without deleting it
 - treat `warnings` from task, watch, agent-run, or runs commands as delivery-risk hints to fix proactively
 
-## Backend Capability Matrix
+## Agent Backend Capability Matrix
 
-Current Avibe routing support is:
+Current Avibe Agent capabilities are:
 
-| Backend | Channel/User backend select | Subagent | Model | Reasoning |
+| Backend | Select through Vibe Agent | Subagent | Model | Reasoning |
 | --- | --- | --- | --- | --- |
 | OpenCode | yes | yes | yes | yes |
 | Claude | yes | yes | yes | yes |
@@ -878,7 +884,7 @@ Relevant docs:
 - plugins: `https://opencode.ai/docs/plugins/`
 - MCP servers: `https://opencode.ai/docs/mcp-servers/`
 
-Inside Avibe, OpenCode scope routing controls backend choice, subagent, model, and reasoning effort. Use `POST /opencode/setup-permission` only for the specific permission helper.
+Inside Avibe, a scope can select an OpenCode-backed Vibe Agent and then set subagent, model, and reasoning effort overrides. Use `POST /opencode/setup-permission` only for the specific permission helper.
 
 ### Claude Code
 
@@ -899,7 +905,7 @@ Relevant docs:
 
 - subagents: `https://docs.anthropic.com/en/docs/claude-code/sub-agents`
 
-Inside Avibe, Claude scope routing controls backend choice, model, subagent, and reasoning effort.
+Inside Avibe, a scope can select a Claude-backed Vibe Agent and then set model, subagent, and reasoning effort overrides.
 
 ### Codex
 
@@ -924,7 +930,7 @@ Relevant docs:
 - CLI overview: `https://developers.openai.com/codex/cli`
 - subagents: `https://developers.openai.com/codex/subagents`
 
-Inside Avibe, Codex scope routing controls backend choice, subagent, model, and reasoning effort.
+Inside Avibe, a scope can select a Codex-backed Vibe Agent and then set subagent, model, and reasoning effort overrides.
 
 ## CLI Reference
 

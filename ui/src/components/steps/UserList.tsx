@@ -575,7 +575,7 @@ export const UserList: React.FC = () => {
       const cwd = u.config.custom_cwd || defaultCwd;
       const routing = u.config.routing || {};
       const selectedAgent = routing.agent_name ? agentByName[routing.agent_name] : null;
-      const backend = selectedAgent?.backend || routing.agent_backend || defaultAgent?.backend || 'opencode';
+      const backend = selectedAgent?.backend || defaultAgent?.backend || 'opencode';
       if (backend === 'opencode' && config.agents?.opencode?.enabled && !opencodeOptionsByCwd[cwd]) loadOpenCodeOptions(cwd);
       if (backend === 'claude' && config.agents?.claude?.enabled && !claudeAgentsByCwd[cwd]) loadClaudeAgents(cwd);
       if (backend === 'codex' && config.agents?.codex?.enabled && !codexAgentsByCwd[cwd]) loadCodexAgents(cwd);

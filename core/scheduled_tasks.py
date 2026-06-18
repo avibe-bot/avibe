@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 
 class _ScopeAgentTarget(NamedTuple):
     agent_name: Optional[str]
-    agent_backend: Optional[str]
 
 
 def _utc_now_iso() -> str:
@@ -1682,13 +1681,8 @@ class ScheduledTaskService:
         ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(config_paths.get_state_dir()))
         agent_store = VibeAgentStore()
         try:
-            scope_target = self._resolve_scope_agent_target(deliver_key) if not agent_name else _ScopeAgentTarget(None, None)
+            scope_target = self._resolve_scope_agent_target(deliver_key) if not agent_name else _ScopeAgentTarget(None)
             resolved_agent_name = agent_name or scope_target.agent_name
-            if not resolved_agent_name and scope_target.agent_backend:
-                raise ValueError(
-                    "scope routing still references a legacy backend without an Agent; "
-                    "choose an Agent before creating sessions for this Scope"
-                )
             agent = agent_store.require_enabled(resolved_agent_name) if resolved_agent_name else agent_store.get_default_agent()
         finally:
             agent_store.close()
@@ -1716,7 +1710,7 @@ class ScheduledTaskService:
         try:
             target = parse_session_key(deliver_key)
         except ValueError:
-            return _ScopeAgentTarget(None, None)
+            return _ScopeAgentTarget(None)
         from config import paths as config_paths
         from storage.settings_service import make_scope_id
 
@@ -1725,17 +1719,16 @@ class ScheduledTaskService:
         try:
             with engine.connect() as conn:
                 value = conn.execute(
-                    select(scope_settings.c.agent_name, scope_settings.c.agent_backend)
+                    select(scope_settings.c.agent_name)
                     .where(scope_settings.c.scope_id == scope_id)
                     .limit(1)
                 ).first()
         finally:
             engine.dispose()
         if value is None:
-            return _ScopeAgentTarget(None, None)
+            return _ScopeAgentTarget(None)
         agent_name = str(value.agent_name).strip() if value.agent_name else None
-        agent_backend = str(value.agent_backend).strip() if value.agent_backend else None
-        return _ScopeAgentTarget(agent_name, agent_backend)
+        return _ScopeAgentTarget(agent_name)
 
     async def _execute_request(
         self,

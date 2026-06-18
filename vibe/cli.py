@@ -1373,31 +1373,29 @@ def _validate_agent_name_arg(agent_name: Optional[str]) -> Optional[str]:
 
 class _ScopeRoutingTarget(NamedTuple):
     agent_name: Optional[str]
-    agent_backend: Optional[str]
 
 
 def _resolve_scope_routing_target(session_key: str) -> _ScopeRoutingTarget:
     if not session_key:
-        return _ScopeRoutingTarget(None, None)
+        return _ScopeRoutingTarget(None)
     try:
         parsed = parse_session_key(session_key)
     except ValueError:
-        return _ScopeRoutingTarget(None, None)
+        return _ScopeRoutingTarget(None)
     scope_id = make_scope_id(parsed.platform, parsed.scope_type, parsed.scope_id)
     _ensure_cli_sqlite_state()
     engine = create_sqlite_engine(paths.get_sqlite_state_path())
     try:
         with engine.connect() as conn:
             row = conn.execute(
-                select(scope_settings.c.agent_name, scope_settings.c.agent_backend)
+                select(scope_settings.c.agent_name)
                 .where(scope_settings.c.scope_id == scope_id)
                 .limit(1)
             ).first()
             if row is None:
-                return _ScopeRoutingTarget(None, None)
+                return _ScopeRoutingTarget(None)
             agent_name = str(row.agent_name).strip() if row.agent_name else None
-            agent_backend = str(row.agent_backend).strip() if row.agent_backend else None
-            return _ScopeRoutingTarget(agent_name, agent_backend)
+            return _ScopeRoutingTarget(agent_name)
     finally:
         engine.dispose()
 
@@ -1406,28 +1404,12 @@ def _resolve_scope_agent_name(session_key: str) -> Optional[str]:
     return _resolve_scope_routing_target(session_key).agent_name
 
 
-def _raise_unresolved_legacy_scope_backend(
-    *,
-    scope_target: _ScopeRoutingTarget,
-    deliver_key: str,
-    help_command: str,
-) -> None:
-    raise TaskCliError(
-        "scope routing still references a legacy backend without an Agent",
-        code="legacy_scope_backend_unresolved",
-        hint="Open the Scope routing settings and choose an Agent before creating sessions for this Scope.",
-        help_command=help_command,
-        details={"deliver_key": deliver_key, "agent_backend": scope_target.agent_backend},
-    )
-
-
 def _resolve_agent_for_target(
     *,
     agent_name: Optional[str],
     session_id: Optional[str],
     session_key: str,
     help_command: str,
-    reject_unresolved_legacy_scope_backend: bool = False,
 ):
     store = _agent_store()
     try:
@@ -1459,12 +1441,6 @@ def _resolve_agent_for_target(
             scope_target = _resolve_scope_routing_target(session_key)
             if scope_target.agent_name:
                 return store.require_enabled(scope_target.agent_name)
-            if scope_target.agent_backend and reject_unresolved_legacy_scope_backend:
-                _raise_unresolved_legacy_scope_backend(
-                    scope_target=scope_target,
-                    deliver_key=session_key,
-                    help_command=help_command,
-                )
 
         return store.get_default_agent()
     finally:
@@ -1478,22 +1454,16 @@ def _resolve_agent_for_session_reservation(
     help_command: str,
 ) -> Optional[VibeAgent]:
     resolved_agent_name = agent_name
-    scope_target = _ScopeRoutingTarget(None, None)
+    scope_target = _ScopeRoutingTarget(None)
     if not resolved_agent_name:
         scope_target = _resolve_scope_routing_target(deliver_key)
         resolved_agent_name = scope_target.agent_name
-    if not resolved_agent_name:
-        if scope_target.agent_backend:
-            _raise_unresolved_legacy_scope_backend(
-                scope_target=scope_target,
-                deliver_key=deliver_key,
-                help_command=help_command,
-            )
-        return None
 
     store = _agent_store()
     try:
-        return store.require_enabled(resolved_agent_name)
+        if resolved_agent_name:
+            return store.require_enabled(resolved_agent_name)
+        return store.get_default_agent()
     finally:
         store.close()
 
@@ -1720,7 +1690,6 @@ def cmd_task_add(args):
             session_id=session_id,
             session_key=session_key or getattr(args, "deliver_key", None) or "",
             help_command="vibe task add --help",
-            reject_unresolved_legacy_scope_backend=session_policy != "existing",
         )
         agent_name = agent.name if agent else None
         if session_policy == "create_once":
@@ -2049,7 +2018,6 @@ def cmd_task_update(args):
                 session_id=None,
                 session_key=deliver_key or "",
                 help_command="vibe task update --help",
-                reject_unresolved_legacy_scope_backend=True,
             )
             agent_name = agent.name if agent else None
         elif agent_name is not None or session_id or session_key:
@@ -3335,7 +3303,6 @@ def cmd_watch_add(args):
             session_id=session_id,
             session_key=session_key or getattr(args, "deliver_key", None) or "",
             help_command="vibe watch add --help",
-            reject_unresolved_legacy_scope_backend=session_policy != "existing",
         )
         agent_name = agent.name if agent else None
         if session_policy == "create_once":
@@ -3613,7 +3580,6 @@ def cmd_watch_update(args):
                 session_id=None,
                 session_key=deliver_key or "",
                 help_command="vibe watch update --help",
-                reject_unresolved_legacy_scope_backend=True,
             )
             agent_name = agent.name if agent else None
         elif agent_name is not None or session_id or session_key:
