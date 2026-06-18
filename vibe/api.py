@@ -4143,6 +4143,7 @@ def _read_claude_cli_oauth_signed_in(
     cli_path: str | None,
     *,
     env: dict[str, str] | None = None,
+    cwd: str | None = None,
 ) -> bool | None:
     """Ask Claude Code whether a first-party OAuth account is signed in.
 
@@ -4162,6 +4163,7 @@ def _read_claude_cli_oauth_signed_in(
             timeout=3,
             check=False,
             env=env,
+            cwd=cwd,
         )
     except (FileNotFoundError, OSError, subprocess.SubprocessError):
         return None
@@ -4183,20 +4185,45 @@ def _read_claude_cli_oauth_signed_in(
     # ``auth status`` reports Claude Code's overall auth state. API-key
     # sources can also be "logged in", so only treat it as OAuth when the
     # CLI identifies the source as Claude.ai / first-party OAuth.
+    saw_concrete_source = False
     for key in ("authMethod", "authProvider", "provider", "source"):
         raw = payload.get(key)
         if isinstance(raw, str):
-            normalized = raw.strip().lower().replace("_", "-")
+            normalized = re.sub(r"[\s_]+", "-", raw.strip().lower())
+            if not normalized:
+                continue
+            saw_concrete_source = True
             if normalized in {
                 "claude.ai",
                 "claude-ai",
                 "oauth",
+                "oauth-token",
+                "setup-token",
+                "claude-code-oauth-token",
                 "subscription",
                 "claude-subscription",
             }:
                 return True
             if any(token in normalized for token in ("api-key", "apikey", "api key", "auth-token", "apihelper", "api-helper")):
                 return False
+    if saw_concrete_source:
+        return False
+    return None
+
+
+def _resolve_claude_status_probe_cwd(config: Any | None) -> str | None:
+    candidates = (
+        getattr(getattr(config, "claude", None), "cwd", None),
+        getattr(getattr(config, "runtime", None), "default_cwd", None),
+    )
+    for raw in candidates:
+        if isinstance(raw, str) and raw.strip():
+            path = os.path.abspath(os.path.expanduser(raw.strip()))
+            try:
+                os.makedirs(path, exist_ok=True)
+                return path
+            except OSError as exc:
+                logger.warning("Failed to prepare Claude auth status cwd=%s: %s", path, exc)
     return None
 
 
@@ -4815,11 +4842,13 @@ def get_claude_auth() -> dict:
         configured_key = getattr(cfg, "api_key", None) or ""
         configured_base = getattr(cfg, "base_url", None) or ""
         configured_cli_path = getattr(cfg, "cli_path", None)
+        status_probe_cwd = _resolve_claude_status_probe_cwd(config)
     except Exception:
         configured_mode = None
         configured_key = ""
         configured_base = ""
         configured_cli_path = None
+        status_probe_cwd = None
 
     configured_key = configured_key.strip() if isinstance(configured_key, str) else ""
     configured_base = configured_base.strip() if isinstance(configured_base, str) else ""
@@ -4835,6 +4864,7 @@ def get_claude_auth() -> dict:
     cli_oauth_signed_in = _read_claude_cli_oauth_signed_in(
         configured_cli_path if isinstance(configured_cli_path, str) else None,
         env=claude_status_env,
+        cwd=status_probe_cwd,
     )
     oauth_signed_in = (
         cli_oauth_signed_in if cli_oauth_signed_in is not None else disk_oauth_signed_in

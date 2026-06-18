@@ -2113,7 +2113,8 @@ class AgentAuthService:
             # real question: whether the current Avibe Claude setup can
             # run an Agent turn. It follows the normal print-mode launch
             # path used by live Claude sessions.
-            cmd = [binary, "-p"]
+            cmd = [binary]
+            cmd.append("-p")
             if isinstance(model, str) and model.strip():
                 cmd.extend(["--model", model.strip()])
             cmd.append(prompt)

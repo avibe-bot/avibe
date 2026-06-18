@@ -148,8 +148,12 @@ def test_get_claude_auth_prefers_cli_oauth_status(
     class _FakeAgents:
         claude = _FakeAgent()
 
+    class _FakeRuntime:
+        default_cwd = str(tmp_path / "runtime")
+
     class _FakeConfig:
         agents = _FakeAgents()
+        runtime = _FakeRuntime()
 
     monkeypatch.setenv("PATH", "/fake/bin")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-stale-shell")
@@ -159,6 +163,7 @@ def test_get_claude_auth_prefers_cli_oauth_status(
         env = kwargs.get("env") or {}
         assert env.get("PATH") == "/fake/bin"
         assert "ANTHROPIC_API_KEY" not in env
+        assert kwargs.get("cwd") == str(tmp_path / "runtime")
         return subprocess.CompletedProcess(
             cmd,
             0,
@@ -175,6 +180,7 @@ def test_get_claude_auth_prefers_cli_oauth_status(
 
     assert state["has_oauth_credentials"] is True
     assert state["active_auth_mode"] == "oauth"
+    assert (tmp_path / "runtime").is_dir()
 
 
 def test_get_claude_auth_ignores_cli_api_key_status_for_oauth(
@@ -214,6 +220,98 @@ def test_get_claude_auth_ignores_cli_api_key_status_for_oauth(
 
     assert state["has_oauth_credentials"] is False
     assert state["active_auth_mode"] == "none"
+
+
+def test_get_claude_auth_suppresses_stale_disk_oauth_for_concrete_non_oauth_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_claude_settings(tmp_path, {})
+    claude_dir = tmp_path / ".claude"
+    (claude_dir / ".credentials.json").write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "stale-oauth",
+                    "refreshToken": "stale-refresh",
+                    "expiresAt": 4_102_444_800_000,
+                    "scopes": ["user:inference"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
+
+    class _FakeAgent:
+        auth_mode = "oauth"
+        api_key = None
+        base_url = None
+        cli_path = "claude"
+
+    class _FakeAgents:
+        claude = _FakeAgent()
+
+    class _FakeConfig:
+        agents = _FakeAgents()
+
+    def fake_run(cmd, **_kwargs):
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout='{"loggedIn": true, "authMethod": "third_party"}',
+            stderr="",
+        )
+
+    monkeypatch.setattr("vibe.api.load_config", lambda: _FakeConfig())
+    monkeypatch.setattr("vibe.api.subprocess.run", fake_run)
+
+    from vibe.api import get_claude_auth
+
+    state = get_claude_auth()
+
+    assert state["has_oauth_credentials"] is False
+    assert state["active_auth_mode"] == "none"
+
+
+def test_get_claude_auth_treats_setup_token_status_as_oauth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_claude_settings(tmp_path, {})
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
+
+    class _FakeAgent:
+        auth_mode = "oauth"
+        api_key = None
+        base_url = None
+        cli_path = "claude"
+
+    class _FakeAgents:
+        claude = _FakeAgent()
+
+    class _FakeConfig:
+        agents = _FakeAgents()
+
+    def fake_run(cmd, **_kwargs):
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout='{"loggedIn": true, "authMethod": "oauth_token"}',
+            stderr="",
+        )
+
+    monkeypatch.setattr("vibe.api.load_config", lambda: _FakeConfig())
+    monkeypatch.setattr("vibe.api.subprocess.run", fake_run)
+
+    from vibe.api import get_claude_auth
+
+    state = get_claude_auth()
+
+    assert state["has_oauth_credentials"] is True
+    assert state["active_auth_mode"] == "oauth"
 
 
 def test_claude_settings_json_auth_token_surfaces_in_get_claude_auth(
