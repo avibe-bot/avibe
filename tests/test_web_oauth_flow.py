@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -26,6 +27,7 @@ from core.agent_auth_service import (
 )
 from modules.agents.opencode.message_processor import extract_opencode_response_text
 from vibe.claude_config import (
+    MANAGED_ENV_VALUES,
     read_claude_oauth_settings_backup,
     read_claude_settings_env,
     restore_claude_settings_env,
@@ -45,6 +47,7 @@ class _Agents:
 class _Config:
     agents = _Agents()
     language = "en"
+    runtime = None
 
 
 class _StubController:
@@ -356,6 +359,9 @@ def test_claude_oauth_begin_persists_backup_before_clearing_settings(
 
     assert attempt.settings_backup == backup
     assert read_claude_settings_env() == {}
+    settings = json.loads((claude_home / "settings.json").read_text())
+    for key, value in MANAGED_ENV_VALUES.items():
+        assert settings["env"][key] == value
     assert read_claude_oauth_settings_backup() == backup
 
 
@@ -375,10 +381,16 @@ def test_claude_oauth_restarts_restore_interrupted_durable_backup(
 
     _run(service._begin_claude_oauth_attempt())
     assert read_claude_settings_env() == {}
+    settings = json.loads((claude_home / "settings.json").read_text())
+    for key, value in MANAGED_ENV_VALUES.items():
+        assert settings["env"][key] == value
 
     AgentAuthService(_StubController())
 
     assert read_claude_settings_env() == backup
+    settings = json.loads((claude_home / "settings.json").read_text())
+    for key, value in MANAGED_ENV_VALUES.items():
+        assert settings["env"][key] == value
     assert read_claude_oauth_settings_backup() is None
 
 
@@ -881,7 +893,8 @@ def test_test_web_auth_claude_oauth_env_removes_stale_anthropic_vars(
         async def communicate(self):
             return (b"Hello from Claude", b"")
 
-    async def _spawn(*_args, **kwargs):
+    async def _spawn(*args, **kwargs):
+        captured["args"] = args
         captured["env"] = kwargs.get("env") or {}
         return _FakeProcess()
 
@@ -895,9 +908,46 @@ def test_test_web_auth_claude_oauth_env_removes_stale_anthropic_vars(
     result = _run(service.test_web_auth("claude"))
 
     assert result["ok"] is True
+    assert captured["args"][:2] == ("/usr/bin/echo", "-p")
+    assert "--bare" not in captured["args"]
     assert "ANTHROPIC_API_KEY" not in captured["env"]
     assert "ANTHROPIC_AUTH_TOKEN" not in captured["env"]
     assert "ANTHROPIC_BASE_URL" not in captured["env"]
+
+
+def test_test_web_auth_claude_runs_in_runtime_cwd(
+    service: AgentAuthService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plain Claude print mode reads project config from cwd; the Settings
+    probe must use the same runtime cwd as live Agent turns.
+    """
+
+    runtime_cwd = tmp_path / "agent-workdir"
+    captured: dict = {}
+
+    class _Runtime:
+        default_cwd = str(runtime_cwd)
+
+    class _FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"Hello from Claude", b"")
+
+    async def _spawn(*_args, **kwargs):
+        captured["cwd"] = kwargs.get("cwd")
+        return _FakeProcess()
+
+    monkeypatch.setattr(_Config, "runtime", _Runtime(), raising=False)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+
+    result = _run(service.test_web_auth("claude"))
+
+    assert result["ok"] is True
+    assert captured["cwd"] == str(runtime_cwd)
+    assert runtime_cwd.is_dir()
 
 
 def test_test_web_auth_claude_oauth_reports_settings_cleanup_failure(
@@ -942,3 +992,25 @@ def test_test_web_auth_failure_surfaces_stderr(
     assert result["error"] == "invalid_credentials"
     assert result["exit_code"] == 7
     assert "Authentication failed" in (result.get("detail") or "")
+
+
+def test_test_web_auth_not_logged_in_has_specific_error_code(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeProcess:
+        returncode = 1
+
+        async def communicate(self):
+            return (b"Not logged in \xc2\xb7 Please run /login", b"")
+
+    async def _spawn(*_args, **_kwargs):
+        return _FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+
+    result = _run(service.test_web_auth("claude"))
+
+    assert result["ok"] is False
+    assert result["error"] == "not_logged_in"
+    assert result["exit_code"] == 1
+    assert "Not logged in" in (result.get("detail") or "")

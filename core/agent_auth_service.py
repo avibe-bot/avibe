@@ -105,7 +105,10 @@ def _classify_test_failure(stdout: str, stderr: str) -> str:
     if not text.strip():
         return "cli_failed"
 
-    # Auth-side rejections (key wrong / revoked / not present).
+    if "not logged in" in text:
+        return "not_logged_in"
+
+    # Auth-side rejections (key wrong / revoked / rejected).
     auth_needles = (
         "401",
         "unauthorized",
@@ -114,7 +117,6 @@ def _classify_test_failure(stdout: str, stderr: str) -> str:
         "api key not valid",
         "authentication",
         "auth failed",
-        "not logged in",
         "missing api key",
         "no api key",
     )
@@ -428,6 +430,29 @@ class AgentAuthService:
         backend_cfg = self._resolve_backend_config(backend)
         cli_path = getattr(backend_cfg, "cli_path", None) or getattr(backend_cfg, "binary", None)
         return cli_path or backend
+
+    def _resolve_claude_probe_cwd(self) -> str:
+        """Return the cwd that a Settings Claude probe should execute in.
+
+        Plain ``claude -p`` loads project hooks, MCP config, and CLAUDE.md from
+        the process cwd. Use the same default runtime cwd as live Agent turns so
+        the Settings test reflects the actual Claude runtime instead of the UI
+        server launch directory.
+        """
+        config = getattr(getattr(self, "controller", None), "config", None)
+        candidates = (
+            getattr(self._resolve_backend_config("claude"), "cwd", None),
+            getattr(getattr(config, "runtime", None), "default_cwd", None),
+        )
+        for raw in candidates:
+            if isinstance(raw, str) and raw.strip():
+                path = os.path.abspath(os.path.expanduser(raw.strip()))
+                try:
+                    os.makedirs(path, exist_ok=True)
+                    return path
+                except OSError as exc:
+                    logger.warning("Failed to prepare Claude Settings probe cwd=%s: %s", path, exc)
+        return os.getcwd()
 
     def _build_claude_full_subprocess_env(self, *, force_oauth: bool = False) -> dict[str, str]:
         """Return a complete environment for direct Claude CLI subprocesses.
@@ -2077,14 +2102,19 @@ class AgentAuthService:
 
         binary = self._get_cli_binary(backend)
         prompt = "Hi"
+        probe_cwd = None
         if backend == "claude":
+            probe_cwd = self._resolve_claude_probe_cwd()
             # ``-p`` switches Claude Code into non-interactive print mode
-            # and exits after the first complete reply. ``--bare`` strips
-            # the launch-time scaffolding (hooks, MCP, CLAUDE.md
-            # auto-discovery) so the probe never fails on environment
-            # quirks; we only care that the auth + endpoint round-trip
-            # works.
-            cmd = [binary, "-p", "--bare"]
+            # and exits after the first complete reply. Deliberately do
+            # not pass ``--bare`` here: recent Claude Code builds document
+            # that bare mode skips OAuth/keychain reads and only accepts
+            # API-key auth. This Settings probe should answer the user's
+            # real question: whether the current Avibe Claude setup can
+            # run an Agent turn. It follows the normal print-mode launch
+            # path used by live Claude sessions.
+            cmd = [binary]
+            cmd.append("-p")
             if isinstance(model, str) and model.strip():
                 cmd.extend(["--model", model.strip()])
             cmd.append(prompt)
@@ -2144,6 +2174,7 @@ class AgentAuthService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env_override,
+                cwd=probe_cwd,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)

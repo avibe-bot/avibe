@@ -309,6 +309,7 @@
       "testFailureCliNotFound": "未找到后端 CLI 二进制。检查 Runtime 卡片上的路径。",
       "testFailureSpawnFailed": "无法启动后端 CLI：{{detail}}",
       "testFailureTimedOut": "CLI 在测试超时时间内没有响应。",
+      "testFailureNotLoggedIn": "后端 CLI 没有读取到已登录账号。请重新登录后再运行测试。",
       "testFailureCliFailed": "CLI 退出失败。展开下方原始输出查看详情。",
       "testConnectionRawOutputLabel": "原始输出",
       "activeAuthOauth": "当前：OAuth",

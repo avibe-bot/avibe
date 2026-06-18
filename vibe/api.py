@@ -4139,6 +4139,106 @@ def _mask_api_key(api_key: str | None) -> str | None:
     return f"{'•' * 6}{last4}"
 
 
+def _read_claude_cli_oauth_signed_in(
+    cli_path: str | None,
+    *,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+) -> bool | None:
+    """Ask Claude Code whether a first-party OAuth account is signed in.
+
+    This is the most accurate Settings signal because it covers both
+    keychain-backed installs and Linux/Docker's on-disk credentials file.
+    Keep it best-effort and quiet: if Claude is missing, slow, or emits an
+    unexpected shape, callers fall back to disk inspection.
+    """
+    configured = (cli_path or "claude").strip() or "claude"
+    binary = resolve_cli_path(configured) or configured
+    try:
+        result = subprocess.run(
+            [binary, "auth", "status", "--json"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=3,
+            check=False,
+            env=env,
+            cwd=cwd,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
+    text = (result.stdout or "").strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    logged_in = payload.get("loggedIn")
+    if logged_in is False:
+        return False
+    if logged_in is not True:
+        return None
+
+    # ``auth status`` reports Claude Code's overall auth state. API-key
+    # sources can also be "logged in", so only treat it as OAuth when the
+    # CLI identifies the source as Claude.ai / first-party OAuth.
+    saw_concrete_source = False
+    for key in ("authMethod", "authProvider", "provider", "source"):
+        raw = payload.get(key)
+        if isinstance(raw, str):
+            normalized = re.sub(r"[\s_]+", "-", raw.strip().lower())
+            if not normalized:
+                continue
+            saw_concrete_source = True
+            if normalized in {
+                "claude.ai",
+                "claude-ai",
+                "oauth",
+                "oauth-token",
+                "setup-token",
+                "claude-code-oauth-token",
+                "subscription",
+                "claude-subscription",
+            }:
+                return True
+            if any(token in normalized for token in ("api-key", "apikey", "api key", "auth-token", "apihelper", "api-helper")):
+                return False
+    if saw_concrete_source:
+        return False
+    return None
+
+
+def _resolve_claude_status_probe_cwd(config: Any | None) -> str | None:
+    candidates = (
+        getattr(getattr(config, "claude", None), "cwd", None),
+        getattr(getattr(config, "runtime", None), "default_cwd", None),
+    )
+    for raw in candidates:
+        if isinstance(raw, str) and raw.strip():
+            path = os.path.abspath(os.path.expanduser(raw.strip()))
+            try:
+                os.makedirs(path, exist_ok=True)
+                return path
+            except OSError as exc:
+                logger.warning("Failed to prepare Claude auth status cwd=%s: %s", path, exc)
+    return None
+
+
+def _build_claude_status_probe_env(claude_env: dict[str, str] | None) -> dict[str, str] | None:
+    if claude_env is None:
+        return None
+    env = dict(os.environ)
+    for key in list(env):
+        if key.startswith("ANTHROPIC_") or key.startswith("CLAUDE_"):
+            env.pop(key, None)
+    env.update(claude_env)
+    return env
+
+
 # ---------------------------------------------------------------------------
 # Web Settings → Backends OAuth flow plumbing.
 #
@@ -4351,7 +4451,7 @@ def remove_backend_api_key(backend: str) -> dict:
     - **Claude**: remove Anthropic env overrides from Claude's
       ``settings.json``, clear legacy V2Config ``api_key`` / ``base_url``
       cache fields, and flip ``auth_mode`` to ``oauth``.
-      ``~/.claude/credentials.json`` (the OAuth token file) is left alone.
+      Claude Code's OAuth token store is left alone.
     """
     backend = (backend or "").strip().lower()
     if backend not in {"claude", "codex"}:
@@ -4715,10 +4815,9 @@ def get_claude_auth() -> dict:
     1. ``~/.claude/settings.json`` is the source of truth for API-key
        env overrides because Claude Code layers that file on top of the
        inherited process env at launch.
-    2. OAuth tokens minted by ``claude login`` live in the OS keychain,
-       which we cannot portably inspect. The "OAuth signed in" signal is
-       therefore inferred from "no API key is configured" — the UI shows
-       a hint pointing users at ``claude login`` if they need to switch.
+    2. OAuth state is owned by Claude Code, so we first ask
+       ``claude auth status --json``. If that probe is unavailable, fall
+       back to the Linux/Docker credentials file signal.
 
     Legacy V2Config keys are read only as a migration fallback so old
     installs still render their current state before the next save moves
@@ -4728,10 +4827,11 @@ def get_claude_auth() -> dict:
         read_claude_auth_state,
         read_claude_oauth_signed_in,
         read_claude_settings_env,
+        build_claude_subprocess_env,
     )
 
     disk_state = read_claude_auth_state()
-    oauth_signed_in = read_claude_oauth_signed_in()
+    disk_oauth_signed_in = read_claude_oauth_signed_in()
     settings_env = read_claude_settings_env()
     settings_key = settings_env.get("ANTHROPIC_API_KEY") or settings_env.get("ANTHROPIC_AUTH_TOKEN") or ""
     settings_base = settings_env.get("ANTHROPIC_BASE_URL") or ""
@@ -4742,13 +4842,34 @@ def get_claude_auth() -> dict:
         configured_mode = getattr(cfg, "auth_mode", None)
         configured_key = getattr(cfg, "api_key", None) or ""
         configured_base = getattr(cfg, "base_url", None) or ""
+        configured_cli_path = getattr(cfg, "cli_path", None)
+        status_probe_cwd = _resolve_claude_status_probe_cwd(config)
     except Exception:
         configured_mode = None
         configured_key = ""
         configured_base = ""
+        configured_cli_path = None
+        status_probe_cwd = None
 
     configured_key = configured_key.strip() if isinstance(configured_key, str) else ""
     configured_base = configured_base.strip() if isinstance(configured_base, str) else ""
+    try:
+        claude_status_env = _build_claude_status_probe_env(
+            build_claude_subprocess_env(
+                cfg if "cfg" in locals() else None,
+                force_oauth=True,
+            )
+        )
+    except Exception:
+        claude_status_env = None
+    cli_oauth_signed_in = _read_claude_cli_oauth_signed_in(
+        configured_cli_path if isinstance(configured_cli_path, str) else None,
+        env=claude_status_env,
+        cwd=status_probe_cwd,
+    )
+    oauth_signed_in = (
+        cli_oauth_signed_in if cli_oauth_signed_in is not None else disk_oauth_signed_in
+    )
 
     # settings.json wins: it is the file Claude Code itself layers on top
     # of inherited env. V2Config is a legacy fallback only.
