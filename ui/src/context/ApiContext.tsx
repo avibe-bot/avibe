@@ -973,6 +973,9 @@ export type ClaudeAuthState = {
   api_key_length: number;
   api_key_masked: string | null;
   api_key_source?: ClaudeApiKeySource;
+  // Raw Claude Code account-token signal. This may remain true while Avibe
+  // is actively using API-key mode, so UI "signed in" indicators should use
+  // active_auth_mode instead.
   has_oauth_credentials: boolean;
   base_url: string | null;
   settings_path: string | null;

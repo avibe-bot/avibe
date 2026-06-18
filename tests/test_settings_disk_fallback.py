@@ -401,6 +401,63 @@ def test_claude_settings_json_auth_token_surfaces_in_get_claude_auth(
     assert state["settings_conflict"] is False
 
 
+def test_claude_api_key_mode_wins_over_stale_oauth_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """API-key mode is mutually exclusive in Avibe's active auth state.
+
+    Claude Code may keep account tokens in its own credentials file after
+    the user switches Avibe to API-key mode. That raw token signal must not
+    make the Settings UI or runtime treat OAuth as the active source.
+    """
+    _write_claude_settings(
+        tmp_path,
+        {
+            "ANTHROPIC_API_KEY": "sk-ant-active-settings-key",
+            "ANTHROPIC_BASE_URL": "https://relay.example.invalid",
+        },
+    )
+    claude_dir = tmp_path / ".claude"
+    (claude_dir / ".credentials.json").write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "stale-oauth",
+                    "refreshToken": "stale-refresh",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_dir))
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
+    monkeypatch.setattr("vibe.api._read_claude_cli_oauth_signed_in", lambda _path, **_kwargs: None)
+
+    class _FakeAgent:
+        auth_mode = "api_key"
+        api_key = None
+        base_url = None
+        cli_path = "claude"
+
+    class _FakeAgents:
+        claude = _FakeAgent()
+
+    class _FakeConfig:
+        agents = _FakeAgents()
+
+    monkeypatch.setattr("vibe.api.load_config", lambda: _FakeConfig())
+
+    from vibe.api import get_claude_auth
+
+    state = get_claude_auth()
+
+    assert state["auth_mode"] == "api_key"
+    assert state["active_auth_mode"] == "api_key"
+    assert state["has_api_key"] is True
+    assert state["has_oauth_credentials"] is True
+
+
 def test_claude_settings_json_takes_precedence_over_legacy_v2config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
