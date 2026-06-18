@@ -4423,6 +4423,28 @@ async def remove_backend_auth_async(backend: str) -> dict:
         return {"ok": False, "error": "remove_failed", "detail": str(exc)}
 
 
+async def remove_claude_oauth_credentials_async() -> dict:
+    """Clear only Claude Code OAuth credentials, preserving API-key auth."""
+    service = _get_oauth_service()
+    try:
+        return await service.clear_claude_oauth_credentials_only()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Claude OAuth credentials cleanup failed: %s", exc, exc_info=True)
+        return {"ok": False, "error": "remove_failed", "detail": str(exc)}
+
+
+def remove_claude_oauth_credentials() -> dict:
+    return _submit_oauth_coro(remove_claude_oauth_credentials_async(), timeout=30.0)
+
+
+def _clear_claude_oauth_credentials_after_api_key_save(service=None) -> dict:
+    service = service or _get_oauth_service()
+    return _submit_oauth_coro(
+        service.clear_claude_oauth_credentials_only(),
+        timeout=30.0,
+    )
+
+
 def remove_backend_api_key(backend: str) -> dict:
     """Clear the stored API key for Claude / Codex without touching OAuth.
 
@@ -5006,6 +5028,8 @@ def save_claude_auth(payload: dict) -> dict:
                 except Exception:
                     effective_base_url = None
 
+    oauth_cleanup_service = _get_oauth_service() if auth_mode == "api_key" else None
+
     from vibe.claude_config import apply_claude_auth
 
     try:
@@ -5039,6 +5063,21 @@ def save_claude_auth(payload: dict) -> dict:
         config.agents.claude.base_url = None
         config.save()
 
+    oauth_cleanup_result: dict | None = None
+    if auth_mode == "api_key":
+        try:
+            oauth_cleanup_result = _clear_claude_oauth_credentials_after_api_key_save(
+                oauth_cleanup_service
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to clear Claude OAuth credentials after API-key save: %s", exc)
+            oauth_cleanup_result = {
+                "ok": True,
+                "partial": True,
+                "warning": "oauth_cleanup_failed",
+                "detail": str(exc),
+            }
+
     # Claude is one-shot per request — no daemon to restart. Return a
     # synthetic restart result so the UI handles the same response shape
     # as Codex / OpenCode and the toast wording can stay consistent.
@@ -5047,6 +5086,10 @@ def save_claude_auth(payload: dict) -> dict:
         "ok": True,
         "message": "Claude relaunches per request; the next message uses the new auth.",
     }
+    if isinstance(oauth_cleanup_result, dict) and oauth_cleanup_result.get("partial"):
+        state["partial"] = True
+        state["warning"] = oauth_cleanup_result.get("warning") or "oauth_cleanup_failed"
+        state["detail"] = oauth_cleanup_result.get("detail")
     return state
 
 

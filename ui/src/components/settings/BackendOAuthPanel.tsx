@@ -31,6 +31,9 @@ export type BackendOAuthPanelProps = {
    *  ``get*Auth`` endpoint). We still render a "re-authenticate" button so
    *  rotating credentials without dropping to a terminal stays one click. */
   signedIn: boolean;
+  /** When ``true`` render a Claude-only cleanup affordance for stale OAuth
+   *  tokens that are not the currently active auth source. */
+  canRemoveAuth?: boolean;
   /** Heading text shown on the panel (e.g. "Claude account login"). */
   title: string;
   /** Short paragraph under the heading describing what login does. */
@@ -74,6 +77,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
   backend,
   opencodeProviderId,
   signedIn,
+  canRemoveAuth,
   title,
   subtitle,
   signedInDetail,
@@ -262,7 +266,10 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
     setRemoving(true);
     setError(null);
     try {
-      const result = await api.removeBackendAuth(backend);
+      const result =
+        backend === 'claude' && canRemoveAuth && !signedIn
+          ? await api.removeClaudeOAuthCredentials()
+          : await api.removeBackendAuth(backend);
       if (!result.ok) {
         showToast(
           t('settings.backends.oauthRemoveFailed', {
@@ -357,6 +364,11 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
         if (backend === 'codex') return t('settings.backends.codexSignInButton');
         return t('settings.backends.opencodeProviderSignIn');
       })();
+  const showRemoveAuth = (canRemoveAuth ?? signedIn) || state === 'success';
+  const removeLabel =
+    backend === 'claude' && canRemoveAuth && !signedIn
+      ? t('settings.backends.oauthCleanStoredCredentials')
+      : t('settings.backends.oauthRemove');
 
   return (
     <div className="flex flex-col gap-4 rounded-lg border border-border bg-surface-2/60 p-4">
@@ -537,7 +549,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
             {t('settings.backends.oauthInProgress')}
           </span>
         )}
-        {!hideRemove && (signedIn || state === 'success') && state !== 'starting' && state !== 'awaiting_code' && state !== 'verifying' && (
+        {!hideRemove && showRemoveAuth && state !== 'starting' && state !== 'awaiting_code' && state !== 'verifying' && (
           <Button
             type="button"
             variant="ghost"
@@ -547,7 +559,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
             className="text-destructive hover:bg-destructive/10 hover:text-destructive"
           >
             <Trash2 className="size-3.5" />
-            {removing ? t('common.removing') : t('settings.backends.oauthRemove')}
+            {removing ? t('common.removing') : removeLabel}
           </Button>
         )}
         {isActive && (

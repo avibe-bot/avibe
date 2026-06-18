@@ -1127,7 +1127,11 @@ class AgentAuthService:
             os.close(slave_fd)
         return process, master_fd, provider
 
-    async def _run_utility_command(self, *cmd: str) -> tuple[bool, str | None]:
+    async def _run_utility_command(
+        self,
+        *cmd: str,
+        env: dict[str, str] | None = None,
+    ) -> tuple[bool, str | None]:
         """Run a short CLI side-call. Returns ``(ok, error_excerpt)``.
 
         Callers that don't care about the outcome (setup preflight)
@@ -1138,6 +1142,7 @@ class AgentAuthService:
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
@@ -1292,6 +1297,8 @@ class AgentAuthService:
             await flow.reader_task
             ok, detail = await self._verify_login(flow)
             if ok:
+                if flow.backend == "codex":
+                    await self._persist_backend_auth_mode(flow.backend, "oauth")
                 await self._refresh_backend_runtime(flow.backend)
                 await self._send_message(
                     flow.context,
@@ -1958,8 +1965,17 @@ class AgentAuthService:
         if backend == "codex":
             logout_ok, logout_error = await self._run_utility_command(binary, "logout")
         else:
-            logout_ok, logout_error = await self._run_utility_command(binary, "auth", "logout")
             settings_cleanup_error = await self._clear_claude_settings_env_for_logout()
+            if settings_cleanup_error:
+                logout_ok = False
+                logout_error = settings_cleanup_error
+            else:
+                logout_ok, logout_error = await self._run_utility_command(
+                    binary,
+                    "auth",
+                    "logout",
+                    env=self._build_claude_full_subprocess_env(force_oauth=True),
+                )
 
         try:
             config = getattr(self.controller, "config", None)
@@ -2015,19 +2031,19 @@ class AgentAuthService:
         # missing, exited non-zero, or timed out), and the user needs
         # to know about that partial sign-out rather than seeing a
         # green toast and assuming the backend is fully signed out.
-        if not logout_ok:
-            return {
-                "ok": True,
-                "partial": True,
-                "warning": "logout_failed",
-                "detail": logout_error or "logout subprocess exited non-zero",
-            }
         if backend == "claude" and settings_cleanup_error:
             return {
                 "ok": True,
                 "partial": True,
                 "warning": "settings_cleanup_failed",
                 "detail": settings_cleanup_error,
+            }
+        if not logout_ok:
+            return {
+                "ok": True,
+                "partial": True,
+                "warning": "logout_failed",
+                "detail": logout_error or "logout subprocess exited non-zero",
             }
         return {"ok": True}
 
@@ -2768,10 +2784,11 @@ class AgentAuthService:
         # OAuth completed via the web UI implies the user wants
         # ``auth_mode = "oauth"``. Persist it before the controller-refresh
         # hook fires so the live agent reloads with the right mode rather
-        # than waiting for the user to click an extra Save button. We
-        # intentionally do not touch ``api_key`` here: the user may have
-        # configured one earlier and we should preserve it for the moment
-        # they decide to switch back via Remove auth.
+        # than waiting for the user to click an extra Save button. The
+        # persist helper also removes backend-specific API-key state when
+        # OAuth is now the active mode, keeping the two auth sources
+        # mutually exclusive on disk instead of relying on CLI logout side
+        # effects.
         #
         # Skipped for opencode: ``OpenCodeConfig`` has no ``auth_mode``
         # field (auth is per-provider, not global), so persisting one
@@ -2800,6 +2817,22 @@ class AgentAuthService:
             raise RuntimeError(
                 "Failed to clear Claude Code settings env after OAuth flow; "
                 "stale ANTHROPIC_* values may still override OAuth."
+            ) from err
+
+    async def _clear_codex_api_key_for_oauth(self) -> None:
+        try:
+            from vibe.codex_config import apply_codex_auth
+
+            await asyncio.to_thread(
+                apply_codex_auth,
+                auth_mode="oauth",
+                api_key=None,
+                base_url=None,
+            )
+        except Exception as err:  # noqa: BLE001
+            raise RuntimeError(
+                "Failed to clear Codex API-key state after OAuth flow; "
+                "stale OPENAI_API_KEY or base_url values may still override OAuth."
             ) from err
 
     async def _read_pending_claude_oauth_settings_backup(
@@ -2995,10 +3028,88 @@ class AgentAuthService:
             return str(err)
         return None
 
+    async def clear_claude_oauth_credentials_only(self) -> dict[str, Any]:
+        """Remove Claude Code account tokens without changing API-key mode.
+
+        Claude Code reapplies ``settings.json`` env values at startup. To make
+        ``claude auth logout`` target stored account credentials instead of the
+        just-saved API key, temporarily clear Anthropic env overrides, run the
+        logout command, then restore the API-key settings exactly.
+        """
+        async with self._claude_oauth_lock:
+            from vibe.claude_config import (
+                clear_claude_oauth_credentials_files,
+                read_claude_settings_env,
+            )
+
+            try:
+                settings_backup = await asyncio.to_thread(read_claude_settings_env)
+            except Exception as err:  # noqa: BLE001
+                detail = (
+                    "Failed to read Claude Code settings before clearing OAuth "
+                    f"credentials: {err}"
+                )
+                logger.warning(detail)
+                return {
+                    "ok": True,
+                    "partial": True,
+                    "warning": "oauth_cleanup_failed",
+                    "detail": detail,
+                }
+
+            settings_cleanup_error = await self._clear_claude_settings_env_for_logout()
+            logout_ok = False
+            logout_error = None
+            if not settings_cleanup_error:
+                logout_env = self._build_claude_full_subprocess_env(force_oauth=True)
+                logout_ok, logout_error = await self._run_utility_command(
+                    self._get_cli_binary("claude"),
+                    "auth",
+                    "logout",
+                    env=logout_env,
+                )
+                try:
+                    await asyncio.to_thread(clear_claude_oauth_credentials_files)
+                except Exception as err:  # noqa: BLE001
+                    logout_ok = False
+                    logout_error = str(err)
+            restore_ok = await self._restore_claude_settings_env_after_oauth_failure(
+                settings_backup or None
+            )
+
+            if settings_cleanup_error:
+                return {
+                    "ok": True,
+                    "partial": True,
+                    "warning": "oauth_cleanup_failed",
+                    "detail": settings_cleanup_error,
+                }
+            if not restore_ok:
+                return {
+                    "ok": True,
+                    "partial": True,
+                    "warning": "oauth_cleanup_failed",
+                    "detail": "Claude API-key settings were saved, but Avibe could not restore them after the OAuth cleanup probe.",
+                }
+            if not logout_ok:
+                return {
+                    "ok": True,
+                    "partial": True,
+                    "warning": "oauth_cleanup_failed",
+                    "detail": logout_error or "claude auth logout exited non-zero",
+                }
+            return {"ok": True}
+
+    async def clear_claude_oauth_for_api_key_mode(self) -> dict[str, Any]:
+        """Backward-compatible name for API-key save cleanup."""
+        return await self.clear_claude_oauth_credentials_only()
+
     async def _persist_backend_auth_mode(self, backend: str, auth_mode: str) -> None:
         """Persist V2Config.agents.<backend>.auth_mode for web and IM flows."""
         if backend == "claude" and auth_mode == "oauth":
             await self._clear_claude_settings_env_for_oauth()
+        if backend == "codex" and auth_mode == "oauth":
+            await self._clear_codex_api_key_for_oauth()
         try:
             config = getattr(self.controller, "config", None)
             target = getattr(getattr(config, "agents", None), backend, None)
@@ -3023,7 +3134,15 @@ class AgentAuthService:
                 backend == "claude"
                 and not bool(getattr(target, "auth_mode_set", False))
             )
-            if not needs_mode_write and not needs_marker_write:
+            needs_codex_oauth_cleanup = (
+                backend == "codex"
+                and auth_mode == "oauth"
+                and (
+                    bool(getattr(target, "api_key", None))
+                    or bool(getattr(target, "base_url", None))
+                )
+            )
+            if not needs_mode_write and not needs_marker_write and not needs_codex_oauth_cleanup:
                 return
             try:
                 from config.v2_config import CONFIG_LOCK
@@ -3033,12 +3152,18 @@ class AgentAuthService:
                         target.auth_mode = auth_mode
                     if needs_marker_write:
                         target.auth_mode_set = True
+                    if needs_codex_oauth_cleanup:
+                        target.api_key = None
+                        target.base_url = None
                     saver()
             except ImportError:
                 if needs_mode_write:
                     target.auth_mode = auth_mode
                 if needs_marker_write:
                     target.auth_mode_set = True
+                if needs_codex_oauth_cleanup:
+                    target.api_key = None
+                    target.base_url = None
                 saver()
             if loaded_config is not None and config is not None:
                 compat_target = getattr(config, backend, None)
@@ -3047,6 +3172,9 @@ class AgentAuthService:
                         setattr(compat_target, "auth_mode", auth_mode)
                     if needs_marker_write:
                         setattr(compat_target, "auth_mode_set", True)
+                    if needs_codex_oauth_cleanup:
+                        setattr(compat_target, "api_key", None)
+                        setattr(compat_target, "base_url", None)
         except Exception as err:  # noqa: BLE001
             logger.warning(
                 "Failed to persist auth_mode=%s after web flow for %s: %s",

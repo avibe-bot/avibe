@@ -146,6 +146,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         harness.service._read_codex_output = AsyncMock(return_value=None)
         harness.service._verify_login = AsyncMock(return_value=(True, "Logged in using ChatGPT"))
         harness.service._refresh_backend_runtime = AsyncMock()
+        harness.service._persist_backend_auth_mode = AsyncMock()
 
         await runner.run(
             ScenarioStep(
@@ -175,6 +176,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         fake_process.finish(0)
         await flow.waiter_task
 
+        harness.service._persist_backend_auth_mode.assert_awaited_once_with("codex", "oauth")
         harness.service._refresh_backend_runtime.assert_awaited_once_with("codex")
         ScenarioExpect.step_history(runner, ["start_setup", "emit_device_url", "emit_device_code"])
         ScenarioExpect.text_contains(harness, "starting codex", index=0)
