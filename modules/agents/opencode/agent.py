@@ -22,6 +22,7 @@ from .message_processor import OpenCodeMessageProcessorMixin
 from .poll_loop import OpenCodePollLoop
 from .server import OpenCodeServerManager
 from .session import OpenCodeResumeUnavailableError, OpenCodeSessionManager
+from .utils import find_opencode_model_info
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,9 @@ def _opencode_model_supports_variant(model_info: dict | None, variant: str | Non
     variants = model_info.get("variants")
     if isinstance(variants, dict) and variant in variants:
         return True
+    capabilities = model_info.get("capabilities")
+    if variants is None and "variants" not in model_info and isinstance(capabilities, dict):
+        return capabilities.get("reasoning") is True
     return False
 
 
@@ -50,9 +54,14 @@ def _opencode_model_has_no_variants(model_info: dict | None) -> bool:
     if not isinstance(model_info, dict):
         return False
     capabilities = model_info.get("capabilities")
-    if isinstance(capabilities, dict) and capabilities.get("reasoning") is False:
-        return True
+    if isinstance(capabilities, dict):
+        if capabilities.get("reasoning") is True:
+            return False
+        if capabilities.get("reasoning") is False:
+            return True
     variants = model_info.get("variants")
+    if variants is None and "variants" not in model_info:
+        return True
     return isinstance(variants, dict) and not variants
 
 
@@ -78,22 +87,15 @@ def resolve_opencode_reasoning_effort(
     if not isinstance(model_catalog, dict):
         return requested_effort
 
-    for provider in model_catalog.get("providers", []) or []:
-        if not isinstance(provider, dict) or provider.get("id") != provider_id:
-            continue
-        models = provider.get("models")
-        if not isinstance(models, dict):
+    model_info = find_opencode_model_info(model_catalog, provider_id, model_id)
+    if requested_effort:
+        if _opencode_model_supports_variant(model_info, requested_effort):
             return requested_effort
-        model_info = models.get(model_id)
-        if requested_effort:
-            if _opencode_model_supports_variant(model_info, requested_effort):
-                return requested_effort
-            if isinstance(model_info, dict):
-                return "default"
-            return requested_effort
-        if _opencode_model_has_no_variants(model_info):
+        if isinstance(model_info, dict):
             return "default"
         return requested_effort
+    if _opencode_model_has_no_variants(model_info):
+        return "default"
     return requested_effort
 
 

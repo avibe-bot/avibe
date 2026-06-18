@@ -705,6 +705,81 @@ def test_opencode_resets_saved_variant_for_non_reasoning_model():
     )
 
 
+def test_opencode_resets_saved_variant_for_model_without_variant_metadata():
+    catalog = {
+        "providers": [
+            {
+                "id": "glm",
+                "models": {
+                    "glm-5.2": {
+                        "id": "glm-5.2",
+                        "name": "GLM 5.2",
+                    }
+                },
+            }
+        ]
+    }
+
+    assert (
+        resolve_opencode_reasoning_effort(
+            {"providerID": "glm", "modelID": "glm-5.2"},
+            None,
+            catalog,
+        )
+        == "default"
+    )
+
+
+def test_opencode_keeps_unspecified_variant_when_catalog_says_reasoning_supported():
+    catalog = {
+        "providers": [
+            {
+                "id": "openai",
+                "models": {
+                    "gpt-5.4": {
+                        "id": "gpt-5.4",
+                        "capabilities": {"reasoning": True},
+                    }
+                },
+            }
+        ]
+    }
+
+    assert (
+        resolve_opencode_reasoning_effort(
+            {"providerID": "openai", "modelID": "gpt-5.4"},
+            None,
+            catalog,
+        )
+        is None
+    )
+
+
+def test_opencode_resets_saved_variant_for_list_model_catalog():
+    catalog = {
+        "providers": [
+            {
+                "provider_id": "glm",
+                "models": [
+                    {
+                        "id": "glm-5.2",
+                        "name": "GLM 5.2",
+                    }
+                ],
+            }
+        ]
+    }
+
+    assert (
+        resolve_opencode_reasoning_effort(
+            {"providerID": "glm", "modelID": "glm-5.2"},
+            None,
+            catalog,
+        )
+        == "default"
+    )
+
+
 def test_opencode_keeps_supported_reasoning_variant():
     catalog = {
         "providers": [
@@ -714,6 +789,57 @@ def test_opencode_keeps_supported_reasoning_variant():
                     "gpt-5.4": {
                         "capabilities": {"reasoning": True},
                         "variants": {"high": {"reasoningEffort": "high"}},
+                    }
+                },
+            }
+        ]
+    }
+
+    assert (
+        resolve_opencode_reasoning_effort(
+            {"providerID": "openai", "modelID": "gpt-5.4"},
+            "high",
+            catalog,
+        )
+        == "high"
+    )
+
+
+def test_opencode_keeps_supported_reasoning_variant_for_list_model_catalog():
+    catalog = {
+        "providers": [
+            {
+                "name": "openai",
+                "models": [
+                    {
+                        "id": "gpt-5.4",
+                        "capabilities": {"reasoning": True},
+                        "variants": {"high": {"reasoningEffort": "high"}},
+                    }
+                ],
+            }
+        ]
+    }
+
+    assert (
+        resolve_opencode_reasoning_effort(
+            {"providerID": "openai", "modelID": "gpt-5.4"},
+            "high",
+            catalog,
+        )
+        == "high"
+    )
+
+
+def test_opencode_keeps_requested_variant_when_catalog_says_reasoning_supported():
+    catalog = {
+        "providers": [
+            {
+                "id": "openai",
+                "models": {
+                    "gpt-5.4": {
+                        "id": "gpt-5.4",
+                        "capabilities": {"reasoning": True},
                     }
                 },
             }
