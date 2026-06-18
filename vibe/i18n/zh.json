@@ -40,7 +40,13 @@
     "updateUnavailable": "当前无法执行更新操作。",
     "unknownAction": "未知操作：{action}",
     "processActionFailed": "处理操作时出错：{error}",
-    "agentNotConfigured": "Agent `{agent}` 未配置。若此频道路由到 Codex，请确保已安装 Codex CLI 并设置环境变量。",
+    "agentNotConfigured": "Agent `{agent}` 使用 {backend} backend，但该 backend 当前不可用。{hint}",
+    "agentNotConfiguredHint": {
+      "opencode": "请启用 OpenCode backend，安装 OpenCode CLI，或设置 OPENCODE_CLI_PATH。",
+      "claude": "请启用 Claude Code backend，并确认 Claude Code CLI 路径已配置。",
+      "codex": "请启用 Codex backend，安装 Codex CLI，或设置 CODEX_CLI_PATH。",
+      "generic": "请在 Agent 设置里选择一个已启用的 Agent，或启用该 Agent 使用的 backend。"
+    },
     "processMessageFailed": "出错：{error}",
     "streamTurnInProgress": "⚠️ 这个会话已经有一条回复在生成中，请等它完成后再试。",
     "sessionReset": "检测到会话错误。会话已重置，请重试。",

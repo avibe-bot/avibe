@@ -61,8 +61,8 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
     setError(null);
     try {
       const titleKey = kind === 'task' ? 'workbench.createDialog.kindTask' : 'workbench.createDialog.kindWatch';
-      // Omit agent_backend so the server routes through the configured
-      // agents.default_backend rather than a hard-coded one.
+      // Omit agent_backend so the server routes through the default Agent
+      // rather than a hard-coded backend.
       const session = await api.createSession({
         project_id: projectId,
         title: t(`harness.createDialog.${kind === 'task' ? 'kindTask' : 'kindWatch'}`, {

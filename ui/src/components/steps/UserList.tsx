@@ -569,14 +569,13 @@ export const UserList: React.FC = () => {
   // Load agent options for visible enabled users
   useEffect(() => {
     const defaultCwd = config.runtime?.default_cwd || '~/work';
-    const defaultBackend = config.agents?.default_backend || 'opencode';
+    const defaultAgent = agentByName[defaultAgentName || ''] || null;
     aggregated.forEach((u) => {
       if (!u.config.enabled) return;
       const cwd = u.config.custom_cwd || defaultCwd;
       const routing = u.config.routing || {};
       const selectedAgent = routing.agent_name ? agentByName[routing.agent_name] : null;
-      const defaultAgent = !routing.agent_backend ? agentByName[defaultAgentName || ''] : null;
-      const backend = selectedAgent?.backend || routing.agent_backend || defaultAgent?.backend || defaultBackend;
+      const backend = selectedAgent?.backend || routing.agent_backend || defaultAgent?.backend || 'opencode';
       if (backend === 'opencode' && config.agents?.opencode?.enabled && !opencodeOptionsByCwd[cwd]) loadOpenCodeOptions(cwd);
       if (backend === 'claude' && config.agents?.claude?.enabled && !claudeAgentsByCwd[cwd]) loadClaudeAgents(cwd);
       if (backend === 'codex' && config.agents?.codex?.enabled && !codexAgentsByCwd[cwd]) loadCodexAgents(cwd);
@@ -743,10 +742,10 @@ export const UserList: React.FC = () => {
             visibleUsers.map((u) => {
               const expanded = expandedKey === u.key;
               const userConfig = u.config;
-              const defaultBackend = config.agents?.default_backend || 'opencode';
+              const defaultAgent = agentByName[defaultAgentName || ''] || null;
               const legacyBackend = userConfig.routing?.agent_backend || null;
               const selectedAgent = agentByName[userConfig.routing?.agent_name || ''] || (!legacyBackend ? agentByName[defaultAgentName || ''] : undefined);
-              const effectiveBackend = selectedAgent?.backend || legacyBackend || defaultBackend;
+              const effectiveBackend = selectedAgent?.backend || legacyBackend || defaultAgent?.backend || 'opencode';
               const effectiveCwd = userConfig.custom_cwd || config.runtime?.default_cwd || '~/work';
               const opencodeOptions = opencodeOptionsByCwd[effectiveCwd];
               const claudeAgents = claudeAgentsByCwd[effectiveCwd] || [];

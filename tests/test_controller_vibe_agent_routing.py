@@ -72,6 +72,43 @@ def test_resolve_agent_for_context_uses_legacy_backend_builtin_agent() -> None:
     assert controller.resolve_agent_for_context(_context()) == "opencode"
 
 
+def test_resolve_agent_for_context_uses_default_agent_not_router_default() -> None:
+    controller = _StubController()
+    default_agent = SimpleNamespace(name="reviewer", backend="codex")
+    controller.primary_platform = "slack"
+    controller._get_settings_key = lambda context: context.channel_id
+    controller.agent_service = SimpleNamespace(agents={"opencode": object(), "codex": object()}, default_agent="opencode")
+    controller.vibe_agent_store = SimpleNamespace(
+        require=lambda name: (_ for _ in ()).throw(ValueError(f"agent '{name}' not found")),
+        get_builtin_default_agent_for_backend=lambda backend: None,
+        get_default_agent=lambda: default_agent,
+    )
+    controller.get_settings_manager_for_context = lambda context: SimpleNamespace(
+        get_channel_routing=lambda settings_key: SimpleNamespace(agent_name=None, agent_backend=None)
+    )
+    controller.agent_router = SimpleNamespace(resolve=lambda platform, settings_key: "opencode")
+
+    assert controller.resolve_agent_for_context(_context()) == "codex"
+
+
+def test_resolve_agent_for_context_reports_unregistered_default_agent_backend() -> None:
+    controller = _StubController()
+    default_agent = SimpleNamespace(name="opencode", backend="opencode")
+    controller.primary_platform = "slack"
+    controller._get_settings_key = lambda context: context.channel_id
+    controller.agent_service = SimpleNamespace(agents={"claude": object()}, default_agent="claude")
+    controller.vibe_agent_store = SimpleNamespace(
+        require=lambda name: (_ for _ in ()).throw(ValueError(f"agent '{name}' not found")),
+        get_builtin_default_agent_for_backend=lambda backend: None,
+        get_default_agent=lambda: default_agent,
+    )
+    controller.get_settings_manager_for_context = lambda context: SimpleNamespace(
+        get_channel_routing=lambda settings_key: SimpleNamespace(agent_name=None, agent_backend=None)
+    )
+
+    assert controller.resolve_agent_for_context(_context()) == "opencode"
+
+
 def test_codex_overrides_prefer_scope_level_model_and_reasoning() -> None:
     controller = _StubController()
     controller.primary_platform = "slack"

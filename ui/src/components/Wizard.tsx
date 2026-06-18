@@ -78,7 +78,6 @@ const buildConfigPayload = (data: any, enabledPlatformOverride?: string[]) => {
     default_cwd: data.default_cwd || data.runtime?.default_cwd || '.',
   },
   agents: {
-    default_backend: data.default_backend || 'opencode',
     opencode: {
       // Preserve existing opencode config
       ...data.agents?.opencode,
@@ -196,7 +195,6 @@ export const Wizard: React.FC = () => {
             ...configWithCatalog,
             discordGuildAllowlist: discordSettings?.guild_allowlist || [],
             channelConfigsByPlatform,
-            default_backend: config.agents?.default_backend,
             agents: {
               opencode: config.agents?.opencode,
               claude: config.agents?.claude,

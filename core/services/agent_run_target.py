@@ -417,15 +417,7 @@ def _resolve_agent_target(
             if target is not None:
                 return target
 
-    router = getattr(controller, "agent_router", None)
-    resolved = None
-    if router is not None:
-        try:
-            resolved = router.resolve(platform, settings_key)
-        except Exception:
-            logger.debug("Failed to resolve router backend for new session", exc_info=True)
-        resolved = resolved or getattr(router, "global_default", None)
-    backend = _supported_backend(resolved) or _configured_default_backend(controller)
+    backend = _fallback_registered_backend(controller)
     if backend is None:
         from modules.agents.catalog import DEFAULT_AGENT_BACKEND
 
@@ -440,12 +432,17 @@ def _resolve_agent_target(
     )
 
 
-def _configured_default_backend(controller: Any) -> Optional[str]:
-    config = getattr(controller, "config", None)
-    agents = getattr(config, "agents", None)
-    return _supported_backend(getattr(agents, "default_backend", None)) or _supported_backend(
-        getattr(config, "default_backend", None)
-    )
+def _fallback_registered_backend(controller: Any) -> Optional[str]:
+    agent_service = getattr(controller, "agent_service", None)
+    registered = getattr(agent_service, "agents", {}) if agent_service is not None else {}
+    default_agent = _supported_backend(getattr(agent_service, "default_agent", None))
+    if default_agent and default_agent in registered:
+        return default_agent
+    for backend in registered:
+        supported = _supported_backend(backend)
+        if supported:
+            return supported
+    return None
 
 
 def _agent_target_from_vibe_agent(agent: Any, *, scope_row: Optional[dict[str, Any]]) -> Optional[ResolvedAgentTarget]:

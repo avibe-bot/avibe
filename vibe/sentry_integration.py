@@ -190,6 +190,18 @@ def resolve_sentry_options() -> Optional[dict[str, Any]]:
 
 def build_sentry_contexts(config: V2Config, component: str, environment: str) -> dict[str, dict[str, Any]]:
     vibe_home = str(paths.get_vibe_remote_dir())
+    default_agent_name = None
+    try:
+        from core.vibe_agents import VibeAgentStore
+
+        store = VibeAgentStore()
+        try:
+            default_agent = store.get_default_agent()
+            default_agent_name = default_agent.name if default_agent else None
+        finally:
+            store.close()
+    except Exception:
+        default_agent_name = None
     return {
         "runtime": {
             "python_version": platform.python_version(),
@@ -211,7 +223,7 @@ def build_sentry_contexts(config: V2Config, component: str, environment: str) ->
             "mode": config.mode,
             "primary_platform": config.platforms.primary,
             "enabled_platforms": config.platforms.enabled,
-            "default_backend": config.agents.default_backend,
+            "default_agent_name": default_agent_name,
             "cwd": config.runtime.default_cwd,
             "vibe_home": vibe_home,
         },

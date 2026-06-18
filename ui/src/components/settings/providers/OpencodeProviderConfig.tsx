@@ -164,7 +164,6 @@ export const OpencodeProviderConfig: React.FC<{
   const runtime = useBackendRuntime({
     backend: BACKEND_ID,
     defaultCli: DEFAULT_CLI,
-    fallbackDefaultBackend: BACKEND_ID,
     deferRestart,
   });
   const permission = useOpencodePermission();

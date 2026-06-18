@@ -1689,10 +1689,12 @@ class ScheduledTaskService:
                     "scope routing still references a legacy backend without an Agent; "
                     "choose an Agent before creating sessions for this Scope"
                 )
-            agent = agent_store.require_enabled(resolved_agent_name) if resolved_agent_name else None
+            agent = agent_store.require_enabled(resolved_agent_name) if resolved_agent_name else agent_store.get_default_agent()
         finally:
             agent_store.close()
-        agent_backend = agent.backend if agent else self.controller.agent_router.global_default
+        if agent is None:
+            raise ValueError("no enabled default Agent is available for session creation")
+        agent_backend = agent.backend
         service = SQLiteSessionsService(config_paths.get_sqlite_state_path())
         try:
             session_id = service.reserve_agent_session(

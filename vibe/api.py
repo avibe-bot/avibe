@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from config import paths
-from config.v2_config import CONFIG_LOCK, DEFAULT_AGENT_BACKEND, V2Config
+from config.v2_config import CONFIG_LOCK, V2Config
 from config.v2_settings import (
     SettingsStore,
     ChannelSettings,
@@ -130,21 +130,11 @@ def _enabled_agent_backends_from_config(config: Optional[V2Config] = None) -> li
     return result
 
 
-def _default_agent_backend_from_config(config: Optional[V2Config] = None) -> str:
-    try:
-        cfg = config or load_config()
-    except FileNotFoundError:
-        return DEFAULT_AGENT_BACKEND
-    agents = getattr(cfg, "agents", None)
-    return str(getattr(agents, "default_backend", DEFAULT_AGENT_BACKEND) or DEFAULT_AGENT_BACKEND)
-
-
 def _ensure_builtin_default_agents(config: Optional[V2Config] = None) -> None:
     backends = _enabled_agent_backends_from_config(config)
-    default_backend = _default_agent_backend_from_config(config)
     store = VibeAgentStore()
     try:
-        store.ensure_builtin_default_agents(backends, default_backend=default_backend)
+        store.ensure_builtin_default_agents(backends)
     finally:
         store.close()
 

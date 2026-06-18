@@ -4,20 +4,19 @@ import { useTranslation } from 'react-i18next';
 import { ChevronRight, Settings2 } from 'lucide-react';
 
 import { Button } from '../ui/button';
-import { Badge } from '../ui/badge';
-import { CompactSelect, SettingsResourceRow, ToggleSwitch } from './SettingsPrimitives';
+import { SettingsResourceRow, ToggleSwitch } from './SettingsPrimitives';
 import { BackendLifecycleChip } from './BackendLifecycleChip';
 import { SettingsPageShell } from './SettingsPageShell';
 import { useApi } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
-import { AGENT_BACKENDS, DEFAULT_AGENT_STATE, DEFAULT_BACKEND_ID } from '@/lib/agentBackends';
+import { AGENT_BACKENDS, DEFAULT_AGENT_STATE } from '@/lib/agentBackends';
 
-// Mirrors design.pen qVHh4 (VR/CM/Backends): top bar with default-backend
-// picker, then three horizontal cards (OpenCode/Claude/Codex). Each card
+// Mirrors design.pen qVHh4 (VR/CM/Backends): three horizontal cards
+// (OpenCode/Claude/Codex). Each card
 // surfaces icon + name/description + status chip + enable toggle + a
 // "Configure" link that drills into the level-2 provider page. CLI path,
 // detect, install, and permission profile live on the provider page now —
-// keep the level-1 page about routing decisions, not setup mechanics.
+// keep the level-1 page about backend availability, not Agent defaults.
 
 type CliStatus = 'unknown' | 'ok' | 'missing';
 
@@ -53,7 +52,6 @@ export const SettingsBackendsPage: React.FC = () => {
 
   const [loaded, setLoaded] = useState(false);
   const [agents, setAgents] = useState<Record<string, AgentState>>(DEFAULT_AGENTS);
-  const [defaultBackend, setDefaultBackend] = useState<string>(DEFAULT_BACKEND_ID);
 
   useEffect(() => {
     let cancelled = false;
@@ -62,9 +60,6 @@ export const SettingsBackendsPage: React.FC = () => {
       .then((config) => {
         if (cancelled) return;
         setAgents(normalizeAgents(config));
-        setDefaultBackend(
-          config?.default_backend || config?.agents?.default_backend || DEFAULT_BACKEND_ID
-        );
         setLoaded(true);
       })
       .catch(() => {
@@ -111,10 +106,10 @@ export const SettingsBackendsPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded]);
 
-  const persist = async (nextAgents: Record<string, AgentState>, nextDefault: string) => {
+  const persist = async (nextAgents: Record<string, AgentState>) => {
     try {
       await api.saveConfig({
-        agents: { ...nextAgents, default_backend: nextDefault },
+        agents: nextAgents,
       });
       showToast(t('common.saved'), 'success');
     } catch (e: any) {
@@ -125,19 +120,7 @@ export const SettingsBackendsPage: React.FC = () => {
   const handleToggle = async (name: string, enabled: boolean) => {
     const nextAgents = { ...agents, [name]: { ...agents[name], enabled } };
     setAgents(nextAgents);
-    await persist(nextAgents, defaultBackend);
-  };
-
-  const handleDefaultChange = async (next: string) => {
-    setDefaultBackend(next);
-    // If the chosen default is disabled, flip it on so the routing target is
-    // actually reachable — saves the user an extra round trip to enable it.
-    let nextAgents = agents;
-    if (!agents[next]?.enabled) {
-      nextAgents = { ...agents, [next]: { ...agents[next], enabled: true } };
-      setAgents(nextAgents);
-    }
-    await persist(nextAgents, next);
+    await persist(nextAgents);
   };
 
   const refreshDetectionFor = async (name: string, cli_path: string) => {
@@ -166,38 +149,9 @@ export const SettingsBackendsPage: React.FC = () => {
         <div className="text-sm text-muted">{t('common.loading')}</div>
       ) : (
         <div className="flex flex-col gap-3.5">
-          <div className="flex flex-col gap-3 rounded-xl border border-border bg-background px-5 py-4 md:flex-row md:items-center md:justify-between">
-            <div className="flex flex-col gap-1">
-              <span className="text-[14px] font-semibold text-foreground">
-                {t('settings.backends.routingTitle')}
-              </span>
-              <span className="max-w-[520px] text-[12px] leading-snug text-muted">
-                {t('settings.backends.routingHint')}
-              </span>
-            </div>
-            <label className="flex items-center gap-2 self-start md:self-auto">
-              <span className="text-[11px] font-medium text-muted">
-                {t('settings.backends.defaultLabel')}
-              </span>
-              <CompactSelect
-                value={defaultBackend}
-                onChange={(e) => void handleDefaultChange(e.target.value)}
-                className="min-w-[180px]"
-                aria-label={t('settings.backends.defaultLabel') as string}
-              >
-                {AGENT_BACKENDS.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.label}
-                  </option>
-                ))}
-              </CompactSelect>
-            </label>
-          </div>
-
           {AGENT_BACKENDS.map((meta) => {
             const agent = agents[meta.id];
             const Icon = meta.Icon;
-            const isDefault = defaultBackend === meta.id;
             const route = meta.settingsRoute;
 
             return (
@@ -207,13 +161,6 @@ export const SettingsBackendsPage: React.FC = () => {
                 tileClassName={meta.tileCls}
                 iconClassName={meta.iconCls}
                 title={meta.label}
-                badges={
-                  isDefault && (
-                    <Badge variant="success" className="font-mono uppercase tracking-[0.08em]">
-                      {t('settings.backends.defaultBadge')}
-                    </Badge>
-                  )
-                }
                 detail={t(`settings.backends.${meta.id}Description`)}
                 actions={
                   <>
