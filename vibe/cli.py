@@ -2269,6 +2269,13 @@ def cmd_agent_show(args):
 def cmd_agent_default(args):
     try:
         store = _agent_store()
+        if store.get(args.name) is None:
+            try:
+                backend = validate_agent_backend(args.name)
+            except ValueError:
+                backend = None
+            if backend:
+                store.sync_builtin_default_agent(backend=backend, backend_enabled=True)
         store.set_default_agent_name(args.name)
         agent = store.require(args.name)
         _print_cli_payload("default_agent", default_agent_name=agent.name, agent=_agent_payload(agent, brief=True))

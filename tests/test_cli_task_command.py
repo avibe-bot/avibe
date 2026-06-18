@@ -1223,6 +1223,24 @@ def test_agent_default_cli_sets_default_agent(tmp_path: Path, capsys) -> None:
     assert agent_store.get_default_agent_name() == "codex"
 
 
+def test_agent_default_cli_bootstraps_builtin_backend_agent(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    args = _parse_agent(["default", "codex"])
+
+    with patch("vibe.cli._agent_store", return_value=agent_store):
+        result = cli.cmd_agent_default(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["default_agent_name"] == "codex"
+    agent = agent_store.get("codex")
+    assert agent is not None
+    assert agent.backend == "codex"
+    assert agent.enabled is True
+    assert agent_store.get_default_agent_name() == "codex"
+
+
 def test_agent_import_name_filters_global_candidates(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     agent_store = cli.VibeAgentStore(db_path)
