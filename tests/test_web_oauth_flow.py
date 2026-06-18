@@ -575,6 +575,8 @@ class _FakeOpencodeServer:
         self.messages: list[dict] = []
         self.prompt_calls: list[dict] = []
         self.abort_calls: list[tuple[str, str]] = []
+        self.active_calls: list[str] = []
+        self.inactive_calls: list[str] = []
         self.message_sent = False
 
     async def get_provider_auth(self):
@@ -592,6 +594,12 @@ class _FakeOpencodeServer:
     async def prompt_async(self, **kwargs):
         self.prompt_calls.append(kwargs)
         self.message_sent = True
+
+    async def mark_run_active(self, session_id):
+        self.active_calls.append(session_id)
+
+    async def mark_run_inactive(self, session_id):
+        self.inactive_calls.append(session_id)
 
     async def abort_session(self, session_id, directory):
         self.abort_calls.append((session_id, directory))
@@ -759,7 +767,9 @@ def test_opencode_provider_test_returns_excerpt_from_non_text_part(
         "providerID": "anthropic",
         "modelID": "claude-opus-4.8",
     }
+    assert fake.active_calls == ["sess_probe"]
     assert fake.abort_calls == [("sess_probe", os.path.expanduser("~"))]
+    assert fake.inactive_calls == ["sess_probe"]
 
 
 def test_opencode_provider_test_fails_on_empty_terminal_message(
@@ -807,7 +817,9 @@ def test_opencode_provider_test_fails_on_empty_terminal_message(
     assert result["model"] == "glm-5.2"
     assert "glm-5.2" in result["detail"]
     assert fake.prompt_calls[-1]["reasoning_effort"] == "default"
+    assert fake.active_calls == ["sess_probe"]
     assert fake.abort_calls == [("sess_probe", os.path.expanduser("~"))]
+    assert fake.inactive_calls == ["sess_probe"]
 
 
 def test_remove_web_auth_rejects_unsupported_backend(service: AgentAuthService) -> None:

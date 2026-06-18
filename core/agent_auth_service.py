@@ -2299,6 +2299,7 @@ class AgentAuthService:
         directory = os.path.expanduser("~")
         started = time.monotonic()
         session_id: str | None = None
+        active_registered = False
         try:
             try:
                 created = await server.create_session(directory, title="vibe-test-probe")
@@ -2351,6 +2352,8 @@ class AgentAuthService:
                     reasoning_effort=reasoning_effort,
                     tools={"question": False},
                 )
+                await server.mark_run_active(session_id)
+                active_registered = True
             except Exception as err:  # noqa: BLE001
                 detail = str(err)
                 return {
@@ -2461,6 +2464,8 @@ class AgentAuthService:
                     await server.abort_session(session_id, directory)
                 except Exception:  # noqa: BLE001
                     pass
+            if active_registered and session_id:
+                await server.mark_run_inactive(session_id)
 
     async def cancel_web_flow(self, flow_id: str) -> dict[str, Any]:
         async with self._web_flow_lock:

@@ -1356,6 +1356,7 @@ export const OpencodeProviderConfig: React.FC<{
                                     subtitle={t('settings.backends.opencodeProviderOauthPanelSubtitle')}
                                     hideRemove
                                     onSuccess={() => {
+                                      notifyOpenCodeModelOptionsChanged();
                                       // Refresh the providers list so
                                       // the just-authorised provider
                                       // flips to "configured" and the
