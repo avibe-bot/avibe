@@ -263,6 +263,7 @@ export const ClaudeProviderConfig: React.FC<{
                 // The Settings UI should show OAuth as signed in only when
                 // OAuth is the currently effective Avibe auth source.
                 signedIn={authState?.active_auth_mode === 'oauth'}
+                canRemoveAuth={!!authState?.has_oauth_credentials}
                 title={t('settings.backends.claudeOauthPanelTitle')}
                 subtitle={t('settings.backends.claudeOauthPanelSubtitle')}
                 onActiveChange={setOauthFlowActive}

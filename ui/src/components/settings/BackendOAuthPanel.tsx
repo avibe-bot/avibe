@@ -31,6 +31,10 @@ export type BackendOAuthPanelProps = {
    *  ``get*Auth`` endpoint). We still render a "re-authenticate" button so
    *  rotating credentials without dropping to a terminal stays one click. */
   signedIn: boolean;
+  /** When ``true`` render the remove-auth affordance even if the parent does
+   *  not want to show a current "signed in" banner. Useful when a backend has
+   *  stored OAuth tokens that are not the currently active auth source. */
+  canRemoveAuth?: boolean;
   /** Heading text shown on the panel (e.g. "Claude account login"). */
   title: string;
   /** Short paragraph under the heading describing what login does. */
@@ -74,6 +78,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
   backend,
   opencodeProviderId,
   signedIn,
+  canRemoveAuth,
   title,
   subtitle,
   signedInDetail,
@@ -357,6 +362,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
         if (backend === 'codex') return t('settings.backends.codexSignInButton');
         return t('settings.backends.opencodeProviderSignIn');
       })();
+  const showRemoveAuth = (canRemoveAuth ?? signedIn) || state === 'success';
 
   return (
     <div className="flex flex-col gap-4 rounded-lg border border-border bg-surface-2/60 p-4">
@@ -537,7 +543,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
             {t('settings.backends.oauthInProgress')}
           </span>
         )}
-        {!hideRemove && (signedIn || state === 'success') && state !== 'starting' && state !== 'awaiting_code' && state !== 'verifying' && (
+        {!hideRemove && showRemoveAuth && state !== 'starting' && state !== 'awaiting_code' && state !== 'verifying' && (
           <Button
             type="button"
             variant="ghost"
