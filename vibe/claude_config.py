@@ -39,6 +39,7 @@ RELEVANT_ENV_KEYS = (
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
 )
+OAUTH_SETTINGS_ENV_BACKUP_NAME = ".avibe-oauth-settings-env-backup.json"
 
 
 def get_claude_home(home: Path | None = None) -> Path:
@@ -72,6 +73,11 @@ def get_claude_credentials_path(home: Path | None = None) -> Path:
     macOS keychain is not portably introspectable.
     """
     return get_claude_home(home) / "credentials.json"
+
+
+def get_claude_oauth_settings_backup_path(home: Path | None = None) -> Path:
+    """Return Avibe's durable rollback file for Claude OAuth setup."""
+    return get_claude_home(home) / OAUTH_SETTINGS_ENV_BACKUP_NAME
 
 
 def read_claude_oauth_signed_in(home: Path | None = None) -> bool:
@@ -153,6 +159,69 @@ def _atomic_write(path: Path, content: str, *, mode: int = 0o600) -> None:
         logger.debug("chmod %s failed: %s", path, exc)
 
 
+def _clean_relevant_env_values(env_values: Dict[str, str]) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for key in RELEVANT_ENV_KEYS:
+        raw = env_values.get(key)
+        if isinstance(raw, str) and raw.strip():
+            out[key] = raw.strip()
+    return out
+
+
+def write_claude_oauth_settings_backup(
+    env_values: Dict[str, str], home: Path | None = None
+) -> None:
+    """Persist a rollback copy of Claude settings env before OAuth cleanup.
+
+    OAuth setup has to remove API-key/base-url overrides from Claude Code's
+    ``settings.json`` before launching the OAuth control client. The rollback
+    state must survive an Avibe process restart, so it lives next to Claude's
+    settings file and uses the same private-file permissions.
+    """
+    cleaned = _clean_relevant_env_values(env_values)
+    if not cleaned:
+        clear_claude_oauth_settings_backup(home)
+        return
+    payload = {"version": 1, "env": cleaned}
+    _atomic_write(
+        get_claude_oauth_settings_backup_path(home),
+        json.dumps(payload, indent=2) + "\n",
+        mode=0o600,
+    )
+
+
+def read_claude_oauth_settings_backup(
+    home: Path | None = None,
+) -> Dict[str, str] | None:
+    """Read Avibe's pending Claude OAuth rollback backup, if present."""
+    path = get_claude_oauth_settings_backup_path(home)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Claude OAuth settings backup read failed (%s)", exc)
+        return None
+    if not isinstance(data, dict):
+        return None
+    env_values = data.get("env")
+    if not isinstance(env_values, dict):
+        return None
+    cleaned = _clean_relevant_env_values(env_values)
+    return cleaned or None
+
+
+def clear_claude_oauth_settings_backup(home: Path | None = None) -> None:
+    """Remove Avibe's pending Claude OAuth rollback backup."""
+    path = get_claude_oauth_settings_backup_path(home)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:  # pragma: no cover - best effort cleanup
+        logger.warning("Claude OAuth settings backup cleanup failed (%s)", exc)
+
+
 def apply_claude_auth(
     *,
     auth_mode: str,
@@ -218,6 +287,33 @@ def read_claude_settings_env(home: Path | None = None) -> Dict[str, str]:
         if isinstance(raw, str) and raw.strip():
             out[key] = raw.strip()
     return out
+
+
+def restore_claude_settings_env(env_values: Dict[str, str], home: Path | None = None) -> None:
+    """Restore Anthropic-relevant Claude settings env values exactly.
+
+    OAuth setup temporarily removes these keys so Claude Code cannot route
+    the OAuth handshake through stale API-key settings. If that setup does
+    not complete, the caller needs to put the previous settings back without
+    changing header semantics or dropping a base-url-only relay setting.
+    """
+    path = get_claude_settings_path(home)
+    settings = _load_settings_for_write(path)
+    env_block = settings.setdefault("env", {})
+    if not isinstance(env_block, dict):
+        env_block = {}
+        settings["env"] = env_block
+
+    for key in RELEVANT_ENV_KEYS:
+        env_block.pop(key, None)
+        raw = env_values.get(key)
+        if isinstance(raw, str) and raw.strip():
+            env_block[key] = raw.strip()
+
+    if not env_block:
+        settings.pop("env", None)
+
+    _atomic_write(path, json.dumps(settings, indent=2) + "\n", mode=0o600)
 
 
 def read_claude_auth_state(home: Path | None = None) -> Dict[str, Any]:
@@ -321,7 +417,10 @@ def build_claude_subprocess_env(
     if claude_cfg is None and not force_oauth:
         return claude_env
 
-    auth_mode = getattr(claude_cfg, "auth_mode", "oauth") if claude_cfg is not None else "oauth"
+    configured_auth_mode = (
+        getattr(claude_cfg, "auth_mode", "oauth") if claude_cfg is not None else "oauth"
+    )
+    auth_mode = "oauth" if force_oauth else configured_auth_mode
     configured_key_raw = (getattr(claude_cfg, "api_key", None) or "").strip() if claude_cfg is not None else ""
     configured_base = (getattr(claude_cfg, "base_url", None) or "").strip() if claude_cfg is not None else ""
     settings_env = read_claude_settings_env()

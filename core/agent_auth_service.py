@@ -287,10 +287,32 @@ class AgentAuthFlow:
     device_code: str | None = None
     provider: str | None = None
     last_status_text: str | None = None
+    force_oauth: bool = False
+    claude_oauth_attempt: "ClaudeOAuthAttempt | None" = None
 
     @property
     def flow_key(self) -> str:
         return f"{self.settings_key}:{self.backend}"
+
+
+@dataclass
+class ClaudeOAuthBatch:
+    backup: dict[str, str] | None
+    attempts: dict[int, "ClaudeOAuthAttempt"] = field(default_factory=dict)
+    committed: bool = False
+    durable_backup: bool = False
+
+
+@dataclass
+class ClaudeOAuthAttempt:
+    attempt_id: int
+    batch: ClaudeOAuthBatch
+    active: bool = True
+    succeeded: bool = False
+
+    @property
+    def settings_backup(self) -> dict[str, str] | None:
+        return self.batch.backup
 
 
 # Web Settings → Backends OAuth flows live alongside the IM ``AgentAuthFlow``
@@ -320,6 +342,7 @@ class WebAuthFlow:
     # — accessing a runtime-assigned attribute on Claude/Codex flows
     # would AttributeError out and 500 the start endpoint.
     provider: str | None = None
+    claude_oauth_attempt: ClaudeOAuthAttempt | None = None
     created_at: float = field(default_factory=time.time)
     # Timestamp the flow first entered a terminal state (success /
     # failed / cancelled). ``None`` while the flow is still in
@@ -343,6 +366,10 @@ class AgentAuthService:
         # context exists for them, so they cannot live in ``_flows``.
         self._web_flows: dict[str, WebAuthFlow] = {}
         self._web_flow_lock = asyncio.Lock()
+        self._claude_oauth_attempt_counter = 0
+        self._claude_oauth_batch: ClaudeOAuthBatch | None = None
+        self._claude_oauth_lock = asyncio.Lock()
+        self._recover_interrupted_claude_oauth_settings_backup()
         # Optional callable invoked after a successful *web* auth flow so
         # the UI-server process can ask the long-running controller to
         # reload V2Config-backed credentials. The hook receives ``(backend,)``
@@ -401,6 +428,32 @@ class AgentAuthService:
         backend_cfg = self._resolve_backend_config(backend)
         cli_path = getattr(backend_cfg, "cli_path", None) or getattr(backend_cfg, "binary", None)
         return cli_path or backend
+
+    def _build_claude_full_subprocess_env(self, *, force_oauth: bool = False) -> dict[str, str]:
+        """Return a complete environment for direct Claude CLI subprocesses.
+
+        ``build_claude_subprocess_env`` intentionally returns only the
+        Anthropic/Claude variables that should be visible to Claude SDK clients.
+        For direct ``create_subprocess_exec(..., env=...)`` calls we need a full
+        process env. Start from ``os.environ`` for PATH/etc, remove every
+        Anthropic/Claude variable, then layer back only the allowed values so
+        OAuth-mode filtering really deletes stale shell credentials.
+        """
+        env_override = dict(os.environ)
+        for key in list(env_override.keys()):
+            if key.startswith("ANTHROPIC_") or key.startswith("CLAUDE_"):
+                env_override.pop(key, None)
+
+        from vibe.claude_config import build_claude_subprocess_env
+
+        env_override.update(
+            build_claude_subprocess_env(
+                self._resolve_backend_config("claude"),
+                base_env=os.environ,
+                force_oauth=force_oauth,
+            )
+        )
+        return env_override
 
     async def _resolve_opencode_provider(self, context: MessageContext) -> str:
         override_agent = None
@@ -581,57 +634,9 @@ class AgentAuthService:
                 f"⏳ {self._t('command.setup.starting', backend=resolved_backend)}",
             )
 
-            if resolved_backend == "codex":
-                process = await self._start_codex_process(force_reset=force_reset)
-                flow = AgentAuthFlow(
-                    flow_id=uuid.uuid4().hex[:12],
-                    backend=resolved_backend,
-                    settings_key=self._get_settings_key(context),
-                    initiator_user_id=context.user_id,
-                    context=context,
-                    process=process,
-                    reader_task=asyncio.create_task(asyncio.sleep(0)),
-                    waiter_task=asyncio.create_task(asyncio.sleep(0)),
-                )
-            elif resolved_backend == "claude":
-                client, manual_url = await self._start_claude_control_flow(
-                    context,
-                    force_reset=force_reset,
-                    login_with_claude_ai=claude_login_method != "console",
-                )
-                flow = AgentAuthFlow(
-                    flow_id=uuid.uuid4().hex[:12],
-                    backend=resolved_backend,
-                    settings_key=self._get_settings_key(context),
-                    initiator_user_id=context.user_id,
-                    context=context,
-                    process=None,
-                    reader_task=asyncio.create_task(asyncio.sleep(0)),
-                    waiter_task=asyncio.create_task(asyncio.sleep(0)),
-                    claude_client=client,
-                    login_prompt_sent=True,
-                    url=manual_url,
-                )
-            else:
-                provider = await self._resolve_opencode_provider(context)
-                if self._supports_direct_opencode_api_key_setup(provider):
-                    flow = AgentAuthFlow(
-                        flow_id=uuid.uuid4().hex[:12],
-                        backend=resolved_backend,
-                        settings_key=self._get_settings_key(context),
-                        initiator_user_id=context.user_id,
-                        context=context,
-                        process=None,
-                        reader_task=asyncio.create_task(asyncio.sleep(0)),
-                        waiter_task=asyncio.create_task(asyncio.sleep(0)),
-                        provider=provider,
-                        awaiting_code=True,
-                        login_prompt_sent=True,
-                        code_prompt_sent=True,
-                        url=self._get_opencode_setup_url(provider),
-                    )
-                else:
-                    process, master_fd, provider = await self._start_opencode_process(context, force_reset=force_reset)
+            try:
+                if resolved_backend == "codex":
+                    process = await self._start_codex_process(force_reset=force_reset)
                     flow = AgentAuthFlow(
                         flow_id=uuid.uuid4().hex[:12],
                         backend=resolved_backend,
@@ -641,9 +646,63 @@ class AgentAuthService:
                         process=process,
                         reader_task=asyncio.create_task(asyncio.sleep(0)),
                         waiter_task=asyncio.create_task(asyncio.sleep(0)),
-                        pty_master_fd=master_fd,
-                        provider=provider,
                     )
+                elif resolved_backend == "claude":
+                    client, manual_url, attempt = await self._start_claude_control_flow(
+                        context,
+                        force_reset=force_reset,
+                        login_with_claude_ai=claude_login_method != "console",
+                    )
+                    flow = AgentAuthFlow(
+                        flow_id=uuid.uuid4().hex[:12],
+                        backend=resolved_backend,
+                        settings_key=self._get_settings_key(context),
+                        initiator_user_id=context.user_id,
+                        context=context,
+                        process=None,
+                        reader_task=asyncio.create_task(asyncio.sleep(0)),
+                        waiter_task=asyncio.create_task(asyncio.sleep(0)),
+                        claude_client=client,
+                        login_prompt_sent=True,
+                        url=manual_url,
+                        claude_oauth_attempt=attempt,
+                    )
+                else:
+                    provider = await self._resolve_opencode_provider(context)
+                    if self._supports_direct_opencode_api_key_setup(provider):
+                        flow = AgentAuthFlow(
+                            flow_id=uuid.uuid4().hex[:12],
+                            backend=resolved_backend,
+                            settings_key=self._get_settings_key(context),
+                            initiator_user_id=context.user_id,
+                            context=context,
+                            process=None,
+                            reader_task=asyncio.create_task(asyncio.sleep(0)),
+                            waiter_task=asyncio.create_task(asyncio.sleep(0)),
+                            provider=provider,
+                            awaiting_code=True,
+                            login_prompt_sent=True,
+                            code_prompt_sent=True,
+                            url=self._get_opencode_setup_url(provider),
+                        )
+                    else:
+                        process, master_fd, provider = await self._start_opencode_process(context, force_reset=force_reset)
+                        flow = AgentAuthFlow(
+                            flow_id=uuid.uuid4().hex[:12],
+                            backend=resolved_backend,
+                            settings_key=self._get_settings_key(context),
+                            initiator_user_id=context.user_id,
+                            context=context,
+                            process=process,
+                            reader_task=asyncio.create_task(asyncio.sleep(0)),
+                            waiter_task=asyncio.create_task(asyncio.sleep(0)),
+                            pty_master_fd=master_fd,
+                            provider=provider,
+                        )
+            except Exception as err:  # noqa: BLE001
+                logger.error("Agent auth setup failed to start for %s: %s", resolved_backend, err, exc_info=True)
+                await self._send_setup_start_failure(context, resolved_backend, str(err))
+                return
 
             self._flows[flow_key] = flow
             self._flows_by_id[flow.flow_id] = flow
@@ -825,6 +884,19 @@ class AgentAuthService:
         fallback = fallback_text or text
         return await im_client.send_message(context, fallback)
 
+    async def _send_setup_start_failure(
+        self,
+        context: MessageContext,
+        backend: str,
+        detail: str,
+    ) -> None:
+        await self._send_message_with_button(
+            context,
+            f"❌ {self._t('command.setup.failed', backend=backend, detail=detail)}",
+            button_text=self._t("button.resetOAuth"),
+            callback_data=f"auth_setup:{backend}",
+        )
+
     async def _prompt_claude_login_method(self, context: MessageContext) -> None:
         text = self._t("command.setup.claudeMethodPrompt")
         keyboard = InlineKeyboard(
@@ -857,15 +929,19 @@ class AgentAuthService:
         *,
         force_reset: bool,
         login_with_claude_ai: bool,
-    ) -> tuple[ClaudeSDKClient, str]:
+    ) -> tuple[ClaudeSDKClient, str, ClaudeOAuthAttempt]:
         if not CLAUDE_SDK_AVAILABLE:
             raise ModuleNotFoundError("claude_agent_sdk is required for Claude setup flows")
 
         if force_reset:
             await self._run_utility_command(self._get_cli_binary("claude"), "auth", "logout")
-
-        client = await self._create_claude_control_client(context)
+        # Claude Code re-applies ``settings.json`` env at startup, so an
+        # OAuth flow must clear stale API-key settings before the control
+        # client or follow-up probes launch.
+        attempt = await self._begin_claude_oauth_attempt()
+        client = None
         try:
+            client = await self._create_claude_control_client(context)
             response = await self._send_claude_control_request(
                 client,
                 {
@@ -874,14 +950,18 @@ class AgentAuthService:
                 },
             )
         except Exception:
-            await self._disconnect_claude_client(client)
+            await self._finish_claude_oauth_attempt(attempt, succeeded=False)
+            if client is not None:
+                await self._disconnect_claude_client(client)
             raise
 
         manual_url = str(response.get("manualUrl") or "").strip()
         if not manual_url:
-            await self._disconnect_claude_client(client)
+            await self._finish_claude_oauth_attempt(attempt, succeeded=False)
+            if client is not None:
+                await self._disconnect_claude_client(client)
             raise RuntimeError("Claude auth flow did not return a manual login URL")
-        return client, manual_url
+        return client, manual_url, attempt
 
     async def _create_claude_control_client(
         self, context: Optional[MessageContext] = None
@@ -1234,15 +1314,18 @@ class AgentAuthService:
                 ),
                 timeout=self.setup_timeout_seconds,
             )
+            flow.force_oauth = True
             ok, detail = await self._verify_login(flow)
             if ok:
-                await self._clear_claude_settings_env_for_oauth()
+                await self._persist_backend_auth_mode(flow.backend, "oauth")
+                await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=True)
                 await self._refresh_backend_runtime(flow.backend)
                 await self._send_message(
                     flow.context,
                     f"✅ {self._t('command.setup.success', backend=flow.backend)}",
                 )
             else:
+                await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
                 detail_text = detail or self._t("command.setup.unknownFailure")
                 await self._send_message_with_button(
                     flow.context,
@@ -1251,6 +1334,7 @@ class AgentAuthService:
                     callback_data=f"auth_setup:{flow.backend}",
                 )
         except asyncio.TimeoutError:
+            await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
             await self._send_message_with_button(
                 flow.context,
                 f"❌ {self._t('command.setup.failed', backend=flow.backend, detail=self._t('command.setup.timedOut', backend=flow.backend))}",
@@ -1258,8 +1342,10 @@ class AgentAuthService:
                 callback_data=f"auth_setup:{flow.backend}",
             )
         except asyncio.CancelledError:
+            await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
             raise
         except Exception as err:  # noqa: BLE001
+            await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
             logger.error("Claude auth flow failed: %s", err, exc_info=True)
             await self._send_message_with_button(
                 flow.context,
@@ -1302,6 +1388,10 @@ class AgentAuthService:
                 return False, self._describe_opencode_cli_failure(process.returncode, text)
             return (verify_opencode_auth_list_output(text, flow.provider), text)
 
+        force_oauth = bool(getattr(flow, "force_oauth", False))
+        settings_backup: dict[str, str] | None = None
+        if force_oauth:
+            settings_backup = await self._prepare_claude_oauth_probe(flow.claude_oauth_attempt)
         binary = self._get_cli_binary("claude")
         process = await asyncio.create_subprocess_exec(
             binary,
@@ -1310,14 +1400,20 @@ class AgentAuthService:
             "--json",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            env=self._build_claude_full_subprocess_env(force_oauth=force_oauth),
         )
         stdout, _ = await process.communicate()
         text = stdout.decode("utf-8", errors="replace").strip()
         try:
             payload = json.loads(text)
         except json.JSONDecodeError:
+            if force_oauth and flow.claude_oauth_attempt is None:
+                await self._restore_transient_claude_oauth_probe_backup(settings_backup)
             return False, text
-        return (bool(payload.get("loggedIn")), text)
+        logged_in = bool(payload.get("loggedIn"))
+        if force_oauth and not logged_in and flow.claude_oauth_attempt is None:
+            await self._restore_transient_claude_oauth_probe_backup(settings_backup)
+        return (logged_in, text)
 
     def _describe_opencode_cli_failure(self, returncode: int, text: str) -> str:
         detail = text or ""
@@ -1643,6 +1739,7 @@ class AgentAuthService:
         return mapped if mapped in CLAUDE_LOGIN_METHODS else None
 
     async def _terminate_flow(self, flow: AgentAuthFlow) -> None:
+        await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
         if flow.waiter_task and not flow.waiter_task.done():
             flow.waiter_task.cancel()
             try:
@@ -1748,12 +1845,13 @@ class AgentAuthService:
                 flow.reader_task = asyncio.create_task(self._read_codex_output_web(flow))
                 flow.waiter_task = asyncio.create_task(self._wait_for_codex_completion_web(flow))
             elif backend == "claude":
-                client, manual_url = await self._start_claude_control_flow(
+                client, manual_url, attempt = await self._start_claude_control_flow(
                     context=None,
                     force_reset=force_reset,
                     login_with_claude_ai=True,
                 )
                 flow.claude_client = client
+                flow.claude_oauth_attempt = attempt
                 flow.url = manual_url
                 flow.awaiting_code = True
                 flow.state = "awaiting_code"
@@ -1764,6 +1862,8 @@ class AgentAuthService:
                 await self._start_opencode_oauth_web(flow, provider_id.strip())
         except Exception as err:  # noqa: BLE001
             logger.error("Web auth start failed for %s: %s", backend, err, exc_info=True)
+            if backend == "claude":
+                await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
             flow.state = "failed"
             flow.error = str(err)
         return flow
@@ -1988,20 +2088,20 @@ class AgentAuthService:
             if isinstance(model, str) and model.strip():
                 cmd.extend(["--model", model.strip()])
             cmd.append(prompt)
-            env_override = dict(os.environ)
-            # Layer V2Config-driven env on top so the test reflects what
-            # the live IM session would do at launch.
+            backend_cfg = self._resolve_backend_config("claude")
+            auth_mode = getattr(backend_cfg, "auth_mode", None)
+            auth_mode_set = bool(getattr(backend_cfg, "auth_mode_set", False))
+            if auth_mode == "oauth" and auth_mode_set:
+                try:
+                    await self._clear_claude_settings_env_for_oauth()
+                except Exception as err:  # noqa: BLE001
+                    return {"ok": False, "error": "settings_cleanup_failed", "detail": str(err)}
             try:
-                from vibe.claude_config import build_claude_subprocess_env
-
-                env_override.update(
-                    build_claude_subprocess_env(
-                        self._resolve_backend_config("claude"),
-                        base_env=env_override,
-                    )
-                )
-            except Exception:
-                pass
+                env_override = self._build_claude_full_subprocess_env()
+            except Exception as err:  # noqa: BLE001
+                if auth_mode == "oauth" and auth_mode_set:
+                    return {"ok": False, "error": "spawn_failed", "detail": str(err)}
+                env_override = dict(os.environ)
         else:
             # Codex single-shot mode. ``--skip-git-repo-check`` bypasses
             # Codex's per-project trust gate. We also force
@@ -2581,7 +2681,7 @@ class AgentAuthService:
                     flow.error = last_line[:400]
                     return
             flow.state = "verifying"
-            ok, detail = await self._verify_web_login(flow.backend)
+            ok, detail = await self._verify_web_login(flow.backend, force_oauth=flow.backend == "claude")
             if ok:
                 await self._invoke_post_web_success_hook(flow.backend)
                 await self._refresh_backend_runtime(flow.backend)
@@ -2611,20 +2711,29 @@ class AgentAuthService:
                 timeout=self.setup_timeout_seconds,
             )
             flow.state = "verifying"
-            ok, detail = await self._verify_web_login(flow.backend)
+            ok, detail = await self._verify_web_login(
+                flow.backend,
+                force_oauth=True,
+                claude_oauth_attempt=flow.claude_oauth_attempt,
+            )
             if ok:
                 await self._invoke_post_web_success_hook(flow.backend)
+                await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=True)
                 await self._refresh_backend_runtime(flow.backend)
                 flow.state = "success"
             else:
+                await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
                 flow.state = "failed"
                 flow.error = detail or "unknown_failure"
         except asyncio.TimeoutError:
+            await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
             flow.state = "failed"
             flow.error = "timed_out"
         except asyncio.CancelledError:
+            await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
             raise
         except Exception as err:  # noqa: BLE001
+            await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
             logger.error("Web Claude auth flow failed: %s", err, exc_info=True)
             flow.state = "failed"
             flow.error = str(err)
@@ -2633,7 +2742,13 @@ class AgentAuthService:
                 await self._disconnect_claude_client(flow.claude_client)
                 flow.claude_client = None
 
-    async def _verify_web_login(self, backend: str) -> tuple[bool, str]:
+    async def _verify_web_login(
+        self,
+        backend: str,
+        *,
+        force_oauth: bool = False,
+        claude_oauth_attempt: ClaudeOAuthAttempt | None = None,
+    ) -> tuple[bool, str]:
         """Re-run the same CLI status probes ``_verify_login`` uses for IM.
 
         Builds a temporary IM-shaped ``AgentAuthFlow`` shell so the existing
@@ -2651,6 +2766,8 @@ class AgentAuthService:
             reader_task=asyncio.create_task(asyncio.sleep(0)),
             waiter_task=asyncio.create_task(asyncio.sleep(0)),
         )
+        dummy.force_oauth = force_oauth
+        dummy.claude_oauth_attempt = claude_oauth_attempt
         try:
             return await self._verify_login(dummy)
         finally:
@@ -2671,7 +2788,7 @@ class AgentAuthService:
         # field (auth is per-provider, not global), so persisting one
         # would add a stray attribute and could mislead future readers.
         if backend != "opencode":
-            await self._persist_web_auth_mode(backend, "oauth")
+            await self._persist_backend_auth_mode(backend, "oauth")
         hook = self._post_web_success_hook
         if not callable(hook):
             return
@@ -2696,6 +2813,191 @@ class AgentAuthService:
                 "stale ANTHROPIC_* values may still override OAuth."
             ) from err
 
+    async def _read_pending_claude_oauth_settings_backup(
+        self,
+    ) -> dict[str, str] | None:
+        try:
+            from vibe.claude_config import read_claude_oauth_settings_backup
+
+            return await asyncio.to_thread(read_claude_oauth_settings_backup)
+        except Exception as err:  # noqa: BLE001
+            logger.warning("Failed to read pending Claude OAuth settings backup: %s", err)
+            return None
+
+    def _recover_interrupted_claude_oauth_settings_backup(self) -> None:
+        try:
+            from vibe.claude_config import (
+                clear_claude_oauth_settings_backup,
+                read_claude_oauth_settings_backup,
+                restore_claude_settings_env,
+            )
+
+            backup = read_claude_oauth_settings_backup()
+            if not backup:
+                return
+            restore_claude_settings_env(backup)
+            clear_claude_oauth_settings_backup()
+        except Exception as err:  # noqa: BLE001
+            logger.warning("Failed to recover interrupted Claude OAuth settings backup: %s", err)
+
+    async def _read_rollback_claude_oauth_settings_backup(
+        self,
+    ) -> dict[str, str] | None:
+        return await self._read_pending_claude_oauth_settings_backup()
+
+    async def _write_pending_claude_oauth_settings_backup(
+        self,
+        settings_backup: dict[str, str] | None,
+    ) -> bool:
+        if not settings_backup:
+            return False
+        try:
+            from vibe.claude_config import write_claude_oauth_settings_backup
+
+            await asyncio.to_thread(write_claude_oauth_settings_backup, settings_backup)
+            return True
+        except Exception as err:  # noqa: BLE001
+            raise RuntimeError(
+                "Failed to persist Claude Code settings backup before OAuth flow; "
+                "existing API-key settings were not changed."
+            ) from err
+
+    async def _clear_pending_claude_oauth_settings_backup(self) -> None:
+        try:
+            from vibe.claude_config import clear_claude_oauth_settings_backup
+
+            await asyncio.to_thread(clear_claude_oauth_settings_backup)
+        except Exception as err:  # noqa: BLE001
+            logger.warning("Failed to clear pending Claude OAuth settings backup: %s", err)
+
+    async def _temporarily_clear_claude_settings_env_for_oauth(
+        self,
+        *,
+        persist_backup: bool = False,
+        existing_backup: dict[str, str] | None = None,
+    ) -> dict[str, str] | None:
+        try:
+            from vibe.claude_config import read_claude_settings_env
+
+            settings_backup = await asyncio.to_thread(read_claude_settings_env)
+        except Exception as err:  # noqa: BLE001
+            raise RuntimeError(
+                "Failed to read Claude Code settings env before OAuth flow; "
+                "stale ANTHROPIC_* values may still override OAuth."
+            ) from err
+        effective_backup = existing_backup or settings_backup or None
+        if persist_backup and settings_backup and not existing_backup:
+            await self._write_pending_claude_oauth_settings_backup(settings_backup)
+        await self._clear_claude_settings_env_for_oauth()
+        return effective_backup
+
+    async def _restore_claude_settings_env_after_oauth_failure(
+        self, settings_backup: dict[str, str] | None
+    ) -> bool:
+        if not settings_backup:
+            return True
+        try:
+            from vibe.claude_config import restore_claude_settings_env
+
+            await asyncio.to_thread(
+                restore_claude_settings_env,
+                settings_backup,
+            )
+            return True
+        except Exception as err:  # noqa: BLE001
+            logger.warning("Failed to restore Claude settings env after OAuth failure: %s", err)
+            return False
+
+    async def _restore_transient_claude_oauth_probe_backup(
+        self,
+        settings_backup: dict[str, str] | None,
+    ) -> None:
+        if not settings_backup:
+            return
+        async with self._claude_oauth_lock:
+            if self._claude_oauth_batch is not None:
+                return
+            await self._restore_claude_settings_env_after_oauth_failure(settings_backup)
+
+    async def _begin_claude_oauth_attempt(self) -> ClaudeOAuthAttempt:
+        async with self._claude_oauth_lock:
+            batch = self._claude_oauth_batch
+            new_batch = batch is None or batch.committed or not batch.attempts
+            existing_backup = None
+            if new_batch:
+                existing_backup = await self._read_rollback_claude_oauth_settings_backup()
+            settings_backup = await self._temporarily_clear_claude_settings_env_for_oauth(
+                persist_backup=new_batch,
+                existing_backup=existing_backup,
+            )
+            if new_batch:
+                batch = ClaudeOAuthBatch(
+                    backup=dict(settings_backup or {}) or None,
+                    durable_backup=bool(existing_backup or settings_backup),
+                )
+                self._claude_oauth_batch = batch
+            elif batch.backup is None and settings_backup:
+                batch.backup = dict(settings_backup)
+
+            self._claude_oauth_attempt_counter += 1
+            attempt = ClaudeOAuthAttempt(
+                attempt_id=self._claude_oauth_attempt_counter,
+                batch=batch,
+            )
+            batch.attempts[attempt.attempt_id] = attempt
+            return attempt
+
+    async def _prepare_claude_oauth_probe(
+        self,
+        attempt: ClaudeOAuthAttempt | None,
+    ) -> dict[str, str] | None:
+        async with self._claude_oauth_lock:
+            settings_backup = await self._temporarily_clear_claude_settings_env_for_oauth()
+            if attempt is None:
+                return settings_backup
+            if attempt.batch.backup is None and settings_backup:
+                attempt.batch.backup = dict(settings_backup)
+            return attempt.settings_backup
+
+    async def _finish_claude_oauth_attempt(
+        self,
+        attempt: ClaudeOAuthAttempt | None,
+        *,
+        succeeded: bool,
+    ) -> None:
+        async with self._claude_oauth_lock:
+            if attempt is None or not attempt.active:
+                return
+
+            attempt.active = False
+            attempt.succeeded = succeeded
+            batch = attempt.batch
+            batch.attempts.pop(attempt.attempt_id, None)
+            if succeeded:
+                had_durable_backup = batch.durable_backup
+                batch.committed = True
+                batch.backup = None
+                batch.durable_backup = False
+                if self._claude_oauth_batch is batch and not batch.attempts:
+                    self._claude_oauth_batch = None
+                if had_durable_backup:
+                    await self._clear_pending_claude_oauth_settings_backup()
+                return
+
+            if not batch.attempts:
+                backup = batch.backup
+                had_durable_backup = batch.durable_backup
+                should_restore = not batch.committed
+                batch.backup = None
+                batch.durable_backup = False
+                if self._claude_oauth_batch is batch:
+                    self._claude_oauth_batch = None
+                restore_ok = True
+                if should_restore:
+                    restore_ok = await self._restore_claude_settings_env_after_oauth_failure(backup)
+                if restore_ok and had_durable_backup:
+                    await self._clear_pending_claude_oauth_settings_backup()
+
     async def _clear_claude_settings_env_for_logout(self) -> str | None:
         try:
             await self._clear_claude_settings_env_for_oauth()
@@ -2704,17 +3006,21 @@ class AgentAuthService:
             return str(err)
         return None
 
-    async def _persist_web_auth_mode(self, backend: str, auth_mode: str) -> None:
-        """Update V2Config.agents.<backend>.auth_mode if the controller has
-        a writable config. Skipped silently in test contexts where the
-        stub controller exposes a non-savable config object.
-        """
+    async def _persist_backend_auth_mode(self, backend: str, auth_mode: str) -> None:
+        """Persist V2Config.agents.<backend>.auth_mode for web and IM flows."""
         if backend == "claude" and auth_mode == "oauth":
             await self._clear_claude_settings_env_for_oauth()
         try:
             config = getattr(self.controller, "config", None)
             target = getattr(getattr(config, "agents", None), backend, None)
             saver = getattr(config, "save", None) if config is not None else None
+            loaded_config = None
+            if target is None or not callable(saver):
+                from config.v2_config import V2Config
+
+                loaded_config = V2Config.load()
+                target = getattr(getattr(loaded_config, "agents", None), backend, None)
+                saver = getattr(loaded_config, "save", None)
             if target is None or not callable(saver):
                 return
             # An explicit OAuth save must also flip ``auth_mode_set``
@@ -2745,6 +3051,13 @@ class AgentAuthService:
                 if needs_marker_write:
                     target.auth_mode_set = True
                 saver()
+            if loaded_config is not None and config is not None:
+                compat_target = getattr(config, backend, None)
+                if compat_target is not None:
+                    if needs_mode_write:
+                        setattr(compat_target, "auth_mode", auth_mode)
+                    if needs_marker_write:
+                        setattr(compat_target, "auth_mode_set", True)
         except Exception as err:  # noqa: BLE001
             logger.warning(
                 "Failed to persist auth_mode=%s after web flow for %s: %s",
@@ -2758,6 +3071,7 @@ class AgentAuthService:
         final_state: WebFlowState,
         error: str | None = None,
     ) -> None:
+        await self._finish_claude_oauth_attempt(flow.claude_oauth_attempt, succeeded=False)
         if flow.reader_task and not flow.reader_task.done():
             flow.reader_task.cancel()
             try:

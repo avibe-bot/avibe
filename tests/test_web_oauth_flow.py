@@ -11,13 +11,25 @@ into ``_web_flows`` and mocking ``_send_claude_callback``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
-from core.agent_auth_service import AgentAuthService, WebAuthFlow
+from core.agent_auth_service import (
+    AgentAuthService,
+    ClaudeOAuthAttempt,
+    ClaudeOAuthBatch,
+    WebAuthFlow,
+)
 from modules.agents.opencode.message_processor import extract_opencode_response_text
+from vibe.claude_config import (
+    read_claude_oauth_settings_backup,
+    read_claude_settings_env,
+    restore_claude_settings_env,
+)
 
 
 class _Backend:
@@ -44,6 +56,13 @@ class _StubController:
     config = _Config()
 
 
+@pytest.fixture(autouse=True)
+def isolated_claude_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    claude_home = tmp_path / "default-claude"
+    claude_home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+
+
 @pytest.fixture
 def service() -> AgentAuthService:
     return AgentAuthService(_StubController())
@@ -51,6 +70,17 @@ def service() -> AgentAuthService:
 
 def _run(coro):
     return asyncio.get_event_loop_policy().new_event_loop().run_until_complete(coro)
+
+
+async def _start_opencode_flow_without_waiter(
+    service: AgentAuthService, provider_id: str
+) -> WebAuthFlow:
+    flow = await service.start_web_setup("opencode", provider_id=provider_id)
+    if flow.waiter_task is not None:
+        flow.waiter_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await flow.waiter_task
+    return flow
 
 
 def test_opencode_message_text_extractor_ignores_non_text_by_default() -> None:
@@ -227,32 +257,198 @@ def test_post_web_success_hook_swallows_exceptions(
     _run(service._invoke_post_web_success_hook("claude"))
 
 
-def test_claude_oauth_settings_cleanup_failure_fails_web_flow(
+def test_claude_oauth_settings_cleanup_failure_fails_web_start(
     service: AgentAuthService,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake_client = object()
-    flow = WebAuthFlow(
-        flow_id="claude-cleanup-fails",
-        backend="claude",
-        claude_client=fake_client,
-    )
-    service._send_claude_control_request = AsyncMock(return_value={})
-    service._verify_web_login = AsyncMock(return_value=(True, '{"loggedIn": true}'))
-    service._refresh_backend_runtime = AsyncMock()
-    service._disconnect_claude_client = AsyncMock()
-
     def fail_cleanup(**_kwargs):
         raise OSError("settings locked")
 
+    service._create_claude_control_client = AsyncMock()
     monkeypatch.setattr("vibe.claude_config.apply_claude_auth", fail_cleanup)
 
-    _run(service._wait_for_claude_completion_web(flow))
+    flow = _run(service.start_web_setup("claude"))
 
     assert flow.state == "failed"
     assert "Failed to clear Claude Code settings env" in (flow.error or "")
-    service._refresh_backend_runtime.assert_not_awaited()
-    service._disconnect_claude_client.assert_awaited_once_with(fake_client)
+    service._create_claude_control_client.assert_not_awaited()
+
+
+def test_claude_web_oauth_failures_restore_settings_after_batch_finishes(
+    service: AgentAuthService,
+) -> None:
+    backup = {"ANTHROPIC_API_KEY": "sk-old", "ANTHROPIC_BASE_URL": "https://old.example"}
+    service._temporarily_clear_claude_settings_env_for_oauth = AsyncMock(
+        side_effect=[backup, None],
+    )
+    service._restore_claude_settings_env_after_oauth_failure = AsyncMock()
+
+    first_attempt = _run(service._begin_claude_oauth_attempt())
+    second_attempt = _run(service._begin_claude_oauth_attempt())
+
+    _run(service._finish_claude_oauth_attempt(first_attempt, succeeded=False))
+    service._restore_claude_settings_env_after_oauth_failure.assert_not_awaited()
+
+    _run(service._finish_claude_oauth_attempt(second_attempt, succeeded=False))
+    service._restore_claude_settings_env_after_oauth_failure.assert_awaited_once_with(backup)
+    assert first_attempt.settings_backup is None
+    assert second_attempt.settings_backup is None
+
+
+def test_stale_claude_web_oauth_failure_ignores_backup_after_newer_success(
+    service: AgentAuthService,
+) -> None:
+    stale_backup = {"ANTHROPIC_API_KEY": "sk-old", "ANTHROPIC_BASE_URL": "https://old.example"}
+    service._temporarily_clear_claude_settings_env_for_oauth = AsyncMock(
+        side_effect=[stale_backup, None],
+    )
+    service._restore_claude_settings_env_after_oauth_failure = AsyncMock()
+
+    stale_attempt = _run(service._begin_claude_oauth_attempt())
+    newer_attempt = _run(service._begin_claude_oauth_attempt())
+
+    _run(service._finish_claude_oauth_attempt(newer_attempt, succeeded=True))
+    _run(service._finish_claude_oauth_attempt(stale_attempt, succeeded=False))
+
+    service._restore_claude_settings_env_after_oauth_failure.assert_not_awaited()
+    assert stale_attempt.settings_backup is None
+    assert newer_attempt.settings_backup is None
+
+
+def test_claude_oauth_new_batch_restores_after_previous_batch_success(
+    service: AgentAuthService,
+) -> None:
+    first_backup = {"ANTHROPIC_API_KEY": "sk-old"}
+    second_backup = {"ANTHROPIC_API_KEY": "sk-second"}
+    service._temporarily_clear_claude_settings_env_for_oauth = AsyncMock(
+        side_effect=[first_backup, None, second_backup],
+    )
+    service._restore_claude_settings_env_after_oauth_failure = AsyncMock()
+
+    stale_attempt = _run(service._begin_claude_oauth_attempt())
+    winning_attempt = _run(service._begin_claude_oauth_attempt())
+    _run(service._finish_claude_oauth_attempt(winning_attempt, succeeded=True))
+    _run(service._finish_claude_oauth_attempt(stale_attempt, succeeded=False))
+
+    next_attempt = _run(service._begin_claude_oauth_attempt())
+    _run(service._finish_claude_oauth_attempt(next_attempt, succeeded=False))
+
+    service._restore_claude_settings_env_after_oauth_failure.assert_awaited_once_with(
+        second_backup
+    )
+
+
+def test_claude_oauth_begin_persists_backup_before_clearing_settings(
+    service: AgentAuthService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claude_home = tmp_path / ".claude"
+    claude_home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+    backup = {
+        "ANTHROPIC_API_KEY": "sk-old",
+        "ANTHROPIC_BASE_URL": "https://relay.example",
+    }
+    restore_claude_settings_env(backup)
+
+    attempt = _run(service._begin_claude_oauth_attempt())
+
+    assert attempt.settings_backup == backup
+    assert read_claude_settings_env() == {}
+    assert read_claude_oauth_settings_backup() == backup
+
+
+def test_claude_oauth_restarts_restore_interrupted_durable_backup(
+    service: AgentAuthService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claude_home = tmp_path / ".claude"
+    claude_home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+    backup = {
+        "ANTHROPIC_API_KEY": "sk-old",
+        "ANTHROPIC_BASE_URL": "https://relay.example",
+    }
+    restore_claude_settings_env(backup)
+
+    _run(service._begin_claude_oauth_attempt())
+    assert read_claude_settings_env() == {}
+
+    AgentAuthService(_StubController())
+
+    assert read_claude_settings_env() == backup
+    assert read_claude_oauth_settings_backup() is None
+
+
+def test_claude_oauth_restarts_restore_pending_backup_even_when_config_is_oauth(
+    service: AgentAuthService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe.claude_config import write_claude_oauth_settings_backup
+
+    claude_home = tmp_path / ".claude"
+    claude_home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+    monkeypatch.setattr(_Backend, "auth_mode", "oauth", raising=False)
+    monkeypatch.setattr(_Backend, "auth_mode_set", True, raising=False)
+    backup = {
+        "ANTHROPIC_API_KEY": "sk-old",
+        "ANTHROPIC_BASE_URL": "https://relay.example",
+    }
+    write_claude_oauth_settings_backup(backup)
+
+    service._recover_interrupted_claude_oauth_settings_backup()
+
+    assert read_claude_settings_env() == backup
+    assert read_claude_oauth_settings_backup() is None
+
+
+def test_claude_oauth_rollback_serializes_before_retry(
+    service: AgentAuthService,
+) -> None:
+    first_backup = {"ANTHROPIC_API_KEY": "sk-old"}
+    retry_backup = {"ANTHROPIC_API_KEY": "sk-retry"}
+    service._temporarily_clear_claude_settings_env_for_oauth = AsyncMock(
+        side_effect=[first_backup, retry_backup],
+    )
+    service._clear_pending_claude_oauth_settings_backup = AsyncMock()
+    restore_started = asyncio.Event()
+    release_restore = asyncio.Event()
+    order: list[str] = []
+
+    async def restore(_backup):
+        order.append("restore-start")
+        restore_started.set()
+        await release_restore.wait()
+        order.append("restore-end")
+        return True
+
+    service._restore_claude_settings_env_after_oauth_failure = restore
+
+    async def scenario():
+        first_attempt = await service._begin_claude_oauth_attempt()
+        finish_task = asyncio.create_task(
+            service._finish_claude_oauth_attempt(first_attempt, succeeded=False)
+        )
+        await restore_started.wait()
+        retry_task = asyncio.create_task(service._begin_claude_oauth_attempt())
+        await asyncio.sleep(0)
+
+        assert not retry_task.done()
+        assert service._temporarily_clear_claude_settings_env_for_oauth.await_count == 1
+
+        release_restore.set()
+        retry_attempt = await retry_task
+        await finish_task
+        return retry_attempt
+
+    retry_attempt = _run(scenario())
+
+    assert order == ["restore-start", "restore-end"]
+    assert retry_attempt.settings_backup == retry_backup
 
 
 def test_post_web_success_hook_unset_is_safe(
@@ -335,7 +531,7 @@ def test_start_web_setup_opencode_extracts_url_and_device_code(
     }
     monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
 
-    flow = _run(service.start_web_setup("opencode", provider_id="openai"))
+    flow = _run(_start_opencode_flow_without_waiter(service, "openai"))
 
     # Headless variant (index 1) wins because the resolver walks the
     # auth list in reverse — important for remote sessions where the
@@ -366,7 +562,7 @@ def test_start_web_setup_opencode_github_copilot_passes_prompt_answer(
     }
     monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
 
-    _run(service.start_web_setup("opencode", provider_id="github-copilot"))
+    _run(_start_opencode_flow_without_waiter(service, "github-copilot"))
 
     assert fake.start_calls == [
         ("github-copilot", 0, {"deploymentType": "github.com"}),
@@ -387,7 +583,7 @@ def test_start_web_setup_opencode_url_only_flow_has_no_device_code(
     }
     monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
 
-    flow = _run(service.start_web_setup("opencode", provider_id="gitlab"))
+    flow = _run(_start_opencode_flow_without_waiter(service, "gitlab"))
     assert flow.state == "awaiting_code"
     assert flow.url is not None
     assert flow.device_code is None
@@ -595,6 +791,134 @@ def test_test_web_auth_happy_path_returns_excerpt(
     assert result["ok"] is True
     assert result["excerpt"] == "Hello from the model"
     assert isinstance(result["duration_ms"], int)
+
+
+def test_verify_web_login_claude_forces_oauth_env(
+    service: AgentAuthService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After Claude's OAuth waiter completes, the verification probe must
+    ignore stale inherited Anthropic env vars or it can report "no login"
+    against the wrong auth source.
+    """
+
+    captured: dict = {}
+    claude_home = tmp_path / ".claude"
+    claude_home.mkdir()
+    (claude_home / "settings.json").write_text(
+        '{"env":{"ANTHROPIC_API_KEY":"sk-settings","ANTHROPIC_BASE_URL":"https://settings-relay.example"}}',
+        encoding="utf-8",
+    )
+
+    class _FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return (b'{"loggedIn": true}', b"")
+
+    async def _spawn(*_args, **kwargs):
+        captured["env"] = kwargs.get("env") or {}
+        return _FakeProcess()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-stale-shell")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://stale-relay.example")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+    monkeypatch.setattr(_Backend, "auth_mode", "api_key", raising=False)
+    monkeypatch.setattr(_Backend, "auth_mode_set", True, raising=False)
+    monkeypatch.setattr(_Backend, "api_key", "sk-configured", raising=False)
+    monkeypatch.setattr(_Backend, "base_url", "https://configured-relay.example", raising=False)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+    original_backup = {"ANTHROPIC_API_KEY": "sk-original"}
+    attempt = ClaudeOAuthAttempt(
+        attempt_id=1,
+        batch=ClaudeOAuthBatch(backup=original_backup),
+    )
+    clear_calls: list[str] = []
+    observed_backup_after_probe: list[dict[str, str] | None] = []
+
+    async def clear_settings():
+        clear_calls.append("called")
+        return {"ANTHROPIC_API_KEY": "sk-restored-by-overlap"}
+
+    original_verify_login = service._verify_login
+
+    async def verify_login_with_existing_backup(flow):
+        result = await original_verify_login(flow)
+        observed_backup_after_probe.append(flow.claude_oauth_attempt.settings_backup)
+        return result
+
+    monkeypatch.setattr(service, "_verify_login", verify_login_with_existing_backup)
+    monkeypatch.setattr(service, "_temporarily_clear_claude_settings_env_for_oauth", clear_settings)
+
+    ok, detail = _run(
+        service._verify_web_login(
+            "claude",
+            force_oauth=True,
+            claude_oauth_attempt=attempt,
+        )
+    )
+
+    assert ok is True
+    assert detail == '{"loggedIn": true}'
+    assert "ANTHROPIC_API_KEY" not in captured["env"]
+    assert "ANTHROPIC_BASE_URL" not in captured["env"]
+    assert clear_calls == ["called"]
+    assert observed_backup_after_probe == [original_backup]
+    assert attempt.settings_backup == original_backup
+
+
+def test_test_web_auth_claude_oauth_env_removes_stale_anthropic_vars(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Settings Test button runs a real Claude subprocess; when OAuth is
+    explicitly selected it must use the same env cleanup as live sessions.
+    """
+
+    captured: dict = {}
+
+    class _FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"Hello from Claude", b"")
+
+    async def _spawn(*_args, **kwargs):
+        captured["env"] = kwargs.get("env") or {}
+        return _FakeProcess()
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-stale-shell")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "bearer-stale-shell")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://stale-relay.example")
+    monkeypatch.setattr(_Backend, "auth_mode", "oauth", raising=False)
+    monkeypatch.setattr(_Backend, "auth_mode_set", True, raising=False)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+
+    result = _run(service.test_web_auth("claude"))
+
+    assert result["ok"] is True
+    assert "ANTHROPIC_API_KEY" not in captured["env"]
+    assert "ANTHROPIC_AUTH_TOKEN" not in captured["env"]
+    assert "ANTHROPIC_BASE_URL" not in captured["env"]
+
+
+def test_test_web_auth_claude_oauth_reports_settings_cleanup_failure(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _spawn(*_args, **_kwargs):
+        raise AssertionError("Claude probe must not spawn when cleanup fails")
+
+    def fail_cleanup(**_kwargs):
+        raise OSError("settings locked")
+
+    monkeypatch.setattr(_Backend, "auth_mode", "oauth", raising=False)
+    monkeypatch.setattr(_Backend, "auth_mode_set", True, raising=False)
+    monkeypatch.setattr("vibe.claude_config.apply_claude_auth", fail_cleanup)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+
+    result = _run(service.test_web_auth("claude"))
+
+    assert result["ok"] is False
+    assert result["error"] == "settings_cleanup_failed"
+    assert "Failed to clear Claude Code settings env" in result["detail"]
 
 
 def test_test_web_auth_failure_surfaces_stderr(
