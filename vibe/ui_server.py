@@ -3171,8 +3171,10 @@ def _persist_wechat_qr_credentials(result: dict) -> None:
         return
 
     from vibe import api as vibe_api
+    from core.services import settings as settings_service
 
-    current = vibe_api.config_to_payload(vibe_api.load_config(), include_secrets=True)
+    config = settings_service.load_config(default_factory=settings_service.default_config)
+    current = vibe_api.config_to_payload(config, include_secrets=True)
     wechat = dict(current.get("wechat") or {})
     wechat["bot_token"] = token.strip()
     if isinstance(result.get("base_url"), str) and result["base_url"].strip():

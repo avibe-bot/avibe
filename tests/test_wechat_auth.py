@@ -76,7 +76,8 @@ class WeChatAuthManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["base_url"], "https://redirect.weixin.qq.com")
         session = manager.get_session("qr-session")
         self.assertIsNotNone(session)
-        self.assertEqual(session.base_url, "https://redirect.weixin.qq.com")
+        self.assertEqual(session.base_url, "https://ilinkai.weixin.qq.com")
+        self.assertEqual(session.current_base_url, "https://redirect.weixin.qq.com")
         poll.assert_awaited_once_with("https://ilinkai.weixin.qq.com", "qr-token", verify_code=None)
 
         with patch(
@@ -123,6 +124,8 @@ class WeChatAuthManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("setLoginState('connected')", source)
         self.assertIn("preserveExistingConnectionFields(result)", source)
         self.assertIn("base_url: baseUrl || data.wechat?.base_url || ''", source)
+        self.assertIn("result.status === 'refreshed'", source)
+        self.assertIn("setQrCodeUrl(result.qrcode_url || '')", source)
 
     async def test_poll_status_refresh_preserves_local_token_list(self):
         manager = WeChatAuthManager()
@@ -154,6 +157,60 @@ class WeChatAuthManagerTests(unittest.IsolatedAsyncioTestCase):
         session = manager.get_session("qr-session")
         self.assertIsNotNone(session)
         self.assertEqual(session.qrcode, "qr-token-2")
+
+    async def test_poll_status_refresh_uses_login_host_after_status_redirect(self):
+        manager = WeChatAuthManager()
+        qr_fetch = AsyncMock(
+            side_effect=[
+                {"qrcode": "qr-token-1", "qrcode_img_content": "https://example.com/qr-1.png"},
+                {"qrcode": "qr-token-2", "qrcode_img_content": "https://example.com/qr-2.png"},
+            ]
+        )
+
+        with patch("modules.im.wechat_auth.get_bot_qrcode", new=qr_fetch):
+            started = await manager.start_login(
+                session_key="qr-session",
+                base_url="https://ilinkai.weixin.qq.com",
+                local_token_list=["saved-token"],
+            )
+            with patch(
+                "modules.im.wechat_auth.get_qrcode_status",
+                new=AsyncMock(return_value={"status": "scaned_but_redirect", "redirect_host": "redirect.weixin.qq.com"}),
+            ):
+                await manager.poll_status(started["session_key"])
+
+            with patch(
+                "modules.im.wechat_auth.get_qrcode_status",
+                new=AsyncMock(return_value={"status": "expired"}),
+            ):
+                refreshed = await manager.poll_status(started["session_key"])
+
+        self.assertEqual(refreshed["status"], "refreshed")
+        self.assertEqual(qr_fetch.await_args_list[1].args[0], "https://ilinkai.weixin.qq.com")
+        session = manager.get_session("qr-session")
+        self.assertIsNotNone(session)
+        self.assertEqual(session.current_base_url, "https://ilinkai.weixin.qq.com")
+
+    async def test_poll_status_refreshes_after_blocked_verify_code(self):
+        manager = WeChatAuthManager()
+        qr_fetch = AsyncMock(
+            side_effect=[
+                {"qrcode": "qr-token-1", "qrcode_img_content": "https://example.com/qr-1.png"},
+                {"qrcode": "qr-token-2", "qrcode_img_content": "https://example.com/qr-2.png"},
+            ]
+        )
+
+        with patch("modules.im.wechat_auth.get_bot_qrcode", new=qr_fetch):
+            started = await manager.start_login(session_key="qr-session", base_url="https://ilinkai.weixin.qq.com")
+            with patch(
+                "modules.im.wechat_auth.get_qrcode_status",
+                new=AsyncMock(return_value={"status": "verify_code_blocked"}),
+            ):
+                refreshed = await manager.poll_status(started["session_key"], verify_code="bad-code")
+
+        self.assertEqual(refreshed["status"], "refreshed")
+        self.assertEqual(refreshed["qrcode_url"], "https://example.com/qr-2.png")
+        self.assertIsNotNone(manager.get_session("qr-session"))
 
     async def test_poll_status_submits_verify_code_and_confirms(self):
         manager = WeChatAuthManager()

@@ -250,6 +250,15 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
         setMessage(result.message || t('wechatConfig.verifyCodePrompt'));
         return;
       }
+      if (result.status === 'refreshed') {
+        setNeedsVerifyCode(false);
+        setVerifyCode('');
+        setLoginState('qr_ready');
+        setQrCodeUrl(result.qrcode_url || '');
+        setMessage(result.message || t('wechatConfig.qrExpired'));
+        startPolling(key);
+        return;
+      }
       if (result.status === 'error' || result.status === 'expired') {
         setNeedsVerifyCode(false);
         setLoginState('error');

@@ -146,8 +146,30 @@ class WeChatAuthManager:
             return None
         refreshed = f"{parsed.scheme}://{parsed.netloc}"
         session.current_base_url = refreshed
-        session.base_url = refreshed
         return refreshed
+
+    async def _refresh_qr_session(self, session: WeChatLoginSession) -> dict:
+        qr_response = await get_bot_qrcode(
+            session.base_url or self.DEFAULT_BASE_URL,
+            self.BOT_TYPE,
+            local_token_list=session.local_token_list,
+        )
+        session.qrcode = qr_response.get("qrcode", "")
+        session.qrcode_url = qr_response.get("qrcode_img_content", "")
+        session.started_at = time.time()
+        session.status = "wait"
+        session.current_base_url = session.base_url
+        session.pending_verify_code = None
+        logger.info("New QR code obtained for session=%s", session.session_key)
+        return {
+            "status": "refreshed",
+            "qrcode_url": session.qrcode_url,
+            "message": (
+                f"QR code expired, refreshed "
+                f"({session.qr_refresh_count}/{self.MAX_QR_REFRESH}). "
+                f"Please scan again."
+            ),
+        }
 
     # -- public API -------------------------------------------------------
 
@@ -312,11 +334,22 @@ class WeChatAuthManager:
 
         if status == "verify_code_blocked":
             session.pending_verify_code = None
-            del self._sessions[session_key]
-            return {
-                "status": "error",
-                "message": "WeChat verification failed too many times. Please restart the login flow.",
-            }
+            session.qr_refresh_count += 1
+            if session.qr_refresh_count > self.MAX_QR_REFRESH:
+                del self._sessions[session_key]
+                return {
+                    "status": "expired",
+                    "message": "WeChat verification failed too many times. Please restart the login flow.",
+                }
+            try:
+                return await self._refresh_qr_session(session)
+            except Exception as exc:
+                logger.error("Failed to refresh QR code after blocked verification: %s", exc)
+                del self._sessions[session_key]
+                return {
+                    "status": "error",
+                    "message": f"Failed to refresh QR code: {exc}",
+                }
 
         if status == "expired":
             session.qr_refresh_count += 1
@@ -339,26 +372,7 @@ class WeChatAuthManager:
                 session_key,
             )
             try:
-                qr_response = await get_bot_qrcode(
-                    session.current_base_url or base_url,
-                    self.BOT_TYPE,
-                    local_token_list=session.local_token_list,
-                )
-                session.qrcode = qr_response.get("qrcode", "")
-                session.qrcode_url = qr_response.get("qrcode_img_content", "")
-                session.started_at = time.time()
-                session.status = "wait"
-                session.pending_verify_code = None
-                logger.info("New QR code obtained for session=%s", session_key)
-                return {
-                    "status": "refreshed",
-                    "qrcode_url": session.qrcode_url,
-                    "message": (
-                        f"QR code expired, refreshed "
-                        f"({session.qr_refresh_count}/{self.MAX_QR_REFRESH}). "
-                        f"Please scan again."
-                    ),
-                }
+                return await self._refresh_qr_session(session)
             except Exception as exc:
                 logger.error("Failed to refresh QR code: %s", exc)
                 del self._sessions[session_key]

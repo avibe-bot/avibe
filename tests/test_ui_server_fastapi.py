@@ -714,6 +714,30 @@ def test_persist_wechat_qr_credentials_saves_before_restart(monkeypatch, tmp_pat
     assert updated.platforms.primary == "wechat"
 
 
+def test_persist_wechat_qr_credentials_seeds_fresh_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    from config import paths
+    from vibe import api
+
+    assert not paths.get_config_path().exists()
+
+    ui_server._persist_wechat_qr_credentials(
+        {
+            "status": "confirmed",
+            "bot_token": "new-token",
+            "base_url": "https://new-wechat.example.com",
+            "user_id": "wx-user",
+        }
+    )
+
+    updated = api.load_config()
+    assert updated.wechat is not None
+    assert updated.wechat.bot_token == "new-token"
+    assert updated.wechat.base_url == "https://new-wechat.example.com"
+    assert updated.platforms.enabled == ["wechat"]
+    assert updated.platforms.primary == "wechat"
+
+
 def test_wechat_qr_start_sends_saved_token_list_to_fixed_qr_host(monkeypatch):
     class _Auth:
         async def start_login(self, base_url=None, local_token_list=None):
