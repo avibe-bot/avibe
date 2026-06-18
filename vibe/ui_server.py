@@ -3144,11 +3144,53 @@ def _get_wechat_auth():
     return _wechat_auth_manager
 
 
+def _load_wechat_local_tokens() -> list[str]:
+    try:
+        from core.services import settings as settings_service
+
+        config = settings_service.load_config()
+    except Exception:
+        logger.warning("Failed to load WeChat local token list for QR login", exc_info=True)
+        return []
+    token = getattr(getattr(config, "wechat", None), "bot_token", "")
+    if isinstance(token, str) and token.strip():
+        return [token.strip()]
+    return []
+
+
 def _schedule_wechat_qr_login_restart() -> dict:
     """Schedule a managed restart after QR-login credentials are persisted."""
     from vibe.restart_supervisor import schedule_restart
 
     return schedule_restart(delay_seconds=2.0, trigger="wechat-qr-login")
+
+
+def _persist_wechat_qr_credentials(result: dict) -> None:
+    token = result.get("bot_token")
+    if not isinstance(token, str) or not token.strip():
+        return
+
+    from vibe import api as vibe_api
+
+    current = vibe_api.config_to_payload(vibe_api.load_config(), include_secrets=True)
+    wechat = dict(current.get("wechat") or {})
+    wechat["bot_token"] = token.strip()
+    if isinstance(result.get("base_url"), str) and result["base_url"].strip():
+        wechat["base_url"] = result["base_url"].strip()
+    elif not wechat.get("base_url"):
+        wechat["base_url"] = "https://ilinkai.weixin.qq.com"
+    current["wechat"] = wechat
+
+    platforms = dict(current.get("platforms") or {})
+    enabled = list(platforms.get("enabled") or [])
+    if "wechat" not in enabled:
+        enabled.append("wechat")
+    platforms["enabled"] = enabled
+    if not platforms.get("primary") or platforms.get("primary") == "avibe":
+        platforms["primary"] = "wechat"
+    current["platforms"] = platforms
+
+    vibe_api.save_config(current)
 
 
 @app.route("/api/wechat/qr_login/start", methods=["POST"])
@@ -3158,7 +3200,7 @@ async def wechat_qr_login_start():
     payload = request.json or {}
     base_url = payload.get("base_url", "https://ilinkai.weixin.qq.com")
 
-    result = await auth.start_login(base_url=base_url)
+    result = await auth.start_login(base_url=base_url, local_token_list=_load_wechat_local_tokens())
     if result.get("ok") is False:
         return jsonify(result), 500
     return jsonify(result)
@@ -3171,15 +3213,24 @@ async def wechat_qr_login_poll():
     session_key = payload.get("session_key", "")
     if not session_key:
         return jsonify({"error": "session_key required"}), 400
+    verify_code = payload.get("verify_code")
+    if verify_code is not None and not isinstance(verify_code, str):
+        return jsonify({"error": "invalid_verify_code"}), 400
 
     auth = _get_wechat_auth()
-    result = await auth.poll_status(session_key)
+    result = await auth.poll_status(session_key, verify_code=verify_code)
     if result.get("ok") is False:
         return jsonify(result), 500
 
     # If confirmed, auto-bind the WeChat user
-    if result.get("status") == "confirmed" and result.get("bot_token"):
-        user_id = result.get("user_id", "wechat_user")
+    if result.get("status") == "confirmed" and result.get("bot_token") and result.get("user_id"):
+        user_id = result["user_id"]
+
+        try:
+            _persist_wechat_qr_credentials(result)
+        except Exception as exc:
+            logger.error("Failed to persist WeChat QR credentials: %s", exc)
+            return jsonify({"ok": False, "error": "failed_to_persist_wechat_credentials"}), 500
 
         # Auto-bind user
         try:

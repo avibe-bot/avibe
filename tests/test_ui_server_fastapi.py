@@ -614,7 +614,7 @@ def test_wechat_qr_poll_marks_bind_hint_and_schedules_managed_restart(monkeypatc
     from vibe import runtime
 
     class _Auth:
-        async def poll_status(self, session_key):
+        async def poll_status(self, session_key, verify_code=None):
             assert session_key == "qr-session"
             return {
                 "status": "confirmed",
@@ -625,9 +625,11 @@ def test_wechat_qr_poll_marks_bind_hint_and_schedules_managed_restart(monkeypatc
 
     bound_users = []
     restart_calls = []
+    persisted = []
 
     runtime.ensure_config()
     monkeypatch.setattr(ui_server, "_get_wechat_auth", lambda: _Auth())
+    monkeypatch.setattr(ui_server, "_persist_wechat_qr_credentials", lambda result: persisted.append(result.copy()))
     monkeypatch.setattr(
         ui_server,
         "_schedule_wechat_qr_login_restart",
@@ -648,8 +650,181 @@ def test_wechat_qr_poll_marks_bind_hint_and_schedules_managed_restart(monkeypatc
 
     assert response.status_code == 200
     assert response.get_json()["status"] == "confirmed"
+    assert persisted == [
+        {
+            "status": "confirmed",
+            "bot_token": "wechat-token",
+            "base_url": "https://wechat.example.com",
+            "user_id": "wx-user",
+        }
+    ]
     assert bound_users == ["wx-user"]
     assert restart_calls == [True]
+
+
+def test_wechat_qr_poll_passes_verify_code(monkeypatch):
+    class _Auth:
+        async def poll_status(self, session_key, verify_code=None):
+            assert session_key == "qr-session"
+            return {"status": "need_verifycode", "verify_code": verify_code}
+
+    monkeypatch.setattr(ui_server, "_get_wechat_auth", lambda: _Auth())
+
+    client = app.test_client()
+    response = client.post(
+        "/api/wechat/qr_login/poll",
+        json={"session_key": "qr-session", "verify_code": "1234"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"status": "need_verifycode", "verify_code": "1234"}
+
+
+def test_persist_wechat_qr_credentials_saves_before_restart(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    from vibe import api
+
+    payload = _full_config_payload()
+    payload["platforms"] = {"enabled": [], "primary": "avibe"}
+    payload["wechat"] = {
+        "bot_token": "",
+        "base_url": "https://old-wechat.example.com",
+        "cdn_base_url": "https://cdn.example.com/c2c",
+        "proxy_url": "socks5://127.0.0.1:1080",
+    }
+    api.save_config(payload)
+
+    ui_server._persist_wechat_qr_credentials(
+        {
+            "status": "confirmed",
+            "bot_token": "new-token",
+            "base_url": "https://new-wechat.example.com",
+            "user_id": "wx-user",
+        }
+    )
+
+    updated = api.load_config()
+    assert updated.wechat is not None
+    assert updated.wechat.bot_token == "new-token"
+    assert updated.wechat.base_url == "https://new-wechat.example.com"
+    assert updated.wechat.cdn_base_url == "https://cdn.example.com/c2c"
+    assert updated.wechat.proxy_url == "socks5://127.0.0.1:1080"
+    assert updated.platforms.enabled == ["wechat"]
+    assert updated.platforms.primary == "wechat"
+
+
+def test_wechat_qr_start_sends_saved_token_list(monkeypatch):
+    class _Auth:
+        async def start_login(self, base_url=None, local_token_list=None):
+            return {
+                "session_key": "qr-session",
+                "qrcode_url": "https://wechat.example.com/qr",
+                "base_url": base_url,
+                "local_token_list": local_token_list,
+            }
+
+    monkeypatch.setattr(ui_server, "_get_wechat_auth", lambda: _Auth())
+    monkeypatch.setattr(ui_server, "_load_wechat_local_tokens", lambda: ["saved-token"])
+
+    client = app.test_client()
+    response = client.post(
+        "/api/wechat/qr_login/start",
+        json={"base_url": "https://wechat.example.com"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["base_url"] == "https://wechat.example.com"
+    assert payload["local_token_list"] == ["saved-token"]
+
+
+def test_wechat_qr_poll_does_not_autobind_without_user_id(monkeypatch):
+    from vibe import runtime
+
+    class _Auth:
+        async def poll_status(self, session_key, verify_code=None):
+            assert session_key == "qr-session"
+            return {
+                "status": "confirmed",
+                "bot_token": "wechat-token",
+                "base_url": "https://wechat.example.com",
+            }
+
+    bound_users = []
+    restart_calls = []
+    persisted = []
+
+    runtime.ensure_config()
+    monkeypatch.setattr(ui_server, "_get_wechat_auth", lambda: _Auth())
+    monkeypatch.setattr(ui_server, "_persist_wechat_qr_credentials", lambda result: persisted.append(result.copy()))
+    monkeypatch.setattr(
+        ui_server,
+        "_schedule_wechat_qr_login_restart",
+        lambda: restart_calls.append(True) or {"job_id": "restart-1"},
+    )
+    monkeypatch.setattr(
+        "vibe.api.auto_bind_wechat_user",
+        lambda user_id: bound_users.append(user_id)
+        or {"ok": True, "already_bound": False, "is_admin": True, "pending_bind_menu_hint": True},
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/wechat/qr_login/poll",
+        json={"session_key": "qr-session"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "confirmed"
+    assert persisted == []
+    assert bound_users == []
+    assert restart_calls == []
+
+
+def test_wechat_qr_poll_blocks_restart_when_credential_persist_fails(monkeypatch):
+    from vibe import runtime
+
+    class _Auth:
+        async def poll_status(self, session_key, verify_code=None):
+            assert session_key == "qr-session"
+            return {
+                "status": "confirmed",
+                "bot_token": "wechat-token",
+                "base_url": "https://wechat.example.com",
+                "user_id": "wx-user",
+            }
+
+    restart_calls = []
+    bound_users = []
+
+    runtime.ensure_config()
+    monkeypatch.setattr(ui_server, "_get_wechat_auth", lambda: _Auth())
+    monkeypatch.setattr(
+        ui_server,
+        "_persist_wechat_qr_credentials",
+        lambda result: (_ for _ in ()).throw(RuntimeError("disk full")),
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "_schedule_wechat_qr_login_restart",
+        lambda: restart_calls.append(True) or {"job_id": "restart-1"},
+    )
+    monkeypatch.setattr("vibe.api.auto_bind_wechat_user", lambda user_id: bound_users.append(user_id))
+
+    client = app.test_client()
+    response = client.post(
+        "/api/wechat/qr_login/poll",
+        json={"session_key": "qr-session"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 500
+    assert response.get_json()["error"] == "failed_to_persist_wechat_credentials"
+    assert restart_calls == []
+    assert bound_users == []
 
 
 def test_web_push_subscription_routes_roundtrip(monkeypatch, tmp_path):

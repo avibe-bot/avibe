@@ -13,8 +13,9 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Dict, Optional
+from urllib.parse import urlparse
 
-import aiohttp
+from modules.im import wechat_api
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +39,13 @@ class WeChatLoginSession:
     qrcode_url: str = ""  # URL to render as QR image
     started_at: float = field(default_factory=time.time)
     status: str = "wait"  # "wait" | "scaned" | "confirmed" | "expired"
+    pending_verify_code: Optional[str] = None
     bot_token: Optional[str] = None
     bot_id: Optional[str] = None
     base_url: Optional[str] = None
     user_id: Optional[str] = None
     qr_refresh_count: int = 1  # tracks how many QR codes have been issued
+    current_base_url: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +56,7 @@ async def get_bot_qrcode(
     bot_type: str,
     *,
     timeout: float = 30,
+    local_token_list: Optional[list[str]] = None,
 ) -> dict:
     """Fetch a new QR code from the iLink server.
 
@@ -61,24 +65,7 @@ async def get_bot_qrcode(
     Returns:
         dict with keys ``qrcode`` and ``qrcode_img_content``.
     """
-    base = base_url.rstrip("/")
-    url = f"{base}/ilink/bot/get_bot_qrcode?bot_type={bot_type}"
-    logger.info("Fetching QR code from: %s", url)
-
-    client_timeout = aiohttp.ClientTimeout(total=timeout)
-    async with aiohttp.ClientSession(timeout=client_timeout) as session:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                logger.error(
-                    "QR code fetch failed: %s %s body=%s",
-                    resp.status,
-                    resp.reason,
-                    body[:500],
-                )
-                raise RuntimeError(f"Failed to fetch QR code: {resp.status} {resp.reason}")
-            # iLink API returns application/octet-stream, not application/json
-            return await resp.json(content_type=None)
+    return await wechat_api.get_bot_qrcode(base_url, bot_type, local_token_list=local_token_list)
 
 
 async def get_qrcode_status(
@@ -86,6 +73,7 @@ async def get_qrcode_status(
     qrcode: str,
     *,
     timeout: float = QR_POLL_TIMEOUT_S,
+    verify_code: Optional[str] = None,
 ) -> dict:
     """Long-poll the QR code scan status.
 
@@ -96,29 +84,13 @@ async def get_qrcode_status(
         On ``confirmed``, also includes ``bot_token``, ``ilink_bot_id``,
         ``baseurl``, and ``ilink_user_id``.
     """
-    base = base_url.rstrip("/")
-    url = f"{base}/ilink/bot/get_qrcode_status?qrcode={qrcode}"
-    logger.debug("Long-poll QR status from: %s", url)
-
-    headers = {"iLink-App-ClientVersion": "1"}
-    client_timeout = aiohttp.ClientTimeout(total=timeout + 5)
-
     try:
-        async with aiohttp.ClientSession(timeout=client_timeout) as session:
-            async with session.get(url, headers=headers) as resp:
-                raw = await resp.text()
-                logger.debug("get_qrcode_status: HTTP %s body=%s", resp.status, raw[:200])
-                if resp.status != 200:
-                    logger.error(
-                        "QR status poll failed: %s %s body=%s",
-                        resp.status,
-                        resp.reason,
-                        raw[:500],
-                    )
-                    raise RuntimeError(f"Failed to poll QR status: {resp.status} {resp.reason}")
-                import json
-
-                return json.loads(raw)
+        return await wechat_api.get_qrcode_status(
+            base_url,
+            qrcode,
+            verify_code=verify_code,
+            timeout_ms=int(timeout * 1000),
+        )
     except asyncio.TimeoutError:
         logger.debug(
             "get_qrcode_status: client-side timeout after %ss, returning wait",
@@ -158,12 +130,26 @@ class WeChatAuthManager:
         self.cleanup_expired()
         return self._sessions.get(session_key)
 
+    def _refresh_base_url(self, session: WeChatLoginSession, redirect_host: str) -> Optional[str]:
+        host = redirect_host.strip()
+        if not host:
+            return None
+        parsed = urlparse(host if "://" in host else f"https://{host}")
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            logger.warning("Ignoring invalid WeChat QR redirect host: %s", redirect_host)
+            return None
+        refreshed = f"{parsed.scheme}://{parsed.netloc}"
+        session.current_base_url = refreshed
+        session.base_url = refreshed
+        return refreshed
+
     # -- public API -------------------------------------------------------
 
     async def start_login(
         self,
         session_key: Optional[str] = None,
         base_url: Optional[str] = None,
+        local_token_list: Optional[list[str]] = None,
     ) -> dict:
         """Start a new QR code login.
 
@@ -195,7 +181,7 @@ class WeChatAuthManager:
 
         try:
             logger.info("Starting WeChat login with bot_type=%s", self.BOT_TYPE)
-            qr_response = await get_bot_qrcode(base_url, self.BOT_TYPE)
+            qr_response = await get_bot_qrcode(base_url, self.BOT_TYPE, local_token_list=local_token_list)
             qrcode = qr_response.get("qrcode", "")
             qrcode_url = qr_response.get("qrcode_img_content", "")
 
@@ -213,6 +199,7 @@ class WeChatAuthManager:
                 started_at=time.time(),
                 status="wait",
                 base_url=base_url,
+                current_base_url=base_url,
             )
             self._sessions[session_key] = session
 
@@ -230,7 +217,7 @@ class WeChatAuthManager:
                 "error": f"Failed to start login: {exc}",
             }
 
-    async def poll_status(self, session_key: str) -> dict:
+    async def poll_status(self, session_key: str, verify_code: Optional[str] = None) -> dict:
         """Poll login status for a single cycle.
 
         Returns:
@@ -251,10 +238,17 @@ class WeChatAuthManager:
                 "message": "QR code has expired. Please start a new login.",
             }
 
-        base_url = session.base_url or self.DEFAULT_BASE_URL
+        base_url = session.current_base_url or session.base_url or self.DEFAULT_BASE_URL
+
+        if verify_code is not None:
+            session.pending_verify_code = verify_code.strip() or None
 
         try:
-            status_resp = await get_qrcode_status(base_url, session.qrcode)
+            status_resp = await get_qrcode_status(
+                base_url,
+                session.qrcode,
+                verify_code=session.pending_verify_code,
+            )
         except Exception as exc:
             # Don't delete session on transient errors (timeouts, network blips).
             # The UI will retry on the next poll cycle.
@@ -278,7 +272,38 @@ class WeChatAuthManager:
             return {"status": "wait", "message": "Waiting for QR code scan..."}
 
         if status == "scaned":
+            session.pending_verify_code = None
             return {"status": "scaned", "message": "QR code scanned. Please confirm in WeChat."}
+
+        if status == "scaned_but_redirect":
+            redirect_host = status_resp.get("redirect_host", "")
+            refreshed_base_url = self._refresh_base_url(session, redirect_host)
+            return {
+                "status": "scaned",
+                "message": "QR code scanned. Please confirm in WeChat.",
+                **({"base_url": refreshed_base_url} if refreshed_base_url else {}),
+            }
+
+        if status == "binded_redirect":
+            del self._sessions[session_key]
+            return {
+                "status": "already_connected",
+                "message": "This WeChat bot is already connected. Existing credentials remain valid.",
+            }
+
+        if status == "need_verifycode":
+            return {
+                "status": "need_verifycode",
+                "message": "Enter the verification code shown in WeChat to continue.",
+            }
+
+        if status == "verify_code_blocked":
+            session.pending_verify_code = None
+            del self._sessions[session_key]
+            return {
+                "status": "error",
+                "message": "WeChat verification failed too many times. Please restart the login flow.",
+            }
 
         if status == "expired":
             session.qr_refresh_count += 1
@@ -301,11 +326,12 @@ class WeChatAuthManager:
                 session_key,
             )
             try:
-                qr_response = await get_bot_qrcode(base_url, self.BOT_TYPE)
+                qr_response = await get_bot_qrcode(session.current_base_url or base_url, self.BOT_TYPE)
                 session.qrcode = qr_response.get("qrcode", "")
                 session.qrcode_url = qr_response.get("qrcode_img_content", "")
                 session.started_at = time.time()
                 session.status = "wait"
+                session.pending_verify_code = None
                 logger.info("New QR code obtained for session=%s", session_key)
                 return {
                     "status": "refreshed",
@@ -335,7 +361,8 @@ class WeChatAuthManager:
                 }
 
             bot_token = status_resp.get("bot_token")
-            resp_base_url = status_resp.get("baseurl")
+            session.pending_verify_code = None
+            resp_base_url = status_resp.get("baseurl") or session.current_base_url or session.base_url
             user_id = status_resp.get("ilink_user_id")
 
             # Store on session before removing

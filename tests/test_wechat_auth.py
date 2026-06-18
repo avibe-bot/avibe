@@ -53,6 +53,106 @@ class WeChatAuthManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "expired")
         self.assertIn("start a new login", result["message"].lower())
 
+    async def test_poll_status_follows_scan_redirect_and_preserves_session(self):
+        manager = WeChatAuthManager()
+
+        with patch(
+            "modules.im.wechat_auth.get_bot_qrcode",
+            new=AsyncMock(return_value={"qrcode": "qr-token", "qrcode_img_content": "https://example.com/qr.png"}),
+        ):
+            started = await manager.start_login(session_key="qr-session", base_url="https://ilinkai.weixin.qq.com")
+
+        with patch(
+            "modules.im.wechat_auth.get_qrcode_status",
+            new=AsyncMock(return_value={"status": "scaned_but_redirect", "redirect_host": "redirect.weixin.qq.com"}),
+        ) as poll:
+            result = await manager.poll_status(started["session_key"])
+
+        self.assertEqual(result["status"], "scaned")
+        self.assertEqual(result["base_url"], "https://redirect.weixin.qq.com")
+        session = manager.get_session("qr-session")
+        self.assertIsNotNone(session)
+        self.assertEqual(session.base_url, "https://redirect.weixin.qq.com")
+        poll.assert_awaited_once_with("https://ilinkai.weixin.qq.com", "qr-token", verify_code=None)
+
+        with patch(
+            "modules.im.wechat_auth.get_qrcode_status",
+            new=AsyncMock(
+                return_value={
+                    "status": "confirmed",
+                    "bot_token": "token-1",
+                    "ilink_bot_id": "bot-1",
+                    "ilink_user_id": "wx-user",
+                }
+            ),
+        ) as redirected_poll:
+            confirmed = await manager.poll_status("qr-session")
+
+        self.assertEqual(confirmed["status"], "confirmed")
+        self.assertEqual(confirmed["base_url"], "https://redirect.weixin.qq.com")
+        redirected_poll.assert_awaited_once_with("https://redirect.weixin.qq.com", "qr-token", verify_code=None)
+
+    async def test_poll_status_returns_already_connected_for_binded_redirect(self):
+        manager = WeChatAuthManager()
+
+        with patch(
+            "modules.im.wechat_auth.get_bot_qrcode",
+            new=AsyncMock(return_value={"qrcode": "qr-token", "qrcode_img_content": "https://example.com/qr.png"}),
+        ):
+            started = await manager.start_login(session_key="qr-session", base_url="https://ilinkai.weixin.qq.com")
+
+        with patch(
+            "modules.im.wechat_auth.get_qrcode_status",
+            new=AsyncMock(return_value={"status": "binded_redirect"}),
+        ):
+            result = await manager.poll_status(started["session_key"])
+
+        self.assertEqual(result["status"], "already_connected")
+        self.assertIn("already connected", result["message"].lower())
+        self.assertIsNone(manager.get_session("qr-session"))
+
+    def test_wechat_config_handles_already_connected_status(self):
+        source = Path("ui/src/components/steps/WeChatConfig.tsx").read_text(encoding="utf-8")
+
+        self.assertIn("status === 'already_connected'", source)
+        self.assertIn("setLoginState('connected')", source)
+
+    async def test_poll_status_submits_verify_code_and_confirms(self):
+        manager = WeChatAuthManager()
+
+        with patch(
+            "modules.im.wechat_auth.get_bot_qrcode",
+            new=AsyncMock(return_value={"qrcode": "qr-token", "qrcode_img_content": "https://example.com/qr.png"}),
+        ):
+            started = await manager.start_login(session_key="qr-session", base_url="https://ilinkai.weixin.qq.com")
+
+        with patch(
+            "modules.im.wechat_auth.get_qrcode_status",
+            new=AsyncMock(return_value={"status": "need_verifycode"}),
+        ) as first_poll:
+            result = await manager.poll_status(started["session_key"])
+
+        self.assertEqual(result["status"], "need_verifycode")
+        first_poll.assert_awaited_once_with("https://ilinkai.weixin.qq.com", "qr-token", verify_code=None)
+
+        with patch(
+            "modules.im.wechat_auth.get_qrcode_status",
+            new=AsyncMock(
+                return_value={
+                    "status": "confirmed",
+                    "bot_token": "token-1",
+                    "ilink_bot_id": "bot-1",
+                    "baseurl": "https://wechat.example.com",
+                    "ilink_user_id": "wx-user",
+                }
+            ),
+        ) as verify_poll:
+            confirmed = await manager.poll_status("qr-session", verify_code="1234")
+
+        self.assertEqual(confirmed["status"], "confirmed")
+        self.assertEqual(confirmed["bot_token"], "token-1")
+        verify_poll.assert_awaited_once_with("https://ilinkai.weixin.qq.com", "qr-token", verify_code="1234")
+
     async def test_auto_bind_wechat_user_marks_one_time_menu_hint_pending(self):
         SettingsStore.reset_instance()
 
