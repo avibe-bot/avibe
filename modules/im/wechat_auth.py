@@ -296,10 +296,12 @@ class WeChatAuthManager:
             }
 
         if status == "binded_redirect":
+            resp_base_url = session.current_base_url or session.base_url or self.DEFAULT_BASE_URL
             del self._sessions[session_key]
             return {
                 "status": "already_connected",
                 "message": "This WeChat bot is already connected. Existing credentials remain valid.",
+                "base_url": resp_base_url,
             }
 
         if status == "need_verifycode":

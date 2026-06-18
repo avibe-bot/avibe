@@ -112,6 +112,7 @@ class WeChatAuthManagerTests(unittest.IsolatedAsyncioTestCase):
             result = await manager.poll_status(started["session_key"])
 
         self.assertEqual(result["status"], "already_connected")
+        self.assertEqual(result["base_url"], "https://ilinkai.weixin.qq.com")
         self.assertIn("already connected", result["message"].lower())
         self.assertIsNone(manager.get_session("qr-session"))
 
@@ -121,6 +122,7 @@ class WeChatAuthManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("status === 'already_connected'", source)
         self.assertIn("setLoginState('connected')", source)
         self.assertIn("preserveExistingConnectionFields(result)", source)
+        self.assertIn("base_url: baseUrl || data.wechat?.base_url || ''", source)
 
     async def test_poll_status_refresh_preserves_local_token_list(self):
         manager = WeChatAuthManager()

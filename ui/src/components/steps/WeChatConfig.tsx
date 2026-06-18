@@ -286,7 +286,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
     platform: 'wechat',
     wechat: {
       ...withSecretDraft(data.wechat, 'bot_token', botToken),
-      base_url: baseUrl,
+      base_url: baseUrl || data.wechat?.base_url || '',
       proxy_url: proxyUrl || undefined,
     },
   });
