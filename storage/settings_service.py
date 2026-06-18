@@ -18,6 +18,7 @@ from config.v2_settings import (
     UserSettings,
     _make_scoped_key,
     _split_scoped_key,
+    normalize_routing_settings,
 )
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.models import auth_codes, scope_settings, scopes
@@ -364,6 +365,7 @@ def _settings_rows(conn: Connection, scope_type: str):
 
 
 def _routing_columns(routing: RoutingSettings) -> dict[str, str | None]:
+    routing = normalize_routing_settings(routing)
     model = routing.model
     effort = routing.reasoning_effort
     variant = routing.codex_agent or routing.claude_agent or routing.opencode_agent
@@ -397,8 +399,9 @@ def _routing_from_row(row: dict[str, Any], payload: dict[str, Any]) -> RoutingSe
     variant = row.get("agent_variant")
     model = row.get("model")
     effort = row.get("reasoning_effort")
-    routing.model = routing.model or model
-    routing.reasoning_effort = routing.reasoning_effort or effort
+    if routing.agent_name:
+        routing.model = routing.model or model
+        routing.reasoning_effort = routing.reasoning_effort or effort
     if routing.agent_name == "codex":
         routing.codex_agent = routing.codex_agent or variant
     elif routing.agent_name == "claude":

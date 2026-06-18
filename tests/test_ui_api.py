@@ -916,6 +916,19 @@ def test_normalize_backend_routing_payload_prefers_canonical_over_round_trip_ali
     assert result["claude_reasoning_effort"] is None
 
 
+def test_normalize_backend_routing_payload_lifts_aliases_for_builtin_agent_name() -> None:
+    result = api._normalize_backend_routing_payload(
+        {
+            "agent_name": "claude",
+            "claude_model": "claude-opus-4-8",
+            "claude_reasoning_effort": "max",
+        }
+    )
+
+    assert result["model"] == "claude-opus-4-8"
+    assert result["reasoning_effort"] == "max"
+
+
 def test_normalize_backend_routing_payload_preserves_explicit_canonical_clears() -> None:
     result = api._normalize_backend_routing_payload(
         {

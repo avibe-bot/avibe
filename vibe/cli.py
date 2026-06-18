@@ -2266,6 +2266,18 @@ def cmd_agent_show(args):
         return 1
 
 
+def cmd_agent_default(args):
+    try:
+        store = _agent_store()
+        store.set_default_agent_name(args.name)
+        agent = store.require(args.name)
+        _print_cli_payload("default_agent", default_agent_name=agent.name, agent=_agent_payload(agent, brief=True))
+        return 0
+    except Exception as exc:
+        _print_task_error(exc)
+        return 1
+
+
 def _agent_models_current(agent, options: dict) -> dict:
     """Echo an Agent's currently-set model/effort and whether they remain valid."""
     by_value = {entry.get("value"): entry for entry in options.get("models") or []}
@@ -5808,6 +5820,10 @@ def build_parser():
     agent_show_parser.add_argument("name", help="Agent name")
     _add_json_noop(agent_show_parser)
 
+    agent_default_parser = agent_subparsers.add_parser("default", help="Set the default Avibe Agent")
+    agent_default_parser.add_argument("name", help="Agent name")
+    _add_json_noop(agent_default_parser)
+
     agent_models_parser = agent_subparsers.add_parser(
         "models",
         help="List available models and reasoning efforts for an Agent or backend",
@@ -6676,6 +6692,8 @@ def main():
             sys.exit(cmd_agent_list(args))
         if args.agent_command == "show":
             sys.exit(cmd_agent_show(args))
+        if args.agent_command == "default":
+            sys.exit(cmd_agent_default(args))
         if args.agent_command == "models":
             sys.exit(cmd_agent_models(args))
         if args.agent_command == "create":

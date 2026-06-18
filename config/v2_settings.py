@@ -93,6 +93,12 @@ class RoutingSettings:
     codex_model: Optional[str] = None
     codex_reasoning_effort: Optional[str] = None
 
+def _backend_specific_value(routing: RoutingSettings, backend: Optional[str], field: str) -> Optional[str]:
+    if backend not in {"opencode", "claude", "codex"}:
+        return None
+    return getattr(routing, f"{backend}_{field}", None)
+
+
 def _payload_value(payload: dict, key: str, fallback_key: str) -> Optional[str]:
     if key in payload:
         return payload.get(key)
@@ -103,10 +109,15 @@ def normalize_routing_settings(routing: Optional[RoutingSettings]) -> RoutingSet
     """Normalize scope routing without consulting deprecated backend routing."""
     if routing is None:
         return RoutingSettings()
+    agent_name = getattr(routing, "agent_name", None)
+    builtin_agent_backend = agent_name if agent_name in {"opencode", "claude", "codex"} else None
+    model = getattr(routing, "model", None)
+    reasoning_effort = getattr(routing, "reasoning_effort", None)
     return RoutingSettings(
-        agent_name=getattr(routing, "agent_name", None),
-        model=getattr(routing, "model", None),
-        reasoning_effort=getattr(routing, "reasoning_effort", None),
+        agent_name=agent_name,
+        model=model or _backend_specific_value(routing, builtin_agent_backend, "model"),
+        reasoning_effort=reasoning_effort
+        or _backend_specific_value(routing, builtin_agent_backend, "reasoning_effort"),
         opencode_agent=getattr(routing, "opencode_agent", None),
         opencode_model=getattr(routing, "opencode_model", None),
         opencode_reasoning_effort=getattr(routing, "opencode_reasoning_effort", None),
@@ -191,8 +202,8 @@ def _parse_routing(payload: dict) -> RoutingSettings:
     """Parse a routing settings dict into a RoutingSettings dataclass."""
     if not isinstance(payload, dict):
         payload = {}
-    model_key_present = "model" in payload
-    reasoning_key_present = "reasoning_effort" in payload
+    model_key_present = "model" in payload or "model_override" in payload
+    reasoning_key_present = "reasoning_effort" in payload or "reasoning_effort_override" in payload
     return normalize_routing_settings(
         RoutingSettings(
             agent_name=payload.get("agent_name") or payload.get("agent"),

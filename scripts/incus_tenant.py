@@ -233,10 +233,12 @@ def cloud_init_user_data(spec: TenantSpec) -> str:
     if spec.install_package_spec:
         install_prefix = f"export AVIBE_INSTALL_PACKAGE_SPEC={shlex.quote(spec.install_package_spec)}; "
     install_command = install_prefix + "curl -fsSL https://avibe.bot/install.sh | bash"
+    seed_default_agent_command = f"vibe agent default {shlex.quote(spec.backend)}"
     runcmd = [
         ["mkdir", "-p", TENANT_WORKDIR, f"{TENANT_HOME}/.vibe_remote/config"],
         ["chown", "-R", f"{TENANT_USER}:{TENANT_USER}", TENANT_HOME],
         ["su", "-", TENANT_USER, "-c", install_command],
+        ["su", "-", TENANT_USER, "-c", seed_default_agent_command],
         ["systemctl", "daemon-reload"],
         ["systemctl", "enable", "--now", "vibe-remote.service"],
     ]

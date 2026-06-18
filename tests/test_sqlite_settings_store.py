@@ -376,7 +376,7 @@ def test_settings_save_does_not_migrate_legacy_model_fields_without_backend(tmp_
     assert routing.opencode_model == "openai/stale"
 
 
-def test_settings_save_ignores_deprecated_backend_when_legacy_fields_exist(tmp_path: Path) -> None:
+def test_settings_save_lifts_backend_aliases_for_builtin_agent_name(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path)
     service = SQLiteSettingsService(db_path)
@@ -401,10 +401,58 @@ def test_settings_save_ignores_deprecated_backend_when_legacy_fields_exist(tmp_p
         service.close()
 
     routing = state.channels["slack::C123"].routing
+    assert routing.model == "claude-opus-4-8"
+    assert routing.reasoning_effort == "max"
+
+
+def test_settings_load_ignores_row_model_without_agent_name(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    engine = create_sqlite_engine(db_path)
+    service = None
+    try:
+        with engine.begin() as conn:
+            scope_id = upsert_scope(
+                conn,
+                "slack",
+                "channel",
+                "C123",
+                display_name=None,
+                native_type=None,
+                is_private=False,
+                supports_threads=True,
+                metadata={},
+                now="now",
+            )
+            conn.execute(
+                scope_settings.insert().values(
+                    scope_id=scope_id,
+                    enabled=1,
+                    role=None,
+                    workdir=None,
+                    agent_name=None,
+                    agent_backend="codex",
+                    agent_variant=None,
+                    model="gpt-stale-codex",
+                    reasoning_effort="high",
+                    require_mention=None,
+                    settings_version=1,
+                    settings_json=json.dumps({"routing": {"agent_backend": "codex"}, "require_bind": None}),
+                    created_at="now",
+                    updated_at="now",
+                )
+            )
+        service = SQLiteSettingsService(db_path)
+        state = service.load_state()
+    finally:
+        if service is not None:
+            service.close()
+        engine.dispose()
+
+    routing = state.channels["slack::C123"].routing
+    assert routing.agent_name is None
     assert routing.model is None
     assert routing.reasoning_effort is None
-    assert routing.claude_model == "claude-opus-4-8"
-    assert routing.claude_reasoning_effort == "max"
 
 
 def test_settings_store_bootstrap_uses_config_primary_platform(tmp_path: Path, monkeypatch) -> None:

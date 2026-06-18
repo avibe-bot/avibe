@@ -57,6 +57,7 @@ def test_cloud_init_configures_vibe_user_service_and_ui():
     assert '"setup_host": "0.0.0.0"' in data
     assert '"setup_port": 5123' in data
     assert '"default_backend"' not in data
+    assert '"vibe agent default codex"' in data
     assert "https://avibe.bot/install.sh" in data
     # The installer runs as vibey, so cloud-init must own the whole home (not just
     # work/ + .vibe_remote) and write the root-created config as root before chown.

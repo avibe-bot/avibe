@@ -1208,6 +1208,21 @@ def test_agent_create_accepts_effort_alias(tmp_path: Path, capsys) -> None:
     assert payload["agent"]["reasoning_effort"] == "high"
 
 
+def test_agent_default_cli_sets_default_agent(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.ensure_builtin_default_agents(["opencode", "codex"])
+    args = _parse_agent(["default", "codex"])
+
+    with patch("vibe.cli._agent_store", return_value=agent_store):
+        result = cli.cmd_agent_default(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["default_agent_name"] == "codex"
+    assert agent_store.get_default_agent_name() == "codex"
+
+
 def test_agent_import_name_filters_global_candidates(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     agent_store = cli.VibeAgentStore(db_path)
