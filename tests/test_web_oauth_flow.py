@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -26,6 +27,7 @@ from core.agent_auth_service import (
 )
 from modules.agents.opencode.message_processor import extract_opencode_response_text
 from vibe.claude_config import (
+    MANAGED_ENV_VALUES,
     read_claude_oauth_settings_backup,
     read_claude_settings_env,
     restore_claude_settings_env,
@@ -356,6 +358,9 @@ def test_claude_oauth_begin_persists_backup_before_clearing_settings(
 
     assert attempt.settings_backup == backup
     assert read_claude_settings_env() == {}
+    settings = json.loads((claude_home / "settings.json").read_text())
+    for key, value in MANAGED_ENV_VALUES.items():
+        assert settings["env"][key] == value
     assert read_claude_oauth_settings_backup() == backup
 
 
@@ -375,10 +380,16 @@ def test_claude_oauth_restarts_restore_interrupted_durable_backup(
 
     _run(service._begin_claude_oauth_attempt())
     assert read_claude_settings_env() == {}
+    settings = json.loads((claude_home / "settings.json").read_text())
+    for key, value in MANAGED_ENV_VALUES.items():
+        assert settings["env"][key] == value
 
     AgentAuthService(_StubController())
 
     assert read_claude_settings_env() == backup
+    settings = json.loads((claude_home / "settings.json").read_text())
+    for key, value in MANAGED_ENV_VALUES.items():
+        assert settings["env"][key] == value
     assert read_claude_oauth_settings_backup() is None
 
 

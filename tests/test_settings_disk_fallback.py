@@ -96,6 +96,11 @@ def _write_claude_settings(home: Path, env: dict) -> None:
     )
 
 
+def _assert_claude_managed_env(env: dict) -> None:
+    assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    assert env["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
+
+
 def test_claude_oauth_state_reads_current_dot_credentials_file(tmp_path: Path) -> None:
     """Claude Code 2.x writes OAuth tokens to ``.credentials.json`` on Linux.
 
@@ -284,6 +289,7 @@ def test_save_claude_auth_writes_settings_json_and_clears_v2_secret(
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
     assert settings["env"]["ANTHROPIC_API_KEY"] == "sk-ant-new-settings-key"
     assert settings["env"]["ANTHROPIC_BASE_URL"] == "https://relay.example.invalid"
+    _assert_claude_managed_env(settings["env"])
 
     saved = V2Config.load()
     assert saved.agents.claude.api_key is None
@@ -338,6 +344,34 @@ def test_save_claude_auth_keeps_settings_token_over_legacy_v2_key(
     assert settings["env"]["ANTHROPIC_AUTH_TOKEN"] == "token-from-settings"
     assert "ANTHROPIC_API_KEY" not in settings["env"]
     assert settings["env"]["ANTHROPIC_BASE_URL"] == "https://new-relay.example.invalid"
+    _assert_claude_managed_env(settings["env"])
+
+
+def test_apply_claude_auth_oauth_removes_auth_env_but_keeps_managed_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
+    _write_claude_settings(
+        tmp_path,
+        {
+            "ANTHROPIC_API_KEY": "sk-stale",
+            "ANTHROPIC_BASE_URL": "https://stale-relay.example.invalid",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "0",
+            "CLAUDE_CODE_ATTRIBUTION_HEADER": "1",
+            "CUSTOM_FLAG": "keep-me",
+        },
+    )
+
+    from vibe.claude_config import apply_claude_auth
+
+    apply_claude_auth(auth_mode="oauth", api_key=None, base_url=None)
+
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    assert "ANTHROPIC_API_KEY" not in settings["env"]
+    assert "ANTHROPIC_BASE_URL" not in settings["env"]
+    assert settings["env"]["CUSTOM_FLAG"] == "keep-me"
+    _assert_claude_managed_env(settings["env"])
 
 
 def test_save_claude_auth_fails_without_overwriting_malformed_settings(
@@ -395,3 +429,4 @@ def test_apply_claude_auth_uses_unique_temp_files_for_concurrent_writes(
     assert errors == []
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
     assert settings["env"]["ANTHROPIC_API_KEY"].startswith("sk-key-")
+    _assert_claude_managed_env(settings["env"])

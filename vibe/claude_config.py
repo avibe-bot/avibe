@@ -8,14 +8,14 @@ instead of storing secrets in V2Config and hoping env injection wins.
 This module owns the narrow settings.json mutation surface:
 
 - ``apply_claude_auth(...)`` upserts or removes Anthropic env vars in
-  ``settings.json``.
+  ``settings.json`` while preserving Avibe-managed Claude Code defaults.
 - ``read_claude_settings_env(...)`` reports the live on-disk state without
   leaking secrets beyond the current process.
 
-OAuth tokens minted by ``claude login`` live in the macOS keychain (or
-the OS-specific equivalent), not on disk. We have no portable way to
-inspect them, so the OAuth-signed-in signal is purely an inference from
-"no API key is configured" plus "the CLI is reachable".
+OAuth tokens minted by ``claude login`` may live in an OS keychain or in
+Claude Code's own credential file depending on platform/version. The Settings
+UI prefers ``claude auth status --json`` and uses the on-disk credential file
+as a fallback signal.
 """
 
 from __future__ import annotations
@@ -28,6 +28,14 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+# Keys Avibe always keeps in ``~/.claude/settings.json`` for Claude Code.
+# They are not auth credentials, so they intentionally stay outside
+# ``RELEVANT_ENV_KEYS`` and survive OAuth/API-key mode switches.
+MANAGED_ENV_VALUES = {
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+}
 
 # Keys we recognise inside ``~/.claude/settings.json``'s ``env`` block.
 # ``ANTHROPIC_API_KEY`` is the SDK's documented variable; relay setups
@@ -176,6 +184,11 @@ def _clean_relevant_env_values(env_values: Dict[str, str]) -> Dict[str, str]:
     return out
 
 
+def _ensure_managed_env_values(env_block: Dict[str, Any]) -> None:
+    """Upsert Avibe-managed, non-secret Claude Code env defaults."""
+    env_block.update(MANAGED_ENV_VALUES)
+
+
 def write_claude_oauth_settings_backup(
     env_values: Dict[str, str], home: Path | None = None
 ) -> None:
@@ -243,7 +256,8 @@ def apply_claude_auth(
     ``api_key`` mode writes ``env.ANTHROPIC_API_KEY`` and removes
     ``ANTHROPIC_AUTH_TOKEN`` so header semantics cannot conflict. ``oauth``
     mode removes all Anthropic credential/base-url overrides from the env
-    block and leaves Claude's OAuth credentials untouched.
+    block and leaves Claude's OAuth credentials untouched. Both modes upsert
+    Avibe's non-secret Claude Code env defaults.
     """
     if auth_mode not in {"oauth", "api_key"}:
         raise ValueError(f"Unsupported claude auth_mode: {auth_mode!r}")
@@ -271,8 +285,8 @@ def apply_claude_auth(
     else:
         for key in RELEVANT_ENV_KEYS:
             env_block.pop(key, None)
-        if not env_block:
-            settings.pop("env", None)
+
+    _ensure_managed_env_values(env_block)
 
     _atomic_write(path, json.dumps(settings, indent=2) + "\n", mode=0o600)
     return {"settings_path": str(path)}
@@ -317,6 +331,8 @@ def restore_claude_settings_env(env_values: Dict[str, str], home: Path | None = 
         raw = env_values.get(key)
         if isinstance(raw, str) and raw.strip():
             env_block[key] = raw.strip()
+
+    _ensure_managed_env_values(env_block)
 
     if not env_block:
         settings.pop("env", None)
