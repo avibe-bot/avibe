@@ -464,7 +464,18 @@ def _agent_variant_for_backend(backend: str, scope_row: Optional[dict[str, Any]]
         variant = _optional_str(routing_payload.get(f"{backend}_agent"))
         if variant:
             return variant
+    stored_variant = _optional_str(scope_row.get("agent_variant")) if _scope_variant_applies(backend, scope_row) else None
+    if stored_variant:
+        return stored_variant
     return backend
+
+
+def _scope_variant_applies(backend: str, scope_row: Optional[dict[str, Any]]) -> bool:
+    if not scope_row:
+        return False
+    if _optional_str(scope_row.get("agent_name")):
+        return True
+    return _optional_str(scope_row.get("agent_backend")) == backend
 
 
 def _scope_routing_payload(scope_row: Optional[dict[str, Any]]) -> dict[str, Any]:

@@ -361,8 +361,10 @@ def update_session(
     if existing is None:
         raise LookupError(f"Session not found: {session_id}")
 
+    derived_backend = False
     if agent_name is not _UNSET and agent_backend is _UNSET:
         agent_backend = _backend_for_agent_name(conn, str(agent_name or "")) if agent_name else None
+        derived_backend = True
 
     # Backend is pinned once a NATIVE conversation exists: the native can only
     # be resumed by the backend that created it, so switching (or clearing) the
@@ -416,6 +418,8 @@ def update_session(
         values["agent_name"] = agent_name or None
     if agent_backend is not _UNSET:
         values["agent_backend"] = agent_backend or ""
+        if derived_backend and agent_variant is _UNSET:
+            values["agent_variant"] = str(agent_backend or "default")
     if agent_variant is not _UNSET:
         values["agent_variant"] = str(agent_variant or "default")
     # ``model`` / ``reasoning_effort`` use a sentinel default so a PRESENT

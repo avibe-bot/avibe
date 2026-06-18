@@ -996,7 +996,9 @@ class SessionHandler(BaseHandler):
             session_key = self._get_session_key(context)
             settings_manager = self._get_settings_manager(context)
             current_routing = settings_manager.get_channel_routing(settings_key)
-            preserve_scope_overrides = bool(current_routing and current_routing.agent_name == agent)
+            preserve_scope_overrides = bool(
+                current_routing and self._routing_matches_backend(current_routing, agent)
+            )
 
             routing = ChannelRouting(
                 agent_name=agent,
@@ -1130,6 +1132,21 @@ class SessionHandler(BaseHandler):
                 context,
                 f"❌ {self._t('error.resumeSubmitFailed', error=str(e))}",
             )
+
+    def _routing_matches_backend(self, routing, backend: str) -> bool:
+        agent_name = getattr(routing, "agent_name", None)
+        if not agent_name:
+            return False
+        if str(agent_name) == str(backend):
+            return True
+        store = getattr(self.controller, "vibe_agent_store", None)
+        if store is None:
+            return False
+        try:
+            agent = store.get(str(agent_name))
+        except Exception:
+            return False
+        return bool(agent and getattr(agent, "backend", None) == backend)
 
     async def cleanup_session(self, composite_key: str, *, current_receiver_task=None):
         """Clean up a specific session by composite key"""

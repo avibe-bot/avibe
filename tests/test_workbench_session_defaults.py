@@ -122,6 +122,29 @@ def test_agent_name_update_derives_backend(engine, tmp_path):
     assert updated["agent_backend"] == "codex"
 
 
+def test_agent_name_update_resets_stale_variant(engine, tmp_path):
+    _ensure_agent("claude-helper", "claude")
+    _ensure_agent("reviewer", "codex")
+    created = _project_with_default(engine, tmp_path)
+    with engine.begin() as conn:
+        session = workbench_sessions_service.create_session(
+            conn,
+            scope_id=created["scope_id"],
+            agent_name="claude-helper",
+            agent_backend="claude",
+            agent_variant="claude-subagent",
+        )
+        updated = workbench_sessions_service.update_session(
+            conn,
+            session["id"],
+            agent_name="reviewer",
+        )
+
+    assert updated["agent_name"] == "reviewer"
+    assert updated["agent_backend"] == "codex"
+    assert updated["agent_variant"] == "codex"
+
+
 def test_session_without_project_default_stays_agentless(engine, tmp_path):
     created = _project_with_default(engine, tmp_path)  # no default configured
     with engine.begin() as conn:

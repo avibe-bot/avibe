@@ -367,6 +367,57 @@ def test_opencode_bind_reuses_scoped_agent_variant_session(tmp_path):
     assert rows == [("opencode", "reviewer", "oc-native")]
 
 
+def test_new_im_session_uses_scope_agent_variant_column_when_json_missing(tmp_path):
+    workdir = tmp_path / "channel"
+    controller = _controller(tmp_path)
+    scoped_agent = SimpleNamespace(
+        id="agent-reviewer",
+        name="Code Reviewer",
+        backend="codex",
+        model=None,
+        reasoning_effort=None,
+    )
+
+    default_resolver = controller.resolve_vibe_agent_for_context
+    controller.resolve_vibe_agent_for_context = lambda _context, override_agent_name=None, required=False: (
+        scoped_agent if override_agent_name == "Code Reviewer" else default_resolver(_context, required=required)
+    )
+    with controller.sqlite_engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="slack",
+            scope_type="channel",
+            native_id="C123",
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(
+            conn,
+            scope_id,
+            workdir=str(workdir),
+            agent_name="Code Reviewer",
+            agent_backend="codex",
+            agent_variant="reviewer-sub",
+            routing={},
+        )
+
+    ctx = MessageContext(user_id="U1", channel_id="C123", platform="slack", thread_id="171717.123")
+
+    target = resolve_agent_run_target(
+        ctx,
+        controller=controller,
+        base_session_id="slack_171717.123",
+    )
+
+    assert target.agent_name == "Code Reviewer"
+    assert target.agent_backend == "codex"
+    assert target.agent_variant == "reviewer-sub"
+    with controller.sqlite_engine.connect() as conn:
+        session = sessions_service.get_session(conn, target.agent_session_id)
+    assert session["agent_name"] == "Code Reviewer"
+    assert session["agent_backend"] == "codex"
+    assert session["agent_variant"] == "reviewer-sub"
+
+
 def test_readonly_cwd_lookup_does_not_create_session(tmp_path):
     workdir = tmp_path / "channel"
     controller = _controller(tmp_path)

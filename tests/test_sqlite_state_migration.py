@@ -205,6 +205,129 @@ def test_run_migrations_adds_agent_events_from_previous_head(tmp_path: Path) -> 
     assert "ix_agent_events_turn_sequence_id" in agent_event_indexes
 
 
+def test_scope_agent_backfill_migrates_explicit_agent_routes(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260526_0006")
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into agents (
+                id, name, normalized_name, description, backend, model,
+                reasoning_effort, system_prompt, enabled, source, source_ref,
+                metadata_json, created_at, updated_at
+            ) values (
+                'agent_reviewer', 'Code Reviewer', 'code-reviewer', null, 'codex', null,
+                null, null, 1, 'user', null, '{}', 'now', 'now'
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into scopes (
+                id, platform, scope_type, native_id, is_private, supports_threads,
+                metadata_json, first_seen_at, last_seen_at, updated_at
+            ) values (
+                'scope_agent', 'slack', 'channel', 'C_AGENT', 0, 1,
+                '{}', 'now', 'now', 'now'
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into scope_settings (
+                scope_id, enabled, role, workdir, agent_name, agent_backend,
+                agent_variant, model, reasoning_effort, require_mention,
+                settings_version, settings_json, created_at, updated_at
+            ) values (
+                'scope_agent', 1, null, '/tmp/project', '', '', '', '', '',
+                null, 1, ?, 'now', 'now'
+            )
+            """,
+            (
+                json.dumps(
+                    {
+                        "routing": {
+                            "agent_name": "Code Reviewer",
+                            "codex_agent": "reviewer-sub",
+                            "model": "gpt-5.5",
+                            "reasoning_effort": "xhigh",
+                        }
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+
+    run_migrations(db_path, revision="20260529_0007")
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            select agent_name, agent_variant, model, reasoning_effort
+              from scope_settings
+             where scope_id = 'scope_agent'
+            """
+        ).fetchone()
+
+    assert row == ("Code Reviewer", "reviewer-sub", "gpt-5.5", "xhigh")
+
+
+def test_scope_agent_backfill_ignores_backend_only_routes(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260526_0006")
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into scopes (
+                id, platform, scope_type, native_id, is_private, supports_threads,
+                metadata_json, first_seen_at, last_seen_at, updated_at
+            ) values (
+                'scope_backend_only', 'slack', 'channel', 'C_BACKEND_ONLY', 0, 1,
+                '{}', 'now', 'now', 'now'
+            )
+            """
+        )
+        conn.execute(
+            """
+            insert into scope_settings (
+                scope_id, enabled, role, workdir, agent_name, agent_backend,
+                agent_variant, model, reasoning_effort, require_mention,
+                settings_version, settings_json, created_at, updated_at
+            ) values (
+                'scope_backend_only', 1, null, '/tmp/project', '', 'opencode',
+                'legacy-subagent', '', '', null, 1, ?, 'now', 'now'
+            )
+            """,
+            (
+                json.dumps(
+                    {
+                        "routing": {
+                            "agent_backend": "opencode",
+                            "model": "gpt-5.5",
+                            "reasoning_effort": "high",
+                        }
+                    }
+                ),
+            ),
+        )
+        conn.commit()
+
+    run_migrations(db_path, revision="20260529_0007")
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            select agent_name, agent_variant, model, reasoning_effort
+              from scope_settings
+             where scope_id = 'scope_backend_only'
+            """
+        ).fetchone()
+
+    assert row == ("", "legacy-subagent", "", "")
+
+
 def test_run_migrations_deletes_historical_message_tool_calls(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
 
