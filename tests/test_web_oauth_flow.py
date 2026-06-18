@@ -28,6 +28,8 @@ from core.agent_auth_service import (
 from modules.agents.opencode.message_processor import extract_opencode_response_text
 from vibe.claude_config import (
     MANAGED_ENV_VALUES,
+    clear_claude_oauth_credentials_files,
+    get_claude_credentials_path,
     read_claude_oauth_settings_backup,
     read_claude_settings_env,
     restore_claude_settings_env,
@@ -763,6 +765,62 @@ def test_remove_web_auth_surfaces_claude_settings_cleanup_failure(
     assert result["partial"] is True
     assert result["warning"] == "settings_cleanup_failed"
     assert "Failed to clear Claude Code settings env" in result["detail"]
+
+
+def test_clear_claude_oauth_for_api_key_mode_restores_key_settings(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    restore_claude_settings_env(
+        {
+            "ANTHROPIC_API_KEY": "sk-active",
+            "ANTHROPIC_BASE_URL": "https://relay.example.invalid",
+        }
+    )
+    credentials_path = get_claude_credentials_path()
+    credentials_path.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "stale-oauth",
+                    "refreshToken": "stale-refresh",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_cmd = AsyncMock(return_value=(True, None))
+    monkeypatch.setattr(service, "_run_utility_command", run_cmd)
+
+    result = _run(service.clear_claude_oauth_for_api_key_mode())
+
+    assert result == {"ok": True}
+    run_cmd.assert_awaited_once()
+    args = run_cmd.call_args.args
+    assert "auth" in args and "logout" in args
+    assert read_claude_settings_env() == {
+        "ANTHROPIC_API_KEY": "sk-active",
+        "ANTHROPIC_BASE_URL": "https://relay.example.invalid",
+    }
+    assert not credentials_path.exists()
+
+
+def test_clear_claude_oauth_credentials_files_removes_known_token_files(
+    tmp_path: Path,
+) -> None:
+    claude_home = tmp_path / ".claude"
+    claude_home.mkdir()
+    current = claude_home / ".credentials.json"
+    legacy = claude_home / "credentials.json"
+    current.write_text("{}", encoding="utf-8")
+    legacy.write_text("{}", encoding="utf-8")
+
+    removed = clear_claude_oauth_credentials_files(tmp_path)
+
+    assert str(current) in removed
+    assert str(legacy) in removed
+    assert not current.exists()
+    assert not legacy.exists()
 
 
 def test_test_web_auth_rejects_unsupported_backend(service: AgentAuthService) -> None:

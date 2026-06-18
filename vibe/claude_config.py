@@ -91,6 +91,20 @@ def get_claude_credentials_path(home: Path | None = None) -> Path:
     return get_claude_credentials_paths(home)[0]
 
 
+def clear_claude_oauth_credentials_files(home: Path | None = None) -> list[str]:
+    """Remove known file-backed Claude Code OAuth credential stores."""
+    removed: list[str] = []
+    for path in get_claude_credentials_paths(home):
+        try:
+            path.unlink()
+            removed.append(str(path))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise OSError(f"Failed to remove Claude OAuth credentials file {path}: {exc}") from exc
+    return removed
+
+
 def get_claude_oauth_settings_backup_path(home: Path | None = None) -> Path:
     """Return Avibe's durable rollback file for Claude OAuth setup."""
     return get_claude_home(home) / OAUTH_SETTINGS_ENV_BACKUP_NAME

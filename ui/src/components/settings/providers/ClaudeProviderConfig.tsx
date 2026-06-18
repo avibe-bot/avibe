@@ -185,7 +185,14 @@ export const ClaudeProviderConfig: React.FC<{
       setEditingKey(false);
       // Claude restart is synthetic (one-shot CLI) so result.restart.ok
       // is always true; treat any falsy state defensively just in case.
-      if (result.restart?.ok === false) {
+      if (result.partial) {
+        showToast(
+          t('settings.backends.claudeSavePartial', {
+            detail: result.detail || result.warning || 'oauth_cleanup_failed',
+          }),
+          'warning',
+        );
+      } else if (result.restart?.ok === false) {
         showToast(result.restart.message || t('settings.backends.claudeSaveSuccess'), 'warning');
       } else {
         showToast(t('settings.backends.claudeSaveSuccess'), 'success');

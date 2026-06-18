@@ -996,6 +996,9 @@ export type ClaudeAuthPayload = {
 
 export type ClaudeAuthSaveResult = ClaudeAuthState & {
   restart?: BackendRestartResult;
+  partial?: boolean;
+  warning?: string;
+  detail?: string;
 };
 
 // One entry in the OpenCode provider grid. The full catalog is built

@@ -2995,6 +2995,76 @@ class AgentAuthService:
             return str(err)
         return None
 
+    async def clear_claude_oauth_for_api_key_mode(self) -> dict[str, Any]:
+        """Remove Claude Code account tokens without changing API-key mode.
+
+        Claude Code reapplies ``settings.json`` env values at startup. To make
+        ``claude auth logout`` target stored account credentials instead of the
+        just-saved API key, temporarily clear Anthropic env overrides, run the
+        logout command, then restore the API-key settings exactly.
+        """
+        async with self._claude_oauth_lock:
+            from vibe.claude_config import (
+                clear_claude_oauth_credentials_files,
+                read_claude_settings_env,
+            )
+
+            try:
+                settings_backup = await asyncio.to_thread(read_claude_settings_env)
+            except Exception as err:  # noqa: BLE001
+                detail = (
+                    "Failed to read Claude Code settings before clearing OAuth "
+                    f"credentials: {err}"
+                )
+                logger.warning(detail)
+                return {
+                    "ok": True,
+                    "partial": True,
+                    "warning": "oauth_cleanup_failed",
+                    "detail": detail,
+                }
+
+            settings_cleanup_error = await self._clear_claude_settings_env_for_logout()
+            logout_ok = False
+            logout_error = None
+            if not settings_cleanup_error:
+                logout_ok, logout_error = await self._run_utility_command(
+                    self._get_cli_binary("claude"),
+                    "auth",
+                    "logout",
+                )
+                try:
+                    await asyncio.to_thread(clear_claude_oauth_credentials_files)
+                except Exception as err:  # noqa: BLE001
+                    logout_ok = False
+                    logout_error = str(err)
+            restore_ok = await self._restore_claude_settings_env_after_oauth_failure(
+                settings_backup or None
+            )
+
+            if settings_cleanup_error:
+                return {
+                    "ok": True,
+                    "partial": True,
+                    "warning": "oauth_cleanup_failed",
+                    "detail": settings_cleanup_error,
+                }
+            if not restore_ok:
+                return {
+                    "ok": True,
+                    "partial": True,
+                    "warning": "oauth_cleanup_failed",
+                    "detail": "Claude API-key settings were saved, but Avibe could not restore them after the OAuth cleanup probe.",
+                }
+            if not logout_ok:
+                return {
+                    "ok": True,
+                    "partial": True,
+                    "warning": "oauth_cleanup_failed",
+                    "detail": logout_error or "claude auth logout exited non-zero",
+                }
+            return {"ok": True}
+
     async def _persist_backend_auth_mode(self, backend: str, auth_mode: str) -> None:
         """Persist V2Config.agents.<backend>.auth_mode for web and IM flows."""
         if backend == "claude" and auth_mode == "oauth":

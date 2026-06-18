@@ -274,6 +274,7 @@
       "claudeSaving": "保存中…",
       "claudeSaveSuccess": "Claude 认证已保存",
       "claudeSaveFailed": "保存 Claude 认证失败",
+      "claudeSavePartial": "API Key 已保存，但旧 Claude 账号凭据未清理干净：{{detail}}",
       "oauthAuthUrlLabel": "授权链接",
       "oauthInProgress": "登录进行中…",
       "oauthStarting": "正在启动 OAuth 流程…",

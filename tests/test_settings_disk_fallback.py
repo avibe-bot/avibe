@@ -503,6 +503,11 @@ def test_save_claude_auth_writes_settings_json_and_clears_v2_secret(
     monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
     monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
     monkeypatch.setattr("vibe.api._read_claude_cli_oauth_signed_in", lambda _path, **_kwargs: None)
+    cleanup_calls: list[bool] = []
+    monkeypatch.setattr(
+        "vibe.api._clear_claude_oauth_credentials_after_api_key_save",
+        lambda: cleanup_calls.append(True) or {"ok": True},
+    )
 
     from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
     from vibe.api import get_claude_auth, save_claude_auth
@@ -542,6 +547,53 @@ def test_save_claude_auth_writes_settings_json_and_clears_v2_secret(
     state = get_claude_auth()
     assert state["api_key_source"] == "settings_json"
     assert state["base_url"] == "https://relay.example.invalid"
+    assert cleanup_calls == [True]
+
+
+def test_save_claude_auth_reports_partial_when_oauth_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
+    monkeypatch.setattr("vibe.api._read_claude_cli_oauth_signed_in", lambda _path, **_kwargs: None)
+    monkeypatch.setattr(
+        "vibe.api._clear_claude_oauth_credentials_after_api_key_save",
+        lambda: {
+            "ok": True,
+            "partial": True,
+            "warning": "oauth_cleanup_failed",
+            "detail": "claude auth logout exited non-zero",
+        },
+    )
+
+    from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
+    from vibe.api import save_claude_auth
+
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+    ).save()
+
+    result = save_claude_auth(
+        {
+            "auth_mode": "api_key",
+            "api_key": "sk-ant-new-settings-key",
+            "base_url": "https://relay.example.invalid",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["active_auth_mode"] == "api_key"
+    assert result["partial"] is True
+    assert result["warning"] == "oauth_cleanup_failed"
+    assert "logout" in result["detail"]
+    settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+    assert settings["env"]["ANTHROPIC_API_KEY"] == "sk-ant-new-settings-key"
+    assert settings["env"]["ANTHROPIC_BASE_URL"] == "https://relay.example.invalid"
 
 
 def test_save_claude_auth_keeps_settings_token_over_legacy_v2_key(

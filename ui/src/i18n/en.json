@@ -274,6 +274,7 @@
       "claudeSaving": "Saving…",
       "claudeSaveSuccess": "Claude auth saved",
       "claudeSaveFailed": "Could not save Claude auth",
+      "claudeSavePartial": "API key saved, but old Claude account credentials were not fully cleared: {{detail}}",
       "oauthAuthUrlLabel": "Authorization URL",
       "oauthInProgress": "Login in progress…",
       "oauthStarting": "Starting OAuth flow…",
