@@ -132,6 +132,8 @@ def normalize_routing_settings(routing: Optional[RoutingSettings]) -> RoutingSet
 
 def routing_model_for_backend(routing: Optional[RoutingSettings], backend: Optional[str]) -> Optional[str]:
     normalized = normalize_routing_settings(routing)
+    if not _routing_backend_matches(normalized, backend):
+        return None
     return normalized.model
 
 
@@ -140,7 +142,16 @@ def routing_reasoning_effort_for_backend(
     backend: Optional[str],
 ) -> Optional[str]:
     normalized = normalize_routing_settings(routing)
+    if not _routing_backend_matches(normalized, backend):
+        return None
     return normalized.reasoning_effort
+
+
+def _routing_backend_matches(routing: RoutingSettings, backend: Optional[str]) -> bool:
+    agent_name = getattr(routing, "agent_name", None)
+    if agent_name in {"opencode", "claude", "codex"}:
+        return agent_name == backend
+    return True
 
 
 @dataclass

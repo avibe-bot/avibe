@@ -70,6 +70,7 @@ def test_public_surface_is_stable():
         "backfill_session_title",
         "count_bound_resources",
         "create_session",
+        "derive_backend_for_agent_name",
         "get_active_session",
         "get_session",
         "is_session_archived",

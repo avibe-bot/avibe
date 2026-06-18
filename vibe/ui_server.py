@@ -4428,6 +4428,18 @@ async def sessions_update(session_id: str):
         return jsonify({"error": "no updatable fields supplied"}), 400
 
     engine = _projects_engine()
+    should_check_backend_lock = "agent_backend" in updatable
+    requested_backend = updatable.get("agent_backend")
+    if "agent_name" in updatable and "agent_backend" not in updatable:
+        try:
+            with engine.connect() as conn:
+                requested_backend = workbench_sessions_service.derive_backend_for_agent_name(
+                    conn,
+                    str(updatable.get("agent_name") or ""),
+                )
+            should_check_backend_lock = True
+        except LookupError as err:
+            return jsonify({"error": str(err)}), 404
     # The row's ``agent_status`` lags turn acceptance: ``SessionTurnManager.submit``
     # registers the in-flight gate synchronously, but ``running`` is only written
     # once dispatch starts — so a cross-backend switch landing in that startup
@@ -4435,13 +4447,13 @@ async def sessions_update(session_id: str):
     # bind-time backend backfill. Consult the controller's authoritative in-flight
     # registry first; an unreachable/slow controller falls through to the
     # row-status guard inside ``update_session`` (best effort).
-    if "agent_backend" in updatable:
+    if should_check_backend_lock:
         try:
             with engine.connect() as conn:
                 current = workbench_sessions_service.get_session(conn, session_id)
         except LookupError as err:
             return jsonify({"error": str(err)}), 404
-        if str(updatable.get("agent_backend") or "") != str(current.get("agent_backend") or ""):
+        if str(requested_backend or "") != str(current.get("agent_backend") or ""):
             try:
                 turn_result = await internal_client.turn_state(session_id)
                 in_flight = bool((turn_result.get("body") or {}).get("in_flight"))
@@ -4452,7 +4464,7 @@ async def sessions_update(session_id: str):
                     workbench_sessions_service.SessionBackendLockedError(
                         session_id=session_id,
                         current_backend=current.get("agent_backend"),
-                        requested_backend=updatable.get("agent_backend"),
+                        requested_backend=requested_backend,
                     )
                 )
 
