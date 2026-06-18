@@ -26,7 +26,10 @@ from core.agent_auth_service import (
     ClaudeOAuthBatch,
     WebAuthFlow,
 )
-from modules.agents.opencode.message_processor import extract_opencode_response_text
+from modules.agents.opencode.message_processor import (
+    extract_opencode_response_text,
+    is_empty_terminal_opencode_message,
+)
 from vibe.claude_config import (
     MANAGED_ENV_VALUES,
     clear_claude_oauth_credentials_files,
@@ -104,6 +107,26 @@ def test_opencode_message_text_extractor_ignores_non_text_by_default() -> None:
         extract_opencode_response_text(message, allow_non_text_fallback=True)
         == "internal chain-of-thought-ish content"
     )
+
+
+def test_empty_terminal_opencode_message_treats_blank_text_as_empty() -> None:
+    message = {
+        "info": {
+            "id": "msg_blank",
+            "role": "assistant",
+            "time": {"completed": 123},
+            "finish": "unknown",
+            "tokens": {
+                "input": 8,
+                "output": 4,
+                "reasoning": 2,
+                "cache": {"read": 1, "write": 0},
+            },
+        },
+        "parts": [{"type": "text", "text": " \n\t "}],
+    }
+
+    assert is_empty_terminal_opencode_message(message) is True
 
 
 def test_unsupported_backend_raises(service: AgentAuthService) -> None:

@@ -62,14 +62,21 @@ def is_empty_terminal_opencode_message(message: Mapping[str, Any]) -> bool:
     parts = message.get("parts")
     if not isinstance(parts, list):
         return True
-    non_status_parts = []
     for part in parts:
         if not isinstance(part, Mapping):
             continue
         part_type = part.get("type")
-        if part_type not in {"step-start", "step-finish"}:
-            non_status_parts.append(part)
-    return not non_status_parts
+        if part_type in {"step-start", "step-finish"}:
+            continue
+        text = part.get("text")
+        if part_type == "text":
+            if not isinstance(text, str) or not text.strip():
+                continue
+            return False
+        if isinstance(text, str) and not text.strip():
+            continue
+        return False
+    return True
 
 
 class OpenCodeMessageProcessorMixin:
