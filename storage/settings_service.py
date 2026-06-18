@@ -98,7 +98,6 @@ class SQLiteSettingsService:
                     role=None,
                     workdir=None,
                     agent_name=None,
-                    agent_backend=None,
                     agent_variant=None,
                     model=None,
                     reasoning_effort=None,
@@ -120,7 +119,6 @@ class SQLiteSettingsService:
                     role=None,
                     workdir=None,
                     agent_name=None,
-                    agent_backend=None,
                     agent_variant=None,
                     model=None,
                     reasoning_effort=None,
@@ -366,20 +364,11 @@ def _settings_rows(conn: Connection, scope_type: str):
 
 
 def _routing_columns(routing: RoutingSettings) -> dict[str, str | None]:
-    backend = routing.agent_backend
     model = routing.model
     effort = routing.reasoning_effort
-    if backend == "codex":
-        variant = routing.codex_agent
-    elif backend == "claude":
-        variant = routing.claude_agent
-    elif backend == "opencode":
-        variant = routing.opencode_agent
-    else:
-        variant = routing.codex_agent or routing.claude_agent or routing.opencode_agent
+    variant = routing.codex_agent or routing.claude_agent or routing.opencode_agent
     return {
         "agent_name": routing.agent_name,
-        "agent_backend": backend,
         "agent_variant": variant,
         "model": model,
         "reasoning_effort": effort,
@@ -390,7 +379,6 @@ def _routing_from_row(row: dict[str, Any], payload: dict[str, Any]) -> RoutingSe
     routing_payload = payload.get("routing") or {}
     routing = RoutingSettings(
         agent_name=routing_payload.get("agent_name") or routing_payload.get("agent"),
-        agent_backend=routing_payload.get("agent_backend"),
         model=routing_payload.get("model") or routing_payload.get("model_override"),
         reasoning_effort=routing_payload.get("reasoning_effort") or routing_payload.get("reasoning_effort_override"),
         opencode_agent=routing_payload.get("opencode_agent"),
@@ -403,22 +391,19 @@ def _routing_from_row(row: dict[str, Any], payload: dict[str, Any]) -> RoutingSe
         codex_model=routing_payload.get("codex_model"),
         codex_reasoning_effort=routing_payload.get("codex_reasoning_effort"),
     )
-    backend = row.get("agent_backend")
     stored_agent_name = row.get("agent_name")
     if stored_agent_name:
         routing.agent_name = routing.agent_name or str(stored_agent_name)
-    if backend:
-        routing.agent_backend = str(backend)
     variant = row.get("agent_variant")
     model = row.get("model")
     effort = row.get("reasoning_effort")
     routing.model = routing.model or model
     routing.reasoning_effort = routing.reasoning_effort or effort
-    if routing.agent_backend == "codex":
+    if routing.agent_name == "codex":
         routing.codex_agent = routing.codex_agent or variant
-    elif routing.agent_backend == "claude":
+    elif routing.agent_name == "claude":
         routing.claude_agent = routing.claude_agent or variant
-    elif routing.agent_backend == "opencode":
+    elif routing.agent_name == "opencode":
         routing.opencode_agent = routing.opencode_agent or variant
     return routing
 

@@ -145,7 +145,7 @@ Shared module surfaces:
 
 - platform choice and platform credential setup share the `VR/CM/Platforms`
   interaction model across Wizard and `Settings -> Platforms`
-- backend detection, CLI path editing, default backend selection, and install
+- backend detection, CLI path editing, default Agent selection, and install
   affordances share `VR/CM/Backends` across Wizard and `Settings -> Backends`
 - messaging rows, diagnostics checks, routing configuration, and service runtime
   controls should map to their `VR/CM/*` modules wherever the same controls

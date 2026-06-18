@@ -1864,9 +1864,6 @@ class FeishuBot(BaseIMClient):
 
     @staticmethod
     def _routing_draft_from_current(current_routing: Any) -> Dict[str, Optional[str]]:
-        backend = getattr(current_routing, "agent_backend", None) if current_routing else None
-        canonical_model = getattr(current_routing, "model", None) if current_routing else None
-        canonical_reasoning = getattr(current_routing, "reasoning_effort", None) if current_routing else None
         fields = (
             "opencode_agent",
             "opencode_model",
@@ -1881,9 +1878,6 @@ class FeishuBot(BaseIMClient):
         draft: Dict[str, Optional[str]] = {}
         for field_name in fields:
             draft[field_name] = getattr(current_routing, field_name, None) if current_routing else None
-        if backend in {"opencode", "claude", "codex"}:
-            draft[f"{backend}_model"] = draft.get(f"{backend}_model") or canonical_model
-            draft[f"{backend}_reasoning_effort"] = draft.get(f"{backend}_reasoning_effort") or canonical_reasoning
         return draft
 
     @staticmethod

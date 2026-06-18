@@ -869,7 +869,6 @@ def config_to_payload(config: V2Config, *, include_secrets: bool = False) -> dic
             "log_level": config.runtime.log_level,
         },
         "agents": {
-            "default_backend": config.agents.default_backend,
             "opencode": config.agents.opencode.__dict__,
             "claude": _agent_payload(config.agents.claude.__dict__, include_secrets=include_secrets),
             "codex": _agent_payload(config.agents.codex.__dict__, include_secrets=include_secrets),
@@ -1260,12 +1259,29 @@ def _normalize_backend_routing_payload(routing_payload: dict) -> dict:
     from modules.agents.opencode.utils import normalize_claude_reasoning_effort
 
     routing = _parse_routing(routing_payload or {})
-    if routing.agent_backend == "claude":
+    if _backend_for_routing_agent(routing.agent_name) == "claude":
         routing.reasoning_effort = normalize_claude_reasoning_effort(
             routing.model,
             routing.reasoning_effort,
         )
     return _routing_to_dict(routing)
+
+
+def _backend_for_routing_agent(agent_name: Optional[str]) -> Optional[str]:
+    name = str(agent_name or "").strip()
+    if not name:
+        return None
+    if is_agent_backend(name):
+        return name
+    store = VibeAgentStore()
+    try:
+        agent = store.get(name)
+        return agent.backend if agent is not None else None
+    except Exception:
+        logger.debug("Failed to resolve Agent backend while normalizing routing payload", exc_info=True)
+        return None
+    finally:
+        store.close()
 
 
 def save_settings(payload: dict) -> dict:

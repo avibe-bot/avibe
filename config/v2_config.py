@@ -17,7 +17,7 @@ from config.platform_registry import (
     supported_platform_ids,
     supported_platform_set,
 )
-from modules.agents.catalog import DEFAULT_AGENT_BACKEND, supported_agent_backend_set
+from modules.agents.catalog import DEFAULT_AGENT_BACKEND
 from modules.im.base import BaseIMConfig
 from vibe.i18n import normalize_language
 
@@ -473,14 +473,7 @@ class V2Config:
         claude = ClaudeConfig(**_filter_dataclass_fields(ClaudeConfig, claude_payload))
         codex = CodexConfig(**_filter_dataclass_fields(CodexConfig, codex_payload))
 
-        default_backend = agents_payload.get("default_backend", DEFAULT_AGENT_BACKEND)
-        supported_backends = supported_agent_backend_set()
-        if default_backend not in supported_backends:
-            allowed = "', '".join(sorted(supported_backends))
-            raise ValueError(f"Config 'agents.default_backend' must be one of '{allowed}'")
-
         agents = AgentsConfig(
-            default_backend=default_backend,
             opencode=opencode,
             claude=claude,
             codex=codex,
@@ -644,7 +637,6 @@ class V2Config:
                 "log_level": self.runtime.log_level,
             },
             "agents": {
-                "default_backend": self.agents.default_backend,
                 "opencode": self.agents.opencode.__dict__,
                 "claude": self.agents.claude.__dict__,
                 "codex": self.agents.codex.__dict__,

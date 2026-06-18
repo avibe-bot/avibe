@@ -124,7 +124,6 @@ def default_config():
         slack=SlackConfig(bot_token="", app_token=""),
         runtime=RuntimeConfig(default_cwd=str(work_dir)),
         agents=AgentsConfig(
-            default_backend="opencode",
             opencode=OpenCodeConfig(enabled=True, cli_path="opencode"),
             claude=ClaudeConfig(enabled=True, cli_path="claude"),
             codex=CodexConfig(enabled=False, cli_path="codex"),

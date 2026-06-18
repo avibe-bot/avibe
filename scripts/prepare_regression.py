@@ -107,7 +107,7 @@ def _build_routing(name: str) -> dict:
         raise SystemExit(f"{prefix}_BACKEND must be one of: {allowed}")
 
     return {
-        "agent_backend": backend or None,
+        "agent_name": backend or None,
         "opencode_agent": _optional(f"{prefix}_OPENCODE_AGENT"),
         "opencode_model": _optional(f"{prefix}_OPENCODE_MODEL"),
         "opencode_reasoning_effort": _optional(f"{prefix}_OPENCODE_REASONING_EFFORT"),
@@ -173,14 +173,6 @@ def _build_wechat_payload() -> dict:
     }
 
 
-def _default_backend() -> str:
-    backend = _env("REGRESSION_DEFAULT_BACKEND", "opencode")
-    if backend not in SUPPORTED_BACKENDS:
-        allowed = ", ".join(sorted(SUPPORTED_BACKENDS))
-        raise SystemExit(f"REGRESSION_DEFAULT_BACKEND must be one of: {allowed}")
-    return backend
-
-
 def _build_config_payload() -> dict:
     """Build a unified config.json with all four platforms and all three backends."""
     return {
@@ -200,7 +192,6 @@ def _build_config_payload() -> dict:
             "log_level": _env("REGRESSION_LOG_LEVEL", "INFO"),
         },
         "agents": {
-            "default_backend": _default_backend(),
             "opencode": {
                 "enabled": True,
                 "cli_path": CONTAINER_OPENCODE_CLI,
@@ -254,7 +245,7 @@ def _build_settings_payload() -> dict:
         routing = _build_routing(name)
         scope: dict = {}
 
-        if channel_id and routing["agent_backend"]:
+        if channel_id and routing["agent_name"]:
             prefix = _platform_prefix(name)
             scope[channel_id] = {
                 "enabled": True,
@@ -720,8 +711,8 @@ def prepare(output_root: Path, reset_mode: str = "none") -> None:
     summary_lines: list[str] = []
     for name, pdef in PLATFORM_DEFS.items():
         channel = _env(pdef["channel_env"]) or "(configure later in UI)"
-        backend = _env(pdef["backend_env"]) or _default_backend()
-        summary_lines.append(f"  {name}: platform={pdef['platform']} channel={channel} backend={backend}")
+        agent = _env(pdef["backend_env"]) or "(global default Agent)"
+        summary_lines.append(f"  {name}: platform={pdef['platform']} channel={channel} agent={agent}")
 
     print(f"Prepared unified regression state under {vibe_dir}")
     print("Platform routing:")

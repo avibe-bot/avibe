@@ -40,7 +40,7 @@ def _make_handler(settings_manager: _StubSettingsManager) -> tuple[SettingsHandl
 def test_handle_routing_update_preserves_existing_codex_agent_when_omitted() -> None:
     settings_manager = _StubSettingsManager(
         RoutingSettings(
-            agent_backend="codex",
+            agent_name="codex",
             codex_agent="reviewer",
             codex_model="gpt-5.4-mini",
             codex_reasoning_effort="low",
@@ -76,7 +76,7 @@ def test_handle_routing_update_preserves_existing_codex_agent_when_omitted() -> 
 def test_handle_routing_update_allows_explicit_codex_agent_clear() -> None:
     settings_manager = _StubSettingsManager(
         RoutingSettings(
-            agent_backend="codex",
+            agent_name="codex",
             codex_agent="reviewer",
             codex_model="gpt-5.4-mini",
             codex_reasoning_effort="low",
@@ -130,7 +130,7 @@ def test_handle_routing_update_handles_first_codex_save_without_existing_routing
     )
 
     assert settings_manager.saved_routing is not None
-    assert settings_manager.saved_routing.agent_backend == "codex"
+    assert settings_manager.saved_routing.agent_name == "codex"
     assert settings_manager.saved_routing.codex_agent is None
     assert settings_manager.saved_routing.model == "gpt-5.4"
     assert settings_manager.saved_routing.reasoning_effort == "high"

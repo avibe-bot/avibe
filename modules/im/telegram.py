@@ -1469,7 +1469,7 @@ class TelegramBot(BaseIMClient):
             raise ValueError("Telegram routing flow requires a message context")
         current_routing = kwargs.get("current_routing")
         current_backend = kwargs.get("current_backend") or "opencode"
-        backend = getattr(current_routing, "agent_backend", None) or current_backend or "opencode"
+        backend = current_backend or "opencode"
         current_model = getattr(current_routing, "model", None)
         current_effort = getattr(current_routing, "reasoning_effort", None)
         state = _TelegramRoutingState(

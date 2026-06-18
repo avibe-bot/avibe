@@ -779,7 +779,7 @@ class SettingsHandler(BaseHandler):
                 resolved_codex_agent = codex_agent
 
             routing = RoutingSettings(
-                agent_backend=backend,
+                agent_name=backend,
                 model=(
                     opencode_model
                     if backend == "opencode"

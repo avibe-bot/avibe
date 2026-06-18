@@ -33,6 +33,7 @@ from storage.models import (
     scope_settings,
     scopes,
     show_pages,
+    agents,
 )
 
 # Raw ``agent_runs.status`` values that are not yet terminal — archive cancels these.
@@ -255,19 +256,24 @@ def create_session(
             scopes.c.id,
             scope_settings.c.workdir,
             scope_settings.c.enabled,
-            scope_settings.c.agent_backend,
             scope_settings.c.agent_name,
+            agents.c.backend.label("agent_backend"),
             scope_settings.c.agent_variant,
             scope_settings.c.model,
             scope_settings.c.reasoning_effort,
         )
-        .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
+        .select_from(
+            scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id)
+            .outerjoin(agents, agents.c.name == scope_settings.c.agent_name)
+        )
         .where(scopes.c.id == scope_id)
     ).mappings().first()
     if scope_row is None:
         raise LookupError(f"Scope not found: {scope_id}")
     if scope_row.get("enabled") == 0:
         raise PermissionError(f"Scope is archived: {scope_id}")
+    if agent_name and not agent_backend:
+        agent_backend = _backend_for_agent_name(conn, str(agent_name))
     # Inherit the project's default Agent when the caller didn't pin a backend.
     # The default lives in ``scope_settings`` (set via Project Settings); adopting
     # it at creation makes the chat header open on the right Agent and the first
@@ -276,7 +282,7 @@ def create_session(
     # the global default (see ``update_session``). No project default → the
     # fields stay empty and dispatch falls back to the global default Vibe
     # Agent. An explicit caller backend always wins.
-    if not agent_backend and scope_row.get("agent_backend"):
+    if not agent_name and not agent_backend and scope_row.get("agent_name") and scope_row.get("agent_backend"):
         agent_backend = str(scope_row["agent_backend"])
         if agent_name is None:
             agent_name = scope_row.get("agent_name")
@@ -354,6 +360,9 @@ def update_session(
     ).first()
     if existing is None:
         raise LookupError(f"Session not found: {session_id}")
+
+    if agent_name is not _UNSET and agent_backend is _UNSET:
+        agent_backend = _backend_for_agent_name(conn, str(agent_name or "")) if agent_name else None
 
     # Backend is pinned once a NATIVE conversation exists: the native can only
     # be resumed by the backend that created it, so switching (or clearing) the
@@ -451,6 +460,14 @@ def update_session(
             requested_backend=agent_backend,
         )
     return get_session(conn, session_id)
+
+
+def _backend_for_agent_name(conn: Connection, agent_name: str) -> str:
+    cleaned = str(agent_name or "").strip()
+    if not cleaned:
+        return ""
+    backend = conn.execute(select(agents.c.backend).where(agents.c.name == cleaned)).scalar_one_or_none()
+    return str(backend or "")
 
 
 def backfill_session_title(

@@ -315,9 +315,6 @@ Important config payload shape:
 }
 ```
 
-`agents.default_backend` may still appear in legacy read-back payloads. Do not
-set it for new default-Agent changes; use the Agent catalog/default Agent instead.
-
 Discord server access belongs to `/settings`, not `/config`. Store enabled
 servers under `guilds`, next to channel settings:
 
@@ -416,7 +413,6 @@ Field meanings:
 - `require_mention`: `null` inherits the platform default, `true` requires mention, `false` disables mention gating for that channel
 - `require_bind`: `null`/`false` lets any channel member use the bot (current default); `true` gates the channel to bound users only — messages from unbound senders are silently ignored (no denial reply), while the bot's own replies stay visible to everyone. Enforced in the shared auth pipeline, so it applies on every platform. Bind is platform-wide, so `require_bind` means "is this sender a bound user", not a per-channel allowlist.
 - `routing.agent_name`: Vibe Agent name for this scope, or `null` to inherit the default Agent
-- `routing.agent_backend`: legacy compatibility field accepted on input/read-back; do not use it as the route selector for new changes
 - `routing.model`: canonical scope-level model override for the selected Agent backend
 - `routing.reasoning_effort`: canonical scope-level reasoning override for the selected Agent backend
 - `routing.<backend>_agent`: backend-specific subagent
@@ -575,7 +571,7 @@ Agent resolution priority is:
 3. global default Vibe Agent from the Agent catalog
 4. registered backend compatibility fallback, only when no enabled default Agent is available
 
-If the user names a specific channel or DM and wants a specific Agent, use the scope API, not global `/config`. Do not set a global default backend; new routing is Agent-based.
+If the user names a specific channel or DM and wants a specific Agent, use the scope API, not global `/config`. New routing is Agent-based.
 
 ### Working directory
 

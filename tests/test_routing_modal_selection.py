@@ -12,7 +12,7 @@ def test_parse_routing_modal_selection_uses_action_override():
     }
     action = {"action_id": "opencode_model_select", "selected_option": {"value": "m2"}}
 
-    selection = parse_routing_modal_selection(view=view, action=action, default_backend="claude")
+    selection = parse_routing_modal_selection(view=view, action=action, fallback_selected_backend="claude")
 
     assert selection.selected_backend == "opencode"
     assert selection.selected_opencode_model == "m2"
@@ -30,7 +30,7 @@ def test_parse_routing_modal_selection_normalizes_default_values():
         }
     }
 
-    selection = parse_routing_modal_selection(view=view, action={}, default_backend="claude")
+    selection = parse_routing_modal_selection(view=view, action={}, fallback_selected_backend="claude")
 
     assert selection.selected_backend == "claude"
     assert selection.selected_codex_agent is None
@@ -51,7 +51,7 @@ def test_parse_routing_modal_selection_applies_codex_action_override():
     }
     action = {"action_id": "codex_agent_select", "selected_option": {"value": "reviewer"}}
 
-    selection = parse_routing_modal_selection(view=view, action=action, default_backend="claude")
+    selection = parse_routing_modal_selection(view=view, action=action, fallback_selected_backend="claude")
 
     assert selection.selected_backend == "codex"
     assert selection.selected_codex_agent == "reviewer"

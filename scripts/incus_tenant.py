@@ -210,7 +210,6 @@ def default_config(spec: TenantSpec) -> dict:
         "wechat": None,
         "runtime": {"default_cwd": TENANT_WORKDIR, "log_level": "INFO"},
         "agents": {
-            "default_backend": spec.backend,
             "opencode": {"enabled": "opencode" in enabled, "cli_path": "opencode", "error_retry_limit": 1},
             "claude": {"enabled": "claude" in enabled, "cli_path": "claude"},
             "codex": {"enabled": "codex" in enabled, "cli_path": "codex"},

@@ -1201,7 +1201,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
         controller = _StubController()
         controller.agent_service = AgentService(controller)
-        controller.agent_router = AgentRouter.from_file(None, platform="slack", default_backend="codex")
+        controller.agent_router = AgentRouter.from_file(None, platform="slack", fallback_backend="codex")
         controller.config.codex = SimpleNamespace(binary="/old/codex")
         controller.config.default_backend = "codex"
         controller.agent_service.register(SimpleNamespace(name="claude"))
@@ -1231,7 +1231,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         controller.agent_service = AgentService(controller)
         controller.config.codex = None
         controller.config.default_backend = "claude"
-        controller.agent_router = AgentRouter.from_file(None, platform="slack", default_backend="claude")
+        controller.agent_router = AgentRouter.from_file(None, platform="slack", fallback_backend="claude")
         service = AgentAuthService(controller)
         runtime_config = CodexCompatConfig(enabled=True, binary="/opt/codex", extra_args=[])
         service._load_backend_runtime_config = Mock(return_value=runtime_config)

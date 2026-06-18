@@ -17,7 +17,6 @@ export interface RoutingConfigValue {
   custom_cwd: string;
   routing: {
     agent_name?: string | null;
-    agent_backend?: string | null;
     model?: string | null;
     reasoning_effort?: string | null;
     opencode_agent?: string | null;
@@ -275,12 +274,10 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
               value={value.routing.agent_name || ''}
               onChange={(e) => {
                 const nextName = e.target.value || null;
-                const nextAgent = nextName ? vibeAgents.find((agent) => agent.name === nextName) || null : null;
                 onChange({
                   routing: {
                     ...value.routing,
                     agent_name: nextName,
-                    agent_backend: nextAgent?.backend || null,
                     model: null,
                     reasoning_effort: null,
                     opencode_model: null,

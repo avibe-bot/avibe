@@ -30,7 +30,6 @@ def _routing_from_dict(payload: Optional[dict]) -> RoutingSettings:
     data = payload or {}
     return normalize_routing_settings(RoutingSettings(
         agent_name=data.get("agent_name") or data.get("agent"),
-        agent_backend=data.get("agent_backend"),
         model=data.get("model") or data.get("model_override"),
         reasoning_effort=data.get("reasoning_effort") or data.get("reasoning_effort_override"),
         opencode_agent=data.get("opencode_agent"),
@@ -426,13 +425,13 @@ class SettingsManager:
         self.update_user_settings(settings_key, settings)
         logger.info(
             f"Updated channel routing for {settings_key}: "
-            f"backend={routing.agent_backend}, "
+            f"agent={routing.agent_name}, "
             f"opencode_agent={routing.opencode_agent}, "
             f"opencode_model={routing.opencode_model}"
         )
 
     def clear_channel_routing(self, settings_key: Union[int, str]):
-        """Clear channel routing override (fall back to default backend)."""
+        """Clear channel routing override (fall back to the default Agent)."""
         settings = self.get_user_settings(settings_key)
         if settings.channel_routing:
             settings.channel_routing = None

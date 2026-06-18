@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,6 +40,7 @@ def _seed_scope_settings(
     agent_name: str | None = None,
     agent_backend: str | None = None,
     agent_variant: str | None = None,
+    routing: dict | None = None,
 ) -> None:
     conn.execute(
         scope_settings.insert().values(
@@ -53,7 +55,7 @@ def _seed_scope_settings(
             reasoning_effort=None,
             require_mention=None,
             settings_version=1,
-            settings_json="{}",
+            settings_json=json.dumps({"routing": routing}) if routing is not None else "{}",
             created_at="2026-06-04T05:00:00Z",
             updated_at="2026-06-04T05:00:00Z",
         )
@@ -330,6 +332,7 @@ def test_opencode_bind_reuses_scoped_agent_variant_session(tmp_path):
             agent_name="Code Reviewer",
             agent_backend="opencode",
             agent_variant="reviewer",
+            routing={"opencode_agent": "reviewer"},
         )
 
     ctx = MessageContext(user_id="U1", channel_id="C123", platform="slack", thread_id="171717.123")

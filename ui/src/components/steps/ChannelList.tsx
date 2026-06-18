@@ -56,7 +56,6 @@ interface ChannelConfig {
   custom_cwd: string;
   routing: {
     agent_name?: string | null;
-    agent_backend?: string | null;
     model?: string | null;
     reasoning_effort?: string | null;
     opencode_agent?: string | null;
@@ -704,7 +703,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
       next.show_message_types = defaultConfig().show_message_types;
     }
     if (!next.routing || typeof next.routing !== 'object') {
-      next.routing = { agent_name: null, agent_backend: null };
+      next.routing = { agent_name: null };
     }
     const nextConfigs = { ...configs, [channelId]: next };
     setConfigs(nextConfigs);
@@ -715,21 +714,20 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     enabled: false,
     show_message_types: ['assistant'],
     custom_cwd: '',
-      routing: {
-        agent_name: null,
-        agent_backend: null,
-        model: null,
-        reasoning_effort: null,
-        opencode_agent: null,
-        opencode_model: null,
-        opencode_reasoning_effort: null,
-        claude_agent: null,
-        claude_model: null,
-        claude_reasoning_effort: null,
-        codex_agent: null,
-        codex_model: null,
-        codex_reasoning_effort: null,
-      },
+    routing: {
+      agent_name: null,
+      model: null,
+      reasoning_effort: null,
+      opencode_agent: null,
+      opencode_model: null,
+      opencode_reasoning_effort: null,
+      claude_agent: null,
+      claude_model: null,
+      claude_reasoning_effort: null,
+      codex_agent: null,
+      codex_model: null,
+      codex_reasoning_effort: null,
+    },
     require_mention: null,
     require_bind: null,
   });
@@ -764,7 +762,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
       next.show_message_types = defaultConfig().show_message_types;
     }
     if (!next.routing || typeof next.routing !== 'object') {
-      next.routing = { agent_name: null, agent_backend: null };
+      next.routing = { agent_name: null };
     }
     const nextPlatformConfigs = { ...platformConfigs, [channelId]: next };
     setAllConfigsByPlatform((prev) => ({ ...prev, [platformId]: nextPlatformConfigs }));
@@ -1319,9 +1317,8 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               };
               const rowKey = `${channelPlatform}::${channel.id}`;
               const expanded = expandedChannelId === rowKey;
-              const legacyBackend = channelConfig.routing.agent_backend || null;
-              const selectedAgent = agentByName[channelConfig.routing.agent_name || ''] || (!legacyBackend ? agentByName[defaultAgentName || ''] : undefined);
-              const effectiveBackend = selectedAgent?.backend || legacyBackend || defaultAgent?.backend || 'opencode';
+              const selectedAgent = agentByName[channelConfig.routing.agent_name || ''] || agentByName[defaultAgentName || ''];
+              const effectiveBackend = selectedAgent?.backend || defaultAgent?.backend || 'opencode';
               const effectiveCwd = channelConfig.custom_cwd || config.runtime?.default_cwd || '~/work';
               const opencodeOptions = opencodeOptionsByCwd[effectiveCwd];
               const claudeAgents = claudeAgentsByCwd[effectiveCwd] || [];

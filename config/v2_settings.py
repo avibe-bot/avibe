@@ -77,7 +77,6 @@ def _infer_user_platform(user_id: str) -> str:
 @dataclass
 class RoutingSettings:
     agent_name: Optional[str] = None
-    agent_backend: Optional[str] = None
     # Scope-level overrides applied on top of the selected Vibe Agent.
     model: Optional[str] = None
     reasoning_effort: Optional[str] = None
@@ -94,18 +93,6 @@ class RoutingSettings:
     codex_model: Optional[str] = None
     codex_reasoning_effort: Optional[str] = None
 
-
-def _backend_field_name(backend: Optional[str], field: str) -> Optional[str]:
-    if backend in {"opencode", "claude", "codex"}:
-        return f"{backend}_{field}"
-    return None
-
-
-def _legacy_value_for_backend(routing: RoutingSettings, field: str) -> Optional[str]:
-    field_name = _backend_field_name(getattr(routing, "agent_backend", None), field)
-    return getattr(routing, field_name, None) if field_name else None
-
-
 def _payload_value(payload: dict, key: str, fallback_key: str) -> Optional[str]:
     if key in payload:
         return payload.get(key)
@@ -113,33 +100,27 @@ def _payload_value(payload: dict, key: str, fallback_key: str) -> Optional[str]:
 
 
 def normalize_routing_settings(routing: Optional[RoutingSettings]) -> RoutingSettings:
-    """Collapse legacy model/effort fields only when the backend is known."""
+    """Normalize scope routing without consulting deprecated backend routing."""
     if routing is None:
         return RoutingSettings()
-    backend = getattr(routing, "agent_backend", None)
-    collapse_legacy = backend in {"opencode", "claude", "codex"}
     return RoutingSettings(
         agent_name=getattr(routing, "agent_name", None),
-        agent_backend=backend,
-        model=getattr(routing, "model", None) or _legacy_value_for_backend(routing, "model"),
-        reasoning_effort=getattr(routing, "reasoning_effort", None)
-        or _legacy_value_for_backend(routing, "reasoning_effort"),
+        model=getattr(routing, "model", None),
+        reasoning_effort=getattr(routing, "reasoning_effort", None),
         opencode_agent=getattr(routing, "opencode_agent", None),
-        opencode_model=None if collapse_legacy else getattr(routing, "opencode_model", None),
-        opencode_reasoning_effort=None if collapse_legacy else getattr(routing, "opencode_reasoning_effort", None),
+        opencode_model=getattr(routing, "opencode_model", None),
+        opencode_reasoning_effort=getattr(routing, "opencode_reasoning_effort", None),
         claude_agent=getattr(routing, "claude_agent", None),
-        claude_model=None if collapse_legacy else getattr(routing, "claude_model", None),
-        claude_reasoning_effort=None if collapse_legacy else getattr(routing, "claude_reasoning_effort", None),
+        claude_model=getattr(routing, "claude_model", None),
+        claude_reasoning_effort=getattr(routing, "claude_reasoning_effort", None),
         codex_agent=getattr(routing, "codex_agent", None),
-        codex_model=None if collapse_legacy else getattr(routing, "codex_model", None),
-        codex_reasoning_effort=None if collapse_legacy else getattr(routing, "codex_reasoning_effort", None),
+        codex_model=getattr(routing, "codex_model", None),
+        codex_reasoning_effort=getattr(routing, "codex_reasoning_effort", None),
     )
 
 
 def routing_model_for_backend(routing: Optional[RoutingSettings], backend: Optional[str]) -> Optional[str]:
     normalized = normalize_routing_settings(routing)
-    if normalized.agent_backend and backend and normalized.agent_backend != backend:
-        return None
     return normalized.model
 
 
@@ -148,8 +129,6 @@ def routing_reasoning_effort_for_backend(
     backend: Optional[str],
 ) -> Optional[str]:
     normalized = normalize_routing_settings(routing)
-    if normalized.agent_backend and backend and normalized.agent_backend != backend:
-        return None
     return normalized.reasoning_effort
 
 
@@ -210,12 +189,13 @@ class SettingsState:
 
 def _parse_routing(payload: dict) -> RoutingSettings:
     """Parse a routing settings dict into a RoutingSettings dataclass."""
+    if not isinstance(payload, dict):
+        payload = {}
     model_key_present = "model" in payload
     reasoning_key_present = "reasoning_effort" in payload
     return normalize_routing_settings(
         RoutingSettings(
             agent_name=payload.get("agent_name") or payload.get("agent"),
-            agent_backend=payload.get("agent_backend"),
             model=_payload_value(payload, "model", "model_override"),
             reasoning_effort=_payload_value(payload, "reasoning_effort", "reasoning_effort_override"),
             opencode_agent=payload.get("opencode_agent"),
@@ -236,7 +216,6 @@ def _routing_to_dict(routing: RoutingSettings) -> dict:
     routing = normalize_routing_settings(routing)
     return {
         "agent_name": routing.agent_name,
-        "agent_backend": routing.agent_backend,
         "model": routing.model,
         "reasoning_effort": routing.reasoning_effort,
         "opencode_agent": routing.opencode_agent,
@@ -254,12 +233,7 @@ def _routing_to_dict(routing: RoutingSettings) -> dict:
 def routing_to_compat_dict(routing: RoutingSettings) -> dict:
     """Serialize routing with legacy read-only aliases derived from canonical fields."""
     routing = normalize_routing_settings(routing)
-    payload = _routing_to_dict(routing)
-    backend = routing.agent_backend
-    if backend in {"opencode", "claude", "codex"}:
-        payload[f"{backend}_model"] = routing.model
-        payload[f"{backend}_reasoning_effort"] = routing.reasoning_effort
-    return payload
+    return _routing_to_dict(routing)
 
 
 def parse_settings_payload(payload: dict) -> tuple[SettingsState, bool]:

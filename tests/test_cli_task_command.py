@@ -1286,9 +1286,9 @@ def test_resolve_agent_for_target_bootstraps_sqlite_before_scope_lookup(tmp_path
         assert conn.execute("select count(*) from scope_settings").fetchone()[0] == 0
 
 
-def test_resolve_agent_for_target_canonicalizes_legacy_scope_backend_to_agent(tmp_path: Path) -> None:
+def test_resolve_agent_for_target_ignores_deprecated_scope_backend(tmp_path: Path) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
-    cli.VibeAgentStore(db_path).ensure_default_agent(backend="claude")
+    default_agent = cli.VibeAgentStore(db_path).ensure_default_agent(backend="claude")
     from storage.importer import ensure_sqlite_state
     from storage.models import scope_settings
     from storage.settings_service import make_scope_id, upsert_scope
@@ -1329,8 +1329,8 @@ def test_resolve_agent_for_target_canonicalizes_legacy_scope_backend_to_agent(tm
         )
 
     assert agent is not None
-    assert agent.name == "codex"
-    assert agent.backend == "codex"
+    assert agent.name == default_agent.name
+    assert agent.backend == default_agent.backend
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             "select agent_name, agent_backend, settings_json from scope_settings where scope_id = ?",
@@ -1338,9 +1338,9 @@ def test_resolve_agent_for_target_canonicalizes_legacy_scope_backend_to_agent(tm
         ).fetchone()
 
     assert row is not None
-    assert row[0] == "codex"
+    assert row[0] is None
     assert row[1] == "codex"
-    assert json.loads(row[2])["routing"]["agent_name"] == "codex"
+    assert "agent_name" not in json.loads(row[2])["routing"]
 
 
 def test_resolve_agent_for_target_allows_unresolved_legacy_scope_backend_without_session_creation(
@@ -1443,9 +1443,9 @@ def test_resolve_agent_for_target_ignores_unresolved_legacy_scope_backend_for_se
     assert agent.name == default_agent.name
 
 
-def test_reserve_definition_session_uses_canonicalized_scope_agent(tmp_path: Path) -> None:
+def test_reserve_definition_session_ignores_deprecated_scope_backend(tmp_path: Path) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
-    cli.VibeAgentStore(db_path).ensure_default_agent(backend="claude")
+    default_agent = cli.VibeAgentStore(db_path).ensure_default_agent(backend="claude")
     from storage.importer import ensure_sqlite_state
     from storage.models import scope_settings
     from storage.settings_service import upsert_scope
@@ -1485,8 +1485,8 @@ def test_reserve_definition_session_uses_canonicalized_scope_agent(tmp_path: Pat
         )
         target = cli.resolve_session_id_target(session_id, db_path=db_path)
 
-    assert target.agent_backend == "codex"
-    assert target.agent_name == "codex"
+    assert target.agent_backend == default_agent.backend
+    assert target.agent_name == default_agent.name
     assert target.agent_id
 
 

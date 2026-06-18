@@ -902,7 +902,7 @@ def test_normalize_backend_routing_payload_prefers_canonical_claude_overrides() 
 def test_normalize_backend_routing_payload_prefers_canonical_over_round_trip_aliases() -> None:
     result = api._normalize_backend_routing_payload(
         {
-            "agent_backend": "claude",
+            "agent_name": "claude",
             "model": "claude-sonnet-4-6",
             "reasoning_effort": "high",
             "claude_model": "claude-opus-4-8",
@@ -919,7 +919,7 @@ def test_normalize_backend_routing_payload_prefers_canonical_over_round_trip_ali
 def test_normalize_backend_routing_payload_preserves_explicit_canonical_clears() -> None:
     result = api._normalize_backend_routing_payload(
         {
-            "agent_backend": "claude",
+            "agent_name": "claude",
             "model": None,
             "reasoning_effort": None,
             "claude_model": "claude-opus-4-8",
@@ -933,7 +933,7 @@ def test_normalize_backend_routing_payload_preserves_explicit_canonical_clears()
     assert result["claude_reasoning_effort"] is None
 
 
-def test_normalize_backend_routing_payload_preserves_legacy_claude_specific_overrides() -> None:
+def test_normalize_backend_routing_payload_ignores_deprecated_backend_for_alias_lifting() -> None:
     result = api._normalize_backend_routing_payload(
         {
             "agent_backend": "claude",
@@ -942,10 +942,10 @@ def test_normalize_backend_routing_payload_preserves_legacy_claude_specific_over
         }
     )
 
-    assert result["model"] == "claude-opus-4-8"
-    assert result["reasoning_effort"] == "max"
-    assert result["claude_model"] is None
-    assert result["claude_reasoning_effort"] is None
+    assert result["model"] is None
+    assert result["reasoning_effort"] is None
+    assert result["claude_model"] == "claude-opus-4-8"
+    assert result["claude_reasoning_effort"] == "max"
 
 
 def test_normalize_backend_routing_payload_preserves_legacy_overrides_without_backend() -> None:
@@ -2325,11 +2325,11 @@ def test_builtin_default_agent_enabled_state_follows_backend_config(tmp_path, mo
     monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
-        store.ensure_builtin_default_agents(["opencode", "claude"], default_backend="opencode")
+        store.ensure_builtin_default_agents(["opencode", "claude"])
         assert store.require("opencode").enabled is True
         assert store.require("claude").enabled is True
 
-        store.ensure_builtin_default_agents(["opencode"], default_backend="opencode")
+        store.ensure_builtin_default_agents(["opencode"])
 
         assert store.require("opencode").enabled is True
         assert store.require("claude").enabled is False
@@ -2379,7 +2379,7 @@ def test_user_can_disable_builtin_default_agent_without_catalog_reenabling_it(tm
     monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
-        store.ensure_builtin_default_agents(["opencode"], default_backend="opencode")
+        store.ensure_builtin_default_agents(["opencode"])
         store.set_enabled("opencode", False)
 
         assert "opencode" not in [agent["name"] for agent in api.get_vibe_agents()["agents"]]
@@ -2412,12 +2412,12 @@ def test_vibe_agent_api_rejects_non_boolean_enabled(tmp_path, monkeypatch):
     assert api.update_vibe_agent("reviewer", {"enabled": False})["agent"]["enabled"] is False
 
 
-def test_builtin_default_agents_legacy_default_backend_argument_is_store_only(tmp_path, monkeypatch):
+def test_builtin_default_agent_uses_first_enabled_backend_when_no_default_exists(tmp_path, monkeypatch):
     monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
-        store.ensure_builtin_default_agents(["opencode", "claude", "codex"], default_backend="codex")
-        assert store.get_default_agent_name() == "codex"
+        store.ensure_builtin_default_agents(["opencode", "claude", "codex"])
+        assert store.get_default_agent_name() == "opencode"
     finally:
         store.close()
 

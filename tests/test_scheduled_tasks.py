@@ -1054,9 +1054,16 @@ def test_runtime_session_reservation_uses_canonicalized_scope_agent(tmp_path: Pa
     monkeypatch.setattr(paths, "get_state_dir", lambda: db_path.parent)
     monkeypatch.setattr(paths, "get_sqlite_state_path", lambda: db_path)
 
+    from core.vibe_agents import VibeAgentStore
     from storage.importer import ensure_sqlite_state
     from storage.models import scope_settings
     from storage.settings_service import upsert_scope
+
+    agent_store = VibeAgentStore(db_path)
+    try:
+        default_agent = agent_store.ensure_default_agent(backend="claude")
+    finally:
+        agent_store.close()
 
     ensure_sqlite_state(db_path=db_path, primary_platform="slack")
     with create_sqlite_engine(db_path).begin() as conn:
@@ -1091,8 +1098,8 @@ def test_runtime_session_reservation_uses_canonicalized_scope_agent(tmp_path: Pa
     session_id = service._reserve_runtime_session(agent_name=None, deliver_key="slack::channel::C123")
     target = resolve_session_id_target(session_id, db_path=db_path)
 
-    assert target.agent_backend == "codex"
-    assert target.agent_name == "codex"
+    assert target.agent_backend == default_agent.backend
+    assert target.agent_name == default_agent.name
     assert target.agent_id
 
 

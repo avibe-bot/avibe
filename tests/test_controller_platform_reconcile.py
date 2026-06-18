@@ -161,7 +161,7 @@ def _controller(config):
     )
     controller.platform_settings_managers = controller.settings_manager.managers
     controller.sessions = controller.settings_manager.sessions
-    controller.agent_router = AgentRouter.from_file(None, platform=controller.primary_platform, default_backend="opencode")
+    controller.agent_router = AgentRouter.from_file(None, platform=controller.primary_platform, fallback_backend="opencode")
     controller.processing_indicator = SimpleNamespace(config=config)
     controller.audio_asr_service = SimpleNamespace(config=config)
     controller.claude_client = SimpleNamespace(config=config.claude, formatter=None)

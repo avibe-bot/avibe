@@ -92,6 +92,9 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const hasExplicitRoute = Boolean(value.agent_name || value.agent_backend);
   const routeIsDefault = isDefaultRoute ?? !hasExplicitRoute;
   const displayValue = routeIsDefault ? (defaultRoute ?? value) : value;
+  const displayedAgent = displayValue.agent_name
+    ? agents.find((agent) => agent.name === displayValue.agent_name) || null
+    : null;
 
   // Serialize patches: an agent pick carries its default model/effort, so if it
   // resolves AFTER a later model/effort pick the later choice would be rolled
@@ -113,8 +116,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
             ? {
                 agent_name: displayValue.agent_name ?? null,
                 agent_id: displayValue.agent_id ?? null,
-                agent_backend: displayValue.agent_backend ?? null,
-                agent_variant: displayValue.agent_variant ?? displayValue.agent_backend ?? null,
+                agent_backend: displayedAgent?.backend ?? displayValue.agent_backend ?? null,
+                agent_variant: displayValue.agent_variant ?? displayedAgent?.backend ?? displayValue.agent_backend ?? null,
                 model: displayValue.model ?? null,
                 reasoning_effort: displayValue.reasoning_effort ?? null,
                 ...changes,
@@ -125,10 +128,10 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
         setPatching(false);
       }
     },
-    [displayValue, patching, onChange, routeIsDefault],
+    [displayValue, displayedAgent, patching, onChange, routeIsDefault],
   );
 
-  const backend = displayValue.agent_backend || '';
+  const backend = displayValue.agent_backend || displayedAgent?.backend || '';
   const currentAgent = displayValue.agent_name;
   const currentModel = displayValue.model;
   const currentEffort = displayValue.reasoning_effort;

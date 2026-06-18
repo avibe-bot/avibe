@@ -51,7 +51,7 @@ This document defines the local setup UI flow, covering SaaS and self-host modes
 
 - Detect CLI paths automatically with a "Detect" button.
 - Allow manual override.
-- OpenCode is the recommended default backend.
+- The default Agent is selected from the Agent catalog.
 
 ## Validation
 

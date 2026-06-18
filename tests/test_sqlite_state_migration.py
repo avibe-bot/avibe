@@ -10,7 +10,7 @@ import pytest
 from config import paths
 from config.v2_settings import ChannelSettings, RoutingSettings, SettingsState, SettingsStore
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
-from storage.importer import JSON_IMPORT_MARKER, ROUTING_CANONICAL_FIELDS_MARKER, ensure_sqlite_state
+from storage.importer import JSON_IMPORT_MARKER, ensure_sqlite_state
 from storage.migrations import background_tables_ready, run_migrations
 from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
@@ -481,7 +481,9 @@ def test_run_migrations_stamps_existing_initial_schema_with_empty_version_table(
     assert version == (HEAD_REVISION,)
 
 
-def test_run_migrations_runs_data_migration_when_stamping_existing_head_schema(tmp_path: Path) -> None:
+def test_run_migrations_ignores_deprecated_scope_backend_when_stamping_existing_head_schema(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "vibe.sqlite"
     engine = create_sqlite_engine(db_path)
     try:
@@ -517,8 +519,8 @@ def test_run_migrations_runs_data_migration_when_stamping_existing_head_schema(t
         codex_agent = conn.execute("select backend from agents where name = 'codex'").fetchone()
 
     assert version == (HEAD_REVISION,)
-    assert agent_name == "codex"
-    assert codex_agent == ("codex",)
+    assert agent_name is None
+    assert codex_agent is None
 
 
 def test_run_migrations_repairs_head_columns_before_stamping_head(tmp_path: Path) -> None:
@@ -1102,7 +1104,7 @@ def test_run_migrations_skips_legacy_default_when_backend_target_is_disabled(tmp
     assert rows == {"default": 1, "opencode": 0}
 
 
-def test_run_migrations_backfills_scope_agent_names_from_legacy_backend(tmp_path: Path) -> None:
+def test_run_migrations_ignores_deprecated_scope_backend_route(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     engine = create_sqlite_engine(db_path)
     try:
@@ -1162,9 +1164,7 @@ def test_run_migrations_backfills_scope_agent_names_from_legacy_backend(tmp_path
 
     with sqlite3.connect(db_path) as conn:
         rows = dict(conn.execute("select scope_id, agent_name from scope_settings"))
-        codex_agent = conn.execute(
-            "select backend, source, enabled, metadata_json from agents where name = 'codex'"
-        ).fetchone()
+        codex_agent = conn.execute("select backend from agents where name = 'codex'").fetchone()
         claude_agent_count = conn.execute("select count(*) from agents where name = 'claude'").fetchone()[0]
         payload = json.loads(
             conn.execute(
@@ -1174,33 +1174,27 @@ def test_run_migrations_backfills_scope_agent_names_from_legacy_backend(tmp_path
         malformed_json = conn.execute(
             "select settings_json from scope_settings where scope_id = 'slack::channel::C4'"
         ).fetchone()[0]
-        legacy_payload = json.loads(
-            conn.execute(
-                "select settings_json from scope_settings where scope_id = 'slack::channel::C6'"
-            ).fetchone()[0]
-        )
         version = conn.execute("select version_num from alembic_version").fetchone()
 
     assert version == (HEAD_REVISION,)
-    assert rows["slack::channel::C1"] == "codex"
-    assert rows["slack::user::U1"] == "claude"
+    assert rows["slack::channel::C1"] is None
+    assert rows["slack::user::U1"] is None
     assert rows["slack::channel::C2"] == "reviewer"
     assert rows["slack::channel::C3"] is None
-    assert rows["slack::channel::C4"] == "claude"
-    assert rows["slack::channel::C5"] == "reviewer"
-    assert rows["slack::channel::C6"] == "legacy-reviewer"
+    assert rows["slack::channel::C4"] is None
+    assert rows["slack::channel::C5"] is None
+    assert rows["slack::channel::C6"] is None
     assert rows["discord::guild::G1"] is None
-    assert codex_agent[0:3] == ("codex", "builtin", 1)
-    assert json.loads(codex_agent[3])["builtin_default"] is True
+    assert codex_agent is None
     assert claude_agent_count == 1
-    assert payload["routing"]["agent_name"] == "codex"
+    assert "agent_name" not in payload["routing"]
     assert payload["routing"]["codex_model"] == "gpt-5.5"
-    assert legacy_payload["routing"]["agent_name"] == "legacy-reviewer"
-    assert legacy_payload["routing"]["agent"] == "legacy-reviewer"
     assert malformed_json == "not-json"
 
 
-def test_run_migrations_skips_agent_name_backfill_on_backend_name_conflict(tmp_path: Path) -> None:
+def test_run_migrations_leaves_deprecated_scope_backend_unresolved_on_agent_name_conflict(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "vibe.sqlite"
     engine = create_sqlite_engine(db_path)
     try:
@@ -1247,7 +1241,7 @@ def test_run_migrations_skips_agent_name_backfill_on_backend_name_conflict(tmp_p
 
     assert version == (HEAD_REVISION,)
     assert rows["slack::channel::C1"] is None
-    assert rows["slack::channel::C2"] == "reviewer"
+    assert rows["slack::channel::C2"] is None
     assert codex_rows == 1
 
 
@@ -1550,8 +1544,8 @@ def test_ensure_sqlite_state_imports_json_once(tmp_path: Path) -> None:
         except sqlite3.IntegrityError:
             duplicate_insert_ok = False
     assert last_activity == ('"2026-05-01T00:00:00+00:00"',)
-    assert channel_settings == ("C123", "/repo", "codex", "codex", "gpt-5.4", None)
-    assert user_settings == ("admin", "opencode", "opencode")
+    assert channel_settings == ("C123", "/repo", None, None, None, None)
+    assert user_settings == ("admin", None, None)
     assert re.fullmatch(r"ses[23456789abcdefghjkmnpqrstuvwxyz]{10}", agent_session[0])
     assert agent_session[1] == "slack::channel::C123"
     # OpenCode ``base:/cwd`` composite is normalised to the bare anchor on import
@@ -1661,11 +1655,11 @@ def test_ensure_sqlite_state_import_skips_agent_name_conflict(tmp_path: Path) ->
         codex_rows = conn.execute("select count(*) from agents where normalized_name = 'codex'").fetchone()[0]
 
     assert channel_agent_name is None
-    assert user_agent_name == "opencode"
+    assert user_agent_name is None
     assert codex_rows == 1
 
 
-def test_ensure_sqlite_state_migrates_scope_routing_legacy_fields_once(tmp_path: Path) -> None:
+def test_ensure_sqlite_state_preserves_backend_aliases_without_deprecated_backend(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     db_path = state_dir / "vibe.sqlite"
@@ -1679,7 +1673,6 @@ def test_ensure_sqlite_state_migrates_scope_routing_legacy_fields_once(tmp_path:
                     "slack::C123": ChannelSettings(
                         enabled=True,
                         routing=RoutingSettings(
-                            agent_backend="claude",
                             claude_model="claude-opus-4-8",
                             claude_reasoning_effort="max",
                         ),
@@ -1702,27 +1695,21 @@ def test_ensure_sqlite_state_migrates_scope_routing_legacy_fields_once(tmp_path:
 
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
-            "select model, reasoning_effort, settings_json from scope_settings where scope_id = ?",
+            "select agent_backend, model, reasoning_effort, settings_json from scope_settings where scope_id = ?",
             ("slack::channel::C123",),
         ).fetchone()
-        marker = conn.execute(
-            "select value_json from state_meta where key = ?",
-            (ROUTING_CANONICAL_FIELDS_MARKER,),
-        ).fetchone()
 
-    routing = json.loads(row[2])["routing"]
-    marker_payload = json.loads(marker[0])
-    assert row[:2] == ("claude-opus-4-8", "max")
-    assert routing["model"] == "claude-opus-4-8"
-    assert routing["reasoning_effort"] == "max"
-    assert routing["claude_model"] is None
-    assert routing["claude_reasoning_effort"] is None
-    assert marker_payload["scope_settings_migrated"] == 1
-    assert first.counts["routing_scope_settings_migrated"] == 1
+    routing = json.loads(row[3])["routing"]
+    assert row[:3] == (None, None, None)
+    assert routing["model"] is None
+    assert routing["reasoning_effort"] is None
+    assert routing["claude_model"] == "claude-opus-4-8"
+    assert routing["claude_reasoning_effort"] == "max"
+    assert "routing_scope_settings_migrated" not in first.counts
     assert "routing_scope_settings_migrated" not in second.counts
 
 
-def test_ensure_sqlite_state_prefers_canonical_scope_routing_over_stale_alias(tmp_path: Path) -> None:
+def test_ensure_sqlite_state_keeps_canonical_scope_routing_with_stale_alias(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     db_path = state_dir / "vibe.sqlite"
@@ -1736,7 +1723,6 @@ def test_ensure_sqlite_state_prefers_canonical_scope_routing_over_stale_alias(tm
                     "slack::C123": ChannelSettings(
                         enabled=True,
                         routing=RoutingSettings(
-                            agent_backend="claude",
                             model="claude-sonnet-4-6",
                             reasoning_effort="high",
                             claude_model="claude-opus-4-8",
@@ -1768,8 +1754,8 @@ def test_ensure_sqlite_state_prefers_canonical_scope_routing_over_stale_alias(tm
     assert row[:2] == ("claude-sonnet-4-6", "high")
     assert routing["model"] == "claude-sonnet-4-6"
     assert routing["reasoning_effort"] == "high"
-    assert routing["claude_model"] is None
-    assert routing["claude_reasoning_effort"] is None
+    assert routing["claude_model"] == "claude-opus-4-8"
+    assert routing["claude_reasoning_effort"] == "max"
 
 
 def test_ensure_sqlite_state_preserves_legacy_routing_without_backend(tmp_path: Path) -> None:
@@ -1810,19 +1796,13 @@ def test_ensure_sqlite_state_preserves_legacy_routing_without_backend(tmp_path: 
             "select agent_backend, model, reasoning_effort, settings_json from scope_settings where scope_id = ?",
             ("slack::channel::C123",),
         ).fetchone()
-        marker = conn.execute(
-            "select value_json from state_meta where key = ?",
-            (ROUTING_CANONICAL_FIELDS_MARKER,),
-        ).fetchone()
 
     routing = json.loads(row[3])["routing"]
-    marker_payload = json.loads(marker[0])
     assert row[:3] == (None, None, None)
     assert routing["model"] is None
     assert routing["reasoning_effort"] is None
     assert routing["claude_model"] == "claude-opus-4-8"
     assert routing["claude_reasoning_effort"] == "max"
-    assert marker_payload["scope_settings_migrated"] == 0
     assert "routing_scope_settings_migrated" not in result.counts
 
     store = SettingsStore(state_dir / "settings.json")

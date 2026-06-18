@@ -13,11 +13,7 @@ default Agent named after that Backend.
 ## Implementation Plan
 
 1. Ensure built-in default Agents exist for enabled Backends.
-2. Normalize legacy Scope settings:
-   - `agent_backend` maps to the matching built-in Agent when `agent_name` is
-     absent.
-   - backend-specific model and reasoning fields are migrated into the
-     canonical Scope-level `model` and `reasoning_effort` overrides.
+2. Treat the old scope backend route field as deprecated and ignored.
 3. Resolve runtime settings from Scope first:
    - Scope chooses Agent.
    - Agent supplies Backend and defaults.

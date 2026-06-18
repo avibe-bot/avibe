@@ -13,9 +13,9 @@ interface UseNewSessionOptions {
 }
 
 // The agent/model/effort selection (agent route). Empty = the server default
-// Agent. Fields allow null because the AgentRoutePicker emits
-// null to clear model/effort when switching agents; send() drops nulls before
-// creating so the create payload only carries real values.
+// Agent. Fields allow null because the AgentRoutePicker emits null to clear
+// model/effort when switching agents; send() drops nulls before creating so
+// the create payload only carries real values.
 export interface AgentRouteSelection {
   agent_backend?: string | null;
   agent_name?: string | null;
@@ -126,7 +126,6 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
     const def = target?.default_agent;
     return def
       ? {
-          agent_backend: def.agent_backend,
           agent_name: def.agent_name,
           agent_variant: def.agent_variant,
           model: def.model,
@@ -204,10 +203,16 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
       // default is empty here, so the payload carries only real fields and an
       // empty route sends nothing → the server resolves the global default.
       const overrides: Partial<WorkbenchSessionCreate> = {};
-      if (routeForCreate.agent_backend) overrides.agent_backend = routeForCreate.agent_backend;
       if (routeForCreate.agent_name) overrides.agent_name = routeForCreate.agent_name;
       if (routeForCreate.agent_id) overrides.agent_id = routeForCreate.agent_id;
-      if (routeForCreate.agent_variant) overrides.agent_variant = routeForCreate.agent_variant;
+      const routeAgent = routeForCreate.agent_name
+        ? agents.find((agent) => agent.name === routeForCreate.agent_name) || null
+        : null;
+      const backendForCreate = routeForCreate.agent_backend || routeAgent?.backend || null;
+      if (backendForCreate) overrides.agent_backend = backendForCreate;
+      if (routeForCreate.agent_variant || backendForCreate) {
+        overrides.agent_variant = routeForCreate.agent_variant || backendForCreate || undefined;
+      }
       if (routeForCreate.model) overrides.model = routeForCreate.model;
       if (routeForCreate.reasoning_effort) overrides.reasoning_effort = routeForCreate.reasoning_effort;
       const session = await createSessionForProject(target.id, overrides);
@@ -218,7 +223,7 @@ export function useNewSession({ active = true, loadErrorText, createFailedText }
       }
       return { sessionId: session.id, initialMessage: trimmed };
     },
-    [sending, loaded, target, routeForCreate, createSessionForProject, createFailedText],
+    [sending, loaded, target, routeForCreate, agents, createSessionForProject, createFailedText],
   );
 
   const upsertSelectProject = useCallback(

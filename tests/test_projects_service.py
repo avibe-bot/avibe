@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from core.vibe_agents import VibeAgentStore
 from storage import projects_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
@@ -22,6 +23,15 @@ def engine():
     # so this initialises and connects to an isolated SQLite state file.
     ensure_sqlite_state()
     return create_sqlite_engine()
+
+
+def _ensure_agent(name: str, backend: str) -> None:
+    store = VibeAgentStore()
+    try:
+        if store.get(name) is None:
+            store.create(name=name, backend=backend)
+    finally:
+        store.close()
 
 
 def test_create_project_is_idempotent_by_path(engine, tmp_path):
@@ -249,6 +259,7 @@ def test_new_project_has_no_default_agent(engine, tmp_path):
 
 
 def test_update_project_sets_and_reads_default_agent(engine, tmp_path):
+    _ensure_agent("claude", "claude")
     folder = tmp_path / "proj"
     folder.mkdir()
     with engine.begin() as conn:
@@ -256,7 +267,6 @@ def test_update_project_sets_and_reads_default_agent(engine, tmp_path):
         updated = projects_service.update_project(
             conn,
             created["id"],
-            agent_backend="claude",
             agent_name="claude",
             agent_variant="claude",
             model="opus",
@@ -282,12 +292,11 @@ def test_update_project_clears_default_agent(engine, tmp_path):
     folder.mkdir()
     with engine.begin() as conn:
         created = projects_service.create_project(conn, str(folder))
-        projects_service.update_project(conn, created["id"], agent_backend="codex", model="gpt-5-codex")
+        projects_service.update_project(conn, created["id"], agent_name="codex", model="gpt-5-codex")
         # Sending explicit Nones clears the default back to "follow global default".
         cleared = projects_service.update_project(
             conn,
             created["id"],
-            agent_backend=None,
             agent_name=None,
             agent_variant=None,
             model=None,
@@ -297,11 +306,12 @@ def test_update_project_clears_default_agent(engine, tmp_path):
 
 
 def test_rename_leaves_default_agent_untouched(engine, tmp_path):
+    _ensure_agent("claude", "claude")
     folder = tmp_path / "proj"
     folder.mkdir()
     with engine.begin() as conn:
         created = projects_service.create_project(conn, str(folder))
-        projects_service.update_project(conn, created["id"], agent_backend="claude", model="opus")
+        projects_service.update_project(conn, created["id"], agent_name="claude", model="opus")
         # Omitted default-Agent fields must not be wiped by an unrelated update.
         renamed = projects_service.update_project(conn, created["id"], display_name="Renamed")
     assert renamed["display_name"] == "Renamed"
@@ -311,6 +321,7 @@ def test_rename_leaves_default_agent_untouched(engine, tmp_path):
 
 def test_set_default_agent_on_folderless_project_inserts_row(engine):
     """A legacy project with no scope_settings row still accepts a default Agent."""
+    _ensure_agent("opencode", "opencode")
     ts = "2026-01-01T00:00:00Z"
     scope_id = "avibe::project::proj_folderless_default"
     with engine.begin() as conn:
@@ -333,7 +344,7 @@ def test_set_default_agent_on_folderless_project_inserts_row(engine):
         )
         # No scope_settings row yet → update must INSERT one carrying the default.
         updated = projects_service.update_project(
-            conn, "proj_folderless_default", agent_backend="opencode", model="grok-code"
+            conn, "proj_folderless_default", agent_name="opencode", model="grok-code"
         )
     assert updated["default_agent"]["agent_backend"] == "opencode"
     assert updated["default_agent"]["model"] == "grok-code"

@@ -352,7 +352,6 @@ def test_settings_save_does_not_migrate_legacy_model_fields_without_backend(tmp_
                         enabled=True,
                         routing=RoutingSettings(
                             agent_name=None,
-                            agent_backend=None,
                             codex_model="gpt-stale-codex",
                             claude_model="claude-stale",
                             opencode_model="openai/stale",
@@ -377,7 +376,7 @@ def test_settings_save_does_not_migrate_legacy_model_fields_without_backend(tmp_
     assert routing.opencode_model == "openai/stale"
 
 
-def test_settings_save_does_not_migrate_active_backend_legacy_fields(tmp_path: Path) -> None:
+def test_settings_save_ignores_deprecated_backend_when_legacy_fields_exist(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path)
     service = SQLiteSettingsService(db_path)
@@ -388,7 +387,7 @@ def test_settings_save_does_not_migrate_active_backend_legacy_fields(tmp_path: P
                     "slack::C123": ChannelSettings(
                         enabled=True,
                         routing=RoutingSettings(
-                            agent_backend="claude",
+                            agent_name="claude",
                             claude_model="claude-opus-4-8",
                             claude_reasoning_effort="max",
                         ),

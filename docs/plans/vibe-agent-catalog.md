@@ -2,18 +2,8 @@
 
 ## Background
 
-Vibe Remote currently treats "agent" mostly as backend-specific routing data:
-
-- `agent_backend`
-- `opencode_agent`
-- `opencode_model`
-- `opencode_reasoning_effort`
-- `claude_agent`
-- `claude_model`
-- `claude_reasoning_effort`
-- `codex_agent`
-- `codex_model`
-- `codex_reasoning_effort`
+Vibe Remote used to treat "agent" mostly as backend-specific routing data.
+The old scope backend route field is now deprecated and ignored.
 
 That was useful while each backend had a different subagent model, but it is not
 the right product abstraction. Scope is becoming the durable project/workspace
@@ -109,8 +99,8 @@ scope_settings
   display settings...
 ```
 
-The existing `agent_backend` and backend-specific agent/model/effort fields are
-replaced conceptually by one `agent_name` reference.
+Scope routing is now represented by one `agent_name` reference plus optional
+model, reasoning, and subagent overrides.
 
 Resolution rules:
 

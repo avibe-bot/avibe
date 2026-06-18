@@ -3815,7 +3815,7 @@ def projects_update(project_id: str):
     # (see ``projects_service.update_project`` and its ``_UNSET`` sentinel).
     agent_kwargs = {
         field: payload[field]
-        for field in ("agent_backend", "agent_name", "agent_variant", "model", "reasoning_effort")
+        for field in ("agent_name", "agent_variant", "model", "reasoning_effort")
         if field in payload
     }
     if display_name is None and folder_path is None and not agent_kwargs:
@@ -5874,7 +5874,7 @@ if os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes"):
                     from config.v2_settings import RoutingSettings
 
                     ch.routing = RoutingSettings(
-                        agent_backend=modal_values.get("backend", "opencode"),
+                        agent_name=modal_values.get("backend", "opencode"),
                         model=(
                             modal_values.get("opencode_model")
                             or modal_values.get("claude_model")
@@ -5921,7 +5921,7 @@ if os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes"):
                     from config.v2_settings import RoutingSettings
 
                     ch.routing = RoutingSettings(
-                        agent_backend=modal_values.get("backend", "opencode"),
+                        agent_name=modal_values.get("backend", "opencode"),
                         model=(
                             modal_values.get("opencode_model")
                             or modal_values.get("claude_model")

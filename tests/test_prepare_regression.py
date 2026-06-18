@@ -83,7 +83,7 @@ def test_prepare_generates_unified_state(tmp_path: Path, monkeypatch: pytest.Mon
     assert config["agents"]["opencode"]["enabled"] is True
     assert config["agents"]["claude"]["enabled"] is True
     assert config["agents"]["codex"]["enabled"] is True
-    assert config["agents"]["default_backend"] == "opencode"
+    assert "default_backend" not in config["agents"]
     assert config["agents"]["opencode"]["cli_path"] == "opencode"
     assert config["agents"]["opencode"]["default_model"] == "gpt-5.4"
     assert config["agents"]["opencode"]["default_provider"] == "openai"
@@ -93,13 +93,13 @@ def test_prepare_generates_unified_state(tmp_path: Path, monkeypatch: pytest.Mon
     assert config["runtime"]["default_cwd"] == "/home/avibe/.avibe/workdir"
 
     # Per-channel routing in settings for each platform
-    assert settings["scopes"]["channel"]["slack"]["C123SLACK"]["routing"]["agent_backend"] == "opencode"
+    assert settings["scopes"]["channel"]["slack"]["C123SLACK"]["routing"]["agent_name"] == "opencode"
     assert settings["scopes"]["channel"]["slack"]["C123SLACK"]["custom_cwd"] == "/home/avibe/.avibe/workdir"
-    assert settings["scopes"]["channel"]["discord"]["123456789012345678"]["routing"]["agent_backend"] == "codex"
+    assert settings["scopes"]["channel"]["discord"]["123456789012345678"]["routing"]["agent_name"] == "codex"
     assert settings["schema_version"] == 5
     assert settings["scopes"]["guild"]["discord"]["754776951587340359"]["enabled"] is True
     assert settings["scopes"]["guild_policy"]["discord"]["default_enabled"] is False
-    assert settings["scopes"]["channel"]["lark"]["oc_test_chat_id"]["routing"]["agent_backend"] == "claude"
+    assert settings["scopes"]["channel"]["lark"]["oc_test_chat_id"]["routing"]["agent_name"] == "claude"
 
     # WeChat has no channel set, so scope is empty
     assert settings["scopes"]["channel"]["wechat"] == {}
@@ -483,7 +483,7 @@ def test_prepare_reset_config_preserves_workdir(tmp_path: Path, monkeypatch: pyt
 
     assert (workdir / "keep.txt").read_text(encoding="utf-8") == "keep-me"
     refreshed = json.loads((config_dir / "config.json").read_text(encoding="utf-8"))
-    assert refreshed["agents"]["default_backend"] == "opencode"
+    assert "default_backend" not in refreshed["agents"]
 
 
 def test_prepare_reset_config_rewrites_shared_agent_configs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -572,7 +572,7 @@ def test_prepare_reset_all_clears_workdir(tmp_path: Path, monkeypatch: pytest.Mo
     assert not (workdir / "drop.txt").exists()
 
 
-def test_prepare_default_backend_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_prepare_ignores_default_backend_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     module = _load_module()
     _set_required_env(monkeypatch)
     monkeypatch.setenv("REGRESSION_DEFAULT_BACKEND", "claude")
@@ -580,7 +580,7 @@ def test_prepare_default_backend_from_env(tmp_path: Path, monkeypatch: pytest.Mo
     module.prepare(tmp_path, reset_mode="config")
 
     config = json.loads((tmp_path / "home" / ".avibe" / "config" / "config.json").read_text(encoding="utf-8"))
-    assert config["agents"]["default_backend"] == "claude"
+    assert "default_backend" not in config["agents"]
 
 
 def test_prepare_all_platform_channel_routing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -592,5 +592,5 @@ def test_prepare_all_platform_channel_routing(tmp_path: Path, monkeypatch: pytes
     module.prepare(tmp_path, reset_mode="config")
 
     settings = json.loads((tmp_path / "home" / ".avibe" / "state" / "settings.json").read_text(encoding="utf-8"))
-    assert settings["scopes"]["channel"]["wechat"]["wx_test_room"]["routing"]["agent_backend"] == "codex"
-    assert settings["scopes"]["channel"]["slack"]["C123SLACK"]["routing"]["agent_backend"] == "opencode"
+    assert settings["scopes"]["channel"]["wechat"]["wx_test_room"]["routing"]["agent_name"] == "codex"
+    assert settings["scopes"]["channel"]["slack"]["C123SLACK"]["routing"]["agent_name"] == "opencode"

@@ -42,7 +42,7 @@ V2 stores all user data under `~/.vibe_remote/` as JSON files. The model preserv
 
 ### agents
 
-- `default_backend`: `"opencode" | "claude" | "codex"`
+- `default_backend`: deprecated legacy field; ignored by current Agent-first routing.
 - `opencode`:
   - `enabled`: bool
   - `cli_path`: absolute path to OpenCode CLI
@@ -72,10 +72,12 @@ Settings are stored per channel and preserve existing functionality.
   - `show_message_types`: list (default: `[]` - hide all message types)
   - `custom_cwd`: optional cwd override
   - `routing`:
-    - `agent_backend`: `"opencode" | "claude" | "codex" | null`
-    - `opencode_agent`: optional OpenCode agent
-    - `opencode_model`: optional OpenCode model
-    - `opencode_reasoning_effort`: optional OpenCode reasoning effort
+    - `agent_name`: optional Vibe Agent name
+    - `model`: optional scope model override
+    - `reasoning_effort`: optional scope reasoning override
+    - `<backend>_agent`: optional backend-specific subagent override
+
+The old scope backend route field is deprecated and ignored.
 
 ## sessions.json (Session State)
 

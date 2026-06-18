@@ -346,8 +346,6 @@ class VibeAgentStore:
     def ensure_builtin_default_agents(
         self,
         backends: Iterable[str],
-        *,
-        default_backend: Optional[str] = None,
     ) -> list[VibeAgent]:
         ensured: list[VibeAgent] = []
         enabled_backends: list[str] = []
@@ -374,11 +372,7 @@ class VibeAgentStore:
         default_agent = self.get(default_name) if default_name else None
         enabled_ensured = [agent for agent in ensured if agent.enabled]
         if (default_agent is None or not default_agent.enabled) and enabled_ensured:
-            preferred = None
-            if default_backend:
-                preferred_backend = validate_agent_backend(default_backend)
-                preferred = next((agent for agent in enabled_ensured if agent.backend == preferred_backend), None)
-            self.set_default_agent_name((preferred or enabled_ensured[0]).name)
+            self.set_default_agent_name(enabled_ensured[0].name)
         return ensured
 
     def get_builtin_default_agent_for_backend(self, backend: str, *, enabled_only: bool = True) -> Optional[VibeAgent]:

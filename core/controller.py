@@ -276,10 +276,9 @@ class Controller:
         # Migrate legacy per-channel language into global config
         self._migrate_language_from_settings()
 
-        # Legacy backend router. It is kept for compatibility with old route
-        # files/tests; product defaults are resolved through VibeAgentStore.
-        default_backend = DEFAULT_AGENT_BACKEND
-        self.agent_router = AgentRouter.from_file(None, platform=self.primary_platform, default_backend=default_backend)
+        # Legacy backend router. It is kept for platform runtime compatibility;
+        # product routing is resolved through VibeAgentStore.
+        self.agent_router = AgentRouter.from_file(None, platform=self.primary_platform)
         for platform in self.enabled_platforms:
             if platform not in self.agent_router.platform_routes:
                 self.agent_router.platform_routes[platform] = self.agent_router.platform_routes[self.primary_platform]
@@ -1059,11 +1058,6 @@ class Controller:
         try:
             if agent_name:
                 return self.vibe_agent_store.require_enabled(agent_name)
-            legacy_backend = target.get("agent_backend") if target else None
-            if legacy_backend:
-                agent = self.vibe_agent_store.get_builtin_default_agent_for_backend(legacy_backend)
-                if agent is not None:
-                    return agent
             default_agent = self.vibe_agent_store.get_default_agent()
             if default_agent is not None:
                 return default_agent

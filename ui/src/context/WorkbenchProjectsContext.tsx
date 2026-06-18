@@ -535,7 +535,6 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       // the user picked an agent (all set) or cleared it (all null → default
       // dropped). Let failures propagate — apiFetch already toasted.
       const updated = await api.updateProject(projectId, {
-        agent_backend: route.agent_backend,
         agent_name: route.agent_name,
         agent_variant: route.agent_variant,
         model: route.model,

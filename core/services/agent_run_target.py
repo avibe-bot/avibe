@@ -9,6 +9,7 @@ sessions.
 from __future__ import annotations
 
 import logging
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -438,16 +439,13 @@ def _agent_target_from_vibe_agent(agent: Any, *, scope_row: Optional[dict[str, A
     backend = _supported_backend(getattr(agent, "backend", None))
     if not backend:
         return None
-    scope_backend = _supported_backend(scope_row.get("agent_backend")) if scope_row else None
-    apply_scope_overrides = scope_backend is None or scope_backend == backend
-    compatible_scope_row = scope_row if apply_scope_overrides else None
-    scope_model = _optional_str(scope_row.get("model")) if scope_row and apply_scope_overrides else None
-    scope_effort = _optional_str(scope_row.get("reasoning_effort")) if scope_row and apply_scope_overrides else None
+    scope_model = _optional_str(scope_row.get("model")) if scope_row else None
+    scope_effort = _optional_str(scope_row.get("reasoning_effort")) if scope_row else None
     return ResolvedAgentTarget(
         agent_id=_optional_str(getattr(agent, "id", None)),
         agent_name=_optional_str(getattr(agent, "name", None)),
         agent_backend=backend,
-        agent_variant=_agent_variant_for_backend(backend, compatible_scope_row),
+        agent_variant=_agent_variant_for_backend(backend, scope_row),
         model=scope_model or _optional_str(getattr(agent, "model", None)),
         reasoning_effort=scope_effort or _optional_str(getattr(agent, "reasoning_effort", None)),
     )
@@ -461,8 +459,26 @@ def _supported_backend(value: Any) -> Optional[str]:
 
 
 def _agent_variant_for_backend(backend: str, scope_row: Optional[dict[str, Any]]) -> str:
-    variant = _optional_str(scope_row.get("agent_variant")) if scope_row else None
-    return variant or backend
+    routing_payload = _scope_routing_payload(scope_row)
+    if routing_payload:
+        variant = _optional_str(routing_payload.get(f"{backend}_agent"))
+        if variant:
+            return variant
+    return backend
+
+
+def _scope_routing_payload(scope_row: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if not scope_row:
+        return {}
+    raw = scope_row.get("settings_json")
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return {}
+    routing = payload.get("routing") if isinstance(payload, dict) else None
+    return routing if isinstance(routing, dict) else {}
 
 
 def _scope_for_context(conn, context: MessageContext, platform: str, settings_key: str) -> Optional[dict[str, Any]]:
@@ -505,10 +521,10 @@ def _scope_row(conn, scope_id: str) -> Optional[dict[str, Any]]:
             scopes.c.native_id,
             scope_settings.c.workdir,
             scope_settings.c.agent_name,
-            scope_settings.c.agent_backend,
             scope_settings.c.agent_variant,
             scope_settings.c.model,
             scope_settings.c.reasoning_effort,
+            scope_settings.c.settings_json,
         )
         .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
         .where(scopes.c.id == scope_id)

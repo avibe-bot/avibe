@@ -59,7 +59,7 @@ export const ProjectSettingsDialog: React.FC<{
     // PRESENT in the patch wins (incl. an explicit null that clears it); an
     // absent field keeps its stored value.
     const merged: ProjectDefaultAgent = {
-      agent_backend: 'agent_backend' in patch ? patch.agent_backend ?? null : current?.agent_backend ?? null,
+      agent_backend: null,
       agent_name: 'agent_name' in patch ? patch.agent_name ?? null : current?.agent_name ?? null,
       agent_variant: 'agent_variant' in patch ? patch.agent_variant ?? null : current?.agent_variant ?? null,
       model: 'model' in patch ? patch.model ?? null : current?.model ?? null,

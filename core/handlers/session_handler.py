@@ -996,10 +996,10 @@ class SessionHandler(BaseHandler):
             session_key = self._get_session_key(context)
             settings_manager = self._get_settings_manager(context)
             current_routing = settings_manager.get_channel_routing(settings_key)
-            preserve_scope_overrides = bool(current_routing and current_routing.agent_backend == agent)
+            preserve_scope_overrides = bool(current_routing and current_routing.agent_name == agent)
 
             routing = ChannelRouting(
-                agent_backend=agent,
+                agent_name=agent,
                 model=current_routing.model if preserve_scope_overrides else None,
                 reasoning_effort=current_routing.reasoning_effort if preserve_scope_overrides else None,
                 opencode_agent=current_routing.opencode_agent if current_routing else None,

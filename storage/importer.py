@@ -4,7 +4,6 @@ import json
 import logging
 import shutil
 import tempfile
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,7 +41,6 @@ from storage.settings_service import SQLiteSettingsService, upsert_scope
 
 JSON_IMPORT_MARKER = "json_import_completed_at"
 BACKGROUND_IMPORT_MARKER = "background_json_import_completed_at"
-ROUTING_CANONICAL_FIELDS_MARKER = "routing_canonical_fields_migrated_at"
 logger = logging.getLogger(__name__)
 
 
@@ -105,7 +103,6 @@ def ensure_sqlite_state(
             _write_parsed_state(target_db, parsed)
 
             with engine.begin() as conn:
-                _backfill_imported_scope_agent_names(conn)
                 discovered_count = _import_discovered_chats(conn, parsed.discovered)
                 background_counts = _import_background_state(conn, target_state_dir)
                 data_migration_counts = _run_sqlite_data_migrations(conn)
@@ -226,133 +223,8 @@ def _set_background_import_marker(conn: Connection) -> None:
     )
 
 
-def _has_data_migration_marker(conn: Connection, key: str) -> bool:
-    return conn.execute(select(state_meta.c.value_json).where(state_meta.c.key == key)).scalar_one_or_none() is not None
-
-
-def _set_data_migration_marker(conn: Connection, key: str, metadata: dict[str, Any]) -> None:
-    now = _utc_now_iso()
-    payload = {"completed_at": now, **metadata}
-    conn.execute(state_meta.delete().where(state_meta.c.key == key))
-    conn.execute(
-        state_meta.insert().values(
-            key=key,
-            value_json=_json_dumps(payload),
-            updated_at=now,
-        )
-    )
-
-
 def _run_sqlite_data_migrations(conn: Connection) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    scope_agent_names = _backfill_scope_agent_names(conn)
-    if scope_agent_names:
-        counts["scope_agent_names_backfilled"] = scope_agent_names
-    if not _has_data_migration_marker(conn, ROUTING_CANONICAL_FIELDS_MARKER):
-        migrated = _migrate_scope_routing_to_canonical_fields(conn)
-        _set_data_migration_marker(
-            conn,
-            ROUTING_CANONICAL_FIELDS_MARKER,
-            {"scope_settings_migrated": migrated, "version": 1},
-        )
-        if migrated:
-            counts["routing_scope_settings_migrated"] = migrated
-    return counts
-
-
-def _backfill_scope_agent_names(conn: Connection) -> int:
-    migrated = 0
-    now = _utc_now_iso()
-    for backend in ("opencode", "claude", "codex"):
-        rows = _legacy_scope_rows_for_backend(conn, backend)
-        if not rows:
-            continue
-        default_agent_name: str | None = None
-        for scope_id, settings_json in rows:
-            agent_name = _explicit_agent_name_from_settings_json(settings_json)
-            if not agent_name:
-                if default_agent_name is None:
-                    default_agent_name = _ensure_backend_default_agent(conn, backend, now)
-                if not default_agent_name:
-                    continue
-                agent_name = default_agent_name
-            _backfill_scope_agent_name(conn, scope_id, settings_json, agent_name, now)
-            migrated += 1
-    return migrated
-
-
-def _migrate_scope_routing_to_canonical_fields(conn: Connection) -> int:
-    migrated = 0
-    rows = conn.execute(
-        select(
-            scope_settings.c.scope_id,
-            scope_settings.c.agent_backend,
-            scope_settings.c.agent_variant,
-            scope_settings.c.model,
-            scope_settings.c.reasoning_effort,
-            scope_settings.c.settings_json,
-        )
-    ).mappings()
-    for row in rows:
-        payload = _json_loads(row["settings_json"], {})
-        routing = payload.get("routing") if isinstance(payload, dict) else None
-        if not isinstance(routing, dict):
-            continue
-
-        next_routing = dict(routing)
-        backend = str(next_routing.get("agent_backend") or row["agent_backend"] or "").strip() or None
-        if backend not in {"opencode", "claude", "codex"}:
-            continue
-        model = next_routing.get("model") or _legacy_backend_value(next_routing, backend, "model") or row["model"]
-        effort = (
-            next_routing.get("reasoning_effort")
-            or _legacy_backend_value(next_routing, backend, "reasoning_effort")
-            or row["reasoning_effort"]
-        )
-        variant = _agent_variant_for_backend(next_routing, backend) or row["agent_variant"]
-
-        next_routing["agent_backend"] = backend
-        next_routing["model"] = model
-        next_routing["reasoning_effort"] = effort
-        for legacy_key in (
-            "opencode_model",
-            "opencode_reasoning_effort",
-            "claude_model",
-            "claude_reasoning_effort",
-            "codex_model",
-            "codex_reasoning_effort",
-        ):
-            next_routing[legacy_key] = None
-
-        next_payload = dict(payload)
-        next_payload["routing"] = next_routing
-        next_settings_json = _json_dumps(next_payload)
-        values = {
-            "agent_backend": backend,
-            "agent_variant": variant,
-            "model": model,
-            "reasoning_effort": effort,
-            "settings_json": next_settings_json,
-        }
-        if all(row.get(key) == value for key, value in values.items() if key != "settings_json") and row[
-            "settings_json"
-        ] == next_settings_json:
-            continue
-        conn.execute(scope_settings.update().where(scope_settings.c.scope_id == row["scope_id"]).values(**values))
-        migrated += 1
-    return migrated
-
-
-def _legacy_backend_value(routing: dict[str, Any], backend: str | None, field: str) -> Any:
-    if backend not in {"opencode", "claude", "codex"}:
-        return None
-    return routing.get(f"{backend}_{field}")
-
-
-def _agent_variant_for_backend(routing: dict[str, Any], backend: str | None) -> Any:
-    if backend not in {"opencode", "claude", "codex"}:
-        return None
-    return routing.get(f"{backend}_agent")
+    return {}
 
 
 def _backup_json_state(state_dir: Path) -> Path:
@@ -500,105 +372,6 @@ def _migrate_session_state_for_import(state: SessionState, *, primary_platform: 
     default_platform = primary_platform or ""
     migrate_session_state_active_polls(state, default_platform)
     migrate_session_state_mappings(state, default_platform)
-
-
-def _backfill_imported_scope_agent_names(conn: Connection) -> None:
-    _backfill_scope_agent_names(conn)
-
-
-def _legacy_scope_rows_for_backend(conn: Connection, backend: str):
-    return conn.exec_driver_sql(
-        """
-        select ss.scope_id, ss.settings_json
-        from scope_settings ss
-        join scopes s on s.id = ss.scope_id
-        where s.scope_type in ('channel', 'user')
-          and ss.agent_backend = ?
-          and (ss.agent_name is null or trim(ss.agent_name) = '')
-        """,
-        (backend,),
-    ).fetchall()
-
-
-def _ensure_backend_default_agent(conn: Connection, backend: str, now: str) -> str | None:
-    existing = conn.exec_driver_sql(
-        "select name, backend, enabled from agents where normalized_name = ? limit 1",
-        (backend,),
-    ).fetchone()
-    if existing:
-        name, existing_backend, enabled = existing
-        return str(name) if existing_backend == backend and bool(enabled) else None
-
-    metadata = {
-        "builtin": True,
-        "builtin_default": True,
-        "lock_delete": True,
-        "backend": backend,
-        "backend_enabled": True,
-    }
-    conn.exec_driver_sql(
-        """
-        insert into agents (
-            id, name, normalized_name, description, backend, model, reasoning_effort,
-            system_prompt, enabled, source, source_ref, metadata_json, created_at, updated_at
-        ) values (?, ?, ?, ?, ?, null, null, null, 1, 'builtin', null, ?, ?, ?)
-        """,
-        (
-            uuid.uuid4().hex[:12],
-            backend,
-            backend,
-            f"Default Agent for the {backend} backend.",
-            backend,
-            _json_dumps(metadata),
-            now,
-            now,
-        ),
-    )
-    return backend
-
-
-def _backfill_scope_agent_name(conn: Connection, scope_id: str, settings_json: str | None, agent_name: str, now: str) -> None:
-    conn.exec_driver_sql(
-        """
-        update scope_settings
-        set agent_name = ?, settings_json = ?, updated_at = ?
-        where scope_id = ?
-        """,
-        (agent_name, _settings_json_with_agent_name(settings_json, agent_name), now, scope_id),
-    )
-
-
-def _explicit_agent_name_from_settings_json(value: str | None) -> str | None:
-    try:
-        payload = json.loads(value or "{}")
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    routing = payload.get("routing")
-    if not isinstance(routing, dict):
-        return None
-    for key in ("agent_name", "agent"):
-        agent_name = routing.get(key)
-        if isinstance(agent_name, str) and agent_name.strip():
-            return agent_name.strip()
-    return None
-
-
-def _settings_json_with_agent_name(value: str | None, agent_name: str) -> str:
-    try:
-        payload = json.loads(value or "{}")
-    except (TypeError, ValueError):
-        return value or "{}"
-    if not isinstance(payload, dict):
-        return value or "{}"
-    routing = payload.get("routing")
-    if not isinstance(routing, dict):
-        routing = {}
-    if not routing.get("agent_name"):
-        routing["agent_name"] = agent_name
-    payload["routing"] = routing
-    return _json_dumps(payload)
 
 
 def _clear_imported_state(conn: Connection) -> None:
