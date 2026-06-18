@@ -1297,6 +1297,8 @@ class AgentAuthService:
             await flow.reader_task
             ok, detail = await self._verify_login(flow)
             if ok:
+                if flow.backend == "codex":
+                    await self._persist_backend_auth_mode(flow.backend, "oauth")
                 await self._refresh_backend_runtime(flow.backend)
                 await self._send_message(
                     flow.context,
@@ -2782,10 +2784,11 @@ class AgentAuthService:
         # OAuth completed via the web UI implies the user wants
         # ``auth_mode = "oauth"``. Persist it before the controller-refresh
         # hook fires so the live agent reloads with the right mode rather
-        # than waiting for the user to click an extra Save button. We
-        # intentionally do not touch ``api_key`` here: the user may have
-        # configured one earlier and we should preserve it for the moment
-        # they decide to switch back via Remove auth.
+        # than waiting for the user to click an extra Save button. The
+        # persist helper also removes backend-specific API-key state when
+        # OAuth is now the active mode, keeping the two auth sources
+        # mutually exclusive on disk instead of relying on CLI logout side
+        # effects.
         #
         # Skipped for opencode: ``OpenCodeConfig`` has no ``auth_mode``
         # field (auth is per-provider, not global), so persisting one
@@ -2814,6 +2817,22 @@ class AgentAuthService:
             raise RuntimeError(
                 "Failed to clear Claude Code settings env after OAuth flow; "
                 "stale ANTHROPIC_* values may still override OAuth."
+            ) from err
+
+    async def _clear_codex_api_key_for_oauth(self) -> None:
+        try:
+            from vibe.codex_config import apply_codex_auth
+
+            await asyncio.to_thread(
+                apply_codex_auth,
+                auth_mode="oauth",
+                api_key=None,
+                base_url=None,
+            )
+        except Exception as err:  # noqa: BLE001
+            raise RuntimeError(
+                "Failed to clear Codex API-key state after OAuth flow; "
+                "stale OPENAI_API_KEY or base_url values may still override OAuth."
             ) from err
 
     async def _read_pending_claude_oauth_settings_backup(
@@ -3089,6 +3108,8 @@ class AgentAuthService:
         """Persist V2Config.agents.<backend>.auth_mode for web and IM flows."""
         if backend == "claude" and auth_mode == "oauth":
             await self._clear_claude_settings_env_for_oauth()
+        if backend == "codex" and auth_mode == "oauth":
+            await self._clear_codex_api_key_for_oauth()
         try:
             config = getattr(self.controller, "config", None)
             target = getattr(getattr(config, "agents", None), backend, None)
@@ -3113,7 +3134,15 @@ class AgentAuthService:
                 backend == "claude"
                 and not bool(getattr(target, "auth_mode_set", False))
             )
-            if not needs_mode_write and not needs_marker_write:
+            needs_codex_oauth_cleanup = (
+                backend == "codex"
+                and auth_mode == "oauth"
+                and (
+                    bool(getattr(target, "api_key", None))
+                    or bool(getattr(target, "base_url", None))
+                )
+            )
+            if not needs_mode_write and not needs_marker_write and not needs_codex_oauth_cleanup:
                 return
             try:
                 from config.v2_config import CONFIG_LOCK
@@ -3123,12 +3152,18 @@ class AgentAuthService:
                         target.auth_mode = auth_mode
                     if needs_marker_write:
                         target.auth_mode_set = True
+                    if needs_codex_oauth_cleanup:
+                        target.api_key = None
+                        target.base_url = None
                     saver()
             except ImportError:
                 if needs_mode_write:
                     target.auth_mode = auth_mode
                 if needs_marker_write:
                     target.auth_mode_set = True
+                if needs_codex_oauth_cleanup:
+                    target.api_key = None
+                    target.base_url = None
                 saver()
             if loaded_config is not None and config is not None:
                 compat_target = getattr(config, backend, None)
@@ -3137,6 +3172,9 @@ class AgentAuthService:
                         setattr(compat_target, "auth_mode", auth_mode)
                     if needs_marker_write:
                         setattr(compat_target, "auth_mode_set", True)
+                    if needs_codex_oauth_cleanup:
+                        setattr(compat_target, "api_key", None)
+                        setattr(compat_target, "base_url", None)
         except Exception as err:  # noqa: BLE001
             logger.warning(
                 "Failed to persist auth_mode=%s after web flow for %s: %s",

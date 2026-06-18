@@ -15,6 +15,7 @@ import contextlib
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -235,6 +236,7 @@ def test_cancel_removes_flow_and_marks_state(service: AgentAuthService) -> None:
 
 def test_post_web_success_hook_invocation_when_set(
     service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hook fires once after a successful flow; absence is a no-op."""
     calls: list[str] = []
@@ -242,9 +244,61 @@ def test_post_web_success_hook_invocation_when_set(
     def hook(backend: str) -> None:
         calls.append(backend)
 
+    persist = AsyncMock()
+    monkeypatch.setattr(service, "_persist_backend_auth_mode", persist)
     service._post_web_success_hook = hook
     _run(service._invoke_post_web_success_hook("codex"))
+    persist.assert_awaited_once_with("codex", "oauth")
     assert calls == ["codex"]
+
+
+def test_codex_oauth_success_clears_api_key_state(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    (codex_home / "auth.json").write_text(
+        json.dumps(
+            {
+                "auth_mode": "apikey",
+                "OPENAI_API_KEY": "sk-old",
+                "tokens": {"id_token": "abc"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (codex_home / "config.toml").write_text(
+        'model_provider = "OpenAI"\n'
+        "\n"
+        "[model_providers.OpenAI]\n"
+        'base_url = "https://relay.example/v1"\n',
+        encoding="utf-8",
+    )
+    saves: list[str] = []
+    codex_cfg = SimpleNamespace(
+        auth_mode="api_key",
+        api_key="sk-old",
+        base_url="https://relay.example/v1",
+    )
+    service.controller.config = SimpleNamespace(
+        language="en",
+        agents=SimpleNamespace(codex=codex_cfg),
+        save=lambda: saves.append("saved"),
+    )
+
+    _run(service._invoke_post_web_success_hook("codex"))
+
+    auth = json.loads((codex_home / "auth.json").read_text(encoding="utf-8"))
+    assert auth["auth_mode"] == "chatgpt"
+    assert auth["tokens"] == {"id_token": "abc"}
+    assert "OPENAI_API_KEY" not in auth
+    assert codex_cfg.auth_mode == "oauth"
+    assert codex_cfg.api_key is None
+    assert codex_cfg.base_url is None
+    assert saves == ["saved"]
 
 
 def test_post_web_success_hook_swallows_exceptions(
@@ -256,7 +310,7 @@ def test_post_web_success_hook_swallows_exceptions(
     def hook(_backend: str) -> None:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("vibe.claude_config.apply_claude_auth", lambda **_kwargs: None)
+    monkeypatch.setattr(service, "_persist_backend_auth_mode", AsyncMock())
     service._post_web_success_hook = hook
     # Should NOT raise.
     _run(service._invoke_post_web_success_hook("claude"))
@@ -469,7 +523,7 @@ def test_post_web_success_hook_unset_is_safe(
     service: AgentAuthService,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("vibe.claude_config.apply_claude_auth", lambda **_kwargs: None)
+    monkeypatch.setattr(service, "_persist_backend_auth_mode", AsyncMock())
     service._post_web_success_hook = None
     _run(service._invoke_post_web_success_hook("claude"))
 
