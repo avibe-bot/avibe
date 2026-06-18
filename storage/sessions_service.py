@@ -455,7 +455,7 @@ class SQLiteSessionsService:
             result = conn.execute(
                 agent_sessions.delete()
                 .where(agent_sessions.c.scope_id == scope_id)
-                .where(agent_sessions.c.agent_variant == (str(agent_name) or "default"))
+                .where(_agent_session_name_predicate(str(agent_name) or "default"))
                 .where(agent_sessions.c.session_anchor == str(session_anchor))
             )
             return bool(result.rowcount)
@@ -474,7 +474,7 @@ class SQLiteSessionsService:
                 return 0
             stmt = agent_sessions.delete().where(agent_sessions.c.scope_id == scope_id)
             if agent_name is not None:
-                stmt = stmt.where(agent_sessions.c.agent_variant == (str(agent_name) or "default"))
+                stmt = stmt.where(_agent_session_name_predicate(str(agent_name) or "default"))
             if session_anchor_prefix is not None:
                 prefix = str(session_anchor_prefix)
                 prefix_pattern = f"{_escape_sql_like(prefix)}:%"
@@ -1064,6 +1064,14 @@ _ROUTING_SENTINEL_VARIANTS = {"", "default", *_BACKEND_AGENT_NAMES}
 
 def _agent_backend(agent_name: str) -> str:
     return agent_name if agent_name in _BACKEND_AGENT_NAMES else "unknown"
+
+
+def _agent_session_name_predicate(agent_name: str) -> Any:
+    requested = str(agent_name) or "default"
+    backend = _agent_backend(requested)
+    if backend != "unknown":
+        return (agent_sessions.c.agent_backend == backend) | (agent_sessions.c.agent_variant == requested)
+    return agent_sessions.c.agent_variant == requested
 
 
 def _new_session_id(used: set[str]) -> str:

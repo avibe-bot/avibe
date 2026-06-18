@@ -318,6 +318,19 @@ class SessionsStore:
         if user_id not in self.state.active_slack_threads:
             self.state.active_slack_threads[user_id] = {}
 
+    @staticmethod
+    def _count_session_mappings(agent_maps: Dict[str, Any]) -> int:
+        return sum(len(thread_map) for thread_map in agent_maps.values() if isinstance(thread_map, dict))
+
+    def _sync_session_mappings_for_user(self, user_id: str) -> None:
+        fresh_maps = self._service.load_state().session_mappings.get(user_id, {})
+        self.state.session_mappings[user_id] = {
+            str(agent_name): dict(thread_map)
+            for agent_name, thread_map in fresh_maps.items()
+            if isinstance(thread_map, dict)
+        }
+        self._ensure_user_namespace(user_id)
+
     def get_agent_map(self, user_id: str, agent_name: str) -> Dict[str, str]:
         """Get mapping of thread_id -> session_id for a user and agent."""
         self.maybe_reload()
@@ -422,28 +435,25 @@ class SessionsStore:
 
     def remove_agent_session(self, user_id: str, agent_name: str, thread_id: str) -> bool:
         self._ensure_service()
+        self._ensure_user_namespace(user_id)
+        before = self._count_session_mappings(self.state.session_mappings[user_id])
         removed = self._service.delete_agent_session(
             scope_key=user_id,
             agent_name=agent_name,
             session_anchor=thread_id,
         )
-        agent_map = self.get_agent_map(user_id, agent_name)
-        if thread_id in agent_map:
-            del agent_map[thread_id]
-            removed = True
-        return removed
+        self._sync_session_mappings_for_user(user_id)
+        after = self._count_session_mappings(self.state.session_mappings[user_id])
+        return bool(removed or after < before)
 
     def clear_agent_sessions(self, user_id: str, agent_name: str | None = None) -> int:
         self._ensure_service()
-        removed = self._service.delete_agent_sessions(scope_key=user_id, agent_name=agent_name)
         self._ensure_user_namespace(user_id)
-        if agent_name is None:
-            count = sum(len(agent_map) for agent_map in self.state.session_mappings[user_id].values())
-            self.state.session_mappings[user_id] = {}
-            return max(removed, count)
-        count = len(self.state.session_mappings[user_id].get(agent_name, {}))
-        self.state.session_mappings[user_id][agent_name] = {}
-        return max(removed, count)
+        before = self._count_session_mappings(self.state.session_mappings[user_id])
+        removed = self._service.delete_agent_sessions(scope_key=user_id, agent_name=agent_name)
+        self._sync_session_mappings_for_user(user_id)
+        after = self._count_session_mappings(self.state.session_mappings[user_id])
+        return max(removed, max(before - after, 0))
 
     def clear_session_base(self, user_id: str, base_session_id: str) -> int:
         self._ensure_service()

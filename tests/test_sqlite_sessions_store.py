@@ -9,9 +9,10 @@ from sqlalchemy import select
 from config import paths
 from config.v2_sessions import ActivePollInfo, SessionState, SessionsStore
 from modules.sessions_facade import SessionsFacade
+from storage.agent_session_rows import create_agent_session_row
 from storage.db import create_sqlite_engine
 from storage.models import agent_sessions
-from storage.sessions_service import SQLiteSessionsService
+from storage.sessions_service import SQLiteSessionsService, resolve_scope_from_legacy_key
 from storage.settings_service import upsert_scope
 
 
@@ -584,6 +585,158 @@ def test_sqlite_sessions_service_delete_agent_sessions_escapes_anchor_prefix(tmp
         assert mappings == {"slack_1A2X3:/repo": "unrelated"}
     finally:
         service.close()
+
+
+def test_delete_agent_sessions_by_backend_removes_custom_variant_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "telegram::-100123", now="2026-06-18T07:30:00Z")
+            assert scope_id is not None
+            create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="opencode",
+                agent_variant="reviewer",
+                session_anchor="telegram_-100123",
+                native_session_id="oc-native",
+                workdir="/tmp",
+                require_workdir=False,
+            )
+            create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="claude",
+                agent_variant="worker",
+                session_anchor="telegram_-100123:claude",
+                native_session_id="claude-native",
+                workdir="/tmp",
+                require_workdir=False,
+            )
+            create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="helper",
+                session_anchor="telegram_-100123:codex",
+                native_session_id="codex-native",
+                workdir="/tmp",
+                require_workdir=False,
+            )
+
+        removed = service.delete_agent_sessions(scope_key="telegram::-100123", agent_name="opencode")
+
+        assert removed == 1
+        assert service.find_session_for_anchor(scope_key="telegram::-100123", session_anchor="telegram_-100123") is None
+        assert (
+            service.find_session_for_anchor(scope_key="telegram::-100123", session_anchor="telegram_-100123:claude")
+            is not None
+        )
+        assert (
+            service.find_session_for_anchor(scope_key="telegram::-100123", session_anchor="telegram_-100123:codex")
+            is not None
+        )
+    finally:
+        service.close()
+
+
+def test_delete_agent_session_by_backend_removes_custom_variant_row(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "telegram::-100123", now="2026-06-18T07:30:00Z")
+            assert scope_id is not None
+            create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="opencode",
+                agent_variant="reviewer",
+                session_anchor="telegram_-100123",
+                native_session_id="oc-native",
+                workdir="/tmp",
+                require_workdir=False,
+            )
+
+        removed = service.delete_agent_session(
+            scope_key="telegram::-100123",
+            agent_name="opencode",
+            session_anchor="telegram_-100123",
+        )
+
+        assert removed is True
+        assert service.find_session_for_anchor(scope_key="telegram::-100123", session_anchor="telegram_-100123") is None
+    finally:
+        service.close()
+
+
+def test_sessions_store_clear_backend_prunes_cached_custom_variant_rows(tmp_path: Path) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    store = SessionsStore(sessions_path)
+    try:
+        with store._service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "telegram::-100123", now="2026-06-18T07:30:00Z")
+            assert scope_id is not None
+            create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="opencode",
+                agent_variant="reviewer",
+                session_anchor="telegram_-100123",
+                native_session_id="oc-native",
+                workdir="/tmp",
+                require_workdir=False,
+            )
+
+        store.load()
+        assert store.state.session_mappings["telegram::-100123"]["reviewer"]["telegram_-100123"] == "oc-native"
+
+        removed = store.clear_agent_sessions("telegram::-100123", "opencode")
+        store.save()
+
+        assert removed == 1
+        assert "reviewer" not in store.state.session_mappings["telegram::-100123"]
+        assert (
+            store.find_session_for_anchor("telegram::-100123", "telegram_-100123")
+            is None
+        )
+    finally:
+        store.close()
+
+
+def test_sessions_store_remove_backend_session_prunes_cached_custom_variant_row(tmp_path: Path) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    store = SessionsStore(sessions_path)
+    try:
+        with store._service.engine.begin() as conn:
+            scope_id = resolve_scope_from_legacy_key(conn, "telegram::-100123", now="2026-06-18T07:30:00Z")
+            assert scope_id is not None
+            create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                agent_backend="opencode",
+                agent_variant="reviewer",
+                session_anchor="telegram_-100123",
+                native_session_id="oc-native",
+                workdir="/tmp",
+                require_workdir=False,
+            )
+
+        store.load()
+        assert store.state.session_mappings["telegram::-100123"]["reviewer"]["telegram_-100123"] == "oc-native"
+
+        removed = store.remove_agent_session("telegram::-100123", "opencode", "telegram_-100123")
+        store.save()
+
+        assert removed is True
+        assert "reviewer" not in store.state.session_mappings["telegram::-100123"]
+        assert (
+            store.find_session_for_anchor("telegram::-100123", "telegram_-100123")
+            is None
+        )
+    finally:
+        store.close()
 
 
 def test_sessions_store_lifecycle_updates_in_memory_state(tmp_path: Path) -> None:
