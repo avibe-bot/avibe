@@ -21,7 +21,11 @@ from modules.claude_sdk_compat import (
     ClaudeSDKClient,
 )
 from modules.agents.catalog import WEB_OAUTH_BACKENDS
-from modules.agents.opencode.message_processor import extract_opencode_response_text
+from modules.agents.opencode.message_processor import (
+    extract_opencode_response_text,
+    is_empty_terminal_opencode_message,
+)
+from modules.agents.opencode.utils import resolve_opencode_reasoning_effort
 from modules.im import InlineButton, InlineKeyboard, MessageContext
 from vibe.i18n import t as i18n_t
 from vibe.opencode_config import remove_opencode_provider_api_key
@@ -381,6 +385,9 @@ class AgentAuthService:
     def _t(self, key: str, **kwargs) -> str:
         lang = getattr(self.controller, "_get_lang", lambda: getattr(self.controller.config, "language", "en"))()
         return i18n_t(key, lang, **kwargs)
+
+    def _lang(self) -> str:
+        return getattr(self.controller, "_get_lang", lambda: getattr(self.controller.config, "language", "en"))()
 
     def _resolve_backend_config(self, backend: str):
         """Return the backend's config object regardless of controller shape.
@@ -2226,7 +2233,7 @@ class AgentAuthService:
         provider is unhealthy or silently mask which provider works — so
         each provider card gets its own probe.
 
-        Flow: create a temp session → ``send_message("Hi", model=...)``
+        Flow: create a temp session → ``prompt_async("Hi", model=...)``
         → poll messages until the assistant message either completes
         with text or surfaces an ``info.error`` block → abort the
         session. The session record stays on disk (OpenCode doesn't
@@ -2325,11 +2332,24 @@ class AgentAuthService:
                 pass
 
             try:
-                await server.send_message(
-                    session_id,
-                    directory,
-                    "Hi",
+                catalog = await server.get_available_models(directory)
+            except Exception:  # noqa: BLE001
+                catalog = None
+            model_dict = {"providerID": provider_id, "modelID": chosen_model}
+            reasoning_effort = resolve_opencode_reasoning_effort(
+                model_dict,
+                None,
+                catalog if isinstance(catalog, dict) else None,
+            )
+
+            try:
+                await server.prompt_async(
+                    session_id=session_id,
+                    directory=directory,
+                    text="Hi",
                     model={"providerID": provider_id, "modelID": chosen_model},
+                    reasoning_effort=reasoning_effort,
+                    tools={"question": False},
                 )
             except Exception as err:  # noqa: BLE001
                 detail = str(err)
@@ -2384,6 +2404,21 @@ class AgentAuthService:
                         terminal,
                         allow_non_text_fallback=True,
                     )
+                    if not final_text and is_empty_terminal_opencode_message(terminal):
+                        lang = self._lang()
+                        return {
+                            "ok": False,
+                            "error": "empty_response",
+                            "detail": i18n_t(
+                                "error.opencodeEmptyResponse",
+                                lang,
+                                provider=provider_id,
+                                model=chosen_model,
+                                variant=reasoning_effort or i18n_t("common.default", lang),
+                            ),
+                            "duration_ms": int((time.monotonic() - started) * 1000),
+                            "model": chosen_model,
+                        }
                     break
                 await asyncio.sleep(poll_interval)
             else:

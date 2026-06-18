@@ -11,6 +11,7 @@ from config.v2_config import DEFAULT_OPENCODE_ERROR_RETRY_LIMIT
 from modules.agents.base import AgentRequest
 from vibe.i18n import t as i18n_t
 
+from .message_processor import is_empty_terminal_opencode_message
 from .server import OpenCodeServerManager
 
 logger = logging.getLogger(__name__)
@@ -20,14 +21,14 @@ class OpenCodePollLoop:
     def __init__(self, agent):
         self._agent = agent
 
-    def _t(self, key: str) -> str:
+    def _t(self, key: str, **kwargs) -> str:
         controller = getattr(self._agent, "controller", None)
         translate = getattr(controller, "_t", None)
         if callable(translate):
-            return str(translate(key))
+            return str(translate(key, **kwargs))
         config = getattr(controller, "config", None)
         lang = getattr(config, "language", "en")
-        return str(i18n_t(key, lang))
+        return str(i18n_t(key, lang, **kwargs))
 
     def _build_restored_handle(self, poll_info):
         snapshot = poll_info.processing_indicator or {
@@ -44,6 +45,22 @@ class OpenCodePollLoop:
 
     def _build_restored_context(self, poll_info):
         return self._build_restored_handle(poll_info).context
+
+    def _empty_terminal_message_text(
+        self,
+        *,
+        model_dict: Optional[Dict[str, str]],
+        reasoning_effort: Optional[str],
+    ) -> str:
+        provider_id = (model_dict or {}).get("providerID") or self._t("common.default")
+        model_id = (model_dict or {}).get("modelID") or self._t("common.default")
+        variant = reasoning_effort or self._t("common.default")
+        return self._t(
+            "error.opencodeEmptyResponse",
+            provider=provider_id,
+            model=model_id,
+            variant=variant,
+        )
 
     def _build_restored_ack_request(self, poll_info) -> AgentRequest:
         handle = self._build_restored_handle(poll_info)
@@ -321,6 +338,25 @@ class OpenCodePollLoop:
                                 last_message_id=last_id,
                                 emitted_message_ids=emitted_assistant_messages,
                             )
+                        if not final_text and not msg_error and is_empty_terminal_opencode_message(last_message):
+                            message = self._empty_terminal_message_text(
+                                model_dict=model_dict,
+                                reasoning_effort=reasoning_effort,
+                            )
+                            logger.warning(
+                                "OpenCode session %s completed without text/error (provider=%s model=%s variant=%s)",
+                                session_id,
+                                (model_dict or {}).get("providerID"),
+                                (model_dict or {}).get("modelID"),
+                                reasoning_effort,
+                            )
+                            await self._agent.controller.emit_agent_message(
+                                request.context,
+                                "result",
+                                message,
+                                is_error=True,
+                            )
+                            return None, False
                         break
 
             await asyncio.sleep(poll_interval_seconds)
@@ -499,6 +535,24 @@ class OpenCodePollLoop:
                                         last_message_id=last_info.get("id"),
                                         emitted_message_ids=emitted_assistant_messages,
                                     )
+                                if not final_text and not msg_error and is_empty_terminal_opencode_message(last_message):
+                                    message = self._empty_terminal_message_text(
+                                        model_dict=None,
+                                        reasoning_effort=None,
+                                    )
+                                    logger.warning(
+                                        "Restored OpenCode session %s completed without text/error",
+                                        session_id,
+                                    )
+                                    await self._agent.controller.emit_agent_message(
+                                        context,
+                                        "result",
+                                        message,
+                                        is_error=True,
+                                    )
+                                    self._agent.sessions.remove_active_poll(session_id)
+                                    await self.remove_restored_ack(poll_info)
+                                    return
                                 break
 
                 await asyncio.sleep(poll_interval_seconds)

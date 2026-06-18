@@ -17,8 +17,9 @@ from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.processing_indicator import ProcessingIndicatorService
 from modules.agents.base import AgentRequest
 from modules.agents.service import AgentService
-from modules.agents.opencode.agent import OpenCodeAgent, resolve_opencode_reasoning_effort
+from modules.agents.opencode.agent import OpenCodeAgent
 from modules.agents.opencode.poll_loop import OpenCodePollLoop
+from modules.agents.opencode.utils import resolve_opencode_reasoning_effort
 
 
 @dataclass
@@ -1343,6 +1344,94 @@ def test_opencode_poll_emits_error_result_on_retry_exhaustion():
     assert should_emit is False
     assert ("result", True) in emitted
     assert not any(mtype == "notify" for mtype, _ in emitted)
+
+
+def test_opencode_poll_emits_error_result_on_empty_terminal_message():
+    emitted = []
+
+    class _AuthSvc:
+        async def maybe_emit_auth_recovery_message(self, context, backend, message):
+            return False
+
+    class _Formatter:
+        def format_toolcall(self, *args, **kwargs):
+            return "tool"
+
+    class _Controller:
+        agent_auth_service = _AuthSvc()
+
+        def _t(self, key, **kwargs):
+            if key == "common.default":
+                return "(Default)"
+            if key == "error.opencodeEmptyResponse":
+                return "empty:{provider}/{model}/{variant}".format(**kwargs)
+            return f"translated:{key}"
+
+        async def emit_agent_message(self, context, message_type, text, parse_mode=None, *, is_error=False, level="normal"):
+            emitted.append((message_type, text, is_error))
+
+    class _Agent:
+        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        controller = _Controller()
+        im_client = type("IM", (), {"formatter": _Formatter()})()
+
+        def _get_formatter(self, context):
+            return _Formatter()
+
+        def _to_relative_path(self, path, working_path):
+            return path
+
+        def _extract_response_text(self, message):
+            return ""
+
+    class _Server:
+        async def list_messages(self, session_id, directory):
+            return [
+                {
+                    "info": {
+                        "id": "msg-empty",
+                        "role": "assistant",
+                        "time": {"completed": 1},
+                        "finish": "unknown",
+                        "tokens": {
+                            "input": 0,
+                            "output": 0,
+                            "reasoning": 0,
+                            "cache": {"read": 0, "write": 0},
+                        },
+                    },
+                    "parts": [
+                        {"type": "step-start", "id": "step-start"},
+                        {"type": "step-finish", "id": "step-finish"},
+                    ],
+                }
+            ]
+
+    request = AgentRequest(
+        context=MessageContext(user_id="u", channel_id="c", platform="slack"),
+        message="hello",
+        working_path="/tmp/work",
+        base_session_id="base",
+        composite_session_id="base:/tmp/work",
+        session_key="slack::c",
+    )
+
+    loop = OpenCodePollLoop(_Agent())
+    final_text, should_emit = asyncio.run(
+        loop.run_prompt_poll(
+            request,
+            _Server(),
+            "oc-session",
+            agent_to_use=None,
+            model_dict={"providerID": "glm", "modelID": "glm-5.2"},
+            reasoning_effort="default",
+            baseline_message_ids=set(),
+        )
+    )
+
+    assert final_text is None
+    assert should_emit is False
+    assert emitted == [("result", "empty:glm/glm-5.2/default", True)]
 
 
 def test_processing_indicator_handle_is_source_of_truth_for_backend_cleanup():

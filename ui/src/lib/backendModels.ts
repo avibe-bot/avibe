@@ -44,7 +44,7 @@ export async function fetchBackendModels(
   }
   if (backend === 'opencode') {
     const res = await api.getOpencodeProviders();
-    const models = (res.providers ?? []).flatMap((p) =>
+    const models = (res.providers ?? []).filter((p) => p.configured).flatMap((p) =>
       (p.models ?? []).map((m) => `${p.id}/${m}`),
     );
     return { models };

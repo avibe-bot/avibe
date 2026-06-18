@@ -550,7 +550,7 @@ class _FakeOpencodeServer:
         self.catalog: dict = {}
         self.created_session: dict = {"info": {"id": "sess_probe"}}
         self.messages: list[dict] = []
-        self.sent_messages: list[tuple[str, str, str, dict | None]] = []
+        self.prompt_calls: list[dict] = []
         self.abort_calls: list[tuple[str, str]] = []
         self.message_sent = False
 
@@ -566,8 +566,8 @@ class _FakeOpencodeServer:
     async def list_messages(self, _session_id, _directory):
         return self.messages if self.message_sent else []
 
-    async def send_message(self, session_id, directory, content, *, model=None):
-        self.sent_messages.append((session_id, directory, content, model))
+    async def prompt_async(self, **kwargs):
+        self.prompt_calls.append(kwargs)
         self.message_sent = True
 
     async def abort_session(self, session_id, directory):
@@ -732,10 +732,58 @@ def test_opencode_provider_test_returns_excerpt_from_non_text_part(
     assert result["ok"] is True
     assert result["model"] == "claude-opus-4.8"
     assert result["excerpt"] == "Hello from a non-text OpenCode part"
-    assert fake.sent_messages[-1][3] == {
+    assert fake.prompt_calls[-1]["model"] == {
         "providerID": "anthropic",
         "modelID": "claude-opus-4.8",
     }
+    assert fake.abort_calls == [("sess_probe", os.path.expanduser("~"))]
+
+
+def test_opencode_provider_test_fails_on_empty_terminal_message(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeOpencodeServer()
+    fake.catalog = {
+        "providers": [
+            {
+                "id": "glm",
+                "models": {
+                    "glm-5.2": {
+                        "capabilities": {"reasoning": False},
+                    }
+                },
+            }
+        ]
+    }
+    fake.messages = [
+        {
+            "info": {
+                "id": "msg_assistant",
+                "role": "assistant",
+                "time": {"completed": 123},
+                "finish": "unknown",
+                "tokens": {
+                    "input": 0,
+                    "output": 0,
+                    "reasoning": 0,
+                    "cache": {"read": 0, "write": 0},
+                },
+            },
+            "parts": [
+                {"type": "step-start", "id": "step_start"},
+                {"type": "step-finish", "id": "step_finish"},
+            ],
+        }
+    ]
+    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+
+    result = _run(service.test_opencode_provider("glm", model="glm-5.2"))
+
+    assert result["ok"] is False
+    assert result["error"] == "empty_response"
+    assert result["model"] == "glm-5.2"
+    assert "glm-5.2" in result["detail"]
+    assert fake.prompt_calls[-1]["reasoning_effort"] == "default"
     assert fake.abort_calls == [("sess_probe", os.path.expanduser("~"))]
 
 

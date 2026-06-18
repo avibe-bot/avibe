@@ -147,6 +147,27 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     [agents, allowedBackendSet],
   );
 
+  useEffect(() => {
+    const clearOpenCodeModels = () => {
+      setModelsByBackend((prev) => {
+        if (!prev.opencode) return prev;
+        const next = { ...prev };
+        delete next.opencode;
+        return next;
+      });
+      setModelLabelsByBackend((prev) => {
+        if (!prev.opencode) return prev;
+        const next = { ...prev };
+        delete next.opencode;
+        return next;
+      });
+    };
+    window.addEventListener('avibe:opencode-model-options-changed', clearOpenCodeModels);
+    return () => {
+      window.removeEventListener('avibe:opencode-model-options-changed', clearOpenCodeModels);
+    };
+  }, []);
+
   const grouped = useMemo(() => {
     const groups: Record<string, VibeAgentBrief[]> = {};
     for (const agent of visibleAgents) {
