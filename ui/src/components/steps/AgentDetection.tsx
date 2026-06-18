@@ -23,14 +23,14 @@ import type { BackendId as RuntimeBackendId } from '../settings/shared/useBacken
 import { useOpencodePermission } from '../settings/shared/useOpencodePermission';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
-import { DEFAULT_AGENT_STATE, DEFAULT_BACKEND_ID, getBackendUiMeta } from '@/lib/agentBackends';
+import { DEFAULT_AGENT_STATE, getBackendUiMeta } from '@/lib/agentBackends';
 
 interface AgentDetectionProps {
   data: any;
   onNext: (data: any) => void;
   onBack?: () => void;
   isPage?: boolean;
-  onSave?: (data: { agents: Record<string, AgentState>; default_backend: string }) => Promise<void> | void;
+  onSave?: (data: { agents: Record<string, AgentState> }) => Promise<void> | void;
 }
 
 type AgentState = {
@@ -71,12 +71,6 @@ const normalizeAgents = (source: any): Record<string, AgentState> => {
 export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, onBack, isPage = false, onSave }) => {
   const { t } = useTranslation();
   const api = useApi();
-  // Persisted routing default. The selector UI was removed, but the value is
-  // still threaded through ``handlePrimaryAction``'s payload so toggling
-  // backends never wipes the saved ``agents.default_backend``.
-  const [defaultBackend] = useState<string>(
-    data.default_backend || data.agents?.default_backend || DEFAULT_BACKEND_ID
-  );
   const [agents, setAgents] = useState<Record<string, AgentState>>(normalizeAgents(data));
   const permission = useOpencodePermission({ autoFetchStatus: true });
   const [installingAgents, setInstallingAgents] = useState<Record<string, boolean>>({});
@@ -243,15 +237,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       }
       syncRef.current = null;
     }
-    // Don't persist a default backend the user just disabled — fall back to an
-    // enabled one so default-routed sessions don't target a disabled backend.
-    const enabledNames = Object.entries(mergedAgents)
-      .filter(([, agent]) => agent.enabled)
-      .map(([backendName]) => backendName);
-    const effectiveDefault = enabledNames.includes(defaultBackend)
-      ? defaultBackend
-      : (enabledNames[0] ?? defaultBackend);
-    const nextData = { agents: mergedAgents, default_backend: effectiveDefault };
+    const nextData = { agents: mergedAgents };
     if (isPage && onSave) {
       await onSave(nextData);
       return;

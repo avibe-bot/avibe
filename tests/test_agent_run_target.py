@@ -188,16 +188,23 @@ def test_new_im_session_uses_resolved_vibe_agent(tmp_path):
     assert session["reasoning_effort"] == "high"
 
 
-def test_new_im_session_falls_back_to_v2_agents_default_backend(tmp_path):
+def test_new_im_session_falls_back_to_default_vibe_agent(tmp_path):
     workdir = tmp_path / "channel"
     controller = _controller(tmp_path)
     del controller.agent_router
-    del controller.resolve_vibe_agent_for_context
     controller.config = SimpleNamespace(
         platform="slack",
         claude=SimpleNamespace(cwd=None),
         agents=SimpleNamespace(default_backend="claude"),
     )
+    default_agent = SimpleNamespace(
+        id="agent-codex-default",
+        name="codex",
+        backend="codex",
+        model=None,
+        reasoning_effort=None,
+    )
+    controller.resolve_vibe_agent_for_context = lambda _context, required=False: default_agent
     with controller.sqlite_engine.begin() as conn:
         scope_id = upsert_scope(
             conn,
@@ -216,12 +223,12 @@ def test_new_im_session_falls_back_to_v2_agents_default_backend(tmp_path):
         base_session_id="slack_171717.123",
     )
 
-    assert target.agent_backend == "claude"
-    assert target.agent_variant == "claude"
+    assert target.agent_backend == "codex"
+    assert target.agent_variant == "codex"
     with controller.sqlite_engine.connect() as conn:
         session = sessions_service.get_session(conn, target.agent_session_id)
-    assert session["agent_backend"] == "claude"
-    assert session["agent_variant"] == "claude"
+    assert session["agent_backend"] == "codex"
+    assert session["agent_variant"] == "codex"
 
 
 def test_new_im_session_without_scope_settings_snapshots_default_cwd(tmp_path):

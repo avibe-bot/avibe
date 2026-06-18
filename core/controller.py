@@ -209,12 +209,9 @@ class Controller:
         self._init_agents()
         self.agent_auth_service = AgentAuthService(self)
 
-        # Validate default_backend against registered agents
-        self._validate_default_backend()
         self.vibe_agent_store = VibeAgentStore()
         self.vibe_agent_store.ensure_builtin_default_agents(
             self._enabled_agent_backends(),
-            default_backend=getattr(self.agent_router, "global_default", DEFAULT_AGENT_BACKEND),
         )
 
         # Setup callbacks
@@ -279,8 +276,9 @@ class Controller:
         # Migrate legacy per-channel language into global config
         self._migrate_language_from_settings()
 
-        # Agent routing - use configured default_backend
-        default_backend = getattr(self.config, "default_backend", DEFAULT_AGENT_BACKEND)
+        # Legacy backend router. It is kept for compatibility with old route
+        # files/tests; product defaults are resolved through VibeAgentStore.
+        default_backend = DEFAULT_AGENT_BACKEND
         self.agent_router = AgentRouter.from_file(None, platform=self.primary_platform, default_backend=default_backend)
         for platform in self.enabled_platforms:
             if platform not in self.agent_router.platform_routes:
@@ -312,9 +310,8 @@ class Controller:
     def _enabled_agent_backends(self) -> list[str]:
         result: list[str] = []
         agent_config = getattr(self.config, "agents", None)
-        default_backend = getattr(self.agent_router, "global_default", DEFAULT_AGENT_BACKEND)
         if agent_config is None:
-            return [default_backend]
+            return list(getattr(self.agent_service, "agents", {}).keys()) or [DEFAULT_AGENT_BACKEND]
         for backend in ("opencode", "claude", "codex"):
             cfg = getattr(agent_config, backend, None)
             if bool(getattr(cfg, "enabled", False)):
@@ -617,36 +614,6 @@ class Controller:
                 self.agent_service.register(OpenCodeAgent(self, self.config.opencode))
             except Exception as e:
                 logger.error(f"Failed to initialize OpenCode agent: {e}")
-
-    def _validate_default_backend(self):
-        """Validate default_backend against registered agents and fallback if needed."""
-        current_default = self.agent_router.global_default
-        registered = set(self.agent_service.agents.keys())
-
-        if current_default not in registered:
-            # Find a fallback from registered agents
-            # Prefer: opencode > claude > codex > any
-            for fallback in ["opencode", "claude", "codex"]:
-                if fallback in registered:
-                    logger.warning(
-                        f"Configured default_backend '{current_default}' is not enabled. Falling back to '{fallback}'."
-                    )
-                    self.agent_router.global_default = fallback
-                    for route in self.agent_router.platform_routes.values():
-                        route.default = fallback
-                    return
-
-            # If no preferred fallback, use any registered agent
-            if registered:
-                fallback = next(iter(registered))
-                logger.warning(
-                    f"Configured default_backend '{current_default}' is not enabled. Falling back to '{fallback}'."
-                )
-                self.agent_router.global_default = fallback
-                for route in self.agent_router.platform_routes.values():
-                    route.default = fallback
-            else:
-                logger.error("No agents are registered! Check your configuration.")
 
     def _setup_callbacks(self):
         """Setup callback connections between modules"""
@@ -1040,8 +1007,7 @@ class Controller:
         1. explicit Vibe Agent selected by the Scope
         2. migration fallback from legacy Scope agent_backend
         3. default Vibe Agent route
-        4. AgentRouter platform default (configured in code)
-        5. AgentService.default_agent ("claude")
+        4. AgentService.default_agent / first registered backend compatibility fallback
         """
         target = self._agent_run_target_payload(context)
         target_agent_name = target.get("agent_name") if target else None
@@ -1052,16 +1018,16 @@ class Controller:
                 override_agent_name=str(target_agent_name),
                 required=False,
             )
-            if vibe_agent and vibe_agent.backend in self.agent_service.agents:
+            if vibe_agent:
                 return vibe_agent.backend
-        if target_backend and str(target_backend) in self.agent_service.agents:
+        if target_backend and str(target_backend) in {"opencode", "claude", "codex"}:
             return str(target_backend)
 
         settings_key = self._get_settings_key(context)
         settings_manager = self.get_settings_manager_for_context(context)
         routing = settings_manager.get_channel_routing(settings_key)
         vibe_agent = self.resolve_vibe_agent_for_context(context, required=False)
-        if vibe_agent and vibe_agent.backend in self.agent_service.agents:
+        if vibe_agent:
             return vibe_agent.backend
 
         if routing and routing.agent_backend:
@@ -1070,15 +1036,20 @@ class Controller:
             if routing.agent_backend in self.agent_service.agents:
                 return routing.agent_backend
             logger.warning(
-                f"Scope routing specifies legacy backend '{routing.agent_backend}' but it is not registered, "
-                f"falling back to static routing"
+                f"Scope routing specifies legacy backend '{routing.agent_backend}' but it is not registered."
             )
+            return routing.agent_backend
 
-        # Fall back to static routing
-        platform = context.platform or (context.platform_specific or {}).get("platform") or self.primary_platform
-        resolved = self.agent_router.resolve(platform, settings_key)
+        return self._fallback_registered_agent_backend()
 
-        return resolved
+    def _fallback_registered_agent_backend(self) -> str:
+        default_agent = getattr(self.agent_service, "default_agent", None)
+        registered = getattr(self.agent_service, "agents", {})
+        if default_agent in registered:
+            return str(default_agent)
+        if registered:
+            return next(iter(registered))
+        return DEFAULT_AGENT_BACKEND
 
     def resolve_vibe_agent_for_context(
         self,

@@ -40,7 +40,13 @@
     "updateUnavailable": "Update action is not available right now.",
     "unknownAction": "Unknown action: {action}",
     "processActionFailed": "Error processing action: {error}",
-    "agentNotConfigured": "Agent `{agent}` is not configured. Make sure the Codex CLI is installed and environment variables are set if this channel is routed to Codex.",
+    "agentNotConfigured": "Agent `{agent}` uses the {backend} backend, but that backend is not available. {hint}",
+    "agentNotConfiguredHint": {
+      "opencode": "Enable the OpenCode backend, install the OpenCode CLI, or set OPENCODE_CLI_PATH.",
+      "claude": "Enable the Claude Code backend and make sure the Claude Code CLI path is configured.",
+      "codex": "Enable the Codex backend, install the Codex CLI, or set CODEX_CLI_PATH.",
+      "generic": "Choose an enabled Agent in Agent settings, or enable the backend this Agent uses."
+    },
     "processMessageFailed": "Error: {error}",
     "streamTurnInProgress": "⚠️ A reply is already streaming for this session — wait for it to finish, then try again.",
     "sessionReset": "Session error detected. Session has been reset. Please try your message again.",

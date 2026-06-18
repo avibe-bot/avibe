@@ -458,7 +458,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       // and would never fetch the project's existing sessions, hiding them.
       const alreadyLoaded = sessionsRef.current[projectId]?.sessions != null;
       try {
-        // No overrides → omit agent fields so the server defers to agents.default_backend.
+        // No overrides → omit agent fields so the server defers to the default Agent.
         const session = await api.createSession({ project_id: projectId, ...overrides });
         if (alreadyLoaded) {
           setSessions((prev) => {

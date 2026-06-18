@@ -2412,12 +2412,32 @@ def test_vibe_agent_api_rejects_non_boolean_enabled(tmp_path, monkeypatch):
     assert api.update_vibe_agent("reviewer", {"enabled": False})["agent"]["enabled"] is False
 
 
-def test_builtin_default_agents_respect_configured_default_backend(tmp_path, monkeypatch):
+def test_builtin_default_agents_legacy_default_backend_argument_is_store_only(tmp_path, monkeypatch):
     monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
         store.ensure_builtin_default_agents(["opencode", "claude", "codex"], default_backend="codex")
         assert store.get_default_agent_name() == "codex"
+    finally:
+        store.close()
+
+
+def test_api_builtin_default_agents_ignore_legacy_config_default_backend(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token="xoxb-test", app_token="xapp-test"),
+        platforms=PlatformsConfig(enabled=["slack"], primary="slack"),
+        runtime=RuntimeConfig(default_cwd="/tmp/work"),
+        agents=AgentsConfig(default_backend="codex"),
+        ui=UiConfig(),
+    )
+
+    api._ensure_builtin_default_agents(config)
+    store = VibeAgentStore()
+    try:
+        assert store.get_default_agent_name() == "opencode"
     finally:
         store.close()
 

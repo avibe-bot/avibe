@@ -20,12 +20,6 @@ export interface UseBackendRuntimeOptions {
   /** Fallback CLI binary name when V2Config carries no override. */
   defaultCli: string;
   /**
-   * Default backend used by the routing layer when the user has not picked
-   * one explicitly. The Save path persists this into ``agents.default_
-   * backend`` so toggling enabled-state never wipes the global default.
-   */
-  fallbackDefaultBackend?: BackendId;
-  /**
    * Skip the controller restart in ``onSaveRuntime`` and treat the save as
    * successful once the config write lands. Used by the setup wizard, where
    * the controller is not necessarily running yet — there, attempting a
@@ -77,6 +71,11 @@ export interface BackendRuntimeState {
   handleLifecycleChanged: (info: { installedPath?: string | null } | undefined | null) => Promise<void>;
 }
 
+const withoutLegacyDefaultBackend = (agents: Record<string, any> | undefined | null) => {
+  const { default_backend: _legacyDefaultBackend, ...rest } = agents || {};
+  return rest;
+};
+
 /**
  * Encapsulates the runtime (CLI lifecycle) state shared by every
  * Settings → Backends provider page. Previously each page (Claude /
@@ -89,7 +88,6 @@ export interface BackendRuntimeState {
 export function useBackendRuntime({
   backend,
   defaultCli,
-  fallbackDefaultBackend = 'opencode',
   deferRestart = false,
 }: UseBackendRuntimeOptions): BackendRuntimeState {
   const api = useApi();
@@ -192,18 +190,14 @@ export function useBackendRuntime({
     try {
       const config = await api.getConfig();
       const nextAgents = {
-        ...(config?.agents || {}),
+        ...withoutLegacyDefaultBackend(config?.agents),
         [backend]: {
           ...(config?.agents?.[backend] || {}),
           enabled,
           cli_path: cliPath || defaultCli,
         },
       };
-      const defaultBackend =
-        config?.default_backend ||
-        config?.agents?.default_backend ||
-        fallbackDefaultBackend;
-      await api.saveConfig({ agents: { ...nextAgents, default_backend: defaultBackend } });
+      await api.saveConfig({ agents: nextAgents });
       // In the wizard the controller may not be running yet, so a restart
       // would (correctly) go un-acknowledged. Treat the config write as the
       // success boundary there and skip the restart — the controller picks up
@@ -222,7 +216,7 @@ export function useBackendRuntime({
     } finally {
       setSavingRuntime(false);
     }
-  }, [api, backend, cliPath, defaultCli, deferRestart, enabled, fallbackDefaultBackend, showToast, t]);
+  }, [api, backend, cliPath, defaultCli, deferRestart, enabled, showToast, t]);
 
   const toggleEnabled = useCallback(() => {
     const next = !enabled;
@@ -236,18 +230,14 @@ export function useBackendRuntime({
       try {
         const config = await api.getConfig();
         const nextAgents = {
-          ...(config?.agents || {}),
+          ...withoutLegacyDefaultBackend(config?.agents),
           [backend]: {
             ...(config?.agents?.[backend] || {}),
             enabled: next,
           },
         };
-        const defaultBackend =
-          config?.default_backend ||
-          config?.agents?.default_backend ||
-          fallbackDefaultBackend;
         await api.saveConfig({
-          agents: { ...nextAgents, default_backend: defaultBackend },
+          agents: nextAgents,
         });
         saved = true;
         if (!deferRestart) {
@@ -261,7 +251,7 @@ export function useBackendRuntime({
         if (!saved) setEnabled(!next);
       }
     })();
-  }, [api, backend, deferRestart, enabled, fallbackDefaultBackend, showToast, t]);
+  }, [api, backend, deferRestart, enabled, showToast, t]);
 
   const handleLifecycleChanged = useCallback(
     async (info: { installedPath?: string | null } | undefined | null) => {

@@ -2872,7 +2872,14 @@ def _reserve_definition_session(*, agent_name: Optional[str], deliver_key: str, 
         deliver_key=deliver_key,
         help_command=help_command,
     )
-    agent_backend = agent.backend if agent else _ensure_config().agents.default_backend
+    if agent is None:
+        raise TaskCliError(
+            "no enabled default Agent is available for session creation",
+            code="default_agent_unavailable",
+            hint="Create or enable a default Agent before creating sessions without --agent.",
+            help_command=help_command,
+        )
+    agent_backend = agent.backend
     session_anchor = session_anchor_for_target(target)
     session_id = sessions_service.reserve_agent_session(
         scope_key=target.session_scope,
@@ -3937,12 +3944,22 @@ def _doctor():
             )
             summary["pass"] += 1
 
-        # Default backend check
-        default_backend = config.agents.default_backend
+        # Default Agent check
+        default_agent_name = None
+        store = None
+        try:
+            store = _agent_store()
+            default_agent = store.get_default_agent()
+            default_agent_name = default_agent.name if default_agent else None
+        except Exception:
+            default_agent_name = None
+        finally:
+            if store is not None:
+                store.close()
         agent_items.append(
             {
                 "status": "pass",
-                "message": f"Default backend: {default_backend}",
+                "message": f"Default Agent: {default_agent_name or 'not configured'}",
             }
         )
         summary["pass"] += 1

@@ -87,7 +87,7 @@ def test_build_sentry_contexts_contains_debug_metadata(monkeypatch):
 
     assert contexts["deployment"]["environment"] == "regression"
     assert contexts["deployment"]["component"] == "service"
-    assert contexts["deployment"]["default_backend"] == "opencode"
+    assert contexts["deployment"]["default_agent_name"] is None
     assert contexts["runtime"]["python_version"]
     assert "hostname" in contexts["host"]
 

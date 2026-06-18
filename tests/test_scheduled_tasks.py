@@ -1150,6 +1150,63 @@ def test_runtime_session_reservation_rejects_unresolved_legacy_scope_backend(
         service._reserve_runtime_session(agent_name=None, deliver_key="slack::channel::C123")
 
 
+def test_runtime_session_reservation_uses_default_agent_without_scope_agent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    monkeypatch.setattr(paths, "get_state_dir", lambda: db_path.parent)
+    monkeypatch.setattr(paths, "get_sqlite_state_path", lambda: db_path)
+
+    from core.vibe_agents import VibeAgentStore
+    from storage.importer import ensure_sqlite_state
+    from storage.models import scope_settings
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
+    agent_store = VibeAgentStore(db_path)
+    try:
+        agent_store.ensure_builtin_default_agents(["opencode", "codex"])
+        agent_store.set_default_agent_name("codex")
+    finally:
+        agent_store.close()
+
+    with create_sqlite_engine(db_path).begin() as conn:
+        now = "2026-05-22T00:00:00+00:00"
+        scope_id = upsert_scope(conn, "slack", "channel", "C456", now=now)
+        conn.execute(
+            scope_settings.insert().values(
+                scope_id=scope_id,
+                enabled=1,
+                role=None,
+                workdir=None,
+                agent_name=None,
+                agent_backend=None,
+                agent_variant=None,
+                model=None,
+                reasoning_effort=None,
+                require_mention=None,
+                settings_version=1,
+                settings_json=json.dumps({}),
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    controller = SimpleNamespace(agent_router=SimpleNamespace(global_default="opencode"))
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+
+    session_id = service._reserve_runtime_session(agent_name=None, deliver_key="slack::channel::C456")
+    target = resolve_session_id_target(session_id, db_path=db_path)
+
+    assert target.agent_backend == "codex"
+    assert target.agent_name == "codex"
+
+
 def test_request_store_constructor_does_not_requeue_processing_files(tmp_path: Path) -> None:
     root = tmp_path / "task_requests"
     store = TaskExecutionStore(root)

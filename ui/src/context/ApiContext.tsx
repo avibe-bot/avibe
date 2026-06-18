@@ -307,7 +307,7 @@ export type WorkbenchSession = {
 
 export type WorkbenchSessionCreate = {
   project_id: string;
-  // Optional: when omitted the server falls back to agents.default_backend.
+  // Optional: when omitted the server resolves the current default Agent.
   agent_backend?: string;
   agent_id?: string;
   agent_name?: string;

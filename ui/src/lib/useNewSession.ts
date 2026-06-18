@@ -13,7 +13,7 @@ interface UseNewSessionOptions {
 }
 
 // The agent/model/effort selection (agent route). Empty = the server default
-// (agents.default_backend). Fields allow null because the AgentRoutePicker emits
+// Agent. Fields allow null because the AgentRoutePicker emits
 // null to clear model/effort when switching agents; send() drops nulls before
 // creating so the create payload only carries real values.
 export interface AgentRouteSelection {

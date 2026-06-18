@@ -196,14 +196,15 @@ High-level V2 config areas:
 
 - platform config: Slack / Discord / Telegram / Feishu / WeChat credentials and switches
 - runtime config: default cwd, log level, and related runtime behavior
-- agent config: default backend plus per-backend enablement and CLI paths
+- agent config: per-backend enablement and CLI paths
 - UI config: setup host/port and Web UI behavior
 
 Agent routing model:
 
-- global default: `agents.default_backend`
+- global default: the enabled Vibe Agent recorded in SQLite `state_meta.default_agent_name`
 - backend availability and CLI path: `agents.<backend>.enabled` and `agents.<backend>.cli_path`
 - per-channel overrides: configured via the Web UI Agent Settings / channel settings
+- legacy compatibility: `agents.default_backend` may still appear in old JSON payloads, but new routing code must not treat it as the product default
 
 Source-of-truth rule:
 

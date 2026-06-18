@@ -631,7 +631,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
   useEffect(() => {
     if (!channels.length) return;
     const defaultCwd = config.runtime?.default_cwd || '~/work';
-    const defaultBackend = config.agents?.default_backend || 'opencode';
+    const defaultAgent = agentByName[defaultAgentName || ''] || null;
 
     const neededOpenCodeCwds = new Set<string>();
     const neededClaudeCwds = new Set<string>();
@@ -643,8 +643,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
       const effectiveCwd = (raw.custom_cwd ?? '') || defaultCwd;
       const routing = raw.routing || {};
       const selectedAgent = routing.agent_name ? agentByName[routing.agent_name] : null;
-      const defaultAgent = !routing.agent_backend ? agentByName[defaultAgentName || ''] : null;
-      const backend = selectedAgent?.backend || routing.agent_backend || defaultAgent?.backend || defaultBackend;
+      const backend = selectedAgent?.backend || routing.agent_backend || defaultAgent?.backend || 'opencode';
 
       if (backend === 'opencode' && config.agents?.opencode?.enabled) {
         neededOpenCodeCwds.add(effectiveCwd);
@@ -674,7 +673,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
         void loadCodexAgents(cwd);
       }
     });
-  }, [channels, configs, config.runtime?.default_cwd, config.agents?.default_backend, config.agents?.opencode?.enabled, config.agents?.claude?.enabled, config.agents?.codex?.enabled, agentByName, defaultAgentName]);
+  }, [channels, configs, config.runtime?.default_cwd, config.agents?.opencode?.enabled, config.agents?.claude?.enabled, config.agents?.codex?.enabled, agentByName, defaultAgentName]);
 
   const isChannelEnabled = (channelId: string) => {
     const channel = configs[channelId];
@@ -1306,7 +1305,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               const channelPlatform = row.platform;
               const rawConfig = row.config;
               const def = defaultConfig();
-              const defaultBackend = config.agents?.default_backend || 'opencode';
+              const defaultAgent = agentByName[defaultAgentName || ''] || null;
               const channelEnabled = rawConfig.enabled === true;
               const channelConfig = {
                 ...def,
@@ -1322,7 +1321,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               const expanded = expandedChannelId === rowKey;
               const legacyBackend = channelConfig.routing.agent_backend || null;
               const selectedAgent = agentByName[channelConfig.routing.agent_name || ''] || (!legacyBackend ? agentByName[defaultAgentName || ''] : undefined);
-              const effectiveBackend = selectedAgent?.backend || legacyBackend || defaultBackend;
+              const effectiveBackend = selectedAgent?.backend || legacyBackend || defaultAgent?.backend || 'opencode';
               const effectiveCwd = channelConfig.custom_cwd || config.runtime?.default_cwd || '~/work';
               const opencodeOptions = opencodeOptionsByCwd[effectiveCwd];
               const claudeAgents = claudeAgentsByCwd[effectiveCwd] || [];
