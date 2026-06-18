@@ -46,6 +46,7 @@ class WeChatLoginSession:
     user_id: Optional[str] = None
     qr_refresh_count: int = 1  # tracks how many QR codes have been issued
     current_base_url: Optional[str] = None
+    local_token_list: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -60,12 +61,17 @@ async def get_bot_qrcode(
 ) -> dict:
     """Fetch a new QR code from the iLink server.
 
-    GET {base_url}/ilink/bot/get_bot_qrcode?bot_type={bot_type}
+    POST {base_url}/ilink/bot/get_bot_qrcode?bot_type={bot_type}
 
     Returns:
         dict with keys ``qrcode`` and ``qrcode_img_content``.
     """
-    return await wechat_api.get_bot_qrcode(base_url, bot_type, local_token_list=local_token_list)
+    return await wechat_api.get_bot_qrcode(
+        base_url,
+        bot_type,
+        local_token_list=local_token_list,
+        timeout_ms=int(timeout * 1000),
+    )
 
 
 async def get_qrcode_status(
@@ -161,10 +167,14 @@ class WeChatAuthManager:
         base_url = base_url or self.DEFAULT_BASE_URL
 
         self.cleanup_expired()
+        normalized_local_tokens = [
+            token.strip() for token in (local_token_list or []) if isinstance(token, str) and token.strip()
+        ]
 
         # Reuse an existing fresh session if available
         existing = self._sessions.get(session_key)
         if existing and self._is_session_fresh(existing) and existing.qrcode_url:
+            existing.local_token_list = normalized_local_tokens
             return {
                 "session_key": session_key,
                 "qrcode_url": existing.qrcode_url,
@@ -181,7 +191,7 @@ class WeChatAuthManager:
 
         try:
             logger.info("Starting WeChat login with bot_type=%s", self.BOT_TYPE)
-            qr_response = await get_bot_qrcode(base_url, self.BOT_TYPE, local_token_list=local_token_list)
+            qr_response = await get_bot_qrcode(base_url, self.BOT_TYPE, local_token_list=normalized_local_tokens)
             qrcode = qr_response.get("qrcode", "")
             qrcode_url = qr_response.get("qrcode_img_content", "")
 
@@ -200,6 +210,7 @@ class WeChatAuthManager:
                 status="wait",
                 base_url=base_url,
                 current_base_url=base_url,
+                local_token_list=normalized_local_tokens,
             )
             self._sessions[session_key] = session
 
@@ -326,7 +337,11 @@ class WeChatAuthManager:
                 session_key,
             )
             try:
-                qr_response = await get_bot_qrcode(session.current_base_url or base_url, self.BOT_TYPE)
+                qr_response = await get_bot_qrcode(
+                    session.current_base_url or base_url,
+                    self.BOT_TYPE,
+                    local_token_list=session.local_token_list,
+                )
                 session.qrcode = qr_response.get("qrcode", "")
                 session.qrcode_url = qr_response.get("qrcode_img_content", "")
                 session.started_at = time.time()

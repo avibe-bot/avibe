@@ -2,7 +2,7 @@
 
 Handles all HTTP communication with the WeChat iLink bot backend.
 All messaging endpoints are POST to ``{base_url}/ilink/bot/{endpoint}``;
-auth/QR endpoints are GET.
+auth/QR status endpoints are GET; QR issuance is POST.
 
 Ported from the TypeScript reference implementation.
 """
@@ -57,6 +57,7 @@ DEFAULT_LONG_POLL_TIMEOUT_MS = 35_000
 DEFAULT_LONG_POLL_TIMEOUT_GRACE_MS = 5_000
 DEFAULT_API_TIMEOUT_MS = 15_000
 DEFAULT_CONFIG_TIMEOUT_MS = 10_000
+DEFAULT_QR_FETCH_TIMEOUT_MS = 30_000
 
 # WeChat's iLink gateway validates the client metadata against the OpenClaw
 # Weixin channel build. Keep this aligned with Tencent/openclaw-weixin.
@@ -399,6 +400,7 @@ async def get_bot_qrcode(
     base_url: str,
     bot_type: str = "3",
     local_token_list: Optional[List[str]] = None,
+    timeout_ms: int = DEFAULT_QR_FETCH_TIMEOUT_MS,
 ) -> dict:
     """Fetch a new QR code for bot login.
 
@@ -416,7 +418,7 @@ async def get_bot_qrcode(
     logger.info("Fetching QR code from: %s", url)
 
     body = json.dumps({"local_token_list": local_token_list or []}).encode("utf-8")
-    timeout = aiohttp.ClientTimeout(total=DEFAULT_API_TIMEOUT_MS / 1000.0)
+    timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000.0)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         async with session.post(url, data=body, headers=_build_headers(body_bytes=body)) as resp:
             if not resp.ok:

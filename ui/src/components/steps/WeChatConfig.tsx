@@ -54,6 +54,11 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
   const autoStartedRef = useRef(false);
   const activeSessionKeyRef = useRef<string | null>(null);
 
+  const preserveExistingConnectionFields = useCallback((result: Record<string, any> = {}) => {
+    setBotToken(result.bot_token || secretInputValue(data.wechat, 'bot_token'));
+    setBaseUrl(result.base_url || data.wechat?.base_url || '');
+  }, [data.wechat]);
+
   const stopPolling = useCallback(() => {
     if (pollTimerRef.current) {
       clearTimeout(pollTimerRef.current);
@@ -165,6 +170,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
           setVerifyCode('');
           setLoginState('connected');
           setMessage(result.message || t('wechatConfig.connected'));
+          preserveExistingConnectionFields(result);
           activeSessionKeyRef.current = null;
           stopPolling();
           return;
@@ -226,6 +232,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
         setVerifyCode('');
         setLoginState('connected');
         setMessage(result.message || t('wechatConfig.connected'));
+        preserveExistingConnectionFields(result);
         activeSessionKeyRef.current = null;
         return;
       }

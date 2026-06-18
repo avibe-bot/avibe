@@ -288,6 +288,9 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
                 return {"qrcode": "qr-token", "qrcode_img_content": "https://wechat.example.com/qr"}
 
         class _Session:
+            def __init__(self, timeout):
+                captured["timeout_total"] = timeout.total
+
             async def __aenter__(self):
                 return self
 
@@ -300,7 +303,7 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
                 captured["headers"] = headers
                 return _Response()
 
-        with patch("modules.im.wechat_api.aiohttp.ClientSession", side_effect=lambda timeout: _Session()):
+        with patch("modules.im.wechat_api.aiohttp.ClientSession", side_effect=lambda timeout: _Session(timeout)):
             result = await wechat_api_module.get_bot_qrcode(
                 "https://wechat.example.com",
                 "3",
@@ -313,6 +316,7 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["headers"]["iLink-App-Id"], "bot")
         self.assertEqual(captured["headers"]["iLink-App-ClientVersion"], "132099")
         self.assertEqual(captured["content_type"], None)
+        self.assertEqual(captured["timeout_total"], 30.0)
 
     async def test_wechat_api_qr_status_uses_current_interface_headers_and_timeout(self):
         captured = {}

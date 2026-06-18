@@ -3193,14 +3193,18 @@ def _persist_wechat_qr_credentials(result: dict) -> None:
     vibe_api.save_config(current)
 
 
+WECHAT_QR_LOGIN_BASE_URL = "https://ilinkai.weixin.qq.com"
+
+
 @app.route("/api/wechat/qr_login/start", methods=["POST"])
 async def wechat_qr_login_start():
     """Start WeChat QR code login flow."""
     auth = _get_wechat_auth()
-    payload = request.json or {}
-    base_url = payload.get("base_url", "https://ilinkai.weixin.qq.com")
 
-    result = await auth.start_login(base_url=base_url, local_token_list=_load_wechat_local_tokens())
+    result = await auth.start_login(
+        base_url=WECHAT_QR_LOGIN_BASE_URL,
+        local_token_list=_load_wechat_local_tokens(),
+    )
     if result.get("ok") is False:
         return jsonify(result), 500
     return jsonify(result)

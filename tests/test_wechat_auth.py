@@ -18,11 +18,15 @@ class WeChatAuthManagerTests(unittest.IsolatedAsyncioTestCase):
             "modules.im.wechat_auth.get_bot_qrcode",
             new=AsyncMock(return_value={"qrcode": "qr-token", "qrcode_img_content": "https://example.com/qr.png"}),
         ):
-            result = await manager.start_login(base_url="https://wechat.example.com")
+            result = await manager.start_login(
+                base_url="https://wechat.example.com",
+                local_token_list=[" saved-token ", "", "second-token"],
+            )
 
         session = manager.get_session(result["session_key"])
         self.assertIsNotNone(session)
         self.assertEqual(session.base_url, "https://wechat.example.com")
+        self.assertEqual(session.local_token_list, ["saved-token", "second-token"])
 
     async def test_poll_status_returns_expired_when_session_missing(self):
         manager = WeChatAuthManager()
@@ -116,6 +120,38 @@ class WeChatAuthManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("status === 'already_connected'", source)
         self.assertIn("setLoginState('connected')", source)
+        self.assertIn("preserveExistingConnectionFields(result)", source)
+
+    async def test_poll_status_refresh_preserves_local_token_list(self):
+        manager = WeChatAuthManager()
+        qr_fetch = AsyncMock(
+            side_effect=[
+                {"qrcode": "qr-token-1", "qrcode_img_content": "https://example.com/qr-1.png"},
+                {"qrcode": "qr-token-2", "qrcode_img_content": "https://example.com/qr-2.png"},
+            ]
+        )
+
+        with patch("modules.im.wechat_auth.get_bot_qrcode", new=qr_fetch):
+            started = await manager.start_login(
+                session_key="qr-session",
+                base_url="https://ilinkai.weixin.qq.com",
+                local_token_list=["saved-token"],
+            )
+
+            with patch(
+                "modules.im.wechat_auth.get_qrcode_status",
+                new=AsyncMock(return_value={"status": "expired"}),
+            ):
+                refreshed = await manager.poll_status(started["session_key"])
+
+        self.assertEqual(refreshed["status"], "refreshed")
+        self.assertEqual(refreshed["qrcode_url"], "https://example.com/qr-2.png")
+        self.assertEqual(qr_fetch.await_count, 2)
+        self.assertEqual(qr_fetch.await_args_list[0].kwargs["local_token_list"], ["saved-token"])
+        self.assertEqual(qr_fetch.await_args_list[1].kwargs["local_token_list"], ["saved-token"])
+        session = manager.get_session("qr-session")
+        self.assertIsNotNone(session)
+        self.assertEqual(session.qrcode, "qr-token-2")
 
     async def test_poll_status_submits_verify_code_and_confirms(self):
         manager = WeChatAuthManager()

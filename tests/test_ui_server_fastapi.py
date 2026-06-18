@@ -714,7 +714,7 @@ def test_persist_wechat_qr_credentials_saves_before_restart(monkeypatch, tmp_pat
     assert updated.platforms.primary == "wechat"
 
 
-def test_wechat_qr_start_sends_saved_token_list(monkeypatch):
+def test_wechat_qr_start_sends_saved_token_list_to_fixed_qr_host(monkeypatch):
     class _Auth:
         async def start_login(self, base_url=None, local_token_list=None):
             return {
@@ -736,7 +736,7 @@ def test_wechat_qr_start_sends_saved_token_list(monkeypatch):
 
     assert response.status_code == 200
     payload = response.get_json()
-    assert payload["base_url"] == "https://wechat.example.com"
+    assert payload["base_url"] == "https://ilinkai.weixin.qq.com"
     assert payload["local_token_list"] == ["saved-token"]
 
 
