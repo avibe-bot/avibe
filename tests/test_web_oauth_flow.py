@@ -47,6 +47,7 @@ class _Agents:
 class _Config:
     agents = _Agents()
     language = "en"
+    runtime = None
 
 
 class _StubController:
@@ -912,6 +913,41 @@ def test_test_web_auth_claude_oauth_env_removes_stale_anthropic_vars(
     assert "ANTHROPIC_API_KEY" not in captured["env"]
     assert "ANTHROPIC_AUTH_TOKEN" not in captured["env"]
     assert "ANTHROPIC_BASE_URL" not in captured["env"]
+
+
+def test_test_web_auth_claude_runs_in_runtime_cwd(
+    service: AgentAuthService,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plain Claude print mode reads project config from cwd; the Settings
+    probe must use the same runtime cwd as live Agent turns.
+    """
+
+    runtime_cwd = tmp_path / "agent-workdir"
+    captured: dict = {}
+
+    class _Runtime:
+        default_cwd = str(runtime_cwd)
+
+    class _FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"Hello from Claude", b"")
+
+    async def _spawn(*_args, **kwargs):
+        captured["cwd"] = kwargs.get("cwd")
+        return _FakeProcess()
+
+    monkeypatch.setattr(_Config, "runtime", _Runtime(), raising=False)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+
+    result = _run(service.test_web_auth("claude"))
+
+    assert result["ok"] is True
+    assert captured["cwd"] == str(runtime_cwd)
+    assert runtime_cwd.is_dir()
 
 
 def test_test_web_auth_claude_oauth_reports_settings_cleanup_failure(

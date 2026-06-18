@@ -4175,7 +4175,29 @@ def _read_claude_cli_oauth_signed_in(
     if not isinstance(payload, dict):
         return None
     logged_in = payload.get("loggedIn")
-    return logged_in if isinstance(logged_in, bool) else None
+    if logged_in is False:
+        return False
+    if logged_in is not True:
+        return None
+
+    # ``auth status`` reports Claude Code's overall auth state. API-key
+    # sources can also be "logged in", so only treat it as OAuth when the
+    # CLI identifies the source as Claude.ai / first-party OAuth.
+    for key in ("authMethod", "authProvider", "provider", "source"):
+        raw = payload.get(key)
+        if isinstance(raw, str):
+            normalized = raw.strip().lower().replace("_", "-")
+            if normalized in {
+                "claude.ai",
+                "claude-ai",
+                "oauth",
+                "subscription",
+                "claude-subscription",
+            }:
+                return True
+            if any(token in normalized for token in ("api-key", "apikey", "api key", "auth-token", "apihelper", "api-helper")):
+                return False
+    return None
 
 
 def _build_claude_status_probe_env(claude_env: dict[str, str] | None) -> dict[str, str] | None:

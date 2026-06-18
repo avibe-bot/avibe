@@ -177,6 +177,45 @@ def test_get_claude_auth_prefers_cli_oauth_status(
     assert state["active_auth_mode"] == "oauth"
 
 
+def test_get_claude_auth_ignores_cli_api_key_status_for_oauth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_claude_settings(tmp_path, {})
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
+
+    class _FakeAgent:
+        auth_mode = "oauth"
+        api_key = None
+        base_url = None
+        cli_path = "claude"
+
+    class _FakeAgents:
+        claude = _FakeAgent()
+
+    class _FakeConfig:
+        agents = _FakeAgents()
+
+    def fake_run(cmd, **_kwargs):
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout='{"loggedIn": true, "authMethod": "api-key"}',
+            stderr="",
+        )
+
+    monkeypatch.setattr("vibe.api.load_config", lambda: _FakeConfig())
+    monkeypatch.setattr("vibe.api.subprocess.run", fake_run)
+
+    from vibe.api import get_claude_auth
+
+    state = get_claude_auth()
+
+    assert state["has_oauth_credentials"] is False
+    assert state["active_auth_mode"] == "none"
+
+
 def test_claude_settings_json_auth_token_surfaces_in_get_claude_auth(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

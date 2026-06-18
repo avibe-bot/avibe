@@ -431,6 +431,29 @@ class AgentAuthService:
         cli_path = getattr(backend_cfg, "cli_path", None) or getattr(backend_cfg, "binary", None)
         return cli_path or backend
 
+    def _resolve_claude_probe_cwd(self) -> str:
+        """Return the cwd that a Settings Claude probe should execute in.
+
+        Plain ``claude -p`` loads project hooks, MCP config, and CLAUDE.md from
+        the process cwd. Use the same default runtime cwd as live Agent turns so
+        the Settings test reflects the actual Claude runtime instead of the UI
+        server launch directory.
+        """
+        config = getattr(getattr(self, "controller", None), "config", None)
+        candidates = (
+            getattr(self._resolve_backend_config("claude"), "cwd", None),
+            getattr(getattr(config, "runtime", None), "default_cwd", None),
+        )
+        for raw in candidates:
+            if isinstance(raw, str) and raw.strip():
+                path = os.path.abspath(os.path.expanduser(raw.strip()))
+                try:
+                    os.makedirs(path, exist_ok=True)
+                    return path
+                except OSError as exc:
+                    logger.warning("Failed to prepare Claude Settings probe cwd=%s: %s", path, exc)
+        return os.getcwd()
+
     def _build_claude_full_subprocess_env(self, *, force_oauth: bool = False) -> dict[str, str]:
         """Return a complete environment for direct Claude CLI subprocesses.
 
@@ -2079,6 +2102,7 @@ class AgentAuthService:
 
         binary = self._get_cli_binary(backend)
         prompt = "Hi"
+        cwd = None
         if backend == "claude":
             # ``-p`` switches Claude Code into non-interactive print mode
             # and exits after the first complete reply. Deliberately do
@@ -2106,6 +2130,7 @@ class AgentAuthService:
                 if auth_mode == "oauth" and auth_mode_set:
                     return {"ok": False, "error": "spawn_failed", "detail": str(err)}
                 env_override = dict(os.environ)
+            cwd = self._resolve_claude_probe_cwd()
         else:
             # Codex single-shot mode. ``--skip-git-repo-check`` bypasses
             # Codex's per-project trust gate. We also force
@@ -2148,6 +2173,7 @@ class AgentAuthService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env_override,
+                cwd=cwd,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
