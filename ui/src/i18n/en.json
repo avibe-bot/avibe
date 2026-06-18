@@ -309,6 +309,7 @@
       "testFailureCliNotFound": "The backend CLI binary was not found. Check the Path on the runtime card.",
       "testFailureSpawnFailed": "Could not launch the backend CLI: {{detail}}",
       "testFailureTimedOut": "The CLI did not respond within the test timeout.",
+      "testFailureNotLoggedIn": "The backend CLI did not find a signed-in account. Sign in again, then rerun the test.",
       "testFailureCliFailed": "The CLI exited with an error. Expand the raw output below to see what it said.",
       "testConnectionRawOutputLabel": "Raw output",
       "activeAuthOauth": "Active: OAuth",

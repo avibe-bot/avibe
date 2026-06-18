@@ -881,7 +881,8 @@ def test_test_web_auth_claude_oauth_env_removes_stale_anthropic_vars(
         async def communicate(self):
             return (b"Hello from Claude", b"")
 
-    async def _spawn(*_args, **kwargs):
+    async def _spawn(*args, **kwargs):
+        captured["args"] = args
         captured["env"] = kwargs.get("env") or {}
         return _FakeProcess()
 
@@ -895,6 +896,8 @@ def test_test_web_auth_claude_oauth_env_removes_stale_anthropic_vars(
     result = _run(service.test_web_auth("claude"))
 
     assert result["ok"] is True
+    assert captured["args"][:2] == ("/usr/bin/echo", "-p")
+    assert "--bare" not in captured["args"]
     assert "ANTHROPIC_API_KEY" not in captured["env"]
     assert "ANTHROPIC_AUTH_TOKEN" not in captured["env"]
     assert "ANTHROPIC_BASE_URL" not in captured["env"]
@@ -942,3 +945,25 @@ def test_test_web_auth_failure_surfaces_stderr(
     assert result["error"] == "invalid_credentials"
     assert result["exit_code"] == 7
     assert "Authentication failed" in (result.get("detail") or "")
+
+
+def test_test_web_auth_not_logged_in_has_specific_error_code(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakeProcess:
+        returncode = 1
+
+        async def communicate(self):
+            return (b"Not logged in \xc2\xb7 Please run /login", b"")
+
+    async def _spawn(*_args, **_kwargs):
+        return _FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spawn)
+
+    result = _run(service.test_web_auth("claude"))
+
+    assert result["ok"] is False
+    assert result["error"] == "not_logged_in"
+    assert result["exit_code"] == 1
+    assert "Not logged in" in (result.get("detail") or "")

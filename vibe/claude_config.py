@@ -63,16 +63,24 @@ def get_claude_settings_path(home: Path | None = None) -> Path:
     return get_claude_home(home) / "settings.json"
 
 
-def get_claude_credentials_path(home: Path | None = None) -> Path:
-    """Return the absolute path to ``~/.claude/credentials.json``.
+def get_claude_credentials_paths(home: Path | None = None) -> tuple[Path, ...]:
+    """Return Claude Code OAuth credential paths, newest layout first.
 
-    The Claude CLI writes OAuth tokens here on platforms that lack a
-    usable keychain (notably Linux/Docker, including the regression
-    container). The Settings UI uses presence + a token field as a
-    best-effort signal for "Claude is signed in via OAuth" since the
-    macOS keychain is not portably introspectable.
+    Claude Code currently writes OAuth tokens to
+    ``~/.claude/.credentials.json`` on Linux/Docker. Older Avibe builds
+    looked for ``credentials.json`` based on earlier CLI behavior, so keep
+    both paths readable for existing installs and tests.
     """
-    return get_claude_home(home) / "credentials.json"
+    claude_home = get_claude_home(home)
+    return (
+        claude_home / ".credentials.json",
+        claude_home / "credentials.json",
+    )
+
+
+def get_claude_credentials_path(home: Path | None = None) -> Path:
+    """Return the primary Claude Code OAuth credentials path."""
+    return get_claude_credentials_paths(home)[0]
 
 
 def get_claude_oauth_settings_backup_path(home: Path | None = None) -> Path:
@@ -83,31 +91,31 @@ def get_claude_oauth_settings_backup_path(home: Path | None = None) -> Path:
 def read_claude_oauth_signed_in(home: Path | None = None) -> bool:
     """Best-effort probe for whether Claude has a usable OAuth session.
 
-    True iff ``~/.claude/credentials.json`` exists and carries something
+    True iff Claude's on-disk credentials file exists and carries something
     that looks like an OAuth token bundle. We don't attempt to introspect
     keychain-backed installs (macOS) — those return False here but the UI
     can still light up the OAuth banner after a successful in-app login.
     """
-    path = get_claude_credentials_path(home)
-    if not path.exists():
-        return False
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    if not isinstance(data, dict):
-        return False
-    # Claude writes nested ``claudeAiOauth`` payloads in newer builds; flat
-    # ``access_token``/``refresh_token`` keys also occur. Accept either.
-    nested = data.get("claudeAiOauth") if isinstance(data.get("claudeAiOauth"), dict) else None
-    if nested and any(
-        isinstance(nested.get(field), str) and nested.get(field)
-        for field in ("access_token", "refresh_token", "accessToken", "refreshToken")
-    ):
-        return True
-    for field in ("access_token", "refresh_token", "accessToken", "refreshToken"):
-        if isinstance(data.get(field), str) and data.get(field):
+    for path in get_claude_credentials_paths(home):
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        # Claude writes nested ``claudeAiOauth`` payloads in newer builds; flat
+        # ``access_token``/``refresh_token`` keys also occur. Accept either.
+        nested = data.get("claudeAiOauth") if isinstance(data.get("claudeAiOauth"), dict) else None
+        if nested and any(
+            isinstance(nested.get(field), str) and nested.get(field)
+            for field in ("access_token", "refresh_token", "accessToken", "refreshToken")
+        ):
             return True
+        for field in ("access_token", "refresh_token", "accessToken", "refreshToken"):
+            if isinstance(data.get(field), str) and data.get(field):
+                return True
     return False
 
 
@@ -390,7 +398,7 @@ def build_claude_subprocess_env(
     The ``auth_mode`` toggle is the load-bearing piece — if a user picks
     OAuth in Settings but their shell exports ``ANTHROPIC_API_KEY``, the
     Claude CLI silently keeps API-key auth and never reaches
-    ``~/.claude/credentials.json``. Stripping both ``ANTHROPIC_API_KEY``
+    Claude Code's OAuth credential store. Stripping both ``ANTHROPIC_API_KEY``
     and ``ANTHROPIC_AUTH_TOKEN`` (header-semantics switch) in OAuth mode
     makes the Settings toggle authoritative.
 
@@ -443,7 +451,7 @@ def build_claude_subprocess_env(
             # it IS the OAuth setup flow. Strip every inherited
             # Anthropic credential header: an ambient
             # ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` would
-            # suppress ``~/.claude/credentials.json``, and an ambient
+            # suppress Claude Code's OAuth credential store, and an ambient
             # ``ANTHROPIC_BASE_URL`` (typically a stale relay URL from
             # the shell) would route OAuth traffic through an
             # api-key-only gateway. Both leaks have to be plugged for

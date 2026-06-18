@@ -105,7 +105,10 @@ def _classify_test_failure(stdout: str, stderr: str) -> str:
     if not text.strip():
         return "cli_failed"
 
-    # Auth-side rejections (key wrong / revoked / not present).
+    if "not logged in" in text:
+        return "not_logged_in"
+
+    # Auth-side rejections (key wrong / revoked / rejected).
     auth_needles = (
         "401",
         "unauthorized",
@@ -114,7 +117,6 @@ def _classify_test_failure(stdout: str, stderr: str) -> str:
         "api key not valid",
         "authentication",
         "auth failed",
-        "not logged in",
         "missing api key",
         "no api key",
     )
@@ -2079,12 +2081,14 @@ class AgentAuthService:
         prompt = "Hi"
         if backend == "claude":
             # ``-p`` switches Claude Code into non-interactive print mode
-            # and exits after the first complete reply. ``--bare`` strips
-            # the launch-time scaffolding (hooks, MCP, CLAUDE.md
-            # auto-discovery) so the probe never fails on environment
-            # quirks; we only care that the auth + endpoint round-trip
-            # works.
-            cmd = [binary, "-p", "--bare"]
+            # and exits after the first complete reply. Deliberately do
+            # not pass ``--bare`` here: recent Claude Code builds document
+            # that bare mode skips OAuth/keychain reads and only accepts
+            # API-key auth. This Settings probe should answer the user's
+            # real question: whether the current Avibe Claude setup can
+            # run an Agent turn. It follows the normal print-mode launch
+            # path used by live Claude sessions.
+            cmd = [binary, "-p"]
             if isinstance(model, str) and model.strip():
                 cmd.extend(["--model", model.strip()])
             cmd.append(prompt)

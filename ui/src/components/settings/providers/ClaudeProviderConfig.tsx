@@ -122,9 +122,9 @@ export const ClaudeProviderConfig: React.FC<{
     : t('settings.backends.claudeApiKeyMissing');
 
   const onRemoveApiKey = async () => {
-    // Drop just the API key from V2Config; leaves any OAuth tokens in
-    // ``~/.claude/credentials.json`` (or the OS keychain) alone. Lets
-    // the user clear a stale key without having to also re-do OAuth.
+    // Drop just the API key from V2Config; leaves Claude Code's own OAuth
+    // token store alone. Lets the user clear a stale key without having to
+    // also re-do OAuth.
     const confirmed = window.confirm(
       t('settings.backends.claudeApiKeyRemoveConfirm') as string,
     );
@@ -258,11 +258,9 @@ export const ClaudeProviderConfig: React.FC<{
             {authMode === 'oauth' && (
               <BackendOAuthPanel
                 backend={BACKEND_ID}
-                // ``has_oauth_credentials`` flips when ``~/.claude/credentials.json``
-                // carries a usable token bundle — that's a real signal we can
-                // trust on Linux/Docker. macOS keychain installs still report
-                // false, but a successful in-session login flips the panel's
-                // own state anyway.
+                // ``has_oauth_credentials`` is derived from Claude Code's
+                // own auth status when available, with file-based detection
+                // as a fallback for Linux/Docker.
                 signedIn={!!authState?.has_oauth_credentials}
                 title={t('settings.backends.claudeOauthPanelTitle')}
                 subtitle={t('settings.backends.claudeOauthPanelSubtitle')}
@@ -323,10 +321,9 @@ export const ClaudeProviderConfig: React.FC<{
                       </Button>
                       {/* Symmetric to OpenCode's Remove affordance:
                           clear the saved API key while leaving OAuth
-                          tokens in ``~/.claude/credentials.json`` /
-                          keychain intact. Without this, a stuck key
-                          keeps forcing the env-var path even after
-                          the user signed in via OAuth. */}
+                          token store intact. Without this, a stuck key
+                          keeps forcing the env-var path even after the
+                          user signed in via OAuth. */}
                       <Button
                         type="button"
                         variant="ghost"

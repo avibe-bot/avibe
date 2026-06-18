@@ -967,7 +967,7 @@ export type ClaudeAuthState = {
   auth_mode: ClaudeAuthMode;
   // Live source the CLI is actually inheriting at launch (api_key when
   // V2Config injects ``ANTHROPIC_API_KEY`` and strips OAuth env vars,
-  // oauth when ``~/.claude/credentials.json`` has a usable token).
+  // oauth when Claude Code reports or stores a usable first-party login).
   active_auth_mode: ActiveAuthMode;
   has_api_key: boolean;
   api_key_length: number;
