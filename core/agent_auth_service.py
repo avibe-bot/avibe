@@ -2102,8 +2102,9 @@ class AgentAuthService:
 
         binary = self._get_cli_binary(backend)
         prompt = "Hi"
-        cwd = None
+        probe_cwd = None
         if backend == "claude":
+            probe_cwd = self._resolve_claude_probe_cwd()
             # ``-p`` switches Claude Code into non-interactive print mode
             # and exits after the first complete reply. Deliberately do
             # not pass ``--bare`` here: recent Claude Code builds document
@@ -2130,7 +2131,6 @@ class AgentAuthService:
                 if auth_mode == "oauth" and auth_mode_set:
                     return {"ok": False, "error": "spawn_failed", "detail": str(err)}
                 env_override = dict(os.environ)
-            cwd = self._resolve_claude_probe_cwd()
         else:
             # Codex single-shot mode. ``--skip-git-repo-check`` bypasses
             # Codex's per-project trust gate. We also force
@@ -2173,7 +2173,7 @@ class AgentAuthService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env_override,
-                cwd=cwd,
+                cwd=probe_cwd,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
