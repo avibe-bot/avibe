@@ -712,6 +712,17 @@ def test_delete_provider_model_only_removes_user_managed_models(fake_model_env) 
     assert read_opencode_provider_user_models("deepseek", home=home) == {}
 
 
+def test_delete_provider_model_keeps_empty_models_tombstone(fake_model_env) -> None:
+    _server, home = fake_model_env
+    _save_model("deepseek", {"model_id": "deepseek-v4-flash"})
+
+    result = _delete_model("deepseek", "deepseek-v4-flash")
+
+    assert result["ok"] is True
+    config = _read_opencode_config(home)
+    assert config["provider"]["deepseek"]["models"] == {}
+
+
 def test_delete_provider_model_rejects_builtin_model(fake_model_env) -> None:
     result = _delete_model("deepseek", "deepseek-chat")
     assert result == {"ok": False, "message": "Only user-managed models can be removed"}

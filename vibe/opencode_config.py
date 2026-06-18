@@ -843,7 +843,7 @@ def remove_opencode_provider_model(
         return probe.path
     models.pop(model_id, None)
     if not models:
-        provider_config.pop("models", None)
+        provider_config["models"] = {}
 
     _prune_empty_provider_config(config, provider_id)
     return _write_opencode_config(config, probe.path)

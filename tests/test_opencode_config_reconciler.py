@@ -140,6 +140,29 @@ def test_user_models_do_not_resurrect_live_deleted_models():
     )["provider"]["deepseek"]["models"] == {"keep-model": {"id": "keep-model"}}
 
 
+def test_empty_user_models_block_drops_live_models():
+    assert _reconcile(
+        {
+            "provider": {
+                "deepseek": {
+                    "options": {"baseURL": "https://api.deepseek.com"},
+                    "models": {},
+                }
+            }
+        },
+        {
+            "provider": {
+                "deepseek": {
+                    "options": {"baseURL": "https://api.deepseek.com"},
+                    "models": {
+                        "deleted-model": {"id": "deleted-model"},
+                    },
+                }
+            }
+        },
+    )["provider"]["deepseek"]["models"] == {}
+
+
 def test_provider_absent_from_user_config_is_dropped_unless_auth_or_local():
     assert set(
         _reconcile(
