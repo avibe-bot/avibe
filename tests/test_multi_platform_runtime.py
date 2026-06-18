@@ -17,7 +17,7 @@ from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.processing_indicator import ProcessingIndicatorService
 from modules.agents.base import AgentRequest
 from modules.agents.service import AgentService
-from modules.agents.opencode.agent import OpenCodeAgent
+from modules.agents.opencode.agent import OpenCodeAgent, resolve_opencode_reasoning_effort
 from modules.agents.opencode.poll_loop import OpenCodePollLoop
 
 
@@ -678,6 +678,81 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     assert calls[0]["tools"] == {"question": False}
     assert calls[0]["model"] == {"providerID": "openai", "modelID": "gpt-5.4"}
     assert calls[0]["reasoning_effort"] == "high"
+
+
+def test_opencode_resets_saved_variant_for_non_reasoning_model():
+    catalog = {
+        "providers": [
+            {
+                "id": "glm",
+                "models": {
+                    "glm-5.2": {
+                        "capabilities": {"reasoning": False},
+                        "variants": {},
+                    }
+                },
+            }
+        ]
+    }
+
+    assert (
+        resolve_opencode_reasoning_effort(
+            {"providerID": "glm", "modelID": "glm-5.2"},
+            None,
+            catalog,
+        )
+        == "default"
+    )
+
+
+def test_opencode_keeps_supported_reasoning_variant():
+    catalog = {
+        "providers": [
+            {
+                "id": "openai",
+                "models": {
+                    "gpt-5.4": {
+                        "capabilities": {"reasoning": True},
+                        "variants": {"high": {"reasoningEffort": "high"}},
+                    }
+                },
+            }
+        ]
+    }
+
+    assert (
+        resolve_opencode_reasoning_effort(
+            {"providerID": "openai", "modelID": "gpt-5.4"},
+            "high",
+            catalog,
+        )
+        == "high"
+    )
+
+
+def test_opencode_resets_unsupported_reasoning_variant():
+    catalog = {
+        "providers": [
+            {
+                "id": "anthropic",
+                "models": {
+                    "claude-opus-4-5": {
+                        "capabilities": {"reasoning": True},
+                        "variants": {"low": {"effort": "low"}},
+                    }
+                },
+            }
+        ]
+    }
+
+    assert (
+        resolve_opencode_reasoning_effort(
+            {"providerID": "anthropic", "modelID": "claude-opus-4-5"},
+            "max",
+            catalog,
+        )
+        == "default"
+    )
 
 
 def test_opencode_fork_prompt_marks_target_session_id_authoritative():

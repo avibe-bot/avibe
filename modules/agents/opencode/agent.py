@@ -37,6 +37,66 @@ def resolve_opencode_model_dict(model_str: str | None, default_provider: str | N
     return None
 
 
+def _opencode_model_supports_variant(model_info: dict | None, variant: str | None) -> bool:
+    if not isinstance(model_info, dict) or not isinstance(variant, str) or not variant.strip():
+        return False
+    variants = model_info.get("variants")
+    if isinstance(variants, dict) and variant in variants:
+        return True
+    return False
+
+
+def _opencode_model_has_no_variants(model_info: dict | None) -> bool:
+    if not isinstance(model_info, dict):
+        return False
+    capabilities = model_info.get("capabilities")
+    if isinstance(capabilities, dict) and capabilities.get("reasoning") is False:
+        return True
+    variants = model_info.get("variants")
+    return isinstance(variants, dict) and not variants
+
+
+def resolve_opencode_reasoning_effort(
+    model_dict: dict[str, str] | None,
+    requested_effort: str | None,
+    model_catalog: dict | None,
+) -> str | None:
+    """Return the variant OpenCode should receive for this model.
+
+    OpenCode stores the last selected run variant per provider/model. When avibe
+    overrides the model to a non-reasoning model, omitting ``variant`` lets that
+    saved value leak into the new request. Send OpenCode's explicit ``default``
+    variant for models that do not support the requested effort.
+    """
+
+    if not model_dict:
+        return requested_effort
+    provider_id = model_dict.get("providerID")
+    model_id = model_dict.get("modelID")
+    if not provider_id or not model_id:
+        return requested_effort
+    if not isinstance(model_catalog, dict):
+        return requested_effort
+
+    for provider in model_catalog.get("providers", []) or []:
+        if not isinstance(provider, dict) or provider.get("id") != provider_id:
+            continue
+        models = provider.get("models")
+        if not isinstance(models, dict):
+            return requested_effort
+        model_info = models.get(model_id)
+        if requested_effort:
+            if _opencode_model_supports_variant(model_info, requested_effort):
+                return requested_effort
+            if isinstance(model_info, dict):
+                return "default"
+            return requested_effort
+        if _opencode_model_has_no_variants(model_info):
+            return "default"
+        return requested_effort
+    return requested_effort
+
+
 class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
     """OpenCode Server API integration via HTTP."""
 
@@ -265,6 +325,16 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 reasoning_effort = server.get_agent_reasoning_effort_from_config(agent_to_use)
             if not reasoning_effort:
                 reasoning_effort = getattr(opencode_cfg, "default_reasoning_effort", None)
+            if model_dict:
+                try:
+                    model_catalog = await server.get_available_models(request.working_path)
+                    reasoning_effort = resolve_opencode_reasoning_effort(
+                        model_dict,
+                        reasoning_effort,
+                        model_catalog,
+                    )
+                except Exception as err:
+                    logger.debug("Failed to resolve OpenCode model variant support: %s", err)
 
             baseline_message_ids: set[str] = set()
             try:

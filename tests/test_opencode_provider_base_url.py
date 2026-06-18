@@ -268,14 +268,14 @@ def test_upsert_provider_model_allows_provider_native_slash(tmp_path: Path) -> N
     )
 
 
-def test_remove_provider_model_prunes_empty_model_block_but_keeps_options(tmp_path: Path) -> None:
+def test_remove_provider_model_keeps_empty_model_tombstone_and_options(tmp_path: Path) -> None:
     upsert_opencode_provider_base_url("deepseek", "https://api.deepseek.com", home=tmp_path)
     upsert_opencode_provider_model("deepseek", "deepseek-v4-flash", home=tmp_path)
 
     remove_opencode_provider_model("deepseek", "deepseek-v4-flash", home=tmp_path)
 
     config = _read_config(get_opencode_config_paths(tmp_path)[0])
-    assert "models" not in config["provider"]["deepseek"]
+    assert config["provider"]["deepseek"]["models"] == {}
     assert config["provider"]["deepseek"]["options"]["baseURL"] == "https://api.deepseek.com"
 
 
