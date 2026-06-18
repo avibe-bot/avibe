@@ -600,6 +600,78 @@ def test_patch_backend_switch_blocked_while_turn_in_flight(isolated_state, tmp_p
     in_flight.assert_awaited_once()
 
 
+def test_patch_agent_name_only_backend_switch_blocked_while_turn_in_flight(isolated_state, tmp_path):
+    """A selected Vibe Agent implies its backend. The UI often sends only
+    ``agent_name`` when changing the picker, so the route must derive the
+    backend before deciding whether to consult the controller's in-flight gate.
+    """
+
+    from core.vibe_agents import VibeAgentStore
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    store = VibeAgentStore()
+    try:
+        store.create(name="reviewer", backend="codex")
+    finally:
+        store.close()
+
+    in_flight = AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "in_flight": True}})
+    with patch("vibe.internal_client.turn_state", in_flight):
+        client = app.test_client()
+        headers = csrf_headers(client)
+        response = client.patch(
+            f"/api/sessions/{session_id}",
+            json={"agent_name": "reviewer"},
+            headers=headers,
+        )
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["code"] == "backend_locked"
+    assert body["current_backend"] == "claude"
+    assert body["requested_backend"] == "codex"
+    in_flight.assert_awaited_once()
+
+
+def test_patch_agent_name_only_backend_switch_refreshes_variant_when_idle(isolated_state, tmp_path):
+    from core.vibe_agents import VibeAgentStore
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == session_id)
+            .values(agent_variant="old-claude-profile")
+        )
+
+    store = VibeAgentStore()
+    try:
+        store.create(name="reviewer", backend="codex")
+    finally:
+        store.close()
+
+    idle = AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "in_flight": False}})
+    with patch("vibe.internal_client.turn_state", idle):
+        client = app.test_client()
+        headers = csrf_headers(client)
+        response = client.patch(
+            f"/api/sessions/{session_id}",
+            json={"agent_name": "reviewer"},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["agent_name"] == "reviewer"
+    assert body["agent_backend"] == "codex"
+    assert body["agent_variant"] == "codex"
+    idle.assert_awaited_once()
+
+
 def test_patch_same_backend_change_skips_in_flight_gate(isolated_state, tmp_path):
     """Same-backend agent/model changes stay allowed mid-turn and don't pay the
     internal turn-state round-trip."""

@@ -474,6 +474,10 @@ def _backend_for_agent_name(conn: Connection, agent_name: str) -> str:
     return str(backend or "")
 
 
+def derive_backend_for_agent_name(conn: Connection, agent_name: str) -> str:
+    return _backend_for_agent_name(conn, agent_name)
+
+
 def backfill_session_title(
     conn: Connection,
     session_id: str,

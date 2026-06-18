@@ -368,13 +368,24 @@ def _routing_columns(routing: RoutingSettings) -> dict[str, str | None]:
     routing = normalize_routing_settings(routing)
     model = routing.model
     effort = routing.reasoning_effort
-    variant = routing.codex_agent or routing.claude_agent or routing.opencode_agent
+    variant = _active_routing_variant(routing)
     return {
         "agent_name": routing.agent_name,
         "agent_variant": variant,
         "model": model,
         "reasoning_effort": effort,
     }
+
+
+def _active_routing_variant(routing: RoutingSettings) -> str | None:
+    agent_name = routing.agent_name
+    if agent_name == "codex":
+        return routing.codex_agent
+    if agent_name == "claude":
+        return routing.claude_agent
+    if agent_name == "opencode":
+        return routing.opencode_agent
+    return routing.codex_agent or routing.claude_agent or routing.opencode_agent
 
 
 def _routing_from_row(row: dict[str, Any], payload: dict[str, Any]) -> RoutingSettings:

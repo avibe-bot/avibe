@@ -131,6 +131,42 @@ def test_codex_overrides_prefer_scope_level_model_and_reasoning() -> None:
     assert controller.get_codex_overrides(_context()) == (None, "gpt-5.5", "xhigh")
 
 
+def test_builtin_agent_model_overrides_only_apply_to_matching_backend() -> None:
+    controller = _StubController()
+    controller.primary_platform = "slack"
+    controller._get_settings_key = lambda context: context.channel_id
+    routing = SimpleNamespace(
+        agent_name="claude",
+        codex_agent=None,
+        opencode_agent=None,
+        model="claude-opus-4-8",
+        reasoning_effort="max",
+    )
+    controller.get_settings_manager_for_context = lambda context: SimpleNamespace(
+        get_channel_routing=lambda settings_key: routing
+    )
+
+    assert controller.get_codex_overrides(_context()) == (None, None, None)
+    assert controller.get_opencode_overrides(_context()) == (None, None, None)
+
+
+def test_builtin_agent_model_overrides_still_apply_to_selected_backend() -> None:
+    controller = _StubController()
+    controller.primary_platform = "slack"
+    controller._get_settings_key = lambda context: context.channel_id
+    routing = SimpleNamespace(
+        agent_name="codex",
+        codex_agent=None,
+        model="gpt-5.5",
+        reasoning_effort="xhigh",
+    )
+    controller.get_settings_manager_for_context = lambda context: SimpleNamespace(
+        get_channel_routing=lambda settings_key: routing
+    )
+
+    assert controller.get_codex_overrides(_context()) == (None, "gpt-5.5", "xhigh")
+
+
 def test_avibe_run_target_agent_does_not_read_im_routing() -> None:
     controller = _StubController()
     reviewer = SimpleNamespace(name="reviewer", backend="codex")

@@ -405,6 +405,83 @@ def test_settings_save_lifts_backend_aliases_for_builtin_agent_name(tmp_path: Pa
     assert routing.reasoning_effort == "max"
 
 
+def test_settings_save_stores_only_active_builtin_agent_variant(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    service = SQLiteSettingsService(db_path)
+    try:
+        service.save_state(
+            SettingsState(
+                channels={
+                    "slack::C123": ChannelSettings(
+                        enabled=True,
+                        routing=RoutingSettings(
+                            agent_name="opencode",
+                            codex_agent="stale-codex-profile",
+                            opencode_agent=None,
+                        ),
+                    ),
+                }
+            )
+        )
+        state = service.load_state()
+    finally:
+        service.close()
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(scope_settings.c.agent_variant, scope_settings.c.settings_json)
+                .select_from(scope_settings)
+                .join(scopes, scopes.c.id == scope_settings.c.scope_id)
+                .where(scopes.c.platform == "slack", scopes.c.native_id == "C123")
+            ).one()
+    finally:
+        engine.dispose()
+
+    assert row.agent_variant is None
+    assert state.channels["slack::C123"].routing.codex_agent == "stale-codex-profile"
+    assert json.loads(row.settings_json)["routing"]["codex_agent"] == "stale-codex-profile"
+
+
+def test_settings_save_uses_matching_builtin_agent_variant(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    service = SQLiteSettingsService(db_path)
+    try:
+        service.save_state(
+            SettingsState(
+                channels={
+                    "slack::C123": ChannelSettings(
+                        enabled=True,
+                        routing=RoutingSettings(
+                            agent_name="codex",
+                            codex_agent="active-codex-profile",
+                            opencode_agent="stale-opencode-profile",
+                        ),
+                    ),
+                }
+            )
+        )
+    finally:
+        service.close()
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(scope_settings.c.agent_variant)
+                .select_from(scope_settings)
+                .join(scopes, scopes.c.id == scope_settings.c.scope_id)
+                .where(scopes.c.platform == "slack", scopes.c.native_id == "C123")
+            ).one()
+    finally:
+        engine.dispose()
+
+    assert row.agent_variant == "active-codex-profile"
+
+
 def test_settings_load_ignores_row_model_without_agent_name(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path)
