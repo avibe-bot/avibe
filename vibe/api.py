@@ -4152,7 +4152,8 @@ def _read_claude_cli_oauth_signed_in(
     Keep it best-effort and quiet: if Claude is missing, slow, or emits an
     unexpected shape, callers fall back to disk inspection.
     """
-    binary = (cli_path or "claude").strip() or "claude"
+    configured = (cli_path or "claude").strip() or "claude"
+    binary = resolve_cli_path(configured) or configured
     try:
         result = subprocess.run(
             [binary, "auth", "status", "--json"],

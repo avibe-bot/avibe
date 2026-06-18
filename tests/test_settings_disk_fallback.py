@@ -157,6 +157,7 @@ def test_get_claude_auth_prefers_cli_oauth_status(
 
     monkeypatch.setenv("PATH", "/fake/bin")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-stale-shell")
+    monkeypatch.setattr("vibe.api.resolve_cli_path", lambda _binary: None)
 
     def fake_run(cmd, **kwargs):
         assert cmd == ["claude", "auth", "status", "--json"]
@@ -181,6 +182,53 @@ def test_get_claude_auth_prefers_cli_oauth_status(
     assert state["has_oauth_credentials"] is True
     assert state["active_auth_mode"] == "oauth"
     assert (tmp_path / "runtime").is_dir()
+
+
+def test_get_claude_auth_resolves_default_claude_cli_before_status_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_claude_settings(tmp_path, {})
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
+
+    resolved_cli = tmp_path / ".claude" / "local" / "claude"
+    resolved_cli.parent.mkdir(parents=True)
+    resolved_cli.write_text("#!/bin/sh\n", encoding="utf-8")
+    resolved_cli.chmod(0o755)
+
+    class _FakeAgent:
+        auth_mode = "oauth"
+        api_key = None
+        base_url = None
+        cli_path = "claude"
+
+    class _FakeAgents:
+        claude = _FakeAgent()
+
+    class _FakeConfig:
+        agents = _FakeAgents()
+
+    def fake_run(cmd, **_kwargs):
+        assert cmd == [str(resolved_cli), "auth", "status", "--json"]
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout='{"loggedIn": true, "authMethod": "claude.ai"}',
+            stderr="",
+        )
+
+    monkeypatch.setattr("vibe.api.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("vibe.api.shutil.which", lambda _binary: None)
+    monkeypatch.setattr("vibe.api.load_config", lambda: _FakeConfig())
+    monkeypatch.setattr("vibe.api.subprocess.run", fake_run)
+
+    from vibe.api import get_claude_auth
+
+    state = get_claude_auth()
+
+    assert state["has_oauth_credentials"] is True
+    assert state["active_auth_mode"] == "oauth"
 
 
 def test_get_claude_auth_ignores_cli_api_key_status_for_oauth(
