@@ -264,8 +264,13 @@ class MessageHandler(BaseHandler):
 
             from config.v2_settings import routing_model_for_backend, routing_reasoning_effort_for_backend
 
-            scope_model_override = routing_model_for_backend(routing, agent_name)
-            scope_reasoning_override = routing_reasoning_effort_for_backend(routing, agent_name)
+            has_session_target = isinstance(session_target, dict) or bool(resolved_target.get("agent_session_id"))
+            scope_model_override = (
+                None if has_session_target else routing_model_for_backend(routing, agent_name)
+            )
+            scope_reasoning_override = (
+                None if has_session_target else routing_reasoning_effort_for_backend(routing, agent_name)
+            )
 
             # A workbench Chat session carries the user's explicit per-session
             # agent / model / effort picks in ``agent_session_target`` (the Chat

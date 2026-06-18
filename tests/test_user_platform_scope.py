@@ -64,9 +64,9 @@ def test_controller_codex_overrides_resolve_dm_user_scope(monkeypatch, tmp_path)
             "U1": UserSettings(
                 display_name="Alex",
                 routing=RoutingSettings(
-                    agent_backend="codex",
-                    codex_model="gpt-5.5",
-                    codex_reasoning_effort="xhigh",
+                    agent_name="codex",
+                    model="gpt-5.5",
+                    reasoning_effort="xhigh",
                 ),
             )
         },

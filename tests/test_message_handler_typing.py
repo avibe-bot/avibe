@@ -363,13 +363,12 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
             (),
             {
                 "agent_name": "claude-opus",
-                "agent_backend": "claude",
-                "model": None,
-                "reasoning_effort": None,
+                "model": "claude-opus-4-8",
+                "reasoning_effort": "max",
                 "opencode_agent": None,
                 "claude_agent": None,
-                "claude_model": "claude-opus-4-8",
-                "claude_reasoning_effort": "max",
+                "claude_model": None,
+                "claude_reasoning_effort": None,
                 "codex_agent": None,
             },
         )()
@@ -643,14 +642,13 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(request.vibe_agent_model)
         self.assertIsNone(request.vibe_agent_system_prompt)
 
-    async def test_existing_session_backend_ignores_other_backend_scope_model_override(self):
+    async def test_existing_session_backend_ignores_scope_model_override(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
         controller.settings_manager.routing = type(
             "Routing",
             (),
             {
                 "agent_name": None,
-                "agent_backend": "claude",
                 "model": "claude-opus-4-8",
                 "reasoning_effort": "max",
             },

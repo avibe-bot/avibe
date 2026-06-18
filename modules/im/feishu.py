@@ -1863,7 +1863,10 @@ class FeishuBot(BaseIMClient):
         return str(value)
 
     @staticmethod
-    def _routing_draft_from_current(current_routing: Any) -> Dict[str, Optional[str]]:
+    def _routing_draft_from_current(
+        current_routing: Any,
+        selected_backend: Optional[str] = None,
+    ) -> Dict[str, Optional[str]]:
         fields = (
             "opencode_agent",
             "opencode_model",
@@ -1878,6 +1881,13 @@ class FeishuBot(BaseIMClient):
         draft: Dict[str, Optional[str]] = {}
         for field_name in fields:
             draft[field_name] = getattr(current_routing, field_name, None) if current_routing else None
+        if selected_backend in {"opencode", "claude", "codex"} and current_routing:
+            model = getattr(current_routing, "model", None)
+            reasoning_effort = getattr(current_routing, "reasoning_effort", None)
+            draft[f"{selected_backend}_model"] = draft.get(f"{selected_backend}_model") or model
+            draft[f"{selected_backend}_reasoning_effort"] = (
+                draft.get(f"{selected_backend}_reasoning_effort") or reasoning_effort
+            )
         return draft
 
     @staticmethod
@@ -1944,7 +1954,8 @@ class FeishuBot(BaseIMClient):
             return False
 
         draft_routing = dict(
-            cache.get("draft_routing") or self._routing_draft_from_current(cache.get("current_routing"))
+            cache.get("draft_routing")
+            or self._routing_draft_from_current(cache.get("current_routing"), cache.get("_selected_backend"))
         )
         selected_value = self._normalize_routing_field_value(self._extract_select_action_value(action))
         draft_routing[routing_field] = selected_value
@@ -1981,7 +1992,10 @@ class FeishuBot(BaseIMClient):
             logger.warning("Routing form submitted with empty backend, ignoring")
             return
 
-        draft_routing = cached.get("draft_routing") or self._routing_draft_from_current(cached.get("current_routing"))
+        draft_routing = cached.get("draft_routing") or self._routing_draft_from_current(
+            cached.get("current_routing"),
+            backend,
+        )
 
         def _val(form_key: str, routing_field: str) -> Optional[str]:
             if form_key in form_value:
@@ -2375,7 +2389,7 @@ class FeishuBot(BaseIMClient):
         cache_key = f"{channel_id or ''}:{cache_user_id}"
         self._routing_cache[cache_key] = {
             "current_routing": kwargs.get("current_routing"),
-            "draft_routing": self._routing_draft_from_current(kwargs.get("current_routing")),
+            "draft_routing": self._routing_draft_from_current(kwargs.get("current_routing"), current_backend),
             "registered_backends": registered_backends,
             "opencode_agents": kwargs.get("opencode_agents", []),
             "opencode_models": kwargs.get("opencode_models", {}),
@@ -2482,7 +2496,7 @@ class FeishuBot(BaseIMClient):
         cache_key = f"{channel_id}:{user_id}"
         cache = self._routing_cache.get(cache_key, {})
         cache["_selected_backend"] = selected_backend
-        cache.setdefault("draft_routing", self._routing_draft_from_current(current_routing))
+        cache.setdefault("draft_routing", self._routing_draft_from_current(current_routing, selected_backend))
         self._routing_cache[cache_key] = cache
 
         form_elements: list = [
