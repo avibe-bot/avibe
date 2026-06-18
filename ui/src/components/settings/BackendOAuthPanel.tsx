@@ -31,9 +31,8 @@ export type BackendOAuthPanelProps = {
    *  ``get*Auth`` endpoint). We still render a "re-authenticate" button so
    *  rotating credentials without dropping to a terminal stays one click. */
   signedIn: boolean;
-  /** When ``true`` render the remove-auth affordance even if the parent does
-   *  not want to show a current "signed in" banner. Useful when a backend has
-   *  stored OAuth tokens that are not the currently active auth source. */
+  /** When ``true`` render a Claude-only cleanup affordance for stale OAuth
+   *  tokens that are not the currently active auth source. */
   canRemoveAuth?: boolean;
   /** Heading text shown on the panel (e.g. "Claude account login"). */
   title: string;
@@ -267,7 +266,10 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
     setRemoving(true);
     setError(null);
     try {
-      const result = await api.removeBackendAuth(backend);
+      const result =
+        backend === 'claude' && canRemoveAuth && !signedIn
+          ? await api.removeClaudeOAuthCredentials()
+          : await api.removeBackendAuth(backend);
       if (!result.ok) {
         showToast(
           t('settings.backends.oauthRemoveFailed', {
@@ -363,6 +365,10 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
         return t('settings.backends.opencodeProviderSignIn');
       })();
   const showRemoveAuth = (canRemoveAuth ?? signedIn) || state === 'success';
+  const removeLabel =
+    backend === 'claude' && canRemoveAuth && !signedIn
+      ? t('settings.backends.oauthCleanStoredCredentials')
+      : t('settings.backends.oauthRemove');
 
   return (
     <div className="flex flex-col gap-4 rounded-lg border border-border bg-surface-2/60 p-4">
@@ -553,7 +559,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
             className="text-destructive hover:bg-destructive/10 hover:text-destructive"
           >
             <Trash2 className="size-3.5" />
-            {removing ? t('common.removing') : t('settings.backends.oauthRemove')}
+            {removing ? t('common.removing') : removeLabel}
           </Button>
         )}
         {isActive && (

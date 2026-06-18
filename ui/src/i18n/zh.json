@@ -286,6 +286,7 @@
       "oauthDeviceCodeCopied": "设备码已复制到剪贴板。",
       "oauthReauthenticate": "重新登录",
       "oauthRemove": "退出登录",
+      "oauthCleanStoredCredentials": "清理账号凭据",
       "oauthRemoved": "已移除凭据。",
       "oauthRemoveFailed": "移除凭据失败：{{detail}}",
       "oauthRemovePartial": "已清除 Avibe 内的凭据，但 CLI logout 返回错误：{{detail}}。CLI 自己的凭据文件可能仍在磁盘上。",

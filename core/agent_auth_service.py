@@ -1127,7 +1127,11 @@ class AgentAuthService:
             os.close(slave_fd)
         return process, master_fd, provider
 
-    async def _run_utility_command(self, *cmd: str) -> tuple[bool, str | None]:
+    async def _run_utility_command(
+        self,
+        *cmd: str,
+        env: dict[str, str] | None = None,
+    ) -> tuple[bool, str | None]:
         """Run a short CLI side-call. Returns ``(ok, error_excerpt)``.
 
         Callers that don't care about the outcome (setup preflight)
@@ -1138,6 +1142,7 @@ class AgentAuthService:
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
@@ -1958,8 +1963,17 @@ class AgentAuthService:
         if backend == "codex":
             logout_ok, logout_error = await self._run_utility_command(binary, "logout")
         else:
-            logout_ok, logout_error = await self._run_utility_command(binary, "auth", "logout")
             settings_cleanup_error = await self._clear_claude_settings_env_for_logout()
+            if settings_cleanup_error:
+                logout_ok = False
+                logout_error = settings_cleanup_error
+            else:
+                logout_ok, logout_error = await self._run_utility_command(
+                    binary,
+                    "auth",
+                    "logout",
+                    env=self._build_claude_full_subprocess_env(force_oauth=True),
+                )
 
         try:
             config = getattr(self.controller, "config", None)
@@ -2015,19 +2029,19 @@ class AgentAuthService:
         # missing, exited non-zero, or timed out), and the user needs
         # to know about that partial sign-out rather than seeing a
         # green toast and assuming the backend is fully signed out.
-        if not logout_ok:
-            return {
-                "ok": True,
-                "partial": True,
-                "warning": "logout_failed",
-                "detail": logout_error or "logout subprocess exited non-zero",
-            }
         if backend == "claude" and settings_cleanup_error:
             return {
                 "ok": True,
                 "partial": True,
                 "warning": "settings_cleanup_failed",
                 "detail": settings_cleanup_error,
+            }
+        if not logout_ok:
+            return {
+                "ok": True,
+                "partial": True,
+                "warning": "logout_failed",
+                "detail": logout_error or "logout subprocess exited non-zero",
             }
         return {"ok": True}
 
@@ -2995,7 +3009,7 @@ class AgentAuthService:
             return str(err)
         return None
 
-    async def clear_claude_oauth_for_api_key_mode(self) -> dict[str, Any]:
+    async def clear_claude_oauth_credentials_only(self) -> dict[str, Any]:
         """Remove Claude Code account tokens without changing API-key mode.
 
         Claude Code reapplies ``settings.json`` env values at startup. To make
@@ -3028,10 +3042,12 @@ class AgentAuthService:
             logout_ok = False
             logout_error = None
             if not settings_cleanup_error:
+                logout_env = self._build_claude_full_subprocess_env(force_oauth=True)
                 logout_ok, logout_error = await self._run_utility_command(
                     self._get_cli_binary("claude"),
                     "auth",
                     "logout",
+                    env=logout_env,
                 )
                 try:
                     await asyncio.to_thread(clear_claude_oauth_credentials_files)
@@ -3064,6 +3080,10 @@ class AgentAuthService:
                     "detail": logout_error or "claude auth logout exited non-zero",
                 }
             return {"ok": True}
+
+    async def clear_claude_oauth_for_api_key_mode(self) -> dict[str, Any]:
+        """Backward-compatible name for API-key save cleanup."""
+        return await self.clear_claude_oauth_credentials_only()
 
     async def _persist_backend_auth_mode(self, backend: str, auth_mode: str) -> None:
         """Persist V2Config.agents.<backend>.auth_mode for web and IM flows."""

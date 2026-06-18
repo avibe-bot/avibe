@@ -3588,6 +3588,14 @@ async def backend_oauth_web_remove(backend: str):
     return jsonify(await api.remove_backend_auth_async(backend))
 
 
+@app.route("/api/backend/claude/auth/oauth/credentials/remove", methods=["POST"])
+async def claude_oauth_credentials_remove():
+    """Clear Claude OAuth credentials without touching API-key auth."""
+    from vibe import api
+
+    return jsonify(await api.remove_claude_oauth_credentials_async())
+
+
 @app.route("/api/backend/<backend>/auth/api-key/remove", methods=["POST"])
 def backend_auth_api_key_remove(backend: str):
     """Clear the stored API key (V2Config + Codex auth.json) without

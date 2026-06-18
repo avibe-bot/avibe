@@ -791,18 +791,47 @@ def test_clear_claude_oauth_for_api_key_mode_restores_key_settings(
     )
     run_cmd = AsyncMock(return_value=(True, None))
     monkeypatch.setattr(service, "_run_utility_command", run_cmd)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-shell-should-not-leak")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "bearer-shell-should-not-leak")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://shell.example.invalid")
 
     result = _run(service.clear_claude_oauth_for_api_key_mode())
 
     assert result == {"ok": True}
     run_cmd.assert_awaited_once()
     args = run_cmd.call_args.args
+    kwargs = run_cmd.call_args.kwargs
     assert "auth" in args and "logout" in args
+    assert "ANTHROPIC_API_KEY" not in kwargs["env"]
+    assert "ANTHROPIC_AUTH_TOKEN" not in kwargs["env"]
+    assert "ANTHROPIC_BASE_URL" not in kwargs["env"]
     assert read_claude_settings_env() == {
         "ANTHROPIC_API_KEY": "sk-active",
         "ANTHROPIC_BASE_URL": "https://relay.example.invalid",
     }
     assert not credentials_path.exists()
+
+
+def test_clear_claude_oauth_credentials_only_preserves_api_key_config(
+    service: AgentAuthService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    restore_claude_settings_env(
+        {
+            "ANTHROPIC_API_KEY": "sk-active",
+            "ANTHROPIC_BASE_URL": "https://relay.example.invalid",
+        }
+    )
+    run_cmd = AsyncMock(return_value=(True, None))
+    monkeypatch.setattr(service, "_run_utility_command", run_cmd)
+
+    result = _run(service.clear_claude_oauth_credentials_only())
+
+    assert result == {"ok": True}
+    assert read_claude_settings_env() == {
+        "ANTHROPIC_API_KEY": "sk-active",
+        "ANTHROPIC_BASE_URL": "https://relay.example.invalid",
+    }
 
 
 def test_clear_claude_oauth_credentials_files_removes_known_token_files(

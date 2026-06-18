@@ -286,6 +286,7 @@
       "oauthDeviceCodeCopied": "Device code copied to clipboard.",
       "oauthReauthenticate": "Re-authenticate",
       "oauthRemove": "Sign out",
+      "oauthCleanStoredCredentials": "Clear account credentials",
       "oauthRemoved": "Credentials removed.",
       "oauthRemoveFailed": "Could not remove credentials: {{detail}}",
       "oauthRemovePartial": "Credentials cleared from Avibe, but the backend CLI logout reported a problem: {{detail}}. The CLI's own files may still be present.",

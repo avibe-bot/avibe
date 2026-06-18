@@ -506,7 +506,7 @@ def test_save_claude_auth_writes_settings_json_and_clears_v2_secret(
     cleanup_calls: list[bool] = []
     monkeypatch.setattr(
         "vibe.api._clear_claude_oauth_credentials_after_api_key_save",
-        lambda: cleanup_calls.append(True) or {"ok": True},
+        lambda _service=None: cleanup_calls.append(True) or {"ok": True},
     )
 
     from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
@@ -559,7 +559,7 @@ def test_save_claude_auth_reports_partial_when_oauth_cleanup_fails(
     monkeypatch.setattr("vibe.api._read_claude_cli_oauth_signed_in", lambda _path, **_kwargs: None)
     monkeypatch.setattr(
         "vibe.api._clear_claude_oauth_credentials_after_api_key_save",
-        lambda: {
+        lambda _service=None: {
             "ok": True,
             "partial": True,
             "warning": "oauth_cleanup_failed",
@@ -594,6 +594,58 @@ def test_save_claude_auth_reports_partial_when_oauth_cleanup_fails(
     settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
     assert settings["env"]["ANTHROPIC_API_KEY"] == "sk-ant-new-settings-key"
     assert settings["env"]["ANTHROPIC_BASE_URL"] == "https://relay.example.invalid"
+
+
+def test_save_claude_auth_restores_pending_oauth_backup_before_writing_new_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setattr("config.paths._home", lambda: tmp_path, raising=False)
+    monkeypatch.setattr("vibe.api._read_claude_cli_oauth_signed_in", lambda _path, **_kwargs: None)
+
+    from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
+    from vibe.api import save_claude_auth
+    from vibe.claude_config import (
+        read_claude_settings_env,
+        write_claude_oauth_settings_backup,
+    )
+
+    write_claude_oauth_settings_backup(
+        {
+            "ANTHROPIC_API_KEY": "sk-old-backup",
+            "ANTHROPIC_BASE_URL": "https://old-backup.example.invalid",
+        }
+    )
+
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+    ).save()
+
+    cleanup_calls: list[object] = []
+    monkeypatch.setattr(
+        "vibe.api._clear_claude_oauth_credentials_after_api_key_save",
+        lambda service=None: cleanup_calls.append(service) or {"ok": True},
+    )
+
+    result = save_claude_auth(
+        {
+            "auth_mode": "api_key",
+            "api_key": "sk-new-key",
+            "base_url": "https://new-relay.example.invalid",
+        }
+    )
+
+    assert result["ok"] is True
+    assert cleanup_calls and cleanup_calls[0] is not None
+    assert read_claude_settings_env() == {
+        "ANTHROPIC_API_KEY": "sk-new-key",
+        "ANTHROPIC_BASE_URL": "https://new-relay.example.invalid",
+    }
 
 
 def test_save_claude_auth_keeps_settings_token_over_legacy_v2_key(
