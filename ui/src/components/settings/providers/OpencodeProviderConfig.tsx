@@ -86,7 +86,7 @@ const SERVER_START_MAX_RETRIES = 5;
 const SERVER_START_RETRY_DELAY_MS = 3000;
 
 const FILTER_MODES: ReadonlyArray<FilterMode> = ['all', 'configured', 'oauth', 'local'];
-const REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
 const defaultReasoningEfforts = () => [...REASONING_EFFORTS];
 

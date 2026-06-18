@@ -42,7 +42,7 @@ def extract_opencode_response_text(
 
 
 def is_empty_terminal_opencode_message(message: Mapping[str, Any]) -> bool:
-    """Return True when OpenCode completed without text, error, or token usage."""
+    """Return True when OpenCode completed without usable text or error."""
 
     info = message.get("info")
     if not isinstance(info, Mapping):
@@ -58,18 +58,6 @@ def is_empty_terminal_opencode_message(message: Mapping[str, Any]) -> bool:
         return False
     if extract_opencode_response_text(message, allow_non_text_fallback=True):
         return False
-
-    tokens = info.get("tokens")
-    if isinstance(tokens, Mapping):
-        token_values = [
-            tokens.get("input"),
-            tokens.get("output"),
-            tokens.get("reasoning"),
-            tokens.get("cache", {}).get("read") if isinstance(tokens.get("cache"), Mapping) else None,
-            tokens.get("cache", {}).get("write") if isinstance(tokens.get("cache"), Mapping) else None,
-        ]
-        if any(isinstance(value, (int, float)) and value > 0 for value in token_values):
-            return False
 
     parts = message.get("parts")
     if not isinstance(parts, list):

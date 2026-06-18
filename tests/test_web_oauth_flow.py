@@ -763,10 +763,10 @@ def test_opencode_provider_test_fails_on_empty_terminal_message(
                 "time": {"completed": 123},
                 "finish": "unknown",
                 "tokens": {
-                    "input": 0,
-                    "output": 0,
-                    "reasoning": 0,
-                    "cache": {"read": 0, "write": 0},
+                    "input": 8,
+                    "output": 4,
+                    "reasoning": 2,
+                    "cache": {"read": 1, "write": 0},
                 },
             },
             "parts": [
