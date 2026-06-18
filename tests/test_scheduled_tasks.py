@@ -1096,7 +1096,7 @@ def test_runtime_session_reservation_uses_canonicalized_scope_agent(tmp_path: Pa
     assert target.agent_id
 
 
-def test_runtime_session_reservation_rejects_unresolved_legacy_scope_backend(
+def test_runtime_session_reservation_ignores_unresolved_legacy_scope_backend(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1111,7 +1111,7 @@ def test_runtime_session_reservation_rejects_unresolved_legacy_scope_backend(
 
     agent_store = VibeAgentStore(db_path)
     try:
-        agent_store.ensure_default_agent(backend="claude")
+        default_agent = agent_store.ensure_default_agent(backend="claude")
         agent_store.create(name="codex", backend="opencode")
     finally:
         agent_store.close()
@@ -1146,8 +1146,11 @@ def test_runtime_session_reservation_rejects_unresolved_legacy_scope_backend(
         request_store=TaskExecutionStore(tmp_path / "task_requests"),
     )
 
-    with pytest.raises(ValueError, match="legacy backend without an Agent"):
-        service._reserve_runtime_session(agent_name=None, deliver_key="slack::channel::C123")
+    session_id = service._reserve_runtime_session(agent_name=None, deliver_key="slack::channel::C123")
+    target = resolve_session_id_target(session_id, db_path=db_path)
+
+    assert target.agent_backend == default_agent.backend
+    assert target.agent_name == default_agent.name
 
 
 def test_runtime_session_reservation_uses_default_agent_without_scope_agent(

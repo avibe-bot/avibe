@@ -643,7 +643,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
       const effectiveCwd = (raw.custom_cwd ?? '') || defaultCwd;
       const routing = raw.routing || {};
       const selectedAgent = routing.agent_name ? agentByName[routing.agent_name] : null;
-      const backend = selectedAgent?.backend || routing.agent_backend || defaultAgent?.backend || 'opencode';
+      const backend = selectedAgent?.backend || defaultAgent?.backend || 'opencode';
 
       if (backend === 'opencode' && config.agents?.opencode?.enabled) {
         neededOpenCodeCwds.add(effectiveCwd);

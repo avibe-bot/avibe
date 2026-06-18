@@ -381,7 +381,6 @@ def _resolve_agent_target(
     """Resolve the concrete Vibe Agent/backend before a Session row exists."""
 
     scope_agent_name = _optional_str(scope_row.get("agent_name")) if scope_row else None
-    scope_backend = _supported_backend(scope_row.get("agent_backend")) if scope_row else None
     resolver = getattr(controller, "resolve_vibe_agent_for_context", None)
     if scope_agent_name and callable(resolver):
         try:
@@ -393,18 +392,8 @@ def _resolve_agent_target(
             agent = None
         if agent is not None:
             target = _agent_target_from_vibe_agent(agent, scope_row=scope_row)
-            if target is not None and (scope_backend is None or target.agent_backend == scope_backend):
+            if target is not None:
                 return target
-
-    if scope_backend:
-        return ResolvedAgentTarget(
-            agent_id=None,
-            agent_name=scope_agent_name,
-            agent_backend=scope_backend,
-            agent_variant=_agent_variant_for_backend(scope_backend, scope_row),
-            model=_optional_str(scope_row.get("model")) if scope_row else None,
-            reasoning_effort=_optional_str(scope_row.get("reasoning_effort")) if scope_row else None,
-        )
 
     if callable(resolver):
         try:
@@ -449,13 +438,16 @@ def _agent_target_from_vibe_agent(agent: Any, *, scope_row: Optional[dict[str, A
     backend = _supported_backend(getattr(agent, "backend", None))
     if not backend:
         return None
-    scope_model = _optional_str(scope_row.get("model")) if scope_row else None
-    scope_effort = _optional_str(scope_row.get("reasoning_effort")) if scope_row else None
+    scope_backend = _supported_backend(scope_row.get("agent_backend")) if scope_row else None
+    apply_scope_overrides = scope_backend is None or scope_backend == backend
+    compatible_scope_row = scope_row if apply_scope_overrides else None
+    scope_model = _optional_str(scope_row.get("model")) if scope_row and apply_scope_overrides else None
+    scope_effort = _optional_str(scope_row.get("reasoning_effort")) if scope_row and apply_scope_overrides else None
     return ResolvedAgentTarget(
         agent_id=_optional_str(getattr(agent, "id", None)),
         agent_name=_optional_str(getattr(agent, "name", None)),
         agent_backend=backend,
-        agent_variant=_agent_variant_for_backend(backend, scope_row),
+        agent_variant=_agent_variant_for_backend(backend, compatible_scope_row),
         model=scope_model or _optional_str(getattr(agent, "model", None)),
         reasoning_effort=scope_effort or _optional_str(getattr(agent, "reasoning_effort", None)),
     )

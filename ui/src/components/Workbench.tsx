@@ -12,7 +12,7 @@ import { AgentRoutePicker } from './workbench/AgentRoutePicker';
 // Mirrors design.pen DnkGJ "Workbench" canvas: a centered hero panel +
 // suggestion chips with the shared chat Composer below it. The Composer is
 // wired to create a new session under the most-recently-active project using
-// the default backend, then routes to /chat/<id> with the typed message
+// the default Agent, then routes to /chat/<id> with the typed message
 // pre-seeded. No project? The send surfaces the NewProjectDialog so the user
 // gets unstuck without bouncing pages. The create flow lives in the shared
 // useNewSession hook — one source of truth with the mobile NewSessionSheet.

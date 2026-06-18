@@ -204,7 +204,9 @@ Agent routing model:
 - global default: the enabled Vibe Agent recorded in SQLite `state_meta.default_agent_name`
 - backend availability and CLI path: `agents.<backend>.enabled` and `agents.<backend>.cli_path`
 - per-channel overrides: configured via the Web UI Agent Settings / channel settings
-- legacy compatibility: `agents.default_backend` may still appear in old JSON payloads, but new routing code must not treat it as the product default
+- legacy compatibility: `agents.default_backend` and scope-level `routing.agent_backend` /
+  `scope_settings.agent_backend` may still appear in old JSON/API payloads, but new routing
+  code must not treat them as the product default or scope route selector
 
 Source-of-truth rule:
 

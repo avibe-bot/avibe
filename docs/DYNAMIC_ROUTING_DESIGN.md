@@ -1,5 +1,12 @@
 # Dynamic Channel Routing Design
 
+> Historical design note: this document describes the pre-Agent-catalog backend
+> routing model. Current Avibe routing is Agent-based: scopes select
+> `routing.agent_name`, new sessions inherit the default Vibe Agent when no
+> scope Agent is set, and `scope_settings.agent_backend` / `routing.agent_backend`
+> are retained only as legacy compatibility fields. Existing Agent Sessions keep
+> their own `agent_sessions.agent_backend` snapshot.
+
 ## Overview
 
 Replace static file-based routing with dynamic per-channel routing configuration that users can change via Slack menus.

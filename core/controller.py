@@ -1004,8 +1004,8 @@ class Controller:
         """Unified agent resolution with dynamic override support.
 
         Priority:
-        1. explicit Vibe Agent selected by the Scope
-        2. migration fallback from legacy Scope agent_backend
+        1. explicit/session Vibe Agent target
+        2. existing session backend snapshot
         3. default Vibe Agent route
         4. AgentService.default_agent / first registered backend compatibility fallback
         """
@@ -1023,22 +1023,9 @@ class Controller:
         if target_backend and str(target_backend) in {"opencode", "claude", "codex"}:
             return str(target_backend)
 
-        settings_key = self._get_settings_key(context)
-        settings_manager = self.get_settings_manager_for_context(context)
-        routing = settings_manager.get_channel_routing(settings_key)
         vibe_agent = self.resolve_vibe_agent_for_context(context, required=False)
         if vibe_agent:
             return vibe_agent.backend
-
-        if routing and routing.agent_backend:
-            # Migration fallback for scopes saved before Agent became the unified
-            # selection. New Scope settings should select agent_name instead.
-            if routing.agent_backend in self.agent_service.agents:
-                return routing.agent_backend
-            logger.warning(
-                f"Scope routing specifies legacy backend '{routing.agent_backend}' but it is not registered."
-            )
-            return routing.agent_backend
 
         return self._fallback_registered_agent_backend()
 
@@ -1072,9 +1059,7 @@ class Controller:
         try:
             if agent_name:
                 return self.vibe_agent_store.require_enabled(agent_name)
-            legacy_backend = (target.get("agent_backend") if target else None) or (
-                routing.agent_backend if routing else None
-            )
+            legacy_backend = target.get("agent_backend") if target else None
             if legacy_backend:
                 agent = self.vibe_agent_store.get_builtin_default_agent_for_backend(legacy_backend)
                 if agent is not None:
