@@ -179,6 +179,41 @@ def test_restored_telegram_dm_poll_keeps_typed_user_session_key():
     ]
 
 
+def test_restored_legacy_telegram_dm_poll_infers_typed_user_session_key():
+    poll = ActivePollInfo(
+        opencode_session_id="oc-telegram",
+        base_session_id="telegram_58181121",
+        channel_id="58181121",
+        thread_id="",
+        settings_key="58181121",
+        working_path="/tmp/work",
+        platform="telegram",
+        user_id="58181121",
+        processing_indicator={
+            "platform": "telegram",
+            "user_id": "58181121",
+            "channel_id": "58181121",
+            "thread_id": "",
+        },
+    )
+    agent, _, _, request_sessions = _build_agent({"oc-telegram": poll})
+
+    async def _run():
+        restored = await agent.restore_active_polls()
+        await asyncio.sleep(0)
+        for task in list(agent._active_requests.values()):
+            if not task.done():
+                await task
+        return restored
+
+    restored = asyncio.run(_run())
+
+    assert restored == 1
+    assert request_sessions == [
+        ("telegram_58181121", "oc-telegram", "/tmp/work", "telegram::user::58181121")
+    ]
+
+
 def test_restored_poll_prefers_persisted_typed_channel_session_key():
     poll = ActivePollInfo(
         opencode_session_id="oc-slack",

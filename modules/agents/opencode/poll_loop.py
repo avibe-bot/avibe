@@ -22,17 +22,21 @@ logger = logging.getLogger(__name__)
 def restored_context_from_poll_info(poll_info) -> MessageContext:
     snapshot = poll_info.processing_indicator if isinstance(poll_info.processing_indicator, dict) else {}
     platform = str(snapshot.get("platform") or poll_info.platform or "")
+    user_id = str(snapshot.get("user_id") or poll_info.user_id or "")
+    channel_id = str(snapshot.get("channel_id") or poll_info.channel_id or "")
     context_token = str(snapshot.get("context_token") or getattr(poll_info, "context_token", "") or "")
     platform_specific: dict[str, Any] = {}
     if platform:
         platform_specific["platform"] = platform
     if snapshot.get("is_dm") is not None:
         platform_specific["is_dm"] = bool(snapshot.get("is_dm"))
+    elif platform in {"telegram", "wechat"} and user_id and user_id == channel_id:
+        platform_specific["is_dm"] = True
     if context_token:
         platform_specific["context_token"] = context_token
     return MessageContext(
-        user_id=str(snapshot.get("user_id") or poll_info.user_id or ""),
-        channel_id=str(snapshot.get("channel_id") or poll_info.channel_id or ""),
+        user_id=user_id,
+        channel_id=channel_id,
         platform=platform or None,
         thread_id=snapshot.get("thread_id") or poll_info.thread_id or None,
         message_id=snapshot.get("message_id") or None,

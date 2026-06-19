@@ -548,7 +548,42 @@ class SettingsHandler(BaseHandler):
         backend = getattr(agent, "backend", None) if agent else None
         return str(backend) if backend else None
 
-    def _routing_update_needs_new_session_hint(self, context: MessageContext, selected_backend: str) -> bool:
+    @staticmethod
+    def _routing_target_from_row(row: dict) -> tuple[str, str, str, str, str]:
+        backend = str(row.get("agent_backend") or "").strip()
+        agent_name = str(row.get("agent_name") or "").strip()
+        if not agent_name and backend in {"opencode", "claude", "codex"}:
+            agent_name = backend
+        variant = str(row.get("agent_variant") or "").strip()
+        if variant == backend and agent_name == backend:
+            variant = ""
+        return (
+            agent_name,
+            backend,
+            variant,
+            str(row.get("model") or "").strip(),
+            str(row.get("reasoning_effort") or "").strip(),
+        )
+
+    def _routing_target_from_settings(self, routing) -> tuple[str, str, str, str, str]:
+        agent_name = str(getattr(routing, "agent_name", None) or "").strip()
+        backend = str(self._resolve_route_backend(agent_name) or agent_name).strip()
+        variant = ""
+        if backend == "opencode":
+            variant = str(getattr(routing, "opencode_agent", None) or "").strip()
+        elif backend == "claude":
+            variant = str(getattr(routing, "claude_agent", None) or "").strip()
+        elif backend == "codex":
+            variant = str(getattr(routing, "codex_agent", None) or "").strip()
+        return (
+            agent_name,
+            backend,
+            variant,
+            str(getattr(routing, "model", None) or "").strip(),
+            str(getattr(routing, "reasoning_effort", None) or "").strip(),
+        )
+
+    def _routing_update_needs_new_session_hint(self, context: MessageContext, routing) -> bool:
         if self._context_can_start_fresh_session_without_reset(context):
             return False
         finder = getattr(self.sessions, "find_session_for_anchor", None)
@@ -563,11 +598,13 @@ class SettingsHandler(BaseHandler):
             return False
         if not row:
             return False
-        current_backend = str(row.get("agent_backend") or "").strip()
-        if not current_backend:
-            current_backend = self._resolve_route_backend(row.get("agent_name")) or ""
-        next_backend = self._resolve_route_backend(selected_backend) or str(selected_backend or "").strip()
-        return bool(current_backend and next_backend and current_backend != next_backend)
+        current_target = self._routing_target_from_row(row)
+        next_target = self._routing_target_from_settings(routing)
+        if not any(current_target):
+            return True
+        if current_target[1] and next_target[1] and current_target[1] != next_target[1]:
+            return True
+        return current_target != next_target
 
     async def _handle_routing_slack(self, context: MessageContext):
         """Handle routing for Slack using modal dialog"""
@@ -871,7 +908,7 @@ class SettingsHandler(BaseHandler):
             )
 
             settings_manager.set_channel_routing(settings_key, routing)
-            needs_new_session_hint = self._routing_update_needs_new_session_hint(context, backend)
+            needs_new_session_hint = self._routing_update_needs_new_session_hint(context, routing)
 
             parts = [f"{self._t('routing.label.backend')}: **{backend}**"]
             if backend == "opencode":
