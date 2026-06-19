@@ -10,6 +10,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  GitFork,
   Loader2,
   Pencil,
   Plus,
@@ -245,7 +246,8 @@ const MobileSessionRow: React.FC<{
   onOpen: () => void;
 }> = ({ projectId, session, unread, onOpen }) => {
   const { t } = useTranslation();
-  const { renameSession, archiveSession } = useWorkbenchProjectsTree();
+  const { renameSession, archiveSession, forkSession } = useWorkbenchProjectsTree();
+  const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -340,6 +342,20 @@ const MobileSessionRow: React.FC<{
           >
             {t('workbench.sessionRename')}
           </MenuItem>
+          {/* Fork is hidden until the session has a native agent session to fork
+              (mirrors the desktop sidebar's fork gate). */}
+          {session.native_session_id && (
+            <MenuItem
+              icon={GitFork}
+              onClick={async () => {
+                setMenuOpen(false);
+                const forked = await forkSession(projectId, session.id);
+                if (forked) navigate(`/chat/${encodeURIComponent(forked.id)}`);
+              }}
+            >
+              {t('workbench.sessionFork')}
+            </MenuItem>
+          )}
           <MenuItem
             icon={Archive}
             danger
