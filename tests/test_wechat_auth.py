@@ -127,6 +127,17 @@ class WeChatAuthManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("result.status === 'refreshed'", source)
         self.assertIn("setQrCodeUrl(result.qrcode_url || '')", source)
 
+    def test_wechat_config_does_not_render_idle_start_for_saved_token(self):
+        source = Path("ui/src/components/steps/WeChatConfig.tsx").read_text(encoding="utf-8")
+
+        self.assertIn("const hasSavedBotToken = hasUsableSecret(data.wechat, 'bot_token', botToken);", source)
+        self.assertIn("const isAlreadyBound = loginState === 'idle' && !botToken && hasSavedBotToken;", source)
+        self.assertIn("loginState === 'idle' && !botToken && !isAlreadyBound", source)
+        self.assertIn("if (!autoStartLogin) return;", source)
+
+        settings_source = Path("ui/src/components/settings/SettingsPlatformsPage.tsx").read_text(encoding="utf-8")
+        self.assertIn("autoStartLogin={false}", settings_source)
+
     async def test_poll_status_refresh_preserves_local_token_list(self):
         manager = WeChatAuthManager()
         qr_fetch = AsyncMock(

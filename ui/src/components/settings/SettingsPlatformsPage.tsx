@@ -487,7 +487,16 @@ const PlatformConfigEmbed: React.FC<{
     return <LarkConfig data={config} onNext={noopNext} embedded onApply={onApply} onCancel={onCancel} />;
   }
   if (platform === 'wechat') {
-    return <WeChatConfig data={config} onNext={noopNext} embedded onApply={onApply} onCancel={onCancel} />;
+    return (
+      <WeChatConfig
+        data={config}
+        onNext={noopNext}
+        embedded
+        onApply={onApply}
+        onCancel={onCancel}
+        autoStartLogin={false}
+      />
+    );
   }
   return null;
 };

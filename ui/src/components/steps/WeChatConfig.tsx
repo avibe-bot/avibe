@@ -27,13 +27,22 @@ interface WeChatConfigProps {
   embedded?: boolean;
   onApply?: (data: Record<string, any>) => Promise<void> | void;
   onCancel?: () => void;
+  autoStartLogin?: boolean;
 }
 
 const QR_POLL_INTERVAL_MS = 5000;
 
 // Mirrors design.pen XCWAT visual treatment for the QR-driven WeChat onboarding.
 // Three-stop horizontal stepper, mint-bordered QR card, mint primary actions.
-export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack, embedded = false, onApply, onCancel }) => {
+export const WeChatConfig: React.FC<WeChatConfigProps> = ({
+  data,
+  onNext,
+  onBack,
+  embedded = false,
+  onApply,
+  onCancel,
+  autoStartLogin = true,
+}) => {
   const { t } = useTranslation();
   const api = useApi();
   const [applying, setApplying] = useState(false);
@@ -49,6 +58,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
   const [verifyCode, setVerifyCode] = useState('');
   const [needsVerifyCode, setNeedsVerifyCode] = useState(false);
   const [starting, setStarting] = useState(false);
+  const hasSavedBotToken = hasUsableSecret(data.wechat, 'bot_token', botToken);
 
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoStartedRef = useRef(false);
@@ -130,13 +140,14 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
 
   useEffect(() => {
     if (autoStartedRef.current) return;
+    if (!autoStartLogin) return;
     if (starting) return;
     if (loginState !== 'idle') return;
-    if (hasUsableSecret(data.wechat, 'bot_token')) return;
+    if (hasSavedBotToken) return;
 
     autoStartedRef.current = true;
     void startLogin();
-  }, [loginState, startLogin, starting, data.wechat]);
+  }, [autoStartLogin, loginState, startLogin, starting, hasSavedBotToken]);
 
   const startPolling = (key: string) => {
     stopPolling();
@@ -273,8 +284,8 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
     }
   };
 
-  const canProceed = hasUsableSecret(data.wechat, 'bot_token', botToken);
-  const isAlreadyBound = loginState === 'idle' && !botToken && hasUsableSecret(data.wechat, 'bot_token');
+  const canProceed = hasSavedBotToken;
+  const isAlreadyBound = loginState === 'idle' && !botToken && hasSavedBotToken;
 
   const getStepState = () => {
     if (isAlreadyBound) return { step: 3, scanning: false, connected: true };
@@ -389,14 +400,24 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
           )}
 
           {/* Starting */}
-          {loginState === 'idle' && !botToken && (
+          {loginState === 'idle' && !botToken && !isAlreadyBound && (
             <div className="rounded-xl border border-border bg-background px-6 py-8 text-center">
               <div className="mx-auto flex size-14 items-center justify-center rounded-full border border-cyan/30 bg-cyan/[0.06] text-cyan">
-                <Loader2 size={26} className="animate-spin" />
+                {starting || autoStartLogin ? (
+                  <Loader2 size={26} className="animate-spin" />
+                ) : (
+                  <Smartphone size={26} />
+                )}
               </div>
               <p className="mt-3 text-[13px] text-muted">
                 {starting ? t('wechatConfig.starting') : t('wechatConfig.startDescription')}
               </p>
+              {!autoStartLogin && !starting && (
+                <Button type="button" variant="brand" size="sm" className="mt-4" onClick={startLogin}>
+                  <RefreshCw size={14} strokeWidth={2.25} />
+                  {t('wechatConfig.startLogin')}
+                </Button>
+              )}
             </div>
           )}
 
