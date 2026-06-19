@@ -96,6 +96,8 @@ class _StubSettingsManager:
     def __init__(self):
         self.bind_calls = []
         self.custom_cwd_calls = []
+        self.session_row = None
+        self.session_lookup_calls = []
 
     def is_bound_user(self, user_id, platform=None):
         return False
@@ -107,6 +109,10 @@ class _StubSettingsManager:
     def set_custom_cwd(self, settings_key, cwd):
         self.custom_cwd_calls.append((settings_key, cwd))
 
+    def find_session_for_anchor(self, session_key, session_anchor):
+        self.session_lookup_calls.append((session_key, session_anchor))
+        return self.session_row
+
 
 class _StubController:
     def __init__(self, user_info):
@@ -114,7 +120,11 @@ class _StubController:
         self.im_client = _StubIMClient(user_info)
         self.settings_manager = _StubSettingsManager()
         self.sessions = self.settings_manager
-        self.session_handler = None
+        self.session_handler = type(
+            "SessionHandler",
+            (),
+            {"get_base_session_id": staticmethod(lambda context: f"{context.platform}_{context.channel_id}")},
+        )()
         self.session_manager = object()
         self.receiver_tasks = {}
         self.cleared_sessions = []
@@ -232,18 +242,35 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             [("wx-chat", "🆕 已开启新的会话。你下一条消息会从全新对话开始。")],
         )
 
-    async def test_setcwd_clears_current_scope_sessions(self):
+    async def test_setcwd_keeps_existing_scope_session_and_shows_new_hint(self):
         controller = _StubController({"display_name": "小王"})
+        controller.settings_manager.session_row = {"agent_backend": "claude"}
         handler = CommandHandlers(controller)
         context = MessageContext(user_id="wx-user", channel_id="wx-chat", platform="wechat")
 
         await handler.handle_set_cwd(context, ".")
 
         self.assertEqual(controller.settings_manager.custom_cwd_calls, [("wx-chat", str(ROOT))])
-        self.assertEqual(controller.cleared_sessions, ["wechat::wx-chat"])
+        self.assertEqual(controller.cleared_sessions, [])
+        self.assertEqual(controller.settings_manager.session_lookup_calls, [("wechat::wx-chat", "wechat_wx-chat")])
         self.assertEqual(len(controller.im_client.sent_messages), 1)
-        self.assertIn("✅", controller.im_client.sent_messages[0][1])
-        self.assertIn(str(ROOT), controller.im_client.sent_messages[0][1])
+        text = controller.im_client.sent_messages[0][1]
+        self.assertIn("✅", text)
+        self.assertIn(str(ROOT), text)
+        self.assertIn("请使用 /new 命令创建新会话，以使设置变更生效。新会话创建后将覆盖当前会话。", text)
+
+    async def test_setcwd_does_not_show_new_hint_without_existing_scope_session(self):
+        controller = _StubController({"display_name": "小王"})
+        handler = CommandHandlers(controller)
+        context = MessageContext(user_id="wx-user", channel_id="wx-chat", platform="wechat")
+
+        await handler.handle_set_cwd(context, ".")
+
+        self.assertEqual(controller.cleared_sessions, [])
+        self.assertEqual(controller.settings_manager.session_lookup_calls, [("wechat::wx-chat", "wechat_wx-chat")])
+        text = controller.im_client.sent_messages[0][1]
+        self.assertIn(str(ROOT), text)
+        self.assertNotIn("请使用 /new 命令创建新会话", text)
 
     async def test_telegram_dm_new_command_clears_user_and_legacy_channel_scopes(self):
         controller = _StubController({"display_name": "Alex"})

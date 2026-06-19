@@ -625,12 +625,13 @@ class CommandHandlers(BaseHandler):
             # Save to user settings
             settings_key = self._get_settings_key(context)
             settings_manager.set_custom_cwd(settings_key, absolute_path)
-            await self.controller.agent_service.clear_sessions(self._get_session_key(context))
 
             logger.info(f"User {context.user_id} changed cwd to: {absolute_path}")
 
             formatter = self._get_formatter(context)
             response_text = f"✅ {self._t('success.cwdChanged', path=formatter.format_code_inline(absolute_path))}"
+            if self._flat_scope_needs_new_session_hint(context, log_context="cwd update hint"):
+                response_text = f"{response_text}\n\n{self._t('success.routingUpdateNeedsNewSession')}"
             channel_context = self._get_channel_context(context)
             await im_client.send_message(channel_context, response_text)
 
