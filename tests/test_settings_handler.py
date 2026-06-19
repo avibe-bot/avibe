@@ -37,6 +37,58 @@ def _make_handler(settings_manager: _StubSettingsManager) -> tuple[SettingsHandl
     return SettingsHandler(controller), send_message
 
 
+class _FlatScopeSessions:
+    def __init__(self, row: dict | None):
+        self.row = row
+        self.calls: list[tuple[str, str]] = []
+
+    def find_session_for_anchor(self, session_key: str, session_anchor: str):
+        self.calls.append((session_key, session_anchor))
+        return self.row
+
+
+class _FlatScopeSettingsManager:
+    def __init__(self, routing: RoutingSettings | None = None):
+        self.routing = routing
+        self.saved_routing: RoutingSettings | None = None
+
+    def get_channel_routing(self, settings_key: str) -> RoutingSettings | None:
+        assert settings_key == "58181121"
+        return self.routing
+
+    def set_channel_routing(self, settings_key: str, routing: RoutingSettings) -> None:
+        assert settings_key == "58181121"
+        self.saved_routing = routing
+
+
+def _make_flat_scope_handler(
+    *,
+    platform: str = "telegram",
+    row: dict | None,
+    threaded: bool = False,
+) -> tuple[SettingsHandler, AsyncMock, _FlatScopeSessions]:
+    send_message = AsyncMock()
+    sessions = _FlatScopeSessions(row)
+    settings_manager = _FlatScopeSettingsManager(RoutingSettings(agent_name="opencode"))
+    im_client = SimpleNamespace(
+        send_message=send_message,
+        should_use_thread_for_reply=lambda: threaded,
+        should_use_thread_for_dm_session=lambda: threaded,
+        should_use_message_id_for_channel_session=lambda context=None: threaded,
+    )
+    controller = SimpleNamespace(
+        config=SimpleNamespace(platform=platform, language="zh"),
+        im_client=im_client,
+        settings_manager=settings_manager,
+        sessions=sessions,
+        session_handler=SimpleNamespace(get_base_session_id=lambda context: f"{platform}_58181121"),
+        _get_settings_key=lambda context: "58181121",
+        _get_session_key=lambda context: f"{platform}::user::58181121",
+        _get_lang=lambda: "zh",
+    )
+    return SettingsHandler(controller), send_message, sessions
+
+
 def test_handle_routing_update_preserves_existing_codex_agent_when_omitted() -> None:
     settings_manager = _StubSettingsManager(
         RoutingSettings(
@@ -137,6 +189,97 @@ def test_handle_routing_update_handles_first_codex_save_without_existing_routing
     assert settings_manager.saved_routing.codex_model is None
     assert settings_manager.saved_routing.codex_reasoning_effort is None
     send_message.assert_not_awaited()
+
+
+def test_handle_routing_update_warns_flat_scope_with_existing_backend_session() -> None:
+    handler, send_message, sessions = _make_flat_scope_handler(row={"agent_backend": "opencode"})
+
+    asyncio.run(
+        handler.handle_routing_update(
+            user_id="58181121",
+            channel_id="58181121",
+            backend="claude",
+            opencode_agent=None,
+            opencode_model=None,
+            claude_agent=None,
+            claude_model=None,
+            platform="telegram",
+            is_dm=True,
+        )
+    )
+
+    text = send_message.await_args.args[1]
+    assert "Agent设置已更新！" in text
+    assert "请使用 /start 命令创建新会话，或丢弃当前会话，以使设置变更生效。" in text
+    assert sessions.calls == [("telegram::user::58181121", "telegram_58181121")]
+
+
+def test_handle_routing_update_warns_wechat_flat_scope_with_existing_backend_session() -> None:
+    handler, send_message, sessions = _make_flat_scope_handler(platform="wechat", row={"agent_backend": "opencode"})
+
+    asyncio.run(
+        handler.handle_routing_update(
+            user_id="58181121",
+            channel_id="58181121",
+            backend="claude",
+            opencode_agent=None,
+            opencode_model=None,
+            claude_agent=None,
+            claude_model=None,
+            platform="wechat",
+            is_dm=True,
+        )
+    )
+
+    text = send_message.await_args.args[1]
+    assert "请使用 /start 命令创建新会话，或丢弃当前会话，以使设置变更生效。" in text
+    assert sessions.calls == [("wechat::user::58181121", "wechat_58181121")]
+
+
+def test_handle_routing_update_does_not_warn_when_flat_scope_has_no_session() -> None:
+    handler, send_message, sessions = _make_flat_scope_handler(row=None)
+
+    asyncio.run(
+        handler.handle_routing_update(
+            user_id="58181121",
+            channel_id="58181121",
+            backend="claude",
+            opencode_agent=None,
+            opencode_model=None,
+            claude_agent=None,
+            claude_model=None,
+            platform="telegram",
+            is_dm=True,
+        )
+    )
+
+    text = send_message.await_args.args[1]
+    assert "Agent设置已更新！" in text
+    assert "请使用 /start 命令创建新会话" not in text
+    assert sessions.calls == [("telegram::user::58181121", "telegram_58181121")]
+
+
+def test_handle_routing_update_does_not_warn_threaded_scope() -> None:
+    handler, send_message, sessions = _make_flat_scope_handler(platform="slack", row={"agent_backend": "opencode"}, threaded=True)
+
+    asyncio.run(
+        handler.handle_routing_update(
+            user_id="U123",
+            channel_id="D123",
+            backend="claude",
+            opencode_agent=None,
+            opencode_model=None,
+            claude_agent=None,
+            claude_model=None,
+            platform="slack",
+            is_dm=True,
+        )
+    )
+
+    text = send_message.await_args.args[1]
+    assert "Agent设置已更新！" in text
+    assert "请使用 /start 命令创建新会话" not in text
+    assert sessions.calls == []
 
 
 class _RoutingSettingsManager:
