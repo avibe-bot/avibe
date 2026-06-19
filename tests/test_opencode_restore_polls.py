@@ -179,6 +179,35 @@ def test_restored_telegram_dm_poll_keeps_typed_user_session_key():
     ]
 
 
+def test_restored_poll_prefers_persisted_typed_channel_session_key():
+    poll = ActivePollInfo(
+        opencode_session_id="oc-slack",
+        base_session_id="slack_171717.123",
+        channel_id="C1",
+        thread_id="171717.123",
+        settings_key="C1",
+        working_path="/tmp/work",
+        platform="slack",
+        session_key="slack::channel::C1",
+    )
+    agent, _, _, request_sessions = _build_agent({"oc-slack": poll})
+
+    async def _run():
+        restored = await agent.restore_active_polls()
+        await asyncio.sleep(0)
+        for task in list(agent._active_requests.values()):
+            if not task.done():
+                await task
+        return restored
+
+    restored = asyncio.run(_run())
+
+    assert restored == 1
+    assert request_sessions == [
+        ("slack_171717.123", "oc-slack", "/tmp/work", "slack::channel::C1")
+    ]
+
+
 def test_workbench_session_id_for_poll_resolution():
     avibe = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
     slack = _make_poll(platform="slack", base_session_id="slack:thread", opencode_session_id="oc-2")

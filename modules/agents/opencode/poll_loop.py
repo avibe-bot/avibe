@@ -41,6 +41,9 @@ def restored_context_from_poll_info(poll_info) -> MessageContext:
 
 
 def restored_session_key_from_poll_info(poll_info, *, context: Optional[MessageContext] = None) -> str:
+    session_key = str(getattr(poll_info, "session_key", "") or "").strip()
+    if session_key:
+        return session_key
     restored_context = context or restored_context_from_poll_info(poll_info)
     return build_context_session_key(
         restored_context,

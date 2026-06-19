@@ -43,6 +43,7 @@ class ActivePollInfo:
     # User identity for restoring question UI context
     user_id: str = ""
     platform: str = ""
+    session_key: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -66,6 +67,7 @@ class ActivePollInfo:
             "processing_indicator": self.processing_indicator,
             "user_id": self.user_id,
             "platform": self.platform,
+            "session_key": self.session_key,
         }
 
     @classmethod
@@ -103,6 +105,7 @@ class ActivePollInfo:
             processing_indicator=processing_indicator,
             user_id=data.get("user_id", ""),
             platform=data.get("platform", ""),
+            session_key=data.get("session_key", ""),
         )
 
 

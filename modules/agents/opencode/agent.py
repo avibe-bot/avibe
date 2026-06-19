@@ -350,9 +350,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request.working_path,
             )
 
-            # ActivePollInfo stores raw settings_key + separate platform field;
-            # request.session_key is the scoped session key (platform::raw_id),
-            # so strip the prefix before persisting.
+            # Keep both the raw settings key for legacy lookup and the complete
+            # scoped key so restored polls remain attached to typed scopes.
             raw_settings_key = _raw_settings_key_from_session_key(request.session_key)
             platform_payload = request.context.platform_specific or {}
 
@@ -374,6 +373,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 prompt_started_at=prompt_started_at,
                 model_dict=model_dict,
                 reasoning_effort=reasoning_effort,
+                session_key=request.session_key,
             )
 
             final_text, should_emit = await self._poll_loop.run_prompt_poll(

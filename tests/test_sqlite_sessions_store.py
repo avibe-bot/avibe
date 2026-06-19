@@ -108,6 +108,34 @@ def test_sessions_store_reloads_external_sqlite_writes(tmp_path: Path) -> None:
         store.close()
 
 
+def test_sessions_facade_preserves_active_poll_session_key(tmp_path: Path) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    store = SessionsStore(sessions_path)
+    facade = SessionsFacade(store)
+    try:
+        facade.add_active_poll(
+            opencode_session_id="oc-typed",
+            base_session_id="slack_171717.123",
+            channel_id="C1",
+            thread_id="171717.123",
+            settings_key="C1",
+            working_path="/repo",
+            baseline_message_ids=[],
+            platform="slack",
+            session_key="slack::channel::C1",
+        )
+
+        reloaded = SessionsStore(sessions_path)
+        try:
+            poll = reloaded.get_active_poll("oc-typed")
+            assert poll is not None
+            assert poll.session_key == "slack::channel::C1"
+        finally:
+            reloaded.close()
+    finally:
+        store.close()
+
+
 def test_sqlite_sessions_service_preserves_agent_session_ids_on_save(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
