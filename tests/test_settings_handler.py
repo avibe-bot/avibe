@@ -210,7 +210,7 @@ def test_handle_routing_update_warns_flat_scope_with_existing_backend_session() 
 
     text = send_message.await_args.args[1]
     assert "Agent设置已更新！" in text
-    assert "请使用 /start 命令创建新会话，或丢弃当前会话，以使设置变更生效。" in text
+    assert "请使用 /new 命令创建新会话，以使设置变更生效。新会话创建后将覆盖当前会话。" in text
     assert sessions.calls == [("telegram::user::58181121", "telegram_58181121")]
 
 
@@ -232,7 +232,7 @@ def test_handle_routing_update_warns_wechat_flat_scope_with_existing_backend_ses
     )
 
     text = send_message.await_args.args[1]
-    assert "请使用 /start 命令创建新会话，或丢弃当前会话，以使设置变更生效。" in text
+    assert "请使用 /new 命令创建新会话，以使设置变更生效。新会话创建后将覆盖当前会话。" in text
     assert sessions.calls == [("wechat::user::58181121", "wechat_58181121")]
 
 
@@ -255,7 +255,7 @@ def test_handle_routing_update_does_not_warn_when_flat_scope_has_no_session() ->
 
     text = send_message.await_args.args[1]
     assert "Agent设置已更新！" in text
-    assert "请使用 /start 命令创建新会话" not in text
+    assert "请使用 /new 命令创建新会话" not in text
     assert sessions.calls == [("telegram::user::58181121", "telegram_58181121")]
 
 
@@ -278,7 +278,7 @@ def test_handle_routing_update_does_not_warn_threaded_scope() -> None:
 
     text = send_message.await_args.args[1]
     assert "Agent设置已更新！" in text
-    assert "请使用 /start 命令创建新会话" not in text
+    assert "请使用 /new 命令创建新会话" not in text
     assert sessions.calls == []
 
 

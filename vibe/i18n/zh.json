@@ -72,7 +72,7 @@
     "sessionResumedContinueDirect": "💬 *接下来直接发送消息* 即可继续该会话。",
     "sessionResumedThreadFreshTip": "_(在主会话中发送新消息将开始新的会话。)_",
     "routingUpdated": "Agent设置已更新！",
-    "routingUpdateNeedsNewSession": "请使用 /start 命令创建新会话，或丢弃当前会话，以使设置变更生效。"
+    "routingUpdateNeedsNewSession": "请使用 /new 命令创建新会话，以使设置变更生效。新会话创建后将覆盖当前会话。"
   },
   "settings": {
     "personalizationTitle": "个性化设置",
