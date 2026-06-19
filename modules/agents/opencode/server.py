@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import json
 import logging
 import os
+from pathlib import Path
 import socket
 import subprocess
 import time
@@ -142,6 +143,13 @@ class OpenCodeServerManager:
         if self._base_url:
             return self._base_url
         return f"http://{self.host}:{self.port}"
+
+    @staticmethod
+    def _normalize_variant(reasoning_effort: Optional[str]) -> Optional[str]:
+        normalized = (reasoning_effort or "").strip()
+        if not normalized or normalized in {"default", "__default__"}:
+            return None
+        return normalized
 
     async def _get_http_session(self) -> aiohttp.ClientSession:
         current_loop = asyncio.get_running_loop()
@@ -355,6 +363,119 @@ class OpenCodeServerManager:
                 self._pid_file.unlink()
         except Exception as e:
             logger.debug(f"Failed to clear OpenCode pid file: {e}")
+
+    @staticmethod
+    def _extract_json_object(text: str, start: int) -> Optional[str]:
+        if start < 0 or start >= len(text) or text[start] != "{":
+            return None
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : index + 1]
+        return None
+
+    @staticmethod
+    def _safe_url(raw: object) -> str:
+        if not isinstance(raw, str) or not raw.strip():
+            return ""
+        parsed = urllib.parse.urlsplit(raw.strip())
+        if not parsed.scheme or not parsed.netloc:
+            return raw.strip()[:160]
+        host = parsed.hostname or parsed.netloc
+        port = f":{parsed.port}" if parsed.port else ""
+        return urllib.parse.urlunsplit((parsed.scheme, f"{host}{port}", parsed.path or "", "", ""))[:160]
+
+    @classmethod
+    def _summarize_log_error_payload(cls, payload: object) -> Optional[str]:
+        if not isinstance(payload, dict):
+            return None
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            error = payload
+
+        name = str(error.get("name") or "OpenCode provider error").strip()
+        cause = error.get("cause") if isinstance(error.get("cause"), dict) else {}
+        code = str(cause.get("code") or error.get("code") or "").strip()
+        url = cls._safe_url(error.get("url") or cause.get("path"))
+
+        message = ""
+        data = error.get("data")
+        if isinstance(data, dict):
+            message = str(data.get("message") or "").strip()
+        if not message:
+            message = str(error.get("message") or "").strip()
+
+        details = name
+        if code:
+            details += f" ({code})"
+        if url:
+            details += f" while calling {url}"
+        if message and message not in details:
+            details += f": {message[:200]}"
+        return details[:500]
+
+    @staticmethod
+    def _opencode_log_dirs() -> list[Path]:
+        candidates: list[Path] = []
+        data_home = os.environ.get("XDG_DATA_HOME")
+        if data_home:
+            candidates.append(Path(data_home).expanduser() / "opencode" / "log")
+        candidates.append(Path.home() / ".local" / "share" / "opencode" / "log")
+        candidates.append(Path.home() / "Library" / "Application Support" / "opencode" / "log")
+        return candidates
+
+    def _recent_session_error_sync(self, session_id: str) -> Optional[str]:
+        if not session_id:
+            return None
+        log_files: list[Path] = []
+        for directory in self._opencode_log_dirs():
+            try:
+                if directory.is_dir():
+                    log_files.extend(path for path in directory.glob("*.log") if path.is_file())
+            except Exception:
+                continue
+        for path in sorted(log_files, key=lambda item: item.stat().st_mtime, reverse=True)[:3]:
+            try:
+                text = path.read_text(errors="replace")[-2_000_000:]
+            except Exception:
+                continue
+            for line in reversed(text.splitlines()):
+                if "ERROR" not in line or f"session.id={session_id}" not in line or "error=" not in line:
+                    continue
+                start = line.find("error={")
+                if start < 0:
+                    continue
+                blob = self._extract_json_object(line, start + len("error="))
+                if not blob:
+                    continue
+                try:
+                    payload = json.loads(blob)
+                except Exception:
+                    continue
+                summary = self._summarize_log_error_payload(payload)
+                if summary:
+                    return summary
+        return None
+
+    async def get_recent_session_error(self, session_id: str) -> Optional[str]:
+        return await asyncio.to_thread(self._recent_session_error_sync, session_id)
 
     @staticmethod
     def _pid_exists(pid: int) -> bool:
@@ -775,8 +896,9 @@ class OpenCodeServerManager:
                 body["agent"] = agent
             if model:
                 body["model"] = model
-            if reasoning_effort:
-                body["variant"] = reasoning_effort
+            variant = self._normalize_variant(reasoning_effort)
+            if variant:
+                body["variant"] = variant
 
             async with session.post(
                 f"{self.base_url}/session/{session_id}/message",
@@ -811,8 +933,9 @@ class OpenCodeServerManager:
                 body["agent"] = agent
             if model:
                 body["model"] = model
-            if reasoning_effort:
-                body["variant"] = reasoning_effort
+            variant = self._normalize_variant(reasoning_effort)
+            if variant:
+                body["variant"] = variant
             if system:
                 body["system"] = system
             if tools:

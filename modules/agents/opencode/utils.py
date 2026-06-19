@@ -120,25 +120,29 @@ def resolve_opencode_reasoning_effort(
 ) -> str | None:
     """Return the variant OpenCode should receive for this model."""
 
+    normalized_effort = (requested_effort or "").strip() or None
+    if normalized_effort in {"default", "__default__"}:
+        normalized_effort = None
+
     if not model_dict:
-        return requested_effort
+        return normalized_effort
     provider_id = model_dict.get("providerID")
     model_id = model_dict.get("modelID")
     if not provider_id or not model_id:
-        return requested_effort
+        return normalized_effort
     if not isinstance(model_catalog, dict):
-        return requested_effort
+        return normalized_effort
 
     model_info = find_opencode_model_info(model_catalog, provider_id, model_id)
-    if requested_effort:
-        if _opencode_model_supports_variant(model_info, requested_effort):
-            return requested_effort
+    if normalized_effort:
+        if _opencode_model_supports_variant(model_info, normalized_effort):
+            return normalized_effort
         if isinstance(model_info, dict):
-            return "default"
-        return requested_effort
+            return None
+        return normalized_effort
     if _opencode_model_has_no_variants(model_info):
-        return "default"
-    return requested_effort
+        return None
+    return normalized_effort
 
 
 def _find_model_variants(opencode_models: dict, target_model: Optional[str]) -> Dict[str, Any]:

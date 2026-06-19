@@ -2409,15 +2409,26 @@ class AgentAuthService:
                     )
                     if not final_text and is_empty_terminal_opencode_message(terminal):
                         lang = self._lang()
+                        detail = None
+                        try:
+                            detail = await server.get_recent_session_error(session_id)
+                        except Exception:  # noqa: BLE001
+                            detail = None
+                        i18n_key = (
+                            "error.opencodeProviderRuntimeError"
+                            if detail
+                            else "error.opencodeEmptyResponse"
+                        )
                         return {
                             "ok": False,
                             "error": "empty_response",
                             "detail": i18n_t(
-                                "error.opencodeEmptyResponse",
+                                i18n_key,
                                 lang,
                                 provider=provider_id,
                                 model=chosen_model,
                                 variant=reasoning_effort or i18n_t("common.default", lang),
+                                detail=detail or "",
                             ),
                             "duration_ms": int((time.monotonic() - started) * 1000),
                             "model": chosen_model,

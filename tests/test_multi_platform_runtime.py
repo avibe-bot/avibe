@@ -681,7 +681,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     assert calls[0]["reasoning_effort"] == "high"
 
 
-def test_opencode_resets_saved_variant_for_non_reasoning_model():
+def test_opencode_clears_default_variant_for_non_reasoning_model():
     catalog = {
         "providers": [
             {
@@ -702,11 +702,11 @@ def test_opencode_resets_saved_variant_for_non_reasoning_model():
             None,
             catalog,
         )
-        == "default"
+        is None
     )
 
 
-def test_opencode_resets_saved_variant_for_model_without_variant_metadata():
+def test_opencode_clears_default_variant_for_model_without_variant_metadata():
     catalog = {
         "providers": [
             {
@@ -727,7 +727,7 @@ def test_opencode_resets_saved_variant_for_model_without_variant_metadata():
             None,
             catalog,
         )
-        == "default"
+        is None
     )
 
 
@@ -756,7 +756,7 @@ def test_opencode_keeps_unspecified_variant_when_catalog_says_reasoning_supporte
     )
 
 
-def test_opencode_resets_saved_variant_for_list_model_catalog():
+def test_opencode_clears_default_variant_for_list_model_catalog():
     catalog = {
         "providers": [
             {
@@ -777,7 +777,7 @@ def test_opencode_resets_saved_variant_for_list_model_catalog():
             None,
             catalog,
         )
-        == "default"
+        is None
     )
 
 
@@ -803,6 +803,30 @@ def test_opencode_keeps_supported_reasoning_variant():
             catalog,
         )
         == "high"
+    )
+
+
+def test_opencode_clears_unsupported_requested_variant():
+    catalog = {
+        "providers": [
+            {
+                "id": "glm",
+                "models": {
+                    "glm-5.2": {
+                        "variants": {"high": {"thinking": {"effort": "high"}}},
+                    }
+                },
+            }
+        ]
+    }
+
+    assert (
+        resolve_opencode_reasoning_effort(
+            {"providerID": "glm", "modelID": "glm-5.2"},
+            "default",
+            catalog,
+        )
+        is None
     )
 
 
@@ -857,7 +881,7 @@ def test_opencode_keeps_requested_variant_when_catalog_says_reasoning_supported(
     )
 
 
-def test_opencode_resets_unsupported_reasoning_variant():
+def test_opencode_clears_unsupported_reasoning_variant():
     catalog = {
         "providers": [
             {
@@ -878,7 +902,7 @@ def test_opencode_resets_unsupported_reasoning_variant():
             "max",
             catalog,
         )
-        == "default"
+        is None
     )
 
 
@@ -1346,7 +1370,7 @@ def test_opencode_poll_emits_error_result_on_retry_exhaustion():
     assert not any(mtype == "notify" for mtype, _ in emitted)
 
 
-def test_opencode_poll_emits_error_result_on_empty_terminal_message():
+def test_opencode_poll_emits_notify_and_silent_error_result_on_empty_terminal_message():
     emitted = []
 
     class _AuthSvc:
@@ -1365,10 +1389,12 @@ def test_opencode_poll_emits_error_result_on_empty_terminal_message():
                 return "(Default)"
             if key == "error.opencodeEmptyResponse":
                 return "empty:{provider}/{model}/{variant}".format(**kwargs)
+            if key == "error.opencodeProviderRuntimeError":
+                return "provider:{provider}/{model}/{variant}:{detail}".format(**kwargs)
             return f"translated:{key}"
 
         async def emit_agent_message(self, context, message_type, text, parse_mode=None, *, is_error=False, level="normal"):
-            emitted.append((message_type, text, is_error))
+            emitted.append((message_type, text, is_error, level))
 
     class _Agent:
         opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
@@ -1385,6 +1411,9 @@ def test_opencode_poll_emits_error_result_on_empty_terminal_message():
             return ""
 
     class _Server:
+        async def get_recent_session_error(self, session_id):
+            return "AI_APICallError (ECONNRESET) while calling https://relay.example/messages"
+
         async def list_messages(self, session_id, directory):
             return [
                 {
@@ -1424,14 +1453,22 @@ def test_opencode_poll_emits_error_result_on_empty_terminal_message():
             "oc-session",
             agent_to_use=None,
             model_dict={"providerID": "glm", "modelID": "glm-5.2"},
-            reasoning_effort="default",
+            reasoning_effort=None,
             baseline_message_ids=set(),
         )
     )
 
     assert final_text is None
     assert should_emit is False
-    assert emitted == [("result", "empty:glm/glm-5.2/default", True)]
+    assert emitted == [
+        (
+            "notify",
+            "provider:glm/glm-5.2/(Default):AI_APICallError (ECONNRESET) while calling https://relay.example/messages",
+            False,
+            "normal",
+        ),
+        ("result", "", True, "silent"),
+    ]
 
 
 def test_processing_indicator_handle_is_source_of_truth_for_backend_cleanup():

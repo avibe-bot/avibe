@@ -51,15 +51,63 @@ class OpenCodePollLoop:
         *,
         model_dict: Optional[Dict[str, str]],
         reasoning_effort: Optional[str],
+        detail: Optional[str] = None,
     ) -> str:
         provider_id = (model_dict or {}).get("providerID") or self._t("common.default")
         model_id = (model_dict or {}).get("modelID") or self._t("common.default")
         variant = reasoning_effort or self._t("common.default")
+        if detail:
+            return self._t(
+                "error.opencodeProviderRuntimeError",
+                provider=provider_id,
+                model=model_id,
+                variant=variant,
+                detail=detail,
+            )
         return self._t(
             "error.opencodeEmptyResponse",
             provider=provider_id,
             model=model_id,
             variant=variant,
+        )
+
+    async def _empty_terminal_message_detail(
+        self,
+        server: OpenCodeServerManager,
+        session_id: str,
+    ) -> Optional[str]:
+        try:
+            return await server.get_recent_session_error(session_id)
+        except Exception as err:
+            logger.debug("Failed to inspect OpenCode logs for %s: %s", session_id, err)
+        return None
+
+    async def _emit_empty_terminal_failure(
+        self,
+        *,
+        context,
+        server: OpenCodeServerManager,
+        session_id: str,
+        model_dict: Optional[Dict[str, str]],
+        reasoning_effort: Optional[str],
+    ) -> None:
+        detail = await self._empty_terminal_message_detail(server, session_id)
+        message = self._empty_terminal_message_text(
+            model_dict=model_dict,
+            reasoning_effort=reasoning_effort,
+            detail=detail,
+        )
+        await self._agent.controller.emit_agent_message(
+            context,
+            "notify",
+            message,
+        )
+        await self._agent.controller.emit_agent_message(
+            context,
+            "result",
+            "",
+            is_error=True,
+            level="silent",
         )
 
     def _build_restored_ack_request(self, poll_info) -> AgentRequest:
@@ -339,10 +387,6 @@ class OpenCodePollLoop:
                                 emitted_message_ids=emitted_assistant_messages,
                             )
                         if not final_text and not msg_error and is_empty_terminal_opencode_message(last_message):
-                            message = self._empty_terminal_message_text(
-                                model_dict=model_dict,
-                                reasoning_effort=reasoning_effort,
-                            )
                             logger.warning(
                                 "OpenCode session %s completed without text/error (provider=%s model=%s variant=%s)",
                                 session_id,
@@ -350,11 +394,12 @@ class OpenCodePollLoop:
                                 (model_dict or {}).get("modelID"),
                                 reasoning_effort,
                             )
-                            await self._agent.controller.emit_agent_message(
-                                request.context,
-                                "result",
-                                message,
-                                is_error=True,
+                            await self._emit_empty_terminal_failure(
+                                context=request.context,
+                                server=server,
+                                session_id=session_id,
+                                model_dict=model_dict,
+                                reasoning_effort=reasoning_effort,
                             )
                             return None, False
                         break
@@ -536,19 +581,16 @@ class OpenCodePollLoop:
                                         emitted_message_ids=emitted_assistant_messages,
                                     )
                                 if not final_text and not msg_error and is_empty_terminal_opencode_message(last_message):
-                                    message = self._empty_terminal_message_text(
-                                        model_dict=None,
-                                        reasoning_effort=None,
-                                    )
                                     logger.warning(
                                         "Restored OpenCode session %s completed without text/error",
                                         session_id,
                                     )
-                                    await self._agent.controller.emit_agent_message(
-                                        context,
-                                        "result",
-                                        message,
-                                        is_error=True,
+                                    await self._emit_empty_terminal_failure(
+                                        context=context,
+                                        server=server,
+                                        session_id=session_id,
+                                        model_dict=None,
+                                        reasoning_effort=None,
                                     )
                                     self._agent.sessions.remove_active_poll(session_id)
                                     await self.remove_restored_ack(poll_info)

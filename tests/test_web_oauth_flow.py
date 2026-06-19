@@ -604,6 +604,9 @@ class _FakeOpencodeServer:
     async def abort_session(self, session_id, directory):
         self.abort_calls.append((session_id, directory))
 
+    async def get_recent_session_error(self, session_id):
+        return None
+
     async def start_provider_oauth(self, provider_id, *, method, prompt_answers):
         self.start_calls.append((provider_id, method, prompt_answers))
         return self.next_authorize
@@ -816,7 +819,7 @@ def test_opencode_provider_test_fails_on_empty_terminal_message(
     assert result["error"] == "empty_response"
     assert result["model"] == "glm-5.2"
     assert "glm-5.2" in result["detail"]
-    assert fake.prompt_calls[-1]["reasoning_effort"] == "default"
+    assert fake.prompt_calls[-1]["reasoning_effort"] is None
     assert fake.active_calls == ["sess_probe"]
     assert fake.abort_calls == [("sess_probe", os.path.expanduser("~"))]
     assert fake.inactive_calls == ["sess_probe"]

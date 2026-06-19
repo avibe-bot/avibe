@@ -113,6 +113,26 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         body = fake_session.posts[0]["json"]
         self.assertEqual(body["tools"], {"question": False})
 
+    async def test_prompt_async_omits_default_variant(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        fake_session = _FakeSession()
+
+        async def _fake_get_http_session():
+            return fake_session
+
+        manager._get_http_session = _fake_get_http_session  # type: ignore[method-assign]
+
+        await manager.prompt_async(
+            session_id="ses-1",
+            directory="/tmp/work",
+            text="hello",
+            reasoning_effort="default",
+        )
+
+        self.assertEqual(len(fake_session.posts), 1)
+        body = fake_session.posts[0]["json"]
+        self.assertNotIn("variant", body)
+
     async def test_load_opencode_user_config_supports_jsonc(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_home = Path(tmp_dir)
@@ -1148,6 +1168,40 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
                 }
             ],
         )
+
+    def test_recent_session_error_summarizes_provider_failure_without_request_body(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_dir = Path(tmp_dir)
+            line_payload = {
+                "error": {
+                    "name": "AI_APICallError",
+                    "cause": {
+                        "code": "ECONNRESET",
+                        "path": "https://user:secret@relay.example/messages?api_key=hidden",
+                    },
+                    "url": "https://relay.example/messages",
+                    "requestBodyValues": {
+                        "system": [{"text": "secret system prompt"}],
+                        "apiKey": "sk-secret",
+                    },
+                }
+            }
+            (log_dir / "2026-06-19T040950.log").write_text(
+                "INFO unrelated\n"
+                + f"ERROR service=llm session.id=ses_test error={SERVER_MODULE.json.dumps(line_payload)} stream error\n",
+                encoding="utf-8",
+            )
+            manager = OpenCodeServerManager(binary="opencode", port=4096)
+
+            with patch.object(manager, "_opencode_log_dirs", return_value=[log_dir]):
+                summary = manager._recent_session_error_sync("ses_test")
+
+        self.assertEqual(
+            summary,
+            "AI_APICallError (ECONNRESET) while calling https://relay.example/messages",
+        )
+        self.assertNotIn("secret system prompt", summary or "")
+        self.assertNotIn("sk-secret", summary or "")
 
 
 async def _async_none():
