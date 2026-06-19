@@ -528,7 +528,7 @@ class OpenCodeServerManager:
                     continue
                 if since is not None:
                     log_ts = self._log_line_timestamp(line)
-                    if log_ts is None or log_ts < since:
+                    if log_ts is None or log_ts < int(since):
                         continue
                 start = line.find("error={")
                 if start < 0:
@@ -591,6 +591,18 @@ class OpenCodeServerManager:
         path = (parsed.path.rstrip("/") + "/v1") if parsed.path else "/v1"
         return cls._safe_url(urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", "")))
 
+    @staticmethod
+    def _diagnostic_adapter(provider_id: str, provider_config: Dict[str, Any]) -> Optional[str]:
+        adapter = get_opencode_custom_provider_adapter(provider_id, provider_config)
+        if adapter in {"anthropic-compatible", "openai-compatible"}:
+            return adapter
+        npm = provider_config.get("npm")
+        if provider_id == "anthropic" or npm == "@ai-sdk/anthropic":
+            return "anthropic-compatible"
+        if provider_id == "openai" or npm == "@ai-sdk/openai-compatible":
+            return "openai-compatible"
+        return None
+
     def _provider_api_diagnostic_sync(self, provider_id: str, model_id: str) -> Optional[str]:
         probe = load_first_opencode_user_config(logger_instance=logger)
         config = probe.config
@@ -613,13 +625,8 @@ class OpenCodeServerManager:
             return None
 
         base_url = base_url.rstrip("/")
-        adapter = get_opencode_custom_provider_adapter(provider_id, provider_config)
-        is_anthropic_compatible = (
-            adapter == "anthropic-compatible"
-            or provider_id == "anthropic"
-            or provider_config.get("npm") == "@ai-sdk/anthropic"
-        )
-        if is_anthropic_compatible:
+        adapter = self._diagnostic_adapter(provider_id, provider_config)
+        if adapter == "anthropic-compatible":
             endpoint_path = "/messages"
             headers = {
                 "x-api-key": api_key,
@@ -631,7 +638,7 @@ class OpenCodeServerManager:
                 "max_tokens": 8,
                 "messages": [{"role": "user", "content": "OK"}],
             }
-        else:
+        elif adapter == "openai-compatible":
             endpoint_path = "/chat/completions"
             headers = {
                 "authorization": f"Bearer {api_key}",
@@ -642,6 +649,8 @@ class OpenCodeServerManager:
                 "messages": [{"role": "user", "content": "OK"}],
                 "stream": False,
             }
+        else:
+            return None
 
         try:
             request = urllib.request.Request(
@@ -677,6 +686,12 @@ class OpenCodeServerManager:
                 if message:
                     return f"Provider API returned HTTP {err.code}: {message}"
                 return f"Provider API returned HTTP {err.code}."
+            except urllib.error.URLError as err:
+                reason = self._redact_diagnostic_text(str(err.reason or err))
+                return f"Provider API request failed: {reason[:240]}"
+            except (TimeoutError, OSError) as err:
+                reason = self._redact_diagnostic_text(str(err))
+                return f"Provider API request failed: {reason[:240] or type(err).__name__}"
         except Exception as err:
             logger.debug("OpenCode provider API diagnostic failed for %s/%s: %s", provider_id, model_id, err)
         return None

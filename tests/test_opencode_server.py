@@ -1364,6 +1364,30 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(summary)
 
+    def test_recent_session_error_keeps_same_second_current_prompt_error(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_dir = Path(tmp_dir)
+            payload = {
+                "error": {
+                    "name": "AI_APICallError",
+                    "cause": {"code": "ECONNRESET", "path": "/messages?api_key=current-secret"},
+                }
+            }
+            (log_dir / "2026-06-19T041003.log").write_text(
+                f"ERROR 2026-06-19T04:10:03 +1ms service=llm session.id=ses_test error={SERVER_MODULE.json.dumps(payload)} stream error\n",
+                encoding="utf-8",
+            )
+            manager = OpenCodeServerManager(binary="opencode", port=4096)
+
+            with patch.object(manager, "_opencode_log_dirs", return_value=[log_dir]):
+                summary = manager._recent_session_error_sync(
+                    "ses_test",
+                    since=SERVER_MODULE.datetime(2026, 6, 19, 4, 10, 3, 500000).timestamp(),
+                )
+
+        self.assertEqual(summary, "AI_APICallError (ECONNRESET) while calling /messages")
+        self.assertNotIn("current-secret", summary or "")
+
     async def test_prompt_async_records_prompt_start_time_for_log_correlation(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         fake_session = _FakeSession()
@@ -1480,6 +1504,48 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("sk-secret", detail or "")
 
+    def test_provider_api_diagnostic_reports_transport_failure(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_home = Path(tmp_dir)
+            config_path = tmp_home / ".config" / "opencode" / "opencode.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "provider": {
+                            "glm": {
+                                "npm": "@ai-sdk/anthropic",
+                                "options": {
+                                    "baseURL": "https://relay.example/v1?api_key=sk-query-secret",
+                                    "apiKey": "sk-secret",
+                                },
+                                "vibe_remote": {
+                                    "custom": True,
+                                    "adapter": "anthropic-compatible",
+                                },
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manager = OpenCodeServerManager(binary="opencode", port=4096)
+
+            def _raise_url_error(request, timeout=None):
+                raise SERVER_MODULE.urllib.error.URLError("timed out with api_key=sk-url-secret")
+
+            with (
+                patch("vibe.opencode_config.Path.home", return_value=tmp_home),
+                patch.object(SERVER_MODULE.urllib.request, "urlopen", _raise_url_error),
+            ):
+                detail = manager._provider_api_diagnostic_sync("glm", "glm-5.2")
+
+        self.assertIn("Provider API request failed", detail or "")
+        self.assertIn("timed out", detail or "")
+        self.assertNotIn("sk-secret", detail or "")
+        self.assertNotIn("sk-url-secret", detail or "")
+        self.assertNotIn("sk-query-secret", detail or "")
+
     def test_provider_api_diagnostic_redacts_json_api_error(self):
         payload = {
             "error": {
@@ -1576,6 +1642,42 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_urlopen.request.full_url, "https://relay.example/v1/messages")
         self.assertEqual(fake_urlopen.request.headers.get("X-api-key"), "sk-secret")
         self.assertNotIn("Authorization", fake_urlopen.request.headers)
+
+    def test_provider_api_diagnostic_skips_unsupported_reserved_provider(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_home = Path(tmp_dir)
+            config_path = tmp_home / ".config" / "opencode" / "opencode.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "provider": {
+                            "google": {
+                                "options": {
+                                    "baseURL": "https://generativelanguage.googleapis.com/v1beta",
+                                    "apiKey": "sk-secret",
+                                },
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manager = OpenCodeServerManager(binary="opencode", port=4096)
+            calls = []
+
+            def _unexpected_urlopen(request, timeout=None):
+                calls.append(request.full_url)
+                raise AssertionError(f"unexpected diagnostic request to {request.full_url}")
+
+            with (
+                patch("vibe.opencode_config.Path.home", return_value=tmp_home),
+                patch.object(SERVER_MODULE.urllib.request, "urlopen", _unexpected_urlopen),
+            ):
+                detail = manager._provider_api_diagnostic_sync("google", "gemini-2.5-pro")
+
+        self.assertIsNone(detail)
+        self.assertEqual(calls, [])
 
 
 async def _async_none():
