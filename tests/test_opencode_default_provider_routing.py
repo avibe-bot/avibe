@@ -91,6 +91,21 @@ def test_model_id_preserves_exact_catalog_match() -> None:
     assert resolve_opencode_model_id(catalog, "glm", "GLM-5.2") == "GLM-5.2"
 
 
+def test_model_id_uses_uppercase_catalog_casing_for_unique_match() -> None:
+    catalog = {
+        "providers": [
+            {
+                "id": "vendor",
+                "models": {
+                    "GLM-5.2": {"id": "GLM-5.2"},
+                },
+            }
+        ]
+    }
+
+    assert resolve_opencode_model_id(catalog, "vendor", "glm-5.2") == "GLM-5.2"
+
+
 def test_model_id_does_not_guess_ambiguous_case_match() -> None:
     catalog = {
         "providers": [

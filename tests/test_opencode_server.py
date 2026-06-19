@@ -1227,6 +1227,56 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret system prompt", summary or "")
         self.assertNotIn("sk-secret", summary or "")
 
+    def test_recent_session_error_redacts_freeform_error_message(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_dir = Path(tmp_dir)
+            line_payload = {
+                "error": {
+                    "name": "AI_APICallError",
+                    "data": {
+                        "message": (
+                            "invalid api_key=sk-secret-123 at "
+                            "https://relay.example/messages?api_key=sk-query-secret"
+                        )
+                    },
+                }
+            }
+            (log_dir / "2026-06-19T040950.log").write_text(
+                f"ERROR 2026-06-19T04:10:03 +1ms service=llm session.id=ses_test error={SERVER_MODULE.json.dumps(line_payload)} stream error\n",
+                encoding="utf-8",
+            )
+            manager = OpenCodeServerManager(binary="opencode", port=4096)
+
+            with patch.object(manager, "_opencode_log_dirs", return_value=[log_dir]):
+                summary = manager._recent_session_error_sync("ses_test")
+
+        self.assertIn("api_key=[redacted]", summary or "")
+        self.assertIn("https://relay.example/messages", summary or "")
+        self.assertNotIn("sk-secret", summary or "")
+        self.assertNotIn("sk-query-secret", summary or "")
+
+    def test_recent_session_error_reads_only_log_tail(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_dir = Path(tmp_dir)
+            line_payload = {"error": {"name": "AI_APICallError", "cause": {"code": "ECONNRESET"}}}
+            log_path = log_dir / "2026-06-19T040950.log"
+            log_path.write_bytes(
+                b"x" * (SERVER_MODULE.OPENCODE_LOG_TAIL_BYTES + 1024)
+                + b"\n"
+                + f"ERROR 2026-06-19T04:10:03 +1ms service=llm session.id=ses_test error={SERVER_MODULE.json.dumps(line_payload)} stream error\n".encode(
+                    "utf-8"
+                )
+            )
+            manager = OpenCodeServerManager(binary="opencode", port=4096)
+
+            with (
+                patch.object(manager, "_opencode_log_dirs", return_value=[log_dir]),
+                patch.object(SERVER_MODULE.Path, "read_text", side_effect=AssertionError("must not read full log")),
+            ):
+                summary = manager._recent_session_error_sync("ses_test")
+
+        self.assertEqual(summary, "AI_APICallError (ECONNRESET)")
+
     def test_recent_session_error_uses_current_prompt_window_and_strips_relative_query(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             log_dir = Path(tmp_dir)
@@ -1406,6 +1456,103 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             "Provider API returned HTTP 503: No available accounts: no available accounts",
         )
         self.assertNotIn("sk-secret", detail or "")
+
+    def test_provider_api_diagnostic_redacts_json_api_error(self):
+        payload = {
+            "error": {
+                "message": (
+                    "bad Authorization: Bearer relay-token and "
+                    "https://relay.example/messages?api_key=sk-query-secret"
+                )
+            }
+        }
+
+        detail = OpenCodeServerManager._diagnostic_payload_message(payload)
+
+        self.assertIn("Bearer [redacted]", detail)
+        self.assertIn("https://relay.example/messages", detail)
+        self.assertNotIn("relay-token", detail)
+        self.assertNotIn("sk-query-secret", detail)
+
+    def test_provider_api_diagnostic_uses_auth_json_api_key(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_home = Path(tmp_dir)
+            config_path = tmp_home / ".config" / "opencode" / "opencode.json"
+            auth_path = tmp_home / ".local" / "share" / "opencode" / "auth.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            auth_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "provider": {
+                            "glm": {
+                                "npm": "@ai-sdk/anthropic",
+                                "options": {
+                                    "baseURL": "https://relay.example/v1",
+                                },
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            auth_path.write_text('{"glm":{"type":"api","key":"sk-auth-json"}}', encoding="utf-8")
+            manager = OpenCodeServerManager(binary="opencode", port=4096)
+
+            class _UrlOpen:
+                def __call__(self, request, timeout=None):
+                    self.request = request
+                    return _FakeUrlOpenResponse(text='{"ok":true}', headers={"content-type": "application/json"})
+
+            fake_urlopen = _UrlOpen()
+            with (
+                patch("vibe.opencode_config.Path.home", return_value=tmp_home),
+                patch.object(SERVER_MODULE.urllib.request, "urlopen", fake_urlopen),
+            ):
+                detail = manager._provider_api_diagnostic_sync("glm", "glm-5.2")
+
+        self.assertIsNone(detail)
+        self.assertEqual(fake_urlopen.request.headers.get("X-api-key"), "sk-auth-json")
+        self.assertEqual(fake_urlopen.request.full_url, "https://relay.example/v1/messages")
+
+    def test_provider_api_diagnostic_probes_builtin_anthropic_as_anthropic(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_home = Path(tmp_dir)
+            config_path = tmp_home / ".config" / "opencode" / "opencode.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "provider": {
+                            "anthropic": {
+                                "options": {
+                                    "baseURL": "https://relay.example/v1",
+                                    "apiKey": "sk-secret",
+                                },
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manager = OpenCodeServerManager(binary="opencode", port=4096)
+
+            class _UrlOpen:
+                def __call__(self, request, timeout=None):
+                    self.request = request
+                    return _FakeUrlOpenResponse(text='{"ok":true}', headers={"content-type": "application/json"})
+
+            fake_urlopen = _UrlOpen()
+            with (
+                patch("vibe.opencode_config.Path.home", return_value=tmp_home),
+                patch.object(SERVER_MODULE.urllib.request, "urlopen", fake_urlopen),
+            ):
+                detail = manager._provider_api_diagnostic_sync("anthropic", "claude-opus-4")
+
+        self.assertIsNone(detail)
+        self.assertEqual(fake_urlopen.request.full_url, "https://relay.example/v1/messages")
+        self.assertEqual(fake_urlopen.request.headers.get("X-api-key"), "sk-secret")
+        self.assertNotIn("Authorization", fake_urlopen.request.headers)
 
 
 async def _async_none():

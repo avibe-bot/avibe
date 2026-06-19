@@ -9,6 +9,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import time
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_OPENCODE_PORT = 4096
 DEFAULT_OPENCODE_HOST = "127.0.0.1"
 SERVER_START_TIMEOUT = 15
+OPENCODE_LOG_TAIL_BYTES = 2_000_000
 
 
 class OpenCodeServerManager:
@@ -416,6 +418,32 @@ class OpenCodeServerManager:
         return urllib.parse.urlunsplit((parsed.scheme, f"{host}{port}", parsed.path or "", "", ""))[:160]
 
     @staticmethod
+    def _redact_diagnostic_text(text: str) -> str:
+        if not text:
+            return ""
+        def _redact_url_query(match: re.Match[str]) -> str:
+            value = match.group(0)
+            parsed = urllib.parse.urlsplit(value)
+            if not parsed.scheme or not parsed.netloc:
+                return value
+            return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+        redacted = re.sub(r"https?://[^\s,)>\]}]+", _redact_url_query, text)
+        redacted = re.sub(
+            r"(?i)\b(authorization)(\s*[:=]\s*)Bearer\s+[A-Za-z0-9._~+/=-]+",
+            r"\1\2Bearer [redacted]",
+            redacted,
+        )
+        redacted = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", redacted)
+        redacted = re.sub(r"\bsk-[A-Za-z0-9._-]+", "[redacted]", redacted)
+        return re.sub(
+            r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|x-api-key)"
+            r"(\s*[:=]\s*)([^\s,;&]+)",
+            r"\1\2[redacted]",
+            redacted,
+        )
+
+    @staticmethod
     def _log_line_timestamp(line: str) -> Optional[float]:
         marker = "ERROR "
         index = line.find(marker)
@@ -446,6 +474,7 @@ class OpenCodeServerManager:
             message = str(data.get("message") or "").strip()
         if not message:
             message = str(error.get("message") or "").strip()
+        message = cls._redact_diagnostic_text(message)
 
         details = name
         if code:
@@ -466,6 +495,20 @@ class OpenCodeServerManager:
         candidates.append(Path.home() / "Library" / "Application Support" / "opencode" / "log")
         return candidates
 
+    @staticmethod
+    def _read_text_tail(path: Path, max_bytes: int = OPENCODE_LOG_TAIL_BYTES) -> str:
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                offset = max(0, size - max_bytes)
+                handle.seek(offset)
+                if offset > 0:
+                    handle.readline()
+                return handle.read(max_bytes).decode(errors="replace")
+        except Exception:
+            return ""
+
     def _recent_session_error_sync(self, session_id: str, since: Optional[float] = None) -> Optional[str]:
         if not session_id:
             return None
@@ -477,9 +520,8 @@ class OpenCodeServerManager:
             except Exception:
                 continue
         for path in sorted(log_files, key=lambda item: item.stat().st_mtime, reverse=True)[:3]:
-            try:
-                text = path.read_text(errors="replace")[-2_000_000:]
-            except Exception:
+            text = self._read_text_tail(path)
+            if not text:
                 continue
             for line in reversed(text.splitlines()):
                 if "ERROR" not in line or f"session.id={session_id}" not in line or "error=" not in line:
@@ -518,11 +560,24 @@ class OpenCodeServerManager:
             if isinstance(error, dict):
                 message = error.get("message")
                 if isinstance(message, str) and message.strip():
-                    return message.strip()[:240]
+                    return OpenCodeServerManager._redact_diagnostic_text(message.strip())[:240]
             message = payload.get("message")
             if isinstance(message, str) and message.strip():
-                return message.strip()[:240]
+                return OpenCodeServerManager._redact_diagnostic_text(message.strip())[:240]
         return ""
+
+    @staticmethod
+    def _auth_json_api_key(provider_id: str) -> Optional[str]:
+        try:
+            auth_entries = read_opencode_provider_auth_entries(logger_instance=logger)
+        except Exception as exc:
+            logger.debug("Could not read OpenCode auth entries for provider diagnostic: %s", exc)
+            return None
+        auth_entry = auth_entries.get(provider_id)
+        if not isinstance(auth_entry, dict) or auth_entry.get("type") != "api":
+            return None
+        key = auth_entry.get("key")
+        return key if isinstance(key, str) and key else None
 
     @staticmethod
     def _append_provider_endpoint(base_url: str, endpoint_path: str) -> str:
@@ -552,12 +607,19 @@ class OpenCodeServerManager:
             return None
         base_url = options.get("baseURL")
         api_key = options.get("apiKey")
+        if not isinstance(api_key, str) or not api_key:
+            api_key = self._auth_json_api_key(provider_id)
         if not isinstance(base_url, str) or not base_url.strip() or not isinstance(api_key, str) or not api_key:
             return None
 
         base_url = base_url.rstrip("/")
         adapter = get_opencode_custom_provider_adapter(provider_id, provider_config)
-        if adapter == "anthropic-compatible":
+        is_anthropic_compatible = (
+            adapter == "anthropic-compatible"
+            or provider_id == "anthropic"
+            or provider_config.get("npm") == "@ai-sdk/anthropic"
+        )
+        if is_anthropic_compatible:
             endpoint_path = "/messages"
             headers = {
                 "x-api-key": api_key,

@@ -91,7 +91,12 @@ def resolve_opencode_model_id(
     provider_id: str | None,
     model_id: str | None,
 ) -> str | None:
-    """Return the catalog-canonical model id for a provider/model pair."""
+    """Return the catalog-canonical model id for a provider/model pair.
+
+    This does not lowercase user input. Exact catalog matches win; otherwise we
+    only adopt the catalog casing when there is exactly one case-insensitive
+    match. Ambiguous or unknown ids are preserved.
+    """
 
     if not provider_id or not model_id or not isinstance(opencode_models, dict):
         return model_id
