@@ -108,6 +108,34 @@ def test_sessions_store_reloads_external_sqlite_writes(tmp_path: Path) -> None:
         store.close()
 
 
+def test_sessions_facade_preserves_active_poll_session_key(tmp_path: Path) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    store = SessionsStore(sessions_path)
+    facade = SessionsFacade(store)
+    try:
+        facade.add_active_poll(
+            opencode_session_id="oc-typed",
+            base_session_id="slack_171717.123",
+            channel_id="C1",
+            thread_id="171717.123",
+            settings_key="C1",
+            working_path="/repo",
+            baseline_message_ids=[],
+            platform="slack",
+            session_key="slack::channel::C1",
+        )
+
+        reloaded = SessionsStore(sessions_path)
+        try:
+            poll = reloaded.get_active_poll("oc-typed")
+            assert poll is not None
+            assert poll.session_key == "slack::channel::C1"
+        finally:
+            reloaded.close()
+    finally:
+        store.close()
+
+
 def test_sqlite_sessions_service_preserves_agent_session_ids_on_save(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
@@ -701,6 +729,107 @@ def test_sessions_store_clear_backend_prunes_cached_custom_variant_rows(tmp_path
             store.find_session_for_anchor("telegram::-100123", "telegram_-100123")
             is None
         )
+    finally:
+        store.close()
+
+
+def test_clear_session_base_can_target_typed_user_and_channel_scopes(tmp_path: Path) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    store = SessionsStore(sessions_path)
+    try:
+        with store._service.engine.begin() as conn:
+            user_scope_id = resolve_scope_from_legacy_key(
+                conn, "telegram::user::58181121", now="2026-06-19T07:30:00Z"
+            )
+            channel_scope_id = resolve_scope_from_legacy_key(
+                conn, "telegram::channel::58181121", now="2026-06-19T07:30:00Z"
+            )
+            assert user_scope_id is not None
+            assert channel_scope_id is not None
+            create_agent_session_row(
+                conn,
+                scope_id=user_scope_id,
+                agent_backend="claude",
+                agent_variant="claude",
+                session_anchor="telegram_58181121",
+                native_session_id="claude-native",
+                workdir="/tmp",
+                require_workdir=False,
+            )
+            create_agent_session_row(
+                conn,
+                scope_id=channel_scope_id,
+                agent_backend="opencode",
+                agent_variant="opencode",
+                session_anchor="telegram_58181121",
+                native_session_id="oc-native",
+                workdir="/tmp",
+                require_workdir=False,
+            )
+        store.load()
+
+        assert store.clear_session_base("telegram::user::58181121", "telegram_58181121") == 1
+        assert store.find_session_for_anchor("telegram::user::58181121", "telegram_58181121") is None
+        assert store.find_session_for_anchor("telegram::channel::58181121", "telegram_58181121") is not None
+
+        assert store.clear_session_base("telegram::channel::58181121", "telegram_58181121") == 1
+        assert store.find_session_for_anchor("telegram::channel::58181121", "telegram_58181121") is None
+    finally:
+        store.close()
+
+
+def test_typed_user_scope_session_mapping_survives_reload_without_legacy_metadata(tmp_path: Path) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    store = SessionsStore(sessions_path)
+    try:
+        with store._service.engine.begin() as conn:
+            user_scope_id = resolve_scope_from_legacy_key(
+                conn, "telegram::user::58181121", now="2026-06-19T07:30:00Z"
+            )
+            assert user_scope_id is not None
+            create_agent_session_row(
+                conn,
+                scope_id=user_scope_id,
+                agent_backend="claude",
+                agent_variant="claude",
+                session_anchor="telegram_58181121",
+                native_session_id="claude-native",
+                workdir="/tmp",
+                require_workdir=False,
+            )
+
+        store.load()
+
+        assert store.state.session_mappings["telegram::user::58181121"]["claude"]["telegram_58181121"] == (
+            "claude-native"
+        )
+        assert "telegram::58181121" not in store.state.session_mappings
+    finally:
+        store.close()
+
+
+def test_slack_user_scope_session_mapping_keeps_legacy_untyped_key_on_reload(tmp_path: Path) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    store = SessionsStore(sessions_path)
+    try:
+        with store._service.engine.begin() as conn:
+            user_scope_id = resolve_scope_from_legacy_key(conn, "slack::user::U123", now="2026-06-19T07:30:00Z")
+            assert user_scope_id is not None
+            create_agent_session_row(
+                conn,
+                scope_id=user_scope_id,
+                agent_backend="claude",
+                agent_variant="claude",
+                session_anchor="slack_171717.123",
+                native_session_id="claude-native",
+                workdir="/tmp",
+                require_workdir=False,
+            )
+
+        store.load()
+
+        assert store.state.session_mappings["slack::U123"]["claude"]["slack_171717.123"] == "claude-native"
+        assert "slack::user::U123" not in store.state.session_mappings
     finally:
         store.close()
 

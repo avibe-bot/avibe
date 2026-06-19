@@ -71,7 +71,8 @@
     "sessionResumedContinueDiscordThread": "💬 *Reply in the subchannel to this message* to continue with this session.",
     "sessionResumedContinueDirect": "💬 *Send your next message directly* to continue with this session.",
     "sessionResumedThreadFreshTip": "_(Sending a new message in the main channel will start a fresh session.)_",
-    "routingUpdated": "Agent routing updated!"
+    "routingUpdated": "Agent routing updated!",
+    "routingUpdateNeedsNewSession": "Use /new to create a new session for this setting change to take effect. The new session will replace the current session."
   },
   "settings": {
     "personalizationTitle": "Personalization Settings",

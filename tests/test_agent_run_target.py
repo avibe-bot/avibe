@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from core.services import sessions as sessions_service
 from core.services.agent_run_target import resolve_agent_run_target
 from modules.im import MessageContext
+from storage.agent_session_rows import create_agent_session_row
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import scope_settings
@@ -188,6 +189,85 @@ def test_new_im_session_uses_resolved_vibe_agent(tmp_path):
     assert session["agent_variant"] == "codex"
     assert session["model"] == "gpt-5.5"
     assert session["reasoning_effort"] == "high"
+
+
+def test_telegram_dm_new_session_ignores_legacy_channel_scope_session(tmp_path):
+    workdir = tmp_path / "telegram-dm"
+    claude_agent = SimpleNamespace(
+        id="agent-claude",
+        name="claude",
+        backend="claude",
+        model="claude-opus-4-8",
+        reasoning_effort=None,
+    )
+    controller = _controller(tmp_path)
+    controller.primary_platform = "telegram"
+    controller.config.platform = "telegram"
+    controller.resolve_vibe_agent_for_context = (
+        lambda _context, override_agent_name=None, required=False: claude_agent
+    )
+    with controller.sqlite_engine.begin() as conn:
+        user_scope_id = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="user",
+            native_id="58181121",
+            now="2026-06-19T07:30:00Z",
+        )
+        _seed_scope_settings(
+            conn,
+            user_scope_id,
+            workdir=str(workdir),
+            agent_name="claude",
+            routing={"agent_name": "claude", "claude_model": "claude-opus-4-8"},
+        )
+        legacy_channel_scope_id = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="channel",
+            native_id="58181121",
+            now="2026-06-19T07:30:00Z",
+        )
+        create_agent_session_row(
+            conn,
+            scope_id=legacy_channel_scope_id,
+            agent_backend="opencode",
+            agent_variant="opencode",
+            agent_name="opencode",
+            session_anchor="telegram_58181121",
+            native_session_id="oc-native",
+            workdir=str(workdir),
+        )
+
+    ctx = MessageContext(
+        user_id="58181121",
+        channel_id="58181121",
+        message_id="100",
+        platform="telegram",
+        platform_specific={"platform": "telegram", "is_dm": True},
+    )
+
+    target = resolve_agent_run_target(
+        ctx,
+        controller=controller,
+        base_session_id="telegram_58181121",
+    )
+
+    assert target.scope_id == "telegram::user::58181121"
+    assert target.session_key == "telegram::user::58181121"
+    assert target.agent_backend == "claude"
+    assert target.agent_name == "claude"
+    assert target.model == "claude-opus-4-8"
+    assert target.agent_session_id is not None
+    with controller.sqlite_engine.connect() as conn:
+        rows = conn.exec_driver_sql(
+            "select scope_id, agent_backend, session_anchor, metadata_json from agent_sessions order by scope_id"
+        ).all()
+    assert [(row.scope_id, row.agent_backend, row.session_anchor) for row in rows] == [
+        ("telegram::channel::58181121", "opencode", "telegram_58181121"),
+        ("telegram::user::58181121", "claude", "telegram_58181121"),
+    ]
+    assert json.loads(rows[1].metadata_json)["legacy_scope_key"] == "telegram::user::58181121"
 
 
 def test_new_im_session_ignores_legacy_scope_backend(tmp_path):

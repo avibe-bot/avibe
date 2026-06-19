@@ -153,10 +153,19 @@ class SessionsFacade:
         agent_name: str,
         thread_id: str,
     ) -> None:
+        self.remove_agent_session(user_id, agent_name, thread_id)
+
+    def remove_agent_session(
+        self,
+        user_id: Union[int, str],
+        agent_name: str,
+        thread_id: str,
+    ) -> bool:
         user_key = self._normalize_user_id(user_id)
         removed = self.sessions_store.remove_agent_session(user_key, agent_name, thread_id)
         if removed:
             logger.info("Cleared %s session mapping for user %s: %s", agent_name, user_id, thread_id)
+        return bool(removed)
 
     def clear_agent_sessions(self, user_id: Union[int, str], agent_name: str) -> None:
         user_key = self._normalize_user_id(user_id)
@@ -440,6 +449,7 @@ class SessionsFacade:
         prompt_started_at: Optional[float] = None,
         model_dict: Optional[Dict[str, str]] = None,
         reasoning_effort: Optional[str] = None,
+        session_key: str = "",
     ) -> None:
         poll_info = ActivePollInfo(
             opencode_session_id=opencode_session_id,
@@ -462,6 +472,7 @@ class SessionsFacade:
             platform=platform,
             model_dict=model_dict,
             reasoning_effort=reasoning_effort,
+            session_key=session_key,
         )
         self.sessions_store.add_active_poll(poll_info)
         logger.debug("Added active poll: session=%s, thread=%s", opencode_session_id, thread_id)

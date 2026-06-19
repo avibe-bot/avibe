@@ -41,6 +41,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo]):
     ``set_agent_status`` writes."""
     status_writes: list[tuple[str, str]] = []
     removed: list[str] = []
+    request_sessions: list[tuple[str, str, str, str]] = []
 
     class _Server:
         async def list_messages(self, session_id, directory):
@@ -63,6 +64,7 @@ def _build_agent(active_polls: dict[str, ActivePollInfo]):
 
     class _SessionManager:
         def set_request_session(self, *args):
+            request_sessions.append(args)
             return None
 
         def pop_request_session(self, *args):
@@ -99,12 +101,12 @@ def _build_agent(active_polls: dict[str, ActivePollInfo]):
         return server
 
     agent._get_server = _get_server
-    return agent, status_writes, removed
+    return agent, status_writes, removed, request_sessions
 
 
 def test_restored_avibe_poll_marks_session_running():
     poll = _make_poll(platform="avibe", base_session_id="ses_wb", opencode_session_id="oc-1")
-    agent, status_writes, _ = _build_agent({"oc-1": poll})
+    agent, status_writes, _, _ = _build_agent({"oc-1": poll})
 
     async def _run():
         restored = await agent.restore_active_polls()
@@ -125,7 +127,7 @@ def test_restored_avibe_poll_marks_session_running():
 
 def test_restored_im_poll_does_not_touch_agent_status():
     poll = _make_poll(platform="slack", base_session_id="slack:thread", opencode_session_id="oc-2")
-    agent, status_writes, _ = _build_agent({"oc-2": poll})
+    agent, status_writes, _, _ = _build_agent({"oc-2": poll})
 
     async def _run():
         restored = await agent.restore_active_polls()
@@ -139,6 +141,106 @@ def test_restored_im_poll_does_not_touch_agent_status():
     assert restored == 1
     # IM polls carry no workbench session id → no dot, so no status write at all.
     assert status_writes == []
+
+
+def test_restored_telegram_dm_poll_keeps_typed_user_session_key():
+    poll = ActivePollInfo(
+        opencode_session_id="oc-telegram",
+        base_session_id="telegram_58181121",
+        channel_id="58181121",
+        thread_id="",
+        settings_key="58181121",
+        working_path="/tmp/work",
+        platform="telegram",
+        user_id="58181121",
+        processing_indicator={
+            "platform": "telegram",
+            "user_id": "58181121",
+            "channel_id": "58181121",
+            "thread_id": "",
+            "is_dm": True,
+        },
+    )
+    agent, _, _, request_sessions = _build_agent({"oc-telegram": poll})
+
+    async def _run():
+        restored = await agent.restore_active_polls()
+        await asyncio.sleep(0)
+        for task in list(agent._active_requests.values()):
+            if not task.done():
+                await task
+        return restored
+
+    restored = asyncio.run(_run())
+
+    assert restored == 1
+    assert request_sessions == [
+        ("telegram_58181121", "oc-telegram", "/tmp/work", "telegram::user::58181121")
+    ]
+
+
+def test_restored_legacy_telegram_dm_poll_infers_typed_user_session_key():
+    poll = ActivePollInfo(
+        opencode_session_id="oc-telegram",
+        base_session_id="telegram_58181121",
+        channel_id="58181121",
+        thread_id="",
+        settings_key="58181121",
+        working_path="/tmp/work",
+        platform="telegram",
+        user_id="58181121",
+        processing_indicator={
+            "platform": "telegram",
+            "user_id": "58181121",
+            "channel_id": "58181121",
+            "thread_id": "",
+        },
+    )
+    agent, _, _, request_sessions = _build_agent({"oc-telegram": poll})
+
+    async def _run():
+        restored = await agent.restore_active_polls()
+        await asyncio.sleep(0)
+        for task in list(agent._active_requests.values()):
+            if not task.done():
+                await task
+        return restored
+
+    restored = asyncio.run(_run())
+
+    assert restored == 1
+    assert request_sessions == [
+        ("telegram_58181121", "oc-telegram", "/tmp/work", "telegram::user::58181121")
+    ]
+
+
+def test_restored_poll_prefers_persisted_typed_channel_session_key():
+    poll = ActivePollInfo(
+        opencode_session_id="oc-slack",
+        base_session_id="slack_171717.123",
+        channel_id="C1",
+        thread_id="171717.123",
+        settings_key="C1",
+        working_path="/tmp/work",
+        platform="slack",
+        session_key="slack::channel::C1",
+    )
+    agent, _, _, request_sessions = _build_agent({"oc-slack": poll})
+
+    async def _run():
+        restored = await agent.restore_active_polls()
+        await asyncio.sleep(0)
+        for task in list(agent._active_requests.values()):
+            if not task.done():
+                await task
+        return restored
+
+    restored = asyncio.run(_run())
+
+    assert restored == 1
+    assert request_sessions == [
+        ("slack_171717.123", "oc-slack", "/tmp/work", "slack::channel::C1")
+    ]
 
 
 def test_workbench_session_id_for_poll_resolution():

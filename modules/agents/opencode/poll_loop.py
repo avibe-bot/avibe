@@ -8,13 +8,52 @@ import time
 from typing import Any, Dict, Optional
 
 from config.v2_config import DEFAULT_OPENCODE_ERROR_RETRY_LIMIT
+from core.message_context import build_context_session_key
 from modules.agents.base import AgentRequest
+from modules.im import MessageContext
 from vibe.i18n import t as i18n_t
 
 from .message_processor import is_empty_terminal_opencode_message
 from .server import OpenCodeServerManager
 
 logger = logging.getLogger(__name__)
+
+
+def restored_context_from_poll_info(poll_info) -> MessageContext:
+    snapshot = poll_info.processing_indicator if isinstance(poll_info.processing_indicator, dict) else {}
+    platform = str(snapshot.get("platform") or poll_info.platform or "")
+    user_id = str(snapshot.get("user_id") or poll_info.user_id or "")
+    channel_id = str(snapshot.get("channel_id") or poll_info.channel_id or "")
+    context_token = str(snapshot.get("context_token") or getattr(poll_info, "context_token", "") or "")
+    platform_specific: dict[str, Any] = {}
+    if platform:
+        platform_specific["platform"] = platform
+    if snapshot.get("is_dm") is not None:
+        platform_specific["is_dm"] = bool(snapshot.get("is_dm"))
+    elif platform in {"telegram", "wechat"} and user_id and user_id == channel_id:
+        platform_specific["is_dm"] = True
+    if context_token:
+        platform_specific["context_token"] = context_token
+    return MessageContext(
+        user_id=user_id,
+        channel_id=channel_id,
+        platform=platform or None,
+        thread_id=snapshot.get("thread_id") or poll_info.thread_id or None,
+        message_id=snapshot.get("message_id") or None,
+        platform_specific=platform_specific or None,
+    )
+
+
+def restored_session_key_from_poll_info(poll_info, *, context: Optional[MessageContext] = None) -> str:
+    session_key = str(getattr(poll_info, "session_key", "") or "").strip()
+    if session_key:
+        return session_key
+    restored_context = context or restored_context_from_poll_info(poll_info)
+    return build_context_session_key(
+        restored_context,
+        platform=poll_info.platform or restored_context.platform,
+        settings_key=poll_info.settings_key,
+    )
 
 
 class OpenCodePollLoop:
@@ -128,7 +167,7 @@ class OpenCodePollLoop:
     def _build_restored_ack_request(self, poll_info) -> AgentRequest:
         handle = self._build_restored_handle(poll_info)
         context = handle.context
-        session_key = f"{poll_info.platform}::{poll_info.settings_key}" if poll_info.platform else poll_info.settings_key
+        session_key = restored_session_key_from_poll_info(poll_info, context=context)
         return AgentRequest(
             context=context,
             message="",

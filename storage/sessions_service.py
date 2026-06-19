@@ -896,6 +896,7 @@ class SQLiteSessionsService:
                 agent_sessions.c.native_session_id,
                 agent_sessions.c.metadata_json,
                 scopes.c.platform,
+                scopes.c.scope_type,
                 scopes.c.native_id,
             ).join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
         ).mappings()
@@ -969,14 +970,22 @@ def _lookup_scope_id(conn: Connection, scope_key: str) -> str | None:
     NEVER upserts a scope — for read paths that must not create one."""
     raw = str(scope_key or "")
     parts = raw.split("::")
+    scope_type = None
     if len(parts) >= 3 and parts[1] in {"channel", "user", "platform", "project"}:
-        platform, native_id = parts[0], "::".join(parts[2:])
+        platform, scope_type, native_id = parts[0], parts[1], "::".join(parts[2:])
     else:
         platform, native_id = _split_scoped_key(scope_key)
         if platform is None:
             platform = "unknown"
     if not platform or not native_id:
         return None
+    if scope_type:
+        found = conn.execute(
+            select(scopes.c.id)
+            .where(scopes.c.platform == platform, scopes.c.scope_type == scope_type, scopes.c.native_id == native_id)
+            .limit(1)
+        ).scalar_one_or_none()
+        return str(found) if found is not None else None
     found = conn.execute(
         select(scopes.c.id).where(scopes.c.platform == platform, scopes.c.native_id == native_id).limit(1)
     ).scalar_one_or_none()
@@ -1038,8 +1047,11 @@ def _legacy_scope_key(row: dict[str, Any]) -> str:
     if isinstance(metadata, dict) and metadata.get("legacy_scope_key"):
         return str(metadata["legacy_scope_key"])
     platform = row.get("platform")
+    scope_type = row.get("scope_type")
     native_id = row.get("native_id")
     if platform and native_id:
+        if scope_type == "user" and platform in {"telegram", "wechat"}:
+            return f"{platform}::user::{native_id}"
         return f"{platform}::{native_id}"
     scope_id = row.get("scope_id")
     if isinstance(scope_id, str) and scope_id.count("::") >= 2:

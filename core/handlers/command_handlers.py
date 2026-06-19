@@ -5,6 +5,7 @@ import os
 import time
 from typing import Any, Optional
 from config.platform_registry import get_platform_descriptor
+from core.message_context import requires_typed_user_session_key
 from modules.agents import get_agent_display_name
 from modules.agents.native_sessions.types import NativeResumeSession
 from modules.agents.base import AgentRequest
@@ -105,6 +106,31 @@ class CommandHandlers(BaseHandler):
     def _get_resume_snapshot_key(self, context: MessageContext) -> str:
         platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
         return f"{platform}::{self._get_settings_key(context)}"
+
+    def _session_anchor_for_new(self, context: MessageContext) -> str:
+        session_handler = getattr(self.controller, "session_handler", None)
+        getter = getattr(session_handler, "get_base_session_id", None)
+        if callable(getter):
+            try:
+                return getter(context)
+            except Exception:
+                logger.debug("Failed to resolve session anchor for /new", exc_info=True)
+        platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
+        payload = context.platform_specific or {}
+        if payload.get("is_dm", False):
+            base_id = context.thread_id or context.channel_id or context.user_id
+        else:
+            base_id = context.thread_id or context.message_id or context.channel_id or context.user_id
+        return f"{platform}_{base_id}"
+
+    def _compat_session_keys_for_new(self, context: MessageContext, session_key: str) -> list[str]:
+        keys = [session_key]
+        platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
+        payload = context.platform_specific or {}
+        if payload.get("is_dm", False) and requires_typed_user_session_key(context) and context.channel_id:
+            keys.append(f"{platform}::channel::{context.channel_id}")
+            keys.append(f"{platform}::{context.channel_id}")
+        return list(dict.fromkeys(keys))
 
     def _store_resume_snapshot(
         self,
@@ -499,7 +525,16 @@ class CommandHandlers(BaseHandler):
                     logger.info("Started new Telegram topic session for user %s", context.user_id)
                     return
             session_key = self._get_session_key(context)
-            await self.controller.agent_service.clear_sessions(session_key)
+            session_anchor = self._session_anchor_for_new(context)
+            sessions = getattr(self.controller, "sessions", None)
+            clear_base = getattr(sessions, "clear_session_base", None)
+            for key in self._compat_session_keys_for_new(context, session_key):
+                await self.controller.agent_service.clear_sessions(key)
+                if callable(clear_base):
+                    try:
+                        clear_base(key, session_anchor)
+                    except Exception:
+                        logger.debug("Failed to clear session base for %s:%s", key, session_anchor, exc_info=True)
             full_response = f"🆕 {self._t('command.new.started')}"
 
             channel_context = self._get_channel_context(context)

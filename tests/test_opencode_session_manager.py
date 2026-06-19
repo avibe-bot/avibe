@@ -264,3 +264,24 @@ def test_session_facade_ensure_fallback_does_not_clear_existing_native_session()
 
     assert facade.ensure_agent_session_id("slack::channel::C1", "codex", "base-1") is None
     assert facade.get_agent_session_id("slack::channel::C1", "base-1", "codex") == "thread-old"
+
+
+def test_sessions_facade_remove_agent_session_delegates_to_store() -> None:
+    class _Store:
+        def __init__(self):
+            self.removed = []
+
+        def remove_agent_session(self, user_id, agent_name, thread_id):
+            self.removed.append((user_id, agent_name, thread_id))
+            return True
+
+    store = _Store()
+    facade = SessionsFacade(store)
+
+    assert facade.remove_agent_session("telegram::user::58181121", "claude", "telegram_58181121") is True
+    facade.clear_agent_session_mapping("telegram::user::58181121", "claude", "telegram_58181121")
+
+    assert store.removed == [
+        ("telegram::user::58181121", "claude", "telegram_58181121"),
+        ("telegram::user::58181121", "claude", "telegram_58181121"),
+    ]

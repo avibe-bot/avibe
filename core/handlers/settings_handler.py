@@ -508,6 +508,104 @@ class SettingsHandler(BaseHandler):
             return False
         return bool(getattr(backend_config, "enabled", True))
 
+    def _context_can_start_fresh_session_without_reset(self, context: MessageContext) -> bool:
+        im_client = self._get_im_client(context)
+        is_dm = bool((context.platform_specific or {}).get("is_dm", False))
+        if is_dm:
+            return bool(getattr(im_client, "should_use_thread_for_dm_session", lambda: False)())
+        uses_threads = bool(getattr(im_client, "should_use_thread_for_reply", lambda: False)())
+        uses_message_sessions = bool(
+            getattr(im_client, "should_use_message_id_for_channel_session", lambda _context=None: True)(context)
+        )
+        return uses_threads and uses_message_sessions
+
+    def _session_anchor_for_context(self, context: MessageContext) -> str:
+        session_handler = getattr(self.controller, "session_handler", None)
+        getter = getattr(session_handler, "get_base_session_id", None)
+        if callable(getter):
+            try:
+                return getter(context)
+            except Exception:
+                logger.debug("Failed to resolve session anchor for routing update hint", exc_info=True)
+        platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
+        payload = context.platform_specific or {}
+        base_id = context.channel_id or context.user_id if payload.get("is_dm", False) else context.channel_id
+        return f"{platform}_{base_id or context.user_id}"
+
+    def _resolve_route_backend(self, agent_name: Optional[str]) -> Optional[str]:
+        if not agent_name:
+            return None
+        name = str(agent_name)
+        if name in {"opencode", "claude", "codex"}:
+            return name
+        store = getattr(self.controller, "vibe_agent_store", None)
+        if store is None:
+            return None
+        try:
+            agent = store.get(name)
+        except Exception:
+            return None
+        backend = getattr(agent, "backend", None) if agent else None
+        return str(backend) if backend else None
+
+    @staticmethod
+    def _routing_target_from_row(row: dict) -> tuple[str, str, str, str, str]:
+        backend = str(row.get("agent_backend") or "").strip()
+        agent_name = str(row.get("agent_name") or "").strip()
+        if not agent_name and backend in {"opencode", "claude", "codex"}:
+            agent_name = backend
+        variant = str(row.get("agent_variant") or "").strip()
+        if variant == backend and agent_name == backend:
+            variant = ""
+        return (
+            agent_name,
+            backend,
+            variant,
+            str(row.get("model") or "").strip(),
+            str(row.get("reasoning_effort") or "").strip(),
+        )
+
+    def _routing_target_from_settings(self, routing) -> tuple[str, str, str, str, str]:
+        agent_name = str(getattr(routing, "agent_name", None) or "").strip()
+        backend = str(self._resolve_route_backend(agent_name) or agent_name).strip()
+        variant = ""
+        if backend == "opencode":
+            variant = str(getattr(routing, "opencode_agent", None) or "").strip()
+        elif backend == "claude":
+            variant = str(getattr(routing, "claude_agent", None) or "").strip()
+        elif backend == "codex":
+            variant = str(getattr(routing, "codex_agent", None) or "").strip()
+        return (
+            agent_name,
+            backend,
+            variant,
+            str(getattr(routing, "model", None) or "").strip(),
+            str(getattr(routing, "reasoning_effort", None) or "").strip(),
+        )
+
+    def _routing_update_needs_new_session_hint(self, context: MessageContext, routing) -> bool:
+        if self._context_can_start_fresh_session_without_reset(context):
+            return False
+        finder = getattr(self.sessions, "find_session_for_anchor", None)
+        if not callable(finder):
+            return False
+        session_key = self._get_session_key(context)
+        session_anchor = self._session_anchor_for_context(context)
+        try:
+            row = finder(session_key, session_anchor)
+        except Exception:
+            logger.debug("Failed to inspect current session for routing update hint", exc_info=True)
+            return False
+        if not row:
+            return False
+        current_target = self._routing_target_from_row(row)
+        next_target = self._routing_target_from_settings(routing)
+        if not any(current_target):
+            return True
+        if current_target[1] and next_target[1] and current_target[1] != next_target[1]:
+            return True
+        return current_target != next_target
+
     async def _handle_routing_slack(self, context: MessageContext):
         """Handle routing for Slack using modal dialog"""
         im_client = self._get_im_client(context)
@@ -810,6 +908,7 @@ class SettingsHandler(BaseHandler):
             )
 
             settings_manager.set_channel_routing(settings_key, routing)
+            needs_new_session_hint = self._routing_update_needs_new_session_hint(context, routing)
 
             parts = [f"{self._t('routing.label.backend')}: **{backend}**"]
             if backend == "opencode":
@@ -835,6 +934,8 @@ class SettingsHandler(BaseHandler):
                     parts.append(f"{self._t('routing.label.model')}: **{codex_model}**")
                 if codex_reasoning_effort:
                     parts.append(f"{self._t('routing.label.reasoningEffort')}: **{codex_reasoning_effort}**")
+            if needs_new_session_hint:
+                parts.extend(["", self._t("success.routingUpdateNeedsNewSession")])
 
             if notify_user:
                 await im_client.send_message(

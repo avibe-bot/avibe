@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 from sqlalchemy import Engine, select
 
+from core.message_context import build_context_session_key, resolve_context_settings_key
 from modules.im import MessageContext
 from storage.agent_session_rows import create_agent_session_row
 from storage.models import agent_sessions, scope_settings, scopes
@@ -102,7 +103,7 @@ def resolve_agent_run_target(
 
     platform = _platform_for(context, controller)
     settings_key = _settings_key_for(context)
-    session_key = f"{platform}::{settings_key}"
+    session_key = build_context_session_key(context, platform=platform, settings_key=settings_key)
     anchor = str(base_session_id or _fallback_anchor(context, platform))
     engine = _engine_for(controller)
 
@@ -251,7 +252,7 @@ def resolve_agent_run_target(
             model=agent_target.model,
             reasoning_effort=agent_target.reasoning_effort,
             workdir=resolved_new_workdir,
-            metadata={"created_via": "agent_run_target", "source": source},
+            metadata={"created_via": "agent_run_target", "source": source, "legacy_scope_key": session_key},
         )
         created = conn.execute(
             select(
@@ -347,8 +348,7 @@ def _platform_for(context: MessageContext, controller: Any) -> str:
 
 
 def _settings_key_for(context: MessageContext) -> str:
-    payload = context.platform_specific or {}
-    return str(context.user_id if payload.get("is_dm", False) else context.channel_id)
+    return resolve_context_settings_key(context)
 
 
 def _fallback_anchor(context: MessageContext, platform: str) -> str:

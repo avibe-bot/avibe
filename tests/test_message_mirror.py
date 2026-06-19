@@ -71,6 +71,29 @@ def test_inbound_creates_scope_and_user_row(isolated_state):
         assert message_rows[0]["author_id"] == "U_alice"
 
 
+def test_telegram_dm_mirror_uses_user_scope_when_chat_id_equals_user_id(isolated_state):
+    ctx = MessageContext(
+        user_id="58181121",
+        channel_id="58181121",
+        platform="telegram",
+        message_id="101",
+        platform_specific={"is_dm": True, "platform": "telegram"},
+    )
+
+    mirror_inbound(ctx, "hello")
+    persist_agent_message(ctx, "result", "hi")
+
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        scope_row = conn.execute(
+            select(scopes).where(scopes.c.platform == "telegram", scopes.c.native_id == "58181121")
+        ).mappings().one()
+        rows = conn.execute(select(messages).where(messages.c.platform == "telegram")).mappings().all()
+
+    assert scope_row["scope_type"] == "user"
+    assert {row["scope_id"] for row in rows} == {"telegram::user::58181121"}
+
+
 def test_persist_agent_writes_typed_agent_row_on_same_scope(isolated_state):
     ctx = _slack_ctx()
     mirror_inbound(ctx, "ping")
