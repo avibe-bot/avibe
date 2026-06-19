@@ -13,6 +13,7 @@ import re
 import socket
 import subprocess
 import time
+from urllib.parse import quote as _url_quote
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -38,6 +39,17 @@ DEFAULT_OPENCODE_PORT = 4096
 DEFAULT_OPENCODE_HOST = "127.0.0.1"
 SERVER_START_TIMEOUT = 15
 OPENCODE_LOG_TAIL_BYTES = 2_000_000
+
+
+def _percent_encode_path(path: str) -> str:
+    """Percent-encode *path* so it is safe for an HTTP header value.
+
+    RFC 7230 only allows visible US-ASCII characters (plus whitespace)
+    in header field values.  Non-ASCII bytes (e.g. CJK characters in
+    project paths) must be percent-encoded, otherwise they will be
+    misinterpreted by the receiving end.
+    """
+    return _url_quote(path, safe="/")
 
 
 class OpenCodeServerManager:
@@ -1079,7 +1091,7 @@ class OpenCodeServerManager:
             async with session.post(
                 f"{self.base_url}/session",
                 json=body,
-                headers={"x-opencode-directory": directory},
+                headers={"x-opencode-directory": _percent_encode_path(directory)},
             ) as resp:
                 if resp.status != 200:
                     text = await resp.text()
@@ -1092,7 +1104,7 @@ class OpenCodeServerManager:
             async with session.post(
                 f"{self.base_url}/session/{source_session_id}/fork",
                 json={},
-                headers={"x-opencode-directory": directory},
+                headers={"x-opencode-directory": _percent_encode_path(directory)},
             ) as resp:
                 if resp.status != 200:
                     text = await resp.text()
@@ -1125,7 +1137,7 @@ class OpenCodeServerManager:
             async with session.post(
                 f"{self.base_url}/session/{session_id}/message",
                 json=body,
-                headers={"x-opencode-directory": directory},
+                headers={"x-opencode-directory": _percent_encode_path(directory)},
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -1167,7 +1179,7 @@ class OpenCodeServerManager:
             async with session.post(
                 f"{self.base_url}/session/{session_id}/prompt_async",
                 json=body,
-                headers={"x-opencode-directory": directory},
+                headers={"x-opencode-directory": _percent_encode_path(directory)},
             ) as resp:
                 # OpenCode returns 204 when accepted.
                 if resp.status not in (200, 204):
@@ -1180,7 +1192,7 @@ class OpenCodeServerManager:
             session = await self._get_http_session()
             async with session.get(
                 f"{self.base_url}/session/{session_id}/message",
-                headers={"x-opencode-directory": directory},
+                headers={"x-opencode-directory": _percent_encode_path(directory)},
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -1192,7 +1204,7 @@ class OpenCodeServerManager:
             session = await self._get_http_session()
             async with session.get(
                 f"{self.base_url}/session/{session_id}/message/{message_id}",
-                headers={"x-opencode-directory": directory},
+                headers={"x-opencode-directory": _percent_encode_path(directory)},
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -1206,7 +1218,7 @@ class OpenCodeServerManager:
             try:
                 async with session.post(
                     f"{self.base_url}/session/{session_id}/abort",
-                    headers={"x-opencode-directory": directory},
+                    headers={"x-opencode-directory": _percent_encode_path(directory)},
                 ) as resp:
                     return resp.status == 200
             except Exception as e:
@@ -1228,7 +1240,7 @@ class OpenCodeServerManager:
             try:
                 async with session.get(
                     f"{self.base_url}/session/{session_id}",
-                    headers={"x-opencode-directory": directory},
+                    headers={"x-opencode-directory": _percent_encode_path(directory)},
                 ) as resp:
                     if resp.status == 200:
                         return await resp.json()
@@ -1263,7 +1275,7 @@ class OpenCodeServerManager:
             try:
                 async with session.get(
                     f"{self.base_url}/agent",
-                    headers={"x-opencode-directory": directory},
+                    headers={"x-opencode-directory": _percent_encode_path(directory)},
                 ) as resp:
                     if resp.status == 200:
                         agents = await resp.json()
@@ -1286,7 +1298,7 @@ class OpenCodeServerManager:
             try:
                 async with session.get(
                     f"{self.base_url}/config/providers",
-                    headers={"x-opencode-directory": directory},
+                    headers={"x-opencode-directory": _percent_encode_path(directory)},
                 ) as resp:
                     if resp.status == 200:
                         return await resp.json()
@@ -1307,7 +1319,7 @@ class OpenCodeServerManager:
             try:
                 async with session.get(
                     f"{self.base_url}/config",
-                    headers={"x-opencode-directory": directory},
+                    headers={"x-opencode-directory": _percent_encode_path(directory)},
                 ) as resp:
                     if resp.status == 200:
                         return await resp.json()
