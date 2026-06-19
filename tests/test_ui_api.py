@@ -1351,7 +1351,8 @@ def test_install_codex_fresh_install_uses_resolved_npm(monkeypatch, tmp_path):
 
 def test_install_codex_npm_install_runs_npm_upgrade(monkeypatch, tmp_path):
     # Npm-owned Codex installs should upgrade through npm, not through a
-    # different installer and not by blindly invoking the CLI self-updater.
+    # different installer and not by blindly invoking the CLI self-updater. The
+    # upgrade must stay in the npm prefix that owns the existing package.
     calls = []
     npm_path = tmp_path / ".nvm" / "versions" / "node" / "v22.18.0" / "bin" / "npm"
     npm_path.parent.mkdir(parents=True)
@@ -1392,8 +1393,8 @@ def test_install_codex_npm_install_runs_npm_upgrade(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert len(calls) == 1
     assert calls[0][0] == [str(npm_path), "install", "-g", "@openai/codex"]
-    assert calls[0][1]["NPM_CONFIG_PREFIX"] == str(tmp_path / ".local")
-    assert calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(tmp_path / ".local" / "bin")
+    assert calls[0][1]["NPM_CONFIG_PREFIX"] == str(npm_path.parent.parent)
+    assert calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(npm_path.parent)
     assert result["path"] == str(codex_path)
 
 
@@ -1608,7 +1609,8 @@ def test_discord_list_channels_rejects_empty_guild_id(monkeypatch):
 def test_install_codex_detects_existing_install_via_npm_prefix_and_upgrades_with_npm(monkeypatch, tmp_path, only_tmp_binaries):
     # Codex already installed under the npm global prefix; resolve_cli_path
     # must discover it (via `npm config get prefix`) and install_agent must
-    # still upgrade by rerunning npm install -g @openai/codex.
+    # still upgrade by rerunning npm install -g @openai/codex in that same
+    # prefix instead of moving it to ~/.local.
     npm_path = tmp_path / "node" / "bin" / "npm"
     npm_path.parent.mkdir(parents=True, exist_ok=True)
     npm_path.write_text("#!/bin/sh\n")
@@ -1646,6 +1648,119 @@ def test_install_codex_detects_existing_install_via_npm_prefix_and_upgrades_with
     assert result["path"] == str(codex_path)
     update_calls = [c for c in calls if c[0] == [str(npm_path), "install", "-g", "@openai/codex"]]
     assert len(update_calls) == 1
+    assert update_calls[0][1]["NPM_CONFIG_PREFIX"] == str(prefix_path)
+    assert update_calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(prefix_path / "bin")
+
+
+def test_install_codex_symlinked_npm_install_upgrades_in_real_prefix(monkeypatch, tmp_path, only_tmp_binaries):
+    # Regression coverage for the Incus layout: ~/.local/bin/codex is a shim to
+    # ~/.npm-global/bin/codex. Running npm with prefix ~/.local tries to replace
+    # the shim and fails with EEXIST, so upgrades must follow the real package.
+    npm_path = tmp_path / "node" / "bin" / "npm"
+    npm_path.parent.mkdir(parents=True, exist_ok=True)
+    npm_path.write_text("#!/bin/sh\n")
+    npm_path.chmod(0o755)
+
+    prefix_path = tmp_path / ".npm-global"
+    package_bin = prefix_path / "lib" / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    package_bin.parent.mkdir(parents=True, exist_ok=True)
+    package_bin.write_text("#!/usr/bin/env node\n")
+    package_bin.chmod(0o755)
+    npm_bin = prefix_path / "bin" / "codex"
+    npm_bin.parent.mkdir(parents=True, exist_ok=True)
+    npm_bin.symlink_to(package_bin)
+
+    local_bin = tmp_path / ".local" / "bin" / "codex"
+    local_bin.parent.mkdir(parents=True, exist_ok=True)
+    local_bin.symlink_to(npm_bin)
+    calls = []
+
+    class CompletedProcess:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs.get("env", {})))
+        if cmd == [str(npm_path), "install", "-g", "@openai/codex"]:
+            return CompletedProcess(stdout="updated")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    def fake_resolve(binary):
+        if binary == "npm":
+            return str(npm_path)
+        if binary == "codex":
+            return str(local_bin)
+        return None
+
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(api.shutil, "which", lambda binary: None)
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+    monkeypatch.setattr(api.subprocess, "Popen", _PopenFromRun)
+    monkeypatch.setattr(api, "resolve_cli_path", fake_resolve)
+
+    result = api.install_agent("codex")
+
+    assert result["ok"] is True
+    assert result["path"] == str(local_bin)
+    update_calls = [c for c in calls if c[0] == [str(npm_path), "install", "-g", "@openai/codex"]]
+    assert len(update_calls) == 1
+    assert update_calls[0][1]["NPM_CONFIG_PREFIX"] == str(prefix_path)
+    assert update_calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(prefix_path / "bin")
+
+
+def test_install_codex_project_local_node_modules_does_not_become_prefix(
+    monkeypatch,
+    tmp_path,
+    only_tmp_binaries,
+):
+    npm_path = tmp_path / "node" / "bin" / "npm"
+    npm_path.parent.mkdir(parents=True, exist_ok=True)
+    npm_path.write_text("#!/bin/sh\n")
+    npm_path.chmod(0o755)
+
+    project_path = tmp_path / "project"
+    codex_path = project_path / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    codex_path.parent.mkdir(parents=True, exist_ok=True)
+    codex_path.write_text("#!/usr/bin/env node\n")
+    codex_path.chmod(0o755)
+    global_prefix = tmp_path / ".npm-global"
+    calls = []
+
+    class CompletedProcess:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs.get("env", {})))
+        if cmd == [str(npm_path), "config", "get", "prefix"]:
+            return CompletedProcess(stdout=f"{global_prefix}\n")
+        if cmd == [str(npm_path), "install", "-g", "@openai/codex"]:
+            return CompletedProcess(stdout="updated")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    def fake_resolve(binary):
+        if binary == "npm":
+            return str(npm_path)
+        if binary == "codex":
+            return str(codex_path)
+        return None
+
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(api.shutil, "which", lambda binary: None)
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+    monkeypatch.setattr(api.subprocess, "Popen", _PopenFromRun)
+    monkeypatch.setattr(api, "resolve_cli_path", fake_resolve)
+
+    result = api.install_agent("codex")
+
+    assert result["ok"] is True
+    update_calls = [c for c in calls if c[0] == [str(npm_path), "install", "-g", "@openai/codex"]]
+    assert len(update_calls) == 1
+    assert update_calls[0][1].get("NPM_CONFIG_PREFIX") != str(project_path)
     assert update_calls[0][1]["NPM_CONFIG_PREFIX"] == str(tmp_path / ".local")
     assert update_calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(tmp_path / ".local" / "bin")
 

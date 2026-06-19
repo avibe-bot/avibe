@@ -218,44 +218,54 @@ def _npm_global_binary_candidates(binary: str) -> list[Path]:
 
     candidates: list[Path] = []
     for npm_path in npm_paths:
-        try:
-            result = subprocess.run(
-                [str(npm_path), "config", "get", "prefix"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=_command_env_for(str(npm_path)),
-            )
-        except Exception:
+        prefix_path = _npm_prefix_for(npm_path)
+        if prefix_path is None:
             continue
 
-        if result.returncode != 0:
-            continue
-
-        prefix = (result.stdout or "").strip().splitlines()
-        if not prefix:
-            continue
-
-        prefix_path = Path(os.path.expanduser(prefix[-1]))
-        derived_candidates = [
-            prefix_path / "bin" / binary,
-            prefix_path / binary,
-            prefix_path / "node_modules" / ".bin" / binary,
-        ]
-        if os.name == "nt":
-            derived_candidates.extend(
-                [
-                    prefix_path / f"{binary}.cmd",
-                    prefix_path / f"{binary}.exe",
-                    prefix_path / "node_modules" / ".bin" / f"{binary}.cmd",
-                ]
-            )
-
-        for candidate in derived_candidates:
+        for candidate in _npm_binary_candidates_for_prefix(prefix_path, binary):
             if candidate not in candidates:
                 candidates.append(candidate)
 
     return candidates
+
+
+def _npm_prefix_for(npm_path: str | Path) -> Path | None:
+    try:
+        result = subprocess.run(
+            [str(npm_path), "config", "get", "prefix"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=_command_env_for(str(npm_path)),
+        )
+    except Exception:
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    prefix = (result.stdout or "").strip().splitlines()
+    if not prefix:
+        return None
+
+    return Path(os.path.expanduser(prefix[-1]))
+
+
+def _npm_binary_candidates_for_prefix(prefix_path: Path, binary: str) -> list[Path]:
+    derived_candidates = [
+        prefix_path / "bin" / binary,
+        prefix_path / binary,
+        prefix_path / "node_modules" / ".bin" / binary,
+    ]
+    if os.name == "nt":
+        derived_candidates.extend(
+            [
+                prefix_path / f"{binary}.cmd",
+                prefix_path / f"{binary}.exe",
+                prefix_path / "node_modules" / ".bin" / f"{binary}.cmd",
+            ]
+        )
+    return derived_candidates
 
 
 def _candidate_cli_paths(binary: str) -> list[Path]:
@@ -344,17 +354,63 @@ def _command_env_for(binary_path: str | None) -> dict[str, str]:
     return env
 
 
-def _codex_npm_install_env(npm_path: str) -> dict[str, str]:
+def _codex_npm_install_env(npm_path: str, *, prefix: str | Path | None = None) -> dict[str, str]:
     env = _command_env_for(npm_path)
     if os.name == "nt":
         return env
 
-    prefix = str(Path.home() / ".local")
-    prefix_bin = str(Path(prefix) / "bin")
+    install_prefix = Path(os.path.expanduser(str(prefix))) if prefix is not None else Path.home() / ".local"
+    prefix = str(install_prefix)
+    prefix_bin = str(install_prefix / "bin")
     path_entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry and entry != prefix_bin]
     env["PATH"] = os.pathsep.join([prefix_bin, *path_entries])
     env["NPM_CONFIG_PREFIX"] = prefix
     return env
+
+
+def _npm_prefix_from_node_modules_path(codex_path: str) -> Path | None:
+    try:
+        paths = [Path(codex_path).expanduser(), Path(codex_path).expanduser().resolve()]
+    except OSError:
+        return None
+
+    for path in paths:
+        parts = path.parts
+        for index in range(len(parts) - 2):
+            if parts[index : index + 3] != ("node_modules", "@openai", "codex"):
+                continue
+            if index == 0 or parts[index - 1] != "lib":
+                continue
+            prefix_parts = parts[: index - 1]
+            if prefix_parts:
+                return Path(*prefix_parts)
+    return None
+
+
+def _npm_prefix_for_existing_codex_install(npm_path: str, codex_path: str) -> Path | None:
+    prefix = _npm_prefix_from_node_modules_path(codex_path)
+    if prefix is not None:
+        return prefix
+
+    prefix = _npm_prefix_for(npm_path)
+    if prefix is None:
+        return None
+
+    try:
+        original = Path(codex_path).expanduser()
+        resolved = original.resolve()
+    except OSError:
+        resolved = None
+
+    for candidate in _npm_binary_candidates_for_prefix(prefix, "codex"):
+        try:
+            candidate_resolved = candidate.resolve()
+        except OSError:
+            candidate_resolved = None
+        if original == candidate or (resolved is not None and candidate_resolved == resolved):
+            return prefix
+
+    return None
 
 
 def _path_is_relative_to(path: Path, parent: Path) -> bool:
@@ -465,7 +521,8 @@ def _codex_upgrade_command(existing_path: str) -> tuple[list[str], dict[str, str
                 "message": "Codex appears to be installed via npm, but npm was not found. Please install Node.js or upgrade Codex manually.",
                 "output": None,
             }
-        return [npm_path, "install", "-g", "@openai/codex"], _codex_npm_install_env(npm_path)
+        prefix = _npm_prefix_for_existing_codex_install(npm_path, existing_path)
+        return [npm_path, "install", "-g", "@openai/codex"], _codex_npm_install_env(npm_path, prefix=prefix)
 
     if _codex_cli_supports_update(existing_path):
         return [existing_path, "update"], None
