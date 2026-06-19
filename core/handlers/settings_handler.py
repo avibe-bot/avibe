@@ -565,11 +565,9 @@ class SettingsHandler(BaseHandler):
             return False
         current_target = self._routing_target_from_row(row)
         next_target = self._routing_target_from_settings(routing)
-        if not any(current_target):
-            return True
-        if current_target[1] and next_target[1] and current_target[1] != next_target[1]:
-            return True
-        return current_target != next_target
+        current_backend = current_target[1]
+        next_backend = next_target[1]
+        return bool(current_backend and next_backend and current_backend != next_backend)
 
     async def _handle_routing_slack(self, context: MessageContext):
         """Handle routing for Slack using modal dialog"""

@@ -236,7 +236,7 @@ def test_handle_routing_update_warns_wechat_flat_scope_with_existing_backend_ses
     assert sessions.calls == [("wechat::user::58181121", "wechat_58181121")]
 
 
-def test_handle_routing_update_warns_flat_scope_same_backend_model_change() -> None:
+def test_handle_routing_update_does_not_warn_flat_scope_same_backend_model_change() -> None:
     handler, send_message, sessions = _make_flat_scope_handler(
         row={
             "agent_name": "claude",
@@ -262,7 +262,38 @@ def test_handle_routing_update_warns_flat_scope_same_backend_model_change() -> N
     )
 
     text = send_message.await_args.args[1]
-    assert "请使用 /new 命令创建新会话，以使设置变更生效。新会话创建后将覆盖当前会话。" in text
+    assert "请使用 /new 命令创建新会话" not in text
+    assert sessions.calls == [("telegram::user::58181121", "telegram_58181121")]
+
+
+def test_handle_routing_update_does_not_warn_flat_scope_same_backend_reasoning_change() -> None:
+    handler, send_message, sessions = _make_flat_scope_handler(
+        row={
+            "agent_name": "claude",
+            "agent_backend": "claude",
+            "agent_variant": "claude",
+            "model": "claude-sonnet-4-5",
+            "reasoning_effort": "low",
+        }
+    )
+
+    asyncio.run(
+        handler.handle_routing_update(
+            user_id="58181121",
+            channel_id="58181121",
+            backend="claude",
+            opencode_agent=None,
+            opencode_model=None,
+            claude_agent=None,
+            claude_model="claude-sonnet-4-5",
+            claude_reasoning_effort="high",
+            platform="telegram",
+            is_dm=True,
+        )
+    )
+
+    text = send_message.await_args.args[1]
+    assert "请使用 /new 命令创建新会话" not in text
     assert sessions.calls == [("telegram::user::58181121", "telegram_58181121")]
 
 
