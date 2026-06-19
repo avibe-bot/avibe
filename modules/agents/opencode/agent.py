@@ -22,7 +22,7 @@ from .message_processor import OpenCodeMessageProcessorMixin
 from .poll_loop import OpenCodePollLoop
 from .server import OpenCodeServerManager
 from .session import OpenCodeResumeUnavailableError, OpenCodeSessionManager
-from .utils import resolve_opencode_reasoning_effort
+from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +269,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if model_dict:
                 try:
                     model_catalog = await server.get_available_models(request.working_path)
+                    resolved_model_id = resolve_opencode_model_id(
+                        model_catalog,
+                        model_dict.get("providerID"),
+                        model_dict.get("modelID"),
+                    )
+                    if resolved_model_id and resolved_model_id != model_dict.get("modelID"):
+                        model_dict = {**model_dict, "modelID": resolved_model_id}
                     reasoning_effort = resolve_opencode_reasoning_effort(
                         model_dict,
                         reasoning_effort,

@@ -25,7 +25,7 @@ from modules.agents.opencode.message_processor import (
     extract_opencode_response_text,
     is_empty_terminal_opencode_message,
 )
-from modules.agents.opencode.utils import resolve_opencode_reasoning_effort
+from modules.agents.opencode.utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 from modules.im import InlineButton, InlineKeyboard, MessageContext
 from vibe.i18n import t as i18n_t
 from vibe.opencode_config import remove_opencode_provider_api_key
@@ -2337,6 +2337,11 @@ class AgentAuthService:
             except Exception:  # noqa: BLE001
                 catalog = None
             model_dict = {"providerID": provider_id, "modelID": chosen_model}
+            if isinstance(catalog, dict):
+                resolved_model_id = resolve_opencode_model_id(catalog, provider_id, chosen_model)
+                if resolved_model_id:
+                    chosen_model = resolved_model_id
+                    model_dict["modelID"] = resolved_model_id
             reasoning_effort = resolve_opencode_reasoning_effort(
                 model_dict,
                 None,
@@ -2349,7 +2354,7 @@ class AgentAuthService:
                     session_id=session_id,
                     directory=directory,
                     text="Hi",
-                    model={"providerID": provider_id, "modelID": chosen_model},
+                    model=model_dict,
                     reasoning_effort=reasoning_effort,
                     tools={"question": False},
                 )

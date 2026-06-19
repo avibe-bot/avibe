@@ -828,6 +828,40 @@ def test_opencode_provider_test_fails_on_empty_terminal_message(
     assert fake.inactive_calls == ["sess_probe"]
 
 
+def test_opencode_provider_test_uses_catalog_model_casing(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeOpencodeServer()
+    fake.catalog = {
+        "providers": [
+            {
+                "id": "glm",
+                "models": {
+                    "glm-5.2": {"id": "glm-5.2"},
+                },
+            }
+        ]
+    }
+    fake.messages = [
+        {
+            "info": {
+                "id": "msg_assistant",
+                "role": "assistant",
+                "time": {"completed": 123},
+                "finish": "stop",
+            },
+            "parts": [{"type": "text", "text": "OK"}],
+        }
+    ]
+    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+
+    result = _run(service.test_opencode_provider("glm", model="GLM-5.2"))
+
+    assert result["ok"] is True
+    assert result["model"] == "glm-5.2"
+    assert fake.prompt_calls[-1]["model"] == {"providerID": "glm", "modelID": "glm-5.2"}
+
+
 def test_remove_web_auth_rejects_unsupported_backend(service: AgentAuthService) -> None:
     # OpenCode joined ``WEB_BACKENDS`` for OAuth, but ``remove_web_auth``
     # is claude / codex specific — opencode providers use the

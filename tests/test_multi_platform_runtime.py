@@ -565,6 +565,20 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
         async def list_messages(self, session_id, directory):
             return []
 
+        async def get_available_models(self, directory):
+            return {
+                "providers": [
+                    {
+                        "id": "openai",
+                        "models": {
+                            "gpt-5.4": {
+                                "variants": {"high": {}},
+                            }
+                        },
+                    }
+                ]
+            }
+
         async def prompt_async(self, **kwargs):
             calls.append(kwargs)
 
@@ -625,13 +639,13 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
                     "remote_access": None,
                     "language": "en",
                     "opencode": type(
-                        "OpenCodeConfig",
-                        (),
-                        {
-                            "default_model": "gpt-5.4",
-                            "default_provider": "openai",
-                            "default_reasoning_effort": "high",
-                        },
+                            "OpenCodeConfig",
+                            (),
+                            {
+                                "default_model": "GPT-5.4",
+                                "default_provider": "openai",
+                                "default_reasoning_effort": "high",
+                            },
                     )(),
                 },
             )()
