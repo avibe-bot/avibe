@@ -750,6 +750,62 @@ def test_clear_session_base_can_target_typed_user_and_channel_scopes(tmp_path: P
         store.close()
 
 
+def test_typed_user_scope_session_mapping_survives_reload_without_legacy_metadata(tmp_path: Path) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    store = SessionsStore(sessions_path)
+    try:
+        with store._service.engine.begin() as conn:
+            user_scope_id = resolve_scope_from_legacy_key(
+                conn, "telegram::user::58181121", now="2026-06-19T07:30:00Z"
+            )
+            assert user_scope_id is not None
+            create_agent_session_row(
+                conn,
+                scope_id=user_scope_id,
+                agent_backend="claude",
+                agent_variant="claude",
+                session_anchor="telegram_58181121",
+                native_session_id="claude-native",
+                workdir="/tmp",
+                require_workdir=False,
+            )
+
+        store.load()
+
+        assert store.state.session_mappings["telegram::user::58181121"]["claude"]["telegram_58181121"] == (
+            "claude-native"
+        )
+        assert "telegram::58181121" not in store.state.session_mappings
+    finally:
+        store.close()
+
+
+def test_slack_user_scope_session_mapping_keeps_legacy_untyped_key_on_reload(tmp_path: Path) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    store = SessionsStore(sessions_path)
+    try:
+        with store._service.engine.begin() as conn:
+            user_scope_id = resolve_scope_from_legacy_key(conn, "slack::user::U123", now="2026-06-19T07:30:00Z")
+            assert user_scope_id is not None
+            create_agent_session_row(
+                conn,
+                scope_id=user_scope_id,
+                agent_backend="claude",
+                agent_variant="claude",
+                session_anchor="slack_171717.123",
+                native_session_id="claude-native",
+                workdir="/tmp",
+                require_workdir=False,
+            )
+
+        store.load()
+
+        assert store.state.session_mappings["slack::U123"]["claude"]["slack_171717.123"] == "claude-native"
+        assert "slack::user::U123" not in store.state.session_mappings
+    finally:
+        store.close()
+
+
 def test_sessions_store_remove_backend_session_prunes_cached_custom_variant_row(tmp_path: Path) -> None:
     sessions_path = tmp_path / "sessions.json"
     store = SessionsStore(sessions_path)

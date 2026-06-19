@@ -103,7 +103,7 @@ def resolve_agent_run_target(
 
     platform = _platform_for(context, controller)
     settings_key = _settings_key_for(context)
-    session_key = _session_key_for(context, platform, settings_key)
+    session_key = build_context_session_key(context, platform=platform, settings_key=settings_key)
     anchor = str(base_session_id or _fallback_anchor(context, platform))
     engine = _engine_for(controller)
 
@@ -252,7 +252,7 @@ def resolve_agent_run_target(
             model=agent_target.model,
             reasoning_effort=agent_target.reasoning_effort,
             workdir=resolved_new_workdir,
-            metadata={"created_via": "agent_run_target", "source": source},
+            metadata={"created_via": "agent_run_target", "source": source, "legacy_scope_key": session_key},
         )
         created = conn.execute(
             select(
@@ -349,10 +349,6 @@ def _platform_for(context: MessageContext, controller: Any) -> str:
 
 def _settings_key_for(context: MessageContext) -> str:
     return resolve_context_settings_key(context)
-
-
-def _session_key_for(context: MessageContext, platform: str, settings_key: str) -> str:
-    return build_context_session_key(context, platform=platform, settings_key=settings_key)
 
 
 def _fallback_anchor(context: MessageContext, platform: str) -> str:

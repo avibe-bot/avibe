@@ -252,6 +252,46 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_wechat_dm_new_command_clears_user_and_legacy_channel_scopes(self):
+        controller = _StubController({"display_name": "Alex"})
+        setattr(controller.config, "platform", "wechat")
+        clear_calls = []
+        clear_base_calls = []
+
+        async def _record_clear(session_key):
+            clear_calls.append(session_key)
+            return {}
+
+        controller.agent_service.clear_sessions = _record_clear  # type: ignore[attr-defined]
+        controller.sessions = type(
+            "Sessions",
+            (),
+            {"clear_session_base": lambda _self, key, anchor: clear_base_calls.append((key, anchor)) or 1},
+        )()
+        handler = CommandHandlers(controller)
+        context = MessageContext(
+            user_id="wxid_alice",
+            channel_id="wxid_alice",
+            message_id="77",
+            platform="wechat",
+            platform_specific={"platform": "wechat", "is_dm": True},
+        )
+
+        await handler.handle_new(context)
+
+        self.assertEqual(
+            clear_calls,
+            ["wechat::user::wxid_alice", "wechat::channel::wxid_alice", "wechat::wxid_alice"],
+        )
+        self.assertEqual(
+            clear_base_calls,
+            [
+                ("wechat::user::wxid_alice", "wechat_wxid_alice"),
+                ("wechat::channel::wxid_alice", "wechat_wxid_alice"),
+                ("wechat::wxid_alice", "wechat_wxid_alice"),
+            ],
+        )
+
     async def test_telegram_new_command_creates_topic_session_when_supported(self):
         controller = _StubController({"display_name": "Alex"})
         setattr(controller.config, "platform", "telegram")

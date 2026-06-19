@@ -896,6 +896,7 @@ class SQLiteSessionsService:
                 agent_sessions.c.native_session_id,
                 agent_sessions.c.metadata_json,
                 scopes.c.platform,
+                scopes.c.scope_type,
                 scopes.c.native_id,
             ).join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
         ).mappings()
@@ -1046,8 +1047,11 @@ def _legacy_scope_key(row: dict[str, Any]) -> str:
     if isinstance(metadata, dict) and metadata.get("legacy_scope_key"):
         return str(metadata["legacy_scope_key"])
     platform = row.get("platform")
+    scope_type = row.get("scope_type")
     native_id = row.get("native_id")
     if platform and native_id:
+        if scope_type == "user" and platform in {"telegram", "wechat"}:
+            return f"{platform}::user::{native_id}"
         return f"{platform}::{native_id}"
     scope_id = row.get("scope_id")
     if isinstance(scope_id, str) and scope_id.count("::") >= 2:

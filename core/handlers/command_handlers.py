@@ -5,6 +5,7 @@ import os
 import time
 from typing import Any, Optional
 from config.platform_registry import get_platform_descriptor
+from core.message_context import requires_typed_user_session_key
 from modules.agents import get_agent_display_name
 from modules.agents.native_sessions.types import NativeResumeSession
 from modules.agents.base import AgentRequest
@@ -126,7 +127,7 @@ class CommandHandlers(BaseHandler):
         keys = [session_key]
         platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
         payload = context.platform_specific or {}
-        if platform == "telegram" and payload.get("is_dm", False) and context.channel_id:
+        if payload.get("is_dm", False) and requires_typed_user_session_key(context) and context.channel_id:
             keys.append(f"{platform}::channel::{context.channel_id}")
             keys.append(f"{platform}::{context.channel_id}")
         return list(dict.fromkeys(keys))

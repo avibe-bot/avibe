@@ -261,12 +261,13 @@ def test_telegram_dm_new_session_ignores_legacy_channel_scope_session(tmp_path):
     assert target.agent_session_id is not None
     with controller.sqlite_engine.connect() as conn:
         rows = conn.exec_driver_sql(
-            "select scope_id, agent_backend, session_anchor from agent_sessions order by scope_id"
+            "select scope_id, agent_backend, session_anchor, metadata_json from agent_sessions order by scope_id"
         ).all()
-    assert rows == [
+    assert [(row.scope_id, row.agent_backend, row.session_anchor) for row in rows] == [
         ("telegram::channel::58181121", "opencode", "telegram_58181121"),
         ("telegram::user::58181121", "claude", "telegram_58181121"),
     ]
+    assert json.loads(rows[1].metadata_json)["legacy_scope_key"] == "telegram::user::58181121"
 
 
 def test_new_im_session_ignores_legacy_scope_backend(tmp_path):
