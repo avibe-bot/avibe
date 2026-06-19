@@ -388,27 +388,32 @@ def _npm_prefix_from_node_modules_path(codex_path: str) -> Path | None:
 
 
 def _npm_prefix_for_existing_codex_install(npm_path: str, codex_path: str) -> Path | None:
-    prefix = _npm_prefix_from_node_modules_path(codex_path)
-    if prefix is not None:
-        return prefix
-
-    prefix = _npm_prefix_for(npm_path)
-    if prefix is None:
-        return None
-
     try:
         original = Path(codex_path).expanduser()
         resolved = original.resolve()
     except OSError:
         resolved = None
 
-    for candidate in _npm_binary_candidates_for_prefix(prefix, "codex"):
+    npm_prefix = _npm_prefix_for(npm_path)
+    if npm_prefix is None:
+        return None
+
+    inferred_prefix = _npm_prefix_from_node_modules_path(codex_path)
+    if inferred_prefix is not None:
+        try:
+            if inferred_prefix.resolve() == npm_prefix.resolve():
+                return npm_prefix
+        except OSError:
+            if inferred_prefix == npm_prefix:
+                return npm_prefix
+
+    for candidate in _npm_binary_candidates_for_prefix(npm_prefix, "codex"):
         try:
             candidate_resolved = candidate.resolve()
         except OSError:
             candidate_resolved = None
         if original == candidate or (resolved is not None and candidate_resolved == resolved):
-            return prefix
+            return npm_prefix
 
     return None
 

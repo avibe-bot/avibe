@@ -1371,6 +1371,8 @@ def test_install_codex_npm_install_runs_npm_upgrade(monkeypatch, tmp_path):
 
     def fake_run(cmd, **kwargs):
         calls.append((cmd, kwargs.get("env", {})))
+        if cmd == [str(npm_path), "config", "get", "prefix"]:
+            return CompletedProcess(stdout=f"{npm_path.parent.parent}\n")
         if cmd == [str(npm_path), "install", "-g", "@openai/codex"]:
             return CompletedProcess(stdout="updated")
         raise AssertionError(f"unexpected command: {cmd}")
@@ -1391,10 +1393,10 @@ def test_install_codex_npm_install_runs_npm_upgrade(monkeypatch, tmp_path):
     result = api.install_agent("codex")
 
     assert result["ok"] is True
-    assert len(calls) == 1
-    assert calls[0][0] == [str(npm_path), "install", "-g", "@openai/codex"]
-    assert calls[0][1]["NPM_CONFIG_PREFIX"] == str(npm_path.parent.parent)
-    assert calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(npm_path.parent)
+    update_calls = [c for c in calls if c[0] == [str(npm_path), "install", "-g", "@openai/codex"]]
+    assert len(update_calls) == 1
+    assert update_calls[0][1]["NPM_CONFIG_PREFIX"] == str(npm_path.parent.parent)
+    assert update_calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(npm_path.parent)
     assert result["path"] == str(codex_path)
 
 
@@ -1683,6 +1685,8 @@ def test_install_codex_symlinked_npm_install_upgrades_in_real_prefix(monkeypatch
 
     def fake_run(cmd, **kwargs):
         calls.append((cmd, kwargs.get("env", {})))
+        if cmd == [str(npm_path), "config", "get", "prefix"]:
+            return CompletedProcess(stdout=f"{prefix_path}\n")
         if cmd == [str(npm_path), "install", "-g", "@openai/codex"]:
             return CompletedProcess(stdout="updated")
         raise AssertionError(f"unexpected command: {cmd}")
@@ -1721,7 +1725,7 @@ def test_install_codex_project_local_node_modules_does_not_become_prefix(
     npm_path.chmod(0o755)
 
     project_path = tmp_path / "project"
-    codex_path = project_path / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    codex_path = project_path / "lib" / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
     codex_path.parent.mkdir(parents=True, exist_ok=True)
     codex_path.write_text("#!/usr/bin/env node\n")
     codex_path.chmod(0o755)
