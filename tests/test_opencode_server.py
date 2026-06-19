@@ -1341,6 +1341,29 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(summary)
 
+    def test_recent_session_error_ignores_pre_prompt_log_inside_short_window(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_dir = Path(tmp_dir)
+            payload = {
+                "error": {
+                    "name": "AI_APICallError",
+                    "cause": {"code": "ECONNRESET", "path": "/messages?api_key=old-secret"},
+                }
+            }
+            (log_dir / "2026-06-19T040950.log").write_text(
+                f"ERROR 2026-06-19T04:09:59 +1ms service=llm session.id=ses_test error={SERVER_MODULE.json.dumps(payload)} stream error\n",
+                encoding="utf-8",
+            )
+            manager = OpenCodeServerManager(binary="opencode", port=4096)
+
+            with patch.object(manager, "_opencode_log_dirs", return_value=[log_dir]):
+                summary = manager._recent_session_error_sync(
+                    "ses_test",
+                    since=SERVER_MODULE.datetime(2026, 6, 19, 4, 10, 0).timestamp(),
+                )
+
+        self.assertIsNone(summary)
+
     async def test_prompt_async_records_prompt_start_time_for_log_correlation(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         fake_session = _FakeSession()

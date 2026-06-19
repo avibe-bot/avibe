@@ -528,7 +528,7 @@ class OpenCodeServerManager:
                     continue
                 if since is not None:
                     log_ts = self._log_line_timestamp(line)
-                    if log_ts is None or log_ts < since - 2:
+                    if log_ts is None or log_ts < since:
                         continue
                 start = line.find("error={")
                 if start < 0:

@@ -365,6 +365,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 user_id=request.context.user_id or "",
                 platform=request.context.platform or platform_payload.get("platform") or "",
                 prompt_started_at=prompt_started_at,
+                model_dict=model_dict,
+                reasoning_effort=reasoning_effort,
             )
 
             final_text, should_emit = await self._poll_loop.run_prompt_poll(

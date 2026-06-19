@@ -611,8 +611,8 @@ class OpenCodePollLoop:
                                         context=context,
                                         server=server,
                                         session_id=session_id,
-                                        model_dict=None,
-                                        reasoning_effort=None,
+                                        model_dict=getattr(poll_info, "model_dict", None),
+                                        reasoning_effort=getattr(poll_info, "reasoning_effort", None),
                                         prompt_started_at=prompt_started_at,
                                     )
                                     self._agent.sessions.remove_active_poll(session_id)

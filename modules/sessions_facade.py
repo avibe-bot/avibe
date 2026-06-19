@@ -438,6 +438,8 @@ class SessionsFacade:
         user_id: str = "",
         platform: str = "",
         prompt_started_at: Optional[float] = None,
+        model_dict: Optional[Dict[str, str]] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> None:
         poll_info = ActivePollInfo(
             opencode_session_id=opencode_session_id,
@@ -458,6 +460,8 @@ class SessionsFacade:
             processing_indicator=processing_indicator or {},
             user_id=user_id,
             platform=platform,
+            model_dict=model_dict,
+            reasoning_effort=reasoning_effort,
         )
         self.sessions_store.add_active_poll(poll_info)
         logger.debug("Added active poll: session=%s, thread=%s", opencode_session_id, thread_id)
