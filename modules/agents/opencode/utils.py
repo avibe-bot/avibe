@@ -86,6 +86,61 @@ def find_opencode_model_info(
     return None
 
 
+def _opencode_model_supports_variant(model_info: dict | None, variant: str | None) -> bool:
+    if not isinstance(model_info, dict) or not isinstance(variant, str) or not variant.strip():
+        return False
+    variants = model_info.get("variants")
+    if isinstance(variants, dict) and variant in variants:
+        return True
+    capabilities = model_info.get("capabilities")
+    if variants is None and "variants" not in model_info and isinstance(capabilities, dict):
+        return capabilities.get("reasoning") is True
+    return False
+
+
+def _opencode_model_has_no_variants(model_info: dict | None) -> bool:
+    if not isinstance(model_info, dict):
+        return False
+    capabilities = model_info.get("capabilities")
+    if isinstance(capabilities, dict):
+        if capabilities.get("reasoning") is True:
+            return False
+        if capabilities.get("reasoning") is False:
+            return True
+    variants = model_info.get("variants")
+    if variants is None and "variants" not in model_info:
+        return True
+    return isinstance(variants, dict) and not variants
+
+
+def resolve_opencode_reasoning_effort(
+    model_dict: dict[str, str] | None,
+    requested_effort: str | None,
+    model_catalog: dict | None,
+) -> str | None:
+    """Return the variant OpenCode should receive for this model."""
+
+    if not model_dict:
+        return requested_effort
+    provider_id = model_dict.get("providerID")
+    model_id = model_dict.get("modelID")
+    if not provider_id or not model_id:
+        return requested_effort
+    if not isinstance(model_catalog, dict):
+        return requested_effort
+
+    model_info = find_opencode_model_info(model_catalog, provider_id, model_id)
+    if requested_effort:
+        if _opencode_model_supports_variant(model_info, requested_effort):
+            return requested_effort
+        if isinstance(model_info, dict):
+            return "default"
+        return requested_effort
+    if _opencode_model_has_no_variants(model_info):
+        return "default"
+    return requested_effort
+
+
 def _find_model_variants(opencode_models: dict, target_model: Optional[str]) -> Dict[str, Any]:
     target_provider, target_model_id = _parse_model_key(target_model)
     if not target_provider or not target_model_id or not isinstance(opencode_models, dict):

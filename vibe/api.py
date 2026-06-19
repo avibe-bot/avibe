@@ -5276,10 +5276,34 @@ def _merge_opencode_user_models(
 ) -> dict:
     """Overlay user-configured ``provider.<id>.models`` onto model metadata."""
 
-    if not isinstance(models, dict) or not user_model_index:
+    if not isinstance(models, dict):
         return models
     providers_raw = models.get("providers")
     if not isinstance(providers_raw, list):
+        return models
+    if allowed_provider_ids is not None:
+        filtered_providers = []
+        for provider in providers_raw:
+            if not isinstance(provider, dict):
+                continue
+            pid = _opencode_provider_id(provider)
+            if isinstance(pid, str) and pid in allowed_provider_ids:
+                filtered_providers.append(provider)
+        raw_defaults = models.get("default")
+        filtered_defaults = {}
+        if isinstance(raw_defaults, dict):
+            filtered_defaults = {
+                pid: model_id
+                for pid, model_id in raw_defaults.items()
+                if pid in allowed_provider_ids
+            }
+        models = {
+            **models,
+            "providers": filtered_providers,
+            "default": filtered_defaults,
+        }
+        providers_raw = models.get("providers", [])
+    if not user_model_index:
         return models
 
     providers = []

@@ -22,7 +22,7 @@ from .message_processor import OpenCodeMessageProcessorMixin
 from .poll_loop import OpenCodePollLoop
 from .server import OpenCodeServerManager
 from .session import OpenCodeResumeUnavailableError, OpenCodeSessionManager
-from .utils import find_opencode_model_info
+from .utils import resolve_opencode_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
@@ -36,67 +36,6 @@ def resolve_opencode_model_dict(model_str: str | None, default_provider: str | N
     if isinstance(default_provider, str) and default_provider.strip():
         return {"providerID": default_provider.strip(), "modelID": model_str}
     return None
-
-
-def _opencode_model_supports_variant(model_info: dict | None, variant: str | None) -> bool:
-    if not isinstance(model_info, dict) or not isinstance(variant, str) or not variant.strip():
-        return False
-    variants = model_info.get("variants")
-    if isinstance(variants, dict) and variant in variants:
-        return True
-    capabilities = model_info.get("capabilities")
-    if variants is None and "variants" not in model_info and isinstance(capabilities, dict):
-        return capabilities.get("reasoning") is True
-    return False
-
-
-def _opencode_model_has_no_variants(model_info: dict | None) -> bool:
-    if not isinstance(model_info, dict):
-        return False
-    capabilities = model_info.get("capabilities")
-    if isinstance(capabilities, dict):
-        if capabilities.get("reasoning") is True:
-            return False
-        if capabilities.get("reasoning") is False:
-            return True
-    variants = model_info.get("variants")
-    if variants is None and "variants" not in model_info:
-        return True
-    return isinstance(variants, dict) and not variants
-
-
-def resolve_opencode_reasoning_effort(
-    model_dict: dict[str, str] | None,
-    requested_effort: str | None,
-    model_catalog: dict | None,
-) -> str | None:
-    """Return the variant OpenCode should receive for this model.
-
-    OpenCode stores the last selected run variant per provider/model. When avibe
-    overrides the model to a non-reasoning model, omitting ``variant`` lets that
-    saved value leak into the new request. Send OpenCode's explicit ``default``
-    variant for models that do not support the requested effort.
-    """
-
-    if not model_dict:
-        return requested_effort
-    provider_id = model_dict.get("providerID")
-    model_id = model_dict.get("modelID")
-    if not provider_id or not model_id:
-        return requested_effort
-    if not isinstance(model_catalog, dict):
-        return requested_effort
-
-    model_info = find_opencode_model_info(model_catalog, provider_id, model_id)
-    if requested_effort:
-        if _opencode_model_supports_variant(model_info, requested_effort):
-            return requested_effort
-        if isinstance(model_info, dict):
-            return "default"
-        return requested_effort
-    if _opencode_model_has_no_variants(model_info):
-        return "default"
-    return requested_effort
 
 
 class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):

@@ -41,6 +41,44 @@ def extract_opencode_response_text(
     return ""
 
 
+def is_empty_terminal_opencode_message(message: Mapping[str, Any]) -> bool:
+    """Return True when OpenCode completed without usable text or error."""
+
+    info = message.get("info")
+    if not isinstance(info, Mapping):
+        return False
+    if info.get("role") != "assistant":
+        return False
+    time_info = info.get("time")
+    if not isinstance(time_info, Mapping) or not time_info.get("completed"):
+        return False
+    if info.get("error"):
+        return False
+    if info.get("finish") == "tool-calls":
+        return False
+    if extract_opencode_response_text(message, allow_non_text_fallback=True):
+        return False
+
+    parts = message.get("parts")
+    if not isinstance(parts, list):
+        return True
+    for part in parts:
+        if not isinstance(part, Mapping):
+            continue
+        part_type = part.get("type")
+        if part_type in {"step-start", "step-finish"}:
+            continue
+        text = part.get("text")
+        if part_type == "text":
+            if not isinstance(text, str) or not text.strip():
+                continue
+            return False
+        if isinstance(text, str) and not text.strip():
+            continue
+        return False
+    return True
+
+
 class OpenCodeMessageProcessorMixin:
     """Pure-ish helpers that depend only on instance config."""
 

@@ -26,7 +26,10 @@ from core.agent_auth_service import (
     ClaudeOAuthBatch,
     WebAuthFlow,
 )
-from modules.agents.opencode.message_processor import extract_opencode_response_text
+from modules.agents.opencode.message_processor import (
+    extract_opencode_response_text,
+    is_empty_terminal_opencode_message,
+)
 from vibe.claude_config import (
     MANAGED_ENV_VALUES,
     clear_claude_oauth_credentials_files,
@@ -104,6 +107,26 @@ def test_opencode_message_text_extractor_ignores_non_text_by_default() -> None:
         extract_opencode_response_text(message, allow_non_text_fallback=True)
         == "internal chain-of-thought-ish content"
     )
+
+
+def test_empty_terminal_opencode_message_treats_blank_text_as_empty() -> None:
+    message = {
+        "info": {
+            "id": "msg_blank",
+            "role": "assistant",
+            "time": {"completed": 123},
+            "finish": "unknown",
+            "tokens": {
+                "input": 8,
+                "output": 4,
+                "reasoning": 2,
+                "cache": {"read": 1, "write": 0},
+            },
+        },
+        "parts": [{"type": "text", "text": " \n\t "}],
+    }
+
+    assert is_empty_terminal_opencode_message(message) is True
 
 
 def test_unsupported_backend_raises(service: AgentAuthService) -> None:
@@ -550,8 +573,10 @@ class _FakeOpencodeServer:
         self.catalog: dict = {}
         self.created_session: dict = {"info": {"id": "sess_probe"}}
         self.messages: list[dict] = []
-        self.sent_messages: list[tuple[str, str, str, dict | None]] = []
+        self.prompt_calls: list[dict] = []
         self.abort_calls: list[tuple[str, str]] = []
+        self.active_calls: list[str] = []
+        self.inactive_calls: list[str] = []
         self.message_sent = False
 
     async def get_provider_auth(self):
@@ -566,9 +591,15 @@ class _FakeOpencodeServer:
     async def list_messages(self, _session_id, _directory):
         return self.messages if self.message_sent else []
 
-    async def send_message(self, session_id, directory, content, *, model=None):
-        self.sent_messages.append((session_id, directory, content, model))
+    async def prompt_async(self, **kwargs):
+        self.prompt_calls.append(kwargs)
         self.message_sent = True
+
+    async def mark_run_active(self, session_id):
+        self.active_calls.append(session_id)
+
+    async def mark_run_inactive(self, session_id):
+        self.inactive_calls.append(session_id)
 
     async def abort_session(self, session_id, directory):
         self.abort_calls.append((session_id, directory))
@@ -732,11 +763,63 @@ def test_opencode_provider_test_returns_excerpt_from_non_text_part(
     assert result["ok"] is True
     assert result["model"] == "claude-opus-4.8"
     assert result["excerpt"] == "Hello from a non-text OpenCode part"
-    assert fake.sent_messages[-1][3] == {
+    assert fake.prompt_calls[-1]["model"] == {
         "providerID": "anthropic",
         "modelID": "claude-opus-4.8",
     }
+    assert fake.active_calls == ["sess_probe"]
     assert fake.abort_calls == [("sess_probe", os.path.expanduser("~"))]
+    assert fake.inactive_calls == ["sess_probe"]
+
+
+def test_opencode_provider_test_fails_on_empty_terminal_message(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeOpencodeServer()
+    fake.catalog = {
+        "providers": [
+            {
+                "id": "glm",
+                "models": {
+                    "glm-5.2": {
+                        "capabilities": {"reasoning": False},
+                    }
+                },
+            }
+        ]
+    }
+    fake.messages = [
+        {
+            "info": {
+                "id": "msg_assistant",
+                "role": "assistant",
+                "time": {"completed": 123},
+                "finish": "unknown",
+                "tokens": {
+                    "input": 8,
+                    "output": 4,
+                    "reasoning": 2,
+                    "cache": {"read": 1, "write": 0},
+                },
+            },
+            "parts": [
+                {"type": "step-start", "id": "step_start"},
+                {"type": "step-finish", "id": "step_finish"},
+            ],
+        }
+    ]
+    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+
+    result = _run(service.test_opencode_provider("glm", model="glm-5.2"))
+
+    assert result["ok"] is False
+    assert result["error"] == "empty_response"
+    assert result["model"] == "glm-5.2"
+    assert "glm-5.2" in result["detail"]
+    assert fake.prompt_calls[-1]["reasoning_effort"] == "default"
+    assert fake.active_calls == ["sess_probe"]
+    assert fake.abort_calls == [("sess_probe", os.path.expanduser("~"))]
+    assert fake.inactive_calls == ["sess_probe"]
 
 
 def test_remove_web_auth_rejects_unsupported_backend(service: AgentAuthService) -> None:
