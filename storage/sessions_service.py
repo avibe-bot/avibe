@@ -969,14 +969,22 @@ def _lookup_scope_id(conn: Connection, scope_key: str) -> str | None:
     NEVER upserts a scope — for read paths that must not create one."""
     raw = str(scope_key or "")
     parts = raw.split("::")
+    scope_type = None
     if len(parts) >= 3 and parts[1] in {"channel", "user", "platform", "project"}:
-        platform, native_id = parts[0], "::".join(parts[2:])
+        platform, scope_type, native_id = parts[0], parts[1], "::".join(parts[2:])
     else:
         platform, native_id = _split_scoped_key(scope_key)
         if platform is None:
             platform = "unknown"
     if not platform or not native_id:
         return None
+    if scope_type:
+        found = conn.execute(
+            select(scopes.c.id)
+            .where(scopes.c.platform == platform, scopes.c.scope_type == scope_type, scopes.c.native_id == native_id)
+            .limit(1)
+        ).scalar_one_or_none()
+        return str(found) if found is not None else None
     found = conn.execute(
         select(scopes.c.id).where(scopes.c.platform == platform, scopes.c.native_id == native_id).limit(1)
     ).scalar_one_or_none()

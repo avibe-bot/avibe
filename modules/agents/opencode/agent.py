@@ -19,7 +19,7 @@ from modules.agents.base import AgentRequest, BaseAgent
 
 from .client_manager import OpenCodeClientManager
 from .message_processor import OpenCodeMessageProcessorMixin
-from .poll_loop import OpenCodePollLoop
+from .poll_loop import OpenCodePollLoop, restored_session_key_from_poll_info
 from .server import OpenCodeServerManager
 from .session import OpenCodeResumeUnavailableError, OpenCodeSessionManager
 from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
@@ -36,6 +36,15 @@ def resolve_opencode_model_dict(model_str: str | None, default_provider: str | N
     if isinstance(default_provider, str) and default_provider.strip():
         return {"providerID": default_provider.strip(), "modelID": model_str}
     return None
+
+
+def _raw_settings_key_from_session_key(session_key: str) -> str:
+    parts = str(session_key or "").split("::")
+    if len(parts) >= 3 and parts[1] in {"user", "channel", "platform", "project"}:
+        return "::".join(parts[2:])
+    if len(parts) >= 2:
+        return "::".join(parts[1:])
+    return str(session_key or "")
 
 
 class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
@@ -344,9 +353,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             # ActivePollInfo stores raw settings_key + separate platform field;
             # request.session_key is the scoped session key (platform::raw_id),
             # so strip the prefix before persisting.
-            raw_settings_key = request.session_key
-            if "::" in raw_settings_key:
-                raw_settings_key = raw_settings_key.split("::", 1)[1]
+            raw_settings_key = _raw_settings_key_from_session_key(request.session_key)
             platform_payload = request.context.platform_specific or {}
 
             self.sessions.add_active_poll(
@@ -618,7 +625,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 poll_info.base_session_id,
                 poll_info.opencode_session_id,
                 poll_info.working_path,
-                f"{poll_info.platform}::{poll_info.settings_key}" if poll_info.platform else poll_info.settings_key,
+                restored_session_key_from_poll_info(poll_info),
             )
             restored_count += 1
 

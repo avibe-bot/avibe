@@ -705,6 +705,51 @@ def test_sessions_store_clear_backend_prunes_cached_custom_variant_rows(tmp_path
         store.close()
 
 
+def test_clear_session_base_can_target_typed_user_and_channel_scopes(tmp_path: Path) -> None:
+    sessions_path = tmp_path / "sessions.json"
+    store = SessionsStore(sessions_path)
+    try:
+        with store._service.engine.begin() as conn:
+            user_scope_id = resolve_scope_from_legacy_key(
+                conn, "telegram::user::58181121", now="2026-06-19T07:30:00Z"
+            )
+            channel_scope_id = resolve_scope_from_legacy_key(
+                conn, "telegram::channel::58181121", now="2026-06-19T07:30:00Z"
+            )
+            assert user_scope_id is not None
+            assert channel_scope_id is not None
+            create_agent_session_row(
+                conn,
+                scope_id=user_scope_id,
+                agent_backend="claude",
+                agent_variant="claude",
+                session_anchor="telegram_58181121",
+                native_session_id="claude-native",
+                workdir="/tmp",
+                require_workdir=False,
+            )
+            create_agent_session_row(
+                conn,
+                scope_id=channel_scope_id,
+                agent_backend="opencode",
+                agent_variant="opencode",
+                session_anchor="telegram_58181121",
+                native_session_id="oc-native",
+                workdir="/tmp",
+                require_workdir=False,
+            )
+        store.load()
+
+        assert store.clear_session_base("telegram::user::58181121", "telegram_58181121") == 1
+        assert store.find_session_for_anchor("telegram::user::58181121", "telegram_58181121") is None
+        assert store.find_session_for_anchor("telegram::channel::58181121", "telegram_58181121") is not None
+
+        assert store.clear_session_base("telegram::channel::58181121", "telegram_58181121") == 1
+        assert store.find_session_for_anchor("telegram::channel::58181121", "telegram_58181121") is None
+    finally:
+        store.close()
+
+
 def test_sessions_store_remove_backend_session_prunes_cached_custom_variant_row(tmp_path: Path) -> None:
     sessions_path = tmp_path / "sessions.json"
     store = SessionsStore(sessions_path)

@@ -34,9 +34,11 @@ from storage.db import create_sqlite_engine
 
 logger = logging.getLogger(__name__)
 
-# Non-avibe IM scopes are stored as 'channel' rows — one per DM/group/topic.
-# avibe projects are 'project' typed and pre-created via ``/api/projects``;
-# this module never touches those.
+# Non-avibe IM scopes are stored as channel rows. Platforms whose DM chat id is
+# literally the user id (Telegram/WeChat style) would otherwise collide with a
+# user scope for the same native id, so those DMs are stored as user rows.
+# avibe projects are 'project' typed and pre-created via ``/api/projects``; this
+# module never touches those.
 DEFAULT_SCOPE_TYPE = "channel"
 
 
@@ -46,14 +48,17 @@ def _now() -> str:
 
 def _resolve_scope_id(conn, context: MessageContext) -> Optional[str]:
     platform = (context.platform or "").strip()
-    native_id = (context.channel_id or "").strip()
+    is_dm = bool((context.platform_specific or {}).get("is_dm", False))
+    use_user_scope = is_dm and context.channel_id and context.user_id and context.channel_id == context.user_id
+    scope_type = "user" if use_user_scope else DEFAULT_SCOPE_TYPE
+    native_id = ((context.user_id if use_user_scope else context.channel_id) or "").strip()
     if not platform or not native_id:
         return None
     try:
         return settings_service.upsert_scope(
             conn,
             platform=platform,
-            scope_type=DEFAULT_SCOPE_TYPE,
+            scope_type=scope_type,
             native_id=native_id,
             now=_now(),
             supports_threads=bool(context.thread_id),

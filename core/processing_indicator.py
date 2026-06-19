@@ -43,6 +43,7 @@ class ProcessingIndicatorHandle:
             "channel_id": self.context.channel_id or "",
             "thread_id": self.context.thread_id or "",
             "message_id": self.context.message_id or "",
+            "is_dm": bool(payload.get("is_dm", False)),
             "context_token": str(payload.get("context_token") or ""),
             "ack_message_id": self.ack_message_id,
             "ack_message_channel_id": self.ack_message_channel_id,
@@ -58,6 +59,8 @@ class ProcessingIndicatorHandle:
         platform_specific: dict[str, Any] = {}
         if platform:
             platform_specific["platform"] = platform
+        if data.get("is_dm") is not None:
+            platform_specific["is_dm"] = bool(data.get("is_dm"))
         if context_token:
             platform_specific["context_token"] = context_token
         context = MessageContext(

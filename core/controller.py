@@ -24,6 +24,7 @@ from core.handlers import (
 )
 from core.agent_auth_service import AgentAuthService
 from core.audio_asr import AudioAsrService
+from core.message_context import build_context_session_key
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.processing_indicator import ProcessingIndicatorService
 from core.runtime_commands import RuntimeCommandWatcher
@@ -861,7 +862,8 @@ class Controller:
         tracking never collide.
         """
         platform = context.platform or (context.platform_specific or {}).get("platform") or self.primary_platform
-        return f"{platform}::{self._get_settings_key(context)}"
+        settings_key = self._get_settings_key(context)
+        return build_context_session_key(context, platform=platform, settings_key=settings_key)
 
     def get_im_client_for_context(self, context: Optional[MessageContext] = None) -> BaseIMClient:
         if context is None:
