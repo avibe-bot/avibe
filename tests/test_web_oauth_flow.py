@@ -604,6 +604,12 @@ class _FakeOpencodeServer:
     async def abort_session(self, session_id, directory):
         self.abort_calls.append((session_id, directory))
 
+    async def get_recent_session_error(self, session_id, since=None):
+        return None
+
+    async def get_provider_api_diagnostic(self, provider_id, model_id):
+        return None
+
     async def start_provider_oauth(self, provider_id, *, method, prompt_answers):
         self.start_calls.append((provider_id, method, prompt_answers))
         return self.next_authorize
@@ -816,10 +822,44 @@ def test_opencode_provider_test_fails_on_empty_terminal_message(
     assert result["error"] == "empty_response"
     assert result["model"] == "glm-5.2"
     assert "glm-5.2" in result["detail"]
-    assert fake.prompt_calls[-1]["reasoning_effort"] == "default"
+    assert fake.prompt_calls[-1]["reasoning_effort"] is None
     assert fake.active_calls == ["sess_probe"]
     assert fake.abort_calls == [("sess_probe", os.path.expanduser("~"))]
     assert fake.inactive_calls == ["sess_probe"]
+
+
+def test_opencode_provider_test_uses_catalog_model_casing(
+    service: AgentAuthService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = _FakeOpencodeServer()
+    fake.catalog = {
+        "providers": [
+            {
+                "id": "glm",
+                "models": {
+                    "glm-5.2": {"id": "glm-5.2"},
+                },
+            }
+        ]
+    }
+    fake.messages = [
+        {
+            "info": {
+                "id": "msg_assistant",
+                "role": "assistant",
+                "time": {"completed": 123},
+                "finish": "stop",
+            },
+            "parts": [{"type": "text", "text": "OK"}],
+        }
+    ]
+    monkeypatch.setattr(service, "_opencode_server", AsyncMock(return_value=fake))
+
+    result = _run(service.test_opencode_provider("glm", model="GLM-5.2"))
+
+    assert result["ok"] is True
+    assert result["model"] == "glm-5.2"
+    assert fake.prompt_calls[-1]["model"] == {"providerID": "glm", "modelID": "glm-5.2"}
 
 
 def test_remove_web_auth_rejects_unsupported_backend(service: AgentAuthService) -> None:

@@ -22,7 +22,7 @@ from .message_processor import OpenCodeMessageProcessorMixin
 from .poll_loop import OpenCodePollLoop
 from .server import OpenCodeServerManager
 from .session import OpenCodeResumeUnavailableError, OpenCodeSessionManager
-from .utils import resolve_opencode_reasoning_effort
+from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +269,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             if model_dict:
                 try:
                     model_catalog = await server.get_available_models(request.working_path)
+                    resolved_model_id = resolve_opencode_model_id(
+                        model_catalog,
+                        model_dict.get("providerID"),
+                        model_dict.get("modelID"),
+                    )
+                    if resolved_model_id and resolved_model_id != model_dict.get("modelID"):
+                        model_dict = {**model_dict, "modelID": resolved_model_id}
                     reasoning_effort = resolve_opencode_reasoning_effort(
                         model_dict,
                         reasoning_effort,
@@ -321,6 +328,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 system=system_prompt_injection,
                 tools={"question": False},
             )
+            get_started_at = getattr(server, "get_last_prompt_started_at", None)
+            prompt_started_at = get_started_at(session_id) if callable(get_started_at) else None
             await server.mark_run_active(session_id)
             run_registered = True
             self.mark_runtime_turn_started(request.context)
@@ -355,6 +364,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 processing_indicator=self.controller.processing_indicator.snapshot_request(request),
                 user_id=request.context.user_id or "",
                 platform=request.context.platform or platform_payload.get("platform") or "",
+                prompt_started_at=prompt_started_at,
+                model_dict=model_dict,
+                reasoning_effort=reasoning_effort,
             )
 
             final_text, should_emit = await self._poll_loop.run_prompt_poll(

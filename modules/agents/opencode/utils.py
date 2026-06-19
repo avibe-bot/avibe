@@ -86,6 +86,41 @@ def find_opencode_model_info(
     return None
 
 
+def resolve_opencode_model_id(
+    opencode_models: dict | None,
+    provider_id: str | None,
+    model_id: str | None,
+) -> str | None:
+    """Return the catalog-canonical model id for a provider/model pair.
+
+    This does not lowercase user input. Exact catalog matches win; otherwise we
+    only adopt the catalog casing when there is exactly one case-insensitive
+    match. Ambiguous or unknown ids are preserved.
+    """
+
+    if not provider_id or not model_id or not isinstance(opencode_models, dict):
+        return model_id
+
+    for provider in opencode_models.get("providers", []) or []:
+        if get_opencode_provider_id(provider) != provider_id:
+            continue
+
+        models = provider.get("models", {}) if isinstance(provider, dict) else {}
+        if isinstance(models, dict):
+            if model_id in models:
+                return model_id
+            matches = [key for key in models if isinstance(key, str) and key.casefold() == model_id.casefold()]
+            return matches[0] if len(matches) == 1 else model_id
+        if isinstance(models, list):
+            ids = [_opencode_model_entry_id(entry) for entry in models]
+            if model_id in ids:
+                return model_id
+            matches = [entry_id for entry_id in ids if entry_id and entry_id.casefold() == model_id.casefold()]
+            return matches[0] if len(matches) == 1 else model_id
+        return model_id
+    return model_id
+
+
 def _opencode_model_supports_variant(model_info: dict | None, variant: str | None) -> bool:
     if not isinstance(model_info, dict) or not isinstance(variant, str) or not variant.strip():
         return False
@@ -120,25 +155,29 @@ def resolve_opencode_reasoning_effort(
 ) -> str | None:
     """Return the variant OpenCode should receive for this model."""
 
+    normalized_effort = (requested_effort or "").strip() or None
+    if normalized_effort in {"default", "__default__"}:
+        normalized_effort = None
+
     if not model_dict:
-        return requested_effort
+        return normalized_effort
     provider_id = model_dict.get("providerID")
     model_id = model_dict.get("modelID")
     if not provider_id or not model_id:
-        return requested_effort
+        return normalized_effort
     if not isinstance(model_catalog, dict):
-        return requested_effort
+        return normalized_effort
 
     model_info = find_opencode_model_info(model_catalog, provider_id, model_id)
-    if requested_effort:
-        if _opencode_model_supports_variant(model_info, requested_effort):
-            return requested_effort
+    if normalized_effort:
+        if _opencode_model_supports_variant(model_info, normalized_effort):
+            return normalized_effort
         if isinstance(model_info, dict):
-            return "default"
-        return requested_effort
+            return None
+        return normalized_effort
     if _opencode_model_has_no_variants(model_info):
-        return "default"
-    return requested_effort
+        return None
+    return normalized_effort
 
 
 def _find_model_variants(opencode_models: dict, target_model: Optional[str]) -> Dict[str, Any]:

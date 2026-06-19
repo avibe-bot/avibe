@@ -59,7 +59,8 @@
     "fileAttachmentUploadFailedNoLink": "⚠️ I could not deliver {filename} as a WeChat file. Please ask me to resend it or use another channel.",
     "opencodeQuestionToolDisabled": "OpenCode asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction.",
     "opencodeQuestionToolDisabledRestored": "Restored OpenCode session asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction.",
-    "opencodeEmptyResponse": "OpenCode finished, but the provider returned no text or error. Provider: {provider}; model: {model}; reasoning: {variant}. Check that this provider/model combination supports the selected adapter, Base URL, API key, and reasoning setting."
+    "opencodeEmptyResponse": "OpenCode finished without a model reply. Provider: {provider}; model: {model}; reasoning: {variant}. OpenCode did not expose a provider error for this run.",
+    "opencodeProviderRuntimeError": "OpenCode provider request failed. Provider: {provider}; model: {model}; reasoning: {variant}. Detail: {detail}"
   },
   "success": {
     "settingsUpdated": "Settings updated successfully!",

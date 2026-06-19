@@ -25,7 +25,7 @@ from modules.agents.opencode.message_processor import (
     extract_opencode_response_text,
     is_empty_terminal_opencode_message,
 )
-from modules.agents.opencode.utils import resolve_opencode_reasoning_effort
+from modules.agents.opencode.utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 from modules.im import InlineButton, InlineKeyboard, MessageContext
 from vibe.i18n import t as i18n_t
 from vibe.opencode_config import remove_opencode_provider_api_key
@@ -2337,6 +2337,11 @@ class AgentAuthService:
             except Exception:  # noqa: BLE001
                 catalog = None
             model_dict = {"providerID": provider_id, "modelID": chosen_model}
+            if isinstance(catalog, dict):
+                resolved_model_id = resolve_opencode_model_id(catalog, provider_id, chosen_model)
+                if resolved_model_id:
+                    chosen_model = resolved_model_id
+                    model_dict["modelID"] = resolved_model_id
             reasoning_effort = resolve_opencode_reasoning_effort(
                 model_dict,
                 None,
@@ -2344,11 +2349,12 @@ class AgentAuthService:
             )
 
             try:
+                prompt_started_at = time.time()
                 await server.prompt_async(
                     session_id=session_id,
                     directory=directory,
                     text="Hi",
-                    model={"providerID": provider_id, "modelID": chosen_model},
+                    model=model_dict,
                     reasoning_effort=reasoning_effort,
                     tools={"question": False},
                 )
@@ -2409,15 +2415,31 @@ class AgentAuthService:
                     )
                     if not final_text and is_empty_terminal_opencode_message(terminal):
                         lang = self._lang()
+                        detail = None
+                        try:
+                            detail = await server.get_recent_session_error(session_id, since=prompt_started_at)
+                        except Exception:  # noqa: BLE001
+                            detail = None
+                        if not detail:
+                            try:
+                                detail = await server.get_provider_api_diagnostic(provider_id, chosen_model)
+                            except Exception:  # noqa: BLE001
+                                detail = None
+                        i18n_key = (
+                            "error.opencodeProviderRuntimeError"
+                            if detail
+                            else "error.opencodeEmptyResponse"
+                        )
                         return {
                             "ok": False,
                             "error": "empty_response",
                             "detail": i18n_t(
-                                "error.opencodeEmptyResponse",
+                                i18n_key,
                                 lang,
                                 provider=provider_id,
                                 model=chosen_model,
                                 variant=reasoning_effort or i18n_t("common.default", lang),
+                                detail=detail or "",
                             ),
                             "duration_ms": int((time.monotonic() - started) * 1000),
                             "model": chosen_model,

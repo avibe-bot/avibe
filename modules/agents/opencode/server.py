@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime
 import json
 import logging
 import os
+from pathlib import Path
+import re
 import socket
 import subprocess
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 import threading
 from asyncio.subprocess import Process
 from typing import Any, Dict, List, Optional
@@ -21,13 +26,18 @@ from config import paths
 from core.process_isolation import isolated_subprocess_kwargs, terminate_process_tree
 from modules.agents.opencode.config_reconciler import OpenCodeConfigReconciler
 from vibe import runtime
-from vibe.opencode_config import load_first_opencode_user_config, read_opencode_provider_auth_entries
+from vibe.opencode_config import (
+    get_opencode_custom_provider_adapter,
+    load_first_opencode_user_config,
+    read_opencode_provider_auth_entries,
+)
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_OPENCODE_PORT = 4096
 DEFAULT_OPENCODE_HOST = "127.0.0.1"
 SERVER_START_TIMEOUT = 15
+OPENCODE_LOG_TAIL_BYTES = 2_000_000
 
 
 class OpenCodeServerManager:
@@ -68,6 +78,7 @@ class OpenCodeServerManager:
         self._auth_refresh_pending = False
         self._auth_refresh_pending_port: Optional[int] = None
         self._pending_runtime_config: Optional[tuple[str, int, int]] = None
+        self._last_prompt_started_at: dict[str, float] = {}
 
     def _get_lock(self) -> asyncio.Lock:
         """Get or create an asyncio.Lock bound to the current event loop."""
@@ -142,6 +153,13 @@ class OpenCodeServerManager:
         if self._base_url:
             return self._base_url
         return f"http://{self.host}:{self.port}"
+
+    @staticmethod
+    def _normalize_variant(reasoning_effort: Optional[str]) -> Optional[str]:
+        normalized = (reasoning_effort or "").strip()
+        if not normalized or normalized in {"default", "__default__"}:
+            return None
+        return normalized
 
     async def _get_http_session(self) -> aiohttp.ClientSession:
         current_loop = asyncio.get_running_loop()
@@ -355,6 +373,331 @@ class OpenCodeServerManager:
                 self._pid_file.unlink()
         except Exception as e:
             logger.debug(f"Failed to clear OpenCode pid file: {e}")
+
+    @staticmethod
+    def _extract_json_object(text: str, start: int) -> Optional[str]:
+        if start < 0 or start >= len(text) or text[start] != "{":
+            return None
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : index + 1]
+        return None
+
+    @staticmethod
+    def _safe_url(raw: object) -> str:
+        if not isinstance(raw, str) or not raw.strip():
+            return ""
+        value = raw.strip()
+        parsed = urllib.parse.urlsplit(value)
+        if not parsed.scheme or not parsed.netloc:
+            # Relative provider paths may still carry query credentials, e.g.
+            # /messages?api_key=...; keep only the path.
+            return urllib.parse.urlunsplit(("", "", parsed.path or value.split("?", 1)[0].split("#", 1)[0], "", ""))[
+                :160
+            ]
+        host = parsed.hostname or parsed.netloc
+        port = f":{parsed.port}" if parsed.port else ""
+        return urllib.parse.urlunsplit((parsed.scheme, f"{host}{port}", parsed.path or "", "", ""))[:160]
+
+    @staticmethod
+    def _redact_diagnostic_text(text: str) -> str:
+        if not text:
+            return ""
+        def _redact_url_query(match: re.Match[str]) -> str:
+            value = match.group(0)
+            parsed = urllib.parse.urlsplit(value)
+            if not parsed.scheme or not parsed.netloc:
+                return value
+            return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+        redacted = re.sub(r"https?://[^\s,)>\]}]+", _redact_url_query, text)
+        redacted = re.sub(
+            r"(?i)\b(authorization)(\s*[:=]\s*)Bearer\s+[A-Za-z0-9._~+/=-]+",
+            r"\1\2Bearer [redacted]",
+            redacted,
+        )
+        redacted = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", redacted)
+        redacted = re.sub(r"\bsk-[A-Za-z0-9._-]+", "[redacted]", redacted)
+        return re.sub(
+            r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password|x-api-key)"
+            r"(\s*[:=]\s*)([^\s,;&]+)",
+            r"\1\2[redacted]",
+            redacted,
+        )
+
+    @staticmethod
+    def _log_line_timestamp(line: str) -> Optional[float]:
+        marker = "ERROR "
+        index = line.find(marker)
+        if index < 0:
+            return None
+        raw = line[index + len(marker) : index + len(marker) + 19]
+        try:
+            return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S").timestamp()
+        except ValueError:
+            return None
+
+    @classmethod
+    def _summarize_log_error_payload(cls, payload: object) -> Optional[str]:
+        if not isinstance(payload, dict):
+            return None
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            error = payload
+
+        name = str(error.get("name") or "OpenCode provider error").strip()
+        cause = error.get("cause") if isinstance(error.get("cause"), dict) else {}
+        code = str(cause.get("code") or error.get("code") or "").strip()
+        url = cls._safe_url(error.get("url") or cause.get("path"))
+
+        message = ""
+        data = error.get("data")
+        if isinstance(data, dict):
+            message = str(data.get("message") or "").strip()
+        if not message:
+            message = str(error.get("message") or "").strip()
+        message = cls._redact_diagnostic_text(message)
+
+        details = name
+        if code:
+            details += f" ({code})"
+        if url:
+            details += f" while calling {url}"
+        if message and message not in details:
+            details += f": {message[:200]}"
+        return details[:500]
+
+    @staticmethod
+    def _opencode_log_dirs() -> list[Path]:
+        candidates: list[Path] = []
+        data_home = os.environ.get("XDG_DATA_HOME")
+        if data_home:
+            candidates.append(Path(data_home).expanduser() / "opencode" / "log")
+        candidates.append(Path.home() / ".local" / "share" / "opencode" / "log")
+        candidates.append(Path.home() / "Library" / "Application Support" / "opencode" / "log")
+        return candidates
+
+    @staticmethod
+    def _read_text_tail(path: Path, max_bytes: int = OPENCODE_LOG_TAIL_BYTES) -> str:
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                offset = max(0, size - max_bytes)
+                handle.seek(offset)
+                if offset > 0:
+                    handle.readline()
+                return handle.read(max_bytes).decode(errors="replace")
+        except Exception:
+            return ""
+
+    def _recent_session_error_sync(self, session_id: str, since: Optional[float] = None) -> Optional[str]:
+        if not session_id:
+            return None
+        log_files: list[Path] = []
+        for directory in self._opencode_log_dirs():
+            try:
+                if directory.is_dir():
+                    log_files.extend(path for path in directory.glob("*.log") if path.is_file())
+            except Exception:
+                continue
+        for path in sorted(log_files, key=lambda item: item.stat().st_mtime, reverse=True)[:3]:
+            text = self._read_text_tail(path)
+            if not text:
+                continue
+            for line in reversed(text.splitlines()):
+                if "ERROR" not in line or f"session.id={session_id}" not in line or "error=" not in line:
+                    continue
+                if since is not None:
+                    log_ts = self._log_line_timestamp(line)
+                    if log_ts is None or log_ts < int(since):
+                        continue
+                start = line.find("error={")
+                if start < 0:
+                    continue
+                blob = self._extract_json_object(line, start + len("error="))
+                if not blob:
+                    continue
+                try:
+                    payload = json.loads(blob)
+                except Exception:
+                    continue
+                summary = self._summarize_log_error_payload(payload)
+                if summary:
+                    return summary
+        return None
+
+    def get_last_prompt_started_at(self, session_id: str) -> Optional[float]:
+        return self._last_prompt_started_at.get(session_id)
+
+    async def get_recent_session_error(self, session_id: str, since: Optional[float] = None) -> Optional[str]:
+        if since is None:
+            since = self.get_last_prompt_started_at(session_id)
+        return await asyncio.to_thread(self._recent_session_error_sync, session_id, since)
+
+    @staticmethod
+    def _diagnostic_payload_message(payload: object) -> str:
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = error.get("message")
+                if isinstance(message, str) and message.strip():
+                    return OpenCodeServerManager._redact_diagnostic_text(message.strip())[:240]
+            message = payload.get("message")
+            if isinstance(message, str) and message.strip():
+                return OpenCodeServerManager._redact_diagnostic_text(message.strip())[:240]
+        return ""
+
+    @staticmethod
+    def _auth_json_api_key(provider_id: str) -> Optional[str]:
+        try:
+            auth_entries = read_opencode_provider_auth_entries(logger_instance=logger)
+        except Exception as exc:
+            logger.debug("Could not read OpenCode auth entries for provider diagnostic: %s", exc)
+            return None
+        auth_entry = auth_entries.get(provider_id)
+        if not isinstance(auth_entry, dict) or auth_entry.get("type") != "api":
+            return None
+        key = auth_entry.get("key")
+        return key if isinstance(key, str) and key else None
+
+    @staticmethod
+    def _append_provider_endpoint(base_url: str, endpoint_path: str) -> str:
+        return f"{base_url.rstrip('/')}/{endpoint_path.lstrip('/')}"
+
+    @classmethod
+    def _suggest_api_base_url(cls, base_url: str) -> str:
+        parsed = urllib.parse.urlsplit(base_url.rstrip("/"))
+        if parsed.path.rstrip("/").endswith("/v1"):
+            return cls._safe_url(base_url)
+        path = (parsed.path.rstrip("/") + "/v1") if parsed.path else "/v1"
+        return cls._safe_url(urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", "")))
+
+    @staticmethod
+    def _diagnostic_adapter(provider_id: str, provider_config: Dict[str, Any]) -> Optional[str]:
+        adapter = get_opencode_custom_provider_adapter(provider_id, provider_config)
+        if adapter in {"anthropic-compatible", "openai-compatible"}:
+            return adapter
+        npm = provider_config.get("npm")
+        if provider_id == "anthropic" or npm == "@ai-sdk/anthropic":
+            return "anthropic-compatible"
+        if provider_id == "openai" or npm == "@ai-sdk/openai-compatible":
+            return "openai-compatible"
+        return None
+
+    def _provider_api_diagnostic_sync(self, provider_id: str, model_id: str) -> Optional[str]:
+        probe = load_first_opencode_user_config(logger_instance=logger)
+        config = probe.config
+        if not isinstance(config, dict):
+            return None
+        provider_map = config.get("provider")
+        if not isinstance(provider_map, dict):
+            return None
+        provider_config = provider_map.get(provider_id)
+        if not isinstance(provider_config, dict):
+            return None
+        options = provider_config.get("options")
+        if not isinstance(options, dict):
+            return None
+        base_url = options.get("baseURL")
+        api_key = options.get("apiKey")
+        if not isinstance(api_key, str) or not api_key:
+            api_key = self._auth_json_api_key(provider_id)
+        if not isinstance(base_url, str) or not base_url.strip() or not isinstance(api_key, str) or not api_key:
+            return None
+
+        base_url = base_url.rstrip("/")
+        adapter = self._diagnostic_adapter(provider_id, provider_config)
+        if adapter == "anthropic-compatible":
+            endpoint_path = "/messages"
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            }
+            body = {
+                "model": model_id,
+                "max_tokens": 8,
+                "messages": [{"role": "user", "content": "OK"}],
+            }
+        elif adapter == "openai-compatible":
+            endpoint_path = "/chat/completions"
+            headers = {
+                "authorization": f"Bearer {api_key}",
+                "content-type": "application/json",
+            }
+            body = {
+                "model": model_id,
+                "messages": [{"role": "user", "content": "OK"}],
+                "stream": False,
+            }
+        else:
+            return None
+
+        try:
+            request = urllib.request.Request(
+                self._append_provider_endpoint(base_url, endpoint_path),
+                data=json.dumps(body).encode("utf-8"),
+                method="POST",
+            )
+            for key, value in headers.items():
+                request.add_header(key, value)
+            try:
+                with urllib.request.urlopen(request, timeout=12) as response:
+                    content_type = response.headers.get("content-type", "")
+                    raw = response.read(2048).decode(errors="replace")
+                    if "text/html" in content_type.lower() or raw.lstrip().lower().startswith("<!doctype html"):
+                        return (
+                            f"Provider Base URL {self._safe_url(base_url)} returned an HTML page instead of an API "
+                            f"response; use the API base path, usually {self._suggest_api_base_url(base_url)}."
+                        )
+                    return None
+            except urllib.error.HTTPError as err:
+                content_type = err.headers.get("content-type", "")
+                raw = err.read(2048).decode(errors="replace")
+                if "text/html" in content_type.lower() or raw.lstrip().lower().startswith("<!doctype html"):
+                    return (
+                        f"Provider Base URL {self._safe_url(base_url)} returned an HTML page instead of an API "
+                        f"response; use the API base path, usually {self._suggest_api_base_url(base_url)}."
+                    )
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    payload = {}
+                message = self._diagnostic_payload_message(payload)
+                if message:
+                    return f"Provider API returned HTTP {err.code}: {message}"
+                return f"Provider API returned HTTP {err.code}."
+            except urllib.error.URLError as err:
+                reason = self._redact_diagnostic_text(str(err.reason or err))
+                return f"Provider API request failed: {reason[:240]}"
+            except (TimeoutError, OSError) as err:
+                reason = self._redact_diagnostic_text(str(err))
+                return f"Provider API request failed: {reason[:240] or type(err).__name__}"
+        except Exception as err:
+            logger.debug("OpenCode provider API diagnostic failed for %s/%s: %s", provider_id, model_id, err)
+        return None
+
+    async def get_provider_api_diagnostic(self, provider_id: str, model_id: str) -> Optional[str]:
+        return await asyncio.to_thread(self._provider_api_diagnostic_sync, provider_id, model_id)
 
     @staticmethod
     def _pid_exists(pid: int) -> bool:
@@ -775,8 +1118,9 @@ class OpenCodeServerManager:
                 body["agent"] = agent
             if model:
                 body["model"] = model
-            if reasoning_effort:
-                body["variant"] = reasoning_effort
+            variant = self._normalize_variant(reasoning_effort)
+            if variant:
+                body["variant"] = variant
 
             async with session.post(
                 f"{self.base_url}/session/{session_id}/message",
@@ -801,6 +1145,7 @@ class OpenCodeServerManager:
     ) -> None:
         """Start a prompt asynchronously without holding the HTTP request open."""
 
+        started_at = time.time()
         async with self._request_scope():
             session = await self._get_http_session()
 
@@ -811,8 +1156,9 @@ class OpenCodeServerManager:
                 body["agent"] = agent
             if model:
                 body["model"] = model
-            if reasoning_effort:
-                body["variant"] = reasoning_effort
+            variant = self._normalize_variant(reasoning_effort)
+            if variant:
+                body["variant"] = variant
             if system:
                 body["system"] = system
             if tools:
@@ -827,6 +1173,7 @@ class OpenCodeServerManager:
                 if resp.status not in (200, 204):
                     error_text = await resp.text()
                     raise RuntimeError(f"Failed to start async prompt: {resp.status} {error_text}")
+            self._last_prompt_started_at[session_id] = started_at
 
     async def list_messages(self, session_id: str, directory: str) -> List[Dict[str, Any]]:
         async with self._request_scope():

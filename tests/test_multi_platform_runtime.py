@@ -565,6 +565,20 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
         async def list_messages(self, session_id, directory):
             return []
 
+        async def get_available_models(self, directory):
+            return {
+                "providers": [
+                    {
+                        "id": "openai",
+                        "models": {
+                            "gpt-5.4": {
+                                "variants": {"high": {}},
+                            }
+                        },
+                    }
+                ]
+            }
+
         async def prompt_async(self, **kwargs):
             calls.append(kwargs)
 
@@ -625,13 +639,13 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
                     "remote_access": None,
                     "language": "en",
                     "opencode": type(
-                        "OpenCodeConfig",
-                        (),
-                        {
-                            "default_model": "gpt-5.4",
-                            "default_provider": "openai",
-                            "default_reasoning_effort": "high",
-                        },
+                            "OpenCodeConfig",
+                            (),
+                            {
+                                "default_model": "GPT-5.4",
+                                "default_provider": "openai",
+                                "default_reasoning_effort": "high",
+                            },
                     )(),
                 },
             )()
@@ -681,7 +695,7 @@ def test_opencode_prompt_disables_question_tool_for_all_platforms():
     assert calls[0]["reasoning_effort"] == "high"
 
 
-def test_opencode_resets_saved_variant_for_non_reasoning_model():
+def test_opencode_clears_default_variant_for_non_reasoning_model():
     catalog = {
         "providers": [
             {
@@ -702,11 +716,11 @@ def test_opencode_resets_saved_variant_for_non_reasoning_model():
             None,
             catalog,
         )
-        == "default"
+        is None
     )
 
 
-def test_opencode_resets_saved_variant_for_model_without_variant_metadata():
+def test_opencode_clears_default_variant_for_model_without_variant_metadata():
     catalog = {
         "providers": [
             {
@@ -727,7 +741,7 @@ def test_opencode_resets_saved_variant_for_model_without_variant_metadata():
             None,
             catalog,
         )
-        == "default"
+        is None
     )
 
 
@@ -756,7 +770,7 @@ def test_opencode_keeps_unspecified_variant_when_catalog_says_reasoning_supporte
     )
 
 
-def test_opencode_resets_saved_variant_for_list_model_catalog():
+def test_opencode_clears_default_variant_for_list_model_catalog():
     catalog = {
         "providers": [
             {
@@ -777,7 +791,7 @@ def test_opencode_resets_saved_variant_for_list_model_catalog():
             None,
             catalog,
         )
-        == "default"
+        is None
     )
 
 
@@ -803,6 +817,30 @@ def test_opencode_keeps_supported_reasoning_variant():
             catalog,
         )
         == "high"
+    )
+
+
+def test_opencode_clears_unsupported_requested_variant():
+    catalog = {
+        "providers": [
+            {
+                "id": "glm",
+                "models": {
+                    "glm-5.2": {
+                        "variants": {"high": {"thinking": {"effort": "high"}}},
+                    }
+                },
+            }
+        ]
+    }
+
+    assert (
+        resolve_opencode_reasoning_effort(
+            {"providerID": "glm", "modelID": "glm-5.2"},
+            "default",
+            catalog,
+        )
+        is None
     )
 
 
@@ -857,7 +895,7 @@ def test_opencode_keeps_requested_variant_when_catalog_says_reasoning_supported(
     )
 
 
-def test_opencode_resets_unsupported_reasoning_variant():
+def test_opencode_clears_unsupported_reasoning_variant():
     catalog = {
         "providers": [
             {
@@ -878,7 +916,7 @@ def test_opencode_resets_unsupported_reasoning_variant():
             "max",
             catalog,
         )
-        == "default"
+        is None
     )
 
 
@@ -1346,7 +1384,7 @@ def test_opencode_poll_emits_error_result_on_retry_exhaustion():
     assert not any(mtype == "notify" for mtype, _ in emitted)
 
 
-def test_opencode_poll_emits_error_result_on_empty_terminal_message():
+def test_opencode_poll_emits_notify_and_silent_error_result_on_empty_terminal_message():
     emitted = []
 
     class _AuthSvc:
@@ -1360,15 +1398,22 @@ def test_opencode_poll_emits_error_result_on_empty_terminal_message():
     class _Controller:
         agent_auth_service = _AuthSvc()
 
+        def __init__(self):
+            self.config = type("Config", (), {"platform": "slack", "ack_mode": "reaction", "language": "en"})()
+            self.im_client = type("IM", (), {"formatter": _Formatter()})()
+            self.processing_indicator = ProcessingIndicatorService(self)
+
         def _t(self, key, **kwargs):
             if key == "common.default":
                 return "(Default)"
             if key == "error.opencodeEmptyResponse":
                 return "empty:{provider}/{model}/{variant}".format(**kwargs)
+            if key == "error.opencodeProviderRuntimeError":
+                return "provider:{provider}/{model}/{variant}:{detail}".format(**kwargs)
             return f"translated:{key}"
 
         async def emit_agent_message(self, context, message_type, text, parse_mode=None, *, is_error=False, level="normal"):
-            emitted.append((message_type, text, is_error))
+            emitted.append((message_type, text, is_error, level))
 
     class _Agent:
         opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
@@ -1385,6 +1430,15 @@ def test_opencode_poll_emits_error_result_on_empty_terminal_message():
             return ""
 
     class _Server:
+        async def get_recent_session_error(self, session_id, since=None):
+            return "AI_APICallError (ECONNRESET) while calling https://relay.example/messages"
+
+        async def get_provider_api_diagnostic(self, provider_id, model_id):
+            return None
+
+        def get_last_prompt_started_at(self, session_id):
+            return 42.0
+
         async def list_messages(self, session_id, directory):
             return [
                 {
@@ -1424,14 +1478,164 @@ def test_opencode_poll_emits_error_result_on_empty_terminal_message():
             "oc-session",
             agent_to_use=None,
             model_dict={"providerID": "glm", "modelID": "glm-5.2"},
-            reasoning_effort="default",
+            reasoning_effort=None,
             baseline_message_ids=set(),
         )
     )
 
     assert final_text is None
     assert should_emit is False
-    assert emitted == [("result", "empty:glm/glm-5.2/default", True)]
+    assert emitted == [
+        (
+            "notify",
+            "provider:glm/glm-5.2/(Default):AI_APICallError (ECONNRESET) while calling https://relay.example/messages",
+            False,
+            "normal",
+        ),
+        (
+            "result",
+            "provider:glm/glm-5.2/(Default):AI_APICallError (ECONNRESET) while calling https://relay.example/messages",
+            True,
+            "silent",
+        ),
+    ]
+
+
+def test_opencode_restored_poll_preserves_model_details_for_empty_terminal_probe():
+    emitted = []
+    removed = []
+    diagnostics = []
+
+    class _AuthSvc:
+        async def maybe_emit_auth_recovery_message(self, context, backend, message):
+            return False
+
+    class _Formatter:
+        def format_toolcall(self, *args, **kwargs):
+            return "tool"
+
+    class _Controller:
+        agent_auth_service = _AuthSvc()
+
+        def __init__(self):
+            self.config = type("Config", (), {"platform": "slack", "ack_mode": "reaction", "language": "en"})()
+            self.im_client = type("IM", (), {"formatter": _Formatter()})()
+            self.processing_indicator = ProcessingIndicatorService(self)
+
+        def _t(self, key, **kwargs):
+            if key == "common.default":
+                return "(Default)"
+            if key == "error.opencodeEmptyResponse":
+                return "empty:{provider}/{model}/{variant}".format(**kwargs)
+            if key == "error.opencodeProviderRuntimeError":
+                return "provider:{provider}/{model}/{variant}:{detail}".format(**kwargs)
+            return f"translated:{key}"
+
+        async def emit_agent_message(self, context, message_type, text, parse_mode=None, *, is_error=False, level="normal"):
+            emitted.append((message_type, text, is_error, level))
+
+    class _Sessions:
+        def update_active_poll_state(self, *args, **kwargs):
+            return None
+
+        def remove_active_poll(self, session_id):
+            removed.append(session_id)
+
+    class _Server:
+        async def get_recent_session_error(self, session_id, since=None):
+            return None
+
+        async def get_provider_api_diagnostic(self, provider_id, model_id):
+            diagnostics.append((provider_id, model_id))
+            return "Provider API returned HTTP 503: No available accounts"
+
+        async def abort_session(self, session_id, directory):
+            return None
+
+        async def list_messages(self, session_id, directory):
+            return [
+                {
+                    "info": {
+                        "id": "msg-empty",
+                        "role": "assistant",
+                        "time": {"completed": 1},
+                        "finish": "unknown",
+                        "tokens": {
+                            "input": 8,
+                            "output": 4,
+                            "reasoning": 2,
+                            "cache": {"read": 1, "write": 0},
+                        },
+                    },
+                    "parts": [{"type": "step-finish", "id": "step-finish"}],
+                }
+            ]
+
+    server = _Server()
+
+    class _Agent:
+        opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
+        controller = _Controller()
+        sessions = _Sessions()
+        im_client = type("IM", (), {"formatter": _Formatter()})()
+
+        async def _get_server(self):
+            return server
+
+        def _get_formatter(self, context):
+            return _Formatter()
+
+        def _to_relative_path(self, path, working_path):
+            return path
+
+        def _extract_response_text(self, message):
+            return ""
+
+        async def emit_result_message(self, *args, **kwargs):
+            raise AssertionError("empty terminal path should emit failure directly")
+
+        async def _remove_ack_reaction(self, request):
+            return None
+
+    poll = ActivePollInfo(
+        opencode_session_id="oc-session",
+        base_session_id="base",
+        channel_id="c",
+        thread_id="t",
+        settings_key="c",
+        working_path="/tmp/work",
+        baseline_message_ids=[],
+        platform="slack",
+        model_dict={"providerID": "glm", "modelID": "glm-5.2"},
+        reasoning_effort="high",
+        prompt_started_at=42.0,
+    )
+
+    loop = OpenCodePollLoop(_Agent())
+    asyncio.run(loop.run_restored_poll_loop(poll))
+
+    assert diagnostics == [("glm", "glm-5.2")]
+    assert removed == ["oc-session"]
+    assert emitted == [
+        (
+            "notify",
+            "Resuming interrupted OpenCode session after restart...",
+            False,
+            "normal",
+        ),
+        (
+            "notify",
+            "provider:glm/glm-5.2/high:Provider API returned HTTP 503: No available accounts",
+            False,
+            "normal",
+        ),
+        (
+            "result",
+            "provider:glm/glm-5.2/high:Provider API returned HTTP 503: No available accounts",
+            True,
+            "silent",
+        ),
+    ]
 
 
 def test_processing_indicator_handle_is_source_of_truth_for_backend_cleanup():

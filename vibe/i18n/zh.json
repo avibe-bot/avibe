@@ -59,7 +59,8 @@
     "fileAttachmentUploadFailedNoLink": "⚠️ {filename} 没能作为微信文件直接发送。请让我重新发送，或换一个渠道接收这个文件。",
     "opencodeQuestionToolDisabled": "OpenCode 发起了交互式提问，但 Avibe 已禁用 OpenCode 的 question 工具。请直接发送一条新消息，告诉我你的答案或下一步方向。",
     "opencodeQuestionToolDisabledRestored": "恢复中的 OpenCode 会话发起了交互式提问，但 Avibe 已禁用 OpenCode 的 question 工具。请直接发送一条新消息，告诉我你的答案或下一步方向。",
-    "opencodeEmptyResponse": "OpenCode 已结束，但服务商没有返回文本或错误。Provider：{provider}；模型：{model}；推理强度：{variant}。请检查这个 provider/model 组合是否支持当前适配器、Base URL、API Key 和推理强度设置。"
+    "opencodeEmptyResponse": "OpenCode 已结束，但没有产出模型回复。Provider：{provider}；模型：{model}；推理强度：{variant}。这次运行里 OpenCode 没有暴露服务商错误。",
+    "opencodeProviderRuntimeError": "OpenCode 服务商请求失败。Provider：{provider}；模型：{model}；推理强度：{variant}。详情：{detail}"
   },
   "success": {
     "settingsUpdated": "设置更新成功！",
