@@ -2344,6 +2344,7 @@ class AgentAuthService:
             )
 
             try:
+                prompt_started_at = time.time()
                 await server.prompt_async(
                     session_id=session_id,
                     directory=directory,
@@ -2411,9 +2412,14 @@ class AgentAuthService:
                         lang = self._lang()
                         detail = None
                         try:
-                            detail = await server.get_recent_session_error(session_id)
+                            detail = await server.get_recent_session_error(session_id, since=prompt_started_at)
                         except Exception:  # noqa: BLE001
                             detail = None
+                        if not detail:
+                            try:
+                                detail = await server.get_provider_api_diagnostic(provider_id, chosen_model)
+                            except Exception:  # noqa: BLE001
+                                detail = None
                         i18n_key = (
                             "error.opencodeProviderRuntimeError"
                             if detail

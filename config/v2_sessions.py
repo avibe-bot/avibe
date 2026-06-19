@@ -23,6 +23,7 @@ class ActivePollInfo:
     seen_tool_calls: List[str] = field(default_factory=list)
     emitted_assistant_messages: List[str] = field(default_factory=list)
     started_at: float = 0.0
+    prompt_started_at: Optional[float] = None
     # Ack reaction info for cleanup on restore
     ack_reaction_message_id: Optional[str] = None
     ack_reaction_emoji: Optional[str] = None
@@ -46,6 +47,7 @@ class ActivePollInfo:
             "seen_tool_calls": self.seen_tool_calls,
             "emitted_assistant_messages": self.emitted_assistant_messages,
             "started_at": self.started_at,
+            "prompt_started_at": self.prompt_started_at,
             "ack_reaction_message_id": self.ack_reaction_message_id,
             "ack_reaction_emoji": self.ack_reaction_emoji,
             "typing_indicator_active": self.typing_indicator_active,
@@ -80,6 +82,7 @@ class ActivePollInfo:
             seen_tool_calls=data.get("seen_tool_calls", []),
             emitted_assistant_messages=data.get("emitted_assistant_messages", []),
             started_at=data.get("started_at", 0.0),
+            prompt_started_at=data.get("prompt_started_at"),
             ack_reaction_message_id=data.get("ack_reaction_message_id"),
             ack_reaction_emoji=data.get("ack_reaction_emoji"),
             typing_indicator_active=bool(data.get("typing_indicator_active", False)),

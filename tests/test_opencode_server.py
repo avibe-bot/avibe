@@ -1,5 +1,7 @@
 import asyncio
 import importlib.util
+import io
+import json
 import sys
 import tempfile
 import types
@@ -36,15 +38,22 @@ OpenCodeServerManager = SERVER_MODULE.OpenCodeServerManager
 
 
 class _FakeResponse:
-    def __init__(self, *, status: int = 204, text: str = "", json_data=None):
+    def __init__(self, *, status: int = 204, text: str = "", json_data=None, headers=None):
         self.status = status
         self._text = text
         self._json_data = json_data
+        self.headers = headers or {}
 
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
         return False
 
     async def text(self):
@@ -55,6 +64,21 @@ class _FakeResponse:
 
     async def json(self):
         return self._json_data if self._json_data is not None else {}
+
+
+class _FakeUrlOpenResponse:
+    def __init__(self, *, text: str = "", headers=None):
+        self._text = text
+        self.headers = headers or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self, size=-1):
+        return self._text.encode() if size is None or size < 0 else self._text.encode()[:size]
 
 
 class _FakeSession:
@@ -1202,6 +1226,186 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("secret system prompt", summary or "")
         self.assertNotIn("sk-secret", summary or "")
+
+    def test_recent_session_error_uses_current_prompt_window_and_strips_relative_query(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_dir = Path(tmp_dir)
+            stale_payload = {
+                "error": {
+                    "name": "AI_APICallError",
+                    "cause": {
+                        "code": "ECONNRESET",
+                        "path": "/messages?api_key=stale-secret",
+                    },
+                }
+            }
+            current_payload = {
+                "error": {
+                    "name": "AI_APICallError",
+                    "cause": {
+                        "code": "ECONNRESET",
+                        "path": "/messages?api_key=current-secret#frag",
+                    },
+                }
+            }
+            (log_dir / "2026-06-19T040950.log").write_text(
+                f"ERROR 2026-06-19T04:09:49 +1ms service=llm session.id=ses_test error={SERVER_MODULE.json.dumps(stale_payload)} stream error\n"
+                f"ERROR 2026-06-19T04:10:03 +1ms service=llm session.id=ses_test error={SERVER_MODULE.json.dumps(current_payload)} stream error\n",
+                encoding="utf-8",
+            )
+            manager = OpenCodeServerManager(binary="opencode", port=4096)
+
+            with patch.object(manager, "_opencode_log_dirs", return_value=[log_dir]):
+                summary = manager._recent_session_error_sync(
+                    "ses_test",
+                    since=SERVER_MODULE.datetime(2026, 6, 19, 4, 10, 0).timestamp(),
+                )
+
+        self.assertEqual(
+            summary,
+            "AI_APICallError (ECONNRESET) while calling /messages",
+        )
+        self.assertNotIn("api_key", summary or "")
+        self.assertNotIn("secret", summary or "")
+
+    def test_recent_session_error_ignores_old_log_entries_for_current_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_dir = Path(tmp_dir)
+            payload = {
+                "error": {
+                    "name": "AI_APICallError",
+                    "cause": {"code": "ECONNRESET", "path": "/messages?api_key=old-secret"},
+                }
+            }
+            (log_dir / "2026-06-19T040950.log").write_text(
+                f"ERROR 2026-06-19T04:09:49 +1ms service=llm session.id=ses_test error={SERVER_MODULE.json.dumps(payload)} stream error\n",
+                encoding="utf-8",
+            )
+            manager = OpenCodeServerManager(binary="opencode", port=4096)
+
+            with patch.object(manager, "_opencode_log_dirs", return_value=[log_dir]):
+                summary = manager._recent_session_error_sync(
+                    "ses_test",
+                    since=SERVER_MODULE.datetime(2026, 6, 19, 4, 10, 0).timestamp(),
+                )
+
+        self.assertIsNone(summary)
+
+    async def test_prompt_async_records_prompt_start_time_for_log_correlation(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        fake_session = _FakeSession()
+
+        async def _fake_get_http_session():
+            return fake_session
+
+        manager._get_http_session = _fake_get_http_session  # type: ignore[method-assign]
+
+        with patch.object(SERVER_MODULE.time, "time", return_value=1234.5):
+            await manager.prompt_async(
+                session_id="ses-1",
+                directory="/tmp/work",
+                text="hello",
+            )
+
+        self.assertEqual(manager.get_last_prompt_started_at("ses-1"), 1234.5)
+
+    def test_provider_api_diagnostic_detects_html_base_url(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_home = Path(tmp_dir)
+            config_path = tmp_home / ".config" / "opencode" / "opencode.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "provider": {
+                            "glm": {
+                                "npm": "@ai-sdk/anthropic",
+                                "options": {
+                                    "baseURL": "https://relay.example",
+                                    "apiKey": "sk-secret",
+                                },
+                                "vibe_remote": {
+                                    "custom": True,
+                                    "adapter": "anthropic-compatible",
+                                },
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manager = OpenCodeServerManager(binary="opencode", port=4096)
+
+            class _UrlOpen:
+                def __call__(self, request, timeout=None):
+                    self.request = request
+                    return _FakeUrlOpenResponse(
+                        text="<!doctype html><html>Relay UI</html>",
+                        headers={"content-type": "text/html; charset=utf-8"},
+                    )
+
+            fake_urlopen = _UrlOpen()
+            with (
+                patch("vibe.opencode_config.Path.home", return_value=tmp_home),
+                patch.object(SERVER_MODULE.urllib.request, "urlopen", fake_urlopen),
+            ):
+                detail = manager._provider_api_diagnostic_sync("glm", "glm-5.2")
+
+        self.assertIn("returned an HTML page", detail or "")
+        self.assertIn("https://relay.example/v1", detail or "")
+        self.assertNotIn("sk-secret", detail or "")
+        self.assertEqual(fake_urlopen.request.full_url, "https://relay.example/messages")
+
+    def test_provider_api_diagnostic_reports_json_api_error(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_home = Path(tmp_dir)
+            config_path = tmp_home / ".config" / "opencode" / "opencode.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "provider": {
+                            "glm": {
+                                "npm": "@ai-sdk/anthropic",
+                                "options": {
+                                    "baseURL": "https://relay.example/v1",
+                                    "apiKey": "sk-secret",
+                                },
+                                "vibe_remote": {
+                                    "custom": True,
+                                    "adapter": "anthropic-compatible",
+                                },
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manager = OpenCodeServerManager(binary="opencode", port=4096)
+
+            def _raise_http_error(request, timeout=None):
+                response = io.BytesIO(
+                    b'{"error":{"message":"No available accounts: no available accounts","type":"api_error"}}'
+                )
+                raise SERVER_MODULE.urllib.error.HTTPError(
+                    request.full_url,
+                    503,
+                    "Service Unavailable",
+                    {"content-type": "application/json; charset=utf-8"},
+                    response,
+                )
+
+            with (
+                patch("vibe.opencode_config.Path.home", return_value=tmp_home),
+                patch.object(SERVER_MODULE.urllib.request, "urlopen", _raise_http_error),
+            ):
+                detail = manager._provider_api_diagnostic_sync("glm", "glm-5.2")
+
+        self.assertEqual(
+            detail,
+            "Provider API returned HTTP 503: No available accounts: no available accounts",
+        )
+        self.assertNotIn("sk-secret", detail or "")
 
 
 async def _async_none():

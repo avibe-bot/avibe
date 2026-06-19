@@ -437,6 +437,7 @@ class SessionsFacade:
         processing_indicator: Optional[Dict[str, Any]] = None,
         user_id: str = "",
         platform: str = "",
+        prompt_started_at: Optional[float] = None,
     ) -> None:
         poll_info = ActivePollInfo(
             opencode_session_id=opencode_session_id,
@@ -449,6 +450,7 @@ class SessionsFacade:
             seen_tool_calls=[],
             emitted_assistant_messages=[],
             started_at=time.time(),
+            prompt_started_at=prompt_started_at,
             ack_reaction_message_id=ack_reaction_message_id,
             ack_reaction_emoji=ack_reaction_emoji,
             typing_indicator_active=typing_indicator_active,

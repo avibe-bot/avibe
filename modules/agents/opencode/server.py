@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime
 import json
 import logging
 import os
@@ -11,7 +12,9 @@ from pathlib import Path
 import socket
 import subprocess
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 import threading
 from asyncio.subprocess import Process
 from typing import Any, Dict, List, Optional
@@ -22,7 +25,11 @@ from config import paths
 from core.process_isolation import isolated_subprocess_kwargs, terminate_process_tree
 from modules.agents.opencode.config_reconciler import OpenCodeConfigReconciler
 from vibe import runtime
-from vibe.opencode_config import load_first_opencode_user_config, read_opencode_provider_auth_entries
+from vibe.opencode_config import (
+    get_opencode_custom_provider_adapter,
+    load_first_opencode_user_config,
+    read_opencode_provider_auth_entries,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +76,7 @@ class OpenCodeServerManager:
         self._auth_refresh_pending = False
         self._auth_refresh_pending_port: Optional[int] = None
         self._pending_runtime_config: Optional[tuple[str, int, int]] = None
+        self._last_prompt_started_at: dict[str, float] = {}
 
     def _get_lock(self) -> asyncio.Lock:
         """Get or create an asyncio.Lock bound to the current event loop."""
@@ -395,12 +403,29 @@ class OpenCodeServerManager:
     def _safe_url(raw: object) -> str:
         if not isinstance(raw, str) or not raw.strip():
             return ""
-        parsed = urllib.parse.urlsplit(raw.strip())
+        value = raw.strip()
+        parsed = urllib.parse.urlsplit(value)
         if not parsed.scheme or not parsed.netloc:
-            return raw.strip()[:160]
+            # Relative provider paths may still carry query credentials, e.g.
+            # /messages?api_key=...; keep only the path.
+            return urllib.parse.urlunsplit(("", "", parsed.path or value.split("?", 1)[0].split("#", 1)[0], "", ""))[
+                :160
+            ]
         host = parsed.hostname or parsed.netloc
         port = f":{parsed.port}" if parsed.port else ""
         return urllib.parse.urlunsplit((parsed.scheme, f"{host}{port}", parsed.path or "", "", ""))[:160]
+
+    @staticmethod
+    def _log_line_timestamp(line: str) -> Optional[float]:
+        marker = "ERROR "
+        index = line.find(marker)
+        if index < 0:
+            return None
+        raw = line[index + len(marker) : index + len(marker) + 19]
+        try:
+            return datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S").timestamp()
+        except ValueError:
+            return None
 
     @classmethod
     def _summarize_log_error_payload(cls, payload: object) -> Optional[str]:
@@ -441,7 +466,7 @@ class OpenCodeServerManager:
         candidates.append(Path.home() / "Library" / "Application Support" / "opencode" / "log")
         return candidates
 
-    def _recent_session_error_sync(self, session_id: str) -> Optional[str]:
+    def _recent_session_error_sync(self, session_id: str, since: Optional[float] = None) -> Optional[str]:
         if not session_id:
             return None
         log_files: list[Path] = []
@@ -459,6 +484,10 @@ class OpenCodeServerManager:
             for line in reversed(text.splitlines()):
                 if "ERROR" not in line or f"session.id={session_id}" not in line or "error=" not in line:
                     continue
+                if since is not None:
+                    log_ts = self._log_line_timestamp(line)
+                    if log_ts is None or log_ts < since - 2:
+                        continue
                 start = line.find("error={")
                 if start < 0:
                     continue
@@ -474,8 +503,124 @@ class OpenCodeServerManager:
                     return summary
         return None
 
-    async def get_recent_session_error(self, session_id: str) -> Optional[str]:
-        return await asyncio.to_thread(self._recent_session_error_sync, session_id)
+    def get_last_prompt_started_at(self, session_id: str) -> Optional[float]:
+        return self._last_prompt_started_at.get(session_id)
+
+    async def get_recent_session_error(self, session_id: str, since: Optional[float] = None) -> Optional[str]:
+        if since is None:
+            since = self.get_last_prompt_started_at(session_id)
+        return await asyncio.to_thread(self._recent_session_error_sync, session_id, since)
+
+    @staticmethod
+    def _diagnostic_payload_message(payload: object) -> str:
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = error.get("message")
+                if isinstance(message, str) and message.strip():
+                    return message.strip()[:240]
+            message = payload.get("message")
+            if isinstance(message, str) and message.strip():
+                return message.strip()[:240]
+        return ""
+
+    @staticmethod
+    def _append_provider_endpoint(base_url: str, endpoint_path: str) -> str:
+        return f"{base_url.rstrip('/')}/{endpoint_path.lstrip('/')}"
+
+    @classmethod
+    def _suggest_api_base_url(cls, base_url: str) -> str:
+        parsed = urllib.parse.urlsplit(base_url.rstrip("/"))
+        if parsed.path.rstrip("/").endswith("/v1"):
+            return cls._safe_url(base_url)
+        path = (parsed.path.rstrip("/") + "/v1") if parsed.path else "/v1"
+        return cls._safe_url(urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", "")))
+
+    def _provider_api_diagnostic_sync(self, provider_id: str, model_id: str) -> Optional[str]:
+        probe = load_first_opencode_user_config(logger_instance=logger)
+        config = probe.config
+        if not isinstance(config, dict):
+            return None
+        provider_map = config.get("provider")
+        if not isinstance(provider_map, dict):
+            return None
+        provider_config = provider_map.get(provider_id)
+        if not isinstance(provider_config, dict):
+            return None
+        options = provider_config.get("options")
+        if not isinstance(options, dict):
+            return None
+        base_url = options.get("baseURL")
+        api_key = options.get("apiKey")
+        if not isinstance(base_url, str) or not base_url.strip() or not isinstance(api_key, str) or not api_key:
+            return None
+
+        base_url = base_url.rstrip("/")
+        adapter = get_opencode_custom_provider_adapter(provider_id, provider_config)
+        if adapter == "anthropic-compatible":
+            endpoint_path = "/messages"
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            }
+            body = {
+                "model": model_id,
+                "max_tokens": 8,
+                "messages": [{"role": "user", "content": "OK"}],
+            }
+        else:
+            endpoint_path = "/chat/completions"
+            headers = {
+                "authorization": f"Bearer {api_key}",
+                "content-type": "application/json",
+            }
+            body = {
+                "model": model_id,
+                "messages": [{"role": "user", "content": "OK"}],
+                "stream": False,
+            }
+
+        try:
+            request = urllib.request.Request(
+                self._append_provider_endpoint(base_url, endpoint_path),
+                data=json.dumps(body).encode("utf-8"),
+                method="POST",
+            )
+            for key, value in headers.items():
+                request.add_header(key, value)
+            try:
+                with urllib.request.urlopen(request, timeout=12) as response:
+                    content_type = response.headers.get("content-type", "")
+                    raw = response.read(2048).decode(errors="replace")
+                    if "text/html" in content_type.lower() or raw.lstrip().lower().startswith("<!doctype html"):
+                        return (
+                            f"Provider Base URL {self._safe_url(base_url)} returned an HTML page instead of an API "
+                            f"response; use the API base path, usually {self._suggest_api_base_url(base_url)}."
+                        )
+                    return None
+            except urllib.error.HTTPError as err:
+                content_type = err.headers.get("content-type", "")
+                raw = err.read(2048).decode(errors="replace")
+                if "text/html" in content_type.lower() or raw.lstrip().lower().startswith("<!doctype html"):
+                    return (
+                        f"Provider Base URL {self._safe_url(base_url)} returned an HTML page instead of an API "
+                        f"response; use the API base path, usually {self._suggest_api_base_url(base_url)}."
+                    )
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    payload = {}
+                message = self._diagnostic_payload_message(payload)
+                if message:
+                    return f"Provider API returned HTTP {err.code}: {message}"
+                return f"Provider API returned HTTP {err.code}."
+        except Exception as err:
+            logger.debug("OpenCode provider API diagnostic failed for %s/%s: %s", provider_id, model_id, err)
+        return None
+
+    async def get_provider_api_diagnostic(self, provider_id: str, model_id: str) -> Optional[str]:
+        return await asyncio.to_thread(self._provider_api_diagnostic_sync, provider_id, model_id)
 
     @staticmethod
     def _pid_exists(pid: int) -> bool:
@@ -923,6 +1068,7 @@ class OpenCodeServerManager:
     ) -> None:
         """Start a prompt asynchronously without holding the HTTP request open."""
 
+        started_at = time.time()
         async with self._request_scope():
             session = await self._get_http_session()
 
@@ -950,6 +1096,7 @@ class OpenCodeServerManager:
                 if resp.status not in (200, 204):
                     error_text = await resp.text()
                     raise RuntimeError(f"Failed to start async prompt: {resp.status} {error_text}")
+            self._last_prompt_started_at[session_id] = started_at
 
     async def list_messages(self, session_id: str, directory: str) -> List[Dict[str, Any]]:
         async with self._request_scope():

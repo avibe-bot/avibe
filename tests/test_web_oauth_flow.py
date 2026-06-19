@@ -604,7 +604,10 @@ class _FakeOpencodeServer:
     async def abort_session(self, session_id, directory):
         self.abort_calls.append((session_id, directory))
 
-    async def get_recent_session_error(self, session_id):
+    async def get_recent_session_error(self, session_id, since=None):
+        return None
+
+    async def get_provider_api_diagnostic(self, provider_id, model_id):
         return None
 
     async def start_provider_oauth(self, provider_id, *, method, prompt_answers):

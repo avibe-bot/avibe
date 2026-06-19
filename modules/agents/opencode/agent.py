@@ -321,6 +321,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 system=system_prompt_injection,
                 tools={"question": False},
             )
+            get_started_at = getattr(server, "get_last_prompt_started_at", None)
+            prompt_started_at = get_started_at(session_id) if callable(get_started_at) else None
             await server.mark_run_active(session_id)
             run_registered = True
             self.mark_runtime_turn_started(request.context)
@@ -355,6 +357,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 processing_indicator=self.controller.processing_indicator.snapshot_request(request),
                 user_id=request.context.user_id or "",
                 platform=request.context.platform or platform_payload.get("platform") or "",
+                prompt_started_at=prompt_started_at,
             )
 
             final_text, should_emit = await self._poll_loop.run_prompt_poll(

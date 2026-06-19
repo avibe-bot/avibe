@@ -162,6 +162,7 @@ def test_active_poll_persists_typing_cleanup_context(tmp_path, monkeypatch):
         },
         user_id="wx-user",
         platform="wechat",
+        prompt_started_at=1234.5,
     )
 
     reloaded = SessionsStore()
@@ -172,6 +173,7 @@ def test_active_poll_persists_typing_cleanup_context(tmp_path, monkeypatch):
     assert poll.typing_indicator_active is True
     assert poll.context_token == "ctx-4"
     assert poll.processing_indicator["context_token"] == "ctx-4"
+    assert poll.prompt_started_at == 1234.5
 
 
 # --- session_mappings migration tests ---

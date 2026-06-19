@@ -75,9 +75,18 @@ class OpenCodePollLoop:
         self,
         server: OpenCodeServerManager,
         session_id: str,
+        model_dict: Optional[Dict[str, str]] = None,
+        *,
+        since: Optional[float] = None,
     ) -> Optional[str]:
         try:
-            return await server.get_recent_session_error(session_id)
+            detail = await server.get_recent_session_error(session_id, since=since)
+            if detail:
+                return detail
+            provider_id = (model_dict or {}).get("providerID")
+            model_id = (model_dict or {}).get("modelID")
+            if provider_id and model_id:
+                return await server.get_provider_api_diagnostic(provider_id, model_id)
         except Exception as err:
             logger.debug("Failed to inspect OpenCode logs for %s: %s", session_id, err)
         return None
@@ -90,8 +99,14 @@ class OpenCodePollLoop:
         session_id: str,
         model_dict: Optional[Dict[str, str]],
         reasoning_effort: Optional[str],
+        prompt_started_at: Optional[float] = None,
     ) -> None:
-        detail = await self._empty_terminal_message_detail(server, session_id)
+        detail = await self._empty_terminal_message_detail(
+            server,
+            session_id,
+            model_dict=model_dict,
+            since=prompt_started_at,
+        )
         message = self._empty_terminal_message_text(
             model_dict=model_dict,
             reasoning_effort=reasoning_effort,
@@ -105,7 +120,7 @@ class OpenCodePollLoop:
         await self._agent.controller.emit_agent_message(
             context,
             "result",
-            "",
+            message,
             is_error=True,
             level="silent",
         )
@@ -195,6 +210,8 @@ class OpenCodePollLoop:
         emitted_assistant_messages: set[str] = set()
         poll_interval_seconds = 2.0
         final_text: Optional[str] = None
+        get_started_at = getattr(server, "get_last_prompt_started_at", None)
+        prompt_started_at = get_started_at(session_id) if callable(get_started_at) else None
 
         error_retry_count = 0
         error_retry_limit = getattr(
@@ -400,6 +417,7 @@ class OpenCodePollLoop:
                                 session_id=session_id,
                                 model_dict=model_dict,
                                 reasoning_effort=reasoning_effort,
+                                prompt_started_at=prompt_started_at,
                             )
                             return None, False
                         break
@@ -426,6 +444,10 @@ class OpenCodePollLoop:
         emitted_assistant_messages = set(poll_info.emitted_assistant_messages)
         poll_interval_seconds = 2.0
         final_text: Optional[str] = None
+        get_started_at = getattr(server, "get_last_prompt_started_at", None)
+        prompt_started_at = getattr(poll_info, "prompt_started_at", None) or (
+            get_started_at(session_id) if callable(get_started_at) else None
+        )
 
         error_retry_count = 0
         error_retry_limit = getattr(
@@ -591,6 +613,7 @@ class OpenCodePollLoop:
                                         session_id=session_id,
                                         model_dict=None,
                                         reasoning_effort=None,
+                                        prompt_started_at=prompt_started_at,
                                     )
                                     self._agent.sessions.remove_active_poll(session_id)
                                     await self.remove_restored_ack(poll_info)

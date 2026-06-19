@@ -1411,8 +1411,14 @@ def test_opencode_poll_emits_notify_and_silent_error_result_on_empty_terminal_me
             return ""
 
     class _Server:
-        async def get_recent_session_error(self, session_id):
+        async def get_recent_session_error(self, session_id, since=None):
             return "AI_APICallError (ECONNRESET) while calling https://relay.example/messages"
+
+        async def get_provider_api_diagnostic(self, provider_id, model_id):
+            return None
+
+        def get_last_prompt_started_at(self, session_id):
+            return 42.0
 
         async def list_messages(self, session_id, directory):
             return [
@@ -1467,7 +1473,12 @@ def test_opencode_poll_emits_notify_and_silent_error_result_on_empty_terminal_me
             False,
             "normal",
         ),
-        ("result", "", True, "silent"),
+        (
+            "result",
+            "provider:glm/glm-5.2/(Default):AI_APICallError (ECONNRESET) while calling https://relay.example/messages",
+            True,
+            "silent",
+        ),
     ]
 
 
