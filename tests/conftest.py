@@ -13,13 +13,13 @@ The post-install bookkeeping in ``vibe.api._run_install_command`` then
 called ``load_config()`` / ``cfg.save()`` against the real config.json and
 persisted the fixture path, surfacing in the UI after the next restart.
 
-Isolation mechanism: we set ``VIBE_REMOTE_HOME`` and patch
-``pathlib.Path.home`` to a per-test tmp directory. This means
-``config.paths.get_vibe_remote_dir`` runs as written — only its
-env-var-set branch is exercised under isolation, and the function
-itself is never replaced, so the suite still catches regressions in
-path-resolution logic while tools that fall back to ``Path.home()`` do
-not see the developer's real home.
+Isolation mechanism: we set ``HOME``, XDG config/data/cache homes, and
+``VIBE_REMOTE_HOME`` to a per-test tmp directory, and patch
+``pathlib.Path.home`` to match. This means ``config.paths.get_vibe_remote_dir``
+runs as written — only its env-var-set branch is exercised under isolation, and
+the function itself is never replaced, so the suite still catches regressions in
+path-resolution logic while Python helpers, subprocesses, and ``expanduser("~")``
+do not see the developer's real home.
 
 The same hazard applies to the agent backends' on-disk credential files:
 Codex resolves its home from ``CODEX_HOME`` (falling back to ``~/.codex``)
@@ -57,6 +57,10 @@ def _isolate_vibe_remote_home(request, tmp_path, monkeypatch):
     monkeypatch.delenv("AVIBE_HOME", raising=False)
     isolated_home = tmp_path / "home"
     monkeypatch.setattr(Path, "home", lambda: isolated_home)
+    monkeypatch.setenv("HOME", str(isolated_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(isolated_home / ".config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(isolated_home / ".local" / "share"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(isolated_home / ".cache"))
     monkeypatch.setenv("VIBE_REMOTE_HOME", str(isolated_home / ".vibe_remote"))
     # Keep Codex / Claude Code credential writes off the developer's real
     # home. Tests that manage these env vars themselves (e.g. the

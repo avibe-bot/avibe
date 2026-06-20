@@ -15,6 +15,9 @@ that tests must never mutate live user state.
 from __future__ import annotations
 
 import os
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 from tests.conftest import REAL_USER_HOME
@@ -25,11 +28,15 @@ def test_backend_credential_homes_are_isolated_from_real_home() -> None:
     codex_home = codex_config.get_codex_home()
     claude_home = claude_config.get_claude_home()
     opencode_auth = opencode_config.get_opencode_auth_path()
+    isolated_home = Path(os.environ["HOME"])
 
     # The autouse fixture must have pinned explicit backend homes where the
     # underlying tool supports them.
     assert os.environ.get("CODEX_HOME")
     assert os.environ.get("CLAUDE_CONFIG_DIR")
+    assert os.environ.get("XDG_CONFIG_HOME") == str(isolated_home / ".config")
+    assert os.environ.get("XDG_DATA_HOME") == str(isolated_home / ".local" / "share")
+    assert os.environ.get("XDG_CACHE_HOME") == str(isolated_home / ".cache")
 
     # And the resolved homes must honour them rather than the real ~/.codex
     # / ~/.claude.
@@ -41,12 +48,38 @@ def test_backend_credential_homes_are_isolated_from_real_home() -> None:
     # OpenCode has no env-var home override in our helpers, so the autouse
     # Path.home patch is its default isolation boundary.
     assert Path.home() != REAL_USER_HOME
+    assert Path.home() == isolated_home
+    assert os.path.expanduser("~") == str(isolated_home)
     assert opencode_auth == (
         Path.home() / ".local" / "share" / "opencode" / "auth.json"
     )
     assert opencode_auth != (
         REAL_USER_HOME / ".local" / "share" / "opencode" / "auth.json"
     )
+
+
+def test_subprocess_home_and_xdg_paths_are_isolated() -> None:
+    code = (
+        "import json, os, pathlib; "
+        "print(json.dumps({"
+        "'home_env': os.environ.get('HOME'), "
+        "'path_home': str(pathlib.Path.home()), "
+        "'expanduser': os.path.expanduser('~'), "
+        "'xdg_config': os.environ.get('XDG_CONFIG_HOME'), "
+        "'xdg_data': os.environ.get('XDG_DATA_HOME'), "
+        "'xdg_cache': os.environ.get('XDG_CACHE_HOME')"
+        "}))"
+    )
+    payload = subprocess.check_output([sys.executable, "-c", code], text=True)
+    data = json.loads(payload)
+    isolated_home = Path(os.environ["HOME"])
+
+    assert data["home_env"] == str(isolated_home)
+    assert data["path_home"] == str(isolated_home)
+    assert data["expanduser"] == str(isolated_home)
+    assert data["xdg_config"] == str(isolated_home / ".config")
+    assert data["xdg_data"] == str(isolated_home / ".local" / "share")
+    assert data["xdg_cache"] == str(isolated_home / ".cache")
 
 
 def test_apply_auth_writes_land_under_isolated_home() -> None:
