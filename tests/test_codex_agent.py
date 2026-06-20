@@ -565,6 +565,142 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._transport_last_activity["/tmp/work"], 950.0)
         agent.sessions.clear_agent_session_mapping.assert_not_called()
 
+    @staticmethod
+    def _make_evict_agent(*, active_turn, last_activity=0.0):
+        """Build a bare CodexAgent wired for evict_idle_transports tests."""
+        agent = object.__new__(CodexAgent)
+        stop_calls = []
+
+        async def stop_transport():
+            stop_calls.append("stop")
+
+        agent._transports = {"/tmp/work": SimpleNamespace(stop=stop_transport)}
+        agent._transport_last_activity = {"/tmp/work": last_activity}
+        agent._transport_locks = {"/tmp/work": asyncio.Lock()}
+        invalidated = []
+        cleared_turns = []
+        agent._session_mgr = SimpleNamespace(
+            sessions_for_cwd=lambda cwd: ["session-1"] if cwd == "/tmp/work" else [],
+            invalidate_thread=lambda base_session_id: invalidated.append(base_session_id),
+        )
+        agent._turn_registry = SimpleNamespace(
+            get_active_turn=lambda base_session_id: active_turn,
+            has_pending_turn_start=lambda base_session_id: False,
+            clear_session=lambda base_session_id: cleared_turns.append(base_session_id),
+        )
+        agent._session_locks = {"session-1": asyncio.Lock()}
+        agent.sessions = SimpleNamespace(clear_agent_session_mapping=Mock())
+        return agent, stop_calls, invalidated, cleared_turns
+
+    async def test_evict_idle_transports_force_evicts_stuck_active_transport(self):
+        # active turn that has been idle WAY past the stuck-active cap
+        # (max(600*3, 1800) = 1800s) must be force-evicted — the leak fix.
+        agent, stop_calls, invalidated, cleared_turns = self._make_evict_agent(
+            active_turn="turn-1", last_activity=0.0
+        )
+
+        with patch.object(_MODULE.time, "monotonic", return_value=2000.0):
+            evicted = await agent.evict_idle_transports(600)
+
+        self.assertEqual(evicted, 1)
+        self.assertEqual(stop_calls, ["stop"])
+        self.assertEqual(invalidated, ["session-1"])
+        self.assertEqual(cleared_turns, ["session-1"])
+        self.assertEqual(agent._transports, {})
+        self.assertEqual(agent._transport_last_activity, {})
+
+    async def test_evict_idle_transports_keeps_active_transport_under_stuck_cap(self):
+        # active turn idle past idle_timeout (600) but under the cap (1800):
+        # still vetoed, NOT force-evicted.
+        agent, stop_calls, _invalidated, cleared_turns = self._make_evict_agent(
+            active_turn="turn-1", last_activity=0.0
+        )
+
+        with patch.object(_MODULE.time, "monotonic", return_value=1000.0):
+            evicted = await agent.evict_idle_transports(600)
+
+        self.assertEqual(evicted, 0)
+        self.assertEqual(stop_calls, [])
+        self.assertIn("/tmp/work", agent._transports)
+        self.assertEqual(cleared_turns, [])
+
+    async def test_evict_idle_transports_stuck_cap_floor_dominates_small_timeout(self):
+        # With a tiny idle_timeout (100s) the multiplier window (300s) is below
+        # the 1800s floor, so the floor governs: idle 1000s < 1800s stays vetoed.
+        agent, stop_calls, _invalidated, _cleared = self._make_evict_agent(
+            active_turn="turn-1", last_activity=0.0
+        )
+
+        with patch.object(_MODULE.time, "monotonic", return_value=1000.0):
+            evicted = await agent.evict_idle_transports(100)
+
+        self.assertEqual(evicted, 0)
+        self.assertEqual(stop_calls, [])
+        self.assertIn("/tmp/work", agent._transports)
+
+    async def test_evict_idle_transports_stuck_backstop_disabled(self):
+        # multiplier <= 0 disables the backstop: an active turn is an absolute
+        # veto again, no matter how long it has been idle.
+        agent, stop_calls, _invalidated, cleared_turns = self._make_evict_agent(
+            active_turn="turn-1", last_activity=0.0
+        )
+
+        with patch.object(_MODULE, "DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER", 0):
+            with patch.object(_MODULE.time, "monotonic", return_value=1_000_000.0):
+                evicted = await agent.evict_idle_transports(600)
+
+        self.assertEqual(evicted, 0)
+        self.assertEqual(stop_calls, [])
+        self.assertIn("/tmp/work", agent._transports)
+        self.assertEqual(cleared_turns, [])
+
+    async def test_evict_idle_transports_force_evict_skips_when_activity_refreshed(self):
+        # Race: pass 1 sees a stuck-active candidate (idle past the 1800s cap),
+        # but a fresh notification updates last_activity before the locked
+        # recheck. The recheck recomputes idle from current state and bails.
+        agent, stop_calls, _invalidated, _cleared = self._make_evict_agent(
+            active_turn="turn-1", last_activity=0.0
+        )
+        lock = asyncio.Lock()
+        await lock.acquire()
+        agent._transport_locks = {"/tmp/work": lock}
+
+        with patch.object(_MODULE.time, "monotonic", return_value=2000.0):
+            eviction_task = asyncio.create_task(agent.evict_idle_transports(600))
+            await asyncio.sleep(0)
+            # fresh activity: idle recomputed as 2000-1900=100s, well under cap
+            agent._transport_last_activity["/tmp/work"] = 1900.0
+            lock.release()
+            evicted = await eviction_task
+
+        self.assertEqual(evicted, 0)
+        self.assertEqual(stop_calls, [])
+        self.assertIn("/tmp/work", agent._transports)
+
+    async def test_evict_idle_transports_reclassifies_when_turn_clears_between_passes(self):
+        # Race: pass 1 sees a stuck-active candidate, but the turn completes
+        # (active flag clears) before the locked recheck while activity stays
+        # stale. The recheck reclassifies it as a NORMAL idle eviction.
+        agent, stop_calls, invalidated, cleared_turns = self._make_evict_agent(
+            active_turn="turn-1", last_activity=0.0
+        )
+        lock = asyncio.Lock()
+        await lock.acquire()
+        agent._transport_locks = {"/tmp/work": lock}
+
+        with patch.object(_MODULE.time, "monotonic", return_value=2000.0):
+            eviction_task = asyncio.create_task(agent.evict_idle_transports(600))
+            await asyncio.sleep(0)
+            # turn finished between the two passes; activity unchanged (stale)
+            agent._turn_registry.get_active_turn = lambda base_session_id: None
+            lock.release()
+            evicted = await eviction_task
+
+        self.assertEqual(evicted, 1)
+        self.assertEqual(stop_calls, ["stop"])
+        self.assertEqual(invalidated, ["session-1"])
+        self.assertEqual(cleared_turns, ["session-1"])
+
     async def test_get_or_create_transport_fast_path_waits_for_transport_lock(self):
         agent = object.__new__(CodexAgent)
         lock = asyncio.Lock()

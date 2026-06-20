@@ -9,6 +9,10 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from config.v2_config import (
+    DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS,
+    DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
+)
 from core.avibe_cloud import avibe_cloud_url_available
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import (
@@ -408,6 +412,13 @@ class CodexAgent(BaseAgent):
         if not hasattr(self, "_session_locks"):
             self._session_locks = {}
 
+        # Absolute-time backstop: a transport whose turn is stuck "active"
+        # forever (turn/completed never arrives — wedged/silently-disconnected
+        # app-server) would otherwise be vetoed from eviction indefinitely and
+        # leak its app-server process until restart (#622/#623 analog). Once it
+        # has been idle past this cap, force-evict it despite the active turn.
+        stuck_active_cap = self._stuck_active_idle_eviction_cap(idle_timeout)
+
         now = time.monotonic()
         evicted = 0
 
@@ -416,10 +427,14 @@ class CodexAgent(BaseAgent):
             if transport is None:
                 self._transport_last_activity.pop(cwd, None)
                 continue
-            if self._has_active_turns_for_cwd(cwd):
-                continue
             idle_for = now - last_activity
-            if idle_for < idle_timeout:
+            has_active = self._has_active_turns_for_cwd(cwd)
+            if not self._is_transport_evictable(
+                has_active=has_active,
+                idle_for=idle_for,
+                idle_timeout=idle_timeout,
+                stuck_active_cap=stuck_active_cap,
+            ):
                 continue
 
             lock = self._transport_locks.setdefault(cwd, asyncio.Lock())
@@ -428,15 +443,30 @@ class CodexAgent(BaseAgent):
                 current_last_activity = self._transport_last_activity.get(cwd)
                 if current_transport is None or current_transport is not transport:
                     continue
-                if self._has_active_turns_for_cwd(cwd):
-                    continue
                 if current_last_activity is None:
                     continue
+                # Recheck from CURRENT state inside the lock: activity (and the
+                # active-turn flag) may have changed between the two passes.
                 idle_for = time.monotonic() - current_last_activity
-                if idle_for < idle_timeout:
+                has_active = self._has_active_turns_for_cwd(cwd)
+                if not self._is_transport_evictable(
+                    has_active=has_active,
+                    idle_for=idle_for,
+                    idle_timeout=idle_timeout,
+                    stuck_active_cap=stuck_active_cap,
+                ):
                     continue
 
-                logger.info("Evicting idle Codex transport for cwd=%s after %.1fs idle", cwd, idle_for)
+                if has_active:
+                    logger.warning(
+                        "Force-evicting stuck-active Codex transport for cwd=%s after %.1fs idle "
+                        "(active turn exceeded stuck-active cap of %.1fs; app-server presumed wedged)",
+                        cwd,
+                        idle_for,
+                        stuck_active_cap,
+                    )
+                else:
+                    logger.info("Evicting idle Codex transport for cwd=%s after %.1fs idle", cwd, idle_for)
                 try:
                     await transport.stop()
                 except Exception as exc:
@@ -458,6 +488,44 @@ class CodexAgent(BaseAgent):
                 evicted += 1
 
         return evicted
+
+    def _stuck_active_idle_eviction_cap(self, idle_timeout: float) -> Optional[float]:
+        """Idle cap after which an *active* transport is force-evicted.
+
+        Returns ``None`` when the backstop is disabled (multiplier <= 0), in
+        which case an active turn remains an absolute veto. Otherwise a
+        transport with an active turn is force-evicted once it has been idle for
+        ``max(idle_timeout * multiplier, floor)`` — the floor keeps the window
+        sane even when ``idle_timeout`` is configured very small.
+        """
+        multiplier = DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER
+        if multiplier <= 0:
+            return None
+        floor = max(0.0, float(DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS))
+        return max(idle_timeout * multiplier, floor)
+
+    def _is_transport_evictable(
+        self,
+        *,
+        has_active: bool,
+        idle_for: float,
+        idle_timeout: float,
+        stuck_active_cap: Optional[float],
+    ) -> bool:
+        """Decide whether an idle transport is eligible for eviction.
+
+        Pure decision (no lookups), so callers evaluate the active-turn flag
+        exactly once. An idle transport with no active turn is evictable once it
+        crosses the normal ``idle_timeout``. A transport with an active turn is
+        normally vetoed, but is force-evictable once it crosses
+        ``stuck_active_cap`` (the absolute-time backstop) — the only path that
+        reaps a wedged app-server whose ``turn/completed`` never arrived.
+        """
+        if has_active:
+            if stuck_active_cap is None:
+                return False
+            return idle_for >= stuck_active_cap
+        return idle_for >= idle_timeout
 
     # ------------------------------------------------------------------
     # Transport management
