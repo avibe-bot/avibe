@@ -1252,8 +1252,11 @@ class SessionHandler(BaseHandler):
         that is ``active`` but whose ``last_activity`` is older than
         ``idle_timeout * stuck_active_multiplier`` is force-evicted regardless of
         why the flag was not cleared. A genuine in-flight turn keeps touching
-        ``last_activity`` via assistant/tool messages, so it stays well under
-        this cap. Pass ``stuck_active_multiplier <= 0`` to disable the backstop.
+        ``last_activity`` via assistant/tool messages, so it normally stays well
+        under this cap. Pass ``stuck_active_multiplier <= 0`` to disable the
+        backstop. Caveat: a real turn whose single tool call runs silently for
+        longer than the cap is indistinguishable from a stuck session and would
+        be force-evicted — see ``DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER``.
         """
         if idle_timeout <= 0:
             return 0

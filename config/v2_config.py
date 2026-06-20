@@ -34,7 +34,18 @@ DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 600
 # eviction from the receiver's flag-release logic, so a stuck-active session can
 # no longer pin its ~220MB ``claude`` subprocess until the next service restart.
 # A genuine in-flight turn keeps touching ``last_activity`` (assistant/tool
-# messages), so it stays well under this cap. Set to 0 to disable the backstop.
+# messages), so it normally stays well under this cap. Set to 0 to disable the
+# backstop.
+#
+# Trade-off: ``last_activity`` is only refreshed when an SDK message arrives.
+# Because a stuck (blocked-receiver) session and a session running a single
+# silent tool call are indistinguishable from ``last_activity`` alone, a real
+# turn whose ONE tool invocation runs silently for longer than
+# ``idle_timeout * multiplier`` (default 30min) would be force-evicted mid-turn.
+# The default 3x is chosen because Claude Code's Bash tool caps at 10min, so a
+# single 30min-silent turn is not expected in practice; raise the multiplier if
+# your deployment runs longer silent tools (e.g. long builds via custom/MCP
+# tools that emit no intermediate messages).
 DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER = 3
 DEFAULT_OPENCODE_ERROR_RETRY_LIMIT = 1
 DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX = 14
