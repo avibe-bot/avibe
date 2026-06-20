@@ -1254,6 +1254,68 @@ def test_evict_idle_sessions_evicts_stuck_active_deactivated_between_passes(monk
     assert composite_key not in controller.claude_sessions
 
 
+def test_reap_orphaned_sessions_disables_in_tree_sweep_when_pid_unresolved(monkeypatch, tmp_path: Path) -> None:
+    """If a tracked client's pid cannot be resolved, the in-tree sweep is
+    disabled so the live process is not misclassified as an orphan."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_reap(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: None)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    composite_key = f"slack_C123:{tmp_path}"
+    controller.claude_sessions[composite_key] = object()  # tracked but pid unresolved
+
+    asyncio.run(handler.reap_orphaned_claude_sessions())
+
+    assert captured["reap_in_tree"] is False
+
+
+def test_reap_orphaned_sessions_disables_in_tree_sweep_when_create_in_flight(monkeypatch, tmp_path: Path) -> None:
+    """A session create in flight (subprocess spawned, not yet tracked) disables
+    the in-tree sweep."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_reap(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    handler.claude_session_creates["slack_C123:/in/flight"] = object()
+
+    asyncio.run(handler.reap_orphaned_claude_sessions())
+
+    assert captured["reap_in_tree"] is False
+
+
+def test_reap_orphaned_sessions_enables_in_tree_sweep_when_owner_set_complete(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _fake_reap(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    controller.claude_sessions[f"slack_C123:{tmp_path}"] = object()
+
+    asyncio.run(handler.reap_orphaned_claude_sessions())
+
+    assert captured["reap_in_tree"] is True
+
+
 def test_cleanup_session_swallows_cancelled_receiver_task(monkeypatch, tmp_path: Path) -> None:
     events = []
 

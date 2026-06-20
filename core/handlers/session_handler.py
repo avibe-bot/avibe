@@ -1325,14 +1325,22 @@ class SessionHandler(BaseHandler):
         """
         owned_pids: set[int] = set()
         tracked_resume_ids: dict[str, int] = {}
+        owner_set_complete = True
         for client in list(self.claude_sessions.values()):
             pid = get_claude_client_pid(client)
             if not pid:
+                # A tracked client whose pid we cannot resolve means the owner
+                # set is incomplete: its live process would look ownerless to
+                # the in-tree sweep. Disable that sweep this round.
+                owner_set_complete = False
                 continue
             owned_pids.add(pid)
             native_session_id = getattr(client, "_vibe_native_session_id", None)
             if native_session_id:
                 tracked_resume_ids[str(native_session_id)] = pid
+        # A session create in flight has spawned a subprocess (connect()) that is
+        # not yet in claude_sessions; the in-tree sweep must not touch it.
+        creates_in_flight = bool(self.claude_session_creates)
         # Let unexpected errors surface to the caller (``periodic_cleanup``
         # logs them at error level); ``reap_orphaned_claude_processes`` already
         # absorbs the expected ``ps``-read failure internally.
@@ -1341,6 +1349,7 @@ class SessionHandler(BaseHandler):
             tracked_resume_ids=tracked_resume_ids,
             cli_path=self._get_claude_cli_path_override(),
             logger=logger,
+            reap_in_tree=owner_set_complete and not creates_in_flight,
         )
 
     async def handle_session_error(self, composite_key: str, context: MessageContext, error: Exception):

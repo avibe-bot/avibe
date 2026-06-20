@@ -332,3 +332,52 @@ def test_reap_orphaned_ignores_unrelated_out_of_tree_claude(monkeypatch):
 
     assert reaped == 0
     assert signals == []
+
+
+def test_reap_orphaned_skips_in_tree_sweep_when_disabled(monkeypatch):
+    """reap_in_tree=False (incomplete owner set) must not touch in-tree pids."""
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"101 {service_pid} /usr/local/bin/claude --resume sess-2 --model opus",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {101: 999.0}, {101})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids=set(),
+            tracked_resume_ids={},
+            logger=logging.getLogger("test.claude_orphan"),
+            reap_in_tree=False,
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []
+
+
+def test_reap_orphaned_ignores_out_of_tree_resume_match_not_init_parented(monkeypatch):
+    """A user's manual `claude --resume <id>` (parented to a shell, not init)
+    must not be reaped even though the resume id matches a tracked session."""
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"100 {service_pid} /usr/local/bin/claude --resume sess-1 --model opus",
+            "300 999 /usr/local/bin/claude --resume sess-1 --model opus",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {300: 999.0}, {100, 300})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids={100},
+            tracked_resume_ids={"sess-1": 100},
+            logger=logging.getLogger("test.claude_orphan"),
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []
