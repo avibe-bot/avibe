@@ -1249,6 +1249,13 @@ class Controller:
                         await self.session_handler.evict_idle_sessions(claude_timeout)
                     except Exception as e:
                         logger.error("Claude idle cleanup failed: %s", e, exc_info=True)
+                    try:
+                        # Defense-in-depth: reconcile live claude subprocesses
+                        # against tracked sessions and reap orphans (no-owner /
+                        # cross-restart) the idle-eviction path cannot see.
+                        await self.session_handler.reap_orphaned_claude_sessions()
+                    except Exception as e:
+                        logger.error("Claude orphan reaper failed: %s", e, exc_info=True)
 
                 if codex_timeout > 0:
                     codex_agent = self.agent_service.agents.get("codex")

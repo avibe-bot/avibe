@@ -204,6 +204,22 @@ async def reap_duplicate_claude_resume_processes(
         native_session_id,
         keep_pid,
     )
+    return await _reap_pid_set(target_pids, terminate_timeout=terminate_timeout, logger=logger)
+
+
+async def _reap_pid_set(
+    target_pids: set[int],
+    *,
+    terminate_timeout: float,
+    logger: logging.Logger,
+) -> int:
+    """SIGTERM a set of pids, wait briefly, then SIGKILL the survivors.
+
+    Returns the number of pids that were targeted.
+    """
+    if not target_pids:
+        return 0
+
     for pid in sorted(target_pids):
         _signal_pid(pid, signal.SIGTERM, logger)
 
@@ -223,3 +239,135 @@ async def reap_duplicate_claude_resume_processes(
         _signal_pid(pid, KILL_SIGNAL, logger)
 
     return len(target_pids)
+
+
+def _process_ages(pids: set[int]) -> dict[int, float]:
+    """Best-effort elapsed-seconds-since-start for the given pids via ``ps``.
+
+    Returns a ``{pid: age_seconds}`` map. Pids whose age cannot be determined
+    are simply absent (callers treat unknown age conservatively: do not reap).
+    Portable across Linux/macOS ``ps`` (``etimes`` = elapsed seconds).
+    """
+    if not pids:
+        return {}
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "pid=,etimes=", "-p", ",".join(str(p) for p in sorted(pids))],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+        )
+    except Exception:
+        return {}
+    ages: dict[int, float] = {}
+    for line in (result.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            ages[int(parts[0])] = float(parts[1])
+        except ValueError:
+            continue
+    return ages
+
+
+async def reap_orphaned_claude_processes(
+    *,
+    owned_pids: set[int],
+    tracked_resume_ids: dict[str, int],
+    cli_path: str | None = None,
+    logger: logging.Logger,
+    min_age_seconds: float = 60.0,
+    terminate_timeout: float = 2.0,
+) -> int:
+    """Reap leaked Claude CLI processes (defense-in-depth orphan reaper).
+
+    Two orphan classes are reaped:
+
+    (a) **In-process orphan** — a ``claude`` process inside the current
+        service's process tree that is no longer referenced by any tracked
+        session (``owned_pids``). This happens when session tracking is lost
+        but the subprocess survives.
+
+    (b) **Cross-restart orphan** — a ``claude`` process *outside* the current
+        service tree (e.g. reparented to init after a previous service crashed
+        or restarted) that carries a ``--resume <native_id>`` for a session we
+        currently own under a *different* pid. Matching the unique native
+        session id makes this safe against unrelated ``claude`` processes.
+
+    Safety guards:
+    - ``owned_pids`` and their descendants are never reaped.
+    - The current service pid is never reaped.
+    - A ``min_age_seconds`` grace window protects a freshly spawned process
+      that has not yet been registered into the tracked set (TOCTOU). A
+      candidate whose age cannot be determined is **not** reaped.
+    """
+    if os.name == "nt":
+        return 0
+
+    try:
+        all_rows = _parse_ps_rows(_run_ps())
+    except Exception:
+        logger.debug("Failed to read process table for Claude orphan cleanup", exc_info=True)
+        return 0
+
+    service_pid = os.getpid()
+    service_tree = {service_pid} | _descendant_pids(all_rows, service_pid)
+
+    owned_all: set[int] = {pid for pid in owned_pids if isinstance(pid, int) and pid > 0}
+    for pid in list(owned_all):
+        owned_all.update(_descendant_pids(all_rows, pid))
+
+    claude_rows = [
+        row
+        for row in all_rows
+        if row.pid != service_pid and _command_is_claude(row.command, cli_path=cli_path)
+    ]
+
+    candidates: set[int] = set()
+
+    # (a) in-tree claude processes we no longer own.
+    for row in claude_rows:
+        if row.pid in service_tree and row.pid not in owned_all:
+            candidates.add(row.pid)
+
+    # (b) out-of-tree claude carrying a tracked --resume id under a foreign pid.
+    for native_id, owner_pid in tracked_resume_ids.items():
+        if not native_id:
+            continue
+        for row in claude_rows:
+            if row.pid in service_tree:
+                continue  # in-tree handled by (a) / the duplicate reaper
+            if row.pid == owner_pid:
+                continue
+            if _command_has_resume(row.command, native_id):
+                candidates.add(row.pid)
+
+    candidates -= owned_all
+    candidates.discard(service_pid)
+    if not candidates:
+        return 0
+
+    # TOCTOU grace window: never reap a process younger than the cutoff, and
+    # never reap one whose age we cannot establish.
+    ages = _process_ages(candidates)
+    aged_candidates = {pid for pid in candidates if ages.get(pid, 0.0) >= min_age_seconds}
+    if not aged_candidates:
+        return 0
+
+    # Reap each orphan together with its descendants (e.g. node helpers).
+    target_pids: set[int] = set(aged_candidates)
+    for pid in aged_candidates:
+        target_pids.update(_descendant_pids(all_rows, pid))
+    target_pids -= owned_all
+    target_pids.discard(service_pid)
+    if not target_pids:
+        return 0
+
+    logger.warning(
+        "Reaping %d orphaned Claude process(es) (no owning session): %s",
+        len(target_pids),
+        sorted(target_pids),
+    )
+    return await _reap_pid_set(target_pids, terminate_timeout=terminate_timeout, logger=logger)
