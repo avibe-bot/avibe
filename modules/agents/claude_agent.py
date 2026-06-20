@@ -654,31 +654,48 @@ class ClaudeAgent(BaseAgent):
                         # stale straggler. No-op for fresh sessions / absent tokens.
                         self._adopt_pending_turn_token(context, pending_request)
 
-                        await self.emit_result_message(
-                            context,
-                            result_text,
-                            subtype=getattr(message, "subtype", "") or "",
-                            duration_ms=getattr(message, "duration_ms", 0),
-                            parse_mode="markdown",
-                            request=pending_request,
-                        )
-                        native_session_id = self._native_session_ids.get(composite_key) or self._reserved_native_session_id(
-                            context,
-                            self.name,
-                        ) or self._reserved_native_session_id(
-                            getattr(pending_request, "context", None),
-                            self.name,
-                        )
-                        if pending_request is not None and native_session_id:
-                            self._maybe_backfill_session_title(pending_request, native_session_id)
+                        # A terminal result settles the turn. The pending request
+                        # was already popped above, so the idle transition must run
+                        # even if emitting the result or backfilling the title
+                        # raises — otherwise the inner ``except … continue`` below
+                        # would swallow the error, skip the mark-idle, and leave the
+                        # session pinned ``active`` (exempt from idle eviction until
+                        # the next service restart). Run it in a ``finally``.
+                        try:
+                            await self.emit_result_message(
+                                context,
+                                result_text,
+                                subtype=getattr(message, "subtype", "") or "",
+                                duration_ms=getattr(message, "duration_ms", 0),
+                                parse_mode="markdown",
+                                request=pending_request,
+                            )
+                            native_session_id = self._native_session_ids.get(composite_key) or self._reserved_native_session_id(
+                                context,
+                                self.name,
+                            ) or self._reserved_native_session_id(
+                                getattr(pending_request, "context", None),
+                                self.name,
+                            )
+                            if pending_request is not None and native_session_id:
+                                self._maybe_backfill_session_title(pending_request, native_session_id)
 
-                        self._discard_pending_reaction(composite_key)
-
-                        self._last_assistant_text.pop(composite_key, None)
-                        is_idle = self._mark_session_idle_if_no_pending_requests(composite_key)
-                        session = await self.session_manager.get_or_create_session(context.user_id, context.channel_id)
-                        if session and is_idle:
-                            session.session_active[composite_key] = False
+                            self._discard_pending_reaction(composite_key)
+                            self._last_assistant_text.pop(composite_key, None)
+                        finally:
+                            is_idle = self._mark_session_idle_if_no_pending_requests(composite_key)
+                            try:
+                                session = await self.session_manager.get_or_create_session(
+                                    context.user_id, context.channel_id
+                                )
+                                if session and is_idle:
+                                    session.session_active[composite_key] = False
+                            except Exception:
+                                logger.debug(
+                                    "claude: failed to update session_active after result for %s",
+                                    composite_key,
+                                    exc_info=True,
+                                )
                         continue
 
                     # Ignore UserMessage/tool results; toolcalls are emitted from ToolUseBlock.
