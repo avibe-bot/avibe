@@ -54,14 +54,19 @@ def _parse_ps_rows(output: str) -> list[ClaudeProcessRow]:
     return rows
 
 
-def _command_has_resume(command: str, native_session_id: str) -> bool:
+def _command_has_flag_value(command: str, flag: str, value: str) -> bool:
+    """True if ``command`` passes ``flag value`` or ``flag=value`` (token-exact)."""
     parts = command.split()
     for index, part in enumerate(parts):
-        if part == "--resume" and index + 1 < len(parts) and parts[index + 1] == native_session_id:
+        if part == flag and index + 1 < len(parts) and parts[index + 1] == value:
             return True
-        if part.startswith("--resume=") and part.removeprefix("--resume=") == native_session_id:
+        if part == f"{flag}={value}":
             return True
     return False
+
+
+def _command_has_resume(command: str, native_session_id: str) -> bool:
+    return _command_has_flag_value(command, "--resume", native_session_id)
 
 
 def _command_has_stream_json_input(command: str) -> bool:
@@ -73,13 +78,7 @@ def _command_has_stream_json_input(command: str) -> bool:
     spawned by another backend or a watch command — does not, so this scopes
     the in-tree orphan sweep to SDK-spawned session subprocesses only.
     """
-    parts = command.split()
-    for index, part in enumerate(parts):
-        if part == "--input-format" and index + 1 < len(parts) and parts[index + 1] == "stream-json":
-            return True
-        if part == "--input-format=stream-json":
-            return True
-    return False
+    return _command_has_flag_value(command, "--input-format", "stream-json")
 
 
 def _command_is_claude(command: str, cli_path: str | None = None) -> bool:
@@ -116,10 +115,20 @@ def find_claude_resume_processes(native_session_id: str, *, cli_path: str | None
     ]
 
 
-def _descendant_pids(rows: list[ClaudeProcessRow], root_pid: int) -> set[int]:
+def _build_children_map(rows: list[ClaudeProcessRow]) -> dict[int, list[int]]:
     children: dict[int, list[int]] = {}
     for row in rows:
         children.setdefault(row.ppid, []).append(row.pid)
+    return children
+
+
+def _descendant_pids(
+    rows: list[ClaudeProcessRow],
+    root_pid: int,
+    children: dict[int, list[int]] | None = None,
+) -> set[int]:
+    if children is None:
+        children = _build_children_map(rows)
 
     descendants: set[int] = set()
     stack = list(children.get(root_pid, []))
@@ -348,12 +357,16 @@ async def reap_orphaned_claude_processes(
         logger.debug("Failed to read process table for Claude orphan cleanup", exc_info=True)
         return 0
 
+    # Build the parent->children index once and reuse it for every descendant
+    # walk below (service tree, owned descendants, orphan descendants).
+    children = _build_children_map(all_rows)
+
     service_pid = os.getpid()
-    service_tree = {service_pid} | _descendant_pids(all_rows, service_pid)
+    service_tree = {service_pid} | _descendant_pids(all_rows, service_pid, children)
 
     owned_all: set[int] = {pid for pid in owned_pids if isinstance(pid, int) and pid > 0}
     for pid in list(owned_all):
-        owned_all.update(_descendant_pids(all_rows, pid))
+        owned_all.update(_descendant_pids(all_rows, pid, children))
 
     claude_rows = [
         row
@@ -410,7 +423,7 @@ async def reap_orphaned_claude_processes(
     # Reap each orphan together with its descendants (e.g. node helpers).
     target_pids: set[int] = set(aged_candidates)
     for pid in aged_candidates:
-        target_pids.update(_descendant_pids(all_rows, pid))
+        target_pids.update(_descendant_pids(all_rows, pid, children))
     target_pids -= owned_all
     target_pids.discard(service_pid)
     if not target_pids:

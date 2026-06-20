@@ -104,6 +104,22 @@ class _StubClaudeAgentOptions:
         self.continue_conversation = False
 
 
+def _disconnect_counting_client(captured: dict[str, Any]):
+    """Stub ClaudeSDKClient that records how many times it was disconnected."""
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["disconnects"] = 0
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            captured["disconnects"] += 1
+
+    return _StubClaudeSDKClient
+
+
 def test_to_app_config_preserves_claude_cli_path() -> None:
     v2 = V2Config(
         mode="self_host",
@@ -1047,18 +1063,8 @@ def test_evict_idle_sessions_force_evicts_stuck_active_session(monkeypatch, tmp_
     """
     captured: dict[str, Any] = {}
 
-    class _StubClaudeSDKClient:
-        def __init__(self, options):
-            captured["disconnects"] = 0
-
-        async def connect(self) -> None:
-            return None
-
-        async def disconnect(self) -> None:
-            captured["disconnects"] += 1
-
     monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
@@ -1085,18 +1091,8 @@ def test_evict_idle_sessions_keeps_stuck_active_below_cap(monkeypatch, tmp_path:
     """An active session below the absolute cap is still protected."""
     captured: dict[str, Any] = {}
 
-    class _StubClaudeSDKClient:
-        def __init__(self, options):
-            captured["disconnects"] = 0
-
-        async def connect(self) -> None:
-            return None
-
-        async def disconnect(self) -> None:
-            captured["disconnects"] += 1
-
     monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
@@ -1122,18 +1118,8 @@ def test_evict_idle_sessions_stuck_active_backstop_can_be_disabled(monkeypatch, 
     """``stuck_active_multiplier <= 0`` restores the absolute active veto."""
     captured: dict[str, Any] = {}
 
-    class _StubClaudeSDKClient:
-        def __init__(self, options):
-            captured["disconnects"] = 0
-
-        async def connect(self) -> None:
-            return None
-
-        async def disconnect(self) -> None:
-            captured["disconnects"] += 1
-
     monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
@@ -1161,18 +1147,8 @@ def test_evict_idle_sessions_spares_session_refreshed_between_passes(monkeypatch
     """
     captured: dict[str, Any] = {}
 
-    class _StubClaudeSDKClient:
-        def __init__(self, options):
-            captured["disconnects"] = 0
-
-        async def connect(self) -> None:
-            return None
-
-        async def disconnect(self) -> None:
-            captured["disconnects"] += 1
-
     monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
@@ -1207,18 +1183,8 @@ def test_evict_idle_sessions_evicts_stuck_active_deactivated_between_passes(monk
     """
     captured: dict[str, Any] = {}
 
-    class _StubClaudeSDKClient:
-        def __init__(self, options):
-            captured["disconnects"] = 0
-
-        async def connect(self) -> None:
-            return None
-
-        async def disconnect(self) -> None:
-            captured["disconnects"] += 1
-
     monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
-    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
