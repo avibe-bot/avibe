@@ -82,13 +82,12 @@ Hard rule:
 
 - **Never restart the local `vibe` service for routine verification.**
 - The local `vibe` process may be the coding agent runtime itself; restarting it can interrupt the session.
-- **Tests and probes must never mutate the current local environment or live user state.**
-  Do not run commands, setup flows, migrations, installers, config writes, or
-  agent detection/install tests against `~/.avibe`, legacy `~/.vibe_remote`, the user's shell
-  environment, or the running local service unless the user explicitly asks for
-  that exact local operation. Use an isolated `VIBE_REMOTE_HOME`, a temporary
-  fixture directory, the Incus regression environment, or the existing regression
-  environment instead.
+- **Tests and probes must be hermetic by default.** Treat `$HOME`, XDG dirs,
+  keychains, CLI config/token stores, running services, browser profiles, and
+  cloud accounts as production data unless the user explicitly asks otherwise.
+- Any test that reaches write-capable production paths must redirect the whole
+  call path to test-owned state and prove a representative write cannot touch
+  real local or external user state; `uses_real_paths` tests must remain read-only.
 - Unless the user explicitly asks otherwise, use the Incus regression environment for user-facing verification.
 
 ### Regression Testing (Incus)
