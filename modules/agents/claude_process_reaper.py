@@ -64,6 +64,24 @@ def _command_has_resume(command: str, native_session_id: str) -> bool:
     return False
 
 
+def _command_has_stream_json_input(command: str) -> bool:
+    """True if the command runs the Claude CLI in bidirectional streaming mode.
+
+    The Claude Agent SDK always launches the session CLI with
+    ``--input-format stream-json`` (see the SDK's subprocess transport). A
+    user's interactive ``claude`` or a one-shot ``claude -p`` — and ``claude``
+    spawned by another backend or a watch command — does not, so this scopes
+    the in-tree orphan sweep to SDK-spawned session subprocesses only.
+    """
+    parts = command.split()
+    for index, part in enumerate(parts):
+        if part == "--input-format" and index + 1 < len(parts) and parts[index + 1] == "stream-json":
+            return True
+        if part == "--input-format=stream-json":
+            return True
+    return False
+
+
 def _command_is_claude(command: str, cli_path: str | None = None) -> bool:
     parts = command.split()
     if not parts:
@@ -288,14 +306,15 @@ async def reap_orphaned_claude_processes(
 
     Two orphan classes are reaped:
 
-    (a) **In-process orphan** — a ``claude`` process inside the current
-        service's process tree that is no longer referenced by any tracked
-        session (``owned_pids``). This happens when session tracking is lost
-        but the subprocess survives. Only attempted when ``reap_in_tree`` is
-        True: the caller must pass False whenever the owner set may be
-        incomplete (a tracked client's pid could not be resolved, or a session
-        create is in flight), otherwise a live tracked/connecting process could
-        be misclassified as an orphan and killed.
+    (a) **In-process orphan** — a Claude SDK *session* subprocess (launched
+        with ``--input-format stream-json``) inside the current service's
+        process tree that is no longer referenced by any tracked session
+        (``owned_pids``). Scoping to the SDK streaming signature avoids reaping
+        a ``claude`` launched by another backend or a watch command. Only
+        attempted when ``reap_in_tree`` is True: the caller must pass False
+        whenever the owner set may be incomplete (a tracked client's pid could
+        not be resolved, or a session create is in flight), otherwise a live
+        tracked/connecting process could be misclassified as an orphan.
 
     (b) **Cross-restart orphan** — a ``claude`` process reparented to init
         (``ppid == 1``) after a previous service crashed/restarted, carrying a
@@ -344,12 +363,19 @@ async def reap_orphaned_claude_processes(
 
     candidates: set[int] = set()
 
-    # (a) in-tree claude processes we no longer own. Skipped when the owner set
-    # may be incomplete (unresolved tracked pid / session create in flight),
-    # since we could not then tell a live tracked process from an orphan.
+    # (a) in-tree claude processes we no longer own. Scoped to SDK session
+    # subprocesses (``--input-format stream-json``) so a `claude` launched by
+    # another backend or a watch command is never reaped. Skipped entirely when
+    # the owner set may be incomplete (unresolved tracked pid / session create
+    # in flight), since we could not then tell a live tracked process from an
+    # orphan.
     if reap_in_tree:
         for row in claude_rows:
-            if row.pid in service_tree and row.pid not in owned_all:
+            if (
+                row.pid in service_tree
+                and row.pid not in owned_all
+                and _command_has_stream_json_input(row.command)
+            ):
                 candidates.add(row.pid)
 
     # (b) init-reparented (ppid == 1) cross-restart orphan carrying a tracked
