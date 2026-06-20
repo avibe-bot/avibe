@@ -101,7 +101,7 @@ Entry points:
 
 - default: `./scripts/run_regression.sh`
 - direct: `python3 scripts/incus_regression.py up --target master`
-- macOS/Lima: run through `INCUS_CMD="limactl shell avibe-incus-regression -- sudo incus"`
+- macOS/Lima: `INCUS_CMD="limactl shell avibe-incus-regression -- sudo incus" ./scripts/run_regression.sh`
 
 Hard rules:
 
@@ -112,8 +112,9 @@ Hard rules:
   preparation, readiness checks, Show Runtime setup, metadata, and cleanup
 - `master` is the long-running unified four-platform environment; keep it online,
   preserve product state, sync source, and restart the service in place
-- `worktree` targets are temporary isolated environments; delete with the runner
-  when merged, abandoned, or stale
+- `worktree` targets are temporary isolated environments; delete with
+  `python3 scripts/incus_regression.py delete --target worktree --yes` or
+  `cleanup-stale --yes` when merged, abandoned, or stale
 - never use `--reset-config` / `--reset-all`, wipe regression state, or overwrite
   Avibe Cloud pairing / `remote_access` just to make probes pass unless asked
 - after any regression update, verify service health before reporting success
@@ -220,7 +221,7 @@ Source-of-truth rule:
 
 ### Frontend (UI)
 
-- source lives in `ui/`; build with `npm run build`; `ui/dist/` is served by `vibe/ui_server.py`
+- source lives in `ui/`; build with `cd ui && npm run build`; `ui/dist/` is served by `vibe/ui_server.py`
 - reuse `ui/src/components/ui/` primitives first (`Button`, `Badge`, `Card`, `Input`, `Popover`, `Dialog`, etc.); extend via variants/sizes/props before creating new primitives
 - follow the reuse ladder for UI and shared backend logic: inventory existing patterns -> reuse -> extend -> promote near-duplicates -> create a reusable unit only when needed; extract on the third repeat
 - `design.pen` is the visual source of truth; map spacing, type, radius, color, and shadow to exact tokens/classes, add missing tokens instead of hardcoding, and verify against the exported frame when visual fidelity matters
