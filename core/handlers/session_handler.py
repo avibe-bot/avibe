@@ -1301,14 +1301,14 @@ class SessionHandler(BaseHandler):
                     "Force-evicting stuck-active Claude session %s after %.1fs idle "
                     "(>= %sx idle_timeout=%ss); receiver never released the active flag",
                     composite_key,
-                    idle_for,
+                    recheck_idle,
                     stuck_active_multiplier,
                     idle_timeout,
                 )
             else:
                 if recheck_idle < idle_timeout:
                     continue
-                logger.info("Evicting idle Claude session %s after %.1fs idle", composite_key, idle_for)
+                logger.info("Evicting idle Claude session %s after %.1fs idle", composite_key, recheck_idle)
             await self.cleanup_session(composite_key)
             evicted += 1
 
