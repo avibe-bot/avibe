@@ -701,6 +701,42 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(invalidated, ["session-1"])
         self.assertEqual(cleared_turns, ["session-1"])
 
+    async def test_evict_idle_transports_force_evict_preserves_state_when_stop_fails(self):
+        # Stuck-active force-eviction path: if transport.stop() raises, the
+        # transport and its bookkeeping must be left intact (next sweep retries).
+        agent = object.__new__(CodexAgent)
+        invalidated = []
+        cleared_turns = []
+
+        async def stop_transport():
+            raise RuntimeError("boom")
+
+        transport = SimpleNamespace(stop=stop_transport)
+        lock = asyncio.Lock()
+        agent._transports = {"/tmp/work": transport}
+        agent._transport_last_activity = {"/tmp/work": 0.0}
+        agent._transport_locks = {"/tmp/work": lock}
+        agent._session_mgr = SimpleNamespace(
+            sessions_for_cwd=lambda cwd: ["session-1"] if cwd == "/tmp/work" else [],
+            invalidate_thread=lambda base_session_id: invalidated.append(base_session_id),
+        )
+        agent._turn_registry = SimpleNamespace(
+            get_active_turn=lambda base_session_id: "turn-1",
+            has_pending_turn_start=lambda base_session_id: False,
+            clear_session=lambda base_session_id: cleared_turns.append(base_session_id),
+        )
+        agent._session_locks = {"session-1": asyncio.Lock()}
+        agent.sessions = SimpleNamespace(clear_agent_session_mapping=Mock())
+
+        with patch.object(_MODULE.time, "monotonic", return_value=2000.0):
+            evicted = await agent.evict_idle_transports(600)
+
+        self.assertEqual(evicted, 0)
+        self.assertIs(agent._transports["/tmp/work"], transport)
+        self.assertEqual(agent._transport_last_activity["/tmp/work"], 0.0)
+        self.assertEqual(invalidated, [])
+        self.assertEqual(cleared_turns, [])
+
     async def test_get_or_create_transport_fast_path_waits_for_transport_lock(self):
         agent = object.__new__(CodexAgent)
         lock = asyncio.Lock()
