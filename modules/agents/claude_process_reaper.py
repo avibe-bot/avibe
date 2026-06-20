@@ -282,6 +282,7 @@ async def reap_orphaned_claude_processes(
     logger: logging.Logger,
     min_age_seconds: float = 60.0,
     terminate_timeout: float = 2.0,
+    reap_in_tree: bool = True,
 ) -> int:
     """Reap leaked Claude CLI processes (defense-in-depth orphan reaper).
 
@@ -290,13 +291,21 @@ async def reap_orphaned_claude_processes(
     (a) **In-process orphan** — a ``claude`` process inside the current
         service's process tree that is no longer referenced by any tracked
         session (``owned_pids``). This happens when session tracking is lost
-        but the subprocess survives.
+        but the subprocess survives. Only attempted when ``reap_in_tree`` is
+        True: the caller must pass False whenever the owner set may be
+        incomplete (a tracked client's pid could not be resolved, or a session
+        create is in flight), otherwise a live tracked/connecting process could
+        be misclassified as an orphan and killed.
 
-    (b) **Cross-restart orphan** — a ``claude`` process *outside* the current
-        service tree (e.g. reparented to init after a previous service crashed
-        or restarted) that carries a ``--resume <native_id>`` for a session we
-        currently own under a *different* pid. Matching the unique native
-        session id makes this safe against unrelated ``claude`` processes.
+    (b) **Cross-restart orphan** — a ``claude`` process reparented to init
+        (``ppid == 1``) after a previous service crashed/restarted, carrying a
+        ``--resume <native_id>`` for a session we currently own under a
+        *different* pid. Requiring ``ppid == 1`` (plus the unique native id)
+        keeps this from touching a user's manually-launched ``claude --resume``
+        of the same conversation (parented to their shell) or another live
+        Avibe instance's process (parented to that instance). The trade-off is
+        that an orphan reparented to a non-init subreaper (e.g. a systemd
+        service manager) is not reaped here.
 
     Safety guards:
     - ``owned_pids`` and their descendants are never reaped.
@@ -335,18 +344,26 @@ async def reap_orphaned_claude_processes(
 
     candidates: set[int] = set()
 
-    # (a) in-tree claude processes we no longer own.
-    for row in claude_rows:
-        if row.pid in service_tree and row.pid not in owned_all:
-            candidates.add(row.pid)
+    # (a) in-tree claude processes we no longer own. Skipped when the owner set
+    # may be incomplete (unresolved tracked pid / session create in flight),
+    # since we could not then tell a live tracked process from an orphan.
+    if reap_in_tree:
+        for row in claude_rows:
+            if row.pid in service_tree and row.pid not in owned_all:
+                candidates.add(row.pid)
 
-    # (b) out-of-tree claude carrying a tracked --resume id under a foreign pid.
+    # (b) init-reparented (ppid == 1) cross-restart orphan carrying a tracked
+    # --resume id under a foreign pid. The ppid==1 requirement excludes a
+    # user's manual `claude --resume` (parented to a shell) and another live
+    # Avibe instance's process (parented to that instance).
     for native_id, owner_pid in tracked_resume_ids.items():
         if not native_id:
             continue
         for row in claude_rows:
             if row.pid in service_tree:
                 continue  # in-tree handled by (a) / the duplicate reaper
+            if row.ppid != 1:
+                continue  # only reap true init-reparented orphans
             if row.pid == owner_pid:
                 continue
             if _command_has_resume(row.command, native_id):
