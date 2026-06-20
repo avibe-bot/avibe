@@ -679,10 +679,13 @@ class ClaudeAgent(BaseAgent):
                             )
                             if pending_request is not None and native_session_id:
                                 self._maybe_backfill_session_title(pending_request, native_session_id)
-
+                        finally:
+                            # Settle the turn regardless of an emit/backfill
+                            # failure: clear the loading reaction and the stale
+                            # assistant-text fallback, then release the active
+                            # flag so the session can be idle-evicted.
                             self._discard_pending_reaction(composite_key)
                             self._last_assistant_text.pop(composite_key, None)
-                        finally:
                             is_idle = self._mark_session_idle_if_no_pending_requests(composite_key)
                             try:
                                 session = await self.session_manager.get_or_create_session(

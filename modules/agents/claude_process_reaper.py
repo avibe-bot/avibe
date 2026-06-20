@@ -246,7 +246,9 @@ def _process_ages(pids: set[int]) -> dict[int, float]:
 
     Returns a ``{pid: age_seconds}`` map. Pids whose age cannot be determined
     are simply absent (callers treat unknown age conservatively: do not reap).
-    Portable across Linux/macOS ``ps`` (``etimes`` = elapsed seconds).
+    ``etimes`` (elapsed seconds) is available on Linux procps-ng and macOS; on
+    busybox ``ps`` (Alpine) it is unsupported, so this returns ``{}`` and the
+    caller reaps nothing — the safe conservative fallback.
     """
     if not pids:
         return {}
@@ -366,7 +368,9 @@ async def reap_orphaned_claude_processes(
         return 0
 
     logger.warning(
-        "Reaping %d orphaned Claude process(es) (no owning session): %s",
+        "Reaping %d orphaned Claude process(es) with no owning session "
+        "(%d pids incl. descendants): %s",
+        len(aged_candidates),
         len(target_pids),
         sorted(target_pids),
     )

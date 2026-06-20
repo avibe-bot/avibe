@@ -1153,6 +1153,52 @@ def test_evict_idle_sessions_stuck_active_backstop_can_be_disabled(monkeypatch, 
     assert composite_key in controller.claude_sessions
 
 
+def test_evict_idle_sessions_spares_session_refreshed_between_passes(monkeypatch, tmp_path: Path) -> None:
+    """The recheck pass re-reads ``last_activity`` from current state.
+
+    A session that looked idle in the collect pass but was touched (a new
+    message arrived) before the recheck pass must NOT be evicted.
+    """
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["disconnects"] = 0
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            captured["disconnects"] += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    _run_session(handler, context)
+
+    composite_key = f"slack_C123:{tmp_path}"
+
+    class _RefreshingActivity(dict):
+        # Collect pass iterates .items() and sees the stale 0.0 (idle 1000s);
+        # the recheck pass calls .get() and sees a freshly-touched 900.0
+        # (idle 100s < idle_timeout), so the session must be spared.
+        def get(self, key, default=None):
+            return 900.0
+
+    handler.session_last_activity = _RefreshingActivity({composite_key: 0.0})
+
+    evicted = asyncio.run(handler.evict_idle_sessions(600))
+
+    assert evicted == 0
+    assert captured["disconnects"] == 0
+    assert composite_key in controller.claude_sessions
+
+
 def test_cleanup_session_swallows_cancelled_receiver_task(monkeypatch, tmp_path: Path) -> None:
     events = []
 

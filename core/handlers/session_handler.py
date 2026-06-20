@@ -1330,16 +1330,15 @@ class SessionHandler(BaseHandler):
             native_session_id = getattr(client, "_vibe_native_session_id", None)
             if native_session_id:
                 tracked_resume_ids[str(native_session_id)] = pid
-        try:
-            return await reap_orphaned_claude_processes(
-                owned_pids=owned_pids,
-                tracked_resume_ids=tracked_resume_ids,
-                cli_path=self._get_claude_cli_path_override(),
-                logger=logger,
-            )
-        except Exception:
-            logger.debug("Claude orphan reaper failed", exc_info=True)
-            return 0
+        # Let unexpected errors surface to the caller (``periodic_cleanup``
+        # logs them at error level); ``reap_orphaned_claude_processes`` already
+        # absorbs the expected ``ps``-read failure internally.
+        return await reap_orphaned_claude_processes(
+            owned_pids=owned_pids,
+            tracked_resume_ids=tracked_resume_ids,
+            cli_path=self._get_claude_cli_path_override(),
+            logger=logger,
+        )
 
     async def handle_session_error(self, composite_key: str, context: MessageContext, error: Exception):
         """Handle session-related errors"""
