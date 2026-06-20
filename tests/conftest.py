@@ -20,6 +20,15 @@ written — only its env-var-set branch is exercised under isolation, and
 the function itself is never replaced, so the suite still catches
 regressions in path-resolution logic.
 
+The same hazard applies to the agent backends' on-disk credential files:
+Codex resolves its home from ``CODEX_HOME`` (falling back to ``~/.codex``)
+and Claude Code from ``CLAUDE_CONFIG_DIR`` (falling back to ``~/.claude``).
+Tests that drive ``apply_codex_auth`` / ``apply_claude_auth`` — directly or
+through the auth-setup scenario harness — would otherwise rewrite the
+developer's real ``~/.codex/auth.json`` (dropping ``OPENAI_API_KEY``) and
+``~/.claude/settings.json`` (dropping ``ANTHROPIC_*`` env). We pin both to
+per-test tmp dirs for the same reason.
+
 Path-resolution tests (e.g. ``tests/test_v2_paths.py::test_paths_are_under_home``)
 intentionally cover the env-var-unset branch where ``get_vibe_remote_dir``
 falls back to the default home. Those opt out with
@@ -39,6 +48,12 @@ def _isolate_vibe_remote_home(request, tmp_path, monkeypatch):
         return
     monkeypatch.delenv("AVIBE_HOME", raising=False)
     monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    # Keep Codex / Claude Code credential writes off the developer's real
+    # home. Tests that manage these env vars themselves (e.g. the
+    # ``get_codex_home`` env-precedence tests) override these via their own
+    # monkeypatch calls, which run after this fixture.
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
 
 
 @pytest.fixture(autouse=True)
