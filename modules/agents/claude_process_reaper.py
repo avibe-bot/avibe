@@ -304,12 +304,18 @@ async def reap_orphaned_claude_processes(
     - A ``min_age_seconds`` grace window protects a freshly spawned process
       that has not yet been registered into the tracked set (TOCTOU). A
       candidate whose age cannot be determined is **not** reaped.
+
+    Returns the number of pids that were signalled, which includes descendant
+    helper processes — not the number of orphan roots. The blocking ``ps``
+    reads are offloaded to a thread so this never stalls the event loop (this
+    runs on every periodic cleanup sweep).
     """
     if os.name == "nt":
         return 0
 
+    loop = asyncio.get_running_loop()
     try:
-        all_rows = _parse_ps_rows(_run_ps())
+        all_rows = _parse_ps_rows(await loop.run_in_executor(None, _run_ps))
     except Exception:
         logger.debug("Failed to read process table for Claude orphan cleanup", exc_info=True)
         return 0
@@ -352,8 +358,8 @@ async def reap_orphaned_claude_processes(
         return 0
 
     # TOCTOU grace window: never reap a process younger than the cutoff, and
-    # never reap one whose age we cannot establish.
-    ages = _process_ages(candidates)
+    # never reap one whose age we cannot establish. Offload the ``ps`` read.
+    ages = await loop.run_in_executor(None, _process_ages, candidates)
     aged_candidates = {pid for pid in candidates if ages.get(pid, 0.0) >= min_age_seconds}
     if not aged_candidates:
         return 0

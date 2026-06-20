@@ -1199,6 +1199,61 @@ def test_evict_idle_sessions_spares_session_refreshed_between_passes(monkeypatch
     assert composite_key in controller.claude_sessions
 
 
+def test_evict_idle_sessions_evicts_stuck_active_deactivated_between_passes(monkeypatch, tmp_path: Path) -> None:
+    """Stuck-active in the collect pass, deactivated before recheck.
+
+    It must still be evicted — via the normal idle path — since by the recheck
+    pass it is no longer active and is well past ``idle_timeout``.
+    """
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["disconnects"] = 0
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            captured["disconnects"] += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    _run_session(handler, context)
+
+    composite_key = f"slack_C123:{tmp_path}"
+    # Idle 2000s (>= 1800 stuck cap and >= 600 idle_timeout).
+    handler.session_last_activity[composite_key] = -1000.0
+
+    class _DeactivatingActiveSet(set):
+        def __init__(self, target_key: str):
+            super().__init__()
+            self.target_key = target_key
+            self.add(target_key)
+            self._checks = 0
+
+        def __contains__(self, item):
+            if item == self.target_key:
+                self._checks += 1
+                # active in the collect pass, deactivated by the recheck pass
+                return self._checks < 2
+            return super().__contains__(item)
+
+    handler.active_sessions = _DeactivatingActiveSet(composite_key)
+
+    evicted = asyncio.run(handler.evict_idle_sessions(600))
+
+    assert evicted == 1
+    assert captured["disconnects"] == 1
+    assert composite_key not in controller.claude_sessions
+
+
 def test_cleanup_session_swallows_cancelled_receiver_task(monkeypatch, tmp_path: Path) -> None:
     events = []
 
