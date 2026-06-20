@@ -117,6 +117,41 @@ class _FakeSession:
 
 
 class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
+    def test_percent_encode_path_preserves_round_trip_sensitive_paths(self):
+        self.assertEqual(
+            SERVER_MODULE._percent_encode_path("/tmp/小说"),
+            "/tmp/%E5%B0%8F%E8%AF%B4",
+        )
+        self.assertEqual(
+            SERVER_MODULE._percent_encode_path("/tmp/a b"),
+            "/tmp/a%20b",
+        )
+        self.assertEqual(
+            SERVER_MODULE._percent_encode_path("/tmp/a%20b"),
+            "/tmp/a%2520b",
+        )
+
+    async def test_prompt_async_percent_encodes_directory_header(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        fake_session = _FakeSession()
+
+        async def _fake_get_http_session():
+            return fake_session
+
+        manager._get_http_session = _fake_get_http_session  # type: ignore[method-assign]
+
+        await manager.prompt_async(
+            session_id="ses-1",
+            directory="/tmp/小说/a%20b",
+            text="hello",
+        )
+
+        self.assertEqual(len(fake_session.posts), 1)
+        self.assertEqual(
+            fake_session.posts[0]["headers"],
+            {"x-opencode-directory": "/tmp/%E5%B0%8F%E8%AF%B4/a%2520b"},
+        )
+
     async def test_prompt_async_includes_tools_when_provided(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         fake_session = _FakeSession()
