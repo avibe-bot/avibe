@@ -583,10 +583,18 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
             sessions_for_cwd=lambda cwd: ["session-1"] if cwd == "/tmp/work" else [],
             invalidate_thread=lambda base_session_id: invalidated.append(base_session_id),
         )
+        request = SimpleNamespace(context="ctx-1", base_session_id="session-1")
         agent._turn_registry = SimpleNamespace(
             get_active_turn=lambda base_session_id: active_turn,
             has_pending_turn_start=lambda base_session_id: False,
+            get_request_for_turn=lambda turn_id: request if turn_id == active_turn else None,
+            get_latest_request=lambda base_session_id: request,
             clear_session=lambda base_session_id: cleared_turns.append(base_session_id),
+        )
+        release_calls = []
+        agent._event_handler = SimpleNamespace(
+            _release_stream_turn=lambda context: release_calls.append(context),
+            release_calls=release_calls,
         )
         agent._session_locks = {"session-1": asyncio.Lock()}
         agent.sessions = SimpleNamespace(clear_agent_session_mapping=Mock())
@@ -608,6 +616,8 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cleared_turns, ["session-1"])
         self.assertEqual(agent._transports, {})
         self.assertEqual(agent._transport_last_activity, {})
+        # runtime gate of the force-reaped stuck turn must be settled
+        self.assertEqual(agent._event_handler.release_calls, ["ctx-1"])
 
     async def test_evict_idle_transports_keeps_active_transport_under_stuck_cap(self):
         # active turn idle past idle_timeout (600) but under the cap (1800):
@@ -700,6 +710,9 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stop_calls, ["stop"])
         self.assertEqual(invalidated, ["session-1"])
         self.assertEqual(cleared_turns, ["session-1"])
+        # reclassified as normal idle: the prior turn already settled itself,
+        # so no spurious runtime-gate release fires here.
+        self.assertEqual(agent._event_handler.release_calls, [])
 
     async def test_evict_idle_transports_force_evict_preserves_state_when_stop_fails(self):
         # Stuck-active force-eviction path: if transport.stop() raises, the

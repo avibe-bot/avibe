@@ -478,6 +478,13 @@ class CodexAgent(BaseAgent):
                 self._cwd_inodes().pop(cwd, None)
 
                 for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
+                    # A force-evicted stuck-active turn never emitted a terminal
+                    # result nor ran _release_stream_turn, so its AgentService
+                    # runtime gate (marked started in _start_turn) is still held.
+                    # Settle it before dropping the turn state, otherwise later
+                    # messages on the same runtime key queue forever (#622 ③
+                    # analog). No-op for sessions with no active turn.
+                    self._release_stuck_active_request(base_session_id)
                     # Keep the persisted thread mapping so a later transport restart
                     # can resume the same Codex conversation for this Slack thread.
                     self._session_mgr.invalidate_thread(base_session_id)
@@ -488,6 +495,37 @@ class CodexAgent(BaseAgent):
                 evicted += 1
 
         return evicted
+
+    def _release_stuck_active_request(self, base_session_id: str) -> None:
+        """Settle the runtime gate for a turn we are about to force-reap.
+
+        ``_start_turn`` marks the AgentService runtime turn started; it is
+        normally released only by a terminal result or ``_release_stream_turn``.
+        The stuck-active force-eviction path emits neither, so without this the
+        runtime key stays "in turn" and later messages queue forever. The
+        release is token-guarded by its owner, so a no-op (already-settled or
+        no active turn) is safe.
+        """
+        get_active = getattr(self._turn_registry, "get_active_turn", None)
+        active_turn = get_active(base_session_id) if callable(get_active) else None
+        if not active_turn:
+            return
+
+        request = None
+        get_for_turn = getattr(self._turn_registry, "get_request_for_turn", None)
+        if callable(get_for_turn):
+            request = get_for_turn(active_turn)
+        if request is None:
+            get_latest = getattr(self._turn_registry, "get_latest_request", None)
+            if callable(get_latest):
+                request = get_latest(base_session_id)
+
+        context = getattr(request, "context", None)
+        if context is None:
+            return
+        release = getattr(self._event_handler, "_release_stream_turn", None)
+        if callable(release):
+            release(context)
 
     def _stuck_active_idle_eviction_cap(self, idle_timeout: float) -> Optional[float]:
         """Idle cap after which an *active* transport is force-evicted.
