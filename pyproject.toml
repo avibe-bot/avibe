@@ -124,7 +124,7 @@ extend-ignore = ["E501"]
 asyncio_mode = "auto"
 markers = [
     "integration: platform integration tests requiring Docker + platform tokens",
-    "uses_real_paths: opt out of the autouse VIBE_REMOTE_HOME isolation so the test can exercise the real config.paths resolver (must remain read-only)",
+    "uses_real_paths: opt out of the autouse home/config isolation so the test can exercise real path resolvers (must remain read-only)",
 ]
 
 [dependency-groups]

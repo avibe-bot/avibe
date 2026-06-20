@@ -89,6 +89,23 @@ Hard rule:
   that exact local operation. Use an isolated `VIBE_REMOTE_HOME`, a temporary
   fixture directory, the Incus regression environment, or the existing regression
   environment instead.
+- Treat third-party agent and CLI homes as live user state too. Codex
+  `~/.codex`, Claude Code `~/.claude`, OpenCode `~/.config/opencode`,
+  `~/.opencode`, `~/.local/share/opencode`, XDG data/config dirs, keychains,
+  token stores, and similar backend-owned files are not test scratch space.
+  Tests that call real auth/config writers must redirect every resolver the
+  writer uses (`VIBE_REMOTE_HOME`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`,
+  `Path.home()`, XDG env vars, or an explicit `home=` argument) before the
+  write path runs.
+- Mocking the external login process is not enough. If the success path invokes
+  production cleanup/persistence code, assume it can still rewrite real
+  credentials unless the test proves the resolved destination is isolated.
+  Add a regression guard for any new backend credential store showing both the
+  resolved path and an actual write land under the isolated home.
+- Tests marked `uses_real_paths` are for read-only path-resolution coverage
+  only. They must not call save/apply/delete/migration/install helpers, backend
+  auth setup flows, CLI logout/login commands, or any helper that can mutate
+  files under the real home.
 - Unless the user explicitly asks otherwise, use the Incus regression environment for user-facing verification.
 
 ### Regression Testing (Incus)
@@ -329,6 +346,10 @@ Testing guidance:
 - for reusable capability-first testing guidance, use `standards/scenario-testing/AGENTS.md` as the entrypoint; project-specific scenario metadata lives under `tests/scenarios/`
 - when a scenario catalog exists, make the scenario ID visible in the automated test and in the PR description
 - for multi-step auth/setup flows, update `tests/scenarios/auth_setup/catalog.yaml` and add or update a closed-loop scenario harness case under `tests/scenarios/auth_setup/test_auth_setup_scenarios.py`; keep provider-specific parsing and heuristics in focused unit tests
+- for auth/setup tests, include negative safety coverage for live-state writes:
+  verify that backend credential homes resolve to isolated paths and that the
+  no-explicit-home write path cannot touch the developer's real Codex, Claude
+  Code, OpenCode, XDG, or keychain-backed state
 - for UI changes, run `npm run build` in `ui/`
 - for cross-platform or user-facing verification, use the Incus regression workflow
 - until CI fully covers a flow, do a manual sanity check for the affected workflow when practical
