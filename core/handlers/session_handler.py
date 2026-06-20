@@ -21,6 +21,7 @@ from modules.agents.claude_process_reaper import (
     get_claude_client_pid,
     reap_duplicate_claude_resume_processes,
 )
+from config.v2_config import DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER
 from core.avibe_cloud import avibe_cloud_url_available
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
@@ -1234,10 +1235,31 @@ class SessionHandler(BaseHandler):
         if exc is not None:
             logger.warning("Claude receiver ended with error during cleanup: %s", exc)
 
-    async def evict_idle_sessions(self, idle_timeout: float) -> int:
-        """Disconnect Claude sessions that have been idle beyond the timeout."""
+    async def evict_idle_sessions(
+        self,
+        idle_timeout: float,
+        stuck_active_multiplier: float = DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
+    ) -> int:
+        """Disconnect Claude sessions that have been idle beyond the timeout.
+
+        A session is normally exempt from eviction while it is flagged
+        ``active`` (a turn is in flight). That veto is **not** absolute: if the
+        receiver coroutine never releases the flag (e.g. it stays alive but
+        blocked on ``receive_messages`` with no stream EOF), the session would
+        otherwise be pinned forever and its ``claude`` subprocess would survive
+        until the next service restart. As an independent backstop, a session
+        that is ``active`` but whose ``last_activity`` is older than
+        ``idle_timeout * stuck_active_multiplier`` is force-evicted regardless of
+        why the flag was not cleared. A genuine in-flight turn keeps touching
+        ``last_activity`` via assistant/tool messages, so it stays well under
+        this cap. Pass ``stuck_active_multiplier <= 0`` to disable the backstop.
+        """
         if idle_timeout <= 0:
             return 0
+
+        stuck_threshold = (
+            idle_timeout * stuck_active_multiplier if stuck_active_multiplier > 0 else None
+        )
 
         now = time.monotonic()
         expired: list[tuple[str, float]] = []
@@ -1247,10 +1269,14 @@ class SessionHandler(BaseHandler):
                 self.session_last_activity.pop(composite_key, None)
                 self.active_sessions.discard(composite_key)
                 continue
+            idle_for = now - last_activity
             if composite_key in self.active_sessions:
+                # Stuck-active backstop: only evict once well past the cap.
+                if stuck_threshold is not None and idle_for >= stuck_threshold:
+                    expired.append((composite_key, idle_for))
                 continue
-            if now - last_activity >= idle_timeout:
-                expired.append((composite_key, now - last_activity))
+            if idle_for >= idle_timeout:
+                expired.append((composite_key, idle_for))
 
         evicted = 0
         for composite_key, idle_for in expired:
@@ -1259,13 +1285,26 @@ class SessionHandler(BaseHandler):
                 self.session_last_activity.pop(composite_key, None)
                 self.active_sessions.discard(composite_key)
                 continue
-            if composite_key in self.active_sessions:
-                continue
             if current_last_activity is None:
                 continue
-            if time.monotonic() - current_last_activity < idle_timeout:
-                continue
-            logger.info("Evicting idle Claude session %s after %.1fs idle", composite_key, idle_for)
+            # Re-derive the decision from current state: a session may have been
+            # touched or (de)activated between the two passes.
+            recheck_idle = time.monotonic() - current_last_activity
+            if composite_key in self.active_sessions:
+                if stuck_threshold is None or recheck_idle < stuck_threshold:
+                    continue
+                logger.warning(
+                    "Force-evicting stuck-active Claude session %s after %.1fs idle "
+                    "(>= %sx idle_timeout=%ss); receiver never released the active flag",
+                    composite_key,
+                    idle_for,
+                    stuck_active_multiplier,
+                    idle_timeout,
+                )
+            else:
+                if recheck_idle < idle_timeout:
+                    continue
+                logger.info("Evicting idle Claude session %s after %.1fs idle", composite_key, idle_for)
             await self.cleanup_session(composite_key)
             evicted += 1
 
