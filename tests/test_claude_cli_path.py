@@ -1034,6 +1034,125 @@ def test_session_handler_keeps_active_claude_session(monkeypatch, tmp_path: Path
     assert composite_key in controller.claude_sessions
 
 
+def test_evict_idle_sessions_force_evicts_stuck_active_session(monkeypatch, tmp_path: Path) -> None:
+    """The active flag is not an absolute veto.
+
+    Regression for the no-EOF / blocked-receiver leak: a receiver coroutine that
+    stays alive but blocked never releases the per-turn ``active`` flag, so the
+    session is pinned in ``active_sessions`` forever and its ``last_activity`` is
+    frozen. Once that frozen activity is older than the absolute cap
+    (``idle_timeout * multiplier``), the backstop must force-evict it. This is
+    distinct from the stream-exhausted path covered elsewhere, which relies on
+    the receiver actually terminating to release the flag.
+    """
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["disconnects"] = 0
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            captured["disconnects"] += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    _run_session(handler, context)
+
+    composite_key = f"slack_C123:{tmp_path}"
+    # Stuck-active: active flag set, but activity frozen 2000s ago. With the
+    # default 3x multiplier the cap is 1800s, so 2000s > cap -> force-evict.
+    handler.session_last_activity[composite_key] = -1000.0
+    handler.active_sessions.add(composite_key)
+
+    evicted = asyncio.run(handler.evict_idle_sessions(600))
+
+    assert evicted == 1
+    assert captured["disconnects"] == 1
+    assert composite_key not in controller.claude_sessions
+    assert composite_key not in handler.active_sessions
+
+
+def test_evict_idle_sessions_keeps_stuck_active_below_cap(monkeypatch, tmp_path: Path) -> None:
+    """An active session below the absolute cap is still protected."""
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["disconnects"] = 0
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            captured["disconnects"] += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    _run_session(handler, context)
+
+    composite_key = f"slack_C123:{tmp_path}"
+    # Idle for 1700s: past idle_timeout (600) but below the 1800s absolute cap.
+    handler.session_last_activity[composite_key] = -700.0
+    handler.active_sessions.add(composite_key)
+
+    evicted = asyncio.run(handler.evict_idle_sessions(600))
+
+    assert evicted == 0
+    assert captured["disconnects"] == 0
+    assert composite_key in controller.claude_sessions
+    assert composite_key in handler.active_sessions
+
+
+def test_evict_idle_sessions_stuck_active_backstop_can_be_disabled(monkeypatch, tmp_path: Path) -> None:
+    """``stuck_active_multiplier <= 0`` restores the absolute active veto."""
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["disconnects"] = 0
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            captured["disconnects"] += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    _run_session(handler, context)
+
+    composite_key = f"slack_C123:{tmp_path}"
+    handler.session_last_activity[composite_key] = -100000.0
+    handler.active_sessions.add(composite_key)
+
+    evicted = asyncio.run(handler.evict_idle_sessions(600, stuck_active_multiplier=0))
+
+    assert evicted == 0
+    assert captured["disconnects"] == 0
+    assert composite_key in controller.claude_sessions
+
+
 def test_cleanup_session_swallows_cancelled_receiver_task(monkeypatch, tmp_path: Path) -> None:
     events = []
 
