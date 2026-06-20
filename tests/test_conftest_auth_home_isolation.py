@@ -37,6 +37,7 @@ def test_backend_credential_homes_are_isolated_from_real_home() -> None:
     assert os.environ.get("XDG_CONFIG_HOME") == str(isolated_home / ".config")
     assert os.environ.get("XDG_DATA_HOME") == str(isolated_home / ".local" / "share")
     assert os.environ.get("XDG_CACHE_HOME") == str(isolated_home / ".cache")
+    assert os.environ.get("XDG_STATE_HOME") == str(isolated_home / ".local" / "state")
 
     # And the resolved homes must honour them rather than the real ~/.codex
     # / ~/.claude.
@@ -67,7 +68,8 @@ def test_subprocess_home_and_xdg_paths_are_isolated() -> None:
         "'expanduser': os.path.expanduser('~'), "
         "'xdg_config': os.environ.get('XDG_CONFIG_HOME'), "
         "'xdg_data': os.environ.get('XDG_DATA_HOME'), "
-        "'xdg_cache': os.environ.get('XDG_CACHE_HOME')"
+        "'xdg_cache': os.environ.get('XDG_CACHE_HOME'), "
+        "'xdg_state': os.environ.get('XDG_STATE_HOME')"
         "}))"
     )
     payload = subprocess.check_output([sys.executable, "-c", code], text=True)
@@ -80,6 +82,7 @@ def test_subprocess_home_and_xdg_paths_are_isolated() -> None:
     assert data["xdg_config"] == str(isolated_home / ".config")
     assert data["xdg_data"] == str(isolated_home / ".local" / "share")
     assert data["xdg_cache"] == str(isolated_home / ".cache")
+    assert data["xdg_state"] == str(isolated_home / ".local" / "state")
 
 
 def test_apply_auth_writes_land_under_isolated_home() -> None:

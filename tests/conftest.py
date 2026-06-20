@@ -13,7 +13,7 @@ The post-install bookkeeping in ``vibe.api._run_install_command`` then
 called ``load_config()`` / ``cfg.save()`` against the real config.json and
 persisted the fixture path, surfacing in the UI after the next restart.
 
-Isolation mechanism: we set ``HOME``, XDG config/data/cache homes, and
+Isolation mechanism: we set ``HOME``, XDG config/data/cache/state homes, and
 ``VIBE_REMOTE_HOME`` to a per-test tmp directory, and patch
 ``pathlib.Path.home`` to match. This means ``config.paths.get_vibe_remote_dir``
 runs as written — only its env-var-set branch is exercised under isolation, and
@@ -61,6 +61,7 @@ def _isolate_vibe_remote_home(request, tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(isolated_home / ".config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(isolated_home / ".local" / "share"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(isolated_home / ".cache"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(isolated_home / ".local" / "state"))
     monkeypatch.setenv("VIBE_REMOTE_HOME", str(isolated_home / ".vibe_remote"))
     # Keep Codex / Claude Code credential writes off the developer's real
     # home. Tests that manage these env vars themselves (e.g. the
