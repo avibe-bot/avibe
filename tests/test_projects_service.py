@@ -19,7 +19,7 @@ from storage.models import scope_settings, scopes
 
 @pytest.fixture
 def engine():
-    # conftest's autouse fixture points VIBE_REMOTE_HOME at a per-test tmp dir,
+    # conftest's autouse fixture points AVIBE_HOME at a per-test tmp dir,
     # so this initialises and connects to an isolated SQLite state file.
     ensure_sqlite_state()
     return create_sqlite_engine()

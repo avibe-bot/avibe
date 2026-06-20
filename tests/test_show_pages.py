@@ -65,7 +65,7 @@ def test_runtime_prepare_cli_preserves_offline_environment(monkeypatch):
 def test_runtime_manager_from_args_preserves_offline_environment(monkeypatch, tmp_path):
     parser = cli.build_parser()
     args = parser.parse_args(["runtime", "status"])
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_SHOW_RUNTIME_OFFLINE", "1")
 
     manager = cli._show_runtime_manager_from_args(args)
@@ -107,7 +107,7 @@ def _save_config() -> V2Config:
 
 
 def test_store_defaults_to_private_and_rotates_public_share(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
 
@@ -139,7 +139,7 @@ def test_store_defaults_to_private_and_rotates_public_share(monkeypatch, tmp_pat
 
 
 def test_rotate_share_requires_public(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
 
     store = ShowPageStore()
@@ -156,7 +156,7 @@ def test_rotate_share_requires_public(monkeypatch, tmp_path):
 
 
 def test_store_lists_pages_by_updated_time_and_visibility(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
 
@@ -178,7 +178,7 @@ def test_store_lists_pages_by_updated_time_and_visibility(monkeypatch, tmp_path)
 
 
 def test_store_lists_show_pages_with_page_and_query(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
 
@@ -201,7 +201,7 @@ def test_store_lists_show_pages_with_page_and_query(monkeypatch, tmp_path):
 
 
 def test_store_escapes_show_page_session_id_prefix_filter(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
 
@@ -221,7 +221,7 @@ def test_store_escapes_show_page_session_id_prefix_filter(monkeypatch, tmp_path)
 
 
 def test_show_page_dir_creates_default_index(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     page_dir = ensure_show_page_dir("ses123")
 
     index_path = page_dir / "index.html"
@@ -251,7 +251,7 @@ def test_show_page_dir_creates_default_index(monkeypatch, tmp_path):
 
 
 def test_show_path_cli_json_creates_page(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
     captured = {}
@@ -299,7 +299,7 @@ def test_show_path_cli_json_creates_page(monkeypatch, tmp_path, capsys):
 
 
 def test_show_path_cli_keeps_page_when_prewarm_fails(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
 
@@ -318,7 +318,7 @@ def test_show_path_cli_keeps_page_when_prewarm_fails(monkeypatch, tmp_path, caps
 
 
 def test_show_path_cli_prewarm_uses_verified_loopback_for_non_loopback_host(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     config = _save_config()
     config.ui.setup_host = "192.168.2.3"
@@ -362,7 +362,7 @@ def test_show_path_cli_prewarm_uses_verified_loopback_for_non_loopback_host(monk
 def test_show_path_cli_prewarm_falls_back_to_configured_ui_host_after_loopback_mismatch(
     monkeypatch, tmp_path, capsys
 ):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     config = _save_config()
     config.ui.setup_host = "192.168.2.3"
@@ -406,7 +406,7 @@ def test_show_path_cli_prewarm_falls_back_to_configured_ui_host_after_loopback_m
 
 
 def test_show_list_cli_json_reports_existing_pages(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
 
@@ -431,7 +431,7 @@ def test_show_list_cli_json_reports_existing_pages(monkeypatch, tmp_path, capsys
 
 
 def test_show_list_cli_json_reports_pagination(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
 
@@ -454,7 +454,7 @@ def test_show_list_cli_json_reports_pagination(monkeypatch, tmp_path, capsys):
 
 
 def test_show_list_cli_next_command_uses_absolute_time_filters(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
 
@@ -477,7 +477,7 @@ def test_show_list_cli_next_command_uses_absolute_time_filters(monkeypatch, tmp_
 
 
 def test_show_list_cli_filters_visibility(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
 
@@ -499,7 +499,7 @@ def test_show_list_cli_filters_visibility(monkeypatch, tmp_path, capsys):
 
 
 def test_show_page_payload_requires_enabled_avibe_cloud(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     config = _save_config()
     config.remote_access.vibe_cloud.enabled = False
@@ -521,7 +521,7 @@ def test_show_page_payload_requires_enabled_avibe_cloud(monkeypatch, tmp_path):
 
 
 def test_show_update_cli_reports_transition_urls(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
     prewarmed = []
@@ -570,7 +570,7 @@ def test_show_update_cli_reports_transition_urls(monkeypatch, tmp_path, capsys):
 
 
 def test_show_update_rotate_share_fails_while_private(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
 
     parser = cli.build_parser()
@@ -587,7 +587,7 @@ def test_show_mark_cli_records_event_and_message(monkeypatch, tmp_path, capsys):
     from storage import messages_service
     from sqlalchemy import select
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
     from storage.importer import ensure_sqlite_state
@@ -641,7 +641,7 @@ def test_show_mark_cli_records_event_and_message(monkeypatch, tmp_path, capsys):
 
 
 def test_show_mark_cli_posts_to_live_ui_when_running(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
@@ -719,7 +719,7 @@ def test_show_event_cli_records_generic_event(monkeypatch, tmp_path, capsys):
     from storage.models import agent_sessions, messages, show_session_events
     from storage.settings_service import upsert_scope
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
     ensure_sqlite_state()
@@ -777,7 +777,7 @@ def test_show_event_cli_records_generic_event(monkeypatch, tmp_path, capsys):
 
 
 def test_show_event_cli_dispatch_flag_updates_annotation_payload(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
@@ -837,7 +837,7 @@ def test_show_event_cli_dispatch_flag_updates_annotation_payload(monkeypatch, tm
 
 
 def test_show_event_cli_dispatch_preserves_top_level_payload(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 123})
@@ -891,7 +891,7 @@ def test_show_event_cli_dispatch_fallback_records_and_dispatches(monkeypatch, tm
     from storage.models import agent_sessions, show_session_events
     from storage.settings_service import upsert_scope
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
     ensure_sqlite_state()
@@ -957,7 +957,7 @@ def test_show_event_cli_fallback_rejects_mismatched_session_id(monkeypatch, tmp_
     from storage.models import agent_sessions, show_session_events
     from storage.settings_service import upsert_scope
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
     ensure_sqlite_state()
@@ -1015,7 +1015,7 @@ def test_show_event_cli_fallback_rejects_mismatched_session_id(monkeypatch, tmp_
 
 
 def test_show_mark_cli_posts_to_configured_ui_host_when_running(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     config = _save_config()
     config.remote_access.vibe_cloud.enabled = False

@@ -43,7 +43,7 @@ From `pyproject.toml`, `AGENTS.md`, live CLI, and a repo-wide grep:
 - PyPI dist name: **`vibe-remote`** (`[project].name`).
 - Command: **`vibe`** → `vibe.cli:main` (`[project.scripts]`).
 - Wheel packages: **`vibe`, `config`, `core`, `modules`, `storage`** — import surface is multi-package, NOT a single `vibe_remote`.
-- Runtime home: `~/.vibe_remote/` (`state/`, `logs/`), env `VIBE_REMOTE_HOME`, log file `vibe_remote.log`; pytest autouse `VIBE_REMOTE_HOME` isolation + marker `uses_real_paths`.
+- Runtime home: `~/.avibe/` (`state/`, `logs/`), env `AVIBE_HOME`, log file `vibe_remote.log`; pytest autouse `AVIBE_HOME` isolation + marker `uses_real_paths`. Old `~/.vibe_remote/` remains a directory migration path.
 - i18n: backend `vibe/i18n/`; frontend `ui/src/i18n/{en,zh}.json`. No hardcoded user-facing strings (AGENTS.md §6).
 - Other repos: `avibe-bot-backend` (keep), `avibe-docs` (keep; domain on-brand, body copy not).
 
@@ -80,8 +80,8 @@ table above, (c) brand/display strings, (d) the runtime-home-dir migration.
 Adopt Alex's model: on upgrade, `rename(~/.vibe_remote → ~/.avibe)`, then create
 symlink `~/.vibe_remote → ~/.avibe`. Hardening so it never strands anyone:
 - **The in-code resolver is the real guarantee, not the symlink.** Resolution
-  order in `config/paths`: `AVIBE_HOME` → `VIBE_REMOTE_HOME` (deprecated, warn)
-  → `~/.avibe` if exists → `~/.vibe_remote` if exists (adopt) → default `~/.avibe`.
+  order in `config/paths`: `AVIBE_HOME` → `~/.avibe` if exists →
+  `~/.vibe_remote` if exists (adopt) → default `~/.avibe`.
   The symlink is a convenience for stale absolute references, not the mechanism.
 - **Atomic + idempotent + run-before-live.** Do the migration at CLI startup
   BEFORE the service binds or caches any path (the live `vibe` process may be the
@@ -176,8 +176,8 @@ record:
 - CLI command and user shell command examples using `vibe`.
 - Python import packages and code identifiers: `vibe`, `config`, `core`,
   `modules`, `storage`.
-- Deprecated compatibility inputs that must remain accepted, especially
-  `VIBE_REMOTE_HOME` and old `~/.vibe_remote` path handling.
+- Deprecated compatibility inputs that must remain accepted, especially old
+  `~/.vibe_remote` path handling.
 - Tests and fixtures that intentionally simulate old users, old package names,
   old paths, or old GitHub URLs.
 - Migration IDs, historical release notes, and compatibility prose where the old
@@ -318,10 +318,9 @@ runtime compatibility surfaces.
 
 - CLI command `vibe` and Python package imports `vibe`, `config`, `core`,
   `modules`, `storage` stay unchanged.
-- `VIBE_REMOTE_HOME` stays accepted as a deprecated compatibility env var.
-  Implementation should introduce `AVIBE_HOME` before it in resolver priority.
+- `AVIBE_HOME` is the only runtime-home env var.
 - Old `~/.vibe_remote` remains a migration/adoption path. Tests should include
-  an old-user-only home and both-env-var cases.
+  an old-user-only home and a removed-legacy-env case.
 - The old PyPI project name `vibe-remote` remains in the one-time
   `vibe-remote==3.0.0` shim and migration tests.
 - Existing release marker `<!-- vibe-remote:update-notification=none -->`
@@ -410,8 +409,8 @@ Do first:
 - P1 distribution/update/install surface: `pyproject.toml`, release workflows,
   `vibe/upgrade.py`, `core/update_checker.py`, `install.sh`, `install.ps1`,
   `npm/avibe/*`, and focused tests.
-- P2 home-dir migration: `config/paths.py`, `AVIBE_HOME`, deprecated
-  `VIBE_REMOTE_HOME`, `~/.avibe` default, old `~/.vibe_remote` adoption,
+- P2 home-dir migration: `config/paths.py`, `AVIBE_HOME`, `~/.avibe` default,
+  old `~/.vibe_remote` adoption,
   back-symlink, conflict rules, and old-user simulation tests.
 - P3 main-repo product copy: README/README_ZH, VISION/VISION_ZH, backend i18n,
   frontend i18n, UI metadata, Slack manifest, Sentry/user-agent labels where
@@ -476,7 +475,7 @@ Updated surfaces:
   non-protocol user agents now use `avibe`.
 
 Intentionally retained:
-- `VIBE_REMOTE_HOME`, `~/.vibe_remote`, `vibe_remote.log`, cookies, OpenCode
+- `~/.vibe_remote`, `vibe_remote.log`, cookies, OpenCode
   metadata keys, release-marker compatibility, legacy `vibe-remote` package
   uninstall/shim references, and test fixtures that simulate old installs.
 - Product Hunt URLs/badge identifiers until the external listing is replaced or
@@ -525,7 +524,7 @@ Still intentionally retained:
   to an `avibe.bot` redirect before the 3.0.0 release.
 - `skills/use-avibe` is the current skill slug/path; stale skill references
   should not remain in new prompt injection.
-- `VIBE_REMOTE_HOME`, `~/.vibe_remote`, `vibe_remote.log`, cookie names,
+- `~/.vibe_remote`, `vibe_remote.log`, cookie names,
   OpenCode metadata keys, legacy release markers, and `vibe-remote` shim /
   uninstall references remain compatibility surfaces.
 - Product Hunt badge URLs and historical docs/plans remain old-name references

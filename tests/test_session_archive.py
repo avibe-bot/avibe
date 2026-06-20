@@ -130,7 +130,7 @@ def test_archived_session_not_reused_for_anchor(monkeypatch, tmp_path: Path) -> 
     Runs on the MIGRATED schema (``ensure_sqlite_state`` → alembic), because that
     unique index only exists post-migration; ``metadata.create_all`` omits it, so
     a create_all-only test would miss the archived-row collision entirely."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     db_path = paths.get_sqlite_state_path()
     service = SQLiteSessionsService(db_path)
@@ -230,7 +230,7 @@ def test_archive_clears_queued_and_pending_messages(tmp_path: Path) -> None:
 
 def test_archived_show_page_cannot_be_republished(monkeypatch, tmp_path: Path) -> None:
     """Archive takes the Show Page offline and locks it there — no re-sharing."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     db_path = paths.get_sqlite_state_path()
     service = SQLiteSessionsService(db_path)
@@ -258,7 +258,7 @@ def test_archived_show_page_cannot_be_republished(monkeypatch, tmp_path: Path) -
 def test_republish_archived_session_creates_no_show_page(monkeypatch, tmp_path: Path) -> None:
     """Republishing an archived session that never had a page must NOT first
     materialize a default page (the guard runs before ``ensure``)."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     db_path = paths.get_sqlite_state_path()
     service = SQLiteSessionsService(db_path)
@@ -304,7 +304,7 @@ def test_bind_by_id_does_not_resurrect_archived(tmp_path: Path) -> None:
 
 def test_archived_session_excluded_from_inbox(monkeypatch, tmp_path: Path) -> None:
     """An archived session (and its unread) drops out of the inbox feed + badges."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     db_path = paths.get_sqlite_state_path()
     service = SQLiteSessionsService(db_path)
@@ -360,7 +360,7 @@ def test_is_session_archived_flag(tmp_path: Path) -> None:
 
 def test_show_event_rejected_for_archived_session(monkeypatch, tmp_path: Path) -> None:
     """An already-open Show Page can't write events into an archived session."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     db_path = paths.get_sqlite_state_path()
     service = SQLiteSessionsService(db_path)

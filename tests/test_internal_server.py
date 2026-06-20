@@ -117,7 +117,7 @@ def _build_controller_double(handler=None):
 
 
 def test_default_socket_path_lives_under_state_dir(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.delenv("VIBE_INTERNAL_DISPATCH_SOCKET", raising=False)
     path = internal_server.default_socket_path()
     assert path.name == "dispatch.sock"
@@ -316,7 +316,7 @@ def test_dispatch_forwards_session_routing_into_platform_specific(monkeypatch, t
     from storage.importer import ensure_sqlite_state
     from storage.settings_service import upsert_scope
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -395,7 +395,7 @@ def test_dispatch_async_starts_turn_and_returns_202(monkeypatch, tmp_path):
 
     # dispatch_async reads the queue (to preserve order after a Stop), so it needs
     # an initialized state DB even on the empty-queue happy path.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     started = asyncio.Event()
@@ -452,7 +452,7 @@ def test_dispatch_async_no_terminal_result_keeps_session_in_flight(monkeypatch, 
     """
     from storage.importer import ensure_sqlite_state
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     started = asyncio.Event()
@@ -508,7 +508,7 @@ def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
     from storage.importer import ensure_sqlite_state
     from storage.settings_service import upsert_scope
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -584,7 +584,7 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
     from storage.importer import ensure_sqlite_state
     from storage.settings_service import upsert_scope
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -664,7 +664,7 @@ def test_cancel_does_not_flush_queue(monkeypatch, tmp_path):
     from storage.importer import ensure_sqlite_state
     from storage.settings_service import upsert_scope
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -1010,7 +1010,7 @@ def test_scheduled_gate_idle_runs_turn_with_lifecycle(monkeypatch, tmp_path):
 
     # submit_scheduled reads the queue (idle → empty-queue happy path), so it
     # needs an initialized state DB.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     captured: dict = {}
@@ -1074,7 +1074,7 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
     from storage.importer import ensure_sqlite_state
     from storage.settings_service import upsert_scope
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -1137,7 +1137,7 @@ def test_scheduled_gate_cancel_stops_scheduled_run(monkeypatch, tmp_path):
     from storage.importer import ensure_sqlite_state
     from storage.settings_service import upsert_scope
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -1244,7 +1244,7 @@ def _manager_capturing_runs():
 def test_flush_runs_scheduled_row_as_scheduled_with_provenance(tmp_path, monkeypatch):
     """A queued scheduled run flushes as its OWN SOURCE_SCHEDULED turn with its
     delivery provenance restored — not merged into a plain user turn (#84)."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     override = {"channel_id": "slack-321", "platform": "slack"}
     session_id = _seed_avibe_session_with_queue(
         [(
@@ -1284,7 +1284,7 @@ def test_flush_segments_user_then_scheduled_in_order(tmp_path, monkeypatch):
     into one user turn; the scheduled row then runs separately with its provenance.
     The completion-reflush handles the next segment, so one flush runs only the first
     segment and leaves the rest (#84)."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     session_id = _seed_avibe_session_with_queue(
         [
             ("u1", None),
@@ -1313,7 +1313,7 @@ def test_flush_segments_user_then_scheduled_in_order(tmp_path, monkeypatch):
 
 
 def test_flush_mixed_owner_user_rows_preserves_owner_list(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     from core.services import sessions as sessions_service
     from storage import messages_service

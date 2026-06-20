@@ -580,7 +580,7 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_process_inbound_message_persists_context_token(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.dict("os.environ", {"VIBE_REMOTE_HOME": tmpdir}):
+            with patch.dict("os.environ", {"AVIBE_HOME": tmpdir}):
                 bot = self._make_bot()
                 bot.check_authorization = lambda **kwargs: AuthResult(allowed=True, is_dm=True)
                 bot.dispatch_text_command = AsyncMock(return_value=False)
@@ -605,7 +605,7 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_send_dm_reuses_persisted_context_token(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.dict("os.environ", {"VIBE_REMOTE_HOME": tmpdir}):
+            with patch.dict("os.environ", {"AVIBE_HOME": tmpdir}):
                 bot = self._make_bot()
                 bot._remember_context_token("user-1", "ctx-persisted")
 
@@ -800,7 +800,7 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_send_message_marks_session_expired_on_explicit_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.dict("os.environ", {"VIBE_REMOTE_HOME": tmpdir}):
+            with patch.dict("os.environ", {"AVIBE_HOME": tmpdir}):
                 bot = self._make_bot()
                 context = MessageContext(
                     user_id="user-1",

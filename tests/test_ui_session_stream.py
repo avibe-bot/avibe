@@ -26,7 +26,7 @@ from tests.ui_server_test_helpers import csrf_headers
 
 @pytest.fixture()
 def isolated_state(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     yield tmp_path
 

@@ -22,7 +22,7 @@ def _save_setup_host_config(host: str) -> None:
 
 
 def test_install_agent_allows_same_origin_request(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_setup_host_config("192.168.2.3")
     monkeypatch.setattr(
         api,
@@ -43,7 +43,7 @@ def test_install_agent_allows_same_origin_request(monkeypatch, tmp_path):
 
 
 def test_install_agent_rejects_cross_origin_request(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_setup_host_config("192.168.2.3")
     monkeypatch.setattr(api, "start_agent_install_job", lambda name: {"ok": True, "name": name})
 
@@ -61,7 +61,7 @@ def test_install_agent_rejects_cross_origin_request(monkeypatch, tmp_path):
 
 
 def test_install_agent_rejects_missing_csrf_token(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setattr(api, "start_agent_install_job", lambda name: {"ok": True, "name": name})
 
     client = app.test_client()
@@ -76,7 +76,7 @@ def test_install_agent_rejects_missing_csrf_token(monkeypatch, tmp_path):
 
 
 def test_install_agent_rejects_missing_origin(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setattr(api, "start_agent_install_job", lambda name: {"ok": True, "name": name})
 
     client = app.test_client()
@@ -90,7 +90,7 @@ def test_install_agent_rejects_missing_origin(monkeypatch, tmp_path):
 
 
 def test_install_agent_status_allows_poll(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_setup_host_config("192.168.2.3")
     monkeypatch.setattr(
         api,
@@ -144,7 +144,7 @@ def test_install_job_fails_when_runtime_refresh_fails(monkeypatch):
 
 
 def test_vibe_agent_routes_return_structured_client_errors(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     client = app.test_client()
 
     missing = client.get("/api/agents/missing")

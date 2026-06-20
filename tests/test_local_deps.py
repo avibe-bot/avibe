@@ -336,7 +336,7 @@ def test_reconcile_startup_dependencies_can_be_disabled(monkeypatch):
 
 
 def test_startup_show_page_prewarm_targets_recent_non_offline(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from config import paths
     from core.show_pages import ShowPageStore
 

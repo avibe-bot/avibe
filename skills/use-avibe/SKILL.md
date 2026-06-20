@@ -153,7 +153,7 @@ python3 "$API_HELPER" GET '/settings?platform=slack'
 
 ## Runtime Layout
 
-Avibe stores runtime data under `~/.avibe/` by default (or `AVIBE_HOME` if set). For backward compatibility, `VIBE_REMOTE_HOME` is still honored when set, and existing default `~/.vibe_remote/` homes may be migrated to `~/.avibe/` with `~/.vibe_remote` kept as a back-symlink. The only paths an agent normally needs:
+Avibe stores runtime data under `~/.avibe/` by default, or under `AVIBE_HOME` when that env var is set. Existing default `~/.vibe_remote/` homes may be migrated to `~/.avibe/` with `~/.vibe_remote` kept as a back-symlink. The only paths an agent normally needs:
 
 - `~/.avibe/config/config.json` — global config; mutate through `POST /config`, not by editing the file
 - `~/.avibe/logs/vibe_remote.log` — main application log; read via `POST /logs`

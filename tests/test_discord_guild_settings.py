@@ -32,7 +32,7 @@ def _config_payload() -> dict:
 
 
 def test_settings_store_persists_discord_guild_scope(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
 
     store = SettingsStore.get_instance()
@@ -55,7 +55,7 @@ def test_settings_store_persists_discord_guild_scope(tmp_path, monkeypatch) -> N
 
 
 def test_discord_settings_manager_prefers_explicit_guild_scope(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
 
     manager = SettingsManager(platform="discord")
@@ -67,7 +67,7 @@ def test_discord_settings_manager_prefers_explicit_guild_scope(tmp_path, monkeyp
 
 
 def test_save_config_moves_legacy_discord_allowlist_to_settings(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
 
     saved = api.save_config(
@@ -92,7 +92,7 @@ def test_save_config_moves_legacy_discord_allowlist_to_settings(tmp_path, monkey
 
 
 def test_save_config_moves_legacy_discord_denylist_to_settings(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
 
     saved = api.save_config(
@@ -119,7 +119,7 @@ def test_save_config_moves_legacy_discord_denylist_to_settings(tmp_path, monkeyp
 
 
 def test_partial_save_config_migrates_existing_legacy_discord_denylist(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
 
     paths.ensure_data_dirs()
@@ -150,7 +150,7 @@ def test_partial_save_config_migrates_existing_legacy_discord_denylist(tmp_path,
 
 
 def test_partial_legacy_guild_config_update_preserves_omitted_denylist(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
 
     paths.ensure_data_dirs()
@@ -185,7 +185,7 @@ def test_partial_legacy_guild_config_update_preserves_omitted_denylist(tmp_path,
 
 
 def test_direct_config_save_preserves_unmigrated_discord_guild_rules(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
 
     config = V2Config.from_payload(
@@ -215,7 +215,7 @@ def test_direct_config_save_preserves_unmigrated_discord_guild_rules(tmp_path, m
 
 
 def test_save_settings_preserves_discord_denylist_policy_when_default_omitted(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
 
     store = SettingsStore.get_instance()
@@ -244,7 +244,7 @@ def test_save_settings_preserves_discord_denylist_policy_when_default_omitted(tm
 
 
 def test_wizard_style_guild_save_preserves_migrated_discord_denylist(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
 
     store = SettingsStore.get_instance()
@@ -265,7 +265,7 @@ def test_wizard_style_guild_save_preserves_migrated_discord_denylist(tmp_path, m
 
 
 def test_save_config_validates_before_migrating_discord_guild_settings(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
 
     payload = {

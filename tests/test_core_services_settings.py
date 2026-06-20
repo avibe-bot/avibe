@@ -21,7 +21,7 @@ from core.services import settings as settings_service
 
 @pytest.fixture()
 def isolated_state(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     yield tmp_path
     SettingsStore.reset_instance()

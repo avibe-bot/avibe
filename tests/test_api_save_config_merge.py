@@ -86,7 +86,7 @@ def _full_config_payload() -> dict:
 
 
 def test_save_config_merges_partial_payload(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     original = api.save_config(_full_config_payload())
     assert original.show_duration is True
@@ -112,7 +112,7 @@ def test_save_config_seeds_default_for_partial_payload_on_fresh_install(monkeypa
     ``V2Config.from_payload`` and raised (missing ``mode``/``runtime``), so the
     advertised first-run "Configure provider" flow failed until a config existed.
     """
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     import pytest
 
@@ -136,7 +136,7 @@ def test_save_config_seeds_default_for_partial_payload_on_fresh_install(monkeypa
 
 
 def test_save_config_defaults_show_duration_to_false_for_new_config(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     payload = _full_config_payload()
     payload.pop("show_duration")
@@ -147,7 +147,7 @@ def test_save_config_defaults_show_duration_to_false_for_new_config(monkeypatch,
 
 
 def test_save_config_defaults_include_time_info_to_true_for_new_config(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     payload = _full_config_payload()
     payload.pop("include_time_info")
@@ -158,7 +158,7 @@ def test_save_config_defaults_include_time_info_to_true_for_new_config(monkeypat
 
 
 def test_save_config_accepts_typing_ack_mode(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     updated = api.save_config({**_full_config_payload(), "ack_mode": "typing"})
 
@@ -166,7 +166,7 @@ def test_save_config_accepts_typing_ack_mode(monkeypatch, tmp_path):
 
 
 def test_save_config_merges_audio_asr_settings(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     created = api.save_config(_full_config_payload())
     assert created.audio_asr.enabled is True
@@ -186,7 +186,7 @@ def test_save_config_merges_audio_asr_settings(monkeypatch, tmp_path):
 
 
 def test_save_config_marks_explicit_audio_asr_disable_patch(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     api.save_config(_full_config_payload())
 
@@ -207,7 +207,7 @@ def test_config_load_defaults_missing_audio_asr_to_enabled():
 
 
 def test_save_config_preserves_show_pages_prompt_toggle(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     created = api.save_config(_full_config_payload())
     assert created.show_pages_prompt is True
@@ -239,7 +239,7 @@ def test_config_load_preserves_pre_upgrade_audio_asr_false_as_opt_out():
 
 
 def test_save_config_preserves_explicit_audio_asr_opt_out(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     payload = _full_config_payload()
     payload["audio_asr"] = {
@@ -255,7 +255,7 @@ def test_save_config_preserves_explicit_audio_asr_opt_out(monkeypatch, tmp_path)
 
 
 def test_config_to_payload_redacts_remote_access_secrets_and_save_preserves_them(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     payload = _full_config_payload()
     payload["remote_access"] = {
         "provider": "vibe_cloud",
@@ -290,7 +290,7 @@ def test_config_to_payload_redacts_remote_access_secrets_and_save_preserves_them
 
 
 def test_config_to_payload_redacts_platform_and_gateway_secrets_and_save_preserves_them(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     payload = _full_config_payload()
     payload["slack"] = {
         **payload["slack"],
@@ -371,7 +371,7 @@ def test_config_to_payload_redacts_platform_and_gateway_secrets_and_save_preserv
 
 
 def test_save_config_accepts_slack_disable_link_unfurl(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     payload = _full_config_payload()
     payload["slack"]["disable_link_unfurl"] = True
@@ -382,7 +382,7 @@ def test_save_config_accepts_slack_disable_link_unfurl(monkeypatch, tmp_path):
 
 
 def test_save_config_preserves_platforms_metadata(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     payload = _full_config_payload()
     payload["slack"]["bot_token"] = "xoxb-valid-token"
@@ -407,7 +407,7 @@ def test_save_config_preserves_platforms_metadata(monkeypatch, tmp_path):
 
 
 def test_save_config_migrates_legacy_single_platform(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     updated = api.save_config(_full_config_payload())
     payload = api.config_to_payload(updated)
@@ -418,7 +418,7 @@ def test_save_config_migrates_legacy_single_platform(monkeypatch, tmp_path):
 
 
 def test_save_config_rejects_enabled_platform_without_config(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     import pytest
 
@@ -435,7 +435,7 @@ def test_save_config_rejects_enabled_platform_without_config(monkeypatch, tmp_pa
 
 
 def test_save_config_rejects_enabled_platform_without_runtime_credentials(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     import pytest
 
@@ -461,7 +461,7 @@ def test_save_config_rejects_enabled_platform_without_runtime_credentials(monkey
 
 
 def test_save_config_allows_slack_bot_token_only_runtime_config(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     payload = {
         **_full_config_payload(),
@@ -480,7 +480,7 @@ def test_save_config_allows_slack_bot_token_only_runtime_config(monkeypatch, tmp
 def test_save_config_rejects_setup_completion_with_enabled_platform_without_runtime_credentials(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     import pytest
 
@@ -504,7 +504,7 @@ def test_save_config_rejects_setup_completion_with_enabled_platform_without_runt
 def test_save_config_allows_unrelated_save_for_legacy_enabled_platform_without_runtime_credentials(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     payload = _full_config_payload()
     payload["platform"] = "slack"
@@ -520,7 +520,7 @@ def test_save_config_allows_unrelated_save_for_legacy_enabled_platform_without_r
 
 
 def test_save_config_allows_redacted_lark_round_trip_for_legacy_missing_secret(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     payload = _full_config_payload()
     payload["platform"] = "lark"
@@ -560,7 +560,7 @@ def test_save_config_allows_redacted_lark_round_trip_for_legacy_missing_secret(m
 
 
 def test_save_config_preserves_disabled_platform_credentials(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     payload = _full_config_payload()
     payload["platform"] = "avibe"
@@ -597,7 +597,7 @@ def test_save_config_preserves_disabled_platform_credentials(monkeypatch, tmp_pa
 
 
 def test_init_sessions_is_noop_when_sessions_file_exists(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     store = api.SessionsStore()
     store.state.session_mappings = {

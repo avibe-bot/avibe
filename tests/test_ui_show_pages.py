@@ -163,7 +163,7 @@ def _write_runtime_manifest(tmp_path: Path, archive_path: Path, *, sha256: str |
 
 
 def test_private_show_page_requires_remote_login(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
 
@@ -179,7 +179,7 @@ def test_private_show_page_requires_remote_login(monkeypatch, tmp_path):
 
 
 def test_private_show_page_serves_locally(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
 
@@ -190,7 +190,7 @@ def test_private_show_page_serves_locally(monkeypatch, tmp_path):
 
 
 def test_private_show_page_uses_runtime_when_available(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     manager = _FakeShowRuntimeManager(body=b"<h1>Runtime Page</h1>")
@@ -225,7 +225,7 @@ def test_private_show_page_uses_runtime_when_available(monkeypatch, tmp_path):
 
 
 def test_private_show_page_materializes_workspace_before_runtime_proxy(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page_record("ses123", "private")
     page_dir = paths.get_show_pages_dir() / "ses123"
@@ -244,7 +244,7 @@ def test_private_show_page_materializes_workspace_before_runtime_proxy(monkeypat
 
 
 def test_private_show_page_injects_runtime_event_config(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     monkeypatch.setattr("vibe.ui_server.show_event_write_token", lambda session_id: f"token-{session_id}")
@@ -280,7 +280,7 @@ def test_private_show_page_injects_runtime_event_config(monkeypatch, tmp_path):
 
 
 def test_private_show_page_does_not_inject_runtime_event_config_into_attachment_html(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     monkeypatch.setattr("vibe.ui_server.show_event_write_token", lambda session_id: f"token-{session_id}")
@@ -305,7 +305,7 @@ def test_private_show_page_does_not_inject_runtime_event_config_into_attachment_
 
 
 def test_private_show_page_does_not_inject_runtime_event_config_into_ranged_html(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     monkeypatch.setattr("vibe.ui_server.show_event_write_token", lambda session_id: f"token-{session_id}")
@@ -337,7 +337,7 @@ def test_private_show_page_does_not_inject_runtime_event_config_into_ranged_html
 
 
 def test_private_show_page_runtime_config_overrides_existing_client_defaults(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     monkeypatch.setattr("vibe.ui_server.show_event_write_token", lambda session_id: f"token-{session_id}")
@@ -357,7 +357,7 @@ def test_private_show_page_runtime_config_overrides_existing_client_defaults(mon
 
 
 def test_public_show_runtime_source_rewrites_private_runtime_paths(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
     manager = _FakeShowRuntimeManager(
@@ -393,7 +393,7 @@ def test_public_show_runtime_source_rewrites_private_runtime_paths(monkeypatch, 
 
 
 def test_public_show_runtime_html_rewrites_private_runtime_client_paths(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
     manager = _FakeShowRuntimeManager(
@@ -446,7 +446,7 @@ def test_show_runtime_public_client_shims_are_cacheable():
 
 
 def test_public_show_runtime_direct_client_paths_return_shims(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
     manager = _FakeShowRuntimeManager(body=b"real vite client")
@@ -471,7 +471,7 @@ def test_public_show_runtime_direct_client_paths_return_shims(monkeypatch, tmp_p
 
 
 def test_public_show_page_does_not_inject_write_runtime_config(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
     monkeypatch.setattr("vibe.ui_server.show_event_write_token", lambda session_id: f"token-{session_id}")
@@ -491,7 +491,7 @@ def test_public_show_page_does_not_inject_write_runtime_config(monkeypatch, tmp_
 
 
 def test_private_show_page_falls_back_to_static_when_runtime_unavailable(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     set_show_runtime_manager_for_tests(_FakeShowRuntimeManager(fail=True))
@@ -508,7 +508,7 @@ def test_private_show_page_falls_back_to_static_when_runtime_unavailable(monkeyp
 
 
 def test_show_page_recovery_loading_holds_before_ready(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     set_show_runtime_manager_for_tests(_FakeShowRuntimeManager(fail=True))
@@ -525,7 +525,7 @@ def test_show_page_recovery_loading_holds_before_ready(monkeypatch, tmp_path):
 
 
 def test_private_show_page_api_does_not_fall_back_to_static(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     (paths.get_show_pages_dir() / "ses123" / "api" / "health.ts").write_text("export const secret = true\n", encoding="utf-8")
@@ -541,7 +541,7 @@ def test_private_show_page_api_does_not_fall_back_to_static(monkeypatch, tmp_pat
 
 
 def test_private_show_page_proxies_runtime_api_methods(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     manager = _FakeShowRuntimeManager(body=b'{"ok":true}', extra_headers={"content-type": "application/json"})
@@ -570,7 +570,7 @@ def test_private_show_page_proxies_runtime_api_methods(monkeypatch, tmp_path):
 
 
 def test_private_show_page_records_show_event(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
     _create_show_page("ses123", "private")
@@ -612,7 +612,7 @@ def test_private_show_page_records_show_event(monkeypatch, tmp_path):
 
 
 def test_private_show_page_rejects_mismatched_event_session_id(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
     _create_show_page("ses123", "private")
@@ -639,7 +639,7 @@ def test_private_show_page_rejects_mismatched_event_session_id(monkeypatch, tmp_
 
 
 def test_private_show_page_dispatches_human_show_event(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
     _create_show_page("ses123", "private")
@@ -687,7 +687,7 @@ def test_private_show_page_dispatches_human_show_event(monkeypatch, tmp_path):
 
 
 def test_private_show_page_dispatches_screenshot_annotation_batch(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
     _create_show_page("ses123", "private")
@@ -751,7 +751,7 @@ def test_private_show_page_dispatches_screenshot_annotation_batch(monkeypatch, t
 
 
 def test_private_show_page_rejects_show_event_without_write_token(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
     _create_show_page("ses123", "private")
@@ -779,7 +779,7 @@ def test_private_show_page_rejects_show_event_without_write_token(monkeypatch, t
 
 
 def test_private_show_page_rejects_other_session_write_token(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
     _create_show_page("ses123", "private")
@@ -804,7 +804,7 @@ def test_private_show_page_rejects_other_session_write_token(monkeypatch, tmp_pa
 
 
 def test_private_show_page_sets_show_event_write_cookie(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
     _create_show_page("ses123", "private")
@@ -822,7 +822,7 @@ def test_private_show_page_sets_show_event_write_cookie(monkeypatch, tmp_path):
 
 
 def test_public_show_page_clears_show_event_write_cookie(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
     share_id = _create_show_page("ses123", "public")
@@ -839,7 +839,7 @@ def test_show_events_stream_replays_all_persisted_pages_before_live(monkeypatch,
     from core.show_session_events import ShowSessionEventStore
     from vibe.ui_server import _show_events_stream
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
     _create_show_page("ses123", "private")
@@ -887,7 +887,7 @@ def test_show_events_stream_forwards_live_dispatch_events(monkeypatch, tmp_path)
     from vibe.sse_broker import broker
     from vibe.ui_server import _show_events_stream
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
     _create_show_page("ses123", "private")
@@ -923,7 +923,7 @@ def test_public_show_events_stream_redacts_nested_dispatch_ids(monkeypatch, tmp_
     from vibe.sse_broker import broker
     from vibe.ui_server import _show_events_stream
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
     _create_show_page("ses123", "public")
@@ -968,7 +968,7 @@ def test_public_show_events_stream_redacts_nested_dispatch_ids(monkeypatch, tmp_
 def test_public_show_page_events_redact_internal_ids(monkeypatch, tmp_path):
     from core.show_session_events import ShowSessionEventStore
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
     share_id = _create_show_page("ses123", "public")
@@ -1004,7 +1004,7 @@ def test_public_show_events_stream_redacts_internal_ids(monkeypatch, tmp_path):
     from core.show_session_events import ShowSessionEventStore
     from vibe.ui_server import _show_events_stream
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
     _create_show_page("ses123", "public")
@@ -1046,7 +1046,7 @@ def test_public_show_events_stream_redacts_internal_ids(monkeypatch, tmp_path):
 
 
 def test_cli_show_event_ingress_records_and_publishes(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
     published = []
@@ -1077,7 +1077,7 @@ def test_cli_show_event_ingress_records_and_publishes(monkeypatch, tmp_path):
 
 
 def test_cli_show_event_ingress_requires_cli_token(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
 
@@ -1098,7 +1098,7 @@ def test_cli_show_event_ingress_requires_cli_token(monkeypatch, tmp_path):
 
 
 def test_cli_show_prewarm_ingress_uses_ui_runtime_manager(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     calls = []
 
@@ -1125,7 +1125,7 @@ def test_cli_show_prewarm_ingress_uses_ui_runtime_manager(monkeypatch, tmp_path)
 
 
 def test_cli_show_prewarm_ingress_requires_cli_token(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
     response = app.test_client().post(
@@ -1142,7 +1142,7 @@ def test_cli_show_prewarm_ingress_requires_cli_token(monkeypatch, tmp_path):
 
 
 def test_cli_show_event_ingress_allows_configured_host_with_cli_token(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     config.remote_access.vibe_cloud.enabled = False
     config.ui.setup_host = "10.1.2.3"
@@ -1168,7 +1168,7 @@ def test_cli_show_event_ingress_allows_configured_host_with_cli_token(monkeypatc
 
 
 def test_cli_show_event_ingress_rejects_configured_host_without_cli_token(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     config.remote_access.vibe_cloud.enabled = False
     config.ui.setup_host = "10.1.2.3"
@@ -1193,7 +1193,7 @@ def test_cli_show_event_ingress_rejects_configured_host_without_cli_token(monkey
 
 
 def test_public_show_page_events_are_read_only(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_agent_session("ses123")
     share_id = _create_show_page("ses123", "public")
@@ -1216,7 +1216,7 @@ def test_public_show_page_events_are_read_only(monkeypatch, tmp_path):
 
 
 def test_private_show_page_api_mutation_rejects_missing_origin(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     manager = _FakeShowRuntimeManager(body=b'{"ok":true}', extra_headers={"content-type": "application/json"})
@@ -1237,7 +1237,7 @@ def test_private_show_page_api_mutation_rejects_missing_origin(monkeypatch, tmp_
 
 
 def test_private_show_page_api_mutation_rejects_cross_origin(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     manager = _FakeShowRuntimeManager(body=b'{"ok":true}', extra_headers={"content-type": "application/json"})
@@ -1261,7 +1261,7 @@ def test_private_show_page_api_mutation_rejects_cross_origin(monkeypatch, tmp_pa
 
 
 def test_private_show_page_preserves_runtime_redirect_location(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     manager = _FakeShowRuntimeManager(
@@ -1285,7 +1285,7 @@ def test_private_show_page_preserves_runtime_redirect_location(monkeypatch, tmp_
 
 
 def test_private_show_page_rewrites_absolute_runtime_redirect_location(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     manager = _FakeShowRuntimeManager(
@@ -2162,7 +2162,7 @@ def test_startup_dependency_reconcile_prewarms_runtime_after_prepare(monkeypatch
 
 def test_show_runtime_proxy_logs_entry_timing(monkeypatch, tmp_path, caplog):
     caplog.set_level("INFO")
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     manager = _FakeShowRuntimeManager(body=b"<html><body><div id=\"root\">ready</div></body></html>")
@@ -2177,7 +2177,7 @@ def test_show_runtime_proxy_logs_entry_timing(monkeypatch, tmp_path, caplog):
 
 
 def test_private_show_page_hmr_websocket_requires_private_page(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "offline")
 
@@ -2193,7 +2193,7 @@ def test_private_show_page_hmr_websocket_requires_private_page(monkeypatch, tmp_
 
 
 def test_private_show_page_hmr_websocket_requires_remote_session(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
 
@@ -2209,7 +2209,7 @@ def test_private_show_page_hmr_websocket_requires_remote_session(monkeypatch, tm
 
 
 def test_private_show_page_hmr_websocket_accepts_remote_session(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     _create_show_page("ses123", "private")
     manager = _FakeShowRuntimeManager()
@@ -2234,7 +2234,7 @@ def test_private_show_page_hmr_websocket_accepts_remote_session(monkeypatch, tmp
 
 
 def test_private_show_page_hmr_websocket_accepts_setup_host_local_peer(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     config.ui.setup_host = "192.168.2.3"
     config.save()
@@ -2261,7 +2261,7 @@ def test_private_show_page_hmr_websocket_accepts_setup_host_local_peer(monkeypat
 
 
 def test_public_show_page_hmr_websocket_uses_share_path(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
     manager = _FakeShowRuntimeManager()
@@ -2282,7 +2282,7 @@ def test_public_show_page_hmr_websocket_uses_share_path(monkeypatch, tmp_path):
 
 
 def test_public_show_page_hmr_websocket_requires_public_page(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "private")
 
@@ -2298,7 +2298,7 @@ def test_public_show_page_hmr_websocket_requires_public_page(monkeypatch, tmp_pa
 
 
 def test_private_show_page_redirects_without_trailing_slash(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
 
@@ -2313,7 +2313,7 @@ def test_private_show_page_redirects_without_trailing_slash(monkeypatch, tmp_pat
 
 
 def test_public_show_page_skips_remote_login_but_requires_public_host(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
     set_show_runtime_manager_for_tests(_FakeShowRuntimeManager(fail=True))
@@ -2346,7 +2346,7 @@ def test_public_show_page_skips_remote_login_but_requires_public_host(monkeypatc
 
 
 def test_public_show_page_uses_runtime_when_available(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
     manager = _FakeShowRuntimeManager(body=b"<h1>Public Runtime Page</h1>")
@@ -2368,7 +2368,7 @@ def test_public_show_page_uses_runtime_when_available(monkeypatch, tmp_path):
 
 
 def test_public_show_page_materializes_workspace_before_runtime_proxy(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page_record("ses123", "public")
     page_dir = paths.get_show_pages_dir() / "ses123"
@@ -2392,7 +2392,7 @@ def test_public_show_page_materializes_workspace_before_runtime_proxy(monkeypatc
 
 
 def test_public_show_page_rewrites_runtime_redirect_location(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
     manager = _FakeShowRuntimeManager(
@@ -2416,7 +2416,7 @@ def test_public_show_page_rewrites_runtime_redirect_location(monkeypatch, tmp_pa
 
 
 def test_public_show_page_proxies_runtime_api_methods(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
     manager = _FakeShowRuntimeManager(body=b'{"ok":true}', extra_headers={"content-type": "application/json"})
@@ -2446,7 +2446,7 @@ def test_public_show_page_proxies_runtime_api_methods(monkeypatch, tmp_path):
 
 
 def test_public_show_page_api_mutation_rejects_cross_origin(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
     manager = _FakeShowRuntimeManager(body=b'{"ok":true}', extra_headers={"content-type": "application/json"})
@@ -2471,7 +2471,7 @@ def test_public_show_page_api_mutation_rejects_cross_origin(monkeypatch, tmp_pat
 
 
 def test_public_show_page_api_does_not_fall_back_to_static(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
     (paths.get_show_pages_dir() / "ses123" / "api" / "health.ts").write_text("export const secret = true\n", encoding="utf-8")
@@ -2491,7 +2491,7 @@ def test_public_show_page_api_does_not_fall_back_to_static(monkeypatch, tmp_path
 
 
 def test_public_show_page_redirects_without_trailing_slash(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
 
@@ -2506,7 +2506,7 @@ def test_public_show_page_redirects_without_trailing_slash(monkeypatch, tmp_path
 
 
 def test_public_and_private_paths_are_canonical_by_visibility(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
 
@@ -2524,7 +2524,7 @@ def test_public_and_private_paths_are_canonical_by_visibility(monkeypatch, tmp_p
 
 
 def test_rotated_public_share_url_stops_working(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     old_share_id = _create_show_page("ses123", "public")
 
@@ -2542,7 +2542,7 @@ def test_rotated_public_share_url_stops_working(monkeypatch, tmp_path):
 
 
 def test_offline_show_page_returns_explanatory_page(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
 
@@ -2560,7 +2560,7 @@ def test_offline_show_page_returns_explanatory_page(monkeypatch, tmp_path):
 
 
 def test_show_page_rejects_path_traversal(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
     (tmp_path / "secret.txt").write_text("secret", encoding="utf-8")
@@ -2572,7 +2572,7 @@ def test_show_page_rejects_path_traversal(monkeypatch, tmp_path):
 
 
 def test_show_page_serves_assets_with_strict_headers(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
 
@@ -2585,7 +2585,7 @@ def test_show_page_serves_assets_with_strict_headers(monkeypatch, tmp_path):
 
 
 def test_show_runtime_vendor_asset_proxy_is_immutable(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     manager = _FakeShowRuntimeManager(
         body=b"export const React = {};",
@@ -2622,7 +2622,7 @@ def test_show_runtime_vendor_asset_proxy_forwards_query_and_is_public(monkeypatc
     # No remote login configured here: the vendor namespace is referenced by the
     # anonymous public `/p/<share>/` surface via the runtime's import map, so it must be
     # reachable without authentication just like the public surface itself.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     manager = _FakeShowRuntimeManager(
         body=b".vendor{}",
@@ -2646,7 +2646,7 @@ def test_show_runtime_vendor_asset_proxy_forwards_query_and_is_public(monkeypatc
 
 
 def test_show_runtime_vendor_asset_proxy_does_not_mark_errors_immutable(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     manager = _FakeShowRuntimeManager(
         body=b'{"error":"Not found"}',
@@ -2667,7 +2667,7 @@ def test_show_runtime_vendor_asset_proxy_does_not_mark_errors_immutable(monkeypa
 
 
 def test_retired_show_runtime_deps_route_is_gone(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     manager = _FakeShowRuntimeManager(body=b"export default {}")
     set_show_runtime_manager_for_tests(manager)
@@ -2688,7 +2688,7 @@ def test_retired_show_runtime_deps_route_is_gone(monkeypatch, tmp_path):
 
 
 def test_private_show_page_passes_runtime_importmap_through(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _create_show_page("ses123", "private")
     monkeypatch.setattr("vibe.ui_server.show_event_write_token", lambda session_id: f"token-{session_id}")
@@ -2723,7 +2723,7 @@ def test_private_show_page_passes_runtime_importmap_through(monkeypatch, tmp_pat
 
 
 def test_public_show_page_passes_runtime_importmap_through_unmodified(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     share_id = _create_show_page("ses123", "public")
     import_map = '{"imports":{"react":"/_show-runtime/vendor/abc123/react.js","@avibe/show-ui/":"/_show-runtime/vendor/abc123/@avibe_show-ui/"}}'

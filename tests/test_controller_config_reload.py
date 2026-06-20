@@ -24,7 +24,7 @@ def _config_payload(discord_payload: dict | None = None, telegram_payload: dict 
 
 
 def test_refresh_config_updates_platform_message_settings(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     stale_discord_config = DiscordConfig(bot_token="discord-token", require_mention=True)
     controller = Controller.__new__(Controller)
@@ -55,7 +55,7 @@ def test_refresh_config_updates_platform_message_settings(tmp_path, monkeypatch)
 
 
 def test_refresh_config_updates_telegram_option_only_settings(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     stale_telegram_config = TelegramConfig(
         bot_token="123456:test-token",
@@ -93,7 +93,7 @@ def test_refresh_config_updates_telegram_option_only_settings(tmp_path, monkeypa
 
 
 def test_refresh_config_updates_remote_access_for_audio_asr(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     controller = Controller.__new__(Controller)
     controller.config = V2Config.from_payload(_config_payload({"bot_token": "discord-token"}))

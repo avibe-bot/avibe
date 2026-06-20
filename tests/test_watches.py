@@ -165,7 +165,7 @@ def test_managed_watch_shell_detaches_waiter_stdin(tmp_path: Path, monkeypatch) 
 
 
 def test_managed_watch_store_uses_sqlite_when_path_is_default(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = ManagedWatchStore()
     watch = store.add_watch(
         name="Watch CI",
@@ -240,7 +240,7 @@ def test_sqlite_remove_watch_soft_deletes_watch_but_keeps_runtime(tmp_path: Path
 
 
 def test_watch_runtime_store_uses_sqlite_when_path_is_default(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = WatchRuntimeStateStore()
 
     store.write(

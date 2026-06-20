@@ -13,7 +13,7 @@ from vibe import api
 
 
 def test_get_users_respects_platform_scope(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform(
@@ -34,7 +34,7 @@ def test_get_users_respects_platform_scope(monkeypatch, tmp_path):
 
 
 def test_toggle_admin_is_scoped_per_platform(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform(
@@ -55,7 +55,7 @@ def test_toggle_admin_is_scoped_per_platform(monkeypatch, tmp_path):
 
 
 def test_controller_codex_overrides_resolve_dm_user_scope(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform(

@@ -39,15 +39,15 @@ class _IsolatedClaudeConfigDirMixin:
 
 @contextmanager
 def _temporary_vibe_home(tmp_path: Path):
-    previous_home = os.environ.get("VIBE_REMOTE_HOME")
-    os.environ["VIBE_REMOTE_HOME"] = str(tmp_path)
+    previous_home = os.environ.get("AVIBE_HOME")
+    os.environ["AVIBE_HOME"] = str(tmp_path)
     try:
         yield
     finally:
         if previous_home is None:
-            os.environ.pop("VIBE_REMOTE_HOME", None)
+            os.environ.pop("AVIBE_HOME", None)
         else:
-            os.environ["VIBE_REMOTE_HOME"] = previous_home
+            os.environ["AVIBE_HOME"] = previous_home
 
 
 class _StubIMClient:

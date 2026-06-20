@@ -1,6 +1,5 @@
 from .paths import (
     AVIBE_HOME_ENV,
-    LEGACY_VIBE_REMOTE_HOME_ENV,
     get_vibe_remote_dir,
     get_config_dir,
     get_state_dir,
@@ -25,7 +24,6 @@ __all__ = [
     "SettingsStore",
     "SessionsStore",
     "AVIBE_HOME_ENV",
-    "LEGACY_VIBE_REMOTE_HOME_ENV",
     "get_vibe_remote_dir",
     "get_config_dir",
     "get_state_dir",

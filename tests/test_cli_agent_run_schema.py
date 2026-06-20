@@ -102,7 +102,7 @@ def test_agent_run_async_accepts_callback_session_id(tmp_path: Path, capsys) -> 
     from storage.settings_service import upsert_scope
 
     state_home = tmp_path / "home"
-    with patch.dict("os.environ", {"VIBE_REMOTE_HOME": str(state_home)}):
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
         engine = create_sqlite_engine(db_path)
@@ -256,7 +256,7 @@ def test_agent_run_fork_session_reserves_new_session_and_persists_metadata(tmp_p
     from storage.models import agent_sessions
 
     state_home = tmp_path / "home"
-    with patch.dict("os.environ", {"VIBE_REMOTE_HOME": str(state_home)}):
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
         source_session_id = _seed_bound_session(db_path, tmp_path)
@@ -319,7 +319,7 @@ def test_agent_run_fork_rejects_cross_backend_agent(tmp_path: Path, capsys) -> N
     from storage.importer import ensure_sqlite_state
 
     state_home = tmp_path / "home"
-    with patch.dict("os.environ", {"VIBE_REMOTE_HOME": str(state_home)}):
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
         source_session_id = _seed_bound_session(db_path, tmp_path)
@@ -355,7 +355,7 @@ def test_agent_run_private_session_workdir_follows_invocation_cwd(tmp_path: Path
     state_home = tmp_path / "home"
     invoke_dir = tmp_path / "repo"
     invoke_dir.mkdir()
-    with patch.dict("os.environ", {"VIBE_REMOTE_HOME": str(state_home)}):
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
         agent_store = cli.VibeAgentStore(db_path)
@@ -386,7 +386,7 @@ def test_agent_run_explicit_cwd_wins(tmp_path: Path, capsys, monkeypatch) -> Non
     invoke_dir.mkdir()
     picked_dir = tmp_path / "elsewhere"
     picked_dir.mkdir()
-    with patch.dict("os.environ", {"VIBE_REMOTE_HOME": str(state_home)}):
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
         ensure_sqlite_state()
         db_path = state_home / "state" / "vibe.sqlite"
         agent_store = cli.VibeAgentStore(db_path)

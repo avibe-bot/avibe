@@ -218,7 +218,7 @@ def test_build_session_key_for_context_uses_platform_specific_platform() -> None
 
 
 def test_scheduled_task_store_uses_sqlite_when_path_is_default(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = ScheduledTaskStore()
     task = store.add_task(
         name="Hourly summary",
@@ -241,7 +241,7 @@ def test_scheduled_task_store_uses_sqlite_when_path_is_default(tmp_path: Path, m
 
 
 def test_sqlite_update_task_persists_changes(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = ScheduledTaskStore()
     task = store.add_task(
         name="Hourly summary",
@@ -278,7 +278,7 @@ def test_sqlite_update_task_persists_changes(tmp_path: Path, monkeypatch) -> Non
 
 
 def test_task_execution_store_uses_sqlite_runs_when_root_is_default(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = TaskExecutionStore()
     request = store.enqueue_hook_send(
         session_key="slack::channel::C123",
@@ -1362,7 +1362,7 @@ def test_drain_requests_executes_hook_send(tmp_path: Path) -> None:
 
 
 def test_agent_run_stays_running_until_terminal_result(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
         session_key="slack::channel::C123",
@@ -1455,7 +1455,7 @@ def test_agent_run_stays_running_until_terminal_result(tmp_path: Path, monkeypat
 
 
 def test_agent_run_preserves_failed_terminal_status(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
         session_key="slack::channel::C123",
@@ -1532,7 +1532,7 @@ def test_agent_run_preserves_failed_terminal_status(tmp_path: Path, monkeypatch)
 
 
 def test_agent_run_callback_enqueues_only_result_to_caller_session(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
@@ -1582,7 +1582,7 @@ def test_agent_run_callback_enqueues_only_result_to_caller_session(tmp_path: Pat
 
 
 def test_agent_run_callback_builds_failure_message_without_result_text(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
@@ -1612,7 +1612,7 @@ def test_agent_run_callback_builds_failure_message_without_result_text(tmp_path:
 
 
 def test_agent_run_synchronous_dispatch_error_marks_failed(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
         session_key="slack::channel::C123",
@@ -2414,7 +2414,7 @@ def _make_avibe_session(monkeypatch, tmp_path) -> str:
     from storage.models import scope_settings
     from storage.settings_service import upsert_scope
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     with engine.begin() as conn:

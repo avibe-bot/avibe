@@ -16,7 +16,7 @@ from storage.settings_service import upsert_scope
 
 
 def test_backfill_agent_session_title_uses_first_user_message_for_claude(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     published: list[tuple[str, dict]] = []
     monkeypatch.setattr(inbox_events.bus, "publish", lambda event_type, data: published.append((event_type, data)))

@@ -1219,7 +1219,7 @@ def test_sessions_store_runtime_updates_do_not_flush_stale_snapshots(tmp_path: P
 
 
 def test_sessions_store_bootstrap_uses_config_primary_platform(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_config_path().write_text(
         json.dumps({"platform": "lark", "platforms": {"enabled": ["lark"], "primary": "lark"}}),

@@ -58,7 +58,7 @@ class TestCLIPackageInstalled:
         assert result.stdout.strip()  # Should print a version string
 
     def test_config_paths_uses_env(self, vibe_container):
-        """VIBE_REMOTE_HOME env var should control the base directory."""
+        """AVIBE_HOME env var should control the base directory."""
         result = _docker_exec("python -c 'from config.paths import get_vibe_remote_dir; print(get_vibe_remote_dir())'")
         assert result.returncode == 0
-        assert "/data/vibe_remote" in result.stdout
+        assert "/data/avibe" in result.stdout

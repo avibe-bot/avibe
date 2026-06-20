@@ -11,7 +11,7 @@ from vibe import cli
 
 
 def _setup(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     ensure_sqlite_state(primary_platform="avibe")
     return create_sqlite_engine(paths.get_sqlite_state_path())
@@ -94,7 +94,7 @@ def test_list_pagination_fixed_ten_no_limit_flag(monkeypatch, tmp_path, capsys):
 def test_list_on_fresh_home_returns_empty(monkeypatch, tmp_path, capsys):
     # No ensure_sqlite_state(): _open_session_engine must bootstrap the DB itself,
     # so a fresh Avibe home returns a clean empty list, not "no such table" (Codex P2).
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     code, payload = _run(cli.cmd_session_list, ["session", "list"], capsys)
     assert code == 0

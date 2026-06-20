@@ -34,7 +34,7 @@ RUN SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION} \
     pip install --no-cache-dir -e .
 
 # Runtime config
-ENV VIBE_REMOTE_HOME=/data/vibe_remote
+ENV AVIBE_HOME=/data/avibe
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 5123
