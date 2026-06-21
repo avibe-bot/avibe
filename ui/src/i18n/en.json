@@ -1881,6 +1881,11 @@
       "provide": "provide",
       "title": "Provide {{name}}",
       "help": "The agent asked for this secret. It's saved straight to the vault and never re-enters the chat."
+    },
+    "history": "History",
+    "audit": {
+      "title": "Recent activity",
+      "empty": "No activity yet."
     }
   }
 }

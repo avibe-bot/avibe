@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { KeyRound, Loader2, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { History, KeyRound, Loader2, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
@@ -7,7 +7,7 @@ import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
-import { useApi, type VaultSecret } from '../../context/ApiContext';
+import { useApi, type VaultAuditEvent, type VaultSecret } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 
 const AddSecretDialog: React.FC<{ onClose: () => void; onSaved: () => void }> = ({ onClose, onSaved }) => {
@@ -104,6 +104,8 @@ export const VaultsPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const [showAudit, setShowAudit] = useState(false);
+  const [audit, setAudit] = useState<VaultAuditEvent[]>([]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -121,6 +123,19 @@ export const VaultsPage: React.FC = () => {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  const toggleAudit = useCallback(async () => {
+    const next = !showAudit;
+    setShowAudit(next);
+    if (next) {
+      try {
+        const res = await api.getVaultAudit({ limit: 50 });
+        setAudit(res.events ?? []);
+      } catch (err: any) {
+        setError(err?.message ?? String(err));
+      }
+    }
+  }, [api, showAudit]);
 
   const onDelete = async (name: string) => {
     if (!window.confirm(t('vaults.deleteConfirm', { name }))) return;
@@ -142,6 +157,9 @@ export const VaultsPage: React.FC = () => {
         subtitle={t('vaults.subtitle')}
         actions={
           <>
+            <Button variant={showAudit ? 'secondary' : 'ghost'} size="icon" onClick={toggleAudit} aria-label={t('vaults.history')}>
+              <History className="size-4" />
+            </Button>
             <Button variant="ghost" size="icon" onClick={refresh} aria-label={t('vaults.refresh')}>
               <RefreshCw className="size-4" />
             </Button>
@@ -189,6 +207,24 @@ export const VaultsPage: React.FC = () => {
               </div>
             </div>
           ))}
+        </div>
+      )}
+      {showAudit && (
+        <div className="rounded-2xl border border-border bg-surface p-4">
+          <div className="mb-2 text-sm font-semibold">{t('vaults.audit.title')}</div>
+          {audit.length === 0 ? (
+            <div className="text-sm text-muted">{t('vaults.audit.empty')}</div>
+          ) : (
+            <ul className="flex flex-col gap-1.5">
+              {audit.map((e) => (
+                <li key={e.id} className="flex items-center gap-2 text-xs">
+                  <Badge variant="secondary">{e.event}</Badge>
+                  {e.secret_name ? <span className="font-mono">{e.secret_name}</span> : null}
+                  <span className="ml-auto text-muted">{new Date(e.ts).toLocaleString()}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
       {adding && (

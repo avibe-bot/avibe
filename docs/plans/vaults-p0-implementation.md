@@ -252,7 +252,8 @@ stay queryable.
    saves to the vault). **[done — 2026-06-21]** Remaining (needs the live pipeline /
    regression env to verify, deferred): message_dispatcher provision-request row + IM
    deep-link rendering + name-only auto-wake-up.
-6. `feat(vault): audit tab + polish` — audit view, masked-read verification.
+6. `feat(vault): audit tab + polish` — Vaults-page Activity panel (toggle → GET
+   /api/vault/audit), end-to-end P0 smoke. **[done — 2026-06-21]** **P0 COMPLETE.**
 
 ## 11. Test plan
 
