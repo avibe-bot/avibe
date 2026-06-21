@@ -51,7 +51,7 @@ def _set_visibility(session_id: str, visibility: str) -> None:
 
 
 def test_list_show_pages_orders_newest_first_and_joins_title(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _seed_session("ses_titled", title="Q2 funnel dashboard")
     _seed_session("ses_plain")
@@ -77,7 +77,7 @@ def test_list_show_pages_orders_newest_first_and_joins_title(monkeypatch, tmp_pa
 
 
 def test_set_show_page_visibility_public_then_offline(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _seed_session("ses_x")
     _set_visibility("ses_x", "private")
@@ -94,7 +94,7 @@ def test_set_show_page_visibility_public_then_offline(monkeypatch, tmp_path):
 
 
 def test_set_show_page_visibility_rejects_invalid(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _seed_session("ses_x")
 
@@ -104,7 +104,7 @@ def test_set_show_page_visibility_rejects_invalid(monkeypatch, tmp_path):
 
 
 def test_rotate_share_requires_public_and_revokes_previous(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _seed_session("ses_x")
     _set_visibility("ses_x", "private")
@@ -122,7 +122,7 @@ def test_rotate_share_requires_public_and_revokes_previous(monkeypatch, tmp_path
 
 
 def test_show_pages_list_route_returns_payload(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     _seed_session("ses_route", title="Release notes preview")
     _set_visibility("ses_route", "public")

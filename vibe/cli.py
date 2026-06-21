@@ -621,6 +621,29 @@ def _watch_add_examples_text() -> str:
     )
 
 
+def _agent_run_examples_text() -> str:
+    return dedent(
+        """\
+        Session target:
+          Use --session-id to continue an existing Agent Session.
+          Use --create-session to start a new blank Session.
+          Use --fork-session to create a new Session by forking an existing Session's native backend context.
+
+        Forking:
+          --fork-session <session-id> creates a new Avibe Agent Session and asks the native backend to fork the source native session on the first turn.
+          Forks keep the same backend as the source Session. Passing --agent is allowed only when that Agent uses the same backend.
+          --agent, --model, and --reasoning-effort may override the forked Session's Agent/model/effort.
+          Do not combine --fork-session with --session-id, --create-session, --create-session-per-run, --deliver-key, or --post-to.
+
+        Examples:
+          vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
+          vibe agent run --async --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
+          vibe agent run --async --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
+          vibe agent run --fork-session sesk8m4q2p7x --agent reviewer --model gpt-5.4 --reasoning-effort high --message 'Review the forked context.'
+        """
+    )
+
+
 def _add_hidden_task_alias(task_subparsers, alias: str, parser) -> None:
     alias_parser = task_subparsers.add_parser(
         alias,
@@ -1350,31 +1373,29 @@ def _validate_agent_name_arg(agent_name: Optional[str]) -> Optional[str]:
 
 class _ScopeRoutingTarget(NamedTuple):
     agent_name: Optional[str]
-    agent_backend: Optional[str]
 
 
 def _resolve_scope_routing_target(session_key: str) -> _ScopeRoutingTarget:
     if not session_key:
-        return _ScopeRoutingTarget(None, None)
+        return _ScopeRoutingTarget(None)
     try:
         parsed = parse_session_key(session_key)
     except ValueError:
-        return _ScopeRoutingTarget(None, None)
+        return _ScopeRoutingTarget(None)
     scope_id = make_scope_id(parsed.platform, parsed.scope_type, parsed.scope_id)
     _ensure_cli_sqlite_state()
     engine = create_sqlite_engine(paths.get_sqlite_state_path())
     try:
         with engine.connect() as conn:
             row = conn.execute(
-                select(scope_settings.c.agent_name, scope_settings.c.agent_backend)
+                select(scope_settings.c.agent_name)
                 .where(scope_settings.c.scope_id == scope_id)
                 .limit(1)
             ).first()
             if row is None:
-                return _ScopeRoutingTarget(None, None)
+                return _ScopeRoutingTarget(None)
             agent_name = str(row.agent_name).strip() if row.agent_name else None
-            agent_backend = str(row.agent_backend).strip() if row.agent_backend else None
-            return _ScopeRoutingTarget(agent_name, agent_backend)
+            return _ScopeRoutingTarget(agent_name)
     finally:
         engine.dispose()
 
@@ -1383,28 +1404,12 @@ def _resolve_scope_agent_name(session_key: str) -> Optional[str]:
     return _resolve_scope_routing_target(session_key).agent_name
 
 
-def _raise_unresolved_legacy_scope_backend(
-    *,
-    scope_target: _ScopeRoutingTarget,
-    deliver_key: str,
-    help_command: str,
-) -> None:
-    raise TaskCliError(
-        "scope routing still references a legacy backend without an Agent",
-        code="legacy_scope_backend_unresolved",
-        hint="Open the Scope routing settings and choose an Agent before creating sessions for this Scope.",
-        help_command=help_command,
-        details={"deliver_key": deliver_key, "agent_backend": scope_target.agent_backend},
-    )
-
-
 def _resolve_agent_for_target(
     *,
     agent_name: Optional[str],
     session_id: Optional[str],
     session_key: str,
     help_command: str,
-    reject_unresolved_legacy_scope_backend: bool = False,
 ):
     store = _agent_store()
     try:
@@ -1436,12 +1441,6 @@ def _resolve_agent_for_target(
             scope_target = _resolve_scope_routing_target(session_key)
             if scope_target.agent_name:
                 return store.require_enabled(scope_target.agent_name)
-            if scope_target.agent_backend and reject_unresolved_legacy_scope_backend:
-                _raise_unresolved_legacy_scope_backend(
-                    scope_target=scope_target,
-                    deliver_key=session_key,
-                    help_command=help_command,
-                )
 
         return store.get_default_agent()
     finally:
@@ -1455,22 +1454,16 @@ def _resolve_agent_for_session_reservation(
     help_command: str,
 ) -> Optional[VibeAgent]:
     resolved_agent_name = agent_name
-    scope_target = _ScopeRoutingTarget(None, None)
+    scope_target = _ScopeRoutingTarget(None)
     if not resolved_agent_name:
         scope_target = _resolve_scope_routing_target(deliver_key)
         resolved_agent_name = scope_target.agent_name
-    if not resolved_agent_name:
-        if scope_target.agent_backend:
-            _raise_unresolved_legacy_scope_backend(
-                scope_target=scope_target,
-                deliver_key=deliver_key,
-                help_command=help_command,
-            )
-        return None
 
     store = _agent_store()
     try:
-        return store.require_enabled(resolved_agent_name)
+        if resolved_agent_name:
+            return store.require_enabled(resolved_agent_name)
+        return store.get_default_agent()
     finally:
         store.close()
 
@@ -1697,7 +1690,6 @@ def cmd_task_add(args):
             session_id=session_id,
             session_key=session_key or getattr(args, "deliver_key", None) or "",
             help_command="vibe task add --help",
-            reject_unresolved_legacy_scope_backend=session_policy != "existing",
         )
         agent_name = agent.name if agent else None
         if session_policy == "create_once":
@@ -2026,7 +2018,6 @@ def cmd_task_update(args):
                 session_id=None,
                 session_key=deliver_key or "",
                 help_command="vibe task update --help",
-                reject_unresolved_legacy_scope_backend=True,
             )
             agent_name = agent.name if agent else None
         elif agent_name is not None or session_id or session_key:
@@ -2272,6 +2263,25 @@ def cmd_agent_show(args):
         return 0
     except Exception as exc:
         _print_task_error(TaskCliError(str(exc), code="agent_not_found", details={"agent": args.name}))
+        return 1
+
+
+def cmd_agent_default(args):
+    try:
+        store = _agent_store()
+        if store.get(args.name) is None:
+            try:
+                backend = validate_agent_backend(args.name)
+            except ValueError:
+                backend = None
+            if backend:
+                store.sync_builtin_default_agent(backend=backend, backend_enabled=True)
+        store.set_default_agent_name(args.name)
+        agent = store.require(args.name)
+        _print_cli_payload("default_agent", default_agent_name=agent.name, agent=_agent_payload(agent, brief=True))
+        return 0
+    except Exception as exc:
+        _print_task_error(exc)
         return 1
 
 
@@ -2565,6 +2575,7 @@ def cmd_agent_import(args):
 
 def _validate_run_session_policy(args, *, help_command: str) -> str:
     session_id = (getattr(args, "session_id", None) or "").strip()
+    fork_session = (getattr(args, "fork_session", None) or "").strip()
     create_session = bool(getattr(args, "create_session", False))
     create_per_run = bool(getattr(args, "create_session_per_run", False))
     if bool(getattr(args, "async_run", False)) and getattr(args, "wait_timeout", None) is not None:
@@ -2579,6 +2590,23 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             "--callback-session-id requires --async",
             code="callback_requires_async",
             hint="Callback delivery happens after an asynchronous run completes.",
+            help_command=help_command,
+        )
+    if fork_session and (session_id or create_session or create_per_run):
+        raise TaskCliError(
+            "use --fork-session without --session-id or session creation flags",
+            code="conflicting_session_policy",
+            hint="Fork creates a new Session from the source Session.",
+            help_command=help_command,
+        )
+    if not fork_session and (
+        (getattr(args, "model", None) or "").strip()
+        or (getattr(args, "reasoning_effort", None) or "").strip()
+    ):
+        raise TaskCliError(
+            "--model and --reasoning-effort are only valid with --fork-session",
+            code="fork_override_without_fork",
+            hint="Use --agent, --model, and --reasoning-effort as overrides when forking a Session.",
             help_command=help_command,
         )
     if session_id and (create_session or create_per_run):
@@ -2600,6 +2628,8 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="Use --create-session for a one-shot agent run.",
             help_command=help_command,
         )
+    if fork_session:
+        return "fork"
     if create_session:
         return "create"
     if session_id:
@@ -2715,7 +2745,44 @@ def _validate_definition_update_delivery_target(
     )
 
 
-def _reserve_cli_session(*, agent, deliver_key: Optional[str]) -> str:
+def _resolve_run_cwd(args, *, session_policy: str, help_command: str) -> Optional[str]:
+    """Working directory for a session this run RESERVES; None = scope snapshot.
+
+    An explicit ``--cwd`` must exist and always wins. Without it, a private
+    (no ``--deliver-key``) reservation follows the CLI invocation's cwd — the
+    caller stands in a concrete directory, which IS the natural context, like
+    every other CLI tool. A ``--deliver-key`` reservation keeps the target
+    scope's configured workdir (returning None defers to the scope snapshot in
+    ``create_agent_session_row``): the scope's binding is the deliberate choice
+    there, not wherever the CLI happens to run. ``--session-id`` reserves
+    nothing — an existing session keeps its workdir — so ``--cwd`` is an error.
+    """
+    raw = (getattr(args, "cwd", None) or "").strip()
+    if session_policy == "existing":
+        if raw:
+            raise TaskCliError(
+                "--cwd only applies when this run creates a session",
+                code="cwd_with_existing_session",
+                hint="An existing --session-id keeps its own working directory.",
+                help_command=help_command,
+            )
+        return None
+    if raw:
+        resolved = os.path.abspath(os.path.expanduser(raw))
+        if not os.path.isdir(resolved):
+            raise TaskCliError(
+                f"--cwd directory does not exist: {resolved}",
+                code="cwd_not_found",
+                hint="Point --cwd to an existing directory, or omit it to use the invocation directory.",
+                help_command=help_command,
+            )
+        return resolved
+    if (getattr(args, "deliver_key", None) or "").strip():
+        return None
+    return os.getcwd()
+
+
+def _reserve_cli_session(*, agent, deliver_key: Optional[str], workdir: Optional[str] = None) -> str:
     # Route through ``core.services.sessions`` so the CLI shares the same
     # business API as the UI server and the future N3 internal endpoint;
     # see docs/plans/workbench-dispatch-architecture.md §6 (C2).
@@ -2732,6 +2799,7 @@ def _reserve_cli_session(*, agent, deliver_key: Optional[str]) -> str:
             agent_name=agent.name,
             model=agent.model,
             reasoning_effort=agent.reasoning_effort,
+            workdir=workdir,
         )
     else:
         platform = _primary_platform()
@@ -2744,6 +2812,7 @@ def _reserve_cli_session(*, agent, deliver_key: Optional[str]) -> str:
             agent_name=agent.name,
             model=agent.model,
             reasoning_effort=agent.reasoning_effort,
+            workdir=workdir,
         )
     if not session_id:
         raise TaskCliError(
@@ -2752,6 +2821,33 @@ def _reserve_cli_session(*, agent, deliver_key: Optional[str]) -> str:
             help_command="vibe agent run --help",
         )
     return session_id
+
+
+def _reserve_forked_cli_session(
+    *,
+    source_session_id: str,
+    agent_name: Optional[str],
+    model: Optional[str],
+    reasoning_effort: Optional[str],
+):
+    from core.services.session_fork import SessionForkError, reserve_forked_session
+
+    try:
+        return reserve_forked_session(
+            source_session_id=source_session_id,
+            agent_name=agent_name or None,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            db_path=paths.get_sqlite_state_path(),
+        )
+    except SessionForkError as exc:
+        raise TaskCliError(
+            str(exc),
+            code="session_fork_failed",
+            hint="Fork requires a bound source Session and, when overriding --agent, the same backend.",
+            help_command="vibe agent run --help",
+            details={"source_session_id": source_session_id},
+        ) from exc
 
 
 def _reserve_definition_session(*, agent_name: Optional[str], deliver_key: str, help_command: str) -> str:
@@ -2763,7 +2859,14 @@ def _reserve_definition_session(*, agent_name: Optional[str], deliver_key: str, 
         deliver_key=deliver_key,
         help_command=help_command,
     )
-    agent_backend = agent.backend if agent else _ensure_config().agents.default_backend
+    if agent is None:
+        raise TaskCliError(
+            "no enabled default Agent is available for session creation",
+            code="default_agent_unavailable",
+            hint="Create or enable a default Agent before creating sessions without --agent.",
+            help_command=help_command,
+        )
+    agent_backend = agent.backend
     session_anchor = session_anchor_for_target(target)
     session_id = sessions_service.reserve_agent_session(
         scope_key=target.session_scope,
@@ -2799,7 +2902,7 @@ def cmd_agent_run(args):
                 hint="Pass --agent with the Avibe Agent name to run.",
                 help_command="vibe agent run --help",
             )
-        if session_policy == "none" and (args.deliver_key or args.post_to):
+        if session_policy in {"none", "fork"} and (args.deliver_key or args.post_to):
             raise TaskCliError(
                 "delivery options require --session-id or --create-session",
                 code="delivery_target_without_session_policy",
@@ -2808,11 +2911,30 @@ def cmd_agent_run(args):
             )
         session_id = (args.session_id or "").strip() or None
         session_key = ""
+        if session_policy == "fork" and (args.cwd or "").strip():
+            raise TaskCliError(
+                "--cwd only applies when this run creates a blank session",
+                code="cwd_with_fork_session",
+                hint="A fork copies the source Session working directory.",
+                help_command="vibe agent run --help",
+            )
+        run_cwd = _resolve_run_cwd(args, session_policy=session_policy, help_command="vibe agent run --help")
         agent = _agent_store().require_enabled(agent_name) if agent_name else None
+        fork_result = None
         if session_policy == "create":
-            session_id = _reserve_cli_session(agent=agent, deliver_key=args.deliver_key)
+            session_id = _reserve_cli_session(agent=agent, deliver_key=args.deliver_key, workdir=run_cwd)
         elif session_policy == "none":
-            session_id = _reserve_cli_session(agent=agent, deliver_key=None)
+            session_id = _reserve_cli_session(agent=agent, deliver_key=None, workdir=run_cwd)
+        elif session_policy == "fork":
+            fork_result = _reserve_forked_cli_session(
+                source_session_id=(args.fork_session or "").strip(),
+                agent_name=agent_name or None,
+                model=args.model,
+                reasoning_effort=args.reasoning_effort,
+            )
+            session_id = fork_result.session_id
+            if agent_name:
+                agent = _agent_store().require_enabled(agent_name)
         if session_id:
             target = resolve_session_id_target(session_id)
             session_key = target.session_key.to_key()
@@ -2838,8 +2960,10 @@ def cmd_agent_run(args):
             agent_name=agent.name if agent else None,
             agent_id=agent.id if agent else None,
             agent_backend=agent.backend if agent else None,
-            model=agent.model if agent else None,
-            reasoning_effort=agent.reasoning_effort if agent else None,
+            model=fork_result.model if fork_result else (agent.model if agent else None),
+            reasoning_effort=(
+                fork_result.reasoning_effort if fork_result else (agent.reasoning_effort if agent else None)
+            ),
             session_policy=session_policy,
             session_key=session_key,
             session_id=session_id,
@@ -2847,6 +2971,11 @@ def cmd_agent_run(args):
             deliver_key=args.deliver_key,
             message=message,
             callback_session_id=callback_session_id,
+            metadata={
+                "session_fork": fork_result.fork.to_metadata(),
+            }
+            if fork_result
+            else None,
         )
         payload = {
             "accepted": True,
@@ -2868,6 +2997,10 @@ def cmd_agent_run(args):
                 "callback_session_id": callback_session_id,
             },
         }
+        if fork_result:
+            payload["forked_from_session_id"] = fork_result.fork.source_session_id
+        if fork_result:
+            payload["run"]["forked_from_session_id"] = fork_result.fork.source_session_id
         if not args.async_run:
             payload["run"] = _wait_for_run_result(request_store, request.id, wait_timeout=args.wait_timeout)
         _print_cli_payload("agent_run", **payload)
@@ -3946,7 +4079,6 @@ def cmd_watch_add(args):
             session_id=session_id,
             session_key=session_key or getattr(args, "deliver_key", None) or "",
             help_command="vibe watch add --help",
-            reject_unresolved_legacy_scope_backend=session_policy != "existing",
         )
         agent_name = agent.name if agent else None
         if session_policy == "create_once":
@@ -4224,7 +4356,6 @@ def cmd_watch_update(args):
                 session_id=None,
                 session_key=deliver_key or "",
                 help_command="vibe watch update --help",
-                reject_unresolved_legacy_scope_backend=True,
             )
             agent_name = agent.name if agent else None
         elif agent_name is not None or session_id or session_key:
@@ -4555,12 +4686,22 @@ def _doctor():
             )
             summary["pass"] += 1
 
-        # Default backend check
-        default_backend = config.agents.default_backend
+        # Default Agent check
+        default_agent_name = None
+        store = None
+        try:
+            store = _agent_store()
+            default_agent = store.get_default_agent()
+            default_agent_name = default_agent.name if default_agent else None
+        except Exception:
+            default_agent_name = None
+        finally:
+            if store is not None:
+                store.close()
         agent_items.append(
             {
                 "status": "pass",
-                "message": f"Default backend: {default_backend}",
+                "message": f"Default Agent: {default_agent_name or 'not configured'}",
             }
         )
         summary["pass"] += 1
@@ -6283,6 +6424,7 @@ def build_parser():
     supervisor_parser.add_argument("--job-id", required=True)
     supervisor_parser.add_argument("--delay-seconds", type=_non_negative_float, default=0)
     supervisor_parser.add_argument("--trigger", default="cli")
+    supervisor_parser.add_argument("--scope", default="all", choices=("all", "service"))
     supervisor_parser.add_argument("--vibe-path")
     supervisor_parser.add_argument("--prepare-show-runtime", action="store_true")
     subparsers.add_parser("status", help="Show service status")
@@ -6442,6 +6584,10 @@ def build_parser():
     agent_show_parser.add_argument("name", help="Agent name")
     _add_json_noop(agent_show_parser)
 
+    agent_default_parser = agent_subparsers.add_parser("default", help="Set the default Avibe Agent")
+    agent_default_parser.add_argument("name", help="Agent name")
+    _add_json_noop(agent_default_parser)
+
     agent_models_parser = agent_subparsers.add_parser(
         "models",
         help="List available models and reasoning efforts for an Agent or backend",
@@ -6523,14 +6669,27 @@ def build_parser():
         "run",
         help="Run an Avibe Agent",
         description="Run an Avibe Agent turn. Use --async to queue it as a background run.",
+        epilog=_agent_run_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe agent run --help",
     )
     agent_run_parser.add_argument("--agent", help="Avibe Agent name")
     agent_run_parser.add_argument("--session-id", help="Existing Agent Session ID to continue")
+    agent_run_parser.add_argument("--fork-session", help="Existing Agent Session ID to fork into a new Session")
     agent_run_parser.add_argument("--create-session", action="store_true", help="Create a new Avibe Session ID before running")
     agent_run_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID for each definition run")
     agent_run_parser.add_argument("--deliver-key", help="Scope ID used as delivery target when creating or sending to a target")
+    agent_run_parser.add_argument("--model", help="Model override for the new forked Session")
+    agent_run_parser.add_argument("--reasoning-effort", help="Reasoning effort override for the new forked Session")
+    agent_run_parser.add_argument(
+        "--cwd",
+        help=(
+            "Working directory for the NEW session. Defaults to the directory the command is "
+            "invoked from; sessions created with --deliver-key default to the target scope's "
+            "configured workdir instead. Invalid with --session-id (an existing session keeps "
+            "its own working directory)."
+        ),
+    )
     agent_run_parser.add_argument("--post-to", choices=("thread", "channel"))
     agent_run_parser.add_argument("--callback-session-id", help="Caller Session ID to receive the completed async run result")
     agent_run_parser.add_argument("--async", dest="async_run", action="store_true", help="Queue the run and return immediately")
@@ -7428,6 +7587,7 @@ def main():
                     str(args.delay_seconds),
                     "--trigger",
                     args.trigger,
+                    *(["--scope", args.scope] if args.scope != "all" else []),
                     *(["--prepare-show-runtime"] if args.prepare_show_runtime else []),
                     *(["--vibe-path", args.vibe_path] if args.vibe_path else []),
                 ]
@@ -7474,6 +7634,8 @@ def main():
             sys.exit(cmd_agent_list(args))
         if args.agent_command == "show":
             sys.exit(cmd_agent_show(args))
+        if args.agent_command == "default":
+            sys.exit(cmd_agent_default(args))
         if args.agent_command == "models":
             sys.exit(cmd_agent_models(args))
         if args.agent_command == "create":

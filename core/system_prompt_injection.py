@@ -12,6 +12,7 @@ from typing import Any, Iterable, Optional
 
 from config import paths
 from core.avibe_cloud import AVIBE_CLOUD_CONNECT_GUIDANCE
+from core.message_context import resolve_context_platform
 from modules.im import MessageContext
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,11 @@ Example: ![Page screenshot](file:///tmp/screenshot.jpg)
 
 _SESSION_START_PROMPT = """\
 Current session id: `{default_session_id}`. Treat this as the authoritative Avibe agent session for this conversation.
+
+"""
+
+_FORKED_SESSION_PROMPT = """\
+This Agent Session was forked from `{source_session_id}`. The authoritative Avibe session id for this fork is `{default_session_id}`. If copied source context mentions another Avibe session id, treat it as historical source-context only and use `{default_session_id}` for Show Pages, Harness commands, tasks, watches, callbacks, and session updates.
 
 """
 
@@ -170,6 +176,7 @@ Useful Harness queries include schema discovery, current session lookup, existin
 | External signal trigger | `vibe watch add` |
 | Independent Agent delegation | `vibe agent run --create-session` |
 | Same-session follow-up | `vibe agent run --session-id ...` |
+| Branch from existing Session context | `vibe agent run --fork-session ...` |
 | State/history inspection | `vibe data query`, `vibe runs list`, `vibe runs show` |
 | Recurring specialist workflow | `vibe agent create/update` plus tasks, watches, or runs |
 
@@ -178,6 +185,8 @@ Useful Harness queries include schema discovery, current session lookup, existin
 `vibe watch add` creates a managed monitor, usually backed by a small script or command, for any observable condition that must be watched until true: product signals, business events, files, logs, CI/reviews/deploys, service health, data freshness, and similar signals.
 
 Use `vibe agent run --async --callback-session-id {default_session_id}` when one Agent delegates work to another Session and the final result text should return to this caller Session as a follow-up Agent message.
+
+Use `vibe agent run --fork-session <source-session-id> --message ...` when work should branch from an existing Session's native backend context without mutating that source Session. Forks keep the source Session backend; `--agent`, `--model`, and `--reasoning-effort` may override the forked Session only when the backend stays the same. Do not combine `--fork-session` with `--session-id`, `--create-session`, `--deliver-key`, or `--post-to`.
 
 `--post-to` changes the delivery target, not the session scope. Use `--post-to channel` when the session should stay thread-scoped but the follow-up message should be posted to the parent channel. For tasks, use `--message "..."` or `--message-file <path>` as the stored message. For watches, use `--prefix "..."` for the follow-up instruction prepended before waiter stdout.
 
@@ -193,8 +202,10 @@ The table below is generated from currently enabled Agents at prompt-injection t
 Rules:
 - All Agents listed in the generated table are enabled. Use the `Agent Name` value exactly as listed in shell commands such as `vibe agent show <agent-name>` and `vibe agent run --agent <agent-name> ...`.
 - `--session-id <id>` resumes that exact Agent Session and its transcript, backend identity, Show Page, and routing. `--create-session` creates a separate Session for the target Agent.
+- `--fork-session <id>` creates a new Agent Session from that source Session's native backend context; use it for alternate paths that need the source context but should not mutate the source Session.
 - For another Agent doing an independent trial, comparison, delegation, or specialist subtask, use `vibe agent run --agent <agent-name> --create-session --message ...`.
 - Use `vibe agent run --agent <agent-name> --session-id ... --message ...` only to continue that same Session. Reuse the current session id only with Agents whose `Backend` matches `{current_agent_backend}`; otherwise use `--create-session`.
+- With `--fork-session`, pass `--agent`, `--model`, or `--reasoning-effort` only as forked-Session overrides, and only when the requested Agent backend matches the source Session backend.
 - `--async` changes waiting behavior, not session identity: synchronous waits for the result; async runs in the background and is inspected later with `vibe runs`.
 - Create or update Agents only when it captures a reusable role, reduces repeated prompting, or makes a long-running Harness more reliable.
 
@@ -212,14 +223,16 @@ _SESSION_END_PROMPT = """\
 Current session id: `{default_session_id}`. Before using Show Page or Harness commands, target this exact session unless the user explicitly asks to target a different one.
 """
 
-# Appended to the session reminder ONLY when the session has no user-chosen title
-# (empty, or a title_source other than "user" — i.e. auto-generated or not yet set).
-# Nudges the agent to set a short, human-scannable title via the CLI so sessions are
-# easy to find in `vibe session list`. A CLI update lands as title_source="user", so
-# the nudge stops on the next turn — it naturally fires at most once per session.
-_SESSION_TITLE_NUDGE = """\
-This session's title is {title_state}. If you can tell what it's about, set a concise title (≤10 chars) once, silently — don't mention it to the user:
+_SESSION_TITLE_PROMPT = """\
+
+## Session Title
+When the topic of this Web conversation is clear, you may silently set one concise, human-scannable title for the current Session once. Before setting it, inspect the Session:
+`vibe session get {default_session_id}`
+
+If `metadata.title_source` is `user` or `agent`, leave the title unchanged; that means the title was deliberately set or cleared. Otherwise, set it once:
 `vibe session update {default_session_id} --title "<short title>"`
+
+Do not mention the title update unless the user asks, and do not repeatedly rename the same Session.
 """
 
 
@@ -247,6 +260,42 @@ def _extract_default_session_id(context: MessageContext) -> str:
     if not default_session_id:
         raise ValueError("agent_session_id is required before building avibe capability prompt")
     return str(default_session_id)
+
+
+def _extract_fork_source_session_id(context: MessageContext) -> Optional[str]:
+    platform_specific = context.platform_specific or {}
+    target = platform_specific.get("agent_session_target")
+    if not isinstance(target, dict):
+        return None
+
+    fork = target.get("native_session_fork")
+    if isinstance(fork, dict):
+        source_session_id = str(fork.get("source_session_id") or "").strip()
+        if source_session_id:
+            return source_session_id
+
+    metadata = target.get("metadata")
+    if isinstance(metadata, dict):
+        source_session_id = str(metadata.get("fork_source_session_id") or "").strip()
+        if source_session_id:
+            return source_session_id
+
+    return None
+
+
+def build_forked_session_correction_prompt(context: MessageContext) -> Optional[str]:
+    default_session_id = _extract_default_session_id(context)
+    source_session_id = _extract_fork_source_session_id(context)
+    if source_session_id and source_session_id != default_session_id:
+        return _FORKED_SESSION_PROMPT.format(
+            default_session_id=default_session_id,
+            source_session_id=source_session_id,
+        )
+    return None
+
+
+def _is_web_platform(platform: str) -> bool:
+    return platform.strip().lower() in {"avibe", "web"}
 
 
 def _coerce_agent_prompt_info(agent: Any) -> AgentPromptInfo:
@@ -327,7 +376,12 @@ def get_enabled_agents_for_prompt(controller: Any) -> Optional[list[AgentPromptI
 
 
 def _build_session_start_prompt(context: MessageContext) -> str:
-    return _SESSION_START_PROMPT.format(default_session_id=_extract_default_session_id(context))
+    default_session_id = _extract_default_session_id(context)
+    prompt = _SESSION_START_PROMPT.format(default_session_id=default_session_id)
+    fork_correction = build_forked_session_correction_prompt(context)
+    if fork_correction:
+        prompt += fork_correction
+    return prompt
 
 
 def _build_harness_prompt(
@@ -352,46 +406,16 @@ def _build_show_pages_prompt(context: MessageContext, *, avibe_cloud_guidance: s
     )
 
 
-def _lookup_session_title(session_id: str) -> Optional[tuple[str, Optional[str]]]:
-    """Return ``(title, title_source)`` for a session, or ``None`` if it can't be
-    read. Best-effort: a lookup failure must never break prompt injection."""
-    try:
-        from core.services import sessions as sessions_service
-        from storage.db import create_sqlite_engine
-
-        engine = create_sqlite_engine(paths.get_sqlite_state_path())
-        with engine.connect() as conn:
-            row = sessions_service.get_session(conn, session_id)
-        title = str(row.get("title") or "").strip()
-        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-        return title, metadata.get("title_source")
-    except Exception:
-        logger.debug("session title lookup for prompt nudge failed", exc_info=True)
-        return None
-
-
-def _build_session_end_prompt(context: MessageContext) -> str:
+def _build_session_end_prompt(
+    context: MessageContext,
+    *,
+    fallback_platform: Optional[str] = None,
+) -> str:
     default_session_id = _extract_default_session_id(context)
     prompt = _SESSION_END_PROMPT.format(default_session_id=default_session_id)
-    looked_up = _lookup_session_title(default_session_id)
-    if looked_up is not None:
-        # Lazy import: keep this module's load storage-free so the agent-setup /
-        # session-handler import chain never transitively pulls in sqlite
-        # (test_native_session_lightweight_imports_do_not_require_sqlite).
-        from storage.workbench_sessions_service import DELIBERATE_TITLE_SOURCES
-
-        title, title_source = looked_up
-        # Nudge only when the title is NOT deliberately owned. DELIBERATE_TITLE_SOURCES
-        # = {"user", "agent"} covers a title set OR cleared on purpose (update_session
-        # stamps the source even for an empty title) — never re-nudge those, or we'd
-        # undo a deliberate clear / re-prompt an agent that already named it. Auto
-        # sources ("backend", "derived_first_prompt") and a never-touched session (no
-        # title_source) still nudge.
-        if title_source not in DELIBERATE_TITLE_SOURCES:
-            title_state = "not set yet" if not title else f'"{title}" (auto-generated)'
-            prompt += "\n" + _SESSION_TITLE_NUDGE.format(
-                title_state=title_state, default_session_id=default_session_id
-            )
+    platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
+    if _is_web_platform(platform):
+        prompt += _SESSION_TITLE_PROMPT.format(default_session_id=default_session_id)
     return prompt
 
 
@@ -400,10 +424,7 @@ def _build_user_preferences_prompt(
     *,
     fallback_platform: Optional[str] = None,
 ) -> str:
-    platform = fallback_platform or "<platform>"
-    if context is not None:
-        platform_specific = context.platform_specific or {}
-        platform = context.platform or platform_specific.get("platform") or fallback_platform or "<platform>"
+    platform = resolve_context_platform(context, fallback_platform=fallback_platform, default="<platform>")
     return _USER_PREFERENCES_PROMPT.format(
         preferences_path=f"`{paths.get_user_preferences_path()}`",
         platform=platform,
@@ -446,7 +467,7 @@ def build_system_prompt_injection(
     if include_user_preferences:
         prompt += _build_user_preferences_prompt(context, fallback_platform=fallback_platform)
     if context is not None:
-        prompt += _build_session_end_prompt(context)
+        prompt += _build_session_end_prompt(context, fallback_platform=fallback_platform)
     return prompt
 
 

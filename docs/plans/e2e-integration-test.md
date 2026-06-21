@@ -163,7 +163,7 @@ services:
     ports:
       - "${VIBE_E2E_PORT:-15123}:5123"
     environment:
-      - VIBE_REMOTE_HOME=/data/vibe_remote
+      - AVIBE_HOME=/data/avibe
       - VIBE_UI_PORT=5123
       # Platform tokens (Bot A - SUT)
       - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-}
@@ -175,7 +175,7 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     volumes:
-      - vibe-e2e-data:/data/vibe_remote
+      - vibe-e2e-data:/data/avibe
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5123/health', timeout=3)"]
       interval: 3s

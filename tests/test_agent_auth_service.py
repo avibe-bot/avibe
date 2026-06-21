@@ -21,17 +21,33 @@ from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE
 from modules.im import MessageContext
 
 
+class _IsolatedClaudeConfigDirMixin:
+    def setUp(self):
+        super().setUp()
+        self._claude_config_dir_tmp = tempfile.TemporaryDirectory()
+        self._previous_claude_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self._claude_config_dir_tmp.name) / ".claude")
+
+    def tearDown(self):
+        if self._previous_claude_config_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = self._previous_claude_config_dir
+        self._claude_config_dir_tmp.cleanup()
+        super().tearDown()
+
+
 @contextmanager
 def _temporary_vibe_home(tmp_path: Path):
-    previous_home = os.environ.get("VIBE_REMOTE_HOME")
-    os.environ["VIBE_REMOTE_HOME"] = str(tmp_path)
+    previous_home = os.environ.get("AVIBE_HOME")
+    os.environ["AVIBE_HOME"] = str(tmp_path)
     try:
         yield
     finally:
         if previous_home is None:
-            os.environ.pop("VIBE_REMOTE_HOME", None)
+            os.environ.pop("AVIBE_HOME", None)
         else:
-            os.environ["VIBE_REMOTE_HOME"] = previous_home
+            os.environ["AVIBE_HOME"] = previous_home
 
 
 class _StubIMClient:
@@ -48,9 +64,9 @@ class _StubIMClient:
         return "btn-1"
 
 
-class _StubController:
+class _StubConfig(SimpleNamespace):
     def __init__(self):
-        self.config = SimpleNamespace(
+        super().__init__(
             platform="slack",
             language="en",
             agents=SimpleNamespace(
@@ -58,7 +74,16 @@ class _StubController:
                 claude=SimpleNamespace(cli_path="claude"),
                 opencode=SimpleNamespace(cli_path="opencode"),
             ),
+            save_calls=0,
         )
+
+    def save(self):
+        self.save_calls += 1
+
+
+class _StubController:
+    def __init__(self):
+        self.config = _StubConfig()
         self.im_client = _StubIMClient()
         self.agent_service = SimpleNamespace(agents={})
         self.settings_manager = SimpleNamespace(sessions={})
@@ -87,7 +112,7 @@ class _StubController:
         return (None, None, None)
 
 
-class AgentAuthServiceTests(unittest.IsolatedAsyncioTestCase):
+class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyncioTestCase):
     async def test_handle_setup_command_submits_code(self):
         controller = _StubController()
         service = AgentAuthService(controller)
@@ -253,7 +278,7 @@ class AgentAuthServiceTests(unittest.IsolatedAsyncioTestCase):
         service = AgentAuthService(controller)
         context = MessageContext(user_id="U1", channel_id="C1")
         mock_client = SimpleNamespace()
-        service._start_claude_control_flow = AsyncMock(return_value=(mock_client, "https://platform.claude.com/oauth/code"))
+        service._start_claude_control_flow = AsyncMock(return_value=(mock_client, "https://platform.claude.com/oauth/code", None))
         service._wait_for_claude_completion = AsyncMock()
 
         await service.start_setup(context, backend="claude", force_reset=True, claude_login_method="console")
@@ -268,6 +293,120 @@ class AgentAuthServiceTests(unittest.IsolatedAsyncioTestCase):
         flow = service._flows["C1:claude"]
         self.assertIs(flow.claude_client, mock_client)
         self.assertTrue(flow.login_prompt_sent)
+
+    async def test_active_claude_auth_client_pids_includes_im_and_web_flows(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+        done_task = asyncio.create_task(asyncio.sleep(0))
+        await done_task
+
+        def _client(pid):
+            return SimpleNamespace(_transport=SimpleNamespace(_process=SimpleNamespace(pid=pid)))
+
+        im_flow = AgentAuthFlow(
+            flow_id="flow-im",
+            backend="claude",
+            settings_key="C1",
+            initiator_user_id="U1",
+            context=context,
+            process=None,
+            reader_task=done_task,
+            waiter_task=done_task,
+            claude_client=_client(501),
+        )
+        service._flows[im_flow.flow_key] = im_flow
+        service._web_flows["web-flow"] = SimpleNamespace(
+            backend="claude",
+            claude_client=_client(502),
+        )
+
+        pids = service.active_claude_auth_client_pids()
+
+        self.assertEqual(pids, {501, 502})
+        self.assertFalse(service.has_active_claude_auth_client_with_unknown_pid())
+
+    async def test_active_claude_auth_client_unknown_pid_detected(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+        done_task = asyncio.create_task(asyncio.sleep(0))
+        await done_task
+
+        flow = AgentAuthFlow(
+            flow_id="flow-im",
+            backend="claude",
+            settings_key="C1",
+            initiator_user_id="U1",
+            context=context,
+            process=None,
+            reader_task=done_task,
+            waiter_task=done_task,
+            claude_client=SimpleNamespace(),
+        )
+        service._flows[flow.flow_key] = flow
+
+        self.assertEqual(service.active_claude_auth_client_pids(), set())
+        self.assertTrue(service.has_active_claude_auth_client_with_unknown_pid())
+
+    async def test_start_setup_reports_claude_start_failure(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+        service._start_claude_control_flow = AsyncMock(
+            side_effect=RuntimeError("Failed to clear Claude Code settings env")
+        )
+
+        await service.start_setup(context, backend="claude", force_reset=True, claude_login_method="console")
+
+        self.assertEqual(len(controller.im_client.sent_messages), 1)
+        self.assertEqual(len(controller.im_client.sent_button_messages), 1)
+        _, text, keyboard = controller.im_client.sent_button_messages[0]
+        self.assertIn("failed", text.lower())
+        self.assertIn("Failed to clear Claude Code settings env", text)
+        self.assertEqual(keyboard.buttons[0][0].callback_data, "auth_setup:claude")
+        self.assertNotIn("C1:claude", service._flows)
+
+    async def test_start_claude_control_flow_restores_settings_on_auth_start_failure(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        with tempfile.TemporaryDirectory() as home:
+            claude_home = Path(home) / ".claude"
+            claude_home.mkdir()
+            previous_claude_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+            os.environ["CLAUDE_CONFIG_DIR"] = str(claude_home)
+            try:
+                from vibe.claude_config import read_claude_settings_env
+
+                (claude_home / "settings.json").write_text(
+                    '{"env":{"ANTHROPIC_API_KEY":"sk-old","ANTHROPIC_BASE_URL":"https://relay.example"}}',
+                    encoding="utf-8",
+                )
+                service._create_claude_control_client = AsyncMock(return_value=SimpleNamespace())
+                service._send_claude_control_request = AsyncMock(side_effect=RuntimeError("control failed"))
+                service._disconnect_claude_client = AsyncMock()
+
+                with self.assertRaisesRegex(RuntimeError, "control failed"):
+                    await service._start_claude_control_flow(
+                        context,
+                        force_reset=False,
+                        login_with_claude_ai=True,
+                    )
+
+                self.assertEqual(
+                    read_claude_settings_env(),
+                    {
+                        "ANTHROPIC_API_KEY": "sk-old",
+                        "ANTHROPIC_BASE_URL": "https://relay.example",
+                    },
+                )
+            finally:
+                if previous_claude_config_dir is None:
+                    os.environ.pop("CLAUDE_CONFIG_DIR", None)
+                else:
+                    os.environ["CLAUDE_CONFIG_DIR"] = previous_claude_config_dir
 
     async def test_start_setup_prompts_for_claude_login_method_when_unspecified(self):
         controller = _StubController()
@@ -882,17 +1021,75 @@ class AgentAuthServiceTests(unittest.IsolatedAsyncioTestCase):
         service._refresh_backend_runtime = AsyncMock()
         service._disconnect_claude_client = AsyncMock()
 
-        await service._wait_for_claude_completion(flow)
+        with patch("vibe.claude_config.apply_claude_auth") as cleanup:
+            await service._wait_for_claude_completion(flow)
 
         service._send_claude_control_request.assert_awaited_once_with(
             flow.claude_client,
             {"subtype": "claude_oauth_wait_for_completion"},
             timeout=service.setup_timeout_seconds,
         )
+        cleanup.assert_called()
+        self.assertEqual(controller.config.agents.claude.auth_mode, "oauth")
+        self.assertTrue(controller.config.agents.claude.auth_mode_set)
+        self.assertEqual(controller.config.save_calls, 1)
         service._refresh_backend_runtime.assert_awaited_once_with("claude")
         service._disconnect_claude_client.assert_awaited_once_with(flow.claude_client)
         self.assertIn("login is active again", controller.im_client.sent_messages[0][1].lower())
         self.assertNotIn(flow.flow_key, service._flows)
+
+    async def test_wait_for_claude_completion_persists_oauth_to_v2_when_controller_is_compat(self):
+        from config.v2_config import AgentsConfig, ClaudeConfig, RuntimeConfig, SlackConfig, V2Config
+
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+        done_task = asyncio.create_task(asyncio.sleep(0))
+        await done_task
+        flow = AgentAuthFlow(
+            flow_id="flow-claude-compat-persist",
+            backend="claude",
+            settings_key="C1",
+            initiator_user_id="U1",
+            context=context,
+            process=None,
+            reader_task=done_task,
+            waiter_task=done_task,
+            claude_client=SimpleNamespace(),
+        )
+        service._flows[flow.flow_key] = flow
+        service._flows_by_id[flow.flow_id] = flow
+        service._send_claude_control_request = AsyncMock(return_value={})
+        service._verify_login = AsyncMock(return_value=(True, '{"loggedIn": true}'))
+        service._refresh_backend_runtime = AsyncMock()
+        service._disconnect_claude_client = AsyncMock()
+
+        with tempfile.TemporaryDirectory() as home:
+            with _temporary_vibe_home(Path(home)):
+                V2Config(
+                    mode="self_host",
+                    version="v2",
+                    slack=SlackConfig(),
+                    runtime=RuntimeConfig(default_cwd="/tmp/work"),
+                    agents=AgentsConfig(
+                        claude=ClaudeConfig(
+                            auth_mode="oauth",
+                            auth_mode_set=False,
+                        )
+                    ),
+                ).save()
+                controller.config = SimpleNamespace(
+                    language="en",
+                    claude=SimpleNamespace(auth_mode="oauth", auth_mode_set=False),
+                )
+                with patch("vibe.claude_config.apply_claude_auth"):
+                    await service._wait_for_claude_completion(flow)
+
+                saved = V2Config.load()
+
+        self.assertEqual(saved.agents.claude.auth_mode, "oauth")
+        self.assertTrue(saved.agents.claude.auth_mode_set)
+        self.assertTrue(controller.config.claude.auth_mode_set)
 
     async def test_wait_for_claude_completion_reports_settings_cleanup_failure(self):
         controller = _StubController()
@@ -998,6 +1195,35 @@ class AgentAuthServiceTests(unittest.IsolatedAsyncioTestCase):
         agent.refresh_runtime_config.assert_awaited_once_with(runtime_config)
         agent.refresh_auth_state.assert_not_awaited()
 
+    async def test_refresh_backend_runtime_releases_runtime_tokens_after_refresh(self):
+        controller = _StubController()
+        runtime_tokens = {"session:/repo": "token-1"}
+        controller.agent_service.runtime_turn_tokens_for_backend = Mock(return_value=runtime_tokens)
+        controller.agent_service.release_runtime_turn_tokens = Mock()
+        controller.agent_service.refresh_runtime_config = AsyncMock(return_value=True)
+        controller.agent_service.agents["codex"] = SimpleNamespace()
+        service = AgentAuthService(controller)
+        runtime_config = object()
+        service._load_backend_runtime_config = Mock(return_value=runtime_config)
+
+        await service._refresh_backend_runtime("codex")
+
+        controller.agent_service.runtime_turn_tokens_for_backend.assert_called_once_with("codex")
+        controller.agent_service.refresh_runtime_config.assert_awaited_once_with("codex", runtime_config)
+        controller.agent_service.release_runtime_turn_tokens.assert_called_once_with(runtime_tokens)
+
+    async def test_clear_backend_sessions_for_context_routes_through_agent_service(self):
+        controller = _StubController()
+        controller.agent_service.clear_backend_sessions = AsyncMock(return_value=1)
+        controller.agent_service.agents["codex"] = SimpleNamespace(clear_sessions=AsyncMock())
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+
+        await service._clear_backend_sessions_for_context("codex", context)
+
+        controller.agent_service.clear_backend_sessions.assert_awaited_once_with("codex", "C1")
+        controller.agent_service.agents["codex"].clear_sessions.assert_not_awaited()
+
     async def test_refresh_backend_runtime_registers_codex_when_enabled_after_startup(self):
         from config.v2_compat import CodexCompatConfig
         from modules.agents.service import AgentService
@@ -1014,7 +1240,6 @@ class AgentAuthServiceTests(unittest.IsolatedAsyncioTestCase):
             extra_args=[],
         )
         service._load_backend_runtime_config = Mock(return_value=runtime_config)
-        service._load_saved_default_backend = Mock(return_value="codex")
 
         await service._refresh_backend_runtime("codex")
 
@@ -1031,22 +1256,14 @@ class AgentAuthServiceTests(unittest.IsolatedAsyncioTestCase):
 
         controller = _StubController()
         controller.agent_service = AgentService(controller)
-        controller.agent_router = AgentRouter.from_file(None, platform="slack", default_backend="codex")
+        controller.agent_router = AgentRouter.from_file(None, platform="slack", fallback_backend="codex")
         controller.config.codex = SimpleNamespace(binary="/old/codex")
         controller.config.default_backend = "codex"
         controller.agent_service.register(SimpleNamespace(name="claude"))
         agent = SimpleNamespace(name="codex", shutdown_runtime=AsyncMock())
         controller.agent_service.register(agent)
-        def validate_default():
-            if controller.agent_router.global_default not in controller.agent_service.agents:
-                controller.agent_router.global_default = "claude"
-                for route in controller.agent_router.platform_routes.values():
-                    route.default = "claude"
-
-        controller._validate_default_backend = validate_default
         service = AgentAuthService(controller)
         service._load_backend_runtime_config = Mock(return_value=None)
-        service._load_saved_default_backend = Mock(return_value="codex")
         service._load_saved_enabled_backends = Mock(return_value=["claude"])
         service._sync_builtin_default_agents = Mock(wraps=service._sync_builtin_default_agents)
 
@@ -1054,13 +1271,13 @@ class AgentAuthServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("codex", controller.agent_service.agents)
         self.assertIsNone(controller.config.codex)
-        self.assertEqual(controller.agent_router.global_default, "claude")
-        self.assertEqual(controller.agent_router.platform_routes["slack"].default, "claude")
-        self.assertEqual(controller.config.default_backend, "claude")
+        self.assertEqual(controller.agent_router.global_default, "codex")
+        self.assertEqual(controller.agent_router.platform_routes["slack"].default, "codex")
+        self.assertEqual(controller.config.default_backend, "codex")
         agent.shutdown_runtime.assert_awaited_once()
-        service._sync_builtin_default_agents.assert_called_once_with("claude")
+        service._sync_builtin_default_agents.assert_called_once_with()
 
-    async def test_refresh_backend_runtime_restores_saved_default_after_late_registration(self):
+    async def test_refresh_backend_runtime_does_not_restore_legacy_default_after_late_registration(self):
         from config.v2_compat import CodexCompatConfig
         from modules.agent_router import AgentRouter
         from modules.agents.service import AgentService
@@ -1069,20 +1286,19 @@ class AgentAuthServiceTests(unittest.IsolatedAsyncioTestCase):
         controller.agent_service = AgentService(controller)
         controller.config.codex = None
         controller.config.default_backend = "claude"
-        controller.agent_router = AgentRouter.from_file(None, platform="slack", default_backend="claude")
+        controller.agent_router = AgentRouter.from_file(None, platform="slack", fallback_backend="claude")
         service = AgentAuthService(controller)
         runtime_config = CodexCompatConfig(enabled=True, binary="/opt/codex", extra_args=[])
         service._load_backend_runtime_config = Mock(return_value=runtime_config)
-        service._load_saved_default_backend = Mock(return_value="codex")
         service._load_saved_enabled_backends = Mock(return_value=["codex"])
         service._sync_builtin_default_agents = Mock(wraps=service._sync_builtin_default_agents)
 
         await service._refresh_backend_runtime("codex")
 
-        self.assertEqual(controller.agent_router.global_default, "codex")
-        self.assertEqual(controller.agent_router.platform_routes["slack"].default, "codex")
-        self.assertEqual(controller.config.default_backend, "codex")
-        service._sync_builtin_default_agents.assert_called_once_with("codex")
+        self.assertEqual(controller.agent_router.global_default, "claude")
+        self.assertEqual(controller.agent_router.platform_routes["slack"].default, "claude")
+        self.assertEqual(controller.config.default_backend, "claude")
+        service._sync_builtin_default_agents.assert_called_once_with()
 
     async def test_sync_builtin_default_agents_uses_saved_enabled_config(self):
         controller = _StubController()
@@ -1090,12 +1306,9 @@ class AgentAuthServiceTests(unittest.IsolatedAsyncioTestCase):
         service = AgentAuthService(controller)
         service._load_saved_enabled_backends = Mock(return_value=["codex"])
 
-        service._sync_builtin_default_agents("codex")
+        service._sync_builtin_default_agents()
 
-        controller.vibe_agent_store.ensure_builtin_default_agents.assert_called_once_with(
-            ["codex"],
-            default_backend="codex",
-        )
+        controller.vibe_agent_store.ensure_builtin_default_agents.assert_called_once_with(["codex"])
 
     async def test_refresh_opencode_runtime_reloads_v2_cli_path(self):
         from config.v2_config import AgentsConfig, OpenCodeConfig, RuntimeConfig, SlackConfig, V2Config
@@ -1522,6 +1735,39 @@ class AgentAuthServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(captured["connected"])
         self.assertEqual(captured["options"].max_buffer_size, CLAUDE_SDK_MAX_BUFFER_SIZE)
+        self.assertEqual(captured["options"].env["AVIBE_CLAUDE_PROCESS_OWNER"], "auth")
+
+    async def test_claude_control_flow_start_in_flight_disables_unknown_pid_guard(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _create_client(_context):
+            started.set()
+            await release.wait()
+            return SimpleNamespace()
+
+        service._create_claude_control_client = AsyncMock(side_effect=_create_client)
+        service._send_claude_control_request = AsyncMock(
+            return_value={"manualUrl": "https://platform.claude.com/oauth/code"}
+        )
+        service._begin_claude_oauth_attempt = AsyncMock(return_value=None)
+
+        task = asyncio.create_task(
+            service._start_claude_control_flow(
+                MessageContext(user_id="U1", channel_id="C1"),
+                force_reset=False,
+                login_with_claude_ai=True,
+            )
+        )
+        await started.wait()
+
+        self.assertTrue(service.has_active_claude_auth_client_with_unknown_pid())
+
+        release.set()
+        await task
+        self.assertFalse(service.has_active_claude_auth_client_with_unknown_pid())
 
     async def test_verify_login_reports_opencode_segmentation_fault(self):
         controller = _StubController()

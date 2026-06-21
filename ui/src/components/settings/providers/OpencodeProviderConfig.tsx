@@ -86,12 +86,19 @@ const SERVER_START_MAX_RETRIES = 5;
 const SERVER_START_RETRY_DELAY_MS = 3000;
 
 const FILTER_MODES: ReadonlyArray<FilterMode> = ['all', 'configured', 'oauth', 'local'];
+const REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+
+const defaultReasoningEfforts = () => [...REASONING_EFFORTS];
+
+const notifyOpenCodeModelOptionsChanged = () => {
+  window.dispatchEvent(new CustomEvent('avibe:opencode-model-options-changed'));
+};
 
 const emptyEdit = (): ProviderEditState => ({
   apiKey: '',
   baseUrl: '',
   modelId: '',
-  reasoningEfforts: [],
+  reasoningEfforts: defaultReasoningEfforts(),
   modelSaving: false,
   removingModelId: null,
   saving: false,
@@ -101,7 +108,6 @@ const emptyEdit = (): ProviderEditState => ({
   editingKey: false,
 });
 
-const REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 const CUSTOM_PROVIDER_ADAPTERS: CustomProviderAdapter[] = [
   'openai-compatible',
   'anthropic-compatible',
@@ -164,7 +170,6 @@ export const OpencodeProviderConfig: React.FC<{
   const runtime = useBackendRuntime({
     backend: BACKEND_ID,
     defaultCli: DEFAULT_CLI,
-    fallbackDefaultBackend: BACKEND_ID,
     deferRestart,
   });
   const permission = useOpencodePermission();
@@ -416,6 +421,7 @@ export const OpencodeProviderConfig: React.FC<{
       setCustomProviderDraft(emptyCustomProviderDraft());
       setShowCustomProviderForm(false);
       showToast(t('settings.backends.opencodeCustomProviderSaved'), 'success');
+      notifyOpenCodeModelOptionsChanged();
       if (!applyMutationCatalogRefresh(result)) {
         await loadProviders();
       }
@@ -450,6 +456,7 @@ export const OpencodeProviderConfig: React.FC<{
       }
       updateEdit(provider.id, { deletingProvider: false, error: null });
       showToast(t('settings.backends.opencodeCustomProviderRemoved'), 'success');
+      notifyOpenCodeModelOptionsChanged();
       if (expandedId === provider.id) setExpandedId(null);
       await loadProviders();
     } catch (e: any) {
@@ -506,6 +513,7 @@ export const OpencodeProviderConfig: React.FC<{
         error: null,
       });
       showToast(t('settings.backends.opencodeProviderSaved'), 'success');
+      notifyOpenCodeModelOptionsChanged();
       if (!applyMutationCatalogRefresh(result)) {
         await loadProviders();
       }
@@ -539,6 +547,7 @@ export const OpencodeProviderConfig: React.FC<{
       }
       updateEdit(provider.id, { removing: false, error: null });
       showToast(t('settings.backends.opencodeProviderRemoved'), 'success');
+      notifyOpenCodeModelOptionsChanged();
       await loadProviders();
     } catch (e: any) {
       updateEdit(provider.id, {
@@ -588,11 +597,12 @@ export const OpencodeProviderConfig: React.FC<{
       }
       updateEdit(provider.id, {
         modelId: '',
-        reasoningEfforts: [],
+        reasoningEfforts: defaultReasoningEfforts(),
         modelSaving: false,
         error: null,
       });
       showToast(t('settings.backends.opencodeProviderModelSaved'), 'success');
+      notifyOpenCodeModelOptionsChanged();
       await loadProviders();
     } catch (e: any) {
       updateEdit(provider.id, {
@@ -615,6 +625,7 @@ export const OpencodeProviderConfig: React.FC<{
       }
       updateEdit(provider.id, { removingModelId: null, error: null });
       showToast(t('settings.backends.opencodeProviderModelRemoved'), 'success');
+      notifyOpenCodeModelOptionsChanged();
       await loadProviders();
     } catch (e: any) {
       updateEdit(provider.id, {
@@ -1345,6 +1356,7 @@ export const OpencodeProviderConfig: React.FC<{
                                     subtitle={t('settings.backends.opencodeProviderOauthPanelSubtitle')}
                                     hideRemove
                                     onSuccess={() => {
+                                      notifyOpenCodeModelOptionsChanged();
                                       // Refresh the providers list so
                                       // the just-authorised provider
                                       // flips to "configured" and the

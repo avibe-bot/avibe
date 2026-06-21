@@ -153,10 +153,19 @@ class SessionsFacade:
         agent_name: str,
         thread_id: str,
     ) -> None:
+        self.remove_agent_session(user_id, agent_name, thread_id)
+
+    def remove_agent_session(
+        self,
+        user_id: Union[int, str],
+        agent_name: str,
+        thread_id: str,
+    ) -> bool:
         user_key = self._normalize_user_id(user_id)
         removed = self.sessions_store.remove_agent_session(user_key, agent_name, thread_id)
         if removed:
             logger.info("Cleared %s session mapping for user %s: %s", agent_name, user_id, thread_id)
+        return bool(removed)
 
     def clear_agent_sessions(self, user_id: Union[int, str], agent_name: str) -> None:
         user_key = self._normalize_user_id(user_id)
@@ -321,6 +330,12 @@ class SessionsFacade:
             return True
         return self._is_thread_active_for_any_user(channel_id, thread_ts)
 
+    def is_thread_active_for_user(self, user_id: Union[int, str], channel_id: str, thread_ts: str) -> bool:
+        user_key = self._normalize_user_id(user_id)
+        self._cleanup_expired_threads_for_channel(user_id, channel_id)
+        channel_map = self.sessions_store.get_thread_map(user_key, channel_id)
+        return thread_ts in channel_map
+
     def _is_thread_active_for_any_user(self, channel_id: str, thread_ts: str) -> bool:
         """Return whether a channel thread is active for any participant.
 
@@ -431,6 +446,10 @@ class SessionsFacade:
         processing_indicator: Optional[Dict[str, Any]] = None,
         user_id: str = "",
         platform: str = "",
+        prompt_started_at: Optional[float] = None,
+        model_dict: Optional[Dict[str, str]] = None,
+        reasoning_effort: Optional[str] = None,
+        session_key: str = "",
     ) -> None:
         poll_info = ActivePollInfo(
             opencode_session_id=opencode_session_id,
@@ -443,6 +462,7 @@ class SessionsFacade:
             seen_tool_calls=[],
             emitted_assistant_messages=[],
             started_at=time.time(),
+            prompt_started_at=prompt_started_at,
             ack_reaction_message_id=ack_reaction_message_id,
             ack_reaction_emoji=ack_reaction_emoji,
             typing_indicator_active=typing_indicator_active,
@@ -450,6 +470,9 @@ class SessionsFacade:
             processing_indicator=processing_indicator or {},
             user_id=user_id,
             platform=platform,
+            model_dict=model_dict,
+            reasoning_effort=reasoning_effort,
+            session_key=session_key,
         )
         self.sessions_store.add_active_poll(poll_info)
         logger.debug("Added active poll: session=%s, thread=%s", opencode_session_id, thread_id)

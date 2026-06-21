@@ -69,6 +69,45 @@ def test_opencode_create_session_does_not_pass_vibe_title() -> None:
     server.create_session.assert_awaited_once_with(directory="/repo")
 
 
+def test_opencode_forks_pending_native_source() -> None:
+    sessions = SimpleNamespace(
+        get_agent_session_id=Mock(return_value=None),
+        ensure_agent_session_id=Mock(return_value="ses-fork"),
+        bind_agent_session=Mock(return_value="ses-fork"),
+        bind_agent_session_by_id=Mock(return_value="ses-fork"),
+    )
+    manager = OpenCodeSessionManager(SimpleNamespace(sessions=sessions), "opencode")
+    server = SimpleNamespace(fork_session=AsyncMock(return_value={"id": "oc-fork"}), create_session=AsyncMock())
+    request = _request()
+    request.context.platform_specific = {
+        "agent_session_id": "ses-fork",
+        "agent_session_target": {
+            "id": "ses-fork",
+            "agent_backend": "opencode",
+            "native_session_id": "",
+            "native_session_fork": {
+                "source_session_id": "ses-source",
+                "source_native_session_id": "oc-source",
+                "source_backend": "opencode",
+            },
+        },
+    }
+
+    session_id = asyncio.run(manager.get_or_create_session_id(request, server))
+
+    assert session_id == "oc-fork"
+    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo")
+    server.create_session.assert_not_awaited()
+    sessions.bind_agent_session_by_id.assert_called_once_with(
+        "ses-fork",
+        "oc-fork",
+        workdir="/repo",
+        vibe_agent_id=None,
+        vibe_agent_name=None,
+        vibe_agent_backend=None,
+    )
+
+
 def test_opencode_reserved_agent_session_id_is_not_replaced() -> None:
     sessions = SimpleNamespace(
         get_agent_session_id=Mock(return_value="oc-session-1"),
@@ -225,3 +264,24 @@ def test_session_facade_ensure_fallback_does_not_clear_existing_native_session()
 
     assert facade.ensure_agent_session_id("slack::channel::C1", "codex", "base-1") is None
     assert facade.get_agent_session_id("slack::channel::C1", "base-1", "codex") == "thread-old"
+
+
+def test_sessions_facade_remove_agent_session_delegates_to_store() -> None:
+    class _Store:
+        def __init__(self):
+            self.removed = []
+
+        def remove_agent_session(self, user_id, agent_name, thread_id):
+            self.removed.append((user_id, agent_name, thread_id))
+            return True
+
+    store = _Store()
+    facade = SessionsFacade(store)
+
+    assert facade.remove_agent_session("telegram::user::58181121", "claude", "telegram_58181121") is True
+    facade.clear_agent_session_mapping("telegram::user::58181121", "claude", "telegram_58181121")
+
+    assert store.removed == [
+        ("telegram::user::58181121", "claude", "telegram_58181121"),
+        ("telegram::user::58181121", "claude", "telegram_58181121"),
+    ]

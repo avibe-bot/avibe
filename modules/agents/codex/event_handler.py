@@ -79,13 +79,20 @@ class CodexEventHandler:
             logger.debug("Unhandled Codex notification: %s", method)
 
     def _release_stream_turn(self, context) -> None:
-        """Release any web-Chat SSE stream waiting on this turn so it closes
-        promptly. Token-guarded in the controller (a superseded turn won't
-        close a newer turn's stream); no-op for IM/CLI turns and for
-        controllers that don't expose streaming completion."""
+        """Release turn state for terminal paths that do not emit a result.
+
+        Result emits settle both the web-Chat SSE stream and the shared backend
+        runtime gate through the outbound dispatcher. Interrupted/stale backend
+        notifications intentionally skip a visible result, so they need the same
+        release here. Both release calls are token-guarded by their owners.
+        """
         mark = getattr(self._agent.controller, "mark_turn_complete", None)
         if callable(mark):
             mark(context)
+        service = getattr(self._agent.controller, "agent_service", None)
+        release = getattr(service, "release_runtime_turn", None)
+        if callable(release):
+            release(context)
 
     # ------------------------------------------------------------------
     # Notification handlers
@@ -94,6 +101,14 @@ class CodexEventHandler:
     async def _on_thread_started(self, params: dict[str, Any], request: AgentRequest) -> None:
         thread_obj = params.get("thread", {})
         thread_id = thread_obj.get("id", "") if isinstance(thread_obj, dict) else ""
+        is_fork_correction_pending = getattr(self._agent, "is_fork_correction_pending", None)
+        if callable(is_fork_correction_pending) and is_fork_correction_pending(request.base_session_id):
+            logger.debug(
+                "Skipping Codex thread/started auto-bind for pending fork correction: session=%s thread=%s",
+                request.base_session_id,
+                thread_id,
+            )
+            return
         if thread_id:
             self._agent._session_mgr.set_thread_id(request.base_session_id, thread_id)
             self._agent.bind_agent_session_id(request, thread_id)

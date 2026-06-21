@@ -152,6 +152,7 @@ class SQLiteSessionsService:
         agent_name: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        workdir: str | None = None,
     ) -> str | None:
         now = _utc_now_iso()
         backend = str(agent_backend or "default")
@@ -170,6 +171,9 @@ class SQLiteSessionsService:
                 agent_name=agent_name,
                 model=model,
                 reasoning_effort=reasoning_effort,
+                # Explicit caller workdir (e.g. the CLI's invocation cwd) wins;
+                # None keeps the scope-settings snapshot fallback.
+                workdir=workdir,
                 metadata={"legacy_scope_key": str(scope_key)},
                 now=now,
                 require_workdir=False,
@@ -185,6 +189,7 @@ class SQLiteSessionsService:
         agent_name: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        workdir: str | None = None,
     ) -> str:
         now = _utc_now_iso()
         platform_key = str(platform or "slack").strip() or "slack"
@@ -216,6 +221,7 @@ class SQLiteSessionsService:
                 agent_name=agent_name,
                 model=model,
                 reasoning_effort=reasoning_effort,
+                workdir=workdir,
                 metadata={"legacy_scope_key": scope_key, **metadata_payload},
                 now=now,
                 require_workdir=False,
@@ -449,7 +455,7 @@ class SQLiteSessionsService:
             result = conn.execute(
                 agent_sessions.delete()
                 .where(agent_sessions.c.scope_id == scope_id)
-                .where(agent_sessions.c.agent_variant == (str(agent_name) or "default"))
+                .where(_agent_session_name_predicate(str(agent_name) or "default"))
                 .where(agent_sessions.c.session_anchor == str(session_anchor))
             )
             return bool(result.rowcount)
@@ -468,7 +474,7 @@ class SQLiteSessionsService:
                 return 0
             stmt = agent_sessions.delete().where(agent_sessions.c.scope_id == scope_id)
             if agent_name is not None:
-                stmt = stmt.where(agent_sessions.c.agent_variant == (str(agent_name) or "default"))
+                stmt = stmt.where(_agent_session_name_predicate(str(agent_name) or "default"))
             if session_anchor_prefix is not None:
                 prefix = str(session_anchor_prefix)
                 prefix_pattern = f"{_escape_sql_like(prefix)}:%"
@@ -890,6 +896,7 @@ class SQLiteSessionsService:
                 agent_sessions.c.native_session_id,
                 agent_sessions.c.metadata_json,
                 scopes.c.platform,
+                scopes.c.scope_type,
                 scopes.c.native_id,
             ).join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
         ).mappings()
@@ -963,14 +970,22 @@ def _lookup_scope_id(conn: Connection, scope_key: str) -> str | None:
     NEVER upserts a scope — for read paths that must not create one."""
     raw = str(scope_key or "")
     parts = raw.split("::")
+    scope_type = None
     if len(parts) >= 3 and parts[1] in {"channel", "user", "platform", "project"}:
-        platform, native_id = parts[0], "::".join(parts[2:])
+        platform, scope_type, native_id = parts[0], parts[1], "::".join(parts[2:])
     else:
         platform, native_id = _split_scoped_key(scope_key)
         if platform is None:
             platform = "unknown"
     if not platform or not native_id:
         return None
+    if scope_type:
+        found = conn.execute(
+            select(scopes.c.id)
+            .where(scopes.c.platform == platform, scopes.c.scope_type == scope_type, scopes.c.native_id == native_id)
+            .limit(1)
+        ).scalar_one_or_none()
+        return str(found) if found is not None else None
     found = conn.execute(
         select(scopes.c.id).where(scopes.c.platform == platform, scopes.c.native_id == native_id).limit(1)
     ).scalar_one_or_none()
@@ -1032,8 +1047,11 @@ def _legacy_scope_key(row: dict[str, Any]) -> str:
     if isinstance(metadata, dict) and metadata.get("legacy_scope_key"):
         return str(metadata["legacy_scope_key"])
     platform = row.get("platform")
+    scope_type = row.get("scope_type")
     native_id = row.get("native_id")
     if platform and native_id:
+        if scope_type == "user" and platform in {"telegram", "wechat"}:
+            return f"{platform}::user::{native_id}"
         return f"{platform}::{native_id}"
     scope_id = row.get("scope_id")
     if isinstance(scope_id, str) and scope_id.count("::") >= 2:
@@ -1058,6 +1076,14 @@ _ROUTING_SENTINEL_VARIANTS = {"", "default", *_BACKEND_AGENT_NAMES}
 
 def _agent_backend(agent_name: str) -> str:
     return agent_name if agent_name in _BACKEND_AGENT_NAMES else "unknown"
+
+
+def _agent_session_name_predicate(agent_name: str) -> Any:
+    requested = str(agent_name) or "default"
+    backend = _agent_backend(requested)
+    if backend != "unknown":
+        return (agent_sessions.c.agent_backend == backend) | (agent_sessions.c.agent_variant == requested)
+    return agent_sessions.c.agent_variant == requested
 
 
 def _new_session_id(used: set[str]) -> str:

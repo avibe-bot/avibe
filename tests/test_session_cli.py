@@ -11,7 +11,7 @@ from vibe import cli
 
 
 def _setup(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     ensure_sqlite_state(primary_platform="avibe")
     return create_sqlite_engine(paths.get_sqlite_state_path())
@@ -94,7 +94,7 @@ def test_list_pagination_fixed_ten_no_limit_flag(monkeypatch, tmp_path, capsys):
 def test_list_on_fresh_home_returns_empty(monkeypatch, tmp_path, capsys):
     # No ensure_sqlite_state(): _open_session_engine must bootstrap the DB itself,
     # so a fresh Avibe home returns a clean empty list, not "no such table" (Codex P2).
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     code, payload = _run(cli.cmd_session_list, ["session", "list"], capsys)
     assert code == 0
@@ -227,61 +227,86 @@ def test_link_inbound_is_noop_when_already_linked(monkeypatch, tmp_path):
     assert sid == "sesim"
 
 
-# ------------------------------------------------------------ title nudge prompt
+# ------------------------------------------------------------ title prompt
 
 
-def _injection_for(session_id):
+def _injection_for(session_id, *, platform="avibe", platform_specific=None):
     from core.system_prompt_injection import build_system_prompt_injection
     from modules.im.base import MessageContext
 
+    payload = {"agent_session_id": session_id}
+    if platform_specific:
+        payload.update(platform_specific)
+
     ctx = MessageContext(
-        user_id="u", channel_id="c", platform="avibe",
-        platform_specific={"agent_session_id": session_id},
+        user_id="u", channel_id="c", platform=platform,
+        platform_specific=payload,
     )
     return build_system_prompt_injection(context=ctx)
 
 
-def test_title_nudge_when_empty(monkeypatch, tmp_path):
-    engine = _setup(monkeypatch, tmp_path)
-    _seed(engine, "sesnone", title="")
-    out = _injection_for("sesnone")
+def test_web_title_prompt_is_fixed_and_uses_session_id():
+    out = _injection_for("sesweb")
+    assert "## Session Title" in out
     # the command carries the REAL session id (not a <id> placeholder)
-    assert 'vibe session update sesnone --title "<short title>"' in out
-    assert "not set yet" in out
-    assert "silently" in out  # only update once, without disturbing the user
+    assert "vibe session get sesweb" in out
+    assert 'vibe session update sesweb --title "<short title>"' in out
+    assert "metadata.title_source" in out
+    assert "`user` or `agent`" in out
+    assert "leave the title unchanged" in out
+    assert "may silently set one concise, human-scannable title" in out
+    assert "do not repeatedly rename the same Session" in out
+    assert "not set yet" not in out
+    assert "auto-generated" not in out
 
 
-def test_title_nudge_when_auto_generated(monkeypatch, tmp_path):
-    engine = _setup(monkeypatch, tmp_path)
-    _seed(engine, "sesauto", title="Some auto title", title_source="backend")
-    out = _injection_for("sesauto")
-    assert "vibe session update sesauto --title" in out
-    assert "auto-generated" in out
-
-
-def test_no_title_nudge_when_user_set(monkeypatch, tmp_path):
-    engine = _setup(monkeypatch, tmp_path)
-    _seed(engine, "sesuser", title="Release review", title_source="user")
-    out = _injection_for("sesuser")
-    assert "vibe session update sesuser --title" not in out
+def test_im_title_prompt_is_not_injected():
+    out = _injection_for("sesim", platform="slack")
+    assert "## Session Title" not in out
+    assert "vibe session update sesim --title" not in out
     assert "Current Session Reminder" in out  # the reminder itself still renders
 
 
-def test_no_title_nudge_when_user_cleared(monkeypatch, tmp_path):
-    # A user who deliberately cleared the title (empty + title_source="user") must
-    # NOT be nudged, or the agent would undo the clear next turn (Codex P2).
-    engine = _setup(monkeypatch, tmp_path)
-    _seed(engine, "sescleared", title="", title_source="user")
-    out = _injection_for("sescleared")
-    assert "vibe session update sescleared --title" not in out
+def test_forked_session_prompt_marks_target_session_id_authoritative():
+    out = _injection_for(
+        "sestarget",
+        platform_specific={
+            "agent_session_target": {
+                "id": "sestarget",
+                "native_session_fork": {
+                    "source_session_id": "sessource",
+                    "source_native_session_id": "native-source",
+                    "source_backend": "codex",
+                },
+            },
+        },
+    )
+
+    assert "Current session id: `sestarget`" in out
+    assert "This Agent Session was forked from `sessource`." in out
+    assert "The authoritative Avibe session id for this fork is `sestarget`." in out
+    assert "If copied source context mentions another Avibe session id" in out
+    assert "use `sestarget` for Show Pages, Harness commands, tasks, watches, callbacks, and session updates" in out
 
 
-def test_no_title_nudge_when_agent_set(monkeypatch, tmp_path):
-    # Once the agent names it (title_source="agent"), the nudge stops — fires once.
-    engine = _setup(monkeypatch, tmp_path)
-    _seed(engine, "sesagent", title="CLI design", title_source="agent")
-    out = _injection_for("sesagent")
-    assert "vibe session update sesagent --title" not in out
+def test_forked_session_prompt_can_use_persisted_metadata():
+    out = _injection_for(
+        "sestarget",
+        platform_specific={
+            "agent_session_target": {
+                "id": "sestarget",
+                "metadata": {
+                    "created_via": "session_fork",
+                    "fork_source_session_id": "sessource",
+                    "fork_source_native_session_id": "native-source",
+                    "fork_source_backend": "opencode",
+                },
+            },
+        },
+    )
+
+    assert "This Agent Session was forked from `sessource`." in out
+    assert "The authoritative Avibe session id for this fork is `sestarget`." in out
 
 
 # ------------------------------------------------ live session.activity endpoint

@@ -86,7 +86,7 @@ def test_make_session_cookie_requires_session_secret() -> None:
 
 
 def test_pair_redeems_key_and_starts_connector(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.remote_access.vibe_cloud.enabled = False
     config.remote_access.vibe_cloud.session_secret = ""
@@ -126,7 +126,7 @@ def test_pair_redeems_key_and_starts_connector(monkeypatch, tmp_path) -> None:
 
 
 def test_pair_origin_service_follows_effective_ui_port(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_UI_PORT", "15130")
     config = _config()
     config.ui.setup_host = "0.0.0.0"
@@ -137,7 +137,7 @@ def test_pair_origin_service_follows_effective_ui_port(monkeypatch, tmp_path) ->
 
 
 def test_pair_origin_service_ignores_configured_ui_host(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.ui.setup_host = "192.168.2.3"
     config.ui.setup_port = 15130
@@ -149,7 +149,7 @@ def test_pair_origin_service_ignores_configured_ui_host(monkeypatch, tmp_path) -
 def test_pair_origin_service_uses_ipv4_loopback_when_localhost_resolves_dual_stack(
     monkeypatch, tmp_path
 ) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setattr(runtime, "resolve_localhost_family", lambda: "inet")
     config = _config()
     config.ui.setup_host = "localhost"
@@ -165,7 +165,7 @@ def test_pair_origin_service_uses_ipv4_loopback_when_localhost_resolves_dual_sta
 def test_pair_origin_service_uses_ipv6_loopback_when_localhost_resolves_v6_only(
     monkeypatch, tmp_path
 ) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setattr(runtime, "resolve_localhost_family", lambda: "inet6")
     config = _config()
     config.ui.setup_host = "localhost"
@@ -179,7 +179,7 @@ def test_pair_origin_service_uses_ipv6_loopback_when_localhost_resolves_v6_only(
 
 
 def test_pair_origin_service_preserves_ipv6_loopback(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.ui.setup_host = "::1"
     config.ui.setup_port = 15130
@@ -189,7 +189,7 @@ def test_pair_origin_service_preserves_ipv6_loopback(monkeypatch, tmp_path) -> N
 
 
 def test_pair_origin_service_preserves_bracketed_ipv6_loopback(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.ui.setup_host = "[::1]"
     config.ui.setup_port = 15130
@@ -199,7 +199,7 @@ def test_pair_origin_service_preserves_bracketed_ipv6_loopback(monkeypatch, tmp_
 
 
 def test_pair_origin_service_uses_ipv6_loopback_for_ipv6_wildcard(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.ui.setup_host = "::"
     config.ui.setup_port = 15130
@@ -209,7 +209,7 @@ def test_pair_origin_service_uses_ipv6_loopback_for_ipv6_wildcard(monkeypatch, t
 
 
 def test_runtime_status_payload_reports_local_origin_and_tunnel_state(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.ui.setup_host = "100.97.103.112"
     config.save()
@@ -236,7 +236,7 @@ def test_runtime_status_payload_reports_local_origin_and_tunnel_state(monkeypatc
 
 
 def test_observed_cloudflared_origin_service_reads_only_log_tail(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     remote_access._cloudflared_stderr_path().parent.mkdir(parents=True, exist_ok=True)
     remote_access._cloudflared_stderr_path().write_bytes(
         b'originService=http://old.local:5123\n'
@@ -249,7 +249,7 @@ def test_observed_cloudflared_origin_service_reads_only_log_tail(monkeypatch, tm
 
 
 def test_observed_cloudflared_origin_service_uses_latest_mixed_log_format(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     remote_access._cloudflared_stderr_path().parent.mkdir(parents=True, exist_ok=True)
     remote_access._cloudflared_stderr_path().write_text(
         'ERR originService=http://100.97.103.112:5123\n'
@@ -261,7 +261,7 @@ def test_observed_cloudflared_origin_service_uses_latest_mixed_log_format(monkey
 
 
 def test_report_runtime_status_posts_to_backend(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     cloud = config.remote_access.vibe_cloud
     cloud.backend_url = "https://backend.test"
@@ -300,7 +300,7 @@ def test_report_runtime_status_posts_to_backend(monkeypatch, tmp_path) -> None:
 
 
 def test_report_runtime_status_posts_when_remote_access_is_disabled(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     cloud = config.remote_access.vibe_cloud
     cloud.enabled = False
@@ -363,7 +363,7 @@ def test_pair_persists_with_locked_incremental_config_save(monkeypatch) -> None:
 
 
 def test_pair_reports_success_when_connector_start_fails(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.remote_access.vibe_cloud.enabled = False
     config.save()
@@ -399,7 +399,7 @@ def test_pair_reports_success_when_connector_start_fails(monkeypatch, tmp_path) 
 
 
 def test_pair_rejects_origin_update_failure_before_saving_config(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.remote_access.vibe_cloud.enabled = False
     config.save()
@@ -462,7 +462,7 @@ def test_pair_preserves_backend_error_response(monkeypatch) -> None:
 
 
 def test_pair_queues_lifecycle_status_for_drain(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     reports = []
 
@@ -499,7 +499,7 @@ def test_pair_queues_lifecycle_status_for_drain(monkeypatch, tmp_path) -> None:
 
 
 def test_lifecycle_status_report_does_not_block_stop(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     started = threading.Event()
     release = threading.Event()
 
@@ -524,7 +524,7 @@ def test_lifecycle_status_report_does_not_block_stop(monkeypatch, tmp_path) -> N
 
 
 def test_lifecycle_status_thread_start_failure_is_best_effort(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     with remote_access._STATUS_REPORT_LOCK:
         remote_access._STATUS_REPORT_THREADS.clear()
@@ -584,7 +584,7 @@ def test_status_heartbeat_can_retry_after_thread_start_failure(monkeypatch) -> N
 
 
 def test_stop_ui_continues_when_remote_access_stop_fails(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     stop_calls = []
     timings = {}
 
@@ -599,7 +599,7 @@ def test_stop_ui_continues_when_remote_access_stop_fails(monkeypatch, tmp_path) 
 
 
 def test_stop_ui_can_skip_remote_access_stop(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     stop_calls = []
     timings = {}
 
@@ -661,7 +661,7 @@ def test_cloudflared_pid_detection_rejects_non_cloudflared_paths(monkeypatch) ->
 
 
 def test_stop_preserves_pid_file_when_process_stop_fails(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     pid = 123
     remote_access._pid_path().parent.mkdir(parents=True, exist_ok=True)
     remote_access._pid_path().write_text(str(pid), encoding="utf-8")
@@ -681,7 +681,7 @@ def test_stop_preserves_pid_file_when_process_stop_fails(monkeypatch, tmp_path) 
 
 
 def test_stop_preserves_pid_file_when_stop_reports_success_but_process_survives(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     pid = 123
     remote_access._pid_path().parent.mkdir(parents=True, exist_ok=True)
     remote_access._pid_path().write_text(str(pid), encoding="utf-8")
@@ -707,7 +707,7 @@ def test_stop_preserves_pid_file_when_stop_reports_success_but_process_survives(
 
 
 def test_status_preserves_pid_file_when_process_command_is_unknown(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     pid = 123
     remote_access._pid_path().parent.mkdir(parents=True, exist_ok=True)
     remote_access._pid_path().write_text(str(pid), encoding="utf-8")
@@ -726,7 +726,7 @@ def test_status_preserves_pid_file_when_process_command_is_unknown(monkeypatch, 
 
 
 def test_start_refuses_duplicate_connector_when_process_command_is_unknown(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     pid = 123
     config = _config()
     config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
@@ -752,7 +752,7 @@ def test_start_refuses_duplicate_connector_when_process_command_is_unknown(monke
 
 
 def test_start_returns_failure_when_remote_access_is_disabled(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.remote_access.vibe_cloud.enabled = False
     config.save()
@@ -766,7 +766,7 @@ def test_start_returns_failure_when_remote_access_is_disabled(monkeypatch, tmp_p
 
 
 def test_start_revalidates_config_after_connector_lock(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.remote_access.vibe_cloud.enabled = False
     load_lock_states = []
@@ -786,7 +786,7 @@ def test_start_revalidates_config_after_connector_lock(monkeypatch, tmp_path) ->
 
 
 def test_start_returns_structured_error_when_initial_config_load_fails(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     def fail_load():
         raise ValueError("corrupt config")
@@ -802,7 +802,7 @@ def test_start_returns_structured_error_when_initial_config_load_fails(monkeypat
 
 
 def test_start_uses_current_persisted_config_over_stale_argument(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     stale_config = _config()
     stale_config.remote_access.vibe_cloud.tunnel_token = "stale-token"
     persisted_config = _config()
@@ -824,7 +824,7 @@ def test_start_uses_current_persisted_config_over_stale_argument(monkeypatch, tm
 
 
 def test_stop_loads_config_before_connector_lock(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     load_lock_states = []
 
@@ -841,7 +841,7 @@ def test_stop_loads_config_before_connector_lock(monkeypatch, tmp_path) -> None:
 
 
 def test_reconcile_stops_when_remote_access_is_disabled(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.remote_access.vibe_cloud.enabled = False
 
@@ -853,7 +853,7 @@ def test_reconcile_stops_when_remote_access_is_disabled(monkeypatch, tmp_path) -
 
 
 def test_start_restarts_when_runtime_signature_changes(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.remote_access.vibe_cloud.tunnel_token = "new-token"
     config.save()
@@ -903,7 +903,7 @@ def test_start_restarts_when_runtime_signature_changes(monkeypatch, tmp_path) ->
 
 
 def test_start_clears_previous_cloudflared_logs_before_spawn(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
     config.save()
@@ -956,9 +956,25 @@ def test_effective_ui_bind_host_preserves_loopback_when_tunnel_disabled() -> Non
     assert runtime.effective_ui_bind_host(config) == "127.0.0.1"
 
 
+def test_effective_ui_bind_host_preserves_loopback_when_tunnel_enabled() -> None:
+    config = _config()
+    assert config.remote_access.vibe_cloud.enabled is True
+    config.ui.setup_host = "127.0.0.1"
+
+    assert runtime.effective_ui_bind_host(config) == "127.0.0.1"
+
+
 def test_effective_ui_bind_host_falls_back_to_loopback_when_setup_host_blank() -> None:
     config = _config()
     config.remote_access.vibe_cloud.enabled = False
+    config.ui.setup_host = ""
+
+    assert runtime.effective_ui_bind_host(config) == "127.0.0.1"
+
+
+def test_effective_ui_bind_host_falls_back_to_loopback_when_tunnel_enabled_and_setup_host_blank() -> None:
+    config = _config()
+    assert config.remote_access.vibe_cloud.enabled is True
     config.ui.setup_host = ""
 
     assert runtime.effective_ui_bind_host(config) == "127.0.0.1"
@@ -972,12 +988,20 @@ def test_effective_ui_bind_host_uses_v6_wildcard_for_ipv6_setup_host() -> None:
     assert runtime.effective_ui_bind_host(config) == "::"
 
 
+def test_effective_ui_bind_host_preserves_v6_loopback_when_tunnel_enabled() -> None:
+    config = _config()
+    assert config.remote_access.vibe_cloud.enabled is True
+    config.ui.setup_host = "::1"
+
+    assert runtime.effective_ui_bind_host(config) == "::1"
+
+
 def test_effective_ui_bind_host_uses_v6_wildcard_for_bracketed_ipv6_loopback() -> None:
     config = _config()
     assert config.remote_access.vibe_cloud.enabled is True
     config.ui.setup_host = "[::1]"
 
-    assert runtime.effective_ui_bind_host(config) == "::"
+    assert runtime.effective_ui_bind_host(config) == "::1"
 
 
 def test_effective_ui_bind_host_prefers_requested_host_over_persisted_setup_host() -> None:
@@ -1000,13 +1024,13 @@ def test_effective_ui_bind_host_overrides_to_ipv4_wildcard_when_localhost_resolv
     monkeypatch,
 ) -> None:
     # Pairs with _origin_host_for_pairing returning 127.0.0.1 for "localhost":
-    # the bind family must be IPv4 so cloudflared can reach the UI.
+    # the bind host must be the same IPv4 loopback so cloudflared can reach the UI.
     monkeypatch.setattr(runtime, "resolve_localhost_family", lambda: "inet")
     config = _config()
     assert config.remote_access.vibe_cloud.enabled is True
     config.ui.setup_host = "localhost"
 
-    assert runtime.effective_ui_bind_host(config) == "0.0.0.0"
+    assert runtime.effective_ui_bind_host(config) == "127.0.0.1"
 
 
 def test_effective_ui_bind_host_overrides_to_ipv6_wildcard_when_localhost_resolves_v6_only(
@@ -1020,7 +1044,7 @@ def test_effective_ui_bind_host_overrides_to_ipv6_wildcard_when_localhost_resolv
     assert config.remote_access.vibe_cloud.enabled is True
     config.ui.setup_host = "localhost"
 
-    assert runtime.effective_ui_bind_host(config) == "::"
+    assert runtime.effective_ui_bind_host(config) == "::1"
 
 
 def test_resolve_localhost_family_prefers_ipv4_when_both_resolve(monkeypatch) -> None:

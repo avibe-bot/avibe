@@ -405,6 +405,10 @@ class ManagedWatchService:
         self._store_error_fused = False
         self._store_reconcile_failures = 0
 
+    def active_process_pids(self) -> set[int]:
+        """Return active waiter process roots owned by managed watches."""
+        return {pid for pid in self._active_pids.values() if isinstance(pid, int) and pid > 0}
+
     def start(self) -> None:
         if self._running:
             return
@@ -659,6 +663,7 @@ class ManagedWatchService:
             process = await asyncio.create_subprocess_shell(
                 watch.shell_command,
                 cwd=watch.cwd or None,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 **isolated_subprocess_kwargs(),
@@ -667,6 +672,7 @@ class ManagedWatchService:
             process = await asyncio.create_subprocess_exec(
                 *watch.command,
                 cwd=watch.cwd or None,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 **isolated_subprocess_kwargs(),

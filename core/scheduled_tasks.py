@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from config import paths
+from core.message_context import resolve_context_platform
 from modules.im import MessageContext
 from storage.db import create_sqlite_engine
 from storage.background import SQLiteBackgroundTaskStore
@@ -31,7 +32,6 @@ logger = logging.getLogger(__name__)
 
 class _ScopeAgentTarget(NamedTuple):
     agent_name: Optional[str]
-    agent_backend: Optional[str]
 
 
 def _utc_now_iso() -> str:
@@ -167,6 +167,7 @@ class ResolvedSessionIdTarget:
     reasoning_effort: Optional[str] = None
     workdir: Optional[str] = None
     session_anchor: Optional[str] = None
+    metadata: Optional[dict[str, Any]] = None
     suppress_delivery: bool = False
 
 
@@ -265,6 +266,7 @@ def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None
         native_session_id=str(row["native_session_id"] or ""),
         workdir=row["workdir"],
         session_anchor=str(row["session_anchor"] or ""),
+        metadata=session_metadata if isinstance(session_metadata, dict) else {},
         suppress_delivery=suppress_delivery,
     )
 
@@ -290,7 +292,7 @@ def build_session_key_for_context(
     fallback_platform: Optional[str] = None,
 ) -> ParsedSessionKey:
     payload = context.platform_specific or {}
-    platform = context.platform or payload.get("platform") or fallback_platform or ""
+    platform = resolve_context_platform(context, fallback_platform=fallback_platform)
     is_dm = bool(payload.get("is_dm", False))
     scope_type = "user" if is_dm else "channel"
     scope_id = context.user_id if is_dm else context.channel_id
@@ -373,6 +375,7 @@ class TaskExecutionRequest:
     session_policy: Optional[str] = None
     callback_session_id: Optional[str] = None
     callback_status: Optional[str] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -401,6 +404,7 @@ class TaskExecutionRequest:
             session_policy=payload.get("session_policy"),
             callback_session_id=payload.get("callback_session_id"),
             callback_status=payload.get("callback_status"),
+            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
         )
 
 
@@ -772,6 +776,7 @@ class TaskExecutionStore:
         source_actor: Optional[str] = None,
         parent_run_id: Optional[str] = None,
         callback_session_id: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> TaskExecutionRequest:
         return self.enqueue(
             TaskExecutionRequest(
@@ -794,6 +799,7 @@ class TaskExecutionStore:
                 model=model,
                 reasoning_effort=reasoning_effort,
                 session_policy=session_policy,
+                metadata=dict(metadata or {}),
             )
         )
 
@@ -1536,6 +1542,7 @@ class ScheduledTaskService:
                     message=request.message,
                     execution_id=request.id,
                     agent_name=request.agent_name,
+                    metadata=request.metadata,
                 )
                 error = result.error
                 should_complete = result.complete_on_return
@@ -1611,6 +1618,7 @@ class ScheduledTaskService:
         execution_id: str,
         session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> AgentRunExecutionResult:
         """Execute one direct Agent Run and wait for the real terminal result.
 
@@ -1637,6 +1645,7 @@ class ScheduledTaskService:
             session_id=session_id,
             agent_name=agent_name,
             target_info=target_info,
+            metadata=metadata,
         )
 
         gate = getattr(self.controller, "session_turn_gate", None)
@@ -1672,17 +1681,14 @@ class ScheduledTaskService:
         ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(config_paths.get_state_dir()))
         agent_store = VibeAgentStore()
         try:
-            scope_target = self._resolve_scope_agent_target(deliver_key) if not agent_name else _ScopeAgentTarget(None, None)
+            scope_target = self._resolve_scope_agent_target(deliver_key) if not agent_name else _ScopeAgentTarget(None)
             resolved_agent_name = agent_name or scope_target.agent_name
-            if not resolved_agent_name and scope_target.agent_backend:
-                raise ValueError(
-                    "scope routing still references a legacy backend without an Agent; "
-                    "choose an Agent before creating sessions for this Scope"
-                )
-            agent = agent_store.require_enabled(resolved_agent_name) if resolved_agent_name else None
+            agent = agent_store.require_enabled(resolved_agent_name) if resolved_agent_name else agent_store.get_default_agent()
         finally:
             agent_store.close()
-        agent_backend = agent.backend if agent else self.controller.agent_router.global_default
+        if agent is None:
+            raise ValueError("no enabled default Agent is available for session creation")
+        agent_backend = agent.backend
         service = SQLiteSessionsService(config_paths.get_sqlite_state_path())
         try:
             session_id = service.reserve_agent_session(
@@ -1704,7 +1710,7 @@ class ScheduledTaskService:
         try:
             target = parse_session_key(deliver_key)
         except ValueError:
-            return _ScopeAgentTarget(None, None)
+            return _ScopeAgentTarget(None)
         from config import paths as config_paths
         from storage.settings_service import make_scope_id
 
@@ -1713,17 +1719,16 @@ class ScheduledTaskService:
         try:
             with engine.connect() as conn:
                 value = conn.execute(
-                    select(scope_settings.c.agent_name, scope_settings.c.agent_backend)
+                    select(scope_settings.c.agent_name)
                     .where(scope_settings.c.scope_id == scope_id)
                     .limit(1)
                 ).first()
         finally:
             engine.dispose()
         if value is None:
-            return _ScopeAgentTarget(None, None)
+            return _ScopeAgentTarget(None)
         agent_name = str(value.agent_name).strip() if value.agent_name else None
-        agent_backend = str(value.agent_backend).strip() if value.agent_backend else None
-        return _ScopeAgentTarget(agent_name, agent_backend)
+        return _ScopeAgentTarget(agent_name)
 
     async def _execute_request(
         self,
@@ -1792,6 +1797,7 @@ class ScheduledTaskService:
         session_id: Optional[str] = None,
         agent_name: Optional[str] = None,
         target_info: Optional[ResolvedSessionIdTarget] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> MessageContext:
         platform = target.platform
         self.validate_platform(platform)
@@ -1815,6 +1821,11 @@ class ScheduledTaskService:
         channel_id = session_target_context["channel_id"]
         if platform == "avibe" and session_id:
             channel_id = session_id
+        from core.services.session_fork import fork_metadata_from_request, fork_metadata_from_session_metadata
+
+        native_session_fork = fork_metadata_from_request(metadata)
+        if native_session_fork is None and target_info and not str(target_info.native_session_id or "").strip():
+            native_session_fork = fork_metadata_from_session_metadata(getattr(target_info, "metadata", None))
 
         return MessageContext(
             user_id=session_target_context["user_id"],
@@ -1860,8 +1871,10 @@ class ScheduledTaskService:
                         "model": target_info.model,
                         "reasoning_effort": target_info.reasoning_effort,
                         "native_session_id": target_info.native_session_id,
+                        "native_session_fork": native_session_fork,
                         "workdir": target_info.workdir,
                         "session_anchor": target_info.session_anchor,
+                        "metadata": getattr(target_info, "metadata", None) or {},
                         "suppress_delivery": target_info.suppress_delivery,
                     }
                     if target_info

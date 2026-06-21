@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from config import paths
-from config.v2_config import CONFIG_LOCK, DEFAULT_AGENT_BACKEND, V2Config
+from config.v2_config import CONFIG_LOCK, V2Config
 from config.v2_settings import (
     SettingsStore,
     ChannelSettings,
@@ -31,6 +31,7 @@ from config.v2_settings import (
     routing_to_compat_dict,
 )
 from config.v2_sessions import SessionsStore
+from config.platform_registry import get_platform_descriptor
 from vibe.opencode_config import (
     get_opencode_config_paths,
     load_first_opencode_user_config,
@@ -129,21 +130,11 @@ def _enabled_agent_backends_from_config(config: Optional[V2Config] = None) -> li
     return result
 
 
-def _default_agent_backend_from_config(config: Optional[V2Config] = None) -> str:
-    try:
-        cfg = config or load_config()
-    except FileNotFoundError:
-        return DEFAULT_AGENT_BACKEND
-    agents = getattr(cfg, "agents", None)
-    return str(getattr(agents, "default_backend", DEFAULT_AGENT_BACKEND) or DEFAULT_AGENT_BACKEND)
-
-
 def _ensure_builtin_default_agents(config: Optional[V2Config] = None) -> None:
     backends = _enabled_agent_backends_from_config(config)
-    default_backend = _default_agent_backend_from_config(config)
     store = VibeAgentStore()
     try:
-        store.ensure_builtin_default_agents(backends, default_backend=default_backend)
+        store.ensure_builtin_default_agents(backends)
     finally:
         store.close()
 
@@ -227,44 +218,54 @@ def _npm_global_binary_candidates(binary: str) -> list[Path]:
 
     candidates: list[Path] = []
     for npm_path in npm_paths:
-        try:
-            result = subprocess.run(
-                [str(npm_path), "config", "get", "prefix"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=_command_env_for(str(npm_path)),
-            )
-        except Exception:
+        prefix_path = _npm_prefix_for(npm_path)
+        if prefix_path is None:
             continue
 
-        if result.returncode != 0:
-            continue
-
-        prefix = (result.stdout or "").strip().splitlines()
-        if not prefix:
-            continue
-
-        prefix_path = Path(os.path.expanduser(prefix[-1]))
-        derived_candidates = [
-            prefix_path / "bin" / binary,
-            prefix_path / binary,
-            prefix_path / "node_modules" / ".bin" / binary,
-        ]
-        if os.name == "nt":
-            derived_candidates.extend(
-                [
-                    prefix_path / f"{binary}.cmd",
-                    prefix_path / f"{binary}.exe",
-                    prefix_path / "node_modules" / ".bin" / f"{binary}.cmd",
-                ]
-            )
-
-        for candidate in derived_candidates:
+        for candidate in _npm_binary_candidates_for_prefix(prefix_path, binary):
             if candidate not in candidates:
                 candidates.append(candidate)
 
     return candidates
+
+
+def _npm_prefix_for(npm_path: str | Path) -> Path | None:
+    try:
+        result = subprocess.run(
+            [str(npm_path), "config", "get", "prefix"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=_command_env_for(str(npm_path)),
+        )
+    except Exception:
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    prefix = (result.stdout or "").strip().splitlines()
+    if not prefix:
+        return None
+
+    return Path(os.path.expanduser(prefix[-1]))
+
+
+def _npm_binary_candidates_for_prefix(prefix_path: Path, binary: str) -> list[Path]:
+    derived_candidates = [
+        prefix_path / "bin" / binary,
+        prefix_path / binary,
+        prefix_path / "node_modules" / ".bin" / binary,
+    ]
+    if os.name == "nt":
+        derived_candidates.extend(
+            [
+                prefix_path / f"{binary}.cmd",
+                prefix_path / f"{binary}.exe",
+                prefix_path / "node_modules" / ".bin" / f"{binary}.cmd",
+            ]
+        )
+    return derived_candidates
 
 
 def _candidate_cli_paths(binary: str) -> list[Path]:
@@ -353,17 +354,68 @@ def _command_env_for(binary_path: str | None) -> dict[str, str]:
     return env
 
 
-def _codex_npm_install_env(npm_path: str) -> dict[str, str]:
+def _codex_npm_install_env(npm_path: str, *, prefix: str | Path | None = None) -> dict[str, str]:
     env = _command_env_for(npm_path)
     if os.name == "nt":
         return env
 
-    prefix = str(Path.home() / ".local")
-    prefix_bin = str(Path(prefix) / "bin")
+    install_prefix = Path(os.path.expanduser(str(prefix))) if prefix is not None else Path.home() / ".local"
+    prefix = str(install_prefix)
+    prefix_bin = str(install_prefix / "bin")
     path_entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry and entry != prefix_bin]
     env["PATH"] = os.pathsep.join([prefix_bin, *path_entries])
     env["NPM_CONFIG_PREFIX"] = prefix
     return env
+
+
+def _npm_prefix_from_node_modules_path(codex_path: str) -> Path | None:
+    try:
+        paths = [Path(codex_path).expanduser(), Path(codex_path).expanduser().resolve()]
+    except OSError:
+        return None
+
+    for path in paths:
+        parts = path.parts
+        for index in range(len(parts) - 2):
+            if parts[index : index + 3] != ("node_modules", "@openai", "codex"):
+                continue
+            if index == 0 or parts[index - 1] != "lib":
+                continue
+            prefix_parts = parts[: index - 1]
+            if prefix_parts:
+                return Path(*prefix_parts)
+    return None
+
+
+def _npm_prefix_for_existing_codex_install(npm_path: str, codex_path: str) -> Path | None:
+    try:
+        original = Path(codex_path).expanduser()
+        resolved = original.resolve()
+    except OSError:
+        resolved = None
+
+    npm_prefix = _npm_prefix_for(npm_path)
+    if npm_prefix is None:
+        return None
+
+    inferred_prefix = _npm_prefix_from_node_modules_path(codex_path)
+    if inferred_prefix is not None:
+        try:
+            if inferred_prefix.resolve() == npm_prefix.resolve():
+                return npm_prefix
+        except OSError:
+            if inferred_prefix == npm_prefix:
+                return npm_prefix
+
+    for candidate in _npm_binary_candidates_for_prefix(npm_prefix, "codex"):
+        try:
+            candidate_resolved = candidate.resolve()
+        except OSError:
+            candidate_resolved = None
+        if original == candidate or (resolved is not None and candidate_resolved == resolved):
+            return npm_prefix
+
+    return None
 
 
 def _path_is_relative_to(path: Path, parent: Path) -> bool:
@@ -474,7 +526,8 @@ def _codex_upgrade_command(existing_path: str) -> tuple[list[str], dict[str, str
                 "message": "Codex appears to be installed via npm, but npm was not found. Please install Node.js or upgrade Codex manually.",
                 "output": None,
             }
-        return [npm_path, "install", "-g", "@openai/codex"], _codex_npm_install_env(npm_path)
+        prefix = _npm_prefix_for_existing_codex_install(npm_path, existing_path)
+        return [npm_path, "install", "-g", "@openai/codex"], _codex_npm_install_env(npm_path, prefix=prefix)
 
     if _codex_cli_supports_update(existing_path):
         return [existing_path, "update"], None
@@ -667,6 +720,83 @@ def _mark_explicit_audio_asr_enabled(payload: dict) -> dict:
     return {**payload, "audio_asr": {**audio_asr, "enabled_configured": True}}
 
 
+def _runtime_credential_fields_for_platform(platform: str) -> tuple[str, ...]:
+    if platform == "wechat":
+        return ()
+    return get_platform_descriptor(platform).credential_fields
+
+
+def _payload_edits_runtime_credential(section: dict, field: str, base_value: object) -> bool:
+    if field not in section:
+        return False
+    value = section.get(field)
+    if value == base_value:
+        return False
+    if not value and section.get(f"has_{field}") is True:
+        return False
+    return True
+
+
+def _platforms_requiring_runtime_credential_validation(
+    config: V2Config,
+    payload: dict,
+    base_config: Optional[V2Config],
+) -> set[str]:
+    enabled = set(config.platforms.enabled)
+    previous_enabled = set(base_config.platforms.enabled) if base_config is not None else set()
+    platforms = enabled - previous_enabled if "platforms" in payload or "platform" in payload else set()
+
+    # Finishing setup promotes the saved config to a runnable runtime config, so
+    # every enabled adapter must be bootable at that boundary.
+    if payload.get("setup_completed") is True:
+        platforms.update(enabled)
+
+    # If a save edits credential fields for an already-enabled platform, reject
+    # partial clears or mismatched edits before they are persisted.
+    for platform in enabled:
+        required_fields = _runtime_credential_fields_for_platform(platform)
+        if not required_fields:
+            continue
+        descriptor = get_platform_descriptor(platform)
+        section = payload.get(descriptor.config_key)
+        base_platform_config = descriptor.get_config(base_config) if base_config is not None else None
+        if isinstance(section, dict) and any(
+            _payload_edits_runtime_credential(
+                section,
+                field,
+                getattr(base_platform_config, field, None),
+            )
+            for field in required_fields
+        ):
+            platforms.add(platform)
+    return platforms
+
+
+def _validate_enabled_platform_runtime_credentials(
+    config: V2Config,
+    payload: dict,
+    base_config: Optional[V2Config],
+) -> None:
+    """Reject enabled IM transports that cannot start after config save.
+
+    ``V2Config.from_payload`` intentionally allows empty credential fields so
+    users can save setup drafts for disabled platforms. Once a platform enters
+    ``platforms.enabled``, however, the running adapter must be able to boot.
+    WeChat is the existing exception: its runtime idles without a token while
+    the QR-login flow completes.
+    """
+    for platform in _platforms_requiring_runtime_credential_validation(config, payload, base_config):
+        required_fields = _runtime_credential_fields_for_platform(platform)
+        if not required_fields:
+            continue
+        descriptor = get_platform_descriptor(platform)
+        platform_config = descriptor.get_config(config)
+        missing = [field for field in required_fields if not getattr(platform_config, field, None)]
+        if missing:
+            fields_text = "', '".join(f"{descriptor.config_key}.{field}" for field in missing)
+            raise ValueError(f"Config '{fields_text}' must be provided when {platform} is enabled")
+
+
 def save_config(payload: dict) -> V2Config:
     if not isinstance(payload, dict):
         raise ValueError("Config payload must be an object")
@@ -708,6 +838,7 @@ def save_config(payload: dict) -> V2Config:
         merged_payload = _merge_legacy_discord_guild_scope_fields(merged_payload, payload, base_config)
         sanitized_payload, guild_scope_update = _extract_settings_scopes_from_config_payload(merged_payload)
         config = V2Config.from_payload(sanitized_payload)
+        _validate_enabled_platform_runtime_credentials(config, payload, base_config)
         if guild_scope_update is not None:
             _save_discord_guild_scope_update(*guild_scope_update)
         elif base_config is not None:
@@ -800,7 +931,6 @@ def config_to_payload(config: V2Config, *, include_secrets: bool = False) -> dic
             "log_level": config.runtime.log_level,
         },
         "agents": {
-            "default_backend": config.agents.default_backend,
             "opencode": config.agents.opencode.__dict__,
             "claude": _agent_payload(config.agents.claude.__dict__, include_secrets=include_secrets),
             "codex": _agent_payload(config.agents.codex.__dict__, include_secrets=include_secrets),
@@ -920,6 +1050,29 @@ def set_show_page_visibility(session_id: str, visibility: str) -> dict:
     finally:
         store.close()
     return {"ok": True, **_apply_session_meta([payload])[0]}
+
+
+def ensure_show_page(session_id: str) -> dict:
+    """Create the session's Show Page if it doesn't exist yet; report which.
+
+    ``existed`` tells the caller whether the page was already initialized, so the
+    workbench can ALSO send the "visualize this session" prompt only on first
+    creation. Mirrors the CLI ``vibe show path`` (ensure + return).
+    """
+    from core.show_pages import ShowPageStore, show_page_payload
+
+    config = V2Config.load()
+    store = ShowPageStore()
+    try:
+        # Atomic: refuses to create a page for an archived session and reports
+        # whether IT created the row (so the UI only prompts the agent on a real
+        # first creation, not a concurrent ensure). Raises ShowPageError for an
+        # archived session — the route maps it to a 4xx.
+        page, created = store.ensure_active(session_id)
+        payload = show_page_payload(page, config=config)
+    finally:
+        store.close()
+    return {"ok": True, "existed": not created, **_apply_session_meta([payload])[0]}
 
 
 def rotate_show_page_share(session_id: str) -> dict:
@@ -1255,12 +1408,29 @@ def _normalize_backend_routing_payload(routing_payload: dict) -> dict:
     from modules.agents.opencode.utils import normalize_claude_reasoning_effort
 
     routing = _parse_routing(routing_payload or {})
-    if routing.agent_backend == "claude":
+    if _backend_for_routing_agent(routing.agent_name) == "claude":
         routing.reasoning_effort = normalize_claude_reasoning_effort(
             routing.model,
             routing.reasoning_effort,
         )
     return _routing_to_dict(routing)
+
+
+def _backend_for_routing_agent(agent_name: Optional[str]) -> Optional[str]:
+    name = str(agent_name or "").strip()
+    if not name:
+        return None
+    if is_agent_backend(name):
+        return name
+    store = VibeAgentStore()
+    try:
+        agent = store.get(name)
+        return agent.backend if agent is not None else None
+    except Exception:
+        logger.debug("Failed to resolve Agent backend while normalizing routing payload", exc_info=True)
+        return None
+    finally:
+        store.close()
 
 
 def save_settings(payload: dict) -> dict:
@@ -1276,6 +1446,7 @@ def save_settings(payload: dict) -> dict:
                 custom_cwd=channel_payload.get("custom_cwd"),
                 routing=_parse_routing(_normalize_backend_routing_payload(channel_payload.get("routing") or {})),
                 require_mention=channel_payload.get("require_mention"),
+                require_bind=channel_payload.get("require_bind"),
             )
         store.set_channels_for_platform(platform, channels)
     if "guilds" in payload or "guild_allowlist" in payload:
@@ -1909,6 +2080,7 @@ def _settings_to_payload(store: SettingsStore, platform: str) -> dict:
             "show_message_types": normalize_show_message_types(settings.show_message_types),
             "custom_cwd": settings.custom_cwd,
             "require_mention": settings.require_mention,
+            "require_bind": settings.require_bind,
             "routing": routing_to_compat_dict(settings.routing),
         }
     payload["guild_scope_configured"] = store.has_guild_scope_for_platform(platform)
@@ -4122,6 +4294,106 @@ def _mask_api_key(api_key: str | None) -> str | None:
     return f"{'•' * 6}{last4}"
 
 
+def _read_claude_cli_oauth_signed_in(
+    cli_path: str | None,
+    *,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+) -> bool | None:
+    """Ask Claude Code whether a first-party OAuth account is signed in.
+
+    This is the most accurate Settings signal because it covers both
+    keychain-backed installs and Linux/Docker's on-disk credentials file.
+    Keep it best-effort and quiet: if Claude is missing, slow, or emits an
+    unexpected shape, callers fall back to disk inspection.
+    """
+    configured = (cli_path or "claude").strip() or "claude"
+    binary = resolve_cli_path(configured) or configured
+    try:
+        result = subprocess.run(
+            [binary, "auth", "status", "--json"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=3,
+            check=False,
+            env=env,
+            cwd=cwd,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
+    text = (result.stdout or "").strip()
+    if not text:
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    logged_in = payload.get("loggedIn")
+    if logged_in is False:
+        return False
+    if logged_in is not True:
+        return None
+
+    # ``auth status`` reports Claude Code's overall auth state. API-key
+    # sources can also be "logged in", so only treat it as OAuth when the
+    # CLI identifies the source as Claude.ai / first-party OAuth.
+    saw_concrete_source = False
+    for key in ("authMethod", "authProvider", "provider", "source"):
+        raw = payload.get(key)
+        if isinstance(raw, str):
+            normalized = re.sub(r"[\s_]+", "-", raw.strip().lower())
+            if not normalized:
+                continue
+            saw_concrete_source = True
+            if normalized in {
+                "claude.ai",
+                "claude-ai",
+                "oauth",
+                "oauth-token",
+                "setup-token",
+                "claude-code-oauth-token",
+                "subscription",
+                "claude-subscription",
+            }:
+                return True
+            if any(token in normalized for token in ("api-key", "apikey", "api key", "auth-token", "apihelper", "api-helper")):
+                return False
+    if saw_concrete_source:
+        return False
+    return None
+
+
+def _resolve_claude_status_probe_cwd(config: Any | None) -> str | None:
+    candidates = (
+        getattr(getattr(config, "claude", None), "cwd", None),
+        getattr(getattr(config, "runtime", None), "default_cwd", None),
+    )
+    for raw in candidates:
+        if isinstance(raw, str) and raw.strip():
+            path = os.path.abspath(os.path.expanduser(raw.strip()))
+            try:
+                os.makedirs(path, exist_ok=True)
+                return path
+            except OSError as exc:
+                logger.warning("Failed to prepare Claude auth status cwd=%s: %s", path, exc)
+    return None
+
+
+def _build_claude_status_probe_env(claude_env: dict[str, str] | None) -> dict[str, str] | None:
+    if claude_env is None:
+        return None
+    env = dict(os.environ)
+    for key in list(env):
+        if key.startswith("ANTHROPIC_") or key.startswith("CLAUDE_"):
+            env.pop(key, None)
+    env.update(claude_env)
+    return env
+
+
 # ---------------------------------------------------------------------------
 # Web Settings → Backends OAuth flow plumbing.
 #
@@ -4316,6 +4588,28 @@ async def remove_backend_auth_async(backend: str) -> dict:
         return {"ok": False, "error": "remove_failed", "detail": str(exc)}
 
 
+async def remove_claude_oauth_credentials_async() -> dict:
+    """Clear only Claude Code OAuth credentials, preserving API-key auth."""
+    service = _get_oauth_service()
+    try:
+        return await service.clear_claude_oauth_credentials_only()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Claude OAuth credentials cleanup failed: %s", exc, exc_info=True)
+        return {"ok": False, "error": "remove_failed", "detail": str(exc)}
+
+
+def remove_claude_oauth_credentials() -> dict:
+    return _submit_oauth_coro(remove_claude_oauth_credentials_async(), timeout=30.0)
+
+
+def _clear_claude_oauth_credentials_after_api_key_save(service=None) -> dict:
+    service = service or _get_oauth_service()
+    return _submit_oauth_coro(
+        service.clear_claude_oauth_credentials_only(),
+        timeout=30.0,
+    )
+
+
 def remove_backend_api_key(backend: str) -> dict:
     """Clear the stored API key for Claude / Codex without touching OAuth.
 
@@ -4334,7 +4628,7 @@ def remove_backend_api_key(backend: str) -> dict:
     - **Claude**: remove Anthropic env overrides from Claude's
       ``settings.json``, clear legacy V2Config ``api_key`` / ``base_url``
       cache fields, and flip ``auth_mode`` to ``oauth``.
-      ``~/.claude/credentials.json`` (the OAuth token file) is left alone.
+      Claude Code's OAuth token store is left alone.
     """
     backend = (backend or "").strip().lower()
     if backend not in {"claude", "codex"}:
@@ -4698,10 +4992,9 @@ def get_claude_auth() -> dict:
     1. ``~/.claude/settings.json`` is the source of truth for API-key
        env overrides because Claude Code layers that file on top of the
        inherited process env at launch.
-    2. OAuth tokens minted by ``claude login`` live in the OS keychain,
-       which we cannot portably inspect. The "OAuth signed in" signal is
-       therefore inferred from "no API key is configured" — the UI shows
-       a hint pointing users at ``claude login`` if they need to switch.
+    2. OAuth state is owned by Claude Code, so we first ask
+       ``claude auth status --json``. If that probe is unavailable, fall
+       back to the Linux/Docker credentials file signal.
 
     Legacy V2Config keys are read only as a migration fallback so old
     installs still render their current state before the next save moves
@@ -4711,10 +5004,11 @@ def get_claude_auth() -> dict:
         read_claude_auth_state,
         read_claude_oauth_signed_in,
         read_claude_settings_env,
+        build_claude_subprocess_env,
     )
 
     disk_state = read_claude_auth_state()
-    oauth_signed_in = read_claude_oauth_signed_in()
+    disk_oauth_signed_in = read_claude_oauth_signed_in()
     settings_env = read_claude_settings_env()
     settings_key = settings_env.get("ANTHROPIC_API_KEY") or settings_env.get("ANTHROPIC_AUTH_TOKEN") or ""
     settings_base = settings_env.get("ANTHROPIC_BASE_URL") or ""
@@ -4725,13 +5019,34 @@ def get_claude_auth() -> dict:
         configured_mode = getattr(cfg, "auth_mode", None)
         configured_key = getattr(cfg, "api_key", None) or ""
         configured_base = getattr(cfg, "base_url", None) or ""
+        configured_cli_path = getattr(cfg, "cli_path", None)
+        status_probe_cwd = _resolve_claude_status_probe_cwd(config)
     except Exception:
         configured_mode = None
         configured_key = ""
         configured_base = ""
+        configured_cli_path = None
+        status_probe_cwd = None
 
     configured_key = configured_key.strip() if isinstance(configured_key, str) else ""
     configured_base = configured_base.strip() if isinstance(configured_base, str) else ""
+    try:
+        claude_status_env = _build_claude_status_probe_env(
+            build_claude_subprocess_env(
+                cfg if "cfg" in locals() else None,
+                force_oauth=True,
+            )
+        )
+    except Exception:
+        claude_status_env = None
+    cli_oauth_signed_in = _read_claude_cli_oauth_signed_in(
+        configured_cli_path if isinstance(configured_cli_path, str) else None,
+        env=claude_status_env,
+        cwd=status_probe_cwd,
+    )
+    oauth_signed_in = (
+        cli_oauth_signed_in if cli_oauth_signed_in is not None else disk_oauth_signed_in
+    )
 
     # settings.json wins: it is the file Claude Code itself layers on top
     # of inherited env. V2Config is a legacy fallback only.
@@ -4878,6 +5193,8 @@ def save_claude_auth(payload: dict) -> dict:
                 except Exception:
                     effective_base_url = None
 
+    oauth_cleanup_service = _get_oauth_service() if auth_mode == "api_key" else None
+
     from vibe.claude_config import apply_claude_auth
 
     try:
@@ -4911,6 +5228,21 @@ def save_claude_auth(payload: dict) -> dict:
         config.agents.claude.base_url = None
         config.save()
 
+    oauth_cleanup_result: dict | None = None
+    if auth_mode == "api_key":
+        try:
+            oauth_cleanup_result = _clear_claude_oauth_credentials_after_api_key_save(
+                oauth_cleanup_service
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to clear Claude OAuth credentials after API-key save: %s", exc)
+            oauth_cleanup_result = {
+                "ok": True,
+                "partial": True,
+                "warning": "oauth_cleanup_failed",
+                "detail": str(exc),
+            }
+
     # Claude is one-shot per request — no daemon to restart. Return a
     # synthetic restart result so the UI handles the same response shape
     # as Codex / OpenCode and the toast wording can stay consistent.
@@ -4919,6 +5251,10 @@ def save_claude_auth(payload: dict) -> dict:
         "ok": True,
         "message": "Claude relaunches per request; the next message uses the new auth.",
     }
+    if isinstance(oauth_cleanup_result, dict) and oauth_cleanup_result.get("partial"):
+        state["partial"] = True
+        state["warning"] = oauth_cleanup_result.get("warning") or "oauth_cleanup_failed"
+        state["detail"] = oauth_cleanup_result.get("detail")
     return state
 
 
@@ -5089,10 +5425,34 @@ def _merge_opencode_user_models(
 ) -> dict:
     """Overlay user-configured ``provider.<id>.models`` onto model metadata."""
 
-    if not isinstance(models, dict) or not user_model_index:
+    if not isinstance(models, dict):
         return models
     providers_raw = models.get("providers")
     if not isinstance(providers_raw, list):
+        return models
+    if allowed_provider_ids is not None:
+        filtered_providers = []
+        for provider in providers_raw:
+            if not isinstance(provider, dict):
+                continue
+            pid = _opencode_provider_id(provider)
+            if isinstance(pid, str) and pid in allowed_provider_ids:
+                filtered_providers.append(provider)
+        raw_defaults = models.get("default")
+        filtered_defaults = {}
+        if isinstance(raw_defaults, dict):
+            filtered_defaults = {
+                pid: model_id
+                for pid, model_id in raw_defaults.items()
+                if pid in allowed_provider_ids
+            }
+        models = {
+            **models,
+            "providers": filtered_providers,
+            "default": filtered_defaults,
+        }
+        providers_raw = models.get("providers", [])
+    if not user_model_index:
         return models
 
     providers = []
@@ -6799,7 +7159,7 @@ def auto_bind_wechat_user(user_id: str) -> dict:
         }
 
     config = load_config()
-    is_admin = not store.has_any_admin(platform=platform)
+    is_admin = not store.has_enabled_admin(platform=platform)
     user = UserSettings(
         display_name=user_id,
         is_admin=is_admin,

@@ -19,9 +19,10 @@ from modules.agents.base import AgentRequest, BaseAgent
 
 from .client_manager import OpenCodeClientManager
 from .message_processor import OpenCodeMessageProcessorMixin
-from .poll_loop import OpenCodePollLoop
+from .poll_loop import OpenCodePollLoop, restored_session_key_from_poll_info
 from .server import OpenCodeServerManager
 from .session import OpenCodeResumeUnavailableError, OpenCodeSessionManager
+from .utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,15 @@ def resolve_opencode_model_dict(model_str: str | None, default_provider: str | N
     if isinstance(default_provider, str) and default_provider.strip():
         return {"providerID": default_provider.strip(), "modelID": model_str}
     return None
+
+
+def _raw_settings_key_from_session_key(session_key: str) -> str:
+    parts = str(session_key or "").split("::")
+    if len(parts) >= 3 and parts[1] in {"user", "channel", "platform", "project"}:
+        return "::".join(parts[2:])
+    if len(parts) >= 2:
+        return "::".join(parts[1:])
+    return str(session_key or "")
 
 
 class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
@@ -265,6 +275,23 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 reasoning_effort = server.get_agent_reasoning_effort_from_config(agent_to_use)
             if not reasoning_effort:
                 reasoning_effort = getattr(opencode_cfg, "default_reasoning_effort", None)
+            if model_dict:
+                try:
+                    model_catalog = await server.get_available_models(request.working_path)
+                    resolved_model_id = resolve_opencode_model_id(
+                        model_catalog,
+                        model_dict.get("providerID"),
+                        model_dict.get("modelID"),
+                    )
+                    if resolved_model_id and resolved_model_id != model_dict.get("modelID"):
+                        model_dict = {**model_dict, "modelID": resolved_model_id}
+                    reasoning_effort = resolve_opencode_reasoning_effort(
+                        model_dict,
+                        reasoning_effort,
+                        model_catalog,
+                    )
+                except Exception as err:
+                    logger.debug("Failed to resolve OpenCode model variant support: %s", err)
 
             baseline_message_ids: set[str] = set()
             try:
@@ -310,8 +337,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 system=system_prompt_injection,
                 tools={"question": False},
             )
+            get_started_at = getattr(server, "get_last_prompt_started_at", None)
+            prompt_started_at = get_started_at(session_id) if callable(get_started_at) else None
             await server.mark_run_active(session_id)
             run_registered = True
+            self.mark_runtime_turn_started(request.context)
 
             logger.info(
                 "Starting OpenCode poll loop for %s (thread=%s, cwd=%s)",
@@ -320,12 +350,9 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 request.working_path,
             )
 
-            # ActivePollInfo stores raw settings_key + separate platform field;
-            # request.session_key is the scoped session key (platform::raw_id),
-            # so strip the prefix before persisting.
-            raw_settings_key = request.session_key
-            if "::" in raw_settings_key:
-                raw_settings_key = raw_settings_key.split("::", 1)[1]
+            # Keep both the raw settings key for legacy lookup and the complete
+            # scoped key so restored polls remain attached to typed scopes.
+            raw_settings_key = _raw_settings_key_from_session_key(request.session_key)
             platform_payload = request.context.platform_specific or {}
 
             self.sessions.add_active_poll(
@@ -343,6 +370,10 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 processing_indicator=self.controller.processing_indicator.snapshot_request(request),
                 user_id=request.context.user_id or "",
                 platform=request.context.platform or platform_payload.get("platform") or "",
+                prompt_started_at=prompt_started_at,
+                model_dict=model_dict,
+                reasoning_effort=reasoning_effort,
+                session_key=request.session_key,
             )
 
             final_text, should_emit = await self._poll_loop.run_prompt_poll(
@@ -480,6 +511,18 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 self.sessions.remove_active_poll(opencode_session_id)
         return terminated
 
+    def runtime_turn_keys_for_session_key(self, session_key: str) -> set[str]:
+        return {
+            f"{base_id}:{req_info[1]}"
+            for base_id, req_info in self._session_manager.list_for_session_key(session_key).items()
+        }
+
+    def runtime_turn_keys(self) -> set[str]:
+        return {
+            f"{base_id}:{req_info[1]}"
+            for base_id, req_info in self._session_manager.list_all().items()
+        }
+
     async def _delete_ack(self, request: AgentRequest) -> None:
         service = getattr(self.controller, "processing_indicator", None)
         if service is not None:
@@ -582,7 +625,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 poll_info.base_session_id,
                 poll_info.opencode_session_id,
                 poll_info.working_path,
-                f"{poll_info.platform}::{poll_info.settings_key}" if poll_info.platform else poll_info.settings_key,
+                restored_session_key_from_poll_info(poll_info),
             )
             restored_count += 1
 

@@ -263,6 +263,21 @@ def test_hook_send_help_includes_examples_and_threadless_guidance(capsys) -> Non
     assert "vibe agent run --async --session-id sesk8m4q2p7x" in captured.out
 
 
+def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["agent", "run", "--help"])
+
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    assert "--fork-session FORK_SESSION" in captured.out
+    assert "Use --fork-session to create a new Session by forking an existing Session's native backend context." in captured.out
+    assert "Forks keep the same backend as the source Session." in captured.out
+    assert "vibe agent run --async --fork-session sesk8m4q2p7x" in captured.out
+    assert "Do not combine --fork-session with --session-id, --create-session, --create-session-per-run, --deliver-key, or --post-to." in captured.out
+
+
 def test_task_add_parse_error_is_structured_json(capsys) -> None:
     parser = cli.build_parser()
 
@@ -1193,6 +1208,39 @@ def test_agent_create_accepts_effort_alias(tmp_path: Path, capsys) -> None:
     assert payload["agent"]["reasoning_effort"] == "high"
 
 
+def test_agent_default_cli_sets_default_agent(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.ensure_builtin_default_agents(["opencode", "codex"])
+    args = _parse_agent(["default", "codex"])
+
+    with patch("vibe.cli._agent_store", return_value=agent_store):
+        result = cli.cmd_agent_default(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["default_agent_name"] == "codex"
+    assert agent_store.get_default_agent_name() == "codex"
+
+
+def test_agent_default_cli_bootstraps_builtin_backend_agent(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    args = _parse_agent(["default", "codex"])
+
+    with patch("vibe.cli._agent_store", return_value=agent_store):
+        result = cli.cmd_agent_default(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["default_agent_name"] == "codex"
+    agent = agent_store.get("codex")
+    assert agent is not None
+    assert agent.backend == "codex"
+    assert agent.enabled is True
+    assert agent_store.get_default_agent_name() == "codex"
+
+
 def test_agent_import_name_filters_global_candidates(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     agent_store = cli.VibeAgentStore(db_path)
@@ -1271,9 +1319,9 @@ def test_resolve_agent_for_target_bootstraps_sqlite_before_scope_lookup(tmp_path
         assert conn.execute("select count(*) from scope_settings").fetchone()[0] == 0
 
 
-def test_resolve_agent_for_target_canonicalizes_legacy_scope_backend_to_agent(tmp_path: Path) -> None:
+def test_resolve_agent_for_target_ignores_deprecated_scope_backend(tmp_path: Path) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
-    cli.VibeAgentStore(db_path).ensure_default_agent(backend="claude")
+    default_agent = cli.VibeAgentStore(db_path).ensure_default_agent(backend="claude")
     from storage.importer import ensure_sqlite_state
     from storage.models import scope_settings
     from storage.settings_service import make_scope_id, upsert_scope
@@ -1314,8 +1362,8 @@ def test_resolve_agent_for_target_canonicalizes_legacy_scope_backend_to_agent(tm
         )
 
     assert agent is not None
-    assert agent.name == "codex"
-    assert agent.backend == "codex"
+    assert agent.name == default_agent.name
+    assert agent.backend == default_agent.backend
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             "select agent_name, agent_backend, settings_json from scope_settings where scope_id = ?",
@@ -1323,9 +1371,9 @@ def test_resolve_agent_for_target_canonicalizes_legacy_scope_backend_to_agent(tm
         ).fetchone()
 
     assert row is not None
-    assert row[0] == "codex"
+    assert row[0] is None
     assert row[1] == "codex"
-    assert json.loads(row[2])["routing"]["agent_name"] == "codex"
+    assert "agent_name" not in json.loads(row[2])["routing"]
 
 
 def test_resolve_agent_for_target_allows_unresolved_legacy_scope_backend_without_session_creation(
@@ -1378,12 +1426,12 @@ def test_resolve_agent_for_target_allows_unresolved_legacy_scope_backend_without
     assert agent.name == default_agent.name
 
 
-def test_resolve_agent_for_target_rejects_unresolved_legacy_scope_backend_for_session_creation(
+def test_resolve_agent_for_target_ignores_unresolved_legacy_scope_backend_for_session_creation(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     agent_store = cli.VibeAgentStore(db_path)
-    agent_store.ensure_default_agent(backend="claude")
+    default_agent = agent_store.ensure_default_agent(backend="claude")
     agent_store.create(name="codex", backend="opencode")
     agent_store.close()
     from storage.importer import ensure_sqlite_state
@@ -1416,23 +1464,21 @@ def test_resolve_agent_for_target_rejects_unresolved_legacy_scope_backend_for_se
     with (
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
-        pytest.raises(cli.TaskCliError) as exc,
     ):
-        cli._resolve_agent_for_target(
+        agent = cli._resolve_agent_for_target(
             agent_name=None,
             session_id=None,
             session_key="slack::channel::C123",
             help_command="vibe task add --help",
-            reject_unresolved_legacy_scope_backend=True,
         )
 
-    assert exc.value.code == "legacy_scope_backend_unresolved"
-    assert exc.value.details == {"deliver_key": "slack::channel::C123", "agent_backend": "codex"}
+    assert agent is not None
+    assert agent.name == default_agent.name
 
 
-def test_reserve_definition_session_uses_canonicalized_scope_agent(tmp_path: Path) -> None:
+def test_reserve_definition_session_ignores_deprecated_scope_backend(tmp_path: Path) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
-    cli.VibeAgentStore(db_path).ensure_default_agent(backend="claude")
+    default_agent = cli.VibeAgentStore(db_path).ensure_default_agent(backend="claude")
     from storage.importer import ensure_sqlite_state
     from storage.models import scope_settings
     from storage.settings_service import upsert_scope
@@ -1472,16 +1518,17 @@ def test_reserve_definition_session_uses_canonicalized_scope_agent(tmp_path: Pat
         )
         target = cli.resolve_session_id_target(session_id, db_path=db_path)
 
-    assert target.agent_backend == "codex"
-    assert target.agent_name == "codex"
+    assert target.agent_backend == default_agent.backend
+    assert target.agent_name == default_agent.name
     assert target.agent_id
 
 
-def test_reserve_definition_session_rejects_unresolved_legacy_scope_backend(tmp_path: Path) -> None:
+def test_reserve_definition_session_ignores_unresolved_legacy_scope_backend(tmp_path: Path) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     agent_store = cli.VibeAgentStore(db_path)
-    agent_store.ensure_default_agent(backend="claude")
+    default_agent = agent_store.ensure_default_agent(backend="claude")
     agent_store.create(name="codex", backend="opencode")
+    agent_store.close()
     from storage.importer import ensure_sqlite_state
     from storage.models import scope_settings
     from storage.settings_service import upsert_scope
@@ -1513,22 +1560,22 @@ def test_reserve_definition_session_rejects_unresolved_legacy_scope_backend(tmp_
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
-        pytest.raises(cli.TaskCliError) as exc,
     ):
-        cli._reserve_definition_session(
+        session_id = cli._reserve_definition_session(
             agent_name=None,
             deliver_key="slack::channel::C123",
             help_command="vibe task add --help",
         )
+        target = cli.resolve_session_id_target(session_id, db_path=db_path)
 
-    assert exc.value.code == "legacy_scope_backend_unresolved"
-    assert exc.value.details == {"deliver_key": "slack::channel::C123", "agent_backend": "codex"}
+    assert target.agent_backend == default_agent.backend
+    assert target.agent_name == default_agent.name
 
 
-def test_task_add_create_per_run_rejects_unresolved_legacy_scope_backend(tmp_path: Path) -> None:
+def test_task_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     agent_store = cli.VibeAgentStore(db_path)
-    agent_store.ensure_default_agent(backend="claude")
+    default_agent = agent_store.ensure_default_agent(backend="claude")
     agent_store.create(name="codex", backend="opencode")
     agent_store.close()
     from storage.importer import ensure_sqlite_state
@@ -1574,11 +1621,12 @@ def test_task_add_create_per_run_rejects_unresolved_legacy_scope_backend(tmp_pat
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
     ):
-        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
+        result = cli.cmd_task_add(args)
 
-    assert result == 1
-    assert payload["code"] == "legacy_scope_backend_unresolved"
-    assert payload["details"] == {"deliver_key": "slack::channel::C123", "agent_backend": "codex"}
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["task"]["agent_name"] == default_agent.name
 
 
 def test_task_add_rejects_deprecated_prompt_argument() -> None:

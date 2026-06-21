@@ -17,6 +17,14 @@ from core.watches import ManagedWatchService, ManagedWatchStore, WatchRuntimeSta
 from storage.background import SQLiteBackgroundTaskStore
 
 
+class _FakeProcess:
+    pid = 1234
+    returncode = 0
+
+    async def communicate(self):
+        return b"ok\n", b""
+
+
 def test_managed_watch_store_round_trip(tmp_path: Path) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     watch = store.add_watch(
@@ -74,8 +82,90 @@ def test_managed_watch_store_preserves_zero_values_on_reload(tmp_path: Path) -> 
     assert saved.retry_delay_seconds == 0
 
 
+def test_managed_watch_exec_detaches_waiter_stdin(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=runtime_store,
+    )
+    watch = store.add_watch(
+        name="Watch Python",
+        session_key="slack::channel::C123",
+        command=["python3", "-c", "print('ok')"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+    )
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = asyncio.run(service._run_cycle(watch, timeout_seconds=5))
+
+    assert result.exit_code == 0
+    assert captured["kwargs"]["stdin"] == asyncio.subprocess.DEVNULL
+    assert captured["kwargs"]["stdout"] == asyncio.subprocess.PIPE
+    assert captured["kwargs"]["stderr"] == asyncio.subprocess.PIPE
+
+
+def test_managed_watch_shell_detaches_waiter_stdin(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=runtime_store,
+    )
+    watch = store.add_watch(
+        name="Watch Shell",
+        session_key="slack::channel::C123",
+        command=[],
+        shell_command="python3 -c 'print(\"ok\")'",
+        prefix=None,
+        cwd=None,
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+    )
+
+    async def fake_create_subprocess_shell(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", fake_create_subprocess_shell)
+
+    result = asyncio.run(service._run_cycle(watch, timeout_seconds=5))
+
+    assert result.exit_code == 0
+    assert captured["kwargs"]["stdin"] == asyncio.subprocess.DEVNULL
+    assert captured["kwargs"]["stdout"] == asyncio.subprocess.PIPE
+    assert captured["kwargs"]["stderr"] == asyncio.subprocess.PIPE
+
+
 def test_managed_watch_store_uses_sqlite_when_path_is_default(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = ManagedWatchStore()
     watch = store.add_watch(
         name="Watch CI",
@@ -150,7 +240,7 @@ def test_sqlite_remove_watch_soft_deletes_watch_but_keeps_runtime(tmp_path: Path
 
 
 def test_watch_runtime_store_uses_sqlite_when_path_is_default(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = WatchRuntimeStateStore()
 
     store.write(

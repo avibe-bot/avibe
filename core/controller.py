@@ -1,6 +1,7 @@
 """Core controller that coordinates between modules and handlers"""
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import threading
@@ -23,6 +24,7 @@ from core.handlers import (
 )
 from core.agent_auth_service import AgentAuthService
 from core.audio_asr import AudioAsrService
+from core.message_context import build_context_session_key
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.processing_indicator import ProcessingIndicatorService
 from core.runtime_commands import RuntimeCommandWatcher
@@ -33,6 +35,105 @@ from core.vibe_agents import VibeAgent, VibeAgentStore
 from vibe.i18n import get_supported_languages, t as i18n_t
 
 logger = logging.getLogger(__name__)
+
+
+class RemovedPlatformIMClient(BaseIMClient):
+    """No-op sink for stale replies after an IM platform is hot-disabled."""
+
+    def __init__(self, platform: str):
+        from config.v2_config import AvibeConfig
+        from modules.im.formatters.avibe_formatter import AvibeFormatter
+
+        super().__init__(AvibeConfig())
+        self.platform = platform
+        self.formatter = AvibeFormatter()
+
+    def get_default_parse_mode(self) -> Optional[str]:
+        return None
+
+    def should_use_thread_for_reply(self) -> bool:
+        return False
+
+    def supports_message_editing(self, context: Optional[MessageContext] = None) -> bool:
+        return False
+
+    async def send_message(
+        self,
+        context: MessageContext,
+        text: str,
+        parse_mode: Optional[str] = None,
+        reply_to: Optional[str] = None,
+    ) -> Optional[str]:
+        logger.info("Dropping stale outbound message for removed IM platform %s", self.platform)
+        return None
+
+    async def send_message_with_buttons(
+        self,
+        context: MessageContext,
+        text: str,
+        keyboard,
+        parse_mode: Optional[str] = None,
+    ) -> Optional[str]:
+        logger.info("Dropping stale outbound button message for removed IM platform %s", self.platform)
+        return None
+
+    async def edit_message(
+        self,
+        context: MessageContext,
+        message_id: str,
+        text: Optional[str] = None,
+        keyboard: Optional[Any] = None,
+        parse_mode: Optional[str] = None,
+    ) -> bool:
+        return False
+
+    async def remove_inline_keyboard(
+        self,
+        context: MessageContext,
+        message_id: str,
+        text: Optional[str] = None,
+        parse_mode: Optional[str] = None,
+    ) -> bool:
+        return False
+
+    async def answer_callback(self, callback_id: str, text: Optional[str] = None, show_alert: bool = False) -> bool:
+        return False
+
+    def register_handlers(self):
+        return None
+
+    def run(self):
+        return None
+
+    def stop(self):
+        return None
+
+    async def get_user_info(self, user_id: str) -> Dict[str, Any]:
+        return {"id": user_id, "platform": self.platform, "removed": True}
+
+    async def get_channel_info(self, channel_id: str) -> Dict[str, Any]:
+        return {"id": channel_id, "platform": self.platform, "removed": True}
+
+    async def add_reaction(self, context: MessageContext, message_id: str, emoji: str) -> bool:
+        return False
+
+    async def remove_reaction(self, context: MessageContext, message_id: str, emoji: str) -> bool:
+        return False
+
+    async def send_typing_indicator(self, context: MessageContext) -> bool:
+        return False
+
+    async def clear_typing_indicator(self, context: MessageContext) -> bool:
+        return False
+
+    async def delete_message(self, context: MessageContext, message_id: str) -> bool:
+        return False
+
+    async def send_dm(self, user_id: str, text: str, **kwargs):
+        return None
+
+    def format_markdown(self, text: str) -> str:
+        return text
 
 
 def _optional_target_str(value: Any) -> Optional[str]:
@@ -68,6 +169,8 @@ class Controller:
         self._im_run_exception: Optional[BaseException] = None
         self.enabled_platforms = list(getattr(config, "enabled_platforms", lambda: [config.platform])())
         self.primary_platform = getattr(getattr(config, "platforms", None), "primary", config.platform)
+        self._reconcile_lock: Optional[asyncio.Lock] = None
+        self._removed_im_clients: Dict[str, BaseIMClient] = {}
 
         # Session tracking (must be initialized before handlers)
         self.claude_sessions: Dict[str, Any] = {}
@@ -107,12 +210,9 @@ class Controller:
         self._init_agents()
         self.agent_auth_service = AgentAuthService(self)
 
-        # Validate default_backend against registered agents
-        self._validate_default_backend()
         self.vibe_agent_store = VibeAgentStore()
         self.vibe_agent_store.ensure_builtin_default_agents(
             self._enabled_agent_backends(),
-            default_backend=getattr(self.agent_router, "global_default", DEFAULT_AGENT_BACKEND),
         )
 
         # Setup callbacks
@@ -143,52 +243,30 @@ class Controller:
 
     def _init_modules(self):
         """Initialize core modules"""
-        self.im_clients: Dict[str, BaseIMClient] = IMFactory.create_clients(self.config)
-
-        # Workbench-only install: no external IM platform is enabled, so
-        # ``create_clients`` returns an empty map. Register the in-process
-        # Avibe (Web UI) client as the SOLE client BEFORE the snapshot/primary
-        # access below so ``self.im_client`` resolves to it, ``self.im_clients
-        # [self.primary_platform]`` (== "avibe") works, and avibe joins the
-        # single-client run loop (its ``run()`` fires on_ready + blocks to keep
-        # the service alive — see ``modules/im/avibe.py``). The has-IM path is
-        # unaffected: avibe is added there AFTER the snapshot (further below) and
-        # stays OUT of the MultiIMClient run loop.
-        if not self.im_clients:
-            from modules.im.avibe import AvibeBot, AvibeConfig
-
-            self.primary_platform = "avibe"
-            self.im_clients["avibe"] = AvibeBot(AvibeConfig())
-
-        for platform, client in self.im_clients.items():
+        runtime_clients: Dict[str, BaseIMClient] = IMFactory.create_clients(self.config)
+        for platform, client in runtime_clients.items():
             client.formatter = self._create_formatter(platform)
+        self.primary_platform = self._derive_primary_platform(self.config)
+        self.im_clients = dict(runtime_clients)
 
-        # Snapshot the platform map for the multi-runtime wrapper. ``avibe``
-        # is registered into ``self.im_clients`` later (for delivery routing
-        # via get_im_client_for_context) but must NOT join the MultiIMClient
-        # run/callback loop — it has no inbound runtime, so a shared reference
-        # would let it leak in and log a spurious "IM runtime for avibe
-        # exited" warning. The copy keeps the run loop to the real platforms.
-        self.im_client = (
-            self.im_clients[self.primary_platform]
-            if len(self.im_clients) == 1
-            else MultiIMClient(dict(self.im_clients), primary_platform=self.primary_platform)
+        from modules.im.avibe import AvibeBot, AvibeConfig
+
+        self.im_clients["avibe"] = AvibeBot(AvibeConfig())
+        self.im_client = MultiIMClient(
+            dict(runtime_clients),
+            primary_platform=self.primary_platform,
+            auxiliary_clients={"avibe": self.im_clients["avibe"]},
         )
-        formatter = self.im_clients[self.primary_platform].formatter
+        self._removed_im_clients = {}
+        formatter = self.im_clients.get(self.primary_platform, self.im_clients["avibe"]).formatter
         self.claude_client = ClaudeClient(self.config.claude, formatter)
 
         # Initialize managers
         self.session_manager = SessionManager()
-        # The settings manager must own a per-platform manager for the primary
-        # so ``get_settings_manager_for_context`` (and its primary fallback) can
-        # always resolve one. For has-IM the primary is already in
-        # ``enabled_platforms`` so this is a no-op; for workbench-only it adds
-        # the "avibe" manager that empty ``enabled_platforms`` would otherwise
-        # omit (which would KeyError on the very first settings lookup).
-        settings_platforms = list(self.enabled_platforms)
-        if self.primary_platform not in settings_platforms:
-            settings_platforms.append(self.primary_platform)
-        self.settings_manager = MultiSettingsManager(settings_platforms, primary_platform=self.primary_platform)
+        self.settings_manager = MultiSettingsManager(
+            self._settings_platforms_for(self.enabled_platforms, self.primary_platform),
+            primary_platform=self.primary_platform,
+        )
         self.platform_settings_managers = self.settings_manager.managers
         self.sessions = self.settings_manager.sessions
         self.native_session_service = None
@@ -199,39 +277,41 @@ class Controller:
         # Migrate legacy per-channel language into global config
         self._migrate_language_from_settings()
 
-        # Agent routing - use configured default_backend
-        default_backend = getattr(self.config, "default_backend", DEFAULT_AGENT_BACKEND)
-        self.agent_router = AgentRouter.from_file(None, platform=self.primary_platform, default_backend=default_backend)
+        # Legacy backend router. It is kept for platform runtime compatibility;
+        # product routing is resolved through VibeAgentStore.
+        self.agent_router = AgentRouter.from_file(None, platform=self.primary_platform)
         for platform in self.enabled_platforms:
             if platform not in self.agent_router.platform_routes:
                 self.agent_router.platform_routes[platform] = self.agent_router.platform_routes[self.primary_platform]
+        if "avibe" not in self.agent_router.platform_routes:
+            self.agent_router.platform_routes["avibe"] = self.agent_router.platform_routes[self.primary_platform]
 
         # Inject settings_manager into IM client if supported
-        for platform, client in self.im_clients.items():
+        for platform, client in runtime_clients.items():
             self._inject_runtime_dependencies(platform, client)
 
-        # Avibe (the workbench Web UI) is always available as an in-process
-        # delivery surface, independent of which external IM platforms are
-        # enabled. Register it here — after ``self.im_client`` / callbacks /
-        # injection are wired for the real platforms — so
-        # ``get_im_client_for_context("avibe")`` resolves to the SSE-backed
-        # client instead of silently falling back to the primary platform
-        # (which mis-delivered workbench chat replies to e.g. Slack, where
-        # the send fails with channel_not_found and the user sees nothing).
-        # Avibe needs no inbound runtime thread (ui_server REST owns inbound),
-        # no settings-manager injection (it inherits the primary's via
-        # get_settings_manager_for_context), and no callbacks.
-        if "avibe" not in self.im_clients:
-            from modules.im.avibe import AvibeBot, AvibeConfig
+    @staticmethod
+    def _derive_primary_platform(config) -> str:
+        enabled = list(getattr(config, "enabled_platforms", lambda: [getattr(config, "platform", "slack")])())
+        configured_primary = getattr(getattr(config, "platforms", None), "primary", getattr(config, "platform", "slack"))
+        if enabled:
+            return configured_primary if configured_primary in enabled else enabled[0]
+        return "avibe"
 
-            self.im_clients["avibe"] = AvibeBot(AvibeConfig())
+    @staticmethod
+    def _settings_platforms_for(enabled_platforms: list[str], primary_platform: str) -> list[str]:
+        platforms = list(enabled_platforms)
+        if primary_platform not in platforms:
+            platforms.append(primary_platform)
+        if "avibe" not in platforms:
+            platforms.append("avibe")
+        return platforms
 
     def _enabled_agent_backends(self) -> list[str]:
         result: list[str] = []
         agent_config = getattr(self.config, "agents", None)
-        default_backend = getattr(self.agent_router, "global_default", DEFAULT_AGENT_BACKEND)
         if agent_config is None:
-            return [default_backend]
+            return list(getattr(self.agent_service, "agents", {}).keys()) or [DEFAULT_AGENT_BACKEND]
         for backend in ("opencode", "claude", "codex"):
             cfg = getattr(agent_config, backend, None)
             if bool(getattr(cfg, "enabled", False)):
@@ -247,6 +327,122 @@ class Controller:
 
     def _create_formatter(self, platform: str):
         return get_platform_descriptor(platform).create_formatter()
+
+    @staticmethod
+    def _runtime_reconcile_signature(config, platform: str) -> tuple[Any, ...]:
+        descriptor = get_platform_descriptor(platform)
+        platform_config = descriptor.get_config(config)
+        if platform_config is None:
+            return ()
+        return tuple(getattr(platform_config, field, None) for field in descriptor.runtime_reconcile_field_names())
+
+    def _ensure_agent_route_for_platform(self, platform: str) -> None:
+        if platform in self.agent_router.platform_routes:
+            return
+        fallback = self.agent_router.platform_routes.get(self.primary_platform)
+        if fallback is None:
+            from modules.agent_router import PlatformRoute
+
+            fallback = PlatformRoute(default=self.agent_router.global_default)
+        self.agent_router.platform_routes[platform] = fallback
+
+    def _register_client_runtime(self, platform: str, client: BaseIMClient) -> None:
+        client.formatter = self._create_formatter(platform)
+        if platform not in self.platform_settings_managers:
+            self.settings_manager.add_platform(platform)
+            self.platform_settings_managers = self.settings_manager.managers
+        self._ensure_agent_route_for_platform(platform)
+        self._inject_runtime_dependencies(platform, client)
+
+    def _build_platform_client(self, platform: str, config) -> BaseIMClient:
+        descriptor = get_platform_descriptor(platform)
+        client = descriptor.create_client(config)
+        self._register_client_runtime(platform, client)
+        return client
+
+    def _sync_config_references(self, new_config) -> None:
+        self.config = new_config
+        self.processing_indicator.config = new_config
+        self.audio_asr_service.config = new_config
+        for handler_name in ("command_handler", "settings_handler", "message_handler", "session_handler"):
+            handler = getattr(self, handler_name, None)
+            if handler is not None:
+                handler.config = new_config
+                handler.im_client = self.im_client
+                handler.settings_manager = self.settings_manager
+                handler.sessions = self.sessions
+        for agent in getattr(getattr(self, "agent_service", None), "agents", {}).values():
+            agent.config = new_config
+            agent.im_client = self.im_client
+            agent.settings_manager = self.settings_manager
+            agent.sessions = self.sessions
+        self.claude_client.config = new_config.claude
+        primary_formatter = self.im_clients.get(self.primary_platform, self.im_clients["avibe"]).formatter
+        if primary_formatter is not None:
+            self.claude_client.formatter = primary_formatter
+
+    async def reconcile_platforms(self, new_config) -> dict[str, Any]:
+        """Hot-apply IM platform enablement and runtime credential changes."""
+        if self._reconcile_lock is None:
+            self._reconcile_lock = asyncio.Lock()
+
+        async with self._reconcile_lock:
+            current_enabled = list(self.enabled_platforms)
+            next_enabled = list(getattr(new_config, "enabled_platforms", lambda: [])())
+            current_set = set(current_enabled)
+            next_set = set(next_enabled)
+            removed = [platform for platform in current_enabled if platform not in next_set]
+            added = [platform for platform in next_enabled if platform not in current_set]
+            rebuilt = [
+                platform
+                for platform in next_enabled
+                if platform in current_set
+                and self._runtime_reconcile_signature(self.config, platform)
+                != self._runtime_reconcile_signature(new_config, platform)
+            ]
+            next_primary = self._derive_primary_platform(new_config)
+
+            for platform in removed + rebuilt:
+                self.im_clients.pop(platform, None)
+                self._removed_im_clients[platform] = RemovedPlatformIMClient(platform)
+                await asyncio.to_thread(self.im_client.remove_client, platform)
+
+            self.enabled_platforms = next_enabled
+            self.primary_platform = next_primary
+            self.settings_manager.set_primary_platform(next_primary)
+            self.platform_settings_managers = self.settings_manager.managers
+            for platform in removed:
+                self.settings_manager.remove_platform(platform)
+                self.agent_router.platform_routes.pop(platform, None)
+
+            for platform in next_enabled:
+                self._ensure_agent_route_for_platform(platform)
+            self._ensure_agent_route_for_platform("avibe")
+
+            for platform in rebuilt + added:
+                client = self._build_platform_client(platform, new_config)
+                self.im_clients[platform] = client
+                self.im_client.add_client(platform, client)
+                self._removed_im_clients.pop(platform, None)
+
+            self.im_client.set_primary_platform(next_primary)
+            self._sync_config_references(new_config)
+
+            logger.info(
+                "Hot-reconciled IM platforms: added=%s removed=%s rebuilt=%s primary=%s",
+                added,
+                removed,
+                rebuilt,
+                next_primary,
+            )
+            return {
+                "ok": True,
+                "added": added,
+                "removed": removed,
+                "rebuilt": rebuilt,
+                "enabled": next_enabled,
+                "primary": next_primary,
+            }
 
     def _migrate_discord_guild_scope_from_config(self) -> None:
         if "discord" not in self.platform_settings_managers:
@@ -325,6 +521,7 @@ class Controller:
                     "allowed_chat_ids",
                     "allowed_user_ids",
                     "disable_link_unfurl",
+                    "forum_auto_topic",
                 )
                 for platform, client in self.im_clients.items():
                     im_cfg = getattr(client, "config", None)
@@ -418,36 +615,6 @@ class Controller:
             except Exception as e:
                 logger.error(f"Failed to initialize OpenCode agent: {e}")
 
-    def _validate_default_backend(self):
-        """Validate default_backend against registered agents and fallback if needed."""
-        current_default = self.agent_router.global_default
-        registered = set(self.agent_service.agents.keys())
-
-        if current_default not in registered:
-            # Find a fallback from registered agents
-            # Prefer: opencode > claude > codex > any
-            for fallback in ["opencode", "claude", "codex"]:
-                if fallback in registered:
-                    logger.warning(
-                        f"Configured default_backend '{current_default}' is not enabled. Falling back to '{fallback}'."
-                    )
-                    self.agent_router.global_default = fallback
-                    for route in self.agent_router.platform_routes.values():
-                        route.default = fallback
-                    return
-
-            # If no preferred fallback, use any registered agent
-            if registered:
-                fallback = next(iter(registered))
-                logger.warning(
-                    f"Configured default_backend '{current_default}' is not enabled. Falling back to '{fallback}'."
-                )
-                self.agent_router.global_default = fallback
-                for route in self.agent_router.platform_routes.values():
-                    route.default = fallback
-            else:
-                logger.error("No agents are registered! Check your configuration.")
-
     def _setup_callbacks(self):
         """Setup callback connections between modules"""
 
@@ -478,7 +645,7 @@ class Controller:
 
         # Register callbacks with the IM client
         self.im_client.register_callbacks(
-            on_message=self._dispatch_to_controller_loop(_on_im_message),
+            on_message=self._dispatch_im_message_to_controller_loop(_on_im_message),
             on_command=command_handlers,
             on_callback_query=self._dispatch_to_controller_loop(self.message_handler.handle_callback_query),
             on_settings_update=self._dispatch_to_controller_loop(self.settings_handler.handle_settings_update),
@@ -509,6 +676,91 @@ class Controller:
             return await asyncio.wrap_future(future)
 
         return _wrapped
+
+    def _dispatch_im_message_to_controller_loop(self, callback):
+        tracked_platforms = {"telegram", "wechat"}
+
+        async def _wrapped(context, *args, **kwargs):
+            platform = self._platform_for_im_callback_context(context)
+            if platform in tracked_platforms:
+                return await self._run_on_controller_loop(callback, context, *args, **kwargs)
+            self._schedule_controller_callback(callback, context, *args, **kwargs)
+            return None
+
+        return _wrapped
+
+    def _platform_for_im_callback_context(self, context) -> str:
+        platform = str(
+            getattr(context, "platform", None)
+            or (getattr(context, "platform_specific", None) or {}).get("platform")
+            or ""
+        ).strip()
+        if platform:
+            return platform
+        im_client = getattr(self, "im_client", None)
+        primary_platform = str(getattr(im_client, "primary_platform", "") or "").strip()
+        if primary_platform:
+            return primary_platform
+        module = str(getattr(type(im_client), "__module__", "") or "")
+        if module.startswith("modules.im.wechat"):
+            return "wechat"
+        if module.startswith("modules.im.telegram"):
+            return "telegram"
+        return ""
+
+    def _dispatch_to_controller_loop_background(self, callback):
+        async def _wrapped(*args, **kwargs):
+            self._schedule_controller_callback(callback, *args, **kwargs)
+
+        return _wrapped
+
+    async def _run_on_controller_loop(self, callback, *args, **kwargs):
+        loop = self._loop
+        if loop is None:
+            return await callback(*args, **kwargs)
+
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if current_loop is loop:
+            return await callback(*args, **kwargs)
+
+        future = asyncio.run_coroutine_threadsafe(callback(*args, **kwargs), loop)
+        return await asyncio.wrap_future(future)
+
+    def _schedule_controller_callback(self, callback, *args, **kwargs) -> None:
+        async def _runner():
+            await callback(*args, **kwargs)
+
+        loop = self._loop
+        if loop is None:
+            task = asyncio.create_task(_runner())
+            task.add_done_callback(self._log_background_callback_result)
+            return
+
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if current_loop is loop:
+            task = loop.create_task(_runner())
+            task.add_done_callback(self._log_background_callback_result)
+            return
+
+        future = asyncio.run_coroutine_threadsafe(_runner(), loop)
+        future.add_done_callback(self._log_background_callback_result)
+
+    @staticmethod
+    def _log_background_callback_result(future) -> None:
+        try:
+            future.result()
+        except (asyncio.CancelledError, concurrent.futures.CancelledError):
+            return
+        except Exception:
+            logger.error("Background IM message callback failed", exc_info=True)
 
     def _run_im_runtime(self) -> None:
         try:
@@ -610,16 +862,29 @@ class Controller:
         tracking never collide.
         """
         platform = context.platform or (context.platform_specific or {}).get("platform") or self.primary_platform
-        return f"{platform}::{self._get_settings_key(context)}"
+        settings_key = self._get_settings_key(context)
+        return build_context_session_key(context, platform=platform, settings_key=settings_key)
 
     def get_im_client_for_context(self, context: Optional[MessageContext] = None) -> BaseIMClient:
         if context is None:
             return self.im_clients[self.primary_platform]
         platform = context.platform or (context.platform_specific or {}).get("platform") or self.primary_platform
-        return self.im_clients.get(platform, self.im_clients[self.primary_platform])
+        client = self.im_clients.get(platform)
+        if client is not None:
+            return client
+        removed_client = self._removed_im_clients.get(platform)
+        if removed_client is not None:
+            return removed_client
+        return self.im_clients[self.primary_platform]
 
     def _get_im_client_for_platform(self, platform: str) -> BaseIMClient:
-        return self.im_clients.get(platform, self.im_clients[self.primary_platform])
+        client = self.im_clients.get(platform)
+        if client is not None:
+            return client
+        removed_client = self._removed_im_clients.get(platform)
+        if removed_client is not None:
+            return removed_client
+        return self.im_clients[self.primary_platform]
 
     # --- Streaming turn sinks -------------------------------------------
     # A live SSE caller registers a sink before dispatching a turn so the
@@ -740,11 +1005,10 @@ class Controller:
         """Unified agent resolution with dynamic override support.
 
         Priority:
-        1. explicit Vibe Agent selected by the Scope
-        2. migration fallback from legacy Scope agent_backend
+        1. explicit/session Vibe Agent target
+        2. existing session backend snapshot
         3. default Vibe Agent route
-        4. AgentRouter platform default (configured in code)
-        5. AgentService.default_agent ("claude")
+        4. AgentService.default_agent / first registered backend compatibility fallback
         """
         target = self._agent_run_target_payload(context)
         target_agent_name = target.get("agent_name") if target else None
@@ -755,33 +1019,25 @@ class Controller:
                 override_agent_name=str(target_agent_name),
                 required=False,
             )
-            if vibe_agent and vibe_agent.backend in self.agent_service.agents:
+            if vibe_agent:
                 return vibe_agent.backend
-        if target_backend and str(target_backend) in self.agent_service.agents:
+        if target_backend and str(target_backend) in {"opencode", "claude", "codex"}:
             return str(target_backend)
 
-        settings_key = self._get_settings_key(context)
-        settings_manager = self.get_settings_manager_for_context(context)
-        routing = settings_manager.get_channel_routing(settings_key)
         vibe_agent = self.resolve_vibe_agent_for_context(context, required=False)
-        if vibe_agent and vibe_agent.backend in self.agent_service.agents:
+        if vibe_agent:
             return vibe_agent.backend
 
-        if routing and routing.agent_backend:
-            # Migration fallback for scopes saved before Agent became the unified
-            # selection. New Scope settings should select agent_name instead.
-            if routing.agent_backend in self.agent_service.agents:
-                return routing.agent_backend
-            logger.warning(
-                f"Scope routing specifies legacy backend '{routing.agent_backend}' but it is not registered, "
-                f"falling back to static routing"
-            )
+        return self._fallback_registered_agent_backend()
 
-        # Fall back to static routing
-        platform = context.platform or (context.platform_specific or {}).get("platform") or self.primary_platform
-        resolved = self.agent_router.resolve(platform, settings_key)
-
-        return resolved
+    def _fallback_registered_agent_backend(self) -> str:
+        default_agent = getattr(self.agent_service, "default_agent", None)
+        registered = getattr(self.agent_service, "agents", {})
+        if default_agent in registered:
+            return str(default_agent)
+        if registered:
+            return next(iter(registered))
+        return DEFAULT_AGENT_BACKEND
 
     def resolve_vibe_agent_for_context(
         self,
@@ -804,13 +1060,6 @@ class Controller:
         try:
             if agent_name:
                 return self.vibe_agent_store.require_enabled(agent_name)
-            legacy_backend = (target.get("agent_backend") if target else None) or (
-                routing.agent_backend if routing else None
-            )
-            if legacy_backend:
-                agent = self.vibe_agent_store.get_builtin_default_agent_for_backend(legacy_backend)
-                if agent is not None:
-                    return agent
             default_agent = self.vibe_agent_store.get_default_agent()
             if default_agent is not None:
                 return default_agent
@@ -827,7 +1076,10 @@ class Controller:
     def _agent_run_target_payload(context: MessageContext) -> dict[str, Any]:
         payload = context.platform_specific or {}
         target = payload.get("agent_run_target")
-        return target if isinstance(target, dict) else {}
+        if isinstance(target, dict):
+            return target
+        session_target = payload.get("agent_session_target")
+        return session_target if isinstance(session_target, dict) else {}
 
     def get_opencode_overrides(self, context: MessageContext) -> tuple[Optional[str], Optional[str], Optional[str]]:
         """Get OpenCode agent, model, and reasoning effort overrides for this channel.
@@ -997,6 +1249,13 @@ class Controller:
                         await self.session_handler.evict_idle_sessions(claude_timeout)
                     except Exception as e:
                         logger.error("Claude idle cleanup failed: %s", e, exc_info=True)
+                    try:
+                        # Defense-in-depth: reconcile live claude subprocesses
+                        # against tracked sessions and reap orphans (no-owner /
+                        # cross-restart) the idle-eviction path cannot see.
+                        await self.session_handler.reap_orphaned_claude_sessions()
+                    except Exception as e:
+                        logger.error("Claude orphan reaper failed: %s", e, exc_info=True)
 
                 if codex_timeout > 0:
                     codex_agent = self.agent_service.agents.get("codex")

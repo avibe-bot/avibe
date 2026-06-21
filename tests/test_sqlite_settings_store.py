@@ -13,6 +13,7 @@ from storage.migrations import run_migrations
 from storage.models import scope_settings, scopes
 from storage.sessions_service import SQLiteSessionsService
 from storage.settings_service import SQLiteSettingsService, upsert_scope
+from modules.settings_manager import SettingsManager
 
 
 def test_settings_store_uses_sqlite_without_rewriting_legacy_json(tmp_path: Path) -> None:
@@ -41,6 +42,137 @@ def test_settings_store_uses_sqlite_without_rewriting_legacy_json(tmp_path: Path
         assert settings_path.read_text(encoding="utf-8") == original
     finally:
         reloaded.close()
+
+
+def test_channel_require_bind_persists(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    store.update_channel("C-bind", ChannelSettings(enabled=True, require_bind=True), platform="slack")
+    store.update_channel("C-open", ChannelSettings(enabled=True), platform="slack")
+    store.close()
+
+    reloaded = SettingsStore(settings_path)
+    try:
+        assert reloaded.find_channel("C-bind", platform="slack").require_bind is True
+        assert reloaded.find_channel("C-open", platform="slack").require_bind in (None, False)
+    finally:
+        reloaded.close()
+
+
+def test_bound_and_enabled_user_checks_are_separate(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    store.set_users_for_platform(
+        "slack",
+        {
+            "U-enabled": UserSettings(display_name="Enabled", enabled=True),
+            "U-disabled": UserSettings(display_name="Disabled", enabled=False),
+        },
+    )
+
+    assert store.is_bound_user("U-enabled", platform="slack") is True
+    assert store.is_enabled_user("U-enabled", platform="slack") is True
+    assert store.is_bound_user("U-disabled", platform="slack") is True
+    assert store.is_enabled_user("U-disabled", platform="slack") is False
+
+    store.close()
+
+
+def test_admin_helpers_require_enabled_user(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    try:
+        store.set_users_for_platform(
+            "slack",
+            {
+                "U-enabled-admin": UserSettings(display_name="Enabled Admin", is_admin=True, enabled=True),
+                "U-disabled-admin": UserSettings(display_name="Disabled Admin", is_admin=True, enabled=False),
+            },
+        )
+
+        assert store.is_admin("U-enabled-admin", platform="slack") is True
+        assert store.is_admin("U-disabled-admin", platform="slack") is False
+        assert store.has_any_admin(platform="slack") is True
+        assert store.has_enabled_admin(platform="slack") is True
+        assert set(store.get_admins(platform="slack")) == {"slack::U-enabled-admin"}
+
+        store.update_user(
+            "U-enabled-admin",
+            UserSettings(display_name="Enabled Admin", is_admin=True, enabled=False),
+            platform="slack",
+        )
+
+        assert store.has_any_admin(platform="slack") is True
+        assert store.has_enabled_admin(platform="slack") is False
+        assert store.get_admins(platform="slack") == {}
+    finally:
+        store.close()
+
+
+def test_bind_user_promotes_when_only_admin_is_disabled(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    try:
+        store.set_users_for_platform(
+            "slack",
+            {
+                "U-disabled-admin": UserSettings(display_name="Disabled Admin", is_admin=True, enabled=False),
+            },
+        )
+        code = store.create_bind_code()
+
+        success, is_admin = store.bind_user_with_code("U-new", "New Admin", code.code, platform="slack")
+
+        assert success is True
+        assert is_admin is True
+        assert store.get_user("U-new", platform="slack").is_admin is True
+    finally:
+        store.close()
+
+
+def test_disabled_user_cannot_rebind_with_active_code(tmp_path: Path) -> None:
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    try:
+        store.set_users_for_platform(
+            "slack",
+            {
+                "U-disabled": UserSettings(display_name="Disabled", enabled=False),
+            },
+        )
+        code = store.create_bind_code()
+
+        success, is_admin = store.bind_user_with_code("U-disabled", "Rebound", code.code, platform="slack")
+
+        assert success is False
+        assert is_admin is False
+        assert store.get_user("U-disabled", platform="slack").enabled is False
+    finally:
+        store.close()
+
+
+def test_settings_manager_runtime_save_preserves_require_bind(tmp_path: Path, monkeypatch) -> None:
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(paths, "ensure_data_dirs", lambda: None)
+
+    manager = SettingsManager(settings_file=str(settings_path), platform="slack")
+    try:
+        manager.store.update_channel(
+            "C-bind",
+            ChannelSettings(enabled=True, require_mention=True, require_bind=True, custom_cwd="/old"),
+            platform="slack",
+        )
+        settings = manager.get_user_settings("C-bind")
+        settings.custom_cwd = "/new"
+        manager.update_user_settings("C-bind", settings)
+
+        reloaded = manager.store.find_channel("C-bind", platform="slack")
+        assert reloaded is not None
+        assert reloaded.custom_cwd == "/new"
+        assert reloaded.require_mention is True
+        assert reloaded.require_bind is True
+    finally:
+        manager.store.close()
 
 
 def test_settings_store_reloads_external_sqlite_writes(tmp_path: Path) -> None:
@@ -220,7 +352,6 @@ def test_settings_save_does_not_migrate_legacy_model_fields_without_backend(tmp_
                         enabled=True,
                         routing=RoutingSettings(
                             agent_name=None,
-                            agent_backend=None,
                             codex_model="gpt-stale-codex",
                             claude_model="claude-stale",
                             opencode_model="openai/stale",
@@ -245,7 +376,7 @@ def test_settings_save_does_not_migrate_legacy_model_fields_without_backend(tmp_
     assert routing.opencode_model == "openai/stale"
 
 
-def test_settings_save_does_not_migrate_active_backend_legacy_fields(tmp_path: Path) -> None:
+def test_settings_save_lifts_backend_aliases_for_builtin_agent_name(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path)
     service = SQLiteSettingsService(db_path)
@@ -256,7 +387,7 @@ def test_settings_save_does_not_migrate_active_backend_legacy_fields(tmp_path: P
                     "slack::C123": ChannelSettings(
                         enabled=True,
                         routing=RoutingSettings(
-                            agent_backend="claude",
+                            agent_name="claude",
                             claude_model="claude-opus-4-8",
                             claude_reasoning_effort="max",
                         ),
@@ -270,14 +401,139 @@ def test_settings_save_does_not_migrate_active_backend_legacy_fields(tmp_path: P
         service.close()
 
     routing = state.channels["slack::C123"].routing
+    assert routing.model == "claude-opus-4-8"
+    assert routing.reasoning_effort == "max"
+
+
+def test_settings_save_stores_only_active_builtin_agent_variant(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    service = SQLiteSettingsService(db_path)
+    try:
+        service.save_state(
+            SettingsState(
+                channels={
+                    "slack::C123": ChannelSettings(
+                        enabled=True,
+                        routing=RoutingSettings(
+                            agent_name="opencode",
+                            codex_agent="stale-codex-profile",
+                            opencode_agent=None,
+                        ),
+                    ),
+                }
+            )
+        )
+        state = service.load_state()
+    finally:
+        service.close()
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(scope_settings.c.agent_variant, scope_settings.c.settings_json)
+                .select_from(scope_settings)
+                .join(scopes, scopes.c.id == scope_settings.c.scope_id)
+                .where(scopes.c.platform == "slack", scopes.c.native_id == "C123")
+            ).one()
+    finally:
+        engine.dispose()
+
+    assert row.agent_variant is None
+    assert state.channels["slack::C123"].routing.codex_agent == "stale-codex-profile"
+    assert json.loads(row.settings_json)["routing"]["codex_agent"] == "stale-codex-profile"
+
+
+def test_settings_save_uses_matching_builtin_agent_variant(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    service = SQLiteSettingsService(db_path)
+    try:
+        service.save_state(
+            SettingsState(
+                channels={
+                    "slack::C123": ChannelSettings(
+                        enabled=True,
+                        routing=RoutingSettings(
+                            agent_name="codex",
+                            codex_agent="active-codex-profile",
+                            opencode_agent="stale-opencode-profile",
+                        ),
+                    ),
+                }
+            )
+        )
+    finally:
+        service.close()
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(scope_settings.c.agent_variant)
+                .select_from(scope_settings)
+                .join(scopes, scopes.c.id == scope_settings.c.scope_id)
+                .where(scopes.c.platform == "slack", scopes.c.native_id == "C123")
+            ).one()
+    finally:
+        engine.dispose()
+
+    assert row.agent_variant == "active-codex-profile"
+
+
+def test_settings_load_ignores_row_model_without_agent_name(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    engine = create_sqlite_engine(db_path)
+    service = None
+    try:
+        with engine.begin() as conn:
+            scope_id = upsert_scope(
+                conn,
+                "slack",
+                "channel",
+                "C123",
+                display_name=None,
+                native_type=None,
+                is_private=False,
+                supports_threads=True,
+                metadata={},
+                now="now",
+            )
+            conn.execute(
+                scope_settings.insert().values(
+                    scope_id=scope_id,
+                    enabled=1,
+                    role=None,
+                    workdir=None,
+                    agent_name=None,
+                    agent_backend="codex",
+                    agent_variant=None,
+                    model="gpt-stale-codex",
+                    reasoning_effort="high",
+                    require_mention=None,
+                    settings_version=1,
+                    settings_json=json.dumps({"routing": {"agent_backend": "codex"}, "require_bind": None}),
+                    created_at="now",
+                    updated_at="now",
+                )
+            )
+        service = SQLiteSettingsService(db_path)
+        state = service.load_state()
+    finally:
+        if service is not None:
+            service.close()
+        engine.dispose()
+
+    routing = state.channels["slack::C123"].routing
+    assert routing.agent_name is None
     assert routing.model is None
     assert routing.reasoning_effort is None
-    assert routing.claude_model == "claude-opus-4-8"
-    assert routing.claude_reasoning_effort == "max"
 
 
 def test_settings_store_bootstrap_uses_config_primary_platform(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_config_path().write_text(
         json.dumps({"platform": "discord", "platforms": {"enabled": ["discord"], "primary": "discord"}}),

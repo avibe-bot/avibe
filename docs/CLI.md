@@ -204,9 +204,18 @@ a scheduled task definition.
 ```bash
 vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
 vibe agent run --async --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
+vibe agent run --async --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --async --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
 vibe agent run --async --create-session --deliver-key slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
 ```
+
+Use `--fork-session <session-id>` when a new Agent Session should branch from
+an existing Session's native backend context instead of starting blank. The new
+Session keeps the source backend. `--agent`, `--model`, and
+`--reasoning-effort` can override the forked Session only when the Agent backend
+stays the same; a cross-backend fork is rejected. Do not combine
+`--fork-session` with `--session-id`, `--create-session`, `--deliver-key`, or
+`--post-to`.
 
 Use `--callback-session-id` when an async run should send its final result text
 back into a caller Session as a follow-up Agent message. The callback is

@@ -204,8 +204,21 @@ def test_build_session_key_for_context_uses_fallback_platform() -> None:
     assert parsed.to_key(include_thread=False) == "slack::channel::C123"
 
 
+def test_build_session_key_for_context_uses_platform_specific_platform() -> None:
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        thread_id="171717.123",
+        platform_specific={"platform": "telegram", "is_dm": False},
+    )
+
+    parsed = build_session_key_for_context(context, fallback_platform="slack")
+
+    assert parsed.to_key(include_thread=False) == "telegram::channel::C123"
+
+
 def test_scheduled_task_store_uses_sqlite_when_path_is_default(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = ScheduledTaskStore()
     task = store.add_task(
         name="Hourly summary",
@@ -228,7 +241,7 @@ def test_scheduled_task_store_uses_sqlite_when_path_is_default(tmp_path: Path, m
 
 
 def test_sqlite_update_task_persists_changes(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = ScheduledTaskStore()
     task = store.add_task(
         name="Hourly summary",
@@ -265,7 +278,7 @@ def test_sqlite_update_task_persists_changes(tmp_path: Path, monkeypatch) -> Non
 
 
 def test_task_execution_store_uses_sqlite_runs_when_root_is_default(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     store = TaskExecutionStore()
     request = store.enqueue_hook_send(
         session_key="slack::channel::C123",
@@ -654,6 +667,111 @@ def test_build_context_avibe_keys_on_session_id_not_project() -> None:
     assert context.platform_specific["session_key_external"] == "avibe::project::proj_890721e64fc8"
 
 
+def test_build_context_carries_pending_native_fork_metadata() -> None:
+    controller = SimpleNamespace(
+        platform_settings_managers={},
+        im_clients={"avibe": SimpleNamespace()},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+    )
+    service = ScheduledTaskService(controller=controller, store=ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json")))
+    target = ParsedSessionKey(platform="avibe", scope_type="project", scope_id="proj_890721e64fc8")
+    target_info = SimpleNamespace(
+        session_id="ses-target",
+        agent_id="agent-1",
+        agent_name="worker",
+        agent_backend="codex",
+        agent_variant="codex",
+        model="gpt-5",
+        reasoning_effort="high",
+        native_session_id="",
+        workdir="/tmp/work",
+        session_anchor="ses-target",
+        suppress_delivery=False,
+    )
+
+    context = asyncio.run(
+        service._build_context(
+            target,
+            execution_id="exec-1",
+            trigger_kind="agent_run",
+            session_id="ses-target",
+            agent_name="worker",
+            target_info=target_info,
+            metadata={
+                "session_fork": {
+                    "source_session_id": "ses-source",
+                    "source_native_session_id": "thread-source",
+                    "source_backend": "codex",
+                }
+            },
+        )
+    )
+
+    session_target = context.platform_specific["agent_session_target"]
+    assert session_target["native_session_id"] == ""
+    assert session_target["metadata"] == {}
+    assert session_target["native_session_fork"] == {
+        "source_session_id": "ses-source",
+        "source_native_session_id": "thread-source",
+        "source_backend": "codex",
+    }
+
+
+def test_build_context_restores_pending_fork_from_session_metadata_when_run_metadata_missing() -> None:
+    controller = SimpleNamespace(
+        platform_settings_managers={},
+        im_clients={"avibe": SimpleNamespace()},
+        get_im_client_for_context=lambda _context: SimpleNamespace(
+            should_use_thread_for_reply=lambda: True,
+            should_use_thread_for_dm_session=lambda: False,
+        ),
+    )
+    service = ScheduledTaskService(controller=controller, store=ScheduledTaskStore(Path("/tmp/nonexistent-scheduled.json")))
+    target = ParsedSessionKey(platform="avibe", scope_type="project", scope_id="proj_890721e64fc8")
+    target_info = SimpleNamespace(
+        session_id="ses-target",
+        agent_id="agent-1",
+        agent_name="worker",
+        agent_backend="codex",
+        agent_variant="codex",
+        model="gpt-5",
+        reasoning_effort="high",
+        native_session_id="",
+        workdir="/tmp/work",
+        session_anchor="ses-target",
+        metadata={
+            "created_via": "session_fork",
+            "fork_source_session_id": "ses-source",
+            "fork_source_native_session_id": "thread-source",
+            "fork_source_backend": "codex",
+        },
+        suppress_delivery=False,
+    )
+
+    context = asyncio.run(
+        service._build_context(
+            target,
+            execution_id="exec-1",
+            trigger_kind="agent_run",
+            session_id="ses-target",
+            agent_name="worker",
+            target_info=target_info,
+            metadata={},
+        )
+    )
+
+    session_target = context.platform_specific["agent_session_target"]
+    assert session_target["metadata"]["fork_source_native_session_id"] == "thread-source"
+    assert session_target["native_session_fork"] == {
+        "source_session_id": "ses-source",
+        "source_native_session_id": "thread-source",
+        "source_backend": "codex",
+    }
+
+
 def test_build_context_clears_provisional_anchor_for_cross_scope_delivery() -> None:
     settings_manager = SimpleNamespace(get_store=lambda: SimpleNamespace(get_user=lambda *_args, **_kwargs: None))
     controller = SimpleNamespace(
@@ -936,9 +1054,16 @@ def test_runtime_session_reservation_uses_canonicalized_scope_agent(tmp_path: Pa
     monkeypatch.setattr(paths, "get_state_dir", lambda: db_path.parent)
     monkeypatch.setattr(paths, "get_sqlite_state_path", lambda: db_path)
 
+    from core.vibe_agents import VibeAgentStore
     from storage.importer import ensure_sqlite_state
     from storage.models import scope_settings
     from storage.settings_service import upsert_scope
+
+    agent_store = VibeAgentStore(db_path)
+    try:
+        default_agent = agent_store.ensure_default_agent(backend="claude")
+    finally:
+        agent_store.close()
 
     ensure_sqlite_state(db_path=db_path, primary_platform="slack")
     with create_sqlite_engine(db_path).begin() as conn:
@@ -973,12 +1098,12 @@ def test_runtime_session_reservation_uses_canonicalized_scope_agent(tmp_path: Pa
     session_id = service._reserve_runtime_session(agent_name=None, deliver_key="slack::channel::C123")
     target = resolve_session_id_target(session_id, db_path=db_path)
 
-    assert target.agent_backend == "codex"
-    assert target.agent_name == "codex"
+    assert target.agent_backend == default_agent.backend
+    assert target.agent_name == default_agent.name
     assert target.agent_id
 
 
-def test_runtime_session_reservation_rejects_unresolved_legacy_scope_backend(
+def test_runtime_session_reservation_ignores_unresolved_legacy_scope_backend(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -993,7 +1118,7 @@ def test_runtime_session_reservation_rejects_unresolved_legacy_scope_backend(
 
     agent_store = VibeAgentStore(db_path)
     try:
-        agent_store.ensure_default_agent(backend="claude")
+        default_agent = agent_store.ensure_default_agent(backend="claude")
         agent_store.create(name="codex", backend="opencode")
     finally:
         agent_store.close()
@@ -1028,8 +1153,68 @@ def test_runtime_session_reservation_rejects_unresolved_legacy_scope_backend(
         request_store=TaskExecutionStore(tmp_path / "task_requests"),
     )
 
-    with pytest.raises(ValueError, match="legacy backend without an Agent"):
-        service._reserve_runtime_session(agent_name=None, deliver_key="slack::channel::C123")
+    session_id = service._reserve_runtime_session(agent_name=None, deliver_key="slack::channel::C123")
+    target = resolve_session_id_target(session_id, db_path=db_path)
+
+    assert target.agent_backend == default_agent.backend
+    assert target.agent_name == default_agent.name
+
+
+def test_runtime_session_reservation_uses_default_agent_without_scope_agent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    monkeypatch.setattr(paths, "get_state_dir", lambda: db_path.parent)
+    monkeypatch.setattr(paths, "get_sqlite_state_path", lambda: db_path)
+
+    from core.vibe_agents import VibeAgentStore
+    from storage.importer import ensure_sqlite_state
+    from storage.models import scope_settings
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
+    agent_store = VibeAgentStore(db_path)
+    try:
+        agent_store.ensure_builtin_default_agents(["opencode", "codex"])
+        agent_store.set_default_agent_name("codex")
+    finally:
+        agent_store.close()
+
+    with create_sqlite_engine(db_path).begin() as conn:
+        now = "2026-05-22T00:00:00+00:00"
+        scope_id = upsert_scope(conn, "slack", "channel", "C456", now=now)
+        conn.execute(
+            scope_settings.insert().values(
+                scope_id=scope_id,
+                enabled=1,
+                role=None,
+                workdir=None,
+                agent_name=None,
+                agent_backend=None,
+                agent_variant=None,
+                model=None,
+                reasoning_effort=None,
+                require_mention=None,
+                settings_version=1,
+                settings_json=json.dumps({}),
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    controller = SimpleNamespace(agent_router=SimpleNamespace(global_default="opencode"))
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+    )
+
+    session_id = service._reserve_runtime_session(agent_name=None, deliver_key="slack::channel::C456")
+    target = resolve_session_id_target(session_id, db_path=db_path)
+
+    assert target.agent_backend == "codex"
+    assert target.agent_name == "codex"
 
 
 def test_request_store_constructor_does_not_requeue_processing_files(tmp_path: Path) -> None:
@@ -1177,7 +1362,7 @@ def test_drain_requests_executes_hook_send(tmp_path: Path) -> None:
 
 
 def test_agent_run_stays_running_until_terminal_result(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
         session_key="slack::channel::C123",
@@ -1270,7 +1455,7 @@ def test_agent_run_stays_running_until_terminal_result(tmp_path: Path, monkeypat
 
 
 def test_agent_run_preserves_failed_terminal_status(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
         session_key="slack::channel::C123",
@@ -1347,7 +1532,7 @@ def test_agent_run_preserves_failed_terminal_status(tmp_path: Path, monkeypatch)
 
 
 def test_agent_run_callback_enqueues_only_result_to_caller_session(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
@@ -1397,7 +1582,7 @@ def test_agent_run_callback_enqueues_only_result_to_caller_session(tmp_path: Pat
 
 
 def test_agent_run_callback_builds_failure_message_without_result_text(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
@@ -1427,7 +1612,7 @@ def test_agent_run_callback_builds_failure_message_without_result_text(tmp_path:
 
 
 def test_agent_run_synchronous_dispatch_error_marks_failed(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     request_store = TaskExecutionStore()
     request = request_store.enqueue_agent_run(
         session_key="slack::channel::C123",
@@ -1580,6 +1765,88 @@ def test_busy_avibe_agent_run_returns_to_queued_and_is_held_by_workbench_queue(m
     assert (run.get("metadata") or {}).get("workbench_queue_holds_run") is True
     assert submitted == [(session_id, "run behind active workbench turn", request.id)]
     assert handler_calls == []
+
+
+def test_busy_avibe_agent_run_requeue_preserves_session_fork_metadata(monkeypatch, tmp_path) -> None:
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="run behind active workbench turn",
+        agent_name="codex",
+        metadata={
+            "session_fork": {
+                "source_session_id": "ses-source",
+                "source_native_session_id": "thread-source",
+                "source_backend": "codex",
+            }
+        },
+    )
+    submitted: list[tuple] = []
+
+    async def _submit_scheduled(sid, ctx, text):
+        submitted.append((sid, text, ctx.platform_specific["agent_session_target"]["native_session_fork"]))
+        return "enqueued"
+
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        raise AssertionError("busy workbench runs should not dispatch directly")
+
+    gate = SimpleNamespace(submit_scheduled=_submit_scheduled, in_flight={session_id: object()})
+    controller = _avibe_controller_double(gate=gate, handle_scheduled_message=_handle_scheduled_message)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        execution = service._inflight_executions.get(request.id)
+        assert execution is not None
+        await execution
+
+    asyncio.run(_exercise())
+
+    run = request_store.get_run(request.id)
+    assert run is not None
+    assert run["metadata"]["session_fork"]["source_native_session_id"] == "thread-source"
+    assert run["metadata"]["workbench_queue_holds_run"] is True
+    assert submitted[0][2]["source_native_session_id"] == "thread-source"
+
+
+def test_workbench_queue_flush_recovery_preserves_session_fork_metadata(monkeypatch, tmp_path) -> None:
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id=session_id,
+        message="recover fork after queue flush",
+        agent_name="codex",
+        metadata={
+            "session_fork": {
+                "source_session_id": "ses-source",
+                "source_native_session_id": "thread-source",
+                "source_backend": "codex",
+            },
+            "workbench_queue_holds_run": True,
+        },
+    )
+
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    assert sqlite_store.claim_queued_run_for_workbench(request.id) is True
+
+    flushed = request_store.get_run(request.id)
+    assert flushed is not None
+    assert flushed["status"] == "running"
+    assert flushed["metadata"]["workbench_queue_holds_run"] is False
+    assert flushed["metadata"]["session_fork"]["source_native_session_id"] == "thread-source"
+
+    request_store.recover_processing()
+    claimed = request_store.claim(request.id)
+
+    assert claimed is not None
+    assert claimed.metadata["workbench_queue_holds_run"] is False
+    assert claimed.metadata["session_fork"]["source_native_session_id"] == "thread-source"
 
 
 def test_drain_requests_reserves_watch_create_per_run_before_session_validation(tmp_path: Path) -> None:
@@ -2147,7 +2414,7 @@ def _make_avibe_session(monkeypatch, tmp_path) -> str:
     from storage.models import scope_settings
     from storage.settings_service import upsert_scope
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     with engine.begin() as conn:

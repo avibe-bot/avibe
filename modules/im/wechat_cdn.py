@@ -15,7 +15,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import aiohttp
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -36,6 +36,16 @@ _AES_BLOCK_BITS = 128
 _AES_BLOCK_BYTES = 16
 # Maximum retry attempts for CDN upload
 _UPLOAD_MAX_RETRIES = 3
+_CDN_ERROR_BODY_LIMIT = 500
+
+
+class _CdnUploadStatusError(RuntimeError):
+    """CDN upload response error with explicit retry semantics."""
+
+    def __init__(self, status: int, message: str, *, retryable: bool):
+        super().__init__(message)
+        self.status = status
+        self.retryable = retryable
 
 
 # ---------------------------------------------------------------------------
@@ -144,15 +154,75 @@ def _build_cdn_download_url(cdn_base_url: str, encrypted_query_param: str) -> st
     return f"{cdn_base_url}/download?encrypted_query_param={quote(encrypted_query_param)}"
 
 
+def _extract_upload_full_url(upload_resp: Dict[str, Any]) -> Optional[str]:
+    """Return a direct CDN upload URL from known iLink response variants."""
+    for key in ("upload_full_url", "uploadFullUrl", "upload_url", "uploadUrl"):
+        value = upload_resp.get(key)
+        if isinstance(value, str) and value.strip():
+            return html.unescape(value.strip())
+    return None
+
+
+def _upload_url_host(upload_url: str) -> str:
+    """Return the upload URL host for diagnostics."""
+    try:
+        return urlparse(upload_url).netloc or "(unknown)"
+    except Exception:
+        return "(invalid)"
+
+
+def _upload_url_for_log(upload_url: str) -> str:
+    """Return a diagnostic upload URL without credential-bearing query values."""
+    try:
+        parsed = urlparse(upload_url)
+        redacted_query = urlencode([(key, "<redacted>") for key, _value in parse_qsl(parsed.query, keep_blank_values=True)])
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, redacted_query, ""))
+    except Exception:
+        return "(invalid)"
+
+
+def _truncate_cdn_error_body(body: str) -> str:
+    body = (body or "").strip()
+    if len(body) <= _CDN_ERROR_BODY_LIMIT:
+        return body
+    return f"{body[:_CDN_ERROR_BODY_LIMIT]}...(truncated)"
+
+
+def _cdn_error_message(resp: aiohttp.ClientResponse, body: str) -> str:
+    header_msg = (resp.headers.get("x-error-message") or "").strip()
+    body_msg = _truncate_cdn_error_body(body)
+    if header_msg and body_msg:
+        return f"{header_msg}; body={body_msg}"
+    if header_msg:
+        return header_msg
+    if body_msg:
+        return body_msg
+    return f"status {resp.status}"
+
+
+async def _read_cdn_error_body(resp: aiohttp.ClientResponse) -> str:
+    try:
+        return await resp.text()
+    except Exception as exc:
+        return f"(failed to read response body: {type(exc).__name__})"
+
+
 def _resolve_cdn_upload_url(cdn_base_url: str, upload_resp: Dict[str, Any], filekey: str, label: str) -> str:
     """Resolve a CDN upload URL from legacy or full-url getUploadUrl responses."""
-    upload_full_url = upload_resp.get("upload_full_url")
+    upload_full_url = _extract_upload_full_url(upload_resp)
     if upload_full_url:
-        return html.unescape(str(upload_full_url))
+        logger.debug("%s: using upload_full_url host=%s", label, _upload_url_host(upload_full_url))
+        return upload_full_url
 
     upload_param = upload_resp.get("upload_param")
     if upload_param:
-        return _build_cdn_upload_url(cdn_base_url, str(upload_param), filekey)
+        fallback_url = _build_cdn_upload_url(cdn_base_url, str(upload_param), filekey)
+        logger.info(
+            "%s: getUploadUrl returned no upload_full_url; falling back to configured CDN host=%s",
+            label,
+            _upload_url_host(fallback_url),
+        )
+        return fallback_url
 
     logger.error(
         "%s: getUploadUrl returned neither upload_param nor upload_full_url, resp=%s",
@@ -190,7 +260,15 @@ async def upload_buffer_to_cdn(
             the expected header.
     """
     ciphertext = aes_ecb_encrypt(data, aes_key)
-    logger.debug("CDN upload: POST url=%s ciphertext_size=%d", upload_url[:80], len(ciphertext))
+    upload_host = _upload_url_host(upload_url)
+    upload_log_url = _upload_url_for_log(upload_url)
+    logger.debug(
+        "CDN upload: POST host=%s url=%s raw_size=%d ciphertext_size=%d",
+        upload_host,
+        upload_log_url,
+        len(data),
+        len(ciphertext),
+    )
 
     download_param: Optional[str] = None
     last_error: Optional[Exception] = None
@@ -205,23 +283,41 @@ async def upload_buffer_to_cdn(
                     headers={"Content-Type": "application/octet-stream"},
                 ) as resp:
                     if 400 <= resp.status < 500:
-                        err_msg = resp.headers.get("x-error-message") or await resp.text()
+                        body = await _read_cdn_error_body(resp)
+                        err_msg = _cdn_error_message(resp, body)
                         logger.error(
-                            "CDN client error attempt=%d status=%d err=%s",
+                            "CDN client error attempt=%d status=%d host=%s url=%s raw_size=%d ciphertext_size=%d err=%s",
                             attempt,
                             resp.status,
+                            upload_host,
+                            upload_log_url,
+                            len(data),
+                            len(ciphertext),
                             err_msg,
                         )
-                        raise RuntimeError(f"CDN upload client error {resp.status}: {err_msg}")
+                        raise _CdnUploadStatusError(
+                            resp.status,
+                            f"CDN upload client error {resp.status}: {err_msg}",
+                            retryable=False,
+                        )
                     if resp.status != 200:
-                        err_msg = resp.headers.get("x-error-message") or f"status {resp.status}"
-                        logger.error(
-                            "CDN server error attempt=%d status=%d err=%s",
+                        body = await _read_cdn_error_body(resp)
+                        err_msg = _cdn_error_message(resp, body)
+                        logger.warning(
+                            "CDN server error attempt=%d status=%d host=%s url=%s raw_size=%d ciphertext_size=%d err=%s",
                             attempt,
                             resp.status,
+                            upload_host,
+                            upload_log_url,
+                            len(data),
+                            len(ciphertext),
                             err_msg,
                         )
-                        raise RuntimeError(f"CDN upload server error: {err_msg}")
+                        raise _CdnUploadStatusError(
+                            resp.status,
+                            f"CDN upload server error {resp.status}: {err_msg}",
+                            retryable=True,
+                        )
 
                     download_param = resp.headers.get("x-encrypted-param")
                     if not download_param:
@@ -233,34 +329,69 @@ async def upload_buffer_to_cdn(
                     logger.debug("CDN upload success attempt=%d", attempt)
                     return download_param
 
-            except RuntimeError as e:
+            except _CdnUploadStatusError as e:
                 last_error = e
-                if "client error" in str(e):
+                if not e.retryable:
                     raise
                 if attempt < _UPLOAD_MAX_RETRIES:
-                    logger.error(
-                        "CDN upload attempt %d failed, retrying: %s",
+                    logger.warning(
+                        "CDN upload attempt %d failed, retrying host=%s raw_size=%d ciphertext_size=%d err=%s",
                         attempt,
+                        upload_host,
+                        len(data),
+                        len(ciphertext),
                         e,
                     )
                 else:
                     logger.error(
-                        "CDN upload all %d attempts failed: %s",
+                        "CDN upload all %d attempts failed host=%s url=%s raw_size=%d ciphertext_size=%d err=%s",
                         _UPLOAD_MAX_RETRIES,
+                        upload_host,
+                        upload_log_url,
+                        len(data),
+                        len(ciphertext),
+                        e,
+                    )
+            except RuntimeError as e:
+                last_error = e
+                if attempt < _UPLOAD_MAX_RETRIES:
+                    logger.warning(
+                        "CDN upload attempt %d failed, retrying host=%s raw_size=%d ciphertext_size=%d err=%s",
+                        attempt,
+                        upload_host,
+                        len(data),
+                        len(ciphertext),
+                        e,
+                    )
+                else:
+                    logger.error(
+                        "CDN upload all %d attempts failed host=%s url=%s raw_size=%d ciphertext_size=%d err=%s",
+                        _UPLOAD_MAX_RETRIES,
+                        upload_host,
+                        upload_log_url,
+                        len(data),
+                        len(ciphertext),
                         e,
                     )
             except aiohttp.ClientError as e:
                 last_error = e
                 if attempt < _UPLOAD_MAX_RETRIES:
-                    logger.error(
-                        "CDN upload attempt %d network error, retrying: %s",
+                    logger.warning(
+                        "CDN upload attempt %d network error, retrying host=%s raw_size=%d ciphertext_size=%d err=%s",
                         attempt,
+                        upload_host,
+                        len(data),
+                        len(ciphertext),
                         e,
                     )
                 else:
                     logger.error(
-                        "CDN upload all %d attempts failed: %s",
+                        "CDN upload all %d attempts failed host=%s url=%s raw_size=%d ciphertext_size=%d err=%s",
                         _UPLOAD_MAX_RETRIES,
+                        upload_host,
+                        upload_log_url,
+                        len(data),
+                        len(ciphertext),
                         e,
                     )
 
@@ -390,11 +521,23 @@ async def _upload_media_to_cdn(
 
     upload_url = _resolve_cdn_upload_url(cdn_base_url, upload_resp, filekey, label)
 
-    download_param = await upload_buffer_to_cdn(
-        upload_url=upload_url,
-        data=plaintext,
-        aes_key=aes_key,
-    )
+    try:
+        download_param = await upload_buffer_to_cdn(
+            upload_url=upload_url,
+            data=plaintext,
+            aes_key=aes_key,
+        )
+    except Exception:
+        logger.warning(
+            "%s: CDN upload failed file=%s raw_size=%d ciphertext_size=%d upload_host=%s",
+            label,
+            file_path,
+            rawsize,
+            filesize,
+            _upload_url_host(upload_url),
+            exc_info=True,
+        )
+        raise
 
     # Encode the AES key as hex then base64 for the CDNMedia.aes_key field
     aes_key_b64 = base64.b64encode(aes_key.hex().encode("ascii")).decode("ascii")

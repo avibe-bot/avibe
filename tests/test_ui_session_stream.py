@@ -26,7 +26,7 @@ from tests.ui_server_test_helpers import csrf_headers
 
 @pytest.fixture()
 def isolated_state(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     yield tmp_path
 
@@ -170,6 +170,110 @@ def test_create_session_without_backend_defers_to_default_agent(isolated_state, 
     assert response.status_code == 201
     # Empty/absent backend — resolution is deferred to dispatch, not pinned here.
     assert not response.get_json().get("agent_backend")
+
+
+def test_fork_session_creates_new_workbench_session(isolated_state, tmp_path):
+    """POST /api/sessions/<id>/fork reserves a new Avibe Session row that is
+    ready for the native backend fork on the first turn, and returns the row the
+    sidebar needs to prepend/navigate immediately.
+    """
+
+    from sqlalchemy import update
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+    from vibe.ui_server import app
+
+    scope_id, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == session_id)
+            .values(native_session_id="native-source-1", title="Source session")
+        )
+        source_message = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            message_type="user",
+            text="fork from here",
+        )
+
+    with patch("vibe.sse_broker.broker.publish") as publish:
+        client = app.test_client()
+        headers = csrf_headers(client)
+        response = client.post(f"/api/sessions/{session_id}/fork", json={}, headers=headers)
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["id"] != session_id
+    assert payload["scope_id"] == scope_id
+    assert payload["project_id"] == "proj_stream"
+    assert payload["title"] == "Fork Source session"
+    assert payload["agent_backend"] == "claude"
+    assert payload["agent_name"] == "worker"
+    assert payload["native_session_id"] == ""
+    assert payload["metadata"]["created_via"] == "session_fork"
+    assert payload["metadata"]["fork_source_session_id"] == session_id
+    assert payload["metadata"]["fork_source_session_title"] == "Source session"
+    assert payload["metadata"]["fork_source_message_id"] == source_message["id"]
+    assert payload["metadata"]["fork_source_native_session_id"] == "native-source-1"
+    publish.assert_called_with(
+        "session.activity",
+        {"session_id": payload["id"], "scope_id": scope_id, "event": "created"},
+    )
+
+
+def test_fork_session_rejects_unbound_source_session(isolated_state, tmp_path):
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    response = client.post(f"/api/sessions/{session_id}/fork", json={}, headers=headers)
+
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "session_not_bound"
+
+
+def test_patch_rejects_backend_switch_for_pending_fork(isolated_state, tmp_path):
+    from sqlalchemy import update
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == session_id)
+            .values(native_session_id="native-source-1")
+        )
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    fork_response = client.post(f"/api/sessions/{session_id}/fork", json={}, headers=headers)
+    assert fork_response.status_code == 201
+    forked_id = fork_response.get_json()["id"]
+
+    response = client.patch(
+        f"/api/sessions/{forked_id}",
+        json={"agent_backend": "codex", "agent_name": "codex"},
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["code"] == "backend_locked"
+    assert body["current_backend"] == "claude"
+    assert body["requested_backend"] == "codex"
 
 
 def test_chat_bootstrap_returns_first_screen_payload(isolated_state, tmp_path):
@@ -470,3 +574,167 @@ def test_turn_state_idle_preserves_response_for_missing_session(isolated_state):
     body = response.get_json()
     assert body["in_flight"] is False
     assert body["recovered_agent_status"] is False
+
+
+def test_patch_backend_switch_blocked_while_turn_in_flight(isolated_state, tmp_path):
+    """The row's ``agent_status`` lags turn acceptance (``submit`` registers the
+    in-flight gate before dispatch writes ``running``), so a cross-backend PATCH
+    in that startup window must consult the controller's gate and 409 — otherwise
+    the bind-time backend backfill would silently undo the switch."""
+
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+
+    in_flight = AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "in_flight": True}})
+    with patch("vibe.internal_client.turn_state", in_flight):
+        client = app.test_client()
+        headers = csrf_headers(client)
+        response = client.patch(
+            f"/api/sessions/{session_id}",
+            json={"agent_backend": "codex", "agent_name": "codex"},
+            headers=headers,
+        )
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "backend_locked"
+    in_flight.assert_awaited_once()
+
+
+def test_patch_agent_name_only_backend_switch_blocked_while_turn_in_flight(isolated_state, tmp_path):
+    """A selected Vibe Agent implies its backend. The UI often sends only
+    ``agent_name`` when changing the picker, so the route must derive the
+    backend before deciding whether to consult the controller's in-flight gate.
+    """
+
+    from core.vibe_agents import VibeAgentStore
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    store = VibeAgentStore()
+    try:
+        store.create(name="reviewer", backend="codex")
+    finally:
+        store.close()
+
+    in_flight = AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "in_flight": True}})
+    with patch("vibe.internal_client.turn_state", in_flight):
+        client = app.test_client()
+        headers = csrf_headers(client)
+        response = client.patch(
+            f"/api/sessions/{session_id}",
+            json={"agent_name": "reviewer"},
+            headers=headers,
+        )
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["code"] == "backend_locked"
+    assert body["current_backend"] == "claude"
+    assert body["requested_backend"] == "codex"
+    in_flight.assert_awaited_once()
+
+
+def test_patch_agent_name_only_backend_switch_refreshes_variant_when_idle(isolated_state, tmp_path):
+    from core.vibe_agents import VibeAgentStore
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == session_id)
+            .values(agent_variant="old-claude-profile")
+        )
+
+    store = VibeAgentStore()
+    try:
+        store.create(name="reviewer", backend="codex")
+    finally:
+        store.close()
+
+    idle = AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "in_flight": False}})
+    with patch("vibe.internal_client.turn_state", idle):
+        client = app.test_client()
+        headers = csrf_headers(client)
+        response = client.patch(
+            f"/api/sessions/{session_id}",
+            json={"agent_name": "reviewer"},
+            headers=headers,
+        )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["agent_name"] == "reviewer"
+    assert body["agent_backend"] == "codex"
+    assert body["agent_variant"] == "codex"
+    idle.assert_awaited_once()
+
+
+def test_patch_same_backend_change_skips_in_flight_gate(isolated_state, tmp_path):
+    """Same-backend agent/model changes stay allowed mid-turn and don't pay the
+    internal turn-state round-trip."""
+
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+
+    gate = AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "in_flight": True}})
+    with patch("vibe.internal_client.turn_state", gate):
+        client = app.test_client()
+        headers = csrf_headers(client)
+        response = client.patch(
+            f"/api/sessions/{session_id}",
+            json={"agent_backend": "claude", "agent_name": "claude-pro", "model": "opus"},
+            headers=headers,
+        )
+    assert response.status_code == 200
+    assert response.get_json()["agent_name"] == "claude-pro"
+    gate.assert_not_awaited()
+
+
+def test_patch_backend_switch_allowed_when_idle(isolated_state, tmp_path):
+    """No native + no in-flight turn → the (project-default) backend is a soft
+    pin and the cross-backend switch lands."""
+
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+
+    idle = AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "in_flight": False}})
+    with patch("vibe.internal_client.turn_state", idle):
+        client = app.test_client()
+        headers = csrf_headers(client)
+        response = client.patch(
+            f"/api/sessions/{session_id}",
+            json={"agent_backend": "codex", "agent_name": "codex"},
+            headers=headers,
+        )
+    assert response.status_code == 200
+    assert response.get_json()["agent_backend"] == "codex"
+
+
+def test_patch_backend_switch_falls_back_to_row_guard_when_controller_down(isolated_state, tmp_path):
+    """An unreachable controller must not brick the picker: the gate check is
+    best-effort and the row-status guard inside ``update_session`` still
+    applies."""
+
+    from vibe import internal_client
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+
+    async def unavailable(session_id_inner):
+        raise internal_client.InternalServerUnavailable("socket missing")
+
+    with patch("vibe.internal_client.turn_state", unavailable):
+        client = app.test_client()
+        headers = csrf_headers(client)
+        response = client.patch(
+            f"/api/sessions/{session_id}",
+            json={"agent_backend": "codex", "agent_name": "codex"},
+            headers=headers,
+        )
+    assert response.status_code == 200
+    assert response.get_json()["agent_backend"] == "codex"

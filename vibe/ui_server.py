@@ -3,6 +3,7 @@ import asyncio
 import gzip
 import hashlib
 import hmac
+import html
 import ipaddress
 import json
 import logging
@@ -15,6 +16,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +41,7 @@ from core.show_pages import (
 )
 from core.show_session_events import show_event_payload_session_mismatch
 from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
+from vibe.i18n import get_supported_languages, t
 from vibe.runtime import get_ui_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
 
@@ -113,6 +116,20 @@ CSRF_COOKIE_NAME = "vibe_csrf_token"
 CSRF_HEADER_NAME = "X-Vibe-CSRF-Token"
 REMOTE_OAUTH_COOKIE_NAME = "__Host-vibe_remote_oauth"
 REMOTE_OAUTH_RETRY_PARAM = "__vibe_oauth_retry"
+# Lifetime of the short-lived OAuth handshake (signed state + PKCE cookie). The
+# cookie MUST carry an explicit Max-Age: iOS standalone PWAs drop session-scoped
+# cookies (no Max-Age) across the cross-origin authorize excursion / app
+# backgrounding, which silently breaks the callback. A persistent cookie with a
+# short TTL survives. The signed payload's own `exp` enforces the real validity.
+REMOTE_OAUTH_HANDSHAKE_TTL_SECONDS = 300
+# Stable, per-browser binding id. Unlike the per-flow handshake state (which the
+# iOS standalone PWA desyncs), this cookie is set once and reused, so it stays
+# consistent across the cross-origin authorize excursion. The callback's
+# server-side store-fallback is bound to hmac(secret, device_id), which an
+# attacker cannot supply for a victim's browser — this closes the login-CSRF that
+# a bare code+state callback URL would otherwise allow.
+REMOTE_OAUTH_DEVICE_COOKIE_NAME = "__Host-vibe_oauth_device"
+REMOTE_OAUTH_DEVICE_TTL_SECONDS = 180 * 24 * 60 * 60
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 LOG_SOURCES = (
     ("service", "vibe_remote.log", lambda: paths.get_logs_dir() / "vibe_remote.log"),
@@ -1014,6 +1031,36 @@ def _should_rotate_remote_session_secret(previous: V2Config | None, current: V2C
     return bool(previous_cloud.enabled and not current_cloud.enabled and current_cloud.session_secret)
 
 
+def _platform_runtime_signature(config: V2Config) -> dict[str, tuple[Any, ...]]:
+    from config.platform_registry import get_platform_descriptor
+
+    signatures: dict[str, tuple[Any, ...]] = {}
+    for platform in config.platforms.enabled:
+        descriptor = get_platform_descriptor(platform)
+        platform_config = descriptor.get_config(config)
+        signatures[platform] = (
+            tuple(getattr(platform_config, field, None) for field in descriptor.runtime_reconcile_field_names())
+            if platform_config is not None
+            else ()
+        )
+    return signatures
+
+
+def _platform_runtime_fields_changed(previous: V2Config | None, current: V2Config, payload: dict) -> bool:
+    from config.platform_registry import im_platform_descriptors
+
+    if previous is None:
+        return False
+    platform_config_keys = {descriptor.config_key for descriptor in im_platform_descriptors()}
+    if "platforms" not in payload and "platform" not in payload and not any(key in payload for key in platform_config_keys):
+        return False
+    return (
+        set(previous.platforms.enabled) != set(current.platforms.enabled)
+        or previous.platforms.primary != current.platforms.primary
+        or _platform_runtime_signature(previous) != _platform_runtime_signature(current)
+    )
+
+
 # Static PWA / icon assets must be reachable WITHOUT the remote-access auth
 # cookie. iOS "Add to Home Screen" fetches the apple-touch-icon + manifest in a
 # context that doesn't carry the session, so gating them makes the installed app
@@ -1070,6 +1117,30 @@ def _oauth_cookie_signature(secret: str, payload: str) -> str:
     return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def _oauth_device_hash(secret: str, device_id: str) -> str:
+    return hmac.new(secret.encode("utf-8"), f"device:{device_id}".encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _oauth_device_id() -> str:
+    """The caller's stable per-browser binding id from its device cookie (or None)."""
+    return request.cookies.get(REMOTE_OAUTH_DEVICE_COOKIE_NAME) or ""
+
+
+def _oauth_store_record_device_bound(secret: str, record: dict[str, Any] | None) -> bool:
+    """True when the request's device cookie matches the handshake record's binding.
+
+    The store-fallback (cookie-state desync path) is only safe when we can prove the
+    callback comes from the same browser that started the flow. The device cookie is
+    that proof: it is stable across the iOS authorize excursion and an attacker
+    cannot present a victim's value.
+    """
+    expected = (record or {}).get("device_hash")
+    device_id = _oauth_device_id()
+    if not expected or not device_id:
+        return False
+    return hmac.compare_digest(str(expected), _oauth_device_hash(secret, device_id))
+
+
 def _make_oauth_cookie(secret: str, payload: dict[str, Any]) -> str:
     payload_text = quote(json.dumps(payload, separators=(",", ":")), safe="")
     signature = _oauth_cookie_signature(secret, payload_text)
@@ -1100,13 +1171,13 @@ def _b64url_decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(f"{value}{padding}")
 
 
-def _make_oauth_state(secret: str, *, next_target: str, retry: bool = False) -> str:
+def _make_oauth_state(secret: str, *, next_target: str, retry: bool = False, rid: str | None = None) -> str:
     payload = {
         "v": 1,
-        "r": secrets.token_urlsafe(18),
+        "r": rid or secrets.token_urlsafe(18),
         "next": next_target,
         "retry": bool(retry),
-        "exp": int(datetime.now().timestamp()) + 300,
+        "exp": int(datetime.now().timestamp()) + REMOTE_OAUTH_HANDSHAKE_TTL_SECONDS,
     }
     payload_text = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
     signature = _b64url_encode(hmac.new(secret.encode("utf-8"), payload_text.encode("ascii"), hashlib.sha256).digest())
@@ -1132,6 +1203,21 @@ def _read_oauth_state(secret: str, value: str | None) -> dict[str, Any] | None:
     if int(payload.get("exp", 0)) <= int(datetime.now().timestamp()):
         return None
     return payload
+
+
+def _peek_oauth_state_rid(token: str | None) -> str | None:
+    """Best-effort extract a vr1 state token's random id, for diagnostics only.
+
+    Does NOT verify the HMAC — purely to compare which state a request carries.
+    The ``r`` field is a single-use random nonce, not a secret.
+    """
+    if not token or not token.startswith("vr1."):
+        return None
+    try:
+        payload = json.loads(_b64url_decode(token.split(".")[1]).decode("utf-8"))
+        return (str(payload.get("r", ""))[:12]) or None
+    except Exception:
+        return None
 
 
 def _safe_remote_redirect_target(value: Any) -> str:
@@ -1176,12 +1262,30 @@ def _redirect_to_vibe_cloud_login(config: V2Config):
     code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
     raw_next = request.full_path if request.query_string else request.path
     next_target = _strip_oauth_retry_param(raw_next)
+    rid = secrets.token_urlsafe(18)
     state = _make_oauth_state(
         cloud.session_secret,
         next_target=next_target,
         retry=request.args.get(REMOTE_OAUTH_RETRY_PARAM) == "1",
+        rid=rid,
     )
     nonce = secrets.token_urlsafe(24)
+    # Stable per-browser binding id: reuse the existing device cookie so it stays
+    # consistent across the iOS authorize excursion (it is NOT regenerated per flow,
+    # unlike the handshake state), generating one only on first use.
+    device_id = _oauth_device_id() or secrets.token_urlsafe(24)
+    # Persist the handshake server-side keyed by the state id, so the callback can
+    # recover the PKCE secrets by the signed URL state even when the cookie desyncs
+    # (iOS standalone PWA runs authorize in a separate in-app-browser context). The
+    # device_hash binds that recovery to this browser; the cookie below stays the
+    # strong per-browser binding for normal browsers.
+    remote_access.store_oauth_handshake(
+        rid,
+        nonce=nonce,
+        code_verifier=code_verifier,
+        next_target=next_target,
+        device_hash=_oauth_device_hash(cloud.session_secret, device_id),
+    )
     oauth_cookie = _make_oauth_cookie(
         cloud.session_secret,
         {
@@ -1189,7 +1293,7 @@ def _redirect_to_vibe_cloud_login(config: V2Config):
             "nonce": nonce,
             "code_verifier": code_verifier,
             "next": next_target,
-            "exp": int(datetime.now().timestamp()) + 300,
+            "exp": int(datetime.now().timestamp()) + REMOTE_OAUTH_HANDSHAKE_TTL_SECONDS,
         },
     )
     response = Response(status=302)
@@ -1201,6 +1305,16 @@ def _redirect_to_vibe_cloud_login(config: V2Config):
         secure=True,
         samesite="Lax",
         path="/",
+        max_age=REMOTE_OAUTH_HANDSHAKE_TTL_SECONDS,
+    )
+    response.set_cookie(
+        REMOTE_OAUTH_DEVICE_COOKIE_NAME,
+        device_id,
+        httponly=True,
+        secure=True,
+        samesite="Lax",
+        path="/",
+        max_age=REMOTE_OAUTH_DEVICE_TTL_SECONDS,
     )
     return response
 
@@ -1213,6 +1327,254 @@ def _restart_vibe_cloud_login_from_state(config: V2Config, state: str | None):
     next_target = _safe_remote_redirect_target(payload.get("next"))
     response = redirect(_add_oauth_retry_param(next_target))
     response.delete_cookie(REMOTE_OAUTH_COOKIE_NAME, path="/", secure=True, samesite="Lax")
+    return response
+
+
+# Error codes with dedicated copy in vibe/i18n (remote_access.oauth_error.*); any
+# other code falls back to the generic "default_*" strings so an unexpected failure
+# still renders a usable page.
+_OAUTH_ERROR_PAGE_CODES = {"invalid_oauth_state", "oauth_exchange_failed", "invalid_oauth_nonce"}
+
+
+def _request_ui_language() -> str:
+    """Best-effort UI language for a pre-auth page, from the Accept-Language header.
+
+    The Web UI persists its language only in localStorage (not a server-readable
+    cookie), so Accept-Language is the available signal here — and it matches what
+    the SPA's own navigator-based detection would pick. Falls back to English.
+    """
+    supported = set(get_supported_languages())
+    for part in (request.headers.get("Accept-Language") or "").split(","):
+        tag = part.split(";")[0].strip().lower()
+        if not tag:
+            continue
+        if tag in supported:
+            return tag
+        primary = tag.split("-")[0]
+        if primary in supported:
+            return primary
+    return "en"
+
+
+def _render_oauth_error_html(error: str, *, retry_href: str, lang: str = "en") -> str:
+    """Render a branded, self-contained re-login page for a failed OAuth callback.
+
+    Replaces the old raw-JSON dead-end: the user sees a plain-language reason and a
+    single re-login button that navigates to ``retry_href`` (a sanitized same-origin
+    path), which re-enters the login flow via the auth gate. Copy is served from
+    ``vibe/i18n`` in ``lang``.
+    """
+    key = error if error in _OAUTH_ERROR_PAGE_CODES else "default"
+    safe_lang = html.escape(lang, quote=True)
+    safe_title = html.escape(t(f"remote_access.oauth_error.{key}_title", lang))
+    safe_message = html.escape(t(f"remote_access.oauth_error.{key}_body", lang))
+    safe_button = html.escape(t("remote_access.oauth_error.sign_in_again", lang))
+    safe_href = html.escape(retry_href or "/", quote=True)
+    safe_code = html.escape(error)
+    hint = ""
+    if error == "invalid_oauth_state":
+        hint = f'<p class="oauth-error-hint">{html.escape(t("remote_access.oauth_error.cookie_hint", lang))}</p>'
+    return f"""<!doctype html>
+<html lang="{safe_lang}">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex">
+    <title>{safe_title}</title>
+    <style>
+      :root {{
+        color-scheme: light;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #f6f7f9;
+        color: #172033;
+      }}
+      body {{ margin: 0; min-height: 100vh; }}
+      .oauth-error-shell {{
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 32px 18px;
+        box-sizing: border-box;
+      }}
+      .oauth-error-panel {{
+        width: min(460px, 100%);
+        border: 1px solid rgba(23, 32, 51, 0.12);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.96);
+        padding: clamp(28px, 6vw, 40px);
+        box-shadow: 0 24px 80px rgba(23, 32, 51, 0.10);
+        box-sizing: border-box;
+        text-align: center;
+      }}
+      .oauth-error-eyebrow {{
+        color: #526078;
+        font-size: 13px;
+        font-weight: 760;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }}
+      .oauth-error-panel h1 {{
+        margin: 14px 0 0;
+        font-size: clamp(24px, 6vw, 32px);
+        line-height: 1.12;
+        letter-spacing: 0;
+      }}
+      .oauth-error-panel p {{
+        margin: 14px 0 0;
+        line-height: 1.65;
+        color: #526078;
+      }}
+      .oauth-error-hint {{ font-size: 13px; }}
+      .oauth-error-actions {{ margin-top: 26px; }}
+      .oauth-error-button {{
+        display: inline-block;
+        height: 44px;
+        padding: 0 24px;
+        border-radius: 12px;
+        background: #0f172a;
+        color: #fff;
+        font: 700 15px/44px Inter, ui-sans-serif, system-ui;
+        text-decoration: none;
+      }}
+      .oauth-error-button:hover {{ background: #1e293b; }}
+      .oauth-error-code {{
+        margin-top: 22px;
+        font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        color: #94a3b8;
+      }}
+    </style>
+  </head>
+  <body>
+    <main class="oauth-error-shell">
+      <section class="oauth-error-panel">
+        <div class="oauth-error-eyebrow">Avibe</div>
+        <h1>{safe_title}</h1>
+        <p>{safe_message}</p>
+        {hint}
+        <div class="oauth-error-actions">
+          <a class="oauth-error-button" href="{safe_href}">{safe_button}</a>
+        </div>
+        <div class="oauth-error-code">{safe_code}</div>
+      </section>
+    </main>
+  </body>
+</html>
+"""
+
+
+_OAUTH_DIAG_LOG_INTERVAL_SECONDS = 60.0
+_oauth_diag_log_lock = threading.Lock()
+# key -> [window_start_monotonic, suppressed_count]
+_oauth_diag_log_state: dict[str, list[float]] = {}
+
+
+def _log_oauth_diag(key: str, message: str, *args: Any) -> None:
+    """Emit an unauthenticated-reachable OAuth diagnostic at WARNING, rate-limited
+    per ``key`` (~once / ``_OAUTH_DIAG_LOG_INTERVAL_SECONDS``).
+
+    The OAuth callback is reachable without auth, so a flood of invalid callbacks
+    would otherwise grow the (unrotated) service log without bound. Suppressed hits
+    are counted and folded into the next emitted line so the signal isn't lost.
+    """
+    now = time.monotonic()
+    with _oauth_diag_log_lock:
+        window_start, suppressed = _oauth_diag_log_state.get(key, (0.0, 0))
+        if window_start and now - window_start < _OAUTH_DIAG_LOG_INTERVAL_SECONDS:
+            _oauth_diag_log_state[key] = [window_start, suppressed + 1]
+            return
+        _oauth_diag_log_state[key] = [now, 0]
+    extra = f" [+{int(suppressed)} suppressed in {int(_OAUTH_DIAG_LOG_INTERVAL_SECONDS)}s]" if suppressed else ""
+    logger.warning(message + extra, *args)
+
+
+def _oauth_callback_error_response(error: str, *, next_target: Any, status: int = 400):
+    """Build the HTML re-login response for a failed OAuth callback.
+
+    Clears any stale handshake cookie so "Sign in again" starts a clean flow, and
+    strips the auto-retry marker from ``next_target`` so the retry gets a fresh
+    attempt (plus one silent auto-retry) instead of immediately failing again.
+    """
+    # Diagnostic only: whether the handshake cookie reached us at all is the key
+    # signal for cookie-loss cases (e.g. iOS standalone PWA). No token values are
+    # logged — only presence and a few non-secret request hints. Rate-limited
+    # because this path is unauthenticated and could be flooded.
+    _log_oauth_diag(
+        "callback_rejected",
+        "oauth callback rejected: error=%s handshake_cookie_present=%s ua=%r sec_fetch_site=%s",
+        error,
+        bool(request.cookies.get(REMOTE_OAUTH_COOKIE_NAME)),
+        (request.headers.get("User-Agent") or "")[:140],
+        request.headers.get("Sec-Fetch-Site") or "",
+    )
+    retry_href = _strip_oauth_retry_param(next_target if isinstance(next_target, str) else "/")
+    response = Response(
+        _render_oauth_error_html(error, retry_href=retry_href, lang=_request_ui_language()),
+        status=status,
+        mimetype="text/html; charset=utf-8",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.delete_cookie(REMOTE_OAUTH_COOKIE_NAME, path="/", secure=True, samesite="Lax")
+    return response
+
+
+# --- Unauthenticated /auth rate limiting -----------------------------------
+#
+# The login-start redirect and /auth/callback are reachable without a session, so
+# a flood of unauthenticated requests is the *root* of the resource-growth concerns
+# on this path. A per-client fixed-window limiter bounds that flood at the door, so
+# the downstream handshake store and diagnostics stay bounded without each needing
+# its own guard. (The per-store cap and per-log throttles remain as cheap backstops.)
+_AUTH_RATELIMIT_WINDOW_SECONDS = 60.0
+_AUTH_RATELIMIT_MAX_PER_WINDOW = 60  # a real login spends a handful; this only stops floods
+_AUTH_RATELIMIT_MAX_TRACKED_CLIENTS = 4096
+_auth_ratelimit_lock = threading.Lock()
+# Bounded LRU of client -> [window_start_monotonic, count]; the least-recently-seen
+# entry is evicted once the table is full, so the table can't grow without bound.
+_auth_ratelimit: OrderedDict[str, list[float]] = OrderedDict()
+
+
+def _auth_client_id() -> str:
+    """Client identity for rate limiting.
+
+    Trust the Cloudflare-forwarded client IP only when the request arrived via the
+    local tunnel (loopback peer = cloudflared). A direct peer reaching the origin
+    port could otherwise set/rotate ``CF-Connecting-IP`` to dodge the limit, so for
+    such peers we key on the real connecting address instead.
+    """
+    forwarded = (request.headers.get("CF-Connecting-IP") or "").strip()
+    if forwarded and _is_loopback_peer():
+        return f"cf:{forwarded}"
+    return f"peer:{(request.remote_addr or 'unknown').strip()}"
+
+
+def _auth_rate_limited() -> bool:
+    """True when the caller has exceeded the unauthenticated /auth request budget."""
+    client = _auth_client_id()
+    now = time.monotonic()
+    with _auth_ratelimit_lock:
+        bucket = _auth_ratelimit.get(client)
+        if bucket is None or now - bucket[0] >= _AUTH_RATELIMIT_WINDOW_SECONDS:
+            # New or rolled-over window. Hard-bound the table before admitting a
+            # genuinely new client (evict the least-recently-seen).
+            if client not in _auth_ratelimit:
+                while len(_auth_ratelimit) >= _AUTH_RATELIMIT_MAX_TRACKED_CLIENTS:
+                    _auth_ratelimit.popitem(last=False)
+            _auth_ratelimit[client] = [now, 1]
+            _auth_ratelimit.move_to_end(client)
+            return False
+        if bucket[1] >= _AUTH_RATELIMIT_MAX_PER_WINDOW:
+            return True
+        bucket[1] += 1
+        _auth_ratelimit.move_to_end(client)
+        return False
+
+
+def _auth_rate_limit_response():
+    """Minimal 429 for an abusive unauthenticated /auth client (no per-request work)."""
+    response = Response("Too Many Requests", status=429, mimetype="text/plain; charset=utf-8")
+    response.headers["Retry-After"] = str(int(_AUTH_RATELIMIT_WINDOW_SECONDS))
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 
@@ -1257,6 +1619,10 @@ def enforce_remote_access_cookie():
             g.remote_session_renew = (str(payload.get("email", "")), str(payload.get("sub", "")))
         return None
     if request.method == "GET":
+        # Bound unauthenticated login-start floods at the door (this writes a
+        # handshake + sets cookies); a real user spends only a couple per login.
+        if _auth_rate_limited():
+            return _auth_rate_limit_response()
         return _redirect_to_vibe_cloud_login(config)
     return jsonify({"ok": False, "error": "remote_access_login_required"}), 401
 
@@ -1979,6 +2345,17 @@ def show_page_visibility_post(session_id):
         return _show_page_error_response(exc)
 
 
+@app.route("/api/show-pages/<session_id>/ensure", methods=["POST"])
+def show_page_ensure_post(session_id):
+    from core.show_pages import ShowPageError
+    from vibe import api
+
+    try:
+        return jsonify(api.ensure_show_page(session_id))
+    except ShowPageError as exc:
+        return _show_page_error_response(exc)
+
+
 @app.route("/api/show-pages/<session_id>/rotate-share", methods=["POST"])
 def show_page_rotate_share_post(session_id):
     from core.show_pages import ShowPageError
@@ -2203,6 +2580,107 @@ def version():
 # =============================================================================
 
 
+# Serializes the restart in-flight check + scheduling below. The UI server runs
+# requests concurrently, so without this two near-simultaneous restart requests
+# could both pass the check before either seeds restart_status.json, scheduling
+# two supervisors that race on the same pid files + lock.
+_RESTART_CONTROL_LOCK = threading.Lock()
+# How long a just-seeded, pid-less "scheduled" status is treated as in flight
+# (its supervisor is still starting up). Past this, a pid-less status is stale
+# (the supervisor died before recording its pid) and must NOT block restarts.
+_RESTART_SEED_GRACE_SECONDS = 60.0
+
+
+def _restart_in_flight() -> bool:
+    """True only when a restart is genuinely still running, so a stale status
+    can never permanently block Web restarts."""
+    from vibe import runtime
+
+    status = runtime.read_json(runtime.get_restart_status_path()) or {}
+    if status.get("state") not in ("scheduled", "running"):
+        return False
+    sup_pid = status.get("supervisor_pid")
+    if isinstance(sup_pid, int):
+        if not runtime.pid_alive(sup_pid):
+            return False
+        # Guard against PID reuse: a dead supervisor's pid can be reclaimed by an
+        # unrelated process (notably across a reboot), which would otherwise keep
+        # blocking restarts until that process exits. The job records its
+        # ``supervisor_started_at`` (process create time), so only treat the pid
+        # as the live supervisor when the create time still matches.
+        started_at = status.get("supervisor_started_at")
+        if started_at is not None:
+            current = runtime.process_create_time(sup_pid)
+            if current is not None and current != started_at:
+                return False
+        return True
+    # No supervisor pid recorded yet: in flight only while the seed is fresh
+    # (the child is still starting). An older pid-less status is stale.
+    try:
+        age = time.time() - runtime.get_restart_status_path().stat().st_mtime
+    except OSError:
+        return False
+    return age < _RESTART_SEED_GRACE_SECONDS
+
+
+def _schedule_service_restart_for_config_fallback() -> dict[str, Any]:
+    from vibe import runtime
+    from vibe.restart_supervisor import mark_pending_restart, schedule_restart
+
+    def _schedule_restart() -> dict[str, Any]:
+        status = runtime.read_status()
+        runtime.write_status("restarting", "restarting", status.get("service_pid"), status.get("ui_pid"))
+        return schedule_restart(delay_seconds=0.0, trigger="web-ui-config", scope="service")
+
+    with _RESTART_CONTROL_LOCK:
+        if _restart_in_flight():
+            restart_status = runtime.read_json(runtime.get_restart_status_path()) or {}
+            pending = mark_pending_restart(
+                trigger="web-ui-config-pending",
+                scope="service",
+                reason="restart_in_progress",
+                restart_job_id=restart_status.get("job_id"),
+            )
+            if not _restart_in_flight():
+                try:
+                    from vibe.restart_supervisor import _pending_restart_path
+
+                    _pending_restart_path().unlink(missing_ok=True)
+                except OSError:
+                    logger.debug("Failed to remove stale pending restart marker", exc_info=True)
+                restart = _schedule_restart()
+                return {
+                    "ok": True,
+                    "restart": restart,
+                    "code": "restart_scheduled_after_in_flight_finished",
+                }
+            return {
+                "ok": True,
+                "pending_restart": pending,
+                "restart": restart_status,
+                "code": "restart_pending_after_in_progress",
+            }
+        restart = _schedule_restart()
+    return {"ok": True, "restart": restart}
+
+
+def _save_config_and_runtime_decisions(payload: dict) -> tuple[V2Config, bool, bool]:
+    from vibe import api
+    from vibe import remote_access
+
+    with CONFIG_LOCK:
+        previous_config = _load_remote_access_config()
+        config = api.save_config(payload)
+        should_reconcile_remote_access = False
+        if _remote_access_settings_changed(previous_config, config, payload):
+            if _should_rotate_remote_session_secret(previous_config, config, payload):
+                remote_access.rotate_session_secret(config)
+                config = V2Config.load()
+            should_reconcile_remote_access = True
+        should_reconcile_platforms = _platform_runtime_fields_changed(previous_config, config, payload)
+        return config, should_reconcile_remote_access, should_reconcile_platforms
+
+
 @app.route("/api/control", methods=["POST"])
 def control():
     from vibe import runtime
@@ -2226,32 +2704,78 @@ def control():
         _stop_opencode_server()
         runtime.write_status("stopped", "stopped", None, status.get("ui_pid"))
     elif action == "restart":
-        runtime.write_status("restarting", "restarting", status.get("service_pid"), status.get("ui_pid"))
-        result = schedule_restart(delay_seconds=0.0, trigger="web-ui")
+        # Scope defaults to "all" (full restart) so the manual Dashboard /
+        # Settings → Service restart buttons keep restarting BOTH processes
+        # (a UI host/port change needs the UI server itself to come back up).
+        # Only the platform-config flow opts into "service" (keep the Web UI up).
+        scope = payload.get("scope") if payload.get("scope") in ("all", "service") else "all"
+        # Reject overlapping restarts: a service-only restart leaves the Web UI
+        # up, so a user (or another tab) could fire a second restart while the
+        # first supervisor is still bouncing the service — two jobs would race
+        # on the same pid files + lock. The check + schedule are held under one
+        # process lock so two concurrent requests can't both slip through.
+        with _RESTART_CONTROL_LOCK:
+            if _restart_in_flight():
+                return (
+                    jsonify(
+                        {
+                            "ok": False,
+                            "action": action,
+                            "error": "a restart is already in progress",
+                            "code": "restart_in_progress",
+                            "status": runtime.read_status(),
+                        }
+                    ),
+                    409,
+                )
+            runtime.write_status("restarting", "restarting", status.get("service_pid"), status.get("ui_pid"))
+            result = schedule_restart(delay_seconds=0.0, trigger="web-ui", scope=scope)
         return jsonify({"ok": True, "action": action, "restart": result, "status": runtime.read_status()})
     return jsonify({"ok": True, "action": action, "status": runtime.read_status()})
 
 
 @app.route("/api/config", methods=["POST"])
-def config_post():
+async def config_post():
     from vibe import api
+    from vibe import internal_client
     from vibe import remote_access
 
     payload = request.json or {}
     remote_access_runtime = None
-    should_reconcile_remote_access = False
-    with CONFIG_LOCK:
-        previous_config = _load_remote_access_config() if "remote_access" in payload else None
-        config = api.save_config(payload)
-        if _remote_access_settings_changed(previous_config, config, payload):
-            if _should_rotate_remote_session_secret(previous_config, config, payload):
-                remote_access.rotate_session_secret(config)
-            should_reconcile_remote_access = True
+    try:
+        config, should_reconcile_remote_access, should_reconcile_platforms = await asyncio.to_thread(
+            _save_config_and_runtime_decisions,
+            payload,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        return jsonify({"ok": False, "error": message, "message": message}), 400
     if should_reconcile_remote_access:
-        remote_access_runtime = remote_access.reconcile()
+        remote_access_runtime = await asyncio.to_thread(remote_access.reconcile)
+    platform_runtime = None
+    if should_reconcile_platforms:
+        try:
+            result = await internal_client.reconcile_platforms()
+            platform_runtime = {
+                "ok": result.get("status_code") == 200 and bool((result.get("body") or {}).get("ok")),
+                "hot_reconciled": result.get("status_code") == 200 and bool((result.get("body") or {}).get("ok")),
+                "body": result.get("body") or {},
+            }
+        except internal_client.InternalServerUnavailable as exc:
+            platform_runtime = {"ok": False, "hot_reconciled": False, "error": str(exc)}
+        if not platform_runtime.get("ok"):
+            restart_result = await asyncio.to_thread(_schedule_service_restart_for_config_fallback)
+            platform_runtime["restart_scheduled"] = bool(restart_result.get("ok"))
+            if restart_result.get("ok"):
+                platform_runtime["restart"] = restart_result.get("restart")
+            else:
+                platform_runtime["restart_error"] = restart_result.get("error")
+                platform_runtime["restart_code"] = restart_result.get("code")
     response_payload = api.config_to_payload(config)
     if remote_access_runtime is not None:
         response_payload["remote_access_runtime"] = remote_access_runtime
+    if platform_runtime is not None:
+        response_payload["platform_runtime"] = platform_runtime
     return jsonify(response_payload)
 
 
@@ -2301,21 +2825,65 @@ def remote_access_auth_callback():
     cloud = config.remote_access.vibe_cloud
     if not cloud.enabled:
         return jsonify({"error": "remote_access_disabled"}), 400
-    oauth_state = _read_oauth_cookie(cloud.session_secret, request.cookies.get(REMOTE_OAUTH_COOKIE_NAME))
-    if not oauth_state or oauth_state.get("state") != _oauth_callback_arg("state"):
-        retry_response = _restart_vibe_cloud_login_from_state(config, _oauth_callback_arg("state"))
+    # Unauthenticated endpoint: bound floods before any store lookup / logging.
+    if _auth_rate_limited():
+        return _auth_rate_limit_response()
+    url_state_token = _oauth_callback_arg("state")
+    cookie_state = _read_oauth_cookie(cloud.session_secret, request.cookies.get(REMOTE_OAUTH_COOKIE_NAME))
+    url_state = _read_oauth_state(cloud.session_secret, url_state_token)
+    # Single-use: consume any server-side handshake for this verified state id, even
+    # when we ultimately use the cookie, so the store stays clean.
+    store_record = remote_access.pop_oauth_handshake(url_state.get("r")) if url_state else None
+
+    # Prefer the cookie when it matches the URL state (strong per-browser binding,
+    # the normal-browser path). Fall back to the server-side handshake when the
+    # cookie is missing or carries a different state — the iOS standalone PWA case,
+    # where the authorize step runs in a separate in-app-browser context and the
+    # cookie desyncs from the state the user actually approved.
+    if cookie_state and cookie_state.get("state") == url_state_token:
+        code_verifier = cookie_state["code_verifier"]
+        handshake_nonce = cookie_state.get("nonce")
+        next_target = cookie_state.get("next")
+    elif store_record is not None and _oauth_store_record_device_bound(cloud.session_secret, store_record):
+        # Store-fallback for the iOS standalone PWA case, where the handshake cookie's
+        # state desyncs (authorize ran in a separate in-app-browser context). Gated on
+        # the stable device cookie matching the handshake record, which proves this is
+        # the same browser that started the flow — so a bare code+state callback URL
+        # can't be replayed in another browser (closes login-CSRF). The PWA carries the
+        # device cookie unchanged across the excursion, so recovery still succeeds.
+        logger.debug("oauth callback recovered via server-side handshake (device-bound, desynced cookie context)")
+        code_verifier = store_record["code_verifier"]
+        handshake_nonce = store_record.get("nonce")
+        next_target = store_record.get("next")
+    else:
+        # Neither the cookie nor the server-side store yielded the handshake.
+        # Rate-limited: this branch is unauthenticated-reachable.
+        _log_oauth_diag(
+            "state_check_failed",
+            "oauth state check failed: cookie_parsed=%s cookie_state_rid=%s url_state_rid=%s url_state_valid=%s",
+            cookie_state is not None,
+            _peek_oauth_state_rid(cookie_state.get("state")) if cookie_state else None,
+            _peek_oauth_state_rid(url_state_token),
+            url_state is not None,
+        )
+        retry_response = _restart_vibe_cloud_login_from_state(config, url_state_token)
         if retry_response is not None:
             return retry_response
-        return jsonify({"error": "invalid_oauth_state"}), 400
+        # Auto-retry exhausted (or the state is undecodable): show the re-login page,
+        # recovering the original destination from the signed state when possible.
+        next_target = url_state.get("next") if url_state else "/"
+        return _oauth_callback_error_response("invalid_oauth_state", next_target=next_target)
     try:
-        result = remote_access.exchange_oauth_code(config, _oauth_callback_arg("code") or "", oauth_state["code_verifier"])
+        result = remote_access.exchange_oauth_code(config, _oauth_callback_arg("code") or "", code_verifier)
         claims = result["claims"]
     except Exception as exc:
-        return jsonify({"error": "oauth_exchange_failed", "detail": str(exc)}), 400
-    if claims.get("nonce") != oauth_state.get("nonce"):
-        return jsonify({"error": "invalid_oauth_nonce"}), 400
+        # Unauthenticated-reachable (valid handshake + bad code), so rate-limited.
+        _log_oauth_diag("exchange_failed", "vibe cloud oauth code exchange failed: %s", exc)
+        return _oauth_callback_error_response("oauth_exchange_failed", next_target=next_target)
+    if claims.get("nonce") != handshake_nonce:
+        return _oauth_callback_error_response("invalid_oauth_nonce", next_target=next_target)
     response = Response(status=302)
-    response.headers["Location"] = _safe_remote_redirect_target(oauth_state.get("next"))
+    response.headers["Location"] = _safe_remote_redirect_target(next_target)
     response.set_cookie(
         remote_access.SESSION_COOKIE_NAME,
         remote_access.make_session_cookie(config, str(claims.get("email", "")), str(claims.get("sub", ""))),
@@ -2623,6 +3191,20 @@ def _get_wechat_auth():
     return _wechat_auth_manager
 
 
+def _load_wechat_local_tokens() -> list[str]:
+    try:
+        from core.services import settings as settings_service
+
+        config = settings_service.load_config()
+    except Exception:
+        logger.warning("Failed to load WeChat local token list for QR login", exc_info=True)
+        return []
+    token = getattr(getattr(config, "wechat", None), "bot_token", "")
+    if isinstance(token, str) and token.strip():
+        return [token.strip()]
+    return []
+
+
 def _schedule_wechat_qr_login_restart() -> dict:
     """Schedule a managed restart after QR-login credentials are persisted."""
     from vibe.restart_supervisor import schedule_restart
@@ -2630,14 +3212,48 @@ def _schedule_wechat_qr_login_restart() -> dict:
     return schedule_restart(delay_seconds=2.0, trigger="wechat-qr-login")
 
 
+def _persist_wechat_qr_credentials(result: dict) -> None:
+    token = result.get("bot_token")
+    if not isinstance(token, str) or not token.strip():
+        return
+
+    from vibe import api as vibe_api
+    from core.services import settings as settings_service
+
+    config = settings_service.load_config(default_factory=settings_service.default_config)
+    current = vibe_api.config_to_payload(config, include_secrets=True)
+    wechat = dict(current.get("wechat") or {})
+    wechat["bot_token"] = token.strip()
+    if isinstance(result.get("base_url"), str) and result["base_url"].strip():
+        wechat["base_url"] = result["base_url"].strip()
+    elif not wechat.get("base_url"):
+        wechat["base_url"] = "https://ilinkai.weixin.qq.com"
+    current["wechat"] = wechat
+
+    platforms = dict(current.get("platforms") or {})
+    enabled = list(platforms.get("enabled") or [])
+    if "wechat" not in enabled:
+        enabled.append("wechat")
+    platforms["enabled"] = enabled
+    if not platforms.get("primary") or platforms.get("primary") == "avibe":
+        platforms["primary"] = "wechat"
+    current["platforms"] = platforms
+
+    vibe_api.save_config(current)
+
+
+WECHAT_QR_LOGIN_BASE_URL = "https://ilinkai.weixin.qq.com"
+
+
 @app.route("/api/wechat/qr_login/start", methods=["POST"])
 async def wechat_qr_login_start():
     """Start WeChat QR code login flow."""
     auth = _get_wechat_auth()
-    payload = request.json or {}
-    base_url = payload.get("base_url", "https://ilinkai.weixin.qq.com")
 
-    result = await auth.start_login(base_url=base_url)
+    result = await auth.start_login(
+        base_url=WECHAT_QR_LOGIN_BASE_URL,
+        local_token_list=_load_wechat_local_tokens(),
+    )
     if result.get("ok") is False:
         return jsonify(result), 500
     return jsonify(result)
@@ -2650,15 +3266,24 @@ async def wechat_qr_login_poll():
     session_key = payload.get("session_key", "")
     if not session_key:
         return jsonify({"error": "session_key required"}), 400
+    verify_code = payload.get("verify_code")
+    if verify_code is not None and not isinstance(verify_code, str):
+        return jsonify({"error": "invalid_verify_code"}), 400
 
     auth = _get_wechat_auth()
-    result = await auth.poll_status(session_key)
+    result = await auth.poll_status(session_key, verify_code=verify_code)
     if result.get("ok") is False:
         return jsonify(result), 500
 
     # If confirmed, auto-bind the WeChat user
-    if result.get("status") == "confirmed" and result.get("bot_token"):
-        user_id = result.get("user_id", "wechat_user")
+    if result.get("status") == "confirmed" and result.get("bot_token") and result.get("user_id"):
+        user_id = result["user_id"]
+
+        try:
+            _persist_wechat_qr_credentials(result)
+        except Exception as exc:
+            logger.error("Failed to persist WeChat QR credentials: %s", exc)
+            return jsonify({"ok": False, "error": "failed_to_persist_wechat_credentials"}), 500
 
         # Auto-bind user
         try:
@@ -3010,6 +3635,14 @@ async def backend_oauth_web_remove(backend: str):
     return jsonify(await api.remove_backend_auth_async(backend))
 
 
+@app.route("/api/backend/claude/auth/oauth/credentials/remove", methods=["POST"])
+async def claude_oauth_credentials_remove():
+    """Clear Claude OAuth credentials without touching API-key auth."""
+    from vibe import api
+
+    return jsonify(await api.remove_claude_oauth_credentials_async())
+
+
 @app.route("/api/backend/<backend>/auth/api-key/remove", methods=["POST"])
 def backend_auth_api_key_remove(backend: str):
     """Clear the stored API key (V2Config + Codex auth.json) without
@@ -3237,7 +3870,7 @@ def projects_update(project_id: str):
     # (see ``projects_service.update_project`` and its ``_UNSET`` sentinel).
     agent_kwargs = {
         field: payload[field]
-        for field in ("agent_backend", "agent_name", "agent_variant", "model", "reasoning_effort")
+        for field in ("agent_name", "agent_variant", "model", "reasoning_effort")
         if field in payload
     }
     if display_name is None and folder_path is None and not agent_kwargs:
@@ -3687,6 +4320,46 @@ def sessions_create():
     return jsonify(session), 201
 
 
+def _session_fork_error_response(err: Exception):
+    message = str(err)
+    if "id not found" in message:
+        return jsonify({"error": message, "code": "session_not_found"}), 404
+    if "is archived" in message:
+        return jsonify({"error": message, "code": "session_archived"}), 409
+    if "no native session id" in message:
+        return jsonify({"error": message, "code": "session_not_bound"}), 409
+    if "backend cannot be forked" in message:
+        return jsonify({"error": message, "code": "session_backend_unsupported"}), 409
+    if "backend does not match" in message:
+        return jsonify({"error": message, "code": "session_backend_mismatch"}), 409
+    return jsonify({"error": message, "code": "session_fork_failed"}), 400
+
+
+@app.route("/api/sessions/<session_id>/fork", methods=["POST"])
+def sessions_fork(session_id: str):
+    from core.services import sessions as workbench_sessions_service
+    from core.services import settings as settings_service
+    from core.services.session_fork import SessionForkError, reserve_forked_session
+    from vibe.sse_broker import broker
+
+    try:
+        # Use the saved global UI language (the same source other backend-generated
+        # strings use) so the forked title matches the chosen UI, not the browser's
+        # Accept-Language header which can differ from the user's selected language.
+        title_lang = settings_service.load_config_or_default().language
+        result = reserve_forked_session(source_session_id=session_id, title_lang=title_lang)
+        engine = _projects_engine()
+        with engine.connect() as conn:
+            session = workbench_sessions_service.get_session(conn, result.session_id)
+    except SessionForkError as err:
+        return _session_fork_error_response(err)
+    except LookupError as err:
+        return jsonify({"error": str(err), "code": "session_not_found"}), 404
+
+    broker.publish("session.activity", {"session_id": session["id"], "scope_id": session["scope_id"], "event": "created"})
+    return jsonify(session), 201
+
+
 @app.route("/api/sessions/<session_id>", methods=["GET"])
 def sessions_get(session_id: str):
     from core.services import sessions as workbench_sessions_service
@@ -3768,9 +4441,25 @@ async def sessions_bootstrap(session_id: str):
     )
 
 
+def _backend_locked_response(err):
+    """Shared 409 payload for a rejected cross-backend session change."""
+    return (
+        jsonify(
+            {
+                "error": str(err),
+                "code": "backend_locked",
+                "current_backend": err.current_backend,
+                "requested_backend": err.requested_backend,
+            }
+        ),
+        409,
+    )
+
+
 @app.route("/api/sessions/<session_id>", methods=["PATCH"])
-def sessions_update(session_id: str):
+async def sessions_update(session_id: str):
     from core.services import sessions as workbench_sessions_service
+    from vibe import internal_client
     from vibe.sse_broker import broker
 
     payload = request.json or {}
@@ -3791,25 +4480,56 @@ def sessions_update(session_id: str):
         return jsonify({"error": "no updatable fields supplied"}), 400
 
     engine = _projects_engine()
+    should_check_backend_lock = "agent_backend" in updatable
+    requested_backend = updatable.get("agent_backend")
+    if "agent_name" in updatable and "agent_backend" not in updatable:
+        try:
+            with engine.connect() as conn:
+                requested_backend = workbench_sessions_service.derive_backend_for_agent_name(
+                    conn,
+                    str(updatable.get("agent_name") or ""),
+                )
+            should_check_backend_lock = True
+        except LookupError as err:
+            return jsonify({"error": str(err)}), 404
+    # The row's ``agent_status`` lags turn acceptance: ``SessionTurnManager.submit``
+    # registers the in-flight gate synchronously, but ``running`` is only written
+    # once dispatch starts — so a cross-backend switch landing in that startup
+    # window would pass the row-status guard and then be silently undone by the
+    # bind-time backend backfill. Consult the controller's authoritative in-flight
+    # registry first; an unreachable/slow controller falls through to the
+    # row-status guard inside ``update_session`` (best effort).
+    if should_check_backend_lock:
+        try:
+            with engine.connect() as conn:
+                current = workbench_sessions_service.get_session(conn, session_id)
+        except LookupError as err:
+            return jsonify({"error": str(err)}), 404
+        if str(requested_backend or "") != str(current.get("agent_backend") or ""):
+            try:
+                turn_result = await internal_client.turn_state(session_id)
+                in_flight = bool((turn_result.get("body") or {}).get("in_flight"))
+            except (internal_client.InternalServerUnavailable, internal_client.InternalServerTimeout):
+                in_flight = False
+            if in_flight:
+                return _backend_locked_response(
+                    workbench_sessions_service.SessionBackendLockedError(
+                        session_id=session_id,
+                        current_backend=current.get("agent_backend"),
+                        requested_backend=requested_backend,
+                    )
+                )
+
     try:
         with engine.begin() as conn:
             session = workbench_sessions_service.update_session(conn, session_id, **updatable)
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
     except workbench_sessions_service.SessionBackendLockedError as err:
-        # A session is pinned to its backend once it has a conversation; the UI
-        # may switch the agent within the same backend, but not across backends.
-        return (
-            jsonify(
-                {
-                    "error": str(err),
-                    "code": "backend_locked",
-                    "current_backend": err.current_backend,
-                    "requested_backend": err.requested_backend,
-                }
-            ),
-            409,
-        )
+        # A session is pinned to its backend once it has a conversation (or a
+        # running turn); the UI may switch the agent within the same backend,
+        # but not across backends.
+        return _backend_locked_response(err)
     # Broadcast so other surfaces (e.g. the sidebar session list) reflect the
     # edit live — renaming a session in the chat header should rename its
     # sidebar row without a manual refresh.
@@ -3933,6 +4653,9 @@ def sessions_messages_list(session_id: str):
     except (TypeError, ValueError):
         limit = 50
     before_id = request.args.get("before_id") or None
+    # ``around_id`` centers the window on a specific message (search deep-link
+    # jump); it takes precedence over after/before/tail in the service.
+    around_id = request.args.get("around_id") or None
     # ``tail=1`` returns the most-recent window (for the Chat page's gap recovery)
     # instead of the oldest page.
     tail = request.args.get("tail") == "1"
@@ -3955,11 +4678,36 @@ def sessions_messages_list(session_id: str):
             session_id=session_id,
             after_id=after_id,
             before_id=before_id,
+            around_id=around_id,
             limit=limit,
             types=messages_service.TRANSCRIPT_TYPES,
             include_metadata_sources=("show_page",),
             tail=tail,
         )
+    return jsonify(result)
+
+
+@app.route("/api/search/messages", methods=["GET"])
+def search_messages_list():
+    """Global message-content search across Workbench sessions, grouped by session.
+
+    Substring (case-insensitive) search over ``content_text`` for ``platform
+    ='avibe'`` user prompts + agent ``result`` replies, excluding archived
+    sessions. ``q`` is the query, ``limit`` caps the matched-message scan. The
+    remote-access host guard + auth run in the global ``before_request`` hooks
+    (same as the messages list), so this handler just delegates to the service.
+    """
+    from storage import messages_service
+
+    query = request.args.get("q") or ""
+    try:
+        limit = int(request.args.get("limit") or 50)
+    except (TypeError, ValueError):
+        limit = 50
+
+    engine = _projects_engine()
+    with engine.connect() as conn:
+        result = messages_service.search_messages(conn, query=query, limit=limit)
     return jsonify(result)
 
 
@@ -5198,7 +5946,7 @@ if os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes"):
                     from config.v2_settings import RoutingSettings
 
                     ch.routing = RoutingSettings(
-                        agent_backend=modal_values.get("backend", "opencode"),
+                        agent_name=modal_values.get("backend", "opencode"),
                         model=(
                             modal_values.get("opencode_model")
                             or modal_values.get("claude_model")
@@ -5245,7 +5993,7 @@ if os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes"):
                     from config.v2_settings import RoutingSettings
 
                     ch.routing = RoutingSettings(
-                        agent_backend=modal_values.get("backend", "opencode"),
+                        agent_name=modal_values.get("backend", "opencode"),
                         model=(
                             modal_values.get("opencode_model")
                             or modal_values.get("claude_model")
@@ -6012,7 +6760,21 @@ def _rewrite_public_show_runtime_private_paths(
         return content
     private_prefix = f"/show/{quote(session_id, safe='')}/"
     public_prefix = f"{external_prefix.rstrip('/')}/"
-    rewritten = text.replace(private_prefix, public_prefix)
+    # Only rewrite the private prefix where it is a genuine URL reference, not
+    # where the same "/show/<session>/" substring is embedded inside an absolute
+    # Vite /@fs/<realpath> filesystem path (e.g.
+    # /@fs/<home>/.avibe/show/<session>/src/App.tsx). A blind str.replace would
+    # also corrupt that fs path -> the module 404s and is served as index.html
+    # -> MIME error -> the app never mounts (blank public Show Page). A genuine
+    # URL reference of the prefix is preceded by a quote / paren / = / comma /
+    # whitespace / start, whereas the embedded fs occurrence is preceded by an
+    # alphanumeric path-component char (the "e" in ".avibe"); the negative
+    # lookbehind (note: "/" is deliberately NOT excluded) skips only the latter.
+    rewritten = re.sub(
+        r"(?<![A-Za-z0-9._~-])" + re.escape(private_prefix),
+        public_prefix,
+        text,
+    )
     if rewritten == text:
         return content
     _mark_show_runtime_document_no_store(headers)
@@ -6142,7 +6904,11 @@ def _rewrite_show_runtime_location(session_id: str, location: str, *, external_p
 
 def _with_show_event_write_cookie(response: Response, session_id: str, *, enabled: bool) -> Response:
     if enabled:
-        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+        # 'self' (not 'none') so the workbench can frame a private Show Page in the
+        # chat view — same origin as the page — while cross-origin clickjacking
+        # stays blocked. Direct navigation is unaffected (frame-ancestors only
+        # governs framing).
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'self'"
         response.set_cookie(
             SHOW_EVENT_WRITE_TOKEN_COOKIE,
             show_event_write_token(session_id),

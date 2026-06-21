@@ -149,6 +149,15 @@ class BaseIMClient(ABC):
         """Whether sent messages can be edited after delivery."""
         return True
 
+    def verify_stopped(self) -> bool:
+        """Return whether adapter-owned runtime resources have stopped.
+
+        ``MultiIMClient.remove_client`` joins the adapter's top-level runtime
+        thread. Adapters that start nested SDK/runtime threads should override
+        this so hot-remove can fail instead of silently leaking callbacks.
+        """
+        return True
+
     def should_use_thread_for_dm_session(self) -> bool:
         """Check if DM conversations should use thread-based session IDs.
 
@@ -160,6 +169,16 @@ class BaseIMClient(ABC):
     def should_use_message_id_for_channel_session(self, context: Optional[MessageContext] = None) -> bool:
         """Whether non-thread channel messages should default to per-message sessions."""
         return True
+
+    def is_scheduled_thread_active(self, channel_id: Optional[str], thread_id: Optional[str]) -> bool:
+        """Return whether a thread is active for the synthetic scheduled owner."""
+        sessions = getattr(self, "sessions", None)
+        if not sessions or not channel_id or not thread_id:
+            return False
+        exact_checker = getattr(sessions, "is_thread_active_for_user", None)
+        if callable(exact_checker):
+            return bool(exact_checker("scheduled", channel_id, thread_id))
+        return False
 
     async def prepare_turn_context(self, context: MessageContext, source: str) -> MessageContext:
         """Allow IM adapters to adjust reply topology for a turn source.
@@ -305,7 +324,7 @@ class BaseIMClient(ABC):
     @abstractmethod
     async def send_message(
         self, context: MessageContext, text: str, parse_mode: Optional[str] = None, reply_to: Optional[str] = None
-    ) -> str:
+    ) -> Optional[str]:
         """Send a text message
 
         Args:
@@ -315,14 +334,14 @@ class BaseIMClient(ABC):
             reply_to: Optional message ID to reply to
 
         Returns:
-            Message ID of sent message
+            Message ID of sent message, or None when not delivered
         """
         pass
 
     @abstractmethod
     async def send_message_with_buttons(
         self, context: MessageContext, text: str, keyboard: InlineKeyboard, parse_mode: Optional[str] = None
-    ) -> str:
+    ) -> Optional[str]:
         """Send a message with inline buttons
 
         Args:
@@ -332,7 +351,7 @@ class BaseIMClient(ABC):
             parse_mode: Optional formatting mode
 
         Returns:
-            Message ID of sent message
+            Message ID of sent message, or None when not delivered
         """
         pass
 

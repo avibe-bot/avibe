@@ -441,6 +441,24 @@ pre,
   animation: vr-typing 1.2s infinite ease-in-out;
 }
 
+/* Deep-link search-match highlight (workbench ChatPage P5, design.pen tBlve):
+   the message jumped to from the search palette gets a brief mint-soft wash
+   that fades to transparent over ~3s. Uses the same --mint-soft token as the
+   agent bubble so it reads as "this is the match" without a hard flash. The
+   negative inset + matching radius let the band breathe slightly around the
+   row's bubble while leaving the row's own width untouched. ``forwards`` so it
+   settles fully transparent if the class lingers a frame past the JS timeout. */
+@keyframes msg-highlight {
+  from { background-color: var(--mint-soft); }
+  to { background-color: transparent; }
+}
+.msg-highlight {
+  margin: -2px -8px;
+  padding: 2px 8px;
+  border-radius: var(--radius-2xl);
+  animation: msg-highlight 3s ease-out forwards;
+}
+
 /* Markdown rendering for agent replies (react-markdown output). No Tailwind
    typography plugin is installed, so the raw element tree is styled against
    theme tokens. Scoped to .vr-markdown so it never leaks elsewhere. */

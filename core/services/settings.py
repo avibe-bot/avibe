@@ -74,7 +74,6 @@ def default_config() -> V2Config:
         platforms=PlatformsConfig(enabled=[], primary=WORKBENCH_PLATFORM_ID),
         runtime=RuntimeConfig(default_cwd=str(Path.home() / "work")),
         agents=AgentsConfig(
-            default_backend="opencode",
             opencode=OpenCodeConfig(enabled=True, cli_path="opencode"),
             claude=ClaudeConfig(enabled=True, cli_path="claude"),
             codex=CodexConfig(enabled=False, cli_path="codex"),

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -13,7 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import paths
 from core import chat_discovery
 from modules.agents.native_sessions import NativeResumeSession
-from modules.im import MessageContext
+from modules.im import InlineButton, InlineKeyboard, MessageContext
+from modules.im.multi import MultiIMClient
 from modules.im.telegram import TelegramBot
 from config.v2_config import TelegramConfig
 
@@ -77,6 +80,33 @@ def test_group_message_uses_channel_require_mention_override() -> None:
 
     bot.on_message_callback.assert_awaited_once()
     assert bot.on_message_callback.await_args.args[1] == "hello team"
+
+
+def test_inbound_message_refreshes_config_before_reading_options() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token", require_mention=True))
+    bot._bot_user = {"id": 1, "username": "vibe_remote_bot"}
+    refresh_calls: list[bool] = []
+
+    def _refresh_config_from_disk() -> None:
+        refresh_calls.append(True)
+        bot.config.require_mention = False
+
+    bot.set_controller(SimpleNamespace(_refresh_config_from_disk=_refresh_config_from_disk))
+    bot.on_message_callback = AsyncMock()
+
+    asyncio.run(
+        bot._handle_message(
+            {
+                "message_id": 77,
+                "chat": {"id": -100123, "type": "group", "title": "Core Group"},
+                "from": {"id": 42},
+                "text": "hello team",
+            }
+        )
+    )
+
+    assert refresh_calls == [True]
+    bot.on_message_callback.assert_awaited_once()
 
 
 def test_group_mention_only_falls_through_as_empty_message() -> None:
@@ -570,6 +600,217 @@ def test_send_message_uses_html_parse_mode() -> None:
     assert payload["text"] == "Hello <b>world</b>"
 
 
+def test_send_markdown_message_keeps_plain_markdown_on_html_path() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = MessageContext(user_id="42", channel_id="-100123", platform="telegram")
+
+    with patch(
+        "modules.im.telegram.telegram_api.call_api",
+        new=AsyncMock(return_value={"result": {"message_id": 77}}),
+    ) as call_mock:
+        asyncio.run(bot.send_markdown_message(context, "Hello **world**"))
+
+    assert call_mock.await_args.args[1] == "sendMessage"
+    payload = call_mock.await_args.args[2]
+    assert payload["parse_mode"] == "HTML"
+    assert payload["text"] == "Hello <b>world</b>"
+
+
+def test_send_markdown_message_uses_rich_message_for_structured_markdown() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = MessageContext(user_id="42", channel_id="-100123", thread_id="8", platform="telegram")
+    keyboard = InlineKeyboard(buttons=[[InlineButton(text="Inspect", callback_data="quick_reply:Inspect")]])
+    markdown = "# Summary\n\n- shipped\n- verified"
+
+    with patch(
+        "modules.im.telegram.telegram_api.call_api",
+        new=AsyncMock(return_value={"result": {"message_id": 88}}),
+    ) as call_mock:
+        result = asyncio.run(bot.send_markdown_message(context, markdown, keyboard=keyboard, reply_to="77"))
+
+    assert result == "88"
+    assert call_mock.await_args.args[1] == "sendRichMessage"
+    payload = call_mock.await_args.args[2]
+    assert payload["chat_id"] == "-100123"
+    assert payload["message_thread_id"] == 8
+    assert payload["reply_parameters"] == {"message_id": 77}
+    assert payload["rich_message"] == {"markdown": markdown}
+    assert payload["reply_markup"] == {
+        "inline_keyboard": [[{"text": "Inspect", "callback_data": "quick_reply:Inspect"}]]
+    }
+
+
+def test_send_markdown_message_preserves_reply_to_on_plain_button_path() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = MessageContext(user_id="42", channel_id="-100123", platform="telegram")
+    keyboard = InlineKeyboard(buttons=[[InlineButton(text="Inspect", callback_data="quick_reply:Inspect")]])
+
+    with patch(
+        "modules.im.telegram.telegram_api.call_api",
+        new=AsyncMock(return_value={"result": {"message_id": 88}}),
+    ) as call_mock:
+        result = asyncio.run(bot.send_markdown_message(context, "Hello **world**", keyboard=keyboard, reply_to="77"))
+
+    assert result == "88"
+    assert call_mock.await_args.args[1] == "sendMessage"
+    payload = call_mock.await_args.args[2]
+    assert payload["reply_parameters"] == {"message_id": 77}
+    assert payload["reply_markup"] == {
+        "inline_keyboard": [[{"text": "Inspect", "callback_data": "quick_reply:Inspect"}]]
+    }
+    assert payload["parse_mode"] == "HTML"
+
+
+def test_send_markdown_message_falls_back_when_rich_message_is_rejected() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = MessageContext(user_id="42", channel_id="-100123", platform="telegram")
+    markdown = "# Summary\n\n- shipped"
+
+    with patch(
+        "modules.im.telegram.telegram_api.call_api",
+        new=AsyncMock(
+            side_effect=[
+                RuntimeError("Bad Request: method not found"),
+                {"result": {"message_id": 89}},
+            ]
+        ),
+    ) as call_mock:
+        result = asyncio.run(bot.send_markdown_message(context, markdown))
+
+    assert result == "89"
+    assert [call.args[1] for call in call_mock.await_args_list] == ["sendRichMessage", "sendMessage"]
+    fallback_payload = call_mock.await_args_list[1].args[2]
+    assert fallback_payload["parse_mode"] == "HTML"
+    assert fallback_payload["text"] == "# Summary\n\n- shipped"
+
+
+def test_send_markdown_message_retries_rich_without_remote_image_media() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = MessageContext(user_id="42", channel_id="-100123", platform="telegram")
+    markdown = (
+        "# Summary\n\n"
+        "![示例图片](https://via.placeholder.com/120x80.png?text=Markdown)\n\n"
+        '![captioned](https://host/img.png "caption")\n\n'
+        "![angle](<https://host/img space.png>)\n\n"
+        "![upper](HTTPS://host/upper.png)\n\n"
+        "![](https://host/no-alt.png)\n\n"
+        "\\![escaped](https://host/escaped.png)\n\n"
+        "[![badge](https://img.shields.io/x.svg)](https://example.com)\n\n"
+        "- screenshot:\n"
+        "    ![shot](https://host/list.png)\n\n"
+        "1. ordered screenshot:\n"
+        "      ![ordered](https://host/ordered.png)\n\n"
+        "- sample:\n"
+        "      ![literal](https://host/code.png)\n\n"
+        "![diagram][img]\n\n"
+        "[![refbadge](https://img.example/x.svg)][badge-url]\n\n"
+        "[img]: https://host/diagram.png\n"
+        "[badge-url]: https://example.com/ref\n\n"
+        "`![inline](https://host/inline.png)`\n\n"
+        "```md\n"
+        "![fenced](https://host/fenced.png)\n"
+        "```\n\n"
+        "    ![indented](https://host/indented.png)\n\n"
+        "- shipped"
+    )
+
+    with patch(
+        "modules.im.telegram.telegram_api.call_api",
+        new=AsyncMock(
+            side_effect=[
+                RuntimeError("Bad Request: RICH_MESSAGE_PHOTO_NO_MEDIA_FOUND"),
+                {"result": {"message_id": 89}},
+            ]
+        ),
+    ) as call_mock:
+        result = asyncio.run(bot.send_markdown_message(context, markdown))
+
+    assert result == "89"
+    assert [call.args[1] for call in call_mock.await_args_list] == ["sendRichMessage", "sendRichMessage"]
+    retry_payload = call_mock.await_args_list[1].args[2]
+    assert retry_payload["rich_message"] == {
+        "markdown": (
+            "# Summary\n\n"
+            "[示例图片](https://via.placeholder.com/120x80.png?text=Markdown)\n\n"
+            "[captioned](https://host/img.png)\n\n"
+            "[angle](<https://host/img space.png>)\n\n"
+            "[upper](HTTPS://host/upper.png)\n\n"
+            "[https://host/no-alt.png](https://host/no-alt.png)\n\n"
+            "\\![escaped](https://host/escaped.png)\n\n"
+            "[badge](https://example.com)\n\n"
+            "- screenshot:\n"
+            "    [shot](https://host/list.png)\n\n"
+            "1. ordered screenshot:\n"
+            "      [ordered](https://host/ordered.png)\n\n"
+            "- sample:\n"
+            "      ![literal](https://host/code.png)\n\n"
+            "[diagram](https://host/diagram.png)\n\n"
+            "[refbadge][badge-url]\n\n"
+            "[img]: https://host/diagram.png\n"
+            "[badge-url]: https://example.com/ref\n\n"
+            "`![inline](https://host/inline.png)`\n\n"
+            "```md\n"
+            "![fenced](https://host/fenced.png)\n"
+            "```\n\n"
+            "    ![indented](https://host/indented.png)\n\n"
+            "- shipped"
+        )
+    }
+
+
+def test_send_markdown_message_preserves_reply_to_on_rejected_rich_button_fallback() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = MessageContext(user_id="42", channel_id="-100123", platform="telegram")
+    keyboard = InlineKeyboard(buttons=[[InlineButton(text="Inspect", callback_data="quick_reply:Inspect")]])
+    markdown = "# Summary\n\n- shipped"
+
+    with patch(
+        "modules.im.telegram.telegram_api.call_api",
+        new=AsyncMock(
+            side_effect=[
+                RuntimeError("Bad Request: rich message is invalid"),
+                {"result": {"message_id": 89}},
+            ]
+        ),
+    ) as call_mock:
+        result = asyncio.run(bot.send_markdown_message(context, markdown, keyboard=keyboard, reply_to="77"))
+
+    assert result == "89"
+    assert [call.args[1] for call in call_mock.await_args_list] == ["sendRichMessage", "sendMessage"]
+    fallback_payload = call_mock.await_args_list[1].args[2]
+    assert fallback_payload["reply_parameters"] == {"message_id": 77}
+    assert fallback_payload["reply_markup"] == {
+        "inline_keyboard": [[{"text": "Inspect", "callback_data": "quick_reply:Inspect"}]]
+    }
+
+
+def test_send_markdown_message_disables_rich_path_after_method_missing() -> None:
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    context = MessageContext(user_id="42", channel_id="-100123", platform="telegram")
+    markdown = "# Summary\n\n- shipped"
+
+    with patch(
+        "modules.im.telegram.telegram_api.call_api",
+        new=AsyncMock(
+            side_effect=[
+                RuntimeError("Bad Request: method not found"),
+                {"result": {"message_id": 89}},
+                {"result": {"message_id": 90}},
+            ]
+        ),
+    ) as call_mock:
+        first = asyncio.run(bot.send_markdown_message(context, markdown))
+        second = asyncio.run(bot.send_markdown_message(context, markdown))
+
+    assert first == "89"
+    assert second == "90"
+    assert [call.args[1] for call in call_mock.await_args_list] == [
+        "sendRichMessage",
+        "sendMessage",
+        "sendMessage",
+    ]
+
+
 def test_add_reaction_uses_telegram_message_reactions() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
     context = MessageContext(user_id="42", channel_id="-100123", platform="telegram")
@@ -1008,3 +1249,39 @@ def test_handle_callback_query_denies_unauthorized_protected_action() -> None:
 
     answer_mock.assert_awaited_once_with("cb-1", "Admin only", show_alert=True)
     bot.on_callback_query_callback.assert_not_awaited()
+
+
+def test_remove_client_cancels_telegram_long_poll_promptly(monkeypatch) -> None:
+    poll_started = threading.Event()
+    poll_cancelled = threading.Event()
+
+    async def _get_me(*args, **kwargs):
+        return {"result": {"id": 1, "username": "vibe_remote_bot"}}
+
+    async def _get_updates(*args, **kwargs):
+        poll_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            poll_cancelled.set()
+            raise
+
+    monkeypatch.setattr("modules.im.telegram.telegram_api.get_me", _get_me)
+    monkeypatch.setattr("modules.im.telegram.telegram_api.get_updates", _get_updates)
+
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    client = MultiIMClient({"telegram": bot}, primary_platform="telegram")
+    runtime_thread = threading.Thread(target=bot.run, daemon=True)
+    runtime_thread.start()
+    client._threads["telegram"] = runtime_thread
+
+    assert poll_started.wait(timeout=2)
+
+    started = time.monotonic()
+    removed = client.remove_client("telegram")
+    elapsed = time.monotonic() - started
+
+    assert removed is bot
+    assert elapsed < 2
+    assert runtime_thread.is_alive() is False
+    assert poll_cancelled.is_set()

@@ -360,6 +360,105 @@ def test_opencode_options_does_not_readd_unconfigured_user_model_provider(
     assert [p["id"] for p in providers] == ["openai"]
 
 
+def test_opencode_options_filters_catalog_provider_with_only_stale_user_model(
+    monkeypatch, tmp_path
+):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+
+    class _FakeManager:
+        async def ensure_running(self):
+            return "http://127.0.0.1:4096"
+
+        async def get_available_agents(self, directory):
+            return []
+
+        async def get_available_models(self, directory):
+            return {
+                "providers": [
+                    {"id": "openai", "models": {"gpt-5": {}}},
+                    {"id": "zai", "models": {"glm-5.2": {}}},
+                ],
+                "default": {
+                    "openai": "gpt-5",
+                    "zai": "glm-5.2",
+                },
+            }
+
+        async def get_providers(self):
+            return {
+                "all": [
+                    {"id": "openai", "name": "OpenAI"},
+                    {"id": "zai", "name": "Z.AI"},
+                ],
+                "connected": ["openai", "zai"],
+            }
+
+        async def get_default_config(self, directory):
+            return {}
+
+        async def close_http_session(self, *, loop=None):
+            pass
+
+    class _FakeServerManager:
+        @staticmethod
+        async def get_instance(**kwargs):
+            return _FakeManager()
+
+    auth_path = tmp_path / ".local" / "share" / "opencode" / "auth.json"
+    auth_path.parent.mkdir(parents=True)
+    auth_path.write_text(json.dumps({"openai": {"type": "api", "key": "sk-test"}}))
+    config_path = tmp_path / ".config" / "opencode" / "opencode.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "provider": {
+                    "zai": {
+                        "options": {"baseURL": "https://relay.example"},
+                        "models": {
+                            "glm-5.2": {
+                                "id": "glm-5.2",
+                                "name": "glm-5.2",
+                                "vibe_remote": {"user_model": True},
+                            }
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: object()))
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(
+        opencode_module,
+        "build_reasoning_effort_options",
+        lambda models, model_key: [{"value": "__default__"}],
+    )
+
+    result = asyncio.run(api.opencode_options_async("/tmp/workspace"))
+
+    assert result["ok"] is True
+    providers = result["data"]["models"]["providers"]
+    assert [p["id"] for p in providers] == ["openai"]
+    assert result["data"]["models"]["default"] == {"openai": "gpt-5"}
+
+
 def test_opencode_options_preserves_models_when_provider_catalog_fails(
     monkeypatch, tmp_path
 ):
@@ -902,7 +1001,7 @@ def test_normalize_backend_routing_payload_prefers_canonical_claude_overrides() 
 def test_normalize_backend_routing_payload_prefers_canonical_over_round_trip_aliases() -> None:
     result = api._normalize_backend_routing_payload(
         {
-            "agent_backend": "claude",
+            "agent_name": "claude",
             "model": "claude-sonnet-4-6",
             "reasoning_effort": "high",
             "claude_model": "claude-opus-4-8",
@@ -916,10 +1015,23 @@ def test_normalize_backend_routing_payload_prefers_canonical_over_round_trip_ali
     assert result["claude_reasoning_effort"] is None
 
 
+def test_normalize_backend_routing_payload_lifts_aliases_for_builtin_agent_name() -> None:
+    result = api._normalize_backend_routing_payload(
+        {
+            "agent_name": "claude",
+            "claude_model": "claude-opus-4-8",
+            "claude_reasoning_effort": "max",
+        }
+    )
+
+    assert result["model"] == "claude-opus-4-8"
+    assert result["reasoning_effort"] == "max"
+
+
 def test_normalize_backend_routing_payload_preserves_explicit_canonical_clears() -> None:
     result = api._normalize_backend_routing_payload(
         {
-            "agent_backend": "claude",
+            "agent_name": "claude",
             "model": None,
             "reasoning_effort": None,
             "claude_model": "claude-opus-4-8",
@@ -933,7 +1045,7 @@ def test_normalize_backend_routing_payload_preserves_explicit_canonical_clears()
     assert result["claude_reasoning_effort"] is None
 
 
-def test_normalize_backend_routing_payload_preserves_legacy_claude_specific_overrides() -> None:
+def test_normalize_backend_routing_payload_ignores_deprecated_backend_for_alias_lifting() -> None:
     result = api._normalize_backend_routing_payload(
         {
             "agent_backend": "claude",
@@ -942,10 +1054,10 @@ def test_normalize_backend_routing_payload_preserves_legacy_claude_specific_over
         }
     )
 
-    assert result["model"] == "claude-opus-4-8"
-    assert result["reasoning_effort"] == "max"
-    assert result["claude_model"] is None
-    assert result["claude_reasoning_effort"] is None
+    assert result["model"] is None
+    assert result["reasoning_effort"] is None
+    assert result["claude_model"] == "claude-opus-4-8"
+    assert result["claude_reasoning_effort"] == "max"
 
 
 def test_normalize_backend_routing_payload_preserves_legacy_overrides_without_backend() -> None:
@@ -1239,7 +1351,8 @@ def test_install_codex_fresh_install_uses_resolved_npm(monkeypatch, tmp_path):
 
 def test_install_codex_npm_install_runs_npm_upgrade(monkeypatch, tmp_path):
     # Npm-owned Codex installs should upgrade through npm, not through a
-    # different installer and not by blindly invoking the CLI self-updater.
+    # different installer and not by blindly invoking the CLI self-updater. The
+    # upgrade must stay in the npm prefix that owns the existing package.
     calls = []
     npm_path = tmp_path / ".nvm" / "versions" / "node" / "v22.18.0" / "bin" / "npm"
     npm_path.parent.mkdir(parents=True)
@@ -1258,6 +1371,8 @@ def test_install_codex_npm_install_runs_npm_upgrade(monkeypatch, tmp_path):
 
     def fake_run(cmd, **kwargs):
         calls.append((cmd, kwargs.get("env", {})))
+        if cmd == [str(npm_path), "config", "get", "prefix"]:
+            return CompletedProcess(stdout=f"{npm_path.parent.parent}\n")
         if cmd == [str(npm_path), "install", "-g", "@openai/codex"]:
             return CompletedProcess(stdout="updated")
         raise AssertionError(f"unexpected command: {cmd}")
@@ -1278,10 +1393,10 @@ def test_install_codex_npm_install_runs_npm_upgrade(monkeypatch, tmp_path):
     result = api.install_agent("codex")
 
     assert result["ok"] is True
-    assert len(calls) == 1
-    assert calls[0][0] == [str(npm_path), "install", "-g", "@openai/codex"]
-    assert calls[0][1]["NPM_CONFIG_PREFIX"] == str(tmp_path / ".local")
-    assert calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(tmp_path / ".local" / "bin")
+    update_calls = [c for c in calls if c[0] == [str(npm_path), "install", "-g", "@openai/codex"]]
+    assert len(update_calls) == 1
+    assert update_calls[0][1]["NPM_CONFIG_PREFIX"] == str(npm_path.parent.parent)
+    assert update_calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(npm_path.parent)
     assert result["path"] == str(codex_path)
 
 
@@ -1496,7 +1611,8 @@ def test_discord_list_channels_rejects_empty_guild_id(monkeypatch):
 def test_install_codex_detects_existing_install_via_npm_prefix_and_upgrades_with_npm(monkeypatch, tmp_path, only_tmp_binaries):
     # Codex already installed under the npm global prefix; resolve_cli_path
     # must discover it (via `npm config get prefix`) and install_agent must
-    # still upgrade by rerunning npm install -g @openai/codex.
+    # still upgrade by rerunning npm install -g @openai/codex in that same
+    # prefix instead of moving it to ~/.local.
     npm_path = tmp_path / "node" / "bin" / "npm"
     npm_path.parent.mkdir(parents=True, exist_ok=True)
     npm_path.write_text("#!/bin/sh\n")
@@ -1534,6 +1650,121 @@ def test_install_codex_detects_existing_install_via_npm_prefix_and_upgrades_with
     assert result["path"] == str(codex_path)
     update_calls = [c for c in calls if c[0] == [str(npm_path), "install", "-g", "@openai/codex"]]
     assert len(update_calls) == 1
+    assert update_calls[0][1]["NPM_CONFIG_PREFIX"] == str(prefix_path)
+    assert update_calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(prefix_path / "bin")
+
+
+def test_install_codex_symlinked_npm_install_upgrades_in_real_prefix(monkeypatch, tmp_path, only_tmp_binaries):
+    # Regression coverage for the Incus layout: ~/.local/bin/codex is a shim to
+    # ~/.npm-global/bin/codex. Running npm with prefix ~/.local tries to replace
+    # the shim and fails with EEXIST, so upgrades must follow the real package.
+    npm_path = tmp_path / "node" / "bin" / "npm"
+    npm_path.parent.mkdir(parents=True, exist_ok=True)
+    npm_path.write_text("#!/bin/sh\n")
+    npm_path.chmod(0o755)
+
+    prefix_path = tmp_path / ".npm-global"
+    package_bin = prefix_path / "lib" / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    package_bin.parent.mkdir(parents=True, exist_ok=True)
+    package_bin.write_text("#!/usr/bin/env node\n")
+    package_bin.chmod(0o755)
+    npm_bin = prefix_path / "bin" / "codex"
+    npm_bin.parent.mkdir(parents=True, exist_ok=True)
+    npm_bin.symlink_to(package_bin)
+
+    local_bin = tmp_path / ".local" / "bin" / "codex"
+    local_bin.parent.mkdir(parents=True, exist_ok=True)
+    local_bin.symlink_to(npm_bin)
+    calls = []
+
+    class CompletedProcess:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs.get("env", {})))
+        if cmd == [str(npm_path), "config", "get", "prefix"]:
+            return CompletedProcess(stdout=f"{prefix_path}\n")
+        if cmd == [str(npm_path), "install", "-g", "@openai/codex"]:
+            return CompletedProcess(stdout="updated")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    def fake_resolve(binary):
+        if binary == "npm":
+            return str(npm_path)
+        if binary == "codex":
+            return str(local_bin)
+        return None
+
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(api.shutil, "which", lambda binary: None)
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+    monkeypatch.setattr(api.subprocess, "Popen", _PopenFromRun)
+    monkeypatch.setattr(api, "resolve_cli_path", fake_resolve)
+
+    result = api.install_agent("codex")
+
+    assert result["ok"] is True
+    assert result["path"] == str(local_bin)
+    update_calls = [c for c in calls if c[0] == [str(npm_path), "install", "-g", "@openai/codex"]]
+    assert len(update_calls) == 1
+    assert update_calls[0][1]["NPM_CONFIG_PREFIX"] == str(prefix_path)
+    assert update_calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(prefix_path / "bin")
+
+
+def test_install_codex_project_local_node_modules_does_not_become_prefix(
+    monkeypatch,
+    tmp_path,
+    only_tmp_binaries,
+):
+    npm_path = tmp_path / "node" / "bin" / "npm"
+    npm_path.parent.mkdir(parents=True, exist_ok=True)
+    npm_path.write_text("#!/bin/sh\n")
+    npm_path.chmod(0o755)
+
+    project_path = tmp_path / "project"
+    codex_path = project_path / "lib" / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    codex_path.parent.mkdir(parents=True, exist_ok=True)
+    codex_path.write_text("#!/usr/bin/env node\n")
+    codex_path.chmod(0o755)
+    global_prefix = tmp_path / ".npm-global"
+    calls = []
+
+    class CompletedProcess:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs.get("env", {})))
+        if cmd == [str(npm_path), "config", "get", "prefix"]:
+            return CompletedProcess(stdout=f"{global_prefix}\n")
+        if cmd == [str(npm_path), "install", "-g", "@openai/codex"]:
+            return CompletedProcess(stdout="updated")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    def fake_resolve(binary):
+        if binary == "npm":
+            return str(npm_path)
+        if binary == "codex":
+            return str(codex_path)
+        return None
+
+    monkeypatch.setattr(api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(api.shutil, "which", lambda binary: None)
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+    monkeypatch.setattr(api.subprocess, "Popen", _PopenFromRun)
+    monkeypatch.setattr(api, "resolve_cli_path", fake_resolve)
+
+    result = api.install_agent("codex")
+
+    assert result["ok"] is True
+    update_calls = [c for c in calls if c[0] == [str(npm_path), "install", "-g", "@openai/codex"]]
+    assert len(update_calls) == 1
+    assert update_calls[0][1].get("NPM_CONFIG_PREFIX") != str(project_path)
     assert update_calls[0][1]["NPM_CONFIG_PREFIX"] == str(tmp_path / ".local")
     assert update_calls[0][1]["PATH"].split(api.os.pathsep)[0] == str(tmp_path / ".local" / "bin")
 
@@ -2286,7 +2517,7 @@ def test_telegram_list_chats_returns_discovered_groups(tmp_path, monkeypatch):
 
 
 def test_vibe_agent_api_crud_and_settings_catalog(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
 
     created = api.create_vibe_agent(
         {
@@ -2312,7 +2543,7 @@ def test_vibe_agent_api_crud_and_settings_catalog(tmp_path, monkeypatch):
 
 
 def test_vibe_agent_catalog_ensures_builtin_defaults_for_enabled_backends(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
 
     listed = api.get_vibe_agents()
     names = {agent["name"] for agent in listed["agents"]}
@@ -2322,14 +2553,14 @@ def test_vibe_agent_catalog_ensures_builtin_defaults_for_enabled_backends(tmp_pa
 
 
 def test_builtin_default_agent_enabled_state_follows_backend_config(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
-        store.ensure_builtin_default_agents(["opencode", "claude"], default_backend="opencode")
+        store.ensure_builtin_default_agents(["opencode", "claude"])
         assert store.require("opencode").enabled is True
         assert store.require("claude").enabled is True
 
-        store.ensure_builtin_default_agents(["opencode"], default_backend="opencode")
+        store.ensure_builtin_default_agents(["opencode"])
 
         assert store.require("opencode").enabled is True
         assert store.require("claude").enabled is False
@@ -2376,10 +2607,10 @@ def test_enabled_agent_backends_respect_explicit_disabled_backend():
 
 
 def test_user_can_disable_builtin_default_agent_without_catalog_reenabling_it(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
-        store.ensure_builtin_default_agents(["opencode"], default_backend="opencode")
+        store.ensure_builtin_default_agents(["opencode"])
         store.set_enabled("opencode", False)
 
         assert "opencode" not in [agent["name"] for agent in api.get_vibe_agents()["agents"]]
@@ -2389,7 +2620,7 @@ def test_user_can_disable_builtin_default_agent_without_catalog_reenabling_it(tm
 
 
 def test_disabled_agent_cannot_be_set_as_default(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
         store.create(name="reviewer", backend="codex", enabled=False)
@@ -2400,7 +2631,7 @@ def test_disabled_agent_cannot_be_set_as_default(tmp_path, monkeypatch):
 
 
 def test_vibe_agent_api_rejects_non_boolean_enabled(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
 
     with pytest.raises(ValueError, match="Agent enabled must be a JSON boolean"):
         api.create_vibe_agent({"name": "reviewer", "backend": "codex", "enabled": "false"})
@@ -2412,18 +2643,38 @@ def test_vibe_agent_api_rejects_non_boolean_enabled(tmp_path, monkeypatch):
     assert api.update_vibe_agent("reviewer", {"enabled": False})["agent"]["enabled"] is False
 
 
-def test_builtin_default_agents_respect_configured_default_backend(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+def test_builtin_default_agent_uses_first_enabled_backend_when_no_default_exists(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
-        store.ensure_builtin_default_agents(["opencode", "claude", "codex"], default_backend="codex")
-        assert store.get_default_agent_name() == "codex"
+        store.ensure_builtin_default_agents(["opencode", "claude", "codex"])
+        assert store.get_default_agent_name() == "opencode"
+    finally:
+        store.close()
+
+
+def test_api_builtin_default_agents_ignore_legacy_config_default_backend(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token="xoxb-test", app_token="xapp-test"),
+        platforms=PlatformsConfig(enabled=["slack"], primary="slack"),
+        runtime=RuntimeConfig(default_cwd="/tmp/work"),
+        agents=AgentsConfig(default_backend="codex"),
+        ui=UiConfig(),
+    )
+
+    api._ensure_builtin_default_agents(config)
+    store = VibeAgentStore()
+    try:
+        assert store.get_default_agent_name() == "opencode"
     finally:
         store.close()
 
 
 def test_builtin_default_agent_does_not_reuse_conflicting_user_agent(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
         store.create(name="opencode", backend="codex")
@@ -2434,7 +2685,7 @@ def test_builtin_default_agent_does_not_reuse_conflicting_user_agent(tmp_path, m
 
 
 def test_builtin_default_agent_does_not_lock_existing_user_agent(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
         created = store.create(name="opencode", backend="opencode")
@@ -2449,7 +2700,7 @@ def test_builtin_default_agent_does_not_lock_existing_user_agent(tmp_path, monke
 
 
 def test_vibe_agent_import_reports_unreadable_file_as_client_error(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     missing_file = tmp_path / "missing-agent.md"
 
     with pytest.raises(ValueError, match="Unable to read or parse agent import file"):
@@ -2457,7 +2708,7 @@ def test_vibe_agent_import_reports_unreadable_file_as_client_error(tmp_path, mon
 
 
 def test_vibe_agent_import_rejects_non_markdown_direct_file(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     secret_file = tmp_path / "config.json"
     secret_file.write_text('{"token":"secret"}', encoding="utf-8")
 
@@ -2466,7 +2717,7 @@ def test_vibe_agent_import_rejects_non_markdown_direct_file(tmp_path, monkeypatc
 
 
 def test_vibe_agent_import_rejects_markdown_without_agent_frontmatter(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     notes_file = tmp_path / "private-notes.md"
     notes_file.write_text("# Private notes\n\nnon-agent content\n", encoding="utf-8")
 
@@ -2475,7 +2726,7 @@ def test_vibe_agent_import_rejects_markdown_without_agent_frontmatter(tmp_path, 
 
 
 def test_vibe_agent_import_allows_uppercase_markdown_extension(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     agent_file = tmp_path / "Reviewer.MD"
     agent_file.write_text("---\nname: reviewer\n---\nReview carefully.\n", encoding="utf-8")
 
@@ -2486,7 +2737,7 @@ def test_vibe_agent_import_allows_uppercase_markdown_extension(tmp_path, monkeyp
 
 
 def test_vibe_agent_import_skips_invalid_global_agent_file(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     valid_file = tmp_path / "valid.md"
     invalid_file = tmp_path / "invalid.md"
     valid_file.write_text("---\nname: reviewer\n---\nReview carefully.\n", encoding="utf-8")
@@ -2507,7 +2758,7 @@ def test_vibe_agent_import_skips_invalid_global_agent_file(tmp_path, monkeypatch
 
 
 def test_vibe_agent_api_rejects_backend_update(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     api.create_vibe_agent({"name": "worker", "backend": "codex"})
 
     with pytest.raises(ValueError, match="backend is immutable"):

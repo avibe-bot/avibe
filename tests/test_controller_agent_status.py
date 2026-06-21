@@ -82,3 +82,45 @@ def test_inbound_skips_non_avibe_turn():
 
     # IM turn carries no workbench session id → the dot is never touched.
     assert calls == []
+
+
+def test_run_marks_running_at_acceptance_before_dispatch(monkeypatch, tmp_path):
+    """The status flips ``running`` synchronously when the turn is ACCEPTED
+    (in_flight registration), not when dispatch later starts: update_session's
+    backend lock re-checks ``agent_status`` inside its UPDATE predicate, so the
+    accept-time write closes the startup window where a cross-backend PATCH
+    could land while the row still read idle."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from storage.importer import ensure_sqlite_state
+
+    ensure_sqlite_state()
+
+    import core.session_turns as session_turns_module
+    from core.session_turns import SessionTurnManager
+
+    calls: list = []
+    dispatched: list = []
+    controller = SimpleNamespace(
+        _session_id_from_context=staticmethod(Controller._session_id_from_context).__func__,
+        set_agent_status=lambda sid, status: calls.append((sid, status)),
+    )
+    mgr = SessionTurnManager(controller)
+
+    async def _dispatch(controller_arg, context, text, **kwargs):
+        dispatched.append(text)
+
+    monkeypatch.setattr(session_turns_module, "dispatch_turn", _dispatch)
+
+    async def _exercise():
+        await mgr._run("ses-accept", _ctx("ses-accept"), "hi")
+        # _run returns right after acceptance; the dispatch task hasn't run yet
+        # (single-threaded loop) — the running mark must already be recorded.
+        assert ("ses-accept", "running") in calls
+        assert dispatched == []
+        turn = mgr.in_flight.get("ses-accept")
+        assert turn is not None
+        await turn.task
+
+    asyncio.run(_exercise())
+    assert dispatched == ["hi"]

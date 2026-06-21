@@ -13,19 +13,25 @@ import { ChannelList } from './steps/ChannelList';
 import { Summary } from './steps/Summary';
 import { useApi } from '../context/ApiContext';
 import clsx from 'clsx';
-import { getEnabledPlatforms, getPrimaryPlatform, platformSupportsChannels } from '../lib/platforms';
+import {
+  getEnabledPlatforms,
+  platformHasRunnableConfig,
+  platformSupportsChannels,
+} from '../lib/platforms';
 import { withoutConfiguredSecretMarker, withSecretDraft, withSecretDrafts } from '../lib/secretFields';
 import { WizardChrome } from './visual';
 
-const buildConfigPayload = (data: any) => {
-  const enabledPlatforms = getEnabledPlatforms(data);
-  const primaryPlatform = getPrimaryPlatform(data);
+const getPersistableWizardPlatforms = (data: any) =>
+  getEnabledPlatforms(data).filter((platform) => platformHasRunnableConfig(data, platform));
+
+const buildConfigPayload = (data: any, enabledPlatformOverride?: string[]) => {
+  const enabledPlatforms = enabledPlatformOverride ?? getEnabledPlatforms(data);
 
   return {
-  platform: primaryPlatform,
+  // No user-facing primary platform: the backend derives an internal default
+  // from ``platforms.enabled``, so the wizard sends only the enabled set.
   platforms: {
     enabled: enabledPlatforms,
-    primary: primaryPlatform,
   },
   mode: data.mode || 'self_host',
   version: 'v2',
@@ -72,7 +78,6 @@ const buildConfigPayload = (data: any) => {
     default_cwd: data.default_cwd || data.runtime?.default_cwd || '.',
   },
   agents: {
-    default_backend: data.default_backend || 'opencode',
     opencode: {
       // Preserve existing opencode config
       ...data.agents?.opencode,
@@ -190,7 +195,6 @@ export const Wizard: React.FC = () => {
             ...configWithCatalog,
             discordGuildAllowlist: discordSettings?.guild_allowlist || [],
             channelConfigsByPlatform,
-            default_backend: config.agents?.default_backend,
             agents: {
               opencode: config.agents?.opencode,
               claude: config.agents?.claude,
@@ -236,19 +240,32 @@ export const Wizard: React.FC = () => {
 
   const persistStep = async (stepData: any, mergedData: any) => {
     if (!mergedData) return;
-    if (
-      mergedData.agents ||
-      mergedData.slack ||
-      mergedData.discord ||
-      mergedData.telegram ||
-      mergedData.lark ||
-      mergedData.wechat ||
-      mergedData.mode ||
-      mergedData.platforms ||
-      mergedData.platform ||
-      mergedData.channelConfigsByPlatform
-    ) {
-      await api.saveConfig(buildConfigPayload(mergedData));
+    const platformSelectionOnly =
+      Boolean(stepData.platforms || stepData.platform) &&
+      !stepData.agents &&
+      !stepData.slack &&
+      !stepData.discord &&
+      !stepData.telegram &&
+      !stepData.lark &&
+      !stepData.wechat &&
+      !stepData.mode &&
+      !stepData.channelConfigsByPlatform;
+    const shouldPersistConfig =
+      !platformSelectionOnly &&
+      Boolean(
+        mergedData.agents ||
+        mergedData.slack ||
+        mergedData.discord ||
+        mergedData.telegram ||
+        mergedData.lark ||
+        mergedData.wechat ||
+        mergedData.mode ||
+        mergedData.platforms ||
+        mergedData.platform ||
+        mergedData.channelConfigsByPlatform
+    );
+    if (shouldPersistConfig) {
+      await api.saveConfig(buildConfigPayload(mergedData, getPersistableWizardPlatforms(mergedData)));
     }
     const discordGuildAllowlist = stepData?.discordGuildAllowlist;
     if (

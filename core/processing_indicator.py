@@ -43,6 +43,7 @@ class ProcessingIndicatorHandle:
             "channel_id": self.context.channel_id or "",
             "thread_id": self.context.thread_id or "",
             "message_id": self.context.message_id or "",
+            "is_dm": bool(payload.get("is_dm", False)),
             "context_token": str(payload.get("context_token") or ""),
             "ack_message_id": self.ack_message_id,
             "ack_message_channel_id": self.ack_message_channel_id,
@@ -58,6 +59,8 @@ class ProcessingIndicatorHandle:
         platform_specific: dict[str, Any] = {}
         if platform:
             platform_specific["platform"] = platform
+        if data.get("is_dm") is not None:
+            platform_specific["is_dm"] = bool(data.get("is_dm"))
         if context_token:
             platform_specific["context_token"] = context_token
         context = MessageContext(
@@ -84,6 +87,7 @@ class ProcessingIndicatorService:
     def __init__(self, controller):
         self.controller = controller
         self.config = controller.config
+        self._indicators_by_turn_token: dict[str, Any] = {}
 
     def _get_im_client(self, context: MessageContext):
         getter = getattr(self.controller, "get_im_client_for_context", None)
@@ -248,6 +252,42 @@ class ProcessingIndicatorService:
         handle.ack_reaction_emoji = ACK_REACTION_EMOJI
         return True
 
+    @staticmethod
+    def _turn_tokens(context: MessageContext) -> set[str]:
+        payload = context.platform_specific or {}
+        tokens = set()
+        for key in ("turn_token", "agent_runtime_turn_token"):
+            token = str(payload.get(key) or "").strip()
+            if token:
+                tokens.add(token)
+        return tokens
+
+    def track_turn(self, context: MessageContext, request_or_handle: Any) -> None:
+        """Remember this turn's indicator for terminal-result cleanup.
+
+        Backends still clean up explicitly with their request object. This registry
+        is the outbound terminal fallback: a result emit can recover the original
+        handle by turn token even when a backend terminal branch lost the request.
+        """
+
+        for token in self._turn_tokens(context):
+            self._indicators_by_turn_token[token] = request_or_handle
+
+    def _forget_turn(self, context: MessageContext, handle: ProcessingIndicatorHandle) -> None:
+        for token in self._turn_tokens(context):
+            tracked = self._indicators_by_turn_token.get(token)
+            if tracked is handle or getattr(tracked, "processing_indicator", None) is handle:
+                self._indicators_by_turn_token.pop(token, None)
+
+    async def finish_terminal_turn(self, context: MessageContext) -> None:
+        """Finish the processing indicator for a terminal result emit."""
+
+        for token in self._turn_tokens(context):
+            tracked = self._indicators_by_turn_token.pop(token, None)
+            if tracked is not None:
+                await self.finish(tracked)
+                return
+
     def _delete_context(self, handle: ProcessingIndicatorHandle, channel_id: Optional[str]) -> MessageContext:
         target_channel_id = channel_id or handle.ack_message_channel_id
         if target_channel_id and target_channel_id != handle.context.channel_id:
@@ -379,3 +419,5 @@ class ProcessingIndicatorService:
 
         if request is not None and getattr(request, "processing_indicator", None) is None:
             request.processing_indicator = handle
+
+        self._forget_turn(handle.context, handle)

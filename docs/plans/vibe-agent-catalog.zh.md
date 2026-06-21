@@ -2,18 +2,8 @@
 
 ## 背景
 
-Vibe Remote 现在基本把 “agent” 当作 backend-specific routing 数据处理：
-
-- `agent_backend`
-- `opencode_agent`
-- `opencode_model`
-- `opencode_reasoning_effort`
-- `claude_agent`
-- `claude_model`
-- `claude_reasoning_effort`
-- `codex_agent`
-- `codex_model`
-- `codex_reasoning_effort`
+Vibe Remote 旧版本基本把 “agent” 当作 backend-specific routing 数据处理。
+旧的 scope backend route 字段现在已经废弃并被忽略。
 
 这在每个 backend 都有不同 subagent 模型时是可用的，但不是正确的产品抽象。
 Scope 正在成为 Vibe Remote 里稳定的 project/workspace 单元。每个 Scope
@@ -103,8 +93,8 @@ scope_settings
   display settings...
 ```
 
-现有 `agent_backend` 和 backend-specific agent/model/effort 字段，在概念上都由
-一个 `agent_name` 引用替代。
+Scope routing 现在由一个 `agent_name` 引用，加上可选 model、reasoning 和
+subagent override 表达。
 
 解析规则：
 

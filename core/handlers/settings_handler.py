@@ -508,6 +508,67 @@ class SettingsHandler(BaseHandler):
             return False
         return bool(getattr(backend_config, "enabled", True))
 
+    def _resolve_route_backend(self, agent_name: Optional[str]) -> Optional[str]:
+        if not agent_name:
+            return None
+        name = str(agent_name)
+        if name in {"opencode", "claude", "codex"}:
+            return name
+        store = getattr(self.controller, "vibe_agent_store", None)
+        if store is None:
+            return None
+        try:
+            agent = store.get(name)
+        except Exception:
+            return None
+        backend = getattr(agent, "backend", None) if agent else None
+        return str(backend) if backend else None
+
+    @staticmethod
+    def _routing_target_from_row(row: dict) -> tuple[str, str, str, str, str]:
+        backend = str(row.get("agent_backend") or "").strip()
+        agent_name = str(row.get("agent_name") or "").strip()
+        if not agent_name and backend in {"opencode", "claude", "codex"}:
+            agent_name = backend
+        variant = str(row.get("agent_variant") or "").strip()
+        if variant == backend and agent_name == backend:
+            variant = ""
+        return (
+            agent_name,
+            backend,
+            variant,
+            str(row.get("model") or "").strip(),
+            str(row.get("reasoning_effort") or "").strip(),
+        )
+
+    def _routing_target_from_settings(self, routing) -> tuple[str, str, str, str, str]:
+        agent_name = str(getattr(routing, "agent_name", None) or "").strip()
+        backend = str(self._resolve_route_backend(agent_name) or agent_name).strip()
+        variant = ""
+        if backend == "opencode":
+            variant = str(getattr(routing, "opencode_agent", None) or "").strip()
+        elif backend == "claude":
+            variant = str(getattr(routing, "claude_agent", None) or "").strip()
+        elif backend == "codex":
+            variant = str(getattr(routing, "codex_agent", None) or "").strip()
+        return (
+            agent_name,
+            backend,
+            variant,
+            str(getattr(routing, "model", None) or "").strip(),
+            str(getattr(routing, "reasoning_effort", None) or "").strip(),
+        )
+
+    def _routing_update_needs_new_session_hint(self, context: MessageContext, routing) -> bool:
+        row = self._current_flat_scope_session_row_for_hint(context, log_context="routing update hint")
+        if not row:
+            return False
+        current_target = self._routing_target_from_row(row)
+        next_target = self._routing_target_from_settings(routing)
+        current_backend = current_target[1]
+        next_backend = next_target[1]
+        return bool(current_backend and next_backend and current_backend != next_backend)
+
     async def _handle_routing_slack(self, context: MessageContext):
         """Handle routing for Slack using modal dialog"""
         im_client = self._get_im_client(context)
@@ -779,7 +840,7 @@ class SettingsHandler(BaseHandler):
                 resolved_codex_agent = codex_agent
 
             routing = RoutingSettings(
-                agent_backend=backend,
+                agent_name=backend,
                 model=(
                     opencode_model
                     if backend == "opencode"
@@ -810,6 +871,7 @@ class SettingsHandler(BaseHandler):
             )
 
             settings_manager.set_channel_routing(settings_key, routing)
+            needs_new_session_hint = self._routing_update_needs_new_session_hint(context, routing)
 
             parts = [f"{self._t('routing.label.backend')}: **{backend}**"]
             if backend == "opencode":
@@ -835,6 +897,8 @@ class SettingsHandler(BaseHandler):
                     parts.append(f"{self._t('routing.label.model')}: **{codex_model}**")
                 if codex_reasoning_effort:
                     parts.append(f"{self._t('routing.label.reasoningEffort')}: **{codex_reasoning_effort}**")
+            if needs_new_session_hint:
+                parts.extend(["", self._t("success.routingUpdateNeedsNewSession")])
 
             if notify_user:
                 await im_client.send_message(

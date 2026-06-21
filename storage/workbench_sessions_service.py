@@ -19,10 +19,11 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.engine import Connection
 
 from storage.agent_session_rows import create_agent_session_row
+from storage.db import escape_sql_like
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 from storage.models import (
     agent_runs,
@@ -32,6 +33,7 @@ from storage.models import (
     scope_settings,
     scopes,
     show_pages,
+    agents,
 )
 
 # Raw ``agent_runs.status`` values that are not yet terminal — archive cancels these.
@@ -131,7 +133,7 @@ def list_sessions(
     if title_query:
         # `#`-mention global search: case-insensitive title LIKE. Escape the LIKE
         # metacharacters so a literal ``%`` / ``_`` in the query can't widen it.
-        like = title_query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = escape_sql_like(title_query.strip())
         if like:
             query = query.where(agent_sessions.c.title.ilike(f"%{like}%", escape="\\"))
     if before_id is not None:
@@ -254,26 +256,33 @@ def create_session(
             scopes.c.id,
             scope_settings.c.workdir,
             scope_settings.c.enabled,
-            scope_settings.c.agent_backend,
             scope_settings.c.agent_name,
+            agents.c.backend.label("agent_backend"),
             scope_settings.c.agent_variant,
             scope_settings.c.model,
             scope_settings.c.reasoning_effort,
         )
-        .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
+        .select_from(
+            scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id)
+            .outerjoin(agents, agents.c.name == scope_settings.c.agent_name)
+        )
         .where(scopes.c.id == scope_id)
     ).mappings().first()
     if scope_row is None:
         raise LookupError(f"Scope not found: {scope_id}")
     if scope_row.get("enabled") == 0:
         raise PermissionError(f"Scope is archived: {scope_id}")
+    if agent_name and not agent_backend:
+        agent_backend = _backend_for_agent_name(conn, str(agent_name))
     # Inherit the project's default Agent when the caller didn't pin a backend.
     # The default lives in ``scope_settings`` (set via Project Settings); adopting
-    # it at creation pins the backend from the first turn (a session's backend is
-    # write-once) and makes the chat header open on the right Agent. No project
-    # default → the fields stay empty and dispatch falls back to the global
-    # default Vibe Agent. An explicit caller backend always wins.
-    if not agent_backend and scope_row.get("agent_backend"):
+    # it at creation makes the chat header open on the right Agent and the first
+    # turn run on it. It is a SOFT default: until a native conversation exists
+    # the user can still re-route the session to any backend or clear it back to
+    # the global default (see ``update_session``). No project default → the
+    # fields stay empty and dispatch falls back to the global default Vibe
+    # Agent. An explicit caller backend always wins.
+    if not agent_name and not agent_backend and scope_row.get("agent_name") and scope_row.get("agent_backend"):
         agent_backend = str(scope_row["agent_backend"])
         if agent_name is None:
             agent_name = scope_row.get("agent_name")
@@ -311,9 +320,10 @@ def create_session(
 
 class SessionBackendLockedError(Exception):
     """Raised when a caller tries to switch the backend of a session that already
-    has a native conversation. A session is pinned to its backend for life: the
-    native can only be resumed by the backend that created it, so switching would
-    strand it and silently lose context. Changing the agent WITHIN the same
+    has a native conversation (pinned for life: the native can only be resumed by
+    the backend that created it, so switching would strand it and silently lose
+    context) or whose turn is currently running (the in-flight turn will bind its
+    native on the current route any moment). Changing the agent WITHIN the same
     backend stays allowed."""
 
     def __init__(self, *, session_id: str, current_backend: Optional[str], requested_backend: Optional[str]):
@@ -344,21 +354,49 @@ def update_session(
             agent_sessions.c.id,
             agent_sessions.c.agent_backend,
             agent_sessions.c.native_session_id,
+            agent_sessions.c.agent_status,
             agent_sessions.c.metadata_json,
         ).where(agent_sessions.c.id == session_id)
     ).first()
     if existing is None:
         raise LookupError(f"Session not found: {session_id}")
 
-    # Backend is pinned as soon as the session row has a concrete backend. Allow
-    # changing the agent/model/effort within the SAME backend; reject a switch to
-    # a DIFFERENT backend. A plain Workbench chat may still have an EMPTY
-    # agent_backend (legacy/global-default inheritance), so empty -> concrete is
-    # the initial pin rather than a backend switch.
-    if (
-        agent_backend is not _UNSET
-        and str(existing.agent_backend or "")
-        and str(agent_backend) != str(existing.agent_backend or "")
+    derived_backend = False
+    if agent_name is not _UNSET and agent_backend is _UNSET:
+        agent_backend = _backend_for_agent_name(conn, str(agent_name or "")) if agent_name else None
+        derived_backend = True
+
+    # Backend is pinned once a NATIVE conversation exists: the native can only
+    # be resumed by the backend that created it, so switching (or clearing) the
+    # backend would strand it. A RUNNING turn locks it too — the first turn is
+    # already executing on the current route and will bind its native shortly,
+    # so a mid-turn switch would either be silently overwritten by the bind-time
+    # backfill or route queued follow-ups inconsistently (a stale ``running``
+    # after a crash is reset to ``idle`` on startup). Before the first turn
+    # nothing is strandable — a fresh session may carry a project-default
+    # backend (see ``create_session``) and the user can still re-route it to ANY
+    # backend or clear back to the default. A pending fork is the exception: it
+    # has no native id yet, but its saved source-native id belongs to exactly
+    # one backend, so the fork target must stay on that source backend until the
+    # native fork binds. Within the same backend, agent/model/effort changes
+    # stay allowed for the session's whole life.
+    # Legacy agent-less rows whose native predates the bind-time backend
+    # backfill keep the old empty -> concrete "initial pin" escape (while idle)
+    # — the row doesn't know which backend owns its native, and locking them
+    # would leave their picker permanently stuck.
+    backend_changes = agent_backend is not _UNSET and str(agent_backend or "") != str(
+        existing.agent_backend or ""
+    )
+    existing_metadata = _load_metadata(existing.metadata_json)
+    pending_fork = bool(
+        existing_metadata.get("created_via") == "session_fork"
+        and not str(existing.native_session_id or "")
+        and str(existing_metadata.get("fork_source_backend") or "")
+    )
+    if backend_changes and (
+        (str(existing.native_session_id or "") and str(existing.agent_backend or ""))
+        or str(existing.agent_status or "") == "running"
+        or pending_fork
     ):
         raise SessionBackendLockedError(
             session_id=session_id,
@@ -370,17 +408,18 @@ def update_session(
     if title is not _UNSET:
         cleaned = str(title or "").strip()
         values["title"] = cleaned or None
-        metadata = _load_metadata(existing.metadata_json)
         # "user" (Web UI / human) or "agent" (vibe session update) — both deliberate.
-        metadata["title_source"] = str(title_source or "user")
-        metadata["title_user_modified_at"] = values["updated_at"]
-        values["metadata_json"] = _dumps_metadata(metadata)
+        existing_metadata["title_source"] = str(title_source or "user")
+        existing_metadata["title_user_modified_at"] = values["updated_at"]
+        values["metadata_json"] = _dumps_metadata(existing_metadata)
     if agent_id is not _UNSET:
         values["agent_id"] = agent_id or None
     if agent_name is not _UNSET:
         values["agent_name"] = agent_name or None
     if agent_backend is not _UNSET:
         values["agent_backend"] = agent_backend or ""
+        if derived_backend and agent_variant is _UNSET:
+            values["agent_variant"] = str(agent_backend or "default")
     if agent_variant is not _UNSET:
         values["agent_variant"] = str(agent_variant or "default")
     # ``model`` / ``reasoning_effort`` use a sentinel default so a PRESENT
@@ -392,8 +431,51 @@ def update_session(
     if reasoning_effort is not _UNSET:
         values["reasoning_effort"] = reasoning_effort or None
 
-    conn.execute(update(agent_sessions).where(agent_sessions.c.id == session_id).values(**values))
+    stmt = update(agent_sessions).where(agent_sessions.c.id == session_id)
+    if backend_changes:
+        # Re-assert the lock INSIDE the UPDATE: the guard above is read-then-
+        # write, and a turn start / native bind can commit in between (the
+        # SELECT runs before this statement takes the write lock). The predicate
+        # makes the change atomic — it only lands while the session is still
+        # unlocked (idle AND (no native or the legacy blank-backend escape)) or
+        # the row already converged to the requested backend.
+        stmt = stmt.where(
+            or_(
+                agent_sessions.c.agent_backend == str(agent_backend or ""),
+                and_(
+                    func.coalesce(agent_sessions.c.agent_status, "idle") != "running",
+                    or_(
+                        func.coalesce(agent_sessions.c.native_session_id, "") == "",
+                        func.coalesce(agent_sessions.c.agent_backend, "") == "",
+                    ),
+                ),
+            )
+        )
+    result = conn.execute(stmt.values(**values))
+    if result.rowcount == 0:
+        current = conn.execute(
+            select(agent_sessions.c.agent_backend).where(agent_sessions.c.id == session_id)
+        ).first()
+        if current is None or not backend_changes:
+            raise LookupError(f"Session not found: {session_id}")
+        raise SessionBackendLockedError(
+            session_id=session_id,
+            current_backend=current.agent_backend,
+            requested_backend=agent_backend,
+        )
     return get_session(conn, session_id)
+
+
+def _backend_for_agent_name(conn: Connection, agent_name: str) -> str:
+    cleaned = str(agent_name or "").strip()
+    if not cleaned:
+        return ""
+    backend = conn.execute(select(agents.c.backend).where(agents.c.name == cleaned)).scalar_one_or_none()
+    return str(backend or "")
+
+
+def derive_backend_for_agent_name(conn: Connection, agent_name: str) -> str:
+    return _backend_for_agent_name(conn, agent_name)
 
 
 def backfill_session_title(

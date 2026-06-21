@@ -36,12 +36,12 @@ def parse_routing_modal_selection(
     *,
     view: dict,
     action: dict,
-    default_backend: str,
+    fallback_selected_backend: str,
 ) -> RoutingModalSelection:
     """Parse Slack routing modal state into normalized selection model."""
     values = view.get("state", {}).get("values", {})
 
-    selected_backend = _extract_selected_value(values, "backend_block", "backend_select") or default_backend
+    selected_backend = _extract_selected_value(values, "backend_block", "backend_select") or fallback_selected_backend
     selected_action_id = action.get("action_id")
 
     selected_value = None

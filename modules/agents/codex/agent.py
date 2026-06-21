@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from config.v2_config import (
+    DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS,
+    DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
+)
 from core.avibe_cloud import avibe_cloud_url_available
-from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
+from core.services.session_fork import pending_native_fork_source
+from core.system_prompt_injection import (
+    build_forked_session_correction_prompt,
+    build_system_prompt_injection,
+    get_enabled_agents_for_prompt,
+)
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.subagent_router import SubagentDefinition, load_codex_subagent
 from modules.agents.codex.event_handler import CodexEventHandler
@@ -57,6 +67,13 @@ class CodexAgent(BaseAgent):
         self._transports: Dict[str, CodexTransport] = {}
         self._transport_locks: Dict[str, asyncio.Lock] = {}
         self._transport_last_activity: Dict[str, float] = {}
+        # cwd inode at app-server spawn time, keyed like ``_transports``. A
+        # cached app-server whose directory was deleted (even if re-created
+        # with the same path) sits in a dead inode and fails every
+        # ``thread/start`` with a misleading "failed to load configuration:
+        # No such file or directory" (#561); the inode comparison detects
+        # that staleness BEFORE paying a failed RPC.
+        self._transport_cwd_inodes: Dict[str, Optional[int]] = {}
 
         self._session_mgr = CodexSessionManager()
         self._turn_registry = CodexTurnRegistry()
@@ -66,6 +83,7 @@ class CodexAgent(BaseAgent):
         self._session_locks: Dict[str, asyncio.Lock] = {}
         # base_session_id → (thread_id, developer_instructions)
         self._thread_developer_instructions: Dict[str, tuple[str, str]] = {}
+        self._fork_correction_pending_base_sessions: set[str] = set()
 
     # ------------------------------------------------------------------
     # BaseAgent interface
@@ -262,6 +280,22 @@ class CodexAgent(BaseAgent):
 
         return count
 
+    def runtime_turn_keys(self) -> set[str]:
+        return {
+            self._runtime_turn_key_for_base_session(base_session_id)
+            for base_session_id in self._session_mgr.all_base_sessions()
+        }
+
+    def runtime_turn_keys_for_session_key(self, session_key: str) -> set[str]:
+        return {
+            self._runtime_turn_key_for_base_session(base_session_id)
+            for base_session_id in self._session_mgr.get_sessions_by_session_key(session_key)
+        }
+
+    def _runtime_turn_key_for_base_session(self, base_session_id: str) -> str:
+        cwd = self._session_mgr.get_cwd(base_session_id)
+        return f"{base_session_id}:{cwd}" if cwd else base_session_id
+
     async def refresh_auth_state(self) -> None:
         """Drop app-server runtime state so future turns pick up fresh auth."""
         if not hasattr(self, "_transport_last_activity"):
@@ -378,6 +412,13 @@ class CodexAgent(BaseAgent):
         if not hasattr(self, "_session_locks"):
             self._session_locks = {}
 
+        # Absolute-time backstop: a transport whose turn is stuck "active"
+        # forever (turn/completed never arrives — wedged/silently-disconnected
+        # app-server) would otherwise be vetoed from eviction indefinitely and
+        # leak its app-server process until restart (#622/#623 analog). Once it
+        # has been idle past this cap, force-evict it despite the active turn.
+        stuck_active_cap = self._stuck_active_idle_eviction_cap(idle_timeout)
+
         now = time.monotonic()
         evicted = 0
 
@@ -386,10 +427,14 @@ class CodexAgent(BaseAgent):
             if transport is None:
                 self._transport_last_activity.pop(cwd, None)
                 continue
-            if self._has_active_turns_for_cwd(cwd):
-                continue
             idle_for = now - last_activity
-            if idle_for < idle_timeout:
+            has_active = self._has_active_turns_for_cwd(cwd)
+            if not self._is_transport_evictable(
+                has_active=has_active,
+                idle_for=idle_for,
+                idle_timeout=idle_timeout,
+                stuck_active_cap=stuck_active_cap,
+            ):
                 continue
 
             lock = self._transport_locks.setdefault(cwd, asyncio.Lock())
@@ -398,15 +443,30 @@ class CodexAgent(BaseAgent):
                 current_last_activity = self._transport_last_activity.get(cwd)
                 if current_transport is None or current_transport is not transport:
                     continue
-                if self._has_active_turns_for_cwd(cwd):
-                    continue
                 if current_last_activity is None:
                     continue
+                # Recheck from CURRENT state inside the lock: activity (and the
+                # active-turn flag) may have changed between the two passes.
                 idle_for = time.monotonic() - current_last_activity
-                if idle_for < idle_timeout:
+                has_active = self._has_active_turns_for_cwd(cwd)
+                if not self._is_transport_evictable(
+                    has_active=has_active,
+                    idle_for=idle_for,
+                    idle_timeout=idle_timeout,
+                    stuck_active_cap=stuck_active_cap,
+                ):
                     continue
 
-                logger.info("Evicting idle Codex transport for cwd=%s after %.1fs idle", cwd, idle_for)
+                if has_active:
+                    logger.warning(
+                        "Force-evicting stuck-active Codex transport for cwd=%s after %.1fs idle "
+                        "(active turn exceeded stuck-active cap of %.1fs; app-server presumed wedged)",
+                        cwd,
+                        idle_for,
+                        stuck_active_cap,
+                    )
+                else:
+                    logger.info("Evicting idle Codex transport for cwd=%s after %.1fs idle", cwd, idle_for)
                 try:
                     await transport.stop()
                 except Exception as exc:
@@ -415,8 +475,15 @@ class CodexAgent(BaseAgent):
 
                 self._transports.pop(cwd, None)
                 self._transport_last_activity.pop(cwd, None)
+                self._cwd_inodes().pop(cwd, None)
 
                 for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
+                    # A force-evicted stuck-active turn never emitted a terminal
+                    # result, so the Workbench status and SSE/runtime gate are
+                    # still owned by that turn. Settle it through the same
+                    # terminal-result path as normal completions before dropping
+                    # turn state. No-op for sessions with no active turn.
+                    await self._settle_stuck_active_request(base_session_id)
                     # Keep the persisted thread mapping so a later transport restart
                     # can resume the same Codex conversation for this Slack thread.
                     self._session_mgr.invalidate_thread(base_session_id)
@@ -427,6 +494,90 @@ class CodexAgent(BaseAgent):
                 evicted += 1
 
         return evicted
+
+    async def _settle_stuck_active_request(self, base_session_id: str) -> None:
+        """Settle a turn we are about to force-reap.
+
+        ``_start_turn`` marks the AgentService runtime turn started; it is
+        normally settled by a terminal result, which also flips Workbench
+        ``agent_status`` out of ``running``. The stuck-active force-eviction path
+        has no backend terminal event, so emit a silent error result here. The
+        terminal-result path is token-guarded by its owner, so a no-op
+        (already-settled or no active turn) is safe.
+        """
+        get_active = getattr(self._turn_registry, "get_active_turn", None)
+        active_turn = get_active(base_session_id) if callable(get_active) else None
+        if not active_turn:
+            return
+
+        request = None
+        get_for_turn = getattr(self._turn_registry, "get_request_for_turn", None)
+        if callable(get_for_turn):
+            request = get_for_turn(active_turn)
+        if request is None:
+            get_latest = getattr(self._turn_registry, "get_latest_request", None)
+            if callable(get_latest):
+                request = get_latest(base_session_id)
+
+        context = getattr(request, "context", None)
+        if context is None:
+            return
+        controller = getattr(self, "controller", None)
+        emit = getattr(controller, "emit_agent_message", None)
+        if callable(emit):
+            try:
+                await emit(context, "result", "", is_error=True, level="silent")
+                return
+            except Exception:
+                logger.warning(
+                    "Failed to emit silent terminal result for force-evicted Codex turn %s",
+                    active_turn,
+                    exc_info=True,
+                )
+
+        # Best-effort fallback for narrow test doubles or partial controllers:
+        # release the runtime gate even if the Workbench status path is absent.
+        release = getattr(self._event_handler, "_release_stream_turn", None)
+        if callable(release):
+            release(context)
+
+    def _stuck_active_idle_eviction_cap(self, idle_timeout: float) -> Optional[float]:
+        """Idle cap after which an *active* transport is force-evicted.
+
+        Returns ``None`` when the backstop is disabled (multiplier <= 0), in
+        which case an active turn remains an absolute veto. Otherwise a
+        transport with an active turn is force-evicted once it has been idle for
+        ``max(idle_timeout * multiplier, floor)`` — the floor keeps the window
+        sane even when ``idle_timeout`` is configured very small.
+        """
+        multiplier = DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER
+        if multiplier <= 0:
+            return None
+        floor = max(0.0, float(DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS))
+        return max(idle_timeout * multiplier, floor)
+
+    def _is_transport_evictable(
+        self,
+        *,
+        has_active: bool,
+        idle_for: float,
+        idle_timeout: float,
+        stuck_active_cap: Optional[float],
+    ) -> bool:
+        """Decide whether an idle transport is eligible for eviction.
+
+        Pure decision (no lookups), so callers evaluate the active-turn flag
+        exactly once. An idle transport with no active turn is evictable once it
+        crosses the normal ``idle_timeout``. A transport with an active turn is
+        normally vetoed, but is force-evictable once it crosses
+        ``stuck_active_cap`` (the absolute-time backstop) — the only path that
+        reaps a wedged app-server whose ``turn/completed`` never arrived.
+        """
+        if has_active:
+            if stuck_active_cap is None:
+                return False
+            return idle_for >= stuck_active_cap
+        return idle_for >= idle_timeout
 
     # ------------------------------------------------------------------
     # Transport management
@@ -443,6 +594,11 @@ class CodexAgent(BaseAgent):
                 "transport is not available",
                 "stdout closed",
                 "timed out after 120s",
+                # codex resolves configuration against its process cwd at
+                # thread/start; a cwd deleted out from under the app-server
+                # surfaces as this RPC error (#561). A restart respawns the
+                # process in the (re-created) directory.
+                "failed to load configuration",
             )
         )
 
@@ -460,6 +616,7 @@ class CodexAgent(BaseAgent):
             if current is transport:
                 self._transports.pop(cwd, None)
                 self._transport_last_activity.pop(cwd, None)
+                self._cwd_inodes().pop(cwd, None)
             try:
                 await transport.stop()
             except Exception as exc:
@@ -487,8 +644,19 @@ class CodexAgent(BaseAgent):
             # Double-check after acquiring lock
             existing = self._transports.get(cwd)
             if existing and existing.is_initialized:
-                self._touch_transport_activity(cwd)
-                return existing
+                # Reuse only while the directory the app-server was spawned in
+                # is still the SAME directory (#561): after a delete (+ possible
+                # re-create) the cached process sits in a dead inode and every
+                # thread/start fails. Untracked legacy entries reuse as before.
+                spawned_ino = self._cwd_inodes().get(cwd)
+                stale_cwd = spawned_ino is not None and self._cwd_inode(cwd) != spawned_ino
+                if not stale_cwd:
+                    self._touch_transport_activity(cwd)
+                    return existing
+                logger.warning(
+                    "Codex transport cwd was replaced under the cached app-server; restarting transport for cwd=%s",
+                    cwd,
+                )
 
             # Stop stale transport if any
             if existing:
@@ -516,10 +684,19 @@ class CodexAgent(BaseAgent):
 
             # Wire up callbacks
             transport.on_notification(self._on_notification)
-            transport.on_server_request(self._on_server_request)
+            # Bind the cwd so any server request (e.g. an auto-approval) refreshes
+            # this transport's activity: a server request IS app-server liveness,
+            # and unlike notifications it isn't always tied to a resolvable
+            # turn/thread in params. Without this a turn that thinks silently and
+            # then asks for approval near the stuck-active cap could be wrongly
+            # force-evicted by the next sweep.
+            transport.on_server_request(
+                lambda req_id, method, params, _cwd=cwd: self._on_server_request(_cwd, req_id, method, params)
+            )
 
             await transport.start()
             self._transports[cwd] = transport
+            self._cwd_inodes()[cwd] = self._cwd_inode(cwd)
             self._touch_transport_activity(cwd)
             return transport
 
@@ -557,6 +734,47 @@ class CodexAgent(BaseAgent):
         # Also persist for resume support
         self.bind_agent_session_id(request, thread_id)
         self._remember_thread_developer_instructions(request.base_session_id, thread_id, developer_instructions)
+        return thread_id
+
+    async def _fork_thread(
+        self,
+        transport: CodexTransport,
+        request: AgentRequest,
+        source_thread_id: str,
+    ) -> str:
+        """Fork an existing Codex thread and bind the new thread id."""
+        self.ensure_agent_session_id(request)
+        _, effective_model, _, _ = self._resolve_codex_agent_settings(request)
+        params: Dict[str, Any] = {
+            "threadId": source_thread_id,
+            "cwd": request.working_path,
+            "approvalPolicy": "never",
+            "sandbox": "danger-full-access",
+        }
+        developer_instructions = self._build_thread_developer_instructions(request)
+        if developer_instructions:
+            params["developerInstructions"] = developer_instructions
+        if effective_model:
+            params["model"] = effective_model
+
+        self._mark_fork_correction_pending(request.base_session_id)
+        try:
+            resp = await transport.send_request("thread/fork", params)
+            thread_id = resp.get("id", "")
+            if not thread_id:
+                thread_obj = resp.get("thread")
+                if isinstance(thread_obj, dict):
+                    thread_id = thread_obj.get("id", "")
+            if not thread_id:
+                raise RuntimeError("Codex thread/fork returned no thread id")
+
+            await self._inject_forked_session_correction(transport, request, thread_id)
+        finally:
+            self._clear_fork_correction_pending(request.base_session_id)
+        self._session_mgr.set_thread_id(request.base_session_id, thread_id)
+        self.bind_agent_session_id(request, thread_id)
+        self._remember_thread_developer_instructions(request.base_session_id, thread_id, developer_instructions)
+        logger.info("Forked Codex thread %s from %s for session %s", thread_id, source_thread_id, request.base_session_id)
         return thread_id
 
     def _resolve_codex_agent_settings(
@@ -678,6 +896,10 @@ class CodexAgent(BaseAgent):
             logger.info("Resumed Codex thread %s for session %s", thread_id, request.base_session_id)
             return thread_id
 
+        fork_source = pending_native_fork_source(request.context, self.name)
+        if fork_source:
+            return await self._fork_thread(transport, request, fork_source)
+
         # No associated thread yet (genuinely first turn) — start fresh.
         return await self._start_thread(transport, request)
 
@@ -789,6 +1011,36 @@ class CodexAgent(BaseAgent):
 
         return "\n\n".join(part for part in instruction_parts if part) or None
 
+    async def _inject_forked_session_correction(
+        self,
+        transport: CodexTransport,
+        request: AgentRequest,
+        thread_id: str,
+    ) -> None:
+        """Append a fork correction as Codex model-visible developer history.
+
+        Codex accepts ``developerInstructions`` on ``thread/fork``, but the fork
+        also copies the source thread's previous developer messages. Appending a
+        fresh developer item makes the target session id authoritative without
+        creating a user turn.
+        """
+        correction = build_forked_session_correction_prompt(request.context)
+        if not correction:
+            return
+        await transport.send_request(
+            "thread/inject_items",
+            {
+                "threadId": thread_id,
+                "items": [
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{"type": "input_text", "text": correction}],
+                    }
+                ],
+            },
+        )
+
     async def _refresh_thread_developer_instructions_if_needed(
         self,
         transport: CodexTransport,
@@ -842,6 +1094,20 @@ class CodexAgent(BaseAgent):
         if hasattr(self, "_thread_developer_instructions"):
             self._thread_developer_instructions.pop(base_session_id, None)
 
+    def _fork_correction_pending_sessions(self) -> set[str]:
+        if not hasattr(self, "_fork_correction_pending_base_sessions"):
+            self._fork_correction_pending_base_sessions = set()
+        return self._fork_correction_pending_base_sessions
+
+    def _mark_fork_correction_pending(self, base_session_id: str) -> None:
+        self._fork_correction_pending_sessions().add(base_session_id)
+
+    def _clear_fork_correction_pending(self, base_session_id: str) -> None:
+        self._fork_correction_pending_sessions().discard(base_session_id)
+
+    def is_fork_correction_pending(self, base_session_id: str) -> bool:
+        return base_session_id in self._fork_correction_pending_sessions()
+
     async def _start_turn(
         self,
         transport: CodexTransport,
@@ -886,6 +1152,7 @@ class CodexAgent(BaseAgent):
             raise RuntimeError("Codex turn/start returned no turn id")
 
         turn_state = self._turn_registry.finalize_turn_start_response(turn_id, request)
+        self._mark_runtime_turn_started(getattr(request, "context", None))
         bind_generated_image_snapshot = getattr(event_handler, "bind_generated_image_snapshot", None)
         if callable(bind_generated_image_snapshot):
             bind_generated_image_snapshot(thread_id, turn_id, request.base_session_id)
@@ -897,6 +1164,12 @@ class CodexAgent(BaseAgent):
             "registered" if turn_state else "already-finished",
         )
         return thread_id
+
+    def _mark_runtime_turn_started(self, context: Any) -> None:
+        service = getattr(getattr(self, "controller", None), "agent_service", None)
+        mark_started = getattr(service, "mark_runtime_turn_started", None)
+        if callable(mark_started):
+            mark_started(context)
 
     # ------------------------------------------------------------------
     # Input building
@@ -957,11 +1230,15 @@ class CodexAgent(BaseAgent):
 
     async def _on_server_request(
         self,
+        cwd: str,
         req_id: int | str,
         method: str,
         params: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Handle server requests — auto-approve all."""
+        # A server request means this app-server is alive and actively driving a
+        # turn, so count it as activity for the stuck-active idle backstop.
+        self._touch_transport_activity(cwd)
         if method in (
             "item/commandExecution/requestApproval",
             "item/fileChange/requestApproval",
@@ -1044,6 +1321,18 @@ class CodexAgent(BaseAgent):
                 logger.debug("Could not delete ack message: %s", err)
             finally:
                 request.ack_message_id = None
+
+    def _cwd_inodes(self) -> Dict[str, Optional[int]]:
+        if not hasattr(self, "_transport_cwd_inodes"):
+            self._transport_cwd_inodes = {}
+        return self._transport_cwd_inodes
+
+    @staticmethod
+    def _cwd_inode(cwd: str) -> Optional[int]:
+        try:
+            return os.stat(cwd).st_ino
+        except OSError:
+            return None
 
     def _touch_transport_activity(self, cwd: str) -> None:
         if not hasattr(self, "_transport_last_activity"):

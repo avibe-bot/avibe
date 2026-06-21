@@ -56,7 +56,7 @@ def test_detect_sentry_environment_defaults_to_local(monkeypatch):
     monkeypatch.delenv("SENTRY_ENVIRONMENT", raising=False)
     monkeypatch.delenv("VIBE_DEPLOYMENT_ENV", raising=False)
     monkeypatch.delenv("E2E_TEST_MODE", raising=False)
-    monkeypatch.setenv("VIBE_REMOTE_HOME", "/tmp/vibe-remote-home")
+    monkeypatch.setenv("AVIBE_HOME", "/tmp/vibe-remote-home")
     monkeypatch.setattr(sentry_integration, "Path", lambda _: type("P", (), {"exists": staticmethod(lambda: False)})())
 
     assert sentry_integration.detect_sentry_environment() == "local"
@@ -75,19 +75,19 @@ def test_detect_sentry_environment_marks_integration_mode(monkeypatch):
     monkeypatch.delenv("SENTRY_ENVIRONMENT", raising=False)
     monkeypatch.delenv("VIBE_DEPLOYMENT_ENV", raising=False)
     monkeypatch.setenv("E2E_TEST_MODE", "true")
-    monkeypatch.setenv("VIBE_REMOTE_HOME", "/tmp/vibe-remote-home")
+    monkeypatch.setenv("AVIBE_HOME", "/tmp/vibe-remote-home")
 
     assert sentry_integration.detect_sentry_environment() == "integration"
 
 
 def test_build_sentry_contexts_contains_debug_metadata(monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", "/tmp/vibe-remote-home")
+    monkeypatch.setenv("AVIBE_HOME", "/tmp/vibe-remote-home")
 
     contexts = sentry_integration.build_sentry_contexts(_config(), component="service", environment="regression")
 
     assert contexts["deployment"]["environment"] == "regression"
     assert contexts["deployment"]["component"] == "service"
-    assert contexts["deployment"]["default_backend"] == "opencode"
+    assert contexts["deployment"]["default_agent_name"] is None
     assert contexts["runtime"]["python_version"]
     assert "hostname" in contexts["host"]
 

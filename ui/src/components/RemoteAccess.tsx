@@ -5,8 +5,10 @@ import { useApi } from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
 import { CompactField } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
+import { Badge } from './ui/badge';
 
 const VIBE_CLOUD_URL = 'https://avibe.bot';
+const VIBE_CLOUD_APP_URL = 'https://avibe.bot/app';
 
 export const RemoteAccess: React.FC = () => {
   const { t } = useTranslation();
@@ -124,33 +126,33 @@ export const RemoteAccess: React.FC = () => {
   return (
     <section
       id="remote-access"
-      className="scroll-mt-24 overflow-hidden rounded-xl border border-cyan/25 bg-surface-2/70 shadow-[0_18px_44px_-28px_rgba(63,224,229,0.55)]"
+      className="scroll-mt-24 overflow-hidden rounded-xl border border-cyan/45 bg-cyan/[0.06] shadow-[0_0_40px_-10px_rgba(63,224,229,0.45)]"
     >
-      <div className="flex items-start justify-between gap-4 border-b border-cyan/15 bg-cyan/[0.035] px-5 py-4">
+      <div className="flex items-start justify-between gap-4 border-b border-cyan/20 bg-cyan/[0.07] px-5 py-4">
         <div className="min-w-0 space-y-2">
           <h2 className="inline-flex items-center gap-2 text-[15px] font-semibold text-foreground">
-            <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-cyan/25 bg-cyan/[0.08] text-cyan">
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-cyan/30 bg-cyan/[0.12] text-cyan">
               <Cloud className="size-4" strokeWidth={2.25} />
             </span>
             {t('remoteAccess.title')}
           </h2>
-          <p className="max-w-2xl text-[12px] leading-relaxed text-muted">
-            <Trans
-              i18nKey="remoteAccess.subtitleWithLink"
-              components={{
-                cloud: (
-                  <a
-                    href={VIBE_CLOUD_URL}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-0.5 font-medium text-cyan hover:underline"
-                  />
-                ),
-              }}
-            />
-          </p>
+          <p className="max-w-2xl text-[12px] leading-relaxed text-muted">{t('remoteAccess.subtitleWithLink')}</p>
           <ol className="ml-4 list-decimal space-y-1 text-[12px] leading-relaxed text-muted">
-            <li>{t('remoteAccess.flowStep1')}</li>
+            <li>
+              <Trans
+                i18nKey="remoteAccess.flowStep1"
+                components={{
+                  console: (
+                    <a
+                      href={VIBE_CLOUD_APP_URL}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-0.5 font-medium text-cyan hover:underline"
+                    />
+                  ),
+                }}
+              />
+            </li>
             <li>{t('remoteAccess.flowStep2')}</li>
             <li>{t('remoteAccess.flowStep3')}</li>
           </ol>
@@ -170,7 +172,13 @@ export const RemoteAccess: React.FC = () => {
       <div className="grid border-b border-border md:grid-cols-3">
         <div className="border-b border-border px-5 py-3.5 md:border-b-0 md:border-r">
           <div className="text-[12px] text-muted">{t('remoteAccess.paired')}</div>
-          <div className="mt-1 text-[13px] font-medium text-foreground">{paired ? t('common.enabled') : t('common.disabled')}</div>
+          <div className="mt-1">
+            {paired ? (
+              <Badge variant="success">{t('common.enabled')}</Badge>
+            ) : (
+              <Badge variant="secondary">{t('common.disabled')}</Badge>
+            )}
+          </div>
         </div>
         <div className="border-b border-border px-5 py-3.5 md:border-b-0 md:border-r">
           <div className="text-[12px] text-muted">{t('remoteAccess.connector')}</div>

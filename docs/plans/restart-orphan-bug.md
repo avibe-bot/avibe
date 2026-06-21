@@ -288,7 +288,7 @@ delayed restart path is fire-and-forget with no audit trail.
 
 After this fix, the following invariants must hold:
 
-1. At most one `service_main.py` process per `VIBE_REMOTE_HOME` data dir
+1. At most one `service_main.py` process per `AVIBE_HOME` data dir
    at any time. A second invocation either reuses the existing one or
    fails loudly.
 2. Every `vibe restart` (CLI direct, CLI delayed, Web UI, `do_upgrade`
@@ -305,7 +305,7 @@ After this fix, the following invariants must hold:
 
 The first-principles boundary is:
 
-> Same `VIBE_REMOTE_HOME` means same service identity. Exactly one process may
+> Same `AVIBE_HOME` means same service identity. Exactly one process may
 > own that service identity at a time.
 
 Pidfiles are now treated as auxiliary status, not the source of running
@@ -347,7 +347,7 @@ Scanning can be useful for diagnostics, but it is the wrong primary
 boundary. A process list answers "what looks like a service process right
 now?" The product invariant is different: "who owns this data directory?"
 The lock answers the invariant directly and avoids false positives across
-different worktrees, installs, and `VIBE_REMOTE_HOME` values.
+different worktrees, installs, and `AVIBE_HOME` values.
 
 ## 6. Implementation plan
 
@@ -417,7 +417,7 @@ After this branch lands:
    keep the spawn_background path as a fallback when no service-manager
    integration is registered.
 2. **What counts as "the same install"?** Resolved here: same
-   `VIBE_REMOTE_HOME` means same service identity, regardless of Python
+   `AVIBE_HOME` means same service identity, regardless of Python
    install path.
 4. **Stop-grace window.** Some IM backends (Lark websocket reconnect
    loops, OpenCode server) may need more than 5s to flush. Should

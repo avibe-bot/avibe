@@ -30,7 +30,7 @@ component via a `backend`-switch dispatcher inside the existing Radix `Dialog`
    - `BackendProviderConfig.tsx` — thin `switch(backend)` dispatcher.
 2. **Slim the 3 settings pages** to `SettingsPageShell` + `<XxxProviderConfig/>`. No behavior change on the settings route.
 3. **AgentDetection.tsx** (wizard backend step) revamp:
-   - Remove the **Default backend** selector (+ DEFAULT pill); also from the shared/settings surface (`agents.default_backend` UI). Confirm `default_backend` payload handling stays valid (Wizard.buildConfigPayload).
+   - Remove the **Default backend** selector (+ DEFAULT pill); also from the shared/settings surface. `agents.default_backend` is deprecated and should not be emitted by the wizard.
    - Keep **auto-detect** (`detectAll` on mount) + a Re-scan affordance.
    - **Missing backend → one-click Install** (existing `installAgent`).
    - **OpenCode → Set up Allow / permission** (existing `opencodeSetupPermission`).

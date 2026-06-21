@@ -92,7 +92,7 @@ def test_maybe_notify_inbox_message_skips_non_notifiable(monkeypatch):
 
 
 def test_send_to_enabled_subscriptions_waits_then_sends_to_owner_devices(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -174,7 +174,7 @@ def test_send_to_enabled_subscriptions_waits_then_sends_to_owner_devices(monkeyp
 def test_send_to_enabled_subscriptions_sets_global_badge_count(monkeypatch, tmp_path):
     """badge_count in the sent payload is the GLOBAL unread total, not the
     triggering session's per-session count — the app-icon badge is one number."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -256,7 +256,7 @@ def test_send_to_enabled_subscriptions_sets_global_badge_count(monkeypatch, tmp_
 
 
 def test_send_to_enabled_subscriptions_uses_legacy_session_owner(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -319,7 +319,7 @@ def test_send_to_enabled_subscriptions_uses_legacy_session_owner(monkeypatch, tm
 
 
 def test_send_to_enabled_subscriptions_prefers_message_owner_over_legacy_session(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -388,7 +388,7 @@ def test_send_to_enabled_subscriptions_prefers_message_owner_over_legacy_session
 
 
 def test_send_to_enabled_subscriptions_sends_to_merged_prompt_owners(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -459,7 +459,7 @@ def test_send_to_enabled_subscriptions_sends_to_merged_prompt_owners(monkeypatch
 
 
 def test_send_to_enabled_subscriptions_ignores_untrusted_author_id(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -527,7 +527,7 @@ def test_send_to_enabled_subscriptions_ignores_untrusted_author_id(monkeypatch, 
 
 
 def test_send_to_enabled_subscriptions_ignores_queued_owner(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -599,7 +599,7 @@ def test_send_to_enabled_subscriptions_ignores_queued_owner(monkeypatch, tmp_pat
 
 
 def test_send_to_enabled_subscriptions_skips_messages_marked_read_during_delay(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -656,7 +656,7 @@ def test_send_to_enabled_subscriptions_skips_messages_marked_read_during_delay(m
 
 
 def test_send_to_enabled_subscriptions_skips_unowned_remote_single_owner(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -712,7 +712,7 @@ def test_send_to_enabled_subscriptions_skips_unowned_remote_single_owner(monkeyp
 
 
 def test_send_to_enabled_subscriptions_falls_back_to_local_owner(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -769,7 +769,7 @@ def test_send_to_enabled_subscriptions_falls_back_to_local_owner(monkeypatch, tm
 
 
 def test_send_to_enabled_subscriptions_skips_local_fallback_when_remote_access_enabled(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -826,7 +826,7 @@ def test_send_to_enabled_subscriptions_skips_local_fallback_when_remote_access_e
 
 
 def test_send_to_enabled_subscriptions_sends_terminal_error_with_owner(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"
@@ -894,7 +894,7 @@ def test_send_to_enabled_subscriptions_sends_terminal_error_with_owner(monkeypat
 
 
 def test_send_to_enabled_subscriptions_skips_ambiguous_legacy_owner(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     now = "2026-06-04T00:00:00Z"

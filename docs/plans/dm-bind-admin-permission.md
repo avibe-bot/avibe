@@ -113,7 +113,7 @@ class SettingsState:
     "C0123456789": {
       "enabled": true,
       "custom_cwd": "/home/user/project",
-      "routing": { "agent_backend": "opencode" },
+      "routing": { "agent_name": "opencode" },
       "show_message_types": [],
       "require_mention": null
     }
@@ -125,7 +125,7 @@ class SettingsState:
       "bound_at": "2026-03-13T10:05:00Z",
       "enabled": true,
       "custom_cwd": null,
-      "routing": { "agent_backend": "opencode" },
+      "routing": { "agent_name": "opencode" },
       "show_message_types": [],
       "require_mention": null
     }

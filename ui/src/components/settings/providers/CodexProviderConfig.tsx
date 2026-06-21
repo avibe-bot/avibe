@@ -285,7 +285,7 @@ export const CodexProviderConfig: React.FC<{
         {authMode === 'oauth' && (
           <BackendOAuthPanel
             backend="codex"
-            signedIn={!!state?.has_chatgpt_tokens}
+            signedIn={state?.active_auth_mode === 'oauth'}
             signedInDetail={(() => {
               // Compose a single-line identity (``email · plan ·
               // org``) from the JWT-decoded ``chatgpt_account``

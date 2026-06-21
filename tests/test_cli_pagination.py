@@ -8,7 +8,7 @@ from vibe import cli
 
 
 def test_runs_list_cli_defaults_to_first_page(monkeypatch, tmp_path, capsys) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     store = SQLiteBackgroundTaskStore()
     try:
@@ -42,7 +42,7 @@ def test_runs_list_cli_defaults_to_first_page(monkeypatch, tmp_path, capsys) -> 
 
 
 def test_runs_list_cli_filters_status_and_query(monkeypatch, tmp_path, capsys) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     store = SQLiteBackgroundTaskStore()
     try:
@@ -84,7 +84,7 @@ def test_runs_list_cli_filters_status_and_query(monkeypatch, tmp_path, capsys) -
 
 
 def test_runs_list_cli_normalizes_offset_time_filters(monkeypatch, tmp_path, capsys) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     store = SQLiteBackgroundTaskStore()
     try:
@@ -117,7 +117,7 @@ def test_runs_list_cli_normalizes_offset_time_filters(monkeypatch, tmp_path, cap
 
 
 def test_runs_list_cli_next_command_uses_absolute_time_filters(monkeypatch, tmp_path, capsys) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     store = SQLiteBackgroundTaskStore()
     try:
@@ -144,7 +144,7 @@ def test_runs_list_cli_next_command_uses_absolute_time_filters(monkeypatch, tmp_
 
 
 def test_data_query_cli_runs_read_only_sql(monkeypatch, tmp_path, capsys) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     store = SQLiteBackgroundTaskStore()
     try:
@@ -170,7 +170,7 @@ def test_data_query_cli_runs_read_only_sql(monkeypatch, tmp_path, capsys) -> Non
 
 
 def test_data_query_cli_omits_next_command_for_stdin_sql(monkeypatch, tmp_path, capsys) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     store = SQLiteBackgroundTaskStore()
     try:
@@ -198,7 +198,7 @@ def test_data_query_cli_omits_next_command_for_stdin_sql(monkeypatch, tmp_path, 
 
 
 def test_data_query_cli_rejects_writes(monkeypatch, tmp_path, capsys) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     store = SQLiteBackgroundTaskStore()
     store.close()

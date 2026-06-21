@@ -117,7 +117,7 @@ def _build_controller_double(handler=None):
 
 
 def test_default_socket_path_lives_under_state_dir(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.delenv("VIBE_INTERNAL_DISPATCH_SOCKET", raising=False)
     path = internal_server.default_socket_path()
     assert path.name == "dispatch.sock"
@@ -156,6 +156,7 @@ def test_create_app_exposes_minimal_endpoints():
     # flow re-publishes its SSE chunks as ``show.dispatch``).
     assert ("/internal/health", ("GET",)) in routes
     assert ("/internal/dispatch_async", ("POST",)) in routes
+    assert ("/internal/reconcile-platforms", ("POST",)) in routes
     assert ("/internal/cancel/{session_id}", ("POST",)) in routes
     assert ("/internal/dispatch", ("POST",)) in routes
 
@@ -177,6 +178,53 @@ def test_health_endpoint():
     resp = asyncio.run(_health_round_trip())
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "service": "vibe-remote-internal", "version": 1}
+
+
+def test_reconcile_platforms_endpoint_calls_controller(monkeypatch):
+    controller = _build_controller_double()
+    calls = []
+
+    async def reconcile_platforms(config):
+        calls.append(config)
+        return {"ok": True, "added": ["discord"]}
+
+    controller.reconcile_platforms = reconcile_platforms
+    monkeypatch.setattr("config.v2_config.V2Config.load", lambda: "v2-config")
+    monkeypatch.setattr("config.v2_compat.to_app_config", lambda config: f"compat:{config}")
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post("/internal/reconcile-platforms")
+
+    resp = asyncio.run(_go())
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "added": ["discord"]}
+    assert calls == ["compat:v2-config"]
+
+
+def test_reconcile_platforms_endpoint_reports_controller_failure(monkeypatch):
+    controller = _build_controller_double()
+
+    async def reconcile_platforms(config):
+        raise RuntimeError("IM thread for discord did not stop within timeout")
+
+    controller.reconcile_platforms = reconcile_platforms
+    monkeypatch.setattr("config.v2_config.V2Config.load", lambda: "v2-config")
+    monkeypatch.setattr("config.v2_compat.to_app_config", lambda config: f"compat:{config}")
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post("/internal/reconcile-platforms")
+
+    resp = asyncio.run(_go())
+
+    assert resp.status_code == 500
+    assert resp.json() == {"ok": False, "error": "IM thread for discord did not stop within timeout"}
 
 
 async def _dispatch_round_trip(body: dict) -> httpx.Response:
@@ -268,7 +316,7 @@ def test_dispatch_forwards_session_routing_into_platform_specific(monkeypatch, t
     from storage.importer import ensure_sqlite_state
     from storage.settings_service import upsert_scope
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -287,6 +335,12 @@ def test_dispatch_forwards_session_routing_into_platform_specific(monkeypatch, t
             agent_name="contract-bot",
             model="claude-sonnet-4-6",
             reasoning_effort="high",
+            metadata={
+                "created_via": "session_fork",
+                "fork_source_session_id": "ses-source",
+                "fork_source_native_session_id": "thread-source",
+                "fork_source_backend": "claude",
+            },
         )
     session_id = session["id"]
 
@@ -325,6 +379,7 @@ def test_dispatch_forwards_session_routing_into_platform_specific(monkeypatch, t
     # restart instead of a computed avibe_<id> (Codex P2). Workbench sessions
     # self-anchor to their id.
     assert target.get("session_anchor") == session_id
+    assert target.get("metadata", {}).get("fork_source_native_session_id") == "thread-source"
 
 
 def test_dispatch_async_starts_turn_and_returns_202(monkeypatch, tmp_path):
@@ -340,7 +395,7 @@ def test_dispatch_async_starts_turn_and_returns_202(monkeypatch, tmp_path):
 
     # dispatch_async reads the queue (to preserve order after a Stop), so it needs
     # an initialized state DB even on the empty-queue happy path.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     started = asyncio.Event()
@@ -397,7 +452,7 @@ def test_dispatch_async_no_terminal_result_keeps_session_in_flight(monkeypatch, 
     """
     from storage.importer import ensure_sqlite_state
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     started = asyncio.Event()
@@ -453,7 +508,7 @@ def test_dispatch_async_enqueues_during_busy_turn(monkeypatch, tmp_path):
     from storage.importer import ensure_sqlite_state
     from storage.settings_service import upsert_scope
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -529,7 +584,7 @@ def test_async_dispatch_flushes_queue_on_turn_end(monkeypatch, tmp_path):
     from storage.importer import ensure_sqlite_state
     from storage.settings_service import upsert_scope
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -609,7 +664,7 @@ def test_cancel_does_not_flush_queue(monkeypatch, tmp_path):
     from storage.importer import ensure_sqlite_state
     from storage.settings_service import upsert_scope
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -955,7 +1010,7 @@ def test_scheduled_gate_idle_runs_turn_with_lifecycle(monkeypatch, tmp_path):
 
     # submit_scheduled reads the queue (idle → empty-queue happy path), so it
     # needs an initialized state DB.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     captured: dict = {}
@@ -1019,7 +1074,7 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
     from storage.importer import ensure_sqlite_state
     from storage.settings_service import upsert_scope
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -1082,7 +1137,7 @@ def test_scheduled_gate_cancel_stops_scheduled_run(monkeypatch, tmp_path):
     from storage.importer import ensure_sqlite_state
     from storage.settings_service import upsert_scope
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -1189,7 +1244,7 @@ def _manager_capturing_runs():
 def test_flush_runs_scheduled_row_as_scheduled_with_provenance(tmp_path, monkeypatch):
     """A queued scheduled run flushes as its OWN SOURCE_SCHEDULED turn with its
     delivery provenance restored — not merged into a plain user turn (#84)."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     override = {"channel_id": "slack-321", "platform": "slack"}
     session_id = _seed_avibe_session_with_queue(
         [(
@@ -1229,7 +1284,7 @@ def test_flush_segments_user_then_scheduled_in_order(tmp_path, monkeypatch):
     into one user turn; the scheduled row then runs separately with its provenance.
     The completion-reflush handles the next segment, so one flush runs only the first
     segment and leaves the rest (#84)."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     session_id = _seed_avibe_session_with_queue(
         [
             ("u1", None),
@@ -1258,7 +1313,7 @@ def test_flush_segments_user_then_scheduled_in_order(tmp_path, monkeypatch):
 
 
 def test_flush_mixed_owner_user_rows_preserves_owner_list(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     from core.services import sessions as sessions_service
     from storage import messages_service

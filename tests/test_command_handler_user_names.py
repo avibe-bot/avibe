@@ -3,6 +3,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from modules.im import MessageContext
 
@@ -12,40 +13,53 @@ sys.path.insert(0, str(ROOT))
 
 
 def _load_command_handlers_class():
-    agents_module = types.ModuleType("modules.agents")
-    agents_module.__path__ = [str(ROOT / "modules" / "agents")]
-    setattr(agents_module, "AgentRequest", type("AgentRequest", (), {}))
-    setattr(
-        agents_module, "get_agent_display_name", lambda agent_name, fallback=None: agent_name or fallback or "Unknown"
-    )
-    sys.modules["modules.agents"] = agents_module
-    agents_base_module = types.ModuleType("modules.agents.base")
-    setattr(agents_base_module, "AgentRequest", type("AgentRequest", (), {}))
-    sys.modules["modules.agents.base"] = agents_base_module
+    with patch.dict(sys.modules, {}, clear=False):
+        agents_module = types.ModuleType("modules.agents")
+        agents_module.__path__ = [str(ROOT / "modules" / "agents")]
+        setattr(agents_module, "AgentRequest", type("AgentRequest", (), {}))
+        setattr(
+            agents_module,
+            "get_agent_display_name",
+            lambda agent_name, fallback=None: agent_name or fallback or "Unknown",
+        )
+        sys.modules["modules.agents"] = agents_module
+        agents_base_module = types.ModuleType("modules.agents.base")
+        setattr(agents_base_module, "AgentRequest", type("AgentRequest", (), {}))
+        sys.modules["modules.agents.base"] = agents_base_module
 
-    core_pkg = types.ModuleType("core")
-    core_pkg.__path__ = [str(ROOT / "core")]
-    sys.modules["core"] = core_pkg
+        core_pkg = types.ModuleType("core")
+        core_pkg.__path__ = [str(ROOT / "core")]
+        sys.modules["core"] = core_pkg
 
-    handlers_pkg = types.ModuleType("core.handlers")
-    handlers_pkg.__path__ = [str(ROOT / "core" / "handlers")]
-    sys.modules["core.handlers"] = handlers_pkg
+        handlers_pkg = types.ModuleType("core.handlers")
+        handlers_pkg.__path__ = [str(ROOT / "core" / "handlers")]
+        sys.modules["core.handlers"] = handlers_pkg
 
-    for module_name, relative_path in (
-        ("core.handlers.base", ROOT / "core" / "handlers" / "base.py"),
-        ("core.handlers.command_handlers", ROOT / "core" / "handlers" / "command_handlers.py"),
-    ):
-        spec = importlib.util.spec_from_file_location(module_name, relative_path)
-        assert spec is not None
-        assert spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
+        command_module = None
+        for module_name, relative_path in (
+            ("core.handlers.base", ROOT / "core" / "handlers" / "base.py"),
+            ("core.handlers.command_handlers", ROOT / "core" / "handlers" / "command_handlers.py"),
+        ):
+            spec = importlib.util.spec_from_file_location(module_name, relative_path)
+            assert spec is not None
+            assert spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+            if module_name == "core.handlers.command_handlers":
+                command_module = module
 
-    return sys.modules["core.handlers.command_handlers"].CommandHandlers
+        assert command_module is not None
+        return command_module.CommandHandlers
 
 
 CommandHandlers = _load_command_handlers_class()
+
+
+class _StubFormatter:
+    @staticmethod
+    def format_code_inline(text):
+        return f"`{text}`"
 
 
 class _StubIMClient:
@@ -55,7 +69,7 @@ class _StubIMClient:
         self.sent_contexts = []
         self.sent_button_messages = []
         self.channel_info_calls = []
-        self.formatter = None
+        self.formatter = _StubFormatter()
         self.started_topic_context = None
 
     async def get_user_info(self, user_id):
@@ -81,6 +95,9 @@ class _StubIMClient:
 class _StubSettingsManager:
     def __init__(self):
         self.bind_calls = []
+        self.custom_cwd_calls = []
+        self.session_row = None
+        self.session_lookup_calls = []
 
     def is_bound_user(self, user_id, platform=None):
         return False
@@ -89,6 +106,13 @@ class _StubSettingsManager:
         self.bind_calls.append((user_id, display_name, code, dm_chat_id, platform))
         return True, False
 
+    def set_custom_cwd(self, settings_key, cwd):
+        self.custom_cwd_calls.append((settings_key, cwd))
+
+    def find_session_for_anchor(self, session_key, session_anchor):
+        self.session_lookup_calls.append((session_key, session_anchor))
+        return self.session_row
+
 
 class _StubController:
     def __init__(self, user_info):
@@ -96,15 +120,34 @@ class _StubController:
         self.im_client = _StubIMClient(user_info)
         self.settings_manager = _StubSettingsManager()
         self.sessions = self.settings_manager
+        self.session_handler = type(
+            "SessionHandler",
+            (),
+            {"get_base_session_id": staticmethod(lambda context: f"{context.platform}_{context.channel_id}")},
+        )()
         self.session_manager = object()
         self.receiver_tasks = {}
-        self.agent_service = type("AgentService", (), {"default_agent": "codex"})()
+        self.cleared_sessions = []
+
+        async def _clear_sessions(session_key):
+            self.cleared_sessions.append(session_key)
+            return {"claude": 1}
+
+        self.agent_service = type(
+            "AgentService",
+            (),
+            {"default_agent": "codex", "clear_sessions": staticmethod(_clear_sessions)},
+        )()
 
     def _get_settings_key(self, context: MessageContext) -> str:
         return context.user_id if context.channel_id.startswith("D") else context.channel_id
 
     def _get_session_key(self, context: MessageContext) -> str:
-        return f"{getattr(context, 'platform', None) or 'test'}::{self._get_settings_key(context)}"
+        platform = getattr(context, "platform", None) or "test"
+        is_dm = bool((context.platform_specific or {}).get("is_dm", False))
+        if is_dm and context.channel_id == context.user_id:
+            return f"{platform}::user::{self._get_settings_key(context)}"
+        return f"{platform}::{self._get_settings_key(context)}"
 
     def resolve_agent_for_context(self, context: MessageContext) -> str:
         return "codex"
@@ -197,6 +240,116 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             controller.im_client.sent_messages,
             [("wx-chat", "🆕 已开启新的会话。你下一条消息会从全新对话开始。")],
+        )
+
+    async def test_setcwd_keeps_existing_scope_session_and_shows_new_hint(self):
+        controller = _StubController({"display_name": "小王"})
+        controller.settings_manager.session_row = {"agent_backend": "claude"}
+        handler = CommandHandlers(controller)
+        context = MessageContext(user_id="wx-user", channel_id="wx-chat", platform="wechat")
+
+        await handler.handle_set_cwd(context, ".")
+
+        self.assertEqual(controller.settings_manager.custom_cwd_calls, [("wx-chat", str(ROOT))])
+        self.assertEqual(controller.cleared_sessions, [])
+        self.assertEqual(controller.settings_manager.session_lookup_calls, [("wechat::wx-chat", "wechat_wx-chat")])
+        self.assertEqual(len(controller.im_client.sent_messages), 1)
+        text = controller.im_client.sent_messages[0][1]
+        self.assertIn("✅", text)
+        self.assertIn(str(ROOT), text)
+        self.assertIn("请使用 /new 命令创建新会话，以使设置变更生效。新会话创建后将覆盖当前会话。", text)
+
+    async def test_setcwd_does_not_show_new_hint_without_existing_scope_session(self):
+        controller = _StubController({"display_name": "小王"})
+        handler = CommandHandlers(controller)
+        context = MessageContext(user_id="wx-user", channel_id="wx-chat", platform="wechat")
+
+        await handler.handle_set_cwd(context, ".")
+
+        self.assertEqual(controller.cleared_sessions, [])
+        self.assertEqual(controller.settings_manager.session_lookup_calls, [("wechat::wx-chat", "wechat_wx-chat")])
+        text = controller.im_client.sent_messages[0][1]
+        self.assertIn(str(ROOT), text)
+        self.assertNotIn("请使用 /new 命令创建新会话", text)
+
+    async def test_telegram_dm_new_command_clears_user_and_legacy_channel_scopes(self):
+        controller = _StubController({"display_name": "Alex"})
+        setattr(controller.config, "platform", "telegram")
+        clear_calls = []
+        clear_base_calls = []
+
+        async def _record_clear(session_key):
+            clear_calls.append(session_key)
+            return {}
+
+        controller.agent_service.clear_sessions = _record_clear  # type: ignore[attr-defined]
+        controller.sessions = type(
+            "Sessions",
+            (),
+            {"clear_session_base": lambda _self, key, anchor: clear_base_calls.append((key, anchor)) or 1},
+        )()
+        handler = CommandHandlers(controller)
+        context = MessageContext(
+            user_id="58181121",
+            channel_id="58181121",
+            message_id="77",
+            platform="telegram",
+            platform_specific={"platform": "telegram", "is_dm": True},
+        )
+
+        await handler.handle_new(context)
+
+        self.assertEqual(
+            clear_calls,
+            ["telegram::user::58181121", "telegram::channel::58181121", "telegram::58181121"],
+        )
+        self.assertEqual(
+            clear_base_calls,
+            [
+                ("telegram::user::58181121", "telegram_58181121"),
+                ("telegram::channel::58181121", "telegram_58181121"),
+                ("telegram::58181121", "telegram_58181121"),
+            ],
+        )
+
+    async def test_wechat_dm_new_command_clears_user_and_legacy_channel_scopes(self):
+        controller = _StubController({"display_name": "Alex"})
+        setattr(controller.config, "platform", "wechat")
+        clear_calls = []
+        clear_base_calls = []
+
+        async def _record_clear(session_key):
+            clear_calls.append(session_key)
+            return {}
+
+        controller.agent_service.clear_sessions = _record_clear  # type: ignore[attr-defined]
+        controller.sessions = type(
+            "Sessions",
+            (),
+            {"clear_session_base": lambda _self, key, anchor: clear_base_calls.append((key, anchor)) or 1},
+        )()
+        handler = CommandHandlers(controller)
+        context = MessageContext(
+            user_id="wxid_alice",
+            channel_id="wxid_alice",
+            message_id="77",
+            platform="wechat",
+            platform_specific={"platform": "wechat", "is_dm": True},
+        )
+
+        await handler.handle_new(context)
+
+        self.assertEqual(
+            clear_calls,
+            ["wechat::user::wxid_alice", "wechat::channel::wxid_alice", "wechat::wxid_alice"],
+        )
+        self.assertEqual(
+            clear_base_calls,
+            [
+                ("wechat::user::wxid_alice", "wechat_wxid_alice"),
+                ("wechat::channel::wxid_alice", "wechat_wxid_alice"),
+                ("wechat::wxid_alice", "wechat_wxid_alice"),
+            ],
         )
 
     async def test_telegram_new_command_creates_topic_session_when_supported(self):

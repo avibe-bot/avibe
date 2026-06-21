@@ -84,7 +84,7 @@ Dashboard / settings changes:
 
 - Replace single `platform` display with `enabled platforms` list.
 - Separate global settings from per-platform settings:
-  - global: default backend, ack mode, duration display, reply enhancements, language
+  - global: default Agent, ack mode, duration display, reply enhancements, language
   - per-platform: credentials, require mention, allowlists, OAuth / QR login state
 - Add per-platform cards or tabs:
   - Slack settings

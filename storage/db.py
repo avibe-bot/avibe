@@ -8,6 +8,17 @@ from sqlalchemy.engine import URL
 from config import paths
 
 
+def escape_sql_like(value: str) -> str:
+    """Escape the LIKE/ILIKE metacharacters in *value* for use with ``escape="\\"``.
+
+    Backslash first (so the escapes we add aren't re-escaped), then the two
+    wildcards ``%`` and ``_`` — a literal one in a user query must match itself,
+    not widen the pattern. Shared by every LIKE-based search (session title +
+    message content) so the escaping can't drift between call sites.
+    """
+    return str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def sqlite_url(db_path: Path | None = None) -> str:
     path = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
     return URL.create("sqlite", database=str(path)).render_as_string(hide_password=False)

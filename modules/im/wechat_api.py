@@ -2,7 +2,7 @@
 
 Handles all HTTP communication with the WeChat iLink bot backend.
 All messaging endpoints are POST to ``{base_url}/ilink/bot/{endpoint}``;
-auth/QR endpoints are GET.
+auth/QR status endpoints are GET; QR issuance is POST.
 
 Ported from the TypeScript reference implementation.
 """
@@ -10,6 +10,7 @@ Ported from the TypeScript reference implementation.
 import asyncio
 import base64
 import logging
+import re
 import struct
 import uuid
 from typing import Any, Dict, List, Optional
@@ -56,9 +57,14 @@ DEFAULT_LONG_POLL_TIMEOUT_MS = 35_000
 DEFAULT_LONG_POLL_TIMEOUT_GRACE_MS = 5_000
 DEFAULT_API_TIMEOUT_MS = 15_000
 DEFAULT_CONFIG_TIMEOUT_MS = 10_000
+DEFAULT_QR_FETCH_TIMEOUT_MS = 30_000
 
-# Channel version reported in base_info
-CHANNEL_VERSION = "vibe-remote"
+# WeChat's iLink gateway validates the client metadata against the OpenClaw
+# Weixin channel build. Keep this aligned with Tencent/openclaw-weixin.
+CHANNEL_VERSION = "2.4.3"
+ILINK_APP_ID = "bot"
+ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 3
+BOT_AGENT_FALLBACK_VERSION = "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -79,9 +85,36 @@ def _ensure_trailing_slash(url: str) -> str:
     return url if url.endswith("/") else f"{url}/"
 
 
+def _safe_product_version(raw: Any) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        return BOT_AGENT_FALLBACK_VERSION
+    return re.sub(r"[^A-Za-z0-9_.+\-]", "_", raw.strip())[:32] or BOT_AGENT_FALLBACK_VERSION
+
+
+def _build_bot_agent() -> str:
+    try:
+        from vibe import __version__
+    except Exception:
+        version = BOT_AGENT_FALLBACK_VERSION
+    else:
+        version = _safe_product_version(__version__)
+    return f"Avibe/{version} OpenClaw/2.4.3"
+
+
 def _build_base_info() -> Dict[str, str]:
     """Build the ``base_info`` payload included in every API request."""
-    return {"channel_version": CHANNEL_VERSION}
+    return {
+        "channel_version": CHANNEL_VERSION,
+        "bot_agent": _build_bot_agent(),
+    }
+
+
+def _build_common_headers() -> Dict[str, str]:
+    """Build iLink metadata headers shared by GET and POST requests."""
+    return {
+        "iLink-App-Id": ILINK_APP_ID,
+        "iLink-App-ClientVersion": str(ILINK_APP_CLIENT_VERSION),
+    }
 
 
 def _build_headers(token: Optional[str] = None, body_bytes: Optional[bytes] = None) -> Dict[str, str]:
@@ -90,9 +123,8 @@ def _build_headers(token: Optional[str] = None, body_bytes: Optional[bytes] = No
         "Content-Type": "application/json",
         "AuthorizationType": "ilink_bot_token",
         "X-WECHAT-UIN": _random_wechat_uin(),
+        **_build_common_headers(),
     }
-    if body_bytes is not None:
-        headers["Content-Length"] = str(len(body_bytes))
     if token and token.strip():
         headers["Authorization"] = f"Bearer {token.strip()}"
     return headers
@@ -267,7 +299,8 @@ async def get_upload_url(
     and optionally thumbnail fields.
 
     Returns:
-        Parsed JSON dict with ``upload_param`` (and possibly ``thumb_upload_param``).
+        Parsed JSON dict with either ``upload_full_url`` or ``upload_param``
+        (and possibly thumbnail upload fields).
     """
     return await _api_fetch(
         base_url,
@@ -330,6 +363,34 @@ async def send_typing(
     )
 
 
+async def notify_start(
+    base_url: str,
+    token: str,
+) -> dict:
+    """Notify the iLink server that this WeChat client is starting."""
+    return await _api_fetch(
+        base_url,
+        "ilink/bot/msg/notifystart",
+        {},
+        token=token,
+        timeout_ms=DEFAULT_CONFIG_TIMEOUT_MS,
+    )
+
+
+async def notify_stop(
+    base_url: str,
+    token: str,
+) -> dict:
+    """Notify the iLink server that this WeChat client is stopping."""
+    return await _api_fetch(
+        base_url,
+        "ilink/bot/msg/notifystop",
+        {},
+        token=token,
+        timeout_ms=DEFAULT_CONFIG_TIMEOUT_MS,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Auth / QR code endpoints (GET requests, no token)
 # ---------------------------------------------------------------------------
@@ -338,23 +399,28 @@ async def send_typing(
 async def get_bot_qrcode(
     base_url: str,
     bot_type: str = "3",
+    local_token_list: Optional[List[str]] = None,
+    timeout_ms: int = DEFAULT_QR_FETCH_TIMEOUT_MS,
 ) -> dict:
     """Fetch a new QR code for bot login.
 
-    GET ``ilink/bot/get_bot_qrcode?bot_type={bot_type}``
+    POST ``ilink/bot/get_bot_qrcode?bot_type={bot_type}``
 
     Returns:
         Dict with ``qrcode`` (string token) and ``qrcode_img_content`` (URL/data).
     """
+    import json
+
     url = urljoin(
         _ensure_trailing_slash(base_url),
-        f"ilink/bot/get_bot_qrcode?bot_type={quote(bot_type)}",
+        f"ilink/bot/get_bot_qrcode?bot_type={quote(bot_type, safe='')}",
     )
     logger.info("Fetching QR code from: %s", url)
 
-    timeout = aiohttp.ClientTimeout(total=DEFAULT_API_TIMEOUT_MS / 1000.0)
+    body = json.dumps({"local_token_list": local_token_list or []}).encode("utf-8")
+    timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000.0)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url) as resp:
+        async with session.post(url, data=body, headers=_build_headers(body_bytes=body)) as resp:
             if not resp.ok:
                 body = await resp.text()
                 logger.error(
@@ -371,11 +437,12 @@ async def get_bot_qrcode(
 async def get_qrcode_status(
     base_url: str,
     qrcode: str,
+    verify_code: Optional[str] = None,
+    timeout_ms: int = DEFAULT_LONG_POLL_TIMEOUT_MS,
 ) -> dict:
     """Long-poll QR code scan status.
 
     GET ``ilink/bot/get_qrcode_status?qrcode={qrcode}``
-    Includes ``iLink-App-ClientVersion: 1`` header.
 
     On client-side timeout (35 s), returns ``{"status": "wait"}``.
 
@@ -387,11 +454,13 @@ async def get_qrcode_status(
 
     url = urljoin(
         _ensure_trailing_slash(base_url),
-        f"ilink/bot/get_qrcode_status?qrcode={quote(qrcode)}",
+        f"ilink/bot/get_qrcode_status?qrcode={quote(qrcode, safe='')}",
     )
-    headers = {"iLink-App-ClientVersion": "1"}
+    if verify_code:
+        url += f"&verify_code={quote(verify_code, safe='')}"
+    headers = _build_common_headers()
 
-    timeout = aiohttp.ClientTimeout(total=DEFAULT_LONG_POLL_TIMEOUT_MS / 1000.0)
+    timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000.0)
     logger.debug("Long-poll QR status from: %s", url)
 
     try:
@@ -409,6 +478,6 @@ async def get_qrcode_status(
     except (aiohttp.ServerTimeoutError, TimeoutError):
         logger.debug(
             "pollQRStatus: client-side timeout after %dms, returning wait",
-            DEFAULT_LONG_POLL_TIMEOUT_MS,
+            timeout_ms,
         )
         return {"status": "wait"}

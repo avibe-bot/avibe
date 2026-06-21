@@ -13,6 +13,7 @@ class _Store:
         self.reload_calls = 0
         self.settings = SimpleNamespace(channels={})
         self._bound_users = set()
+        self._disabled_users = set()
         self._admins = set()
 
     def maybe_reload(self):
@@ -21,11 +22,14 @@ class _Store:
     def is_bound_user(self, user_id: str) -> bool:
         return user_id in self._bound_users
 
+    def is_enabled_user(self, user_id: str) -> bool:
+        return user_id in self._bound_users and user_id not in self._disabled_users
+
     def has_any_admin(self) -> bool:
         return bool(self._admins)
 
     def is_admin(self, user_id: str) -> bool:
-        return user_id in self._admins
+        return user_id in self._admins and user_id not in self._disabled_users
 
 
 class _SettingsManager:
@@ -111,6 +115,71 @@ def test_admin_guard_denies_non_admin_for_protected_action():
     assert result.denial == "not_admin"
 
 
+def test_require_bind_channel_denies_unbound_user():
+    store = _Store()
+    store.settings.channels["C1"] = SimpleNamespace(enabled=True, require_bind=True)
+
+    result = check_auth(
+        user_id="U-stranger",
+        channel_id="C1",
+        is_dm=False,
+        action="",
+        store=store,
+    )
+
+    assert result.allowed is False
+    assert result.denial == "not_bound_channel"
+
+
+def test_require_bind_channel_allows_bound_user():
+    store = _Store()
+    store.settings.channels["C1"] = SimpleNamespace(enabled=True, require_bind=True)
+    store._bound_users.add("U-me")
+
+    result = check_auth(
+        user_id="U-me",
+        channel_id="C1",
+        is_dm=False,
+        action="",
+        store=store,
+    )
+
+    assert result.allowed is True
+
+
+def test_require_bind_channel_denies_disabled_bound_user():
+    store = _Store()
+    store.settings.channels["C1"] = SimpleNamespace(enabled=True, require_bind=True)
+    store._bound_users.add("U-disabled")
+    store._disabled_users.add("U-disabled")
+
+    result = check_auth(
+        user_id="U-disabled",
+        channel_id="C1",
+        is_dm=False,
+        action="",
+        store=store,
+    )
+
+    assert result.allowed is False
+    assert result.denial == "not_bound_channel"
+
+
+def test_require_bind_off_allows_any_channel_member():
+    store = _Store()
+    store.settings.channels["C1"] = SimpleNamespace(enabled=True, require_bind=None)
+
+    result = check_auth(
+        user_id="U-stranger",
+        channel_id="C1",
+        is_dm=False,
+        action="",
+        store=store,
+    )
+
+    assert result.allowed is True
+
+
 def test_admin_guard_denies_non_admin_for_auth_setup_callback():
     store = _Store()
     store.settings.channels["C1"] = SimpleNamespace(enabled=True)
@@ -122,6 +191,24 @@ def test_admin_guard_denies_non_admin_for_auth_setup_callback():
         channel_id="C1",
         is_dm=False,
         action="auth_setup:codex",
+        store=store,
+    )
+
+    assert result.allowed is False
+    assert result.denial == "not_admin"
+
+
+def test_admin_guard_stays_enabled_when_only_admin_is_disabled():
+    store = _Store()
+    store.settings.channels["C1"] = SimpleNamespace(enabled=True)
+    store._admins.add("U-disabled-admin")
+    store._disabled_users.add("U-disabled-admin")
+
+    result = check_auth(
+        user_id="U-anyone",
+        channel_id="C1",
+        is_dm=False,
+        action="settings",
         store=store,
     )
 

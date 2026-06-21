@@ -56,6 +56,23 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_get_updates_error_code({"errcode": -14, "errmsg": "session timeout"}), -14)
         self.assertIsNone(_get_updates_error_code({"ret": 0}))
 
+    def test_wechat_api_metadata_matches_current_openclaw_weixin_interface(self):
+        self.assertEqual(wechat_api_module.CHANNEL_VERSION, "2.4.3")
+        self.assertEqual(wechat_api_module.ILINK_APP_ID, "bot")
+        self.assertEqual(wechat_api_module.ILINK_APP_CLIENT_VERSION, 132099)
+        with patch("vibe.__version__", "3.0.3.dev102+g5a817be5f"):
+            self.assertEqual(
+                wechat_api_module._build_base_info(),
+                {"channel_version": "2.4.3", "bot_agent": "Avibe/3.0.3.dev102+g5a817be5f OpenClaw/2.4.3"},
+            )
+        self.assertEqual(
+            wechat_api_module._build_common_headers(),
+            {"iLink-App-Id": "bot", "iLink-App-ClientVersion": "132099"},
+        )
+
+    def test_wechat_api_bot_agent_sanitizes_version(self):
+        self.assertEqual(wechat_api_module._safe_product_version("3.0.3 dev/102"), "3.0.3_dev_102")
+
     async def test_wechat_api_get_updates_adds_long_poll_timeout_grace(self):
         captured = {}
 
@@ -84,6 +101,8 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
 
             def post(self, url, data=None, headers=None):
                 captured["url"] = url
+                captured["headers"] = headers
+                captured["data"] = data
                 return _Response()
 
         with patch("modules.im.wechat_api.aiohttp.ClientSession", side_effect=lambda timeout: _Session(timeout)):
@@ -97,6 +116,10 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["get_updates_buf"], "buf-2")
         self.assertEqual(captured["timeout"], 40.0)
         self.assertTrue(captured["url"].endswith("/ilink/bot/getupdates"))
+        self.assertEqual(captured["headers"]["iLink-App-Id"], "bot")
+        self.assertEqual(captured["headers"]["iLink-App-ClientVersion"], "132099")
+        self.assertNotIn("Content-Length", captured["headers"])
+        self.assertEqual(json.loads(captured["data"])["base_info"]["channel_version"], "2.4.3")
 
     async def test_wechat_api_get_updates_poll_logs_are_debug(self):
         class _Response:
@@ -192,6 +215,7 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
                 return False
 
             def post(self, url, data=None, headers=None):
+                captured["headers"] = headers
                 return _Response()
 
         with patch("modules.im.wechat_api.aiohttp.ClientSession", side_effect=lambda timeout: _Session(timeout)):
@@ -205,6 +229,139 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, {"ret": 0})
         self.assertEqual(captured["timeout"], 15.0)
+        self.assertEqual(captured["headers"]["iLink-App-Id"], "bot")
+        self.assertEqual(captured["headers"]["iLink-App-ClientVersion"], "132099")
+
+    async def test_wechat_api_notify_start_uses_current_metadata(self):
+        captured = {}
+
+        class _Response:
+            ok = True
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def text(self):
+                return '{"ret": 0}'
+
+        class _Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def post(self, url, data=None, headers=None):
+                captured["url"] = url
+                captured["data"] = data
+                captured["headers"] = headers
+                return _Response()
+
+        with patch("modules.im.wechat_api.aiohttp.ClientSession", side_effect=lambda timeout: _Session()):
+            result = await wechat_api_module.notify_start("https://wechat.example.com", "token")
+
+        self.assertEqual(result, {"ret": 0})
+        self.assertTrue(captured["url"].endswith("/ilink/bot/msg/notifystart"))
+        self.assertEqual(json.loads(captured["data"])["base_info"]["channel_version"], "2.4.3")
+        self.assertEqual(captured["headers"]["iLink-App-Id"], "bot")
+        self.assertEqual(captured["headers"]["iLink-App-ClientVersion"], "132099")
+
+    async def test_wechat_api_qr_fetch_posts_current_interface_metadata(self):
+        captured = {}
+
+        class _Response:
+            ok = True
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def json(self, content_type=None):
+                captured["content_type"] = content_type
+                return {"qrcode": "qr-token", "qrcode_img_content": "https://wechat.example.com/qr"}
+
+        class _Session:
+            def __init__(self, timeout):
+                captured["timeout_total"] = timeout.total
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def post(self, url, data=None, headers=None):
+                captured["url"] = url
+                captured["data"] = data
+                captured["headers"] = headers
+                return _Response()
+
+        with patch("modules.im.wechat_api.aiohttp.ClientSession", side_effect=lambda timeout: _Session(timeout)):
+            result = await wechat_api_module.get_bot_qrcode(
+                "https://wechat.example.com",
+                "3",
+                local_token_list=["token-1"],
+            )
+
+        self.assertEqual(result["qrcode"], "qr-token")
+        self.assertTrue(captured["url"].endswith("/ilink/bot/get_bot_qrcode?bot_type=3"))
+        self.assertEqual(json.loads(captured["data"]), {"local_token_list": ["token-1"]})
+        self.assertEqual(captured["headers"]["iLink-App-Id"], "bot")
+        self.assertEqual(captured["headers"]["iLink-App-ClientVersion"], "132099")
+        self.assertEqual(captured["content_type"], None)
+        self.assertEqual(captured["timeout_total"], 30.0)
+
+    async def test_wechat_api_qr_status_uses_current_interface_headers_and_timeout(self):
+        captured = {}
+
+        class _Response:
+            ok = True
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def text(self):
+                return '{"status": "wait"}'
+
+        class _Session:
+            def __init__(self, timeout):
+                captured["timeout"] = timeout.total
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def get(self, url, headers=None):
+                captured["url"] = url
+                captured["headers"] = headers
+                return _Response()
+
+        with patch("modules.im.wechat_api.aiohttp.ClientSession", side_effect=lambda timeout: _Session(timeout)):
+            result = await wechat_api_module.get_qrcode_status(
+                "https://wechat.example.com",
+                "qr token",
+                verify_code="1234",
+                timeout_ms=3000,
+            )
+
+        self.assertEqual(result, {"status": "wait"})
+        self.assertEqual(captured["timeout"], 3.0)
+        self.assertIn("qrcode=qr%20token", captured["url"])
+        self.assertIn("verify_code=1234", captured["url"])
+        self.assertEqual(captured["headers"], {"iLink-App-Id": "bot", "iLink-App-ClientVersion": "132099"})
 
     async def test_get_user_info_uses_short_fixed_display_name(self):
         bot = self._make_bot()
@@ -241,6 +398,29 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         args = mock_typing.await_args.args  # type: ignore[union-attr]
         self.assertEqual(args[3], "ticket-1")
+
+    async def test_notify_connection_state_is_best_effort(self):
+        bot = self._make_bot()
+
+        with patch("modules.im.wechat_api.notify_start", new=AsyncMock(return_value={"ret": 0})) as start:
+            await bot._notify_connection_state("start")
+
+        start.assert_awaited_once_with("https://ilinkai.weixin.qq.com", "token")
+
+        with patch("modules.im.wechat_api.notify_stop", new=AsyncMock(side_effect=RuntimeError("offline"))):
+            await bot._notify_connection_state("stop")
+
+    async def test_notify_connection_state_sends_stop_once(self):
+        bot = self._make_bot()
+
+        with patch("modules.im.wechat_api.notify_start", new=AsyncMock(return_value={"ret": 0})):
+            await bot._notify_connection_state("start")
+
+        with patch("modules.im.wechat_api.notify_stop", new=AsyncMock(return_value={"ret": 0})) as stop:
+            await bot._notify_connection_state("stop")
+            await bot._notify_connection_state("stop")
+
+        stop.assert_awaited_once_with("https://ilinkai.weixin.qq.com", "token")
 
     async def test_process_inbound_message_dispatches_allowed_message(self):
         bot = self._make_bot()
@@ -400,7 +580,7 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_process_inbound_message_persists_context_token(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.dict("os.environ", {"VIBE_REMOTE_HOME": tmpdir}):
+            with patch.dict("os.environ", {"AVIBE_HOME": tmpdir}):
                 bot = self._make_bot()
                 bot.check_authorization = lambda **kwargs: AuthResult(allowed=True, is_dm=True)
                 bot.dispatch_text_command = AsyncMock(return_value=False)
@@ -425,7 +605,7 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_send_dm_reuses_persisted_context_token(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.dict("os.environ", {"VIBE_REMOTE_HOME": tmpdir}):
+            with patch.dict("os.environ", {"AVIBE_HOME": tmpdir}):
                 bot = self._make_bot()
                 bot._remember_context_token("user-1", "ctx-persisted")
 
@@ -620,7 +800,7 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_send_message_marks_session_expired_on_explicit_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch.dict("os.environ", {"VIBE_REMOTE_HOME": tmpdir}):
+            with patch.dict("os.environ", {"AVIBE_HOME": tmpdir}):
                 bot = self._make_bot()
                 context = MessageContext(
                     user_id="user-1",

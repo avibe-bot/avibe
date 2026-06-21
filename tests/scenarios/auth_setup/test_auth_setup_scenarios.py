@@ -77,6 +77,33 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         ScenarioExpect.button_callback_contains(harness, "auth_setup:codex")
         ScenarioExpect.flow_missing(harness, "C1:codex")
 
+    async def test_claude_startup_cleanup_failure_emits_reset_path(self):
+        """Scenario: AUTH-SETUP-208"""
+        harness = AuthSetupScenarioHarness()
+        runner = ScenarioRunner(harness)
+        harness.service._start_claude_control_flow = AsyncMock(
+            side_effect=RuntimeError("Failed to clear Claude Code settings env")
+        )
+
+        await runner.run(
+            ScenarioStep(
+                "start_setup",
+                lambda h: h.service.start_setup(
+                    h.context,
+                    backend="claude",
+                    force_reset=True,
+                    claude_login_method="console",
+                ),
+            ),
+        )
+
+        ScenarioExpect.step_history(runner, ["start_setup"])
+        ScenarioExpect.text_contains(harness, "starting claude", index=0)
+        ScenarioExpect.text_contains(harness, "failed", index=1)
+        ScenarioExpect.text_contains(harness, "Failed to clear Claude Code settings env", index=1)
+        ScenarioExpect.button_callback_contains(harness, "auth_setup:claude")
+        ScenarioExpect.flow_missing(harness, "C1:claude")
+
     async def test_codex_reentry_scenario_replaces_existing_flow(self):
         """Scenario: AUTH-SETUP-201"""
         harness = AuthSetupScenarioHarness()
@@ -119,6 +146,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         harness.service._read_codex_output = AsyncMock(return_value=None)
         harness.service._verify_login = AsyncMock(return_value=(True, "Logged in using ChatGPT"))
         harness.service._refresh_backend_runtime = AsyncMock()
+        harness.service._persist_backend_auth_mode = AsyncMock()
 
         await runner.run(
             ScenarioStep(
@@ -148,6 +176,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         fake_process.finish(0)
         await flow.waiter_task
 
+        harness.service._persist_backend_auth_mode.assert_awaited_once_with("codex", "oauth")
         harness.service._refresh_backend_runtime.assert_awaited_once_with("codex")
         ScenarioExpect.step_history(runner, ["start_setup", "emit_device_url", "emit_device_code"])
         ScenarioExpect.text_contains(harness, "starting codex", index=0)
@@ -207,7 +236,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         runner = ScenarioRunner(harness)
         callback_payloads = []
         harness.service._start_claude_control_flow = AsyncMock(
-            return_value=(fake_client, "https://platform.claude.com/oauth/code/callback")
+            return_value=(fake_client, "https://platform.claude.com/oauth/code/callback", None)
         )
         harness.service._wait_for_claude_completion = AsyncMock(return_value=None)
         harness.service._send_claude_callback = AsyncMock(
@@ -254,7 +283,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         runner = ScenarioRunner(harness)
 
         harness.service._start_claude_control_flow = AsyncMock(
-            return_value=(fake_client, "https://platform.claude.com/oauth/code/callback")
+            return_value=(fake_client, "https://platform.claude.com/oauth/code/callback", None)
         )
 
         async def fake_control_request(client, request, timeout=900.0):
@@ -317,7 +346,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         runner = ScenarioRunner(harness)
 
         harness.service._start_claude_control_flow = AsyncMock(
-            return_value=(fake_client, "https://platform.claude.com/oauth/code/callback")
+            return_value=(fake_client, "https://platform.claude.com/oauth/code/callback", None)
         )
 
         async def fake_control_request(client, request, timeout=900.0):
@@ -374,7 +403,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         fake_client = object()
         runner = ScenarioRunner(harness)
         harness.service._start_claude_control_flow = AsyncMock(
-            return_value=(fake_client, "https://platform.claude.com/oauth/code/callback")
+            return_value=(fake_client, "https://platform.claude.com/oauth/code/callback", None)
         )
         harness.service._wait_for_claude_completion = AsyncMock(return_value=None)
         harness.service._send_claude_callback = AsyncMock()
@@ -409,7 +438,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         runner = ScenarioRunner(harness)
 
         harness.service._start_claude_control_flow = AsyncMock(
-            return_value=(fake_client, "https://platform.claude.com/oauth/code/callback")
+            return_value=(fake_client, "https://platform.claude.com/oauth/code/callback", None)
         )
         harness.service._resolve_opencode_provider = AsyncMock(return_value="opencode")
         harness.service._install_opencode_api_key = AsyncMock()
@@ -483,7 +512,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
 
         harness.service.setup_timeout_seconds = 0.01
         harness.service._start_claude_control_flow = AsyncMock(
-            return_value=(fake_client, "https://platform.claude.com/oauth/code/callback")
+            return_value=(fake_client, "https://platform.claude.com/oauth/code/callback", None)
         )
 
         async def fake_control_request(client, request, timeout=900.0):
@@ -649,8 +678,8 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         harness.service.setup_timeout_seconds = 0.01
         harness.service._start_claude_control_flow = AsyncMock(
             side_effect=[
-                (first_client, "https://platform.claude.com/oauth/code/callback?attempt=1"),
-                (second_client, "https://platform.claude.com/oauth/code/callback?attempt=2"),
+                (first_client, "https://platform.claude.com/oauth/code/callback?attempt=1", None),
+                (second_client, "https://platform.claude.com/oauth/code/callback?attempt=2", None),
             ]
         )
 

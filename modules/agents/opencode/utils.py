@@ -44,33 +44,151 @@ def _parse_provider_id(model_key: Optional[str]) -> Optional[str]:
     return provider_id or None
 
 
+def get_opencode_provider_id(provider: dict | None) -> str:
+    if not isinstance(provider, dict):
+        return ""
+    provider_id = provider.get("id") or provider.get("provider_id") or provider.get("name") or ""
+    return provider_id if isinstance(provider_id, str) else ""
+
+
+def _opencode_model_entry_id(model_entry: Any) -> str:
+    if isinstance(model_entry, str):
+        return model_entry
+    if not isinstance(model_entry, dict):
+        return ""
+    model_id = model_entry.get("id") or model_entry.get("modelID") or model_entry.get("model_id") or ""
+    return model_id if isinstance(model_id, str) else ""
+
+
+def find_opencode_model_info(
+    opencode_models: dict | None,
+    provider_id: str | None,
+    model_id: str | None,
+) -> dict | None:
+    if not provider_id or not model_id or not isinstance(opencode_models, dict):
+        return None
+
+    for provider in opencode_models.get("providers", []) or []:
+        if get_opencode_provider_id(provider) != provider_id:
+            continue
+
+        models = provider.get("models", {}) if isinstance(provider, dict) else {}
+        if isinstance(models, dict):
+            model_info = models.get(model_id)
+            if isinstance(model_info, dict):
+                return model_info
+            return {} if model_info is not None else None
+        if isinstance(models, list):
+            for entry in models:
+                if _opencode_model_entry_id(entry) == model_id:
+                    return entry if isinstance(entry, dict) else {}
+        return None
+    return None
+
+
+def resolve_opencode_model_id(
+    opencode_models: dict | None,
+    provider_id: str | None,
+    model_id: str | None,
+) -> str | None:
+    """Return the catalog-canonical model id for a provider/model pair.
+
+    This does not lowercase user input. Exact catalog matches win; otherwise we
+    only adopt the catalog casing when there is exactly one case-insensitive
+    match. Ambiguous or unknown ids are preserved.
+    """
+
+    if not provider_id or not model_id or not isinstance(opencode_models, dict):
+        return model_id
+
+    for provider in opencode_models.get("providers", []) or []:
+        if get_opencode_provider_id(provider) != provider_id:
+            continue
+
+        models = provider.get("models", {}) if isinstance(provider, dict) else {}
+        if isinstance(models, dict):
+            if model_id in models:
+                return model_id
+            matches = [key for key in models if isinstance(key, str) and key.casefold() == model_id.casefold()]
+            return matches[0] if len(matches) == 1 else model_id
+        if isinstance(models, list):
+            ids = [_opencode_model_entry_id(entry) for entry in models]
+            if model_id in ids:
+                return model_id
+            matches = [entry_id for entry_id in ids if entry_id and entry_id.casefold() == model_id.casefold()]
+            return matches[0] if len(matches) == 1 else model_id
+        return model_id
+    return model_id
+
+
+def _opencode_model_supports_variant(model_info: dict | None, variant: str | None) -> bool:
+    if not isinstance(model_info, dict) or not isinstance(variant, str) or not variant.strip():
+        return False
+    variants = model_info.get("variants")
+    if isinstance(variants, dict) and variant in variants:
+        return True
+    capabilities = model_info.get("capabilities")
+    if variants is None and "variants" not in model_info and isinstance(capabilities, dict):
+        return capabilities.get("reasoning") is True
+    return False
+
+
+def _opencode_model_has_no_variants(model_info: dict | None) -> bool:
+    if not isinstance(model_info, dict):
+        return False
+    capabilities = model_info.get("capabilities")
+    if isinstance(capabilities, dict):
+        if capabilities.get("reasoning") is True:
+            return False
+        if capabilities.get("reasoning") is False:
+            return True
+    variants = model_info.get("variants")
+    if variants is None and "variants" not in model_info:
+        return True
+    return isinstance(variants, dict) and not variants
+
+
+def resolve_opencode_reasoning_effort(
+    model_dict: dict[str, str] | None,
+    requested_effort: str | None,
+    model_catalog: dict | None,
+) -> str | None:
+    """Return the variant OpenCode should receive for this model."""
+
+    normalized_effort = (requested_effort or "").strip() or None
+    if normalized_effort in {"default", "__default__"}:
+        normalized_effort = None
+
+    if not model_dict:
+        return normalized_effort
+    provider_id = model_dict.get("providerID")
+    model_id = model_dict.get("modelID")
+    if not provider_id or not model_id:
+        return normalized_effort
+    if not isinstance(model_catalog, dict):
+        return normalized_effort
+
+    model_info = find_opencode_model_info(model_catalog, provider_id, model_id)
+    if normalized_effort:
+        if _opencode_model_supports_variant(model_info, normalized_effort):
+            return normalized_effort
+        if isinstance(model_info, dict):
+            return None
+        return normalized_effort
+    if _opencode_model_has_no_variants(model_info):
+        return None
+    return normalized_effort
+
+
 def _find_model_variants(opencode_models: dict, target_model: Optional[str]) -> Dict[str, Any]:
     target_provider, target_model_id = _parse_model_key(target_model)
     if not target_provider or not target_model_id or not isinstance(opencode_models, dict):
         return {}
-    providers_data = opencode_models.get("providers", [])
-    for provider in providers_data:
-        provider_id = provider.get("id") or provider.get("provider_id") or provider.get("name")
-        if provider_id != target_provider:
-            continue
-
-        models = provider.get("models", {})
-        model_info: Optional[dict] = None
-        if isinstance(models, dict):
-            candidate = models.get(target_model_id)
-            if isinstance(candidate, dict):
-                model_info = candidate
-        elif isinstance(models, list):
-            for entry in models:
-                if isinstance(entry, dict) and entry.get("id") == target_model_id:
-                    model_info = entry
-                    break
-
-        if isinstance(model_info, dict):
-            variants = model_info.get("variants", {})
-            if isinstance(variants, dict):
-                return variants
-        break
+    model_info = find_opencode_model_info(opencode_models, target_provider, target_model_id)
+    if isinstance(model_info, dict):
+        variants = model_info.get("variants", {})
+        if isinstance(variants, dict):
+            return variants
     return {}
 
 
@@ -212,7 +330,7 @@ def build_opencode_model_option_items(
 
     providers: List[Tuple[str, dict]] = []
     for provider in providers_data:
-        provider_id = provider.get("id") or provider.get("provider_id") or provider.get("name") or ""
+        provider_id = get_opencode_provider_id(provider)
         if not provider_id:
             continue
         providers.append((provider_id, provider))

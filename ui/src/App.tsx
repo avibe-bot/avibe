@@ -3,6 +3,7 @@ import { Wizard } from './components/Wizard';
 import { AppShell } from './components/AppShell';
 import { Workbench } from './components/Workbench';
 import { InboxPage } from './components/workbench/InboxPage';
+import { SearchPage } from './components/workbench/SearchPage';
 import { AgentsPage } from './components/workbench/AgentsPage';
 import { SkillsPage } from './components/workbench/SkillsPage';
 import { HarnessPage } from './components/workbench/HarnessPage';
@@ -30,8 +31,9 @@ import { ToastProvider } from './context/ToastContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { WorkbenchInboxProvider } from './context/WorkbenchInboxContext';
 import { WorkbenchProjectsProvider } from './context/WorkbenchProjectsContext';
+import { ComposerBridgeProvider } from './context/ComposerBridgeContext';
 import { AgentationToggle } from './components/AgentationToggle';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { hasConfiguredPlatformCredentials } from './lib/platforms';
 import { useTranslation } from 'react-i18next';
@@ -43,11 +45,13 @@ import { Button } from './components/ui/button';
 const LOGIN_CHECK_PATHS = new Set(['/admin/logs', '/admin/settings/diagnostics']);
 
 const RemoteLoginRedirect = ({ target }: { target: string }) => {
+    const { t } = useTranslation();
+
     useEffect(() => {
         window.location.assign(target);
     }, [target]);
 
-    return <div className="min-h-screen flex items-center justify-center bg-bg text-text">Loading...</div>;
+    return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
 };
 
 // Server error codes (from the Web UI's enforce_remote_access_cookie guard)
@@ -152,6 +156,7 @@ const WebPushNotificationNavigator = () => {
 // page reload because ``<AppShell>`` got unmounted and re-mounted.
 const AuthGuard = ({ children }: { children: ReactNode }) => {
     const { getConfig, getAuthSession } = useApi();
+    const { t } = useTranslation();
     const location = useLocation();
     const guardTarget = location.pathname + location.search;
     const [guardStatus, setGuardStatus] = useState<GuardStatus>('loading');
@@ -163,6 +168,11 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     // `needs-setup` status refreshes to `ready` instead of bouncing the
     // user straight back to /setup.
     const isSetupRoute = location.pathname === '/setup';
+    const previousIsSetupRouteRef = useRef(isSetupRoute);
+
+    useEffect(() => {
+        previousIsSetupRouteRef.current = isSetupRoute;
+    }, [isSetupRoute]);
 
     useEffect(() => {
         let cancelled = false;
@@ -229,7 +239,7 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
 
     if (bypassSetupGuard) return children;
     if (guardStatus === 'loading') {
-        return <div className="min-h-screen flex items-center justify-center bg-bg text-text">Loading...</div>;
+        return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
     }
     if (guardStatus === 'remote-login-required') {
         return <RemoteLoginRedirect target={guardTarget} />;
@@ -239,6 +249,14 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     }
     if (guardStatus === 'needs-setup') {
         if (location.pathname === '/setup') return children;
+        // A wizard finish navigates from /setup to / before the re-validation
+        // effect can flip `guardStatus` to loading. Without this render-time
+        // bridge, the stale setup-required state immediately redirects back to
+        // /setup, so the first finish appears to "not take" even though the
+        // config was already saved with setup_completed=true.
+        if (previousIsSetupRouteRef.current) {
+            return <div className="min-h-screen flex items-center justify-center bg-bg text-text">{t('common.loading')}</div>;
+        }
         return <Navigate to="/setup" replace />;
     }
     return children;
@@ -258,6 +276,7 @@ function AppRoutes() {
             module screens land in later commits. */}
         <Route path="/" element={<Workbench />} />
         <Route path="/inbox" element={<InboxPage />} />
+        <Route path="/search" element={<SearchPage />} />
         <Route path="/agents" element={<AgentsPage />} />
         <Route path="/skills" element={<SkillsPage />} />
         <Route path="/harness" element={<HarnessPage />} />
@@ -326,10 +345,12 @@ function App() {
           <ApiProvider>
             <WorkbenchInboxProvider>
               <WorkbenchProjectsProvider>
-                <BrowserRouter>
-                  <AppRoutes />
-                </BrowserRouter>
-                <AgentationToggle />
+                <ComposerBridgeProvider>
+                  <BrowserRouter>
+                    <AppRoutes />
+                  </BrowserRouter>
+                  <AgentationToggle />
+                </ComposerBridgeProvider>
               </WorkbenchProjectsProvider>
             </WorkbenchInboxProvider>
           </ApiProvider>

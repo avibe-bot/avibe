@@ -8,26 +8,66 @@ import time
 from typing import Any, Dict, Optional
 
 from config.v2_config import DEFAULT_OPENCODE_ERROR_RETRY_LIMIT
+from core.message_context import build_context_session_key
 from modules.agents.base import AgentRequest
+from modules.im import MessageContext
 from vibe.i18n import t as i18n_t
 
+from .message_processor import is_empty_terminal_opencode_message
 from .server import OpenCodeServerManager
 
 logger = logging.getLogger(__name__)
+
+
+def restored_context_from_poll_info(poll_info) -> MessageContext:
+    snapshot = poll_info.processing_indicator if isinstance(poll_info.processing_indicator, dict) else {}
+    platform = str(snapshot.get("platform") or poll_info.platform or "")
+    user_id = str(snapshot.get("user_id") or poll_info.user_id or "")
+    channel_id = str(snapshot.get("channel_id") or poll_info.channel_id or "")
+    context_token = str(snapshot.get("context_token") or getattr(poll_info, "context_token", "") or "")
+    platform_specific: dict[str, Any] = {}
+    if platform:
+        platform_specific["platform"] = platform
+    if snapshot.get("is_dm") is not None:
+        platform_specific["is_dm"] = bool(snapshot.get("is_dm"))
+    elif platform in {"telegram", "wechat"} and user_id and user_id == channel_id:
+        platform_specific["is_dm"] = True
+    if context_token:
+        platform_specific["context_token"] = context_token
+    return MessageContext(
+        user_id=user_id,
+        channel_id=channel_id,
+        platform=platform or None,
+        thread_id=snapshot.get("thread_id") or poll_info.thread_id or None,
+        message_id=snapshot.get("message_id") or None,
+        platform_specific=platform_specific or None,
+    )
+
+
+def restored_session_key_from_poll_info(poll_info, *, context: Optional[MessageContext] = None) -> str:
+    session_key = str(getattr(poll_info, "session_key", "") or "").strip()
+    if session_key:
+        return session_key
+    restored_context = context or restored_context_from_poll_info(poll_info)
+    return build_context_session_key(
+        restored_context,
+        platform=poll_info.platform or restored_context.platform,
+        settings_key=poll_info.settings_key,
+    )
 
 
 class OpenCodePollLoop:
     def __init__(self, agent):
         self._agent = agent
 
-    def _t(self, key: str) -> str:
+    def _t(self, key: str, **kwargs) -> str:
         controller = getattr(self._agent, "controller", None)
         translate = getattr(controller, "_t", None)
         if callable(translate):
-            return str(translate(key))
+            return str(translate(key, **kwargs))
         config = getattr(controller, "config", None)
         lang = getattr(config, "language", "en")
-        return str(i18n_t(key, lang))
+        return str(i18n_t(key, lang, **kwargs))
 
     def _build_restored_handle(self, poll_info):
         snapshot = poll_info.processing_indicator or {
@@ -45,10 +85,89 @@ class OpenCodePollLoop:
     def _build_restored_context(self, poll_info):
         return self._build_restored_handle(poll_info).context
 
+    def _empty_terminal_message_text(
+        self,
+        *,
+        model_dict: Optional[Dict[str, str]],
+        reasoning_effort: Optional[str],
+        detail: Optional[str] = None,
+    ) -> str:
+        provider_id = (model_dict or {}).get("providerID") or self._t("common.default")
+        model_id = (model_dict or {}).get("modelID") or self._t("common.default")
+        variant = reasoning_effort or self._t("common.default")
+        if detail:
+            return self._t(
+                "error.opencodeProviderRuntimeError",
+                provider=provider_id,
+                model=model_id,
+                variant=variant,
+                detail=detail,
+            )
+        return self._t(
+            "error.opencodeEmptyResponse",
+            provider=provider_id,
+            model=model_id,
+            variant=variant,
+        )
+
+    async def _empty_terminal_message_detail(
+        self,
+        server: OpenCodeServerManager,
+        session_id: str,
+        model_dict: Optional[Dict[str, str]] = None,
+        *,
+        since: Optional[float] = None,
+    ) -> Optional[str]:
+        try:
+            detail = await server.get_recent_session_error(session_id, since=since)
+            if detail:
+                return detail
+            provider_id = (model_dict or {}).get("providerID")
+            model_id = (model_dict or {}).get("modelID")
+            if provider_id and model_id:
+                return await server.get_provider_api_diagnostic(provider_id, model_id)
+        except Exception as err:
+            logger.debug("Failed to inspect OpenCode logs for %s: %s", session_id, err)
+        return None
+
+    async def _emit_empty_terminal_failure(
+        self,
+        *,
+        context,
+        server: OpenCodeServerManager,
+        session_id: str,
+        model_dict: Optional[Dict[str, str]],
+        reasoning_effort: Optional[str],
+        prompt_started_at: Optional[float] = None,
+    ) -> None:
+        detail = await self._empty_terminal_message_detail(
+            server,
+            session_id,
+            model_dict=model_dict,
+            since=prompt_started_at,
+        )
+        message = self._empty_terminal_message_text(
+            model_dict=model_dict,
+            reasoning_effort=reasoning_effort,
+            detail=detail,
+        )
+        await self._agent.controller.emit_agent_message(
+            context,
+            "notify",
+            message,
+        )
+        await self._agent.controller.emit_agent_message(
+            context,
+            "result",
+            message,
+            is_error=True,
+            level="silent",
+        )
+
     def _build_restored_ack_request(self, poll_info) -> AgentRequest:
         handle = self._build_restored_handle(poll_info)
         context = handle.context
-        session_key = f"{poll_info.platform}::{poll_info.settings_key}" if poll_info.platform else poll_info.settings_key
+        session_key = restored_session_key_from_poll_info(poll_info, context=context)
         return AgentRequest(
             context=context,
             message="",
@@ -130,6 +249,8 @@ class OpenCodePollLoop:
         emitted_assistant_messages: set[str] = set()
         poll_interval_seconds = 2.0
         final_text: Optional[str] = None
+        get_started_at = getattr(server, "get_last_prompt_started_at", None)
+        prompt_started_at = get_started_at(session_id) if callable(get_started_at) else None
 
         error_retry_count = 0
         error_retry_limit = getattr(
@@ -321,6 +442,23 @@ class OpenCodePollLoop:
                                 last_message_id=last_id,
                                 emitted_message_ids=emitted_assistant_messages,
                             )
+                        if not final_text and not msg_error and is_empty_terminal_opencode_message(last_message):
+                            logger.warning(
+                                "OpenCode session %s completed without text/error (provider=%s model=%s variant=%s)",
+                                session_id,
+                                (model_dict or {}).get("providerID"),
+                                (model_dict or {}).get("modelID"),
+                                reasoning_effort,
+                            )
+                            await self._emit_empty_terminal_failure(
+                                context=request.context,
+                                server=server,
+                                session_id=session_id,
+                                model_dict=model_dict,
+                                reasoning_effort=reasoning_effort,
+                                prompt_started_at=prompt_started_at,
+                            )
+                            return None, False
                         break
 
             await asyncio.sleep(poll_interval_seconds)
@@ -345,6 +483,10 @@ class OpenCodePollLoop:
         emitted_assistant_messages = set(poll_info.emitted_assistant_messages)
         poll_interval_seconds = 2.0
         final_text: Optional[str] = None
+        get_started_at = getattr(server, "get_last_prompt_started_at", None)
+        prompt_started_at = getattr(poll_info, "prompt_started_at", None) or (
+            get_started_at(session_id) if callable(get_started_at) else None
+        )
 
         error_retry_count = 0
         error_retry_limit = getattr(
@@ -499,6 +641,22 @@ class OpenCodePollLoop:
                                         last_message_id=last_info.get("id"),
                                         emitted_message_ids=emitted_assistant_messages,
                                     )
+                                if not final_text and not msg_error and is_empty_terminal_opencode_message(last_message):
+                                    logger.warning(
+                                        "Restored OpenCode session %s completed without text/error",
+                                        session_id,
+                                    )
+                                    await self._emit_empty_terminal_failure(
+                                        context=context,
+                                        server=server,
+                                        session_id=session_id,
+                                        model_dict=getattr(poll_info, "model_dict", None),
+                                        reasoning_effort=getattr(poll_info, "reasoning_effort", None),
+                                        prompt_started_at=prompt_started_at,
+                                    )
+                                    self._agent.sessions.remove_active_poll(session_id)
+                                    await self.remove_restored_ack(poll_info)
+                                    return
                                 break
 
                 await asyncio.sleep(poll_interval_seconds)

@@ -282,13 +282,6 @@ class DiscordBot(BaseIMClient):
 
         return await self._run_on_client_loop(_impl())
 
-    def _is_thread_reply_allowed(self, author_id: str, channel_id: str, thread_id: str) -> bool:
-        if not self.settings_manager or not self.sessions:
-            return False
-        if self.sessions.is_thread_active(author_id, channel_id, thread_id):
-            return True
-        return self.sessions.is_thread_active("scheduled", channel_id, thread_id)
-
     @staticmethod
     def _get_reference_message_id(message: discord.Message) -> Optional[str]:
         reference = getattr(message, "reference", None)
@@ -822,6 +815,12 @@ class DiscordBot(BaseIMClient):
         """Send denial message for failed auth check."""
         msg = self.build_auth_denial_text(auth_result.denial, channel_id)
         if not msg:
+            if interaction:
+                try:
+                    if not interaction.response.is_done():
+                        await interaction.response.defer(ephemeral=True)
+                except Exception as err:
+                    logger.debug("Failed to acknowledge silent interaction auth denial: %s", err)
             return
 
         if interaction:
@@ -940,11 +939,7 @@ class DiscordBot(BaseIMClient):
 
         if effective_require_mention and not is_dm:
             if isinstance(channel, discord.Thread):
-                if self.settings_manager:
-                    thread_active = self._is_thread_reply_allowed(str(message.author.id), channel_id, str(channel.id))
-                    if not thread_active:
-                        return
-                else:
+                if not mentioned_bot and not self.is_scheduled_thread_active(channel_id, str(channel.id)):
                     return
             else:
                 if referenced_anchor_base:
@@ -1452,13 +1447,10 @@ class DiscordBot(BaseIMClient):
                 self.selected_backend = current_backend or (
                     registered_backends[0] if registered_backends else "opencode"
                 )
-                stored_backend = getattr(current_routing, "agent_backend", None) if current_routing else None
                 canonical_model = getattr(current_routing, "model", None) if current_routing else None
                 canonical_reasoning = getattr(current_routing, "reasoning_effort", None) if current_routing else None
 
                 def _canonical_applies_to_backend(backend: str) -> bool:
-                    if stored_backend:
-                        return stored_backend == backend
                     return backend == (current_backend or "opencode")
 
                 def _current_model(field_name: str, backend: str) -> Optional[str]:

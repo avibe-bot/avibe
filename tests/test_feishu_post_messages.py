@@ -15,7 +15,10 @@ sys.path.insert(0, str(ROOT))
 
 def _install_opencode_utils_module() -> None:
     if "aiohttp" not in sys.modules:
-        sys.modules["aiohttp"] = types.ModuleType("aiohttp")
+        try:
+            __import__("aiohttp")
+        except ImportError:
+            sys.modules["aiohttp"] = types.ModuleType("aiohttp")
 
     if "modules.agents.opencode.utils" in sys.modules:
         return
@@ -128,6 +131,91 @@ class FeishuPostMessageTests(unittest.IsolatedAsyncioTestCase):
         assert context.files is not None
         self.assertEqual(len(context.files), 1)
         self.assertEqual(context.files[0].name, "img_123.image")
+
+    async def test_active_thread_requires_fresh_mention_when_require_mention_enabled(self):
+        bot = FeishuBot(LarkConfig(app_id="app-id", app_secret="app-secret", require_mention=True))
+        bot._bot_open_id = "ou_bot"
+        bot.check_authorization = lambda **kwargs: AuthResult(allowed=True, is_dm=False)
+        bot.dispatch_text_command = AsyncMock(return_value=False)
+        bot.on_message_callback = AsyncMock()
+
+        class _Sessions:
+            def is_thread_active(self, _user_id, _chat_id, _root_id):
+                return True
+
+            def is_thread_active_for_user(self, _user_id, _chat_id, _root_id):
+                return False
+
+        class _SettingsManager:
+            sessions = _Sessions()
+
+            def get_require_mention(self, _chat_id, global_default=False):
+                return global_default
+
+        bot.set_settings_manager(_SettingsManager())
+
+        await bot._async_handle_message(
+            {
+                "sender": {
+                    "sender_type": "user",
+                    "sender_id": {"open_id": "ou_user"},
+                },
+                "message": {
+                    "chat_id": "oc_chat",
+                    "chat_type": "group",
+                    "message_id": "om_child",
+                    "root_id": "om_root",
+                    "message_type": "text",
+                    "content": json.dumps({"text": "@colleague take a look"}),
+                    "mentions": [{"key": "@colleague", "id": {"open_id": "ou_colleague"}}],
+                },
+            }
+        )
+
+        bot.on_message_callback.assert_not_awaited()
+
+    async def test_scheduled_active_thread_still_bypasses_mention_requirement(self):
+        bot = FeishuBot(LarkConfig(app_id="app-id", app_secret="app-secret", require_mention=True))
+        bot._bot_open_id = "ou_bot"
+        bot.check_authorization = lambda **kwargs: AuthResult(allowed=True, is_dm=False)
+        bot.dispatch_text_command = AsyncMock(return_value=False)
+        bot.on_message_callback = AsyncMock()
+
+        class _Sessions:
+            def is_thread_active(self, _user_id, _chat_id, _root_id):
+                return True
+
+            def is_thread_active_for_user(self, user_id, chat_id, root_id):
+                return user_id == "scheduled" and chat_id == "oc_chat" and root_id == "om_root"
+
+        class _SettingsManager:
+            sessions = _Sessions()
+
+            def get_require_mention(self, _chat_id, global_default=False):
+                return global_default
+
+        bot.set_settings_manager(_SettingsManager())
+
+        await bot._async_handle_message(
+            {
+                "sender": {
+                    "sender_type": "user",
+                    "sender_id": {"open_id": "ou_user"},
+                },
+                "message": {
+                    "chat_id": "oc_chat",
+                    "chat_type": "group",
+                    "message_id": "om_child",
+                    "root_id": "om_root",
+                    "message_type": "text",
+                    "content": json.dumps({"text": "scheduled follow-up context"}),
+                    "mentions": [],
+                },
+            }
+        )
+
+        bot.on_message_callback.assert_awaited_once()
+        self.assertEqual(bot.on_message_callback.await_args.args[1], "scheduled follow-up context")
 
 
 if __name__ == "__main__":

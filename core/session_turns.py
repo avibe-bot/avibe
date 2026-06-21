@@ -317,6 +317,16 @@ class SessionTurnManager:
         task = asyncio.create_task(_runner(), name="internal-dispatch-async")
         if isinstance(session_id, str) and session_id:
             self.in_flight[session_id] = Turn(task=task, context=context)
+            # Make the DB row authoritative at ACCEPTANCE, not at dispatch start:
+            # ``update_session``'s backend lock re-checks ``agent_status`` inside
+            # its UPDATE predicate, so writing ``running`` synchronously here —
+            # before the loop can start the dispatch task — closes the startup
+            # window where a cross-backend PATCH could land while the row still
+            # read idle (and would then be silently undone by the bind-time
+            # backfill). The inbound chokepoint's own ``running`` write becomes a
+            # no-op; every terminal path still settles the status (outbound
+            # chokepoint / cancel / startup recovery).
+            self.controller.set_agent_status(session_id, "running")
             bus.publish("turn.start", {"session_id": session_id})
 
     async def flush_queue(self, session_id: str) -> bool:

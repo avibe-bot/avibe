@@ -17,7 +17,7 @@ from config.platform_registry import (
     supported_platform_ids,
     supported_platform_set,
 )
-from modules.agents.catalog import DEFAULT_AGENT_BACKEND, supported_agent_backend_set
+from modules.agents.catalog import DEFAULT_AGENT_BACKEND
 from modules.im.base import BaseIMConfig
 from vibe.i18n import normalize_language
 
@@ -26,6 +26,50 @@ logger = logging.getLogger(__name__)
 CONFIG_LOCK = threading.RLock()
 
 DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 600
+
+# Absolute-time backstop for evicting a Codex transport whose turn is stuck
+# "active" forever (e.g. the ``codex app-server`` wedged or silently
+# disconnected after ``turn/start`` but before ``turn/completed``, so
+# ``_active_turns`` is never cleared). Without this, ``evict_idle_transports``
+# treats an active turn as an ABSOLUTE veto and the wedged app-server process
+# leaks until service restart (mirrors the Claude leak in #622/#623).
+#
+# A transport with an active turn is force-evicted once it has been idle for
+# ``max(idle_timeout * MULTIPLIER, FLOOR_SECONDS)``. Set the multiplier <= 0 to
+# disable the backstop entirely.
+#
+# TRADE-OFF: this cap is driven purely by ``last_activity`` (refreshed on every
+# Codex notification), so it CANNOT distinguish a genuinely wedged turn from a
+# legitimately long, fully-silent one. A single tool/MCP run or model "thinking"
+# phase that emits no notifications for longer than the cap will be misjudged as
+# stuck and have its transport torn down. The multiplier defaults higher than a
+# typical tool-run assumption, and the floor guarantees a >= 30 min window even
+# when ``idle_timeout`` is configured small, to keep that false-positive rare.
+DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER = 3
+DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
+
+# Absolute-age backstop for idle eviction. A Claude session that is still
+# flagged ``active`` (its per-turn receiver never released the flag, e.g. a
+# long-lived receiver blocked on ``receive_messages`` with no stream EOF) is
+# force-evicted once its ``last_activity`` is older than
+# ``max(idle_timeout * STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER, FLOOR_SECONDS)``.
+# This decouples eviction from the receiver's flag-release logic, so a
+# stuck-active session can no longer pin its ~220MB ``claude`` subprocess until
+# the next service restart. A genuine in-flight turn keeps touching
+# ``last_activity`` (assistant/tool messages), so it normally stays well under
+# this cap. Set the multiplier to 0 to disable the backstop.
+#
+# Trade-off: ``last_activity`` is only refreshed when an SDK message arrives.
+# Because a stuck (blocked-receiver) session and a session running a single
+# silent tool call are indistinguishable from ``last_activity`` alone, a real
+# turn whose ONE tool invocation runs silently for longer than
+# the cap would be force-evicted mid-turn. The default cap is at least 30min
+# because Claude Code's Bash tool caps at 10min, so a single 30min-silent turn
+# is not expected in practice; raise the multiplier if your deployment runs
+# longer silent tools (e.g. long builds via custom/MCP tools that emit no
+# intermediate messages).
+DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER = 3
+DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
 DEFAULT_OPENCODE_ERROR_RETRY_LIMIT = 1
 DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX = 14
 MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
@@ -324,7 +368,12 @@ class PlatformsConfig:
             supported_text = "', '".join(supported_platform_ids())
             raise ValueError(f"Config 'platforms.primary' must be one of: '{supported_text}'")
         elif self.primary not in normalized:
-            normalized.insert(0, self.primary)
+            # ``enabled`` is the source of truth and ``primary`` is now an
+            # internal default with no user-facing control. A primary that is
+            # not in the enabled set (e.g. a stale value surviving a deep config
+            # merge after the platform was disabled) must FOLLOW enabled, not
+            # resurrect a removed platform by forcing itself back into the list.
+            self.primary = normalized[0]
         self.enabled = normalized
 
 
@@ -468,14 +517,7 @@ class V2Config:
         claude = ClaudeConfig(**_filter_dataclass_fields(ClaudeConfig, claude_payload))
         codex = CodexConfig(**_filter_dataclass_fields(CodexConfig, codex_payload))
 
-        default_backend = agents_payload.get("default_backend", DEFAULT_AGENT_BACKEND)
-        supported_backends = supported_agent_backend_set()
-        if default_backend not in supported_backends:
-            allowed = "', '".join(sorted(supported_backends))
-            raise ValueError(f"Config 'agents.default_backend' must be one of '{allowed}'")
-
         agents = AgentsConfig(
-            default_backend=default_backend,
             opencode=opencode,
             claude=claude,
             codex=codex,
@@ -639,7 +681,6 @@ class V2Config:
                 "log_level": self.runtime.log_level,
             },
             "agents": {
-                "default_backend": self.agents.default_backend,
                 "opencode": self.agents.opencode.__dict__,
                 "claude": self.agents.claude.__dict__,
                 "codex": self.agents.codex.__dict__,

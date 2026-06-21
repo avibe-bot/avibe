@@ -159,5 +159,4 @@ def to_app_config(v2: V2Config) -> AppCompatConfig:
         include_time_info=v2.include_time_info,
         include_user_info=v2.include_user_info,
         reply_enhancements=v2.reply_enhancements,
-        default_backend=v2.agents.default_backend,
     )

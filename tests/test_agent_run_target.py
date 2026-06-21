@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 from core.services import sessions as sessions_service
 from core.services.agent_run_target import resolve_agent_run_target
 from modules.im import MessageContext
+from storage.agent_session_rows import create_agent_session_row
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import scope_settings
@@ -39,6 +41,7 @@ def _seed_scope_settings(
     agent_name: str | None = None,
     agent_backend: str | None = None,
     agent_variant: str | None = None,
+    routing: dict | None = None,
 ) -> None:
     conn.execute(
         scope_settings.insert().values(
@@ -53,7 +56,7 @@ def _seed_scope_settings(
             reasoning_effort=None,
             require_mention=None,
             settings_version=1,
-            settings_json="{}",
+            settings_json=json.dumps({"routing": routing}) if routing is not None else "{}",
             created_at="2026-06-04T05:00:00Z",
             updated_at="2026-06-04T05:00:00Z",
         )
@@ -188,16 +191,141 @@ def test_new_im_session_uses_resolved_vibe_agent(tmp_path):
     assert session["reasoning_effort"] == "high"
 
 
-def test_new_im_session_falls_back_to_v2_agents_default_backend(tmp_path):
+def test_telegram_dm_new_session_ignores_legacy_channel_scope_session(tmp_path):
+    workdir = tmp_path / "telegram-dm"
+    claude_agent = SimpleNamespace(
+        id="agent-claude",
+        name="claude",
+        backend="claude",
+        model="claude-opus-4-8",
+        reasoning_effort=None,
+    )
+    controller = _controller(tmp_path)
+    controller.primary_platform = "telegram"
+    controller.config.platform = "telegram"
+    controller.resolve_vibe_agent_for_context = (
+        lambda _context, override_agent_name=None, required=False: claude_agent
+    )
+    with controller.sqlite_engine.begin() as conn:
+        user_scope_id = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="user",
+            native_id="58181121",
+            now="2026-06-19T07:30:00Z",
+        )
+        _seed_scope_settings(
+            conn,
+            user_scope_id,
+            workdir=str(workdir),
+            agent_name="claude",
+            routing={"agent_name": "claude", "claude_model": "claude-opus-4-8"},
+        )
+        legacy_channel_scope_id = upsert_scope(
+            conn,
+            platform="telegram",
+            scope_type="channel",
+            native_id="58181121",
+            now="2026-06-19T07:30:00Z",
+        )
+        create_agent_session_row(
+            conn,
+            scope_id=legacy_channel_scope_id,
+            agent_backend="opencode",
+            agent_variant="opencode",
+            agent_name="opencode",
+            session_anchor="telegram_58181121",
+            native_session_id="oc-native",
+            workdir=str(workdir),
+        )
+
+    ctx = MessageContext(
+        user_id="58181121",
+        channel_id="58181121",
+        message_id="100",
+        platform="telegram",
+        platform_specific={"platform": "telegram", "is_dm": True},
+    )
+
+    target = resolve_agent_run_target(
+        ctx,
+        controller=controller,
+        base_session_id="telegram_58181121",
+    )
+
+    assert target.scope_id == "telegram::user::58181121"
+    assert target.session_key == "telegram::user::58181121"
+    assert target.agent_backend == "claude"
+    assert target.agent_name == "claude"
+    assert target.model == "claude-opus-4-8"
+    assert target.agent_session_id is not None
+    with controller.sqlite_engine.connect() as conn:
+        rows = conn.exec_driver_sql(
+            "select scope_id, agent_backend, session_anchor, metadata_json from agent_sessions order by scope_id"
+        ).all()
+    assert [(row.scope_id, row.agent_backend, row.session_anchor) for row in rows] == [
+        ("telegram::channel::58181121", "opencode", "telegram_58181121"),
+        ("telegram::user::58181121", "claude", "telegram_58181121"),
+    ]
+    assert json.loads(rows[1].metadata_json)["legacy_scope_key"] == "telegram::user::58181121"
+
+
+def test_new_im_session_ignores_legacy_scope_backend(tmp_path):
+    workdir = tmp_path / "channel"
+    controller = _controller(tmp_path)
+    with controller.sqlite_engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="slack",
+            scope_type="channel",
+            native_id="C123",
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(
+            conn,
+            scope_id,
+            workdir=str(workdir),
+            agent_backend="opencode",
+            agent_variant="reviewer",
+        )
+
+    ctx = MessageContext(user_id="U1", channel_id="C123", platform="slack", thread_id="171717.123")
+
+    target = resolve_agent_run_target(
+        ctx,
+        controller=controller,
+        base_session_id="slack_171717.123",
+    )
+
+    assert target.agent_id == "agent-codex-default"
+    assert target.agent_name == "codex"
+    assert target.agent_backend == "codex"
+    assert target.agent_variant == "codex"
+    with controller.sqlite_engine.connect() as conn:
+        session = sessions_service.get_session(conn, target.agent_session_id)
+    assert session["agent_id"] == "agent-codex-default"
+    assert session["agent_name"] == "codex"
+    assert session["agent_backend"] == "codex"
+    assert session["agent_variant"] == "codex"
+
+
+def test_new_im_session_falls_back_to_default_vibe_agent(tmp_path):
     workdir = tmp_path / "channel"
     controller = _controller(tmp_path)
     del controller.agent_router
-    del controller.resolve_vibe_agent_for_context
     controller.config = SimpleNamespace(
         platform="slack",
         claude=SimpleNamespace(cwd=None),
         agents=SimpleNamespace(default_backend="claude"),
     )
+    default_agent = SimpleNamespace(
+        id="agent-codex-default",
+        name="codex",
+        backend="codex",
+        model=None,
+        reasoning_effort=None,
+    )
+    controller.resolve_vibe_agent_for_context = lambda _context, required=False: default_agent
     with controller.sqlite_engine.begin() as conn:
         scope_id = upsert_scope(
             conn,
@@ -216,12 +344,12 @@ def test_new_im_session_falls_back_to_v2_agents_default_backend(tmp_path):
         base_session_id="slack_171717.123",
     )
 
-    assert target.agent_backend == "claude"
-    assert target.agent_variant == "claude"
+    assert target.agent_backend == "codex"
+    assert target.agent_variant == "codex"
     with controller.sqlite_engine.connect() as conn:
         session = sessions_service.get_session(conn, target.agent_session_id)
-    assert session["agent_backend"] == "claude"
-    assert session["agent_variant"] == "claude"
+    assert session["agent_backend"] == "codex"
+    assert session["agent_variant"] == "codex"
 
 
 def test_new_im_session_without_scope_settings_snapshots_default_cwd(tmp_path):
@@ -257,6 +385,18 @@ def test_new_im_session_without_scope_settings_snapshots_default_cwd(tmp_path):
 def test_opencode_bind_reuses_scoped_agent_variant_session(tmp_path):
     workdir = tmp_path / "channel"
     controller = _controller(tmp_path)
+    opencode_agent = SimpleNamespace(
+        id="agent-opencode-reviewer",
+        name="Code Reviewer",
+        backend="opencode",
+        model=None,
+        reasoning_effort=None,
+    )
+
+    default_resolver = controller.resolve_vibe_agent_for_context
+    controller.resolve_vibe_agent_for_context = lambda _context, override_agent_name=None, required=False: (
+        opencode_agent if override_agent_name == "Code Reviewer" else default_resolver(_context, required=required)
+    )
     with controller.sqlite_engine.begin() as conn:
         scope_id = upsert_scope(
             conn,
@@ -272,6 +412,7 @@ def test_opencode_bind_reuses_scoped_agent_variant_session(tmp_path):
             agent_name="Code Reviewer",
             agent_backend="opencode",
             agent_variant="reviewer",
+            routing={"opencode_agent": "reviewer"},
         )
 
     ctx = MessageContext(user_id="U1", channel_id="C123", platform="slack", thread_id="171717.123")
@@ -304,6 +445,57 @@ def test_opencode_bind_reuses_scoped_agent_variant_session(tmp_path):
             "select agent_backend, agent_variant, native_session_id from agent_sessions"
         ).all()
     assert rows == [("opencode", "reviewer", "oc-native")]
+
+
+def test_new_im_session_uses_scope_agent_variant_column_when_json_missing(tmp_path):
+    workdir = tmp_path / "channel"
+    controller = _controller(tmp_path)
+    scoped_agent = SimpleNamespace(
+        id="agent-reviewer",
+        name="Code Reviewer",
+        backend="codex",
+        model=None,
+        reasoning_effort=None,
+    )
+
+    default_resolver = controller.resolve_vibe_agent_for_context
+    controller.resolve_vibe_agent_for_context = lambda _context, override_agent_name=None, required=False: (
+        scoped_agent if override_agent_name == "Code Reviewer" else default_resolver(_context, required=required)
+    )
+    with controller.sqlite_engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="slack",
+            scope_type="channel",
+            native_id="C123",
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(
+            conn,
+            scope_id,
+            workdir=str(workdir),
+            agent_name="Code Reviewer",
+            agent_backend="codex",
+            agent_variant="reviewer-sub",
+            routing={},
+        )
+
+    ctx = MessageContext(user_id="U1", channel_id="C123", platform="slack", thread_id="171717.123")
+
+    target = resolve_agent_run_target(
+        ctx,
+        controller=controller,
+        base_session_id="slack_171717.123",
+    )
+
+    assert target.agent_name == "Code Reviewer"
+    assert target.agent_backend == "codex"
+    assert target.agent_variant == "reviewer-sub"
+    with controller.sqlite_engine.connect() as conn:
+        session = sessions_service.get_session(conn, target.agent_session_id)
+    assert session["agent_name"] == "Code Reviewer"
+    assert session["agent_backend"] == "codex"
+    assert session["agent_variant"] == "reviewer-sub"
 
 
 def test_readonly_cwd_lookup_does_not_create_session(tmp_path):

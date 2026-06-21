@@ -1731,8 +1731,9 @@ class SlackBot(BaseIMClient):
             ):
                 return
 
-            # Check if we require mention in channels (not DMs)
-            # For threads: only respond if the bot is active in that thread
+            # Check if we require mention in channels (not DMs).
+            # In threads, human activity does not bypass the mention requirement;
+            # scheduled follow-up threads are the only no-mention exception.
             is_thread_reply = event.get("thread_ts") is not None
 
             # Resolve effective require_mention: per-channel override or global default
@@ -1750,20 +1751,12 @@ class SlackBot(BaseIMClient):
                     logger.debug(f"Ignoring non-mention message in channel: '{route_text}'")
                     return
 
-                # In thread: check if bot is active in this thread
+                # In thread: require a fresh bot mention unless this is a scheduled follow-up thread.
                 elif is_thread_reply:
                     thread_ts = event.get("thread_ts")
-                    # If we have settings_manager, check if thread is active
                     if self.settings_manager:
-                        thread_active = (
-                            self.sessions.is_thread_active(user_id, channel_id, thread_ts) if self.sessions else False
-                        )
-                        scheduled_thread_active = (
-                            self.sessions.is_thread_active("scheduled", channel_id, thread_ts)
-                            if self.sessions
-                            else False
-                        )
-                        if not thread_active and not scheduled_thread_active:
+                        scheduled_thread_active = self.is_scheduled_thread_active(channel_id, thread_ts)
+                        if not scheduled_thread_active:
                             logger.debug(f"Ignoring message in inactive thread {thread_ts}: '{route_text}'")
                             return
                     else:
@@ -2112,7 +2105,7 @@ class SlackBot(BaseIMClient):
                             selection = parse_routing_modal_selection(
                                 view=view,
                                 action=action,
-                                default_backend="",
+                                fallback_selected_backend="",
                             )
                             await self._on_routing_modal_update(
                                 user.get("id"),
@@ -3214,13 +3207,10 @@ class SlackBot(BaseIMClient):
 
         # Determine effective backend for showing backend-specific options
         effective_backend = selected_backend_value or current_backend or "opencode"
-        stored_backend = getattr(current_routing, "agent_backend", None) if current_routing else None
         canonical_model = getattr(current_routing, "model", None) if current_routing else None
         canonical_reasoning = getattr(current_routing, "reasoning_effort", None) if current_routing else None
 
         def _canonical_applies_to_backend(backend: str) -> bool:
-            if stored_backend:
-                return stored_backend == backend
             return backend == (current_backend or "opencode")
 
         def _current_model_for_backend(field_name: str, backend: str) -> Optional[str]:

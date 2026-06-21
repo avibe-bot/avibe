@@ -8,7 +8,6 @@ import {
   getEnabledPlatforms,
   getImPlatforms,
   getPlatformCatalog,
-  getPrimaryPlatform,
   WORKBENCH_PLATFORM_ID,
 } from '../../lib/platforms';
 import { hasUsableSecret, secretInputValue } from '../../lib/secretFields';
@@ -77,34 +76,31 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
   // setup).
   const initialPlatforms = useMemo(() => getEnabledPlatforms(data), [data]);
   const platformCatalog = useMemo(() => getPlatformCatalog(data), [data]);
+  // The credential-tab fallback must be a configurable IM platform — never the
+  // always-on workbench (which has no credentials and isn't in the selectable
+  // grid), so default to the first IM platform rather than the full catalog.
+  const defaultCredentialPlatform = useMemo(() => getImPlatforms(data)[0]?.id || 'slack', [data]);
   const [selected, setSelected] = useState<string[]>(initialPlatforms);
-  const [primary, setPrimary] = useState<string>(getPrimaryPlatform(data));
-  const [activeCredentialPlatform, setActiveCredentialPlatform] = useState<string>(getPrimaryPlatform(data));
+  const [activeCredentialPlatform, setActiveCredentialPlatform] = useState<string>(
+    initialPlatforms[0] || defaultCredentialPlatform
+  );
   const [credentialDraft, setCredentialDraft] = useState<Record<string, any>>(() => buildInitialCredentialDraft(data));
   const [validating, setValidating] = useState(false);
   const [validationState, setValidationState] = useState<Record<string, ValidationState>>({});
 
   useEffect(() => {
     if (!selected.includes(activeCredentialPlatform)) {
-      setActiveCredentialPlatform(selected[0] || platformCatalog[0]?.id || 'slack');
+      setActiveCredentialPlatform(selected[0] || defaultCredentialPlatform);
     }
-  }, [activeCredentialPlatform, platformCatalog, selected]);
+  }, [activeCredentialPlatform, defaultCredentialPlatform, selected]);
 
   const togglePlatform = (platform: string) => {
     setSelected((current) => {
       if (current.includes(platform)) {
-        const next = current.filter((item) => item !== platform);
-        if (primary === platform) {
-          setPrimary(next[0] ?? '');
-        }
-        return next;
-      }
-      const next = [...current, platform];
-      if (!current.length) {
-        setPrimary(platform);
+        return current.filter((item) => item !== platform);
       }
       setActiveCredentialPlatform(platform);
-      return next;
+      return [...current, platform];
     });
   };
 
@@ -121,17 +117,18 @@ export const PlatformSelection: React.FC<PlatformSelectionProps> = ({ data, onNe
 
   const handleContinue = async () => {
     // Workbench-only setups are valid, so allow an empty IM selection — do not
-    // force a fallback platform into the enabled set.
+    // force a fallback platform into the enabled set. No user-facing primary:
+    // the backend derives its internal default from ``enabled``.
     const normalized = selected;
-    const resolvedPrimary = normalized.includes(primary) ? primary : (normalized[0] ?? '');
+    const selectionData = {
+      platforms: {
+        enabled: normalized,
+      },
+    };
     const nextData = {
       ...credentialDraft,
       discord_client_id: credentialDraft.discord?.client_id || '',
-      platform: resolvedPrimary,
-      platforms: {
-        enabled: normalized,
-        primary: resolvedPrimary,
-      },
+      ...selectionData,
     };
 
     if (isPage && onSave) {

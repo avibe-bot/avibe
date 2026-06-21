@@ -12,23 +12,26 @@ from modules.im.base import InlineButton, InlineKeyboard, MessageContext
 
 def _install_slack_stubs() -> None:
     if "aiohttp" not in sys.modules:
-        aiohttp_mod = types.ModuleType("aiohttp")
+        try:
+            __import__("aiohttp")
+        except ImportError:
+            aiohttp_mod = types.ModuleType("aiohttp")
 
-        class _ClientWebSocketResponse:
-            closed = False
+            class _ClientWebSocketResponse:
+                closed = False
 
-        class _ClientSession:
-            async def close(self):
-                return None
+            class _ClientSession:
+                async def close(self):
+                    return None
 
-        class _ClientTimeout:
-            def __init__(self, *args, **kwargs):
-                pass
+            class _ClientTimeout:
+                def __init__(self, *args, **kwargs):
+                    pass
 
-        aiohttp_mod.ClientWebSocketResponse = _ClientWebSocketResponse
-        aiohttp_mod.ClientSession = _ClientSession
-        aiohttp_mod.ClientTimeout = _ClientTimeout
-        sys.modules["aiohttp"] = aiohttp_mod
+            aiohttp_mod.ClientWebSocketResponse = _ClientWebSocketResponse
+            aiohttp_mod.ClientSession = _ClientSession
+            aiohttp_mod.ClientTimeout = _ClientTimeout
+            sys.modules["aiohttp"] = aiohttp_mod
 
     if "markdown_to_mrkdwn" not in sys.modules:
         markdown_mod = types.ModuleType("markdown_to_mrkdwn")
@@ -1374,6 +1377,88 @@ class SlackDmMentionTests(unittest.IsolatedAsyncioTestCase):
         await slack._handle_event(payload)
 
         self.assertEqual(marked, [("U123", "C_CONNECT", "1710000000.000360")])
+
+    async def test_active_thread_requires_fresh_mention_when_require_mention_enabled(self):
+        slack = SlackBot(SlackConfig(bot_token="xoxb-test", require_mention=True))
+        received = []
+
+        class _Sessions:
+            def is_thread_active(self, _user_id, _channel_id, _thread_ts):
+                return True
+
+            def is_thread_active_for_user(self, _user_id, _channel_id, _thread_ts):
+                return False
+
+        class _SettingsManager:
+            sessions = _Sessions()
+
+            def get_require_mention(self, _channel_id, global_default=False):
+                return global_default
+
+        async def _on_message(_context, text):
+            received.append(text)
+
+        slack.set_settings_manager(_SettingsManager())
+        slack.register_callbacks(on_message=_on_message)
+
+        payload = {
+            "event_id": "evt-active-thread-no-mention",
+            "team_id": "T1",
+            "authorizations": [{"user_id": "U_BOT"}],
+            "event": {
+                "type": "message",
+                "channel": "C123",
+                "user": "U123",
+                "text": "@colleague take a look",
+                "ts": "1710000000.000361",
+                "thread_ts": "1710000000.000360",
+            },
+        }
+
+        await slack._handle_event(payload)
+
+        self.assertEqual(received, [])
+
+    async def test_scheduled_active_thread_still_bypasses_mention_requirement(self):
+        slack = SlackBot(SlackConfig(bot_token="xoxb-test", require_mention=True))
+        received = []
+
+        class _Sessions:
+            def is_thread_active(self, _user_id, _channel_id, _thread_ts):
+                return True
+
+            def is_thread_active_for_user(self, user_id, channel_id, thread_ts):
+                return user_id == "scheduled" and channel_id == "C123" and thread_ts == "1710000000.000360"
+
+        class _SettingsManager:
+            sessions = _Sessions()
+
+            def get_require_mention(self, _channel_id, global_default=False):
+                return global_default
+
+        async def _on_message(_context, text):
+            received.append(text)
+
+        slack.set_settings_manager(_SettingsManager())
+        slack.register_callbacks(on_message=_on_message)
+
+        payload = {
+            "event_id": "evt-scheduled-thread-no-mention",
+            "team_id": "T1",
+            "authorizations": [{"user_id": "U_BOT"}],
+            "event": {
+                "type": "message",
+                "channel": "C123",
+                "user": "U123",
+                "text": "scheduled follow-up context",
+                "ts": "1710000000.000362",
+                "thread_ts": "1710000000.000360",
+            },
+        }
+
+        await slack._handle_event(payload)
+
+        self.assertEqual(received, ["scheduled follow-up context"])
 
     async def test_socket_mode_events_ack_before_message_processing_finishes(self):
         slack = SlackBot(SlackConfig(bot_token="xoxb-test"))

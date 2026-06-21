@@ -6,7 +6,7 @@ services:
     ports:
       - "${VIBE_E2E_PORT:-15123}:5123"
     environment:
-      - VIBE_REMOTE_HOME=/data/vibe_remote
+      - AVIBE_HOME=/data/avibe
       - VIBE_DEPLOYMENT_ENV=e2e
       - VIBE_UI_PORT=5123
     healthcheck:

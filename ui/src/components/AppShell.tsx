@@ -13,6 +13,7 @@ import { ThemeToggle } from './ThemeToggle';
 import { VersionBadge } from './VersionBadge';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { NewSessionSheet } from './workbench/NewSessionSheet';
+import { SearchPalette } from './workbench/search/SearchPalette';
 import { Button } from './ui/button';
 import { InstallHint } from './InstallHint';
 import logoImg from '../assets/logo.png';
@@ -141,6 +142,7 @@ export const AppShell: React.FC = () => {
   const [enabledPlatforms, setEnabledPlatforms] = useState<string[]>([]);
   const [config, setConfig] = useState<any>(null);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   // Mirror the iOS visual-viewport height into --app-vvh. The MOBILE shell is a
   // static locked column that does NOT read it (resizing the shell mid-focus
   // fought iOS's scroll-into-view and flung the input off-screen); only the md+
@@ -154,6 +156,20 @@ export const AppShell: React.FC = () => {
       setEnabledPlatforms(getEnabledPlatforms(c));
     }).catch(() => {});
   }, [api]);
+
+  // Global ⌘K / Ctrl+K toggles the message-search palette. Intercept the chord
+  // everywhere (it's a deliberate command, so it wins even from the composer);
+  // the palette's own input/Esc/arrow handling takes over once it is open.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        setSearchOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
   const isRunning = status.state === 'running';
@@ -201,10 +217,14 @@ export const AppShell: React.FC = () => {
     { to: '/more', label: t('nav.more'), icon: Menu, match: (p) => p.startsWith('/more') },
   ];
 
-  // Chat is a full-screen detail (own composer); the wizard owns the whole
-  // viewport. Hide the bottom tab bar on both.
+  // Chat is a full-screen detail (own composer) and Search is a full-screen
+  // focused surface (own header + back button); the wizard owns the whole
+  // viewport. These mobile surfaces render their own top chrome, so the shell's
+  // mobile brand header AND the bottom tab bar are hidden on them.
   const isChat = location.pathname.startsWith('/chat/');
-  const showBottomNav = !isChat && location.pathname !== '/setup';
+  const isSearch = location.pathname === '/search';
+  const isFullScreenMobile = isChat || isSearch;
+  const showBottomNav = !isFullScreenMobile && location.pathname !== '/setup';
 
   return (
     // Mobile: a LOCKED, full-viewport flex column (overflow-hidden) so the
@@ -219,7 +239,10 @@ export const AppShell: React.FC = () => {
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-[240px] flex-col border-r border-border bg-surface md:flex">
         <div className="flex h-full flex-col justify-between gap-6 px-4 py-5">
           {/* Top: Brand + Workspace label + Nav list */}
-          <div className="flex min-h-0 flex-1 flex-col gap-6">
+          {/* Workbench mounts a search field right under the brand, so use the
+              same gap as the sidebar's own rows (gap-4) for an even rhythm; admin
+              keeps the wider gap-6 to separate the brand from its labelled nav. */}
+          <div className={clsx('flex min-h-0 flex-1 flex-col', shellMode === 'workbench' ? 'gap-4' : 'gap-6')}>
             <div className="flex items-center gap-2.5 px-1 py-2">
               <img
                 src={logoImg}
@@ -242,7 +265,7 @@ export const AppShell: React.FC = () => {
                 </nav>
               </div>
             )}
-            {shellMode === 'workbench' && <WorkbenchSidebar />}
+            {shellMode === 'workbench' && <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />}
           </div>
 
           {/* Bottom: Status (with embedded version badge) + toggles + hostname */}
@@ -313,9 +336,10 @@ export const AppShell: React.FC = () => {
         </div>
       </aside>
 
-      {/* Chat is a fixed full-screen surface with its own header bar, so the
-          brand header is hidden there (otherwise it would sit behind the chat). */}
-      {!isChat && (
+      {/* Chat and Search are fixed full-screen surfaces with their own header
+          bars, so the brand header is hidden there (otherwise it would sit
+          behind them). */}
+      {!isFullScreenMobile && (
         <header className="sticky top-0 z-40 flex h-[calc(4rem+env(safe-area-inset-top))] shrink-0 items-center justify-between gap-2 border-b border-border bg-background/92 px-4 pt-[env(safe-area-inset-top)] backdrop-blur md:hidden">
           <div className="flex min-w-0 items-center gap-2">
             <img
@@ -365,6 +389,11 @@ export const AppShell: React.FC = () => {
         onClose={() => setNewSessionOpen(false)}
         onOpen={() => setNewSessionOpen(true)}
       />
+
+      {/* ⌘K message-search palette. Mounted shell-wide so the shortcut works from
+          both Workbench and Control Panel; the sidebar field is the workbench
+          entry point. */}
+      <SearchPalette open={searchOpen} onClose={() => setSearchOpen(false)} />
     </div>
   );
 };

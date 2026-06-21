@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from core.controller import Controller
@@ -208,6 +209,40 @@ class ResumeSessionTests(unittest.IsolatedAsyncioTestCase):
         # The anchor is cleared first, then re-bound to the user-selected native.
         self.assertEqual(settings.remove_calls, [("slack::C111", "claude", "slack_169999.123")])
         self.assertEqual(settings.set_calls, [("slack::C111", "claude", "slack_169999.123", "sess_new")])
+
+    async def test_handle_resume_session_submission_preserves_same_backend_scope_overrides(self):
+        from modules.settings_manager import ChannelRouting
+
+        settings = _StubSettingsManager()
+        settings.get_channel_routing = lambda _settings_key: ChannelRouting(
+            agent_name="reviewer",
+            model="gpt-5.5",
+            reasoning_effort="xhigh",
+            codex_agent="reviewer-sub",
+        )
+        im_client = _StubIMClient()
+        ctrl = _StubController()
+        ctrl.init_minimal(im_client, settings, _StubConfig())
+        ctrl.im_client.should_use_thread_for_reply = lambda: True
+        ctrl.vibe_agent_store = SimpleNamespace(
+            get=lambda name: SimpleNamespace(backend="codex") if name == "reviewer" else None
+        )
+
+        await ctrl.session_handler.handle_resume_session_submission(
+            user_id="U123",
+            channel_id="C111",
+            thread_id="169999.123",
+            agent="codex",
+            session_id="codex_native",
+        )
+
+        self.assertEqual(len(settings.routing_calls), 1)
+        settings_key, routing = settings.routing_calls[0]
+        self.assertEqual(settings_key, "C111")
+        self.assertEqual(routing.agent_name, "codex")
+        self.assertEqual(routing.model, "gpt-5.5")
+        self.assertEqual(routing.reasoning_effort, "xhigh")
+        self.assertEqual(routing.codex_agent, "reviewer-sub")
 
     async def test_handle_resume_session_submission_dm_falls_back_to_channel(self):
         settings = _StubSettingsManager()

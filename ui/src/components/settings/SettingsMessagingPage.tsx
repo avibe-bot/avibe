@@ -9,7 +9,6 @@ import { SettingsPageShell } from './SettingsPageShell';
 import {
   platformHasCapability,
   getEnabledPlatforms,
-  getPrimaryPlatform,
 } from '@/lib/platforms';
 import {
   CompactField,
@@ -43,9 +42,10 @@ const SAVE_KEYS = [
 ] as const;
 
 function buildMessagePatch(config: any, extraPatch: Record<string, unknown> = {}) {
-  const patch: Record<string, unknown> = {
-    platform: getPrimaryPlatform(config),
-  };
+  // ``save_config`` merges onto the stored config and the backend derives the
+  // internal default platform from ``platforms.enabled``, so this messaging
+  // save no longer sends a ``platform``/primary field.
+  const patch: Record<string, unknown> = {};
 
   for (const key of SAVE_KEYS) {
     patch[key] = config?.[key];

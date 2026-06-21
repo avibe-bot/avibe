@@ -18,6 +18,7 @@ import { hasUsableSecret, secretInputValue, withSecretDraft } from '../../lib/se
 import { EmbeddedConfigShell, EyebrowBadge, WizardCard } from '../visual';
 import { ProxyUrlField } from '../shared/ProxyUrlField';
 import { Button } from '../ui/button';
+import { Input } from '../ui/input';
 
 interface WeChatConfigProps {
   data: Record<string, any>;
@@ -26,13 +27,22 @@ interface WeChatConfigProps {
   embedded?: boolean;
   onApply?: (data: Record<string, any>) => Promise<void> | void;
   onCancel?: () => void;
+  autoStartLogin?: boolean;
 }
 
 const QR_POLL_INTERVAL_MS = 5000;
 
 // Mirrors design.pen XCWAT visual treatment for the QR-driven WeChat onboarding.
 // Three-stop horizontal stepper, mint-bordered QR card, mint primary actions.
-export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack, embedded = false, onApply, onCancel }) => {
+export const WeChatConfig: React.FC<WeChatConfigProps> = ({
+  data,
+  onNext,
+  onBack,
+  embedded = false,
+  onApply,
+  onCancel,
+  autoStartLogin = true,
+}) => {
   const { t } = useTranslation();
   const api = useApi();
   const [applying, setApplying] = useState(false);
@@ -45,11 +55,19 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
   const [botToken, setBotToken] = useState<string>(secretInputValue(data.wechat, 'bot_token'));
   const [baseUrl, setBaseUrl] = useState<string>(data.wechat?.base_url || '');
   const [proxyUrl, setProxyUrl] = useState<string>(data.wechat?.proxy_url || '');
+  const [verifyCode, setVerifyCode] = useState('');
+  const [needsVerifyCode, setNeedsVerifyCode] = useState(false);
   const [starting, setStarting] = useState(false);
+  const hasSavedBotToken = hasUsableSecret(data.wechat, 'bot_token', botToken);
 
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoStartedRef = useRef(false);
   const activeSessionKeyRef = useRef<string | null>(null);
+
+  const preserveExistingConnectionFields = useCallback((result: Record<string, any> = {}) => {
+    setBotToken(result.bot_token || secretInputValue(data.wechat, 'bot_token'));
+    setBaseUrl(result.base_url || data.wechat?.base_url || '');
+  }, [data.wechat]);
 
   const stopPolling = useCallback(() => {
     if (pollTimerRef.current) {
@@ -71,6 +89,8 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
     setQrCodeUrl('');
     setBotToken('');
     setBaseUrl('');
+    setVerifyCode('');
+    setNeedsVerifyCode(false);
     activeSessionKeyRef.current = null;
     stopPolling();
 
@@ -120,13 +140,14 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
 
   useEffect(() => {
     if (autoStartedRef.current) return;
+    if (!autoStartLogin) return;
     if (starting) return;
     if (loginState !== 'idle') return;
-    if (hasUsableSecret(data.wechat, 'bot_token')) return;
+    if (hasSavedBotToken) return;
 
     autoStartedRef.current = true;
     void startLogin();
-  }, [loginState, startLogin, starting, data.wechat]);
+  }, [autoStartLogin, loginState, startLogin, starting, hasSavedBotToken]);
 
   const startPolling = (key: string) => {
     stopPolling();
@@ -137,9 +158,17 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
 
         const status = result.status;
         if (status === 'scaned') {
+          setNeedsVerifyCode(false);
+          setVerifyCode('');
           setLoginState('confirming');
           setMessage(result.message || t('wechatConfig.confirmOnPhone'));
+        } else if (status === 'need_verifycode') {
+          setNeedsVerifyCode(true);
+          setLoginState('confirming');
+          setMessage(result.message || t('wechatConfig.verifyCodePrompt'));
         } else if (status === 'confirmed') {
+          setNeedsVerifyCode(false);
+          setVerifyCode('');
           setLoginState('connected');
           setMessage(result.message || t('wechatConfig.connected'));
           setBotToken(result.bot_token || '');
@@ -147,17 +176,30 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
           activeSessionKeyRef.current = null;
           stopPolling();
           return;
+        } else if (status === 'already_connected') {
+          setNeedsVerifyCode(false);
+          setVerifyCode('');
+          setLoginState('connected');
+          setMessage(result.message || t('wechatConfig.connected'));
+          preserveExistingConnectionFields(result);
+          activeSessionKeyRef.current = null;
+          stopPolling();
+          return;
         } else if (status === 'refreshed') {
+          setNeedsVerifyCode(false);
+          setVerifyCode('');
           setLoginState('qr_ready');
           setQrCodeUrl(result.qrcode_url || '');
           setMessage(result.message || t('wechatConfig.qrExpired'));
         } else if (status === 'expired') {
+          setNeedsVerifyCode(false);
           setLoginState('error');
           setMessage(result.message || t('wechatConfig.qrExpired'));
           activeSessionKeyRef.current = null;
           stopPolling();
           return;
         } else if (status === 'error') {
+          setNeedsVerifyCode(false);
           setLoginState('error');
           setMessage(result.message || t('wechatConfig.pollError'));
           activeSessionKeyRef.current = null;
@@ -178,8 +220,72 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
     void pollOnce();
   };
 
-  const canProceed = hasUsableSecret(data.wechat, 'bot_token', botToken);
-  const isAlreadyBound = loginState === 'idle' && !botToken && hasUsableSecret(data.wechat, 'bot_token');
+  const submitVerifyCode = async () => {
+    const key = activeSessionKeyRef.current;
+    const code = verifyCode.trim();
+    if (!key || !code) return;
+    stopPolling();
+    try {
+      const result = await api.wechatPollLogin(key, code);
+      if (!result || activeSessionKeyRef.current !== key) return;
+      if (result.status === 'confirmed') {
+        setNeedsVerifyCode(false);
+        setVerifyCode('');
+        setLoginState('connected');
+        setMessage(result.message || t('wechatConfig.connected'));
+        setBotToken(result.bot_token || '');
+        setBaseUrl(result.base_url || '');
+        activeSessionKeyRef.current = null;
+        return;
+      }
+      if (result.status === 'already_connected') {
+        setNeedsVerifyCode(false);
+        setVerifyCode('');
+        setLoginState('connected');
+        setMessage(result.message || t('wechatConfig.connected'));
+        preserveExistingConnectionFields(result);
+        activeSessionKeyRef.current = null;
+        return;
+      }
+      if (result.status === 'scaned') {
+        setNeedsVerifyCode(false);
+        setVerifyCode('');
+        setLoginState('confirming');
+        setMessage(result.message || t('wechatConfig.confirmOnPhone'));
+        startPolling(key);
+        return;
+      }
+      if (result.status === 'need_verifycode') {
+        setNeedsVerifyCode(true);
+        setLoginState('confirming');
+        setMessage(result.message || t('wechatConfig.verifyCodePrompt'));
+        return;
+      }
+      if (result.status === 'refreshed') {
+        setNeedsVerifyCode(false);
+        setVerifyCode('');
+        setLoginState('qr_ready');
+        setQrCodeUrl(result.qrcode_url || '');
+        setMessage(result.message || t('wechatConfig.qrExpired'));
+        startPolling(key);
+        return;
+      }
+      if (result.status === 'error' || result.status === 'expired') {
+        setNeedsVerifyCode(false);
+        setLoginState('error');
+        setMessage(result.message || t('wechatConfig.pollError'));
+        activeSessionKeyRef.current = null;
+        return;
+      }
+      startPolling(key);
+    } catch (err: any) {
+      setMessage(err?.message || t('wechatConfig.pollError'));
+      startPolling(key);
+    }
+  };
+
+  const canProceed = hasSavedBotToken;
+  const isAlreadyBound = loginState === 'idle' && !botToken && hasSavedBotToken;
 
   const getStepState = () => {
     if (isAlreadyBound) return { step: 3, scanning: false, connected: true };
@@ -200,7 +306,7 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
     platform: 'wechat',
     wechat: {
       ...withSecretDraft(data.wechat, 'bot_token', botToken),
-      base_url: baseUrl,
+      base_url: baseUrl || data.wechat?.base_url || '',
       proxy_url: proxyUrl || undefined,
     },
   });
@@ -294,14 +400,24 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
           )}
 
           {/* Starting */}
-          {loginState === 'idle' && !botToken && (
+          {loginState === 'idle' && !botToken && !isAlreadyBound && (
             <div className="rounded-xl border border-border bg-background px-6 py-8 text-center">
               <div className="mx-auto flex size-14 items-center justify-center rounded-full border border-cyan/30 bg-cyan/[0.06] text-cyan">
-                <Loader2 size={26} className="animate-spin" />
+                {starting || autoStartLogin ? (
+                  <Loader2 size={26} className="animate-spin" />
+                ) : (
+                  <Smartphone size={26} />
+                )}
               </div>
               <p className="mt-3 text-[13px] text-muted">
                 {starting ? t('wechatConfig.starting') : t('wechatConfig.startDescription')}
               </p>
+              {!autoStartLogin && !starting && (
+                <Button type="button" variant="brand" size="sm" className="mt-4" onClick={startLogin}>
+                  <RefreshCw size={14} strokeWidth={2.25} />
+                  {t('wechatConfig.startLogin')}
+                </Button>
+              )}
             </div>
           )}
 
@@ -334,6 +450,20 @@ export const WeChatConfig: React.FC<WeChatConfigProps> = ({ data, onNext, onBack
                   )}
                 </div>
                 <p className="text-center text-[11px] text-muted">{t('wechatConfig.scanHint')}</p>
+                {needsVerifyCode && (
+                  <div className="w-full max-w-xs space-y-2">
+                    <Input
+                      value={verifyCode}
+                      onChange={(event) => setVerifyCode(event.target.value)}
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      placeholder={t('wechatConfig.verifyCodePlaceholder')}
+                    />
+                    <Button type="button" variant="brand" size="sm" className="w-full" onClick={submitVerifyCode}>
+                      {t('wechatConfig.submitVerifyCode')}
+                    </Button>
+                  </div>
+                )}
               </div>
             </div>
           )}

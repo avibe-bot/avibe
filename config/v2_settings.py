@@ -77,7 +77,6 @@ def _infer_user_platform(user_id: str) -> str:
 @dataclass
 class RoutingSettings:
     agent_name: Optional[str] = None
-    agent_backend: Optional[str] = None
     # Scope-level overrides applied on top of the selected Vibe Agent.
     model: Optional[str] = None
     reasoning_effort: Optional[str] = None
@@ -94,16 +93,10 @@ class RoutingSettings:
     codex_model: Optional[str] = None
     codex_reasoning_effort: Optional[str] = None
 
-
-def _backend_field_name(backend: Optional[str], field: str) -> Optional[str]:
-    if backend in {"opencode", "claude", "codex"}:
-        return f"{backend}_{field}"
-    return None
-
-
-def _legacy_value_for_backend(routing: RoutingSettings, field: str) -> Optional[str]:
-    field_name = _backend_field_name(getattr(routing, "agent_backend", None), field)
-    return getattr(routing, field_name, None) if field_name else None
+def _backend_specific_value(routing: RoutingSettings, backend: Optional[str], field: str) -> Optional[str]:
+    if backend not in {"opencode", "claude", "codex"}:
+        return None
+    return getattr(routing, f"{backend}_{field}", None)
 
 
 def _payload_value(payload: dict, key: str, fallback_key: str) -> Optional[str]:
@@ -113,32 +106,33 @@ def _payload_value(payload: dict, key: str, fallback_key: str) -> Optional[str]:
 
 
 def normalize_routing_settings(routing: Optional[RoutingSettings]) -> RoutingSettings:
-    """Collapse legacy model/effort fields only when the backend is known."""
+    """Normalize scope routing without consulting deprecated backend routing."""
     if routing is None:
         return RoutingSettings()
-    backend = getattr(routing, "agent_backend", None)
-    collapse_legacy = backend in {"opencode", "claude", "codex"}
+    agent_name = getattr(routing, "agent_name", None)
+    builtin_agent_backend = agent_name if agent_name in {"opencode", "claude", "codex"} else None
+    model = getattr(routing, "model", None)
+    reasoning_effort = getattr(routing, "reasoning_effort", None)
     return RoutingSettings(
-        agent_name=getattr(routing, "agent_name", None),
-        agent_backend=backend,
-        model=getattr(routing, "model", None) or _legacy_value_for_backend(routing, "model"),
-        reasoning_effort=getattr(routing, "reasoning_effort", None)
-        or _legacy_value_for_backend(routing, "reasoning_effort"),
+        agent_name=agent_name,
+        model=model or _backend_specific_value(routing, builtin_agent_backend, "model"),
+        reasoning_effort=reasoning_effort
+        or _backend_specific_value(routing, builtin_agent_backend, "reasoning_effort"),
         opencode_agent=getattr(routing, "opencode_agent", None),
-        opencode_model=None if collapse_legacy else getattr(routing, "opencode_model", None),
-        opencode_reasoning_effort=None if collapse_legacy else getattr(routing, "opencode_reasoning_effort", None),
+        opencode_model=getattr(routing, "opencode_model", None),
+        opencode_reasoning_effort=getattr(routing, "opencode_reasoning_effort", None),
         claude_agent=getattr(routing, "claude_agent", None),
-        claude_model=None if collapse_legacy else getattr(routing, "claude_model", None),
-        claude_reasoning_effort=None if collapse_legacy else getattr(routing, "claude_reasoning_effort", None),
+        claude_model=getattr(routing, "claude_model", None),
+        claude_reasoning_effort=getattr(routing, "claude_reasoning_effort", None),
         codex_agent=getattr(routing, "codex_agent", None),
-        codex_model=None if collapse_legacy else getattr(routing, "codex_model", None),
-        codex_reasoning_effort=None if collapse_legacy else getattr(routing, "codex_reasoning_effort", None),
+        codex_model=getattr(routing, "codex_model", None),
+        codex_reasoning_effort=getattr(routing, "codex_reasoning_effort", None),
     )
 
 
 def routing_model_for_backend(routing: Optional[RoutingSettings], backend: Optional[str]) -> Optional[str]:
     normalized = normalize_routing_settings(routing)
-    if normalized.agent_backend and backend and normalized.agent_backend != backend:
+    if not _routing_backend_matches(normalized, backend):
         return None
     return normalized.model
 
@@ -148,9 +142,16 @@ def routing_reasoning_effort_for_backend(
     backend: Optional[str],
 ) -> Optional[str]:
     normalized = normalize_routing_settings(routing)
-    if normalized.agent_backend and backend and normalized.agent_backend != backend:
+    if not _routing_backend_matches(normalized, backend):
         return None
     return normalized.reasoning_effort
+
+
+def _routing_backend_matches(routing: RoutingSettings, backend: Optional[str]) -> bool:
+    agent_name = getattr(routing, "agent_name", None)
+    if agent_name in {"opencode", "claude", "codex"}:
+        return agent_name == backend
+    return True
 
 
 @dataclass
@@ -161,6 +162,9 @@ class ChannelSettings:
     routing: RoutingSettings = field(default_factory=RoutingSettings)
     # Per-channel require_mention override: None=use global default, True=require, False=don't require
     require_mention: Optional[bool] = None
+    # Per-channel require_bind gate: None/False=off (any channel member), True=only
+    # process messages from bound users; unbound senders are silently ignored.
+    require_bind: Optional[bool] = None
 
 
 @dataclass
@@ -207,12 +211,13 @@ class SettingsState:
 
 def _parse_routing(payload: dict) -> RoutingSettings:
     """Parse a routing settings dict into a RoutingSettings dataclass."""
-    model_key_present = "model" in payload
-    reasoning_key_present = "reasoning_effort" in payload
+    if not isinstance(payload, dict):
+        payload = {}
+    model_key_present = "model" in payload or "model_override" in payload
+    reasoning_key_present = "reasoning_effort" in payload or "reasoning_effort_override" in payload
     return normalize_routing_settings(
         RoutingSettings(
             agent_name=payload.get("agent_name") or payload.get("agent"),
-            agent_backend=payload.get("agent_backend"),
             model=_payload_value(payload, "model", "model_override"),
             reasoning_effort=_payload_value(payload, "reasoning_effort", "reasoning_effort_override"),
             opencode_agent=payload.get("opencode_agent"),
@@ -233,7 +238,6 @@ def _routing_to_dict(routing: RoutingSettings) -> dict:
     routing = normalize_routing_settings(routing)
     return {
         "agent_name": routing.agent_name,
-        "agent_backend": routing.agent_backend,
         "model": routing.model,
         "reasoning_effort": routing.reasoning_effort,
         "opencode_agent": routing.opencode_agent,
@@ -251,12 +255,7 @@ def _routing_to_dict(routing: RoutingSettings) -> dict:
 def routing_to_compat_dict(routing: RoutingSettings) -> dict:
     """Serialize routing with legacy read-only aliases derived from canonical fields."""
     routing = normalize_routing_settings(routing)
-    payload = _routing_to_dict(routing)
-    backend = routing.agent_backend
-    if backend in {"opencode", "claude", "codex"}:
-        payload[f"{backend}_model"] = routing.model
-        payload[f"{backend}_reasoning_effort"] = routing.reasoning_effort
-    return payload
+    return _routing_to_dict(routing)
 
 
 def parse_settings_payload(payload: dict) -> tuple[SettingsState, bool]:
@@ -288,6 +287,7 @@ def parse_settings_payload(payload: dict) -> tuple[SettingsState, bool]:
                         custom_cwd=cp.get("custom_cwd"),
                         routing=_parse_routing(cp.get("routing") or {}),
                         require_mention=cp.get("require_mention"),
+                        require_bind=cp.get("require_bind"),
                     )
 
         raw_guild_scopes = scopes.get("guild") or {}
@@ -345,6 +345,7 @@ def parse_settings_payload(payload: dict) -> tuple[SettingsState, bool]:
                 custom_cwd=cp.get("custom_cwd"),
                 routing=_parse_routing(cp.get("routing") or {}),
                 require_mention=cp.get("require_mention"),
+                require_bind=cp.get("require_bind"),
             )
             migrated_legacy_channels = True
 
@@ -590,31 +591,47 @@ class SettingsStore:
         suffix = f"{SCOPED_KEY_SEP}{user_id}"
         return any(key.endswith(suffix) for key in self.settings.users.keys())
 
+    def is_enabled_user(self, user_id: str, platform: Optional[str] = None) -> bool:
+        user = self.get_user(user_id, platform=platform)
+        return user is not None and user.enabled
+
     def is_admin(self, user_id: str, platform: Optional[str] = None) -> bool:
         if platform:
             user = self.settings.users.get(self._user_key(user_id, platform))
-            return user is not None and user.is_admin
+            return user is not None and user.enabled and user.is_admin
         if user_id in self.settings.users:
-            return self.settings.users[user_id].is_admin
+            user = self.settings.users[user_id]
+            return user.enabled and user.is_admin
         suffix = f"{SCOPED_KEY_SEP}{user_id}"
         for key, value in self.settings.users.items():
-            if key.endswith(suffix):
+            if key.endswith(suffix) and value.enabled:
                 return value.is_admin
         return False
 
     def has_any_admin(self, platform: Optional[str] = None) -> bool:
-        """Return True if at least one admin exists."""
+        """Return True if at least one admin record exists."""
         if platform:
             prefix = f"{platform}{SCOPED_KEY_SEP}"
             return any(u.is_admin for key, u in self.settings.users.items() if key.startswith(prefix))
         return any(u.is_admin for u in self.settings.users.values())
 
-    def get_admins(self, platform: Optional[str] = None) -> Dict[str, UserSettings]:
-        """Return all admin users."""
+    def has_enabled_admin(self, platform: Optional[str] = None) -> bool:
+        """Return True if at least one enabled admin exists."""
         if platform:
             prefix = f"{platform}{SCOPED_KEY_SEP}"
-            return {uid: u for uid, u in self.settings.users.items() if uid.startswith(prefix) and u.is_admin}
-        return {uid: u for uid, u in self.settings.users.items() if u.is_admin}
+            return any(u.enabled and u.is_admin for key, u in self.settings.users.items() if key.startswith(prefix))
+        return any(u.enabled and u.is_admin for u in self.settings.users.values())
+
+    def get_admins(self, platform: Optional[str] = None) -> Dict[str, UserSettings]:
+        """Return enabled admin users."""
+        if platform:
+            prefix = f"{platform}{SCOPED_KEY_SEP}"
+            return {
+                uid: u
+                for uid, u in self.settings.users.items()
+                if uid.startswith(prefix) and u.enabled and u.is_admin
+            }
+        return {uid: u for uid, u in self.settings.users.items() if u.enabled and u.is_admin}
 
     def add_user(
         self, user_id: str, display_name: str, is_admin: bool = False, platform: Optional[str] = None
@@ -653,7 +670,7 @@ class SettingsStore:
                 return False, False
 
             # Auto-admin for first user
-            is_admin = not self.has_any_admin(platform=platform)
+            is_admin = not self.has_enabled_admin(platform=platform)
 
             # Create user
             user = UserSettings(

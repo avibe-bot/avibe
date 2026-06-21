@@ -125,7 +125,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "22.14.0"
           cache: "npm"
           cache-dependency-path: ui/package-lock.json
 
@@ -272,12 +272,43 @@ jobs:
             gh "${ARGS[@]}" || gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null
           fi
 
-          gh release upload "$TAG" \
-            --repo "${GITHUB_REPOSITORY}" \
-            dist/* \
-            runtime-artifacts/vibe-show-runtime-node-*.tgz \
-            runtime-artifacts/show-runtime-manifest.json \
-            --clobber
+          # Show Runtime archives + manifest are IMMUTABLE per tag and must NOT be
+          # re-clobbered. The runtime tarball is not byte-reproducible, so a re-run of
+          # this workflow rebuilds different bytes, while the manifest baked into the wheel
+          # is published to PyPI immutably (skip-existing). Clobbering the release archive
+          # with a fresh build would desync the published wheel's manifest from the hosted
+          # archive, and every Show Runtime install would fail its integrity check
+          # (runtime_archive_size_mismatch).
+          #
+          # Verify immutability BEFORE mutating ANY release asset (including dist/*), so a
+          # mismatch fails the job without having already replaced the wheel/sdist. Upload
+          # each runtime asset only if absent; if it already exists, require byte-identity.
+          existing="$(gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
+          tmp="$(mktemp -d)"
+          runtime_to_upload=()
+          for path in runtime-artifacts/vibe-show-runtime-node-*.tgz runtime-artifacts/show-runtime-manifest.json; do
+            name="$(basename "$path")"
+            if grep -qxF "$name" <<<"$existing"; then
+              rm -f "$tmp/$name"
+              gh release download "$TAG" --repo "${GITHUB_REPOSITORY}" --pattern "$name" --dir "$tmp" --clobber
+              if cmp -s "$tmp/$name" "$path"; then
+                echo "Release asset '$name' already present and byte-identical; skipping (immutable per tag)."
+              else
+                echo "::error::Release asset '$name' already exists for $TAG but differs from this run's build." >&2
+                echo "::error::The Show Runtime tarball is not byte-reproducible and this run rebuilt it; overwriting would desync the release from the PyPI wheel's manifest. Cut a NEW version instead of re-running the release." >&2
+                exit 1
+              fi
+            else
+              runtime_to_upload+=("$path")
+            fi
+          done
+
+          # Immutability gate passed — only now is it safe to mutate the release.
+          if [ "${#runtime_to_upload[@]}" -gt 0 ]; then
+            gh release upload "$TAG" --repo "${GITHUB_REPOSITORY}" "${runtime_to_upload[@]}"
+          fi
+          # Python distributions are safe to refresh (PyPI itself is skip-existing).
+          gh release upload "$TAG" --repo "${GITHUB_REPOSITORY}" dist/* --clobber
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v6

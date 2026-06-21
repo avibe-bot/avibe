@@ -76,6 +76,7 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
       cli_not_found: 'settings.backends.testFailureCliNotFound',
       spawn_failed: 'settings.backends.testFailureSpawnFailed',
       timed_out: 'settings.backends.testFailureTimedOut',
+      not_logged_in: 'settings.backends.testFailureNotLoggedIn',
       cli_failed: 'settings.backends.testFailureCliFailed',
     };
     const key = map[code];

@@ -13,11 +13,14 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  GitFork,
+  Hash,
   Inbox,
   KeyRound,
   Loader2,
   Pencil,
   Plus,
+  Search,
   Settings2,
   WandSparkles,
 } from 'lucide-react';
@@ -26,6 +29,7 @@ import type { LucideIcon } from 'lucide-react';
 
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { useComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import type { InboxSession, WorkbenchProject, WorkbenchSession } from '../../context/ApiContext';
 import { formatRelativeTime } from '../../lib/relativeTime';
 import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from '../ui/popover';
@@ -185,23 +189,28 @@ const STATUS_DOT_CLASS: Record<string, string> = {
 };
 
 // One session row under a project. Left-click opens the chat; right-click opens
-// a small menu whose action is Rename — an inline edit equivalent to the chat
-// header's title field. Rename calls api.updateSession({ title }); the live
+// the session action menu. Rename calls api.updateSession({ title }); the live
 // session.activity 'updated' event then patches the title in this list (see the
 // onSessionActivity handler in WorkbenchSidebar), so no manual local patch here.
 const SessionRow: React.FC<{
   session: WorkbenchSession;
   unread: number;
   onSessionMarkRead: (sessionId: string) => void;
+  onForkSession: (sessionId: string) => Promise<WorkbenchSession | null>;
   onRenameSession: (sessionId: string, title: string) => Promise<void>;
   onArchiveSession: (sessionId: string) => Promise<void>;
-}> = ({ session, unread, onSessionMarkRead, onRenameSession, onArchiveSession }) => {
+}> = ({ session, unread, onSessionMarkRead, onForkSession, onRenameSession, onArchiveSession }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
   const active = location.pathname === `/chat/${session.id}`;
+  // "Reference this session" shows only when a chat composer is mounted (a chat
+  // is open) AND this row isn't that open session — you can't reference yourself.
+  const insertTarget = useComposerInsertTarget();
+  const canReference = insertTarget != null && insertTarget.sessionId !== session.id;
   const [menuOpen, setMenuOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
+  const [forking, setForking] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(session.title ?? '');
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -259,6 +268,7 @@ const SessionRow: React.FC<{
   }
 
   const displayName = session.title?.trim() || t('workbench.untitledSession');
+  const canFork = !!session.native_session_id && !forking;
   return (
     <>
     <Popover open={menuOpen} onOpenChange={setMenuOpen}>
@@ -303,6 +313,39 @@ const SessionRow: React.FC<{
         </button>
       </PopoverAnchor>
       <PopoverContent align="start" className="w-[176px] p-1">
+        {canReference && (
+          <button
+            type="button"
+            onClick={() => {
+              setMenuOpen(false);
+              insertTarget?.insertSessionReference(session.id, session.title);
+            }}
+            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04]"
+          >
+            <Hash className="size-3 text-muted" />
+            {t('workbench.sessionReference')}
+          </button>
+        )}
+        <button
+          type="button"
+          disabled={!canFork}
+          title={!session.native_session_id ? t('workbench.sessionForkUnavailable') : undefined}
+          onClick={async () => {
+            if (!canFork) return;
+            setMenuOpen(false);
+            setForking(true);
+            try {
+              const forked = await onForkSession(session.id);
+              if (forked) navigate(`/chat/${encodeURIComponent(forked.id)}`);
+            } finally {
+              setForking(false);
+            }
+          }}
+          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-[12px] text-foreground transition hover:bg-foreground/[0.04] disabled:cursor-not-allowed disabled:text-muted disabled:hover:bg-transparent"
+        >
+          {forking ? <Loader2 className="size-3 animate-spin text-muted" /> : <GitFork className="size-3 text-muted" />}
+          {t('workbench.sessionFork')}
+        </button>
         <button
           type="button"
           onClick={() => {
@@ -364,6 +407,7 @@ const ProjectRow: React.FC<{
   onSessionMarkRead: (sessionId: string) => void;
   onRename: (next: string) => Promise<void>;
   onArchive: () => Promise<void>;
+  onForkSession: (sessionId: string) => Promise<WorkbenchSession | null>;
   onRenameSession: (sessionId: string, title: string) => Promise<void>;
   onArchiveSession: (sessionId: string) => Promise<void>;
 }> = ({
@@ -381,6 +425,7 @@ const ProjectRow: React.FC<{
   onSessionMarkRead,
   onRename,
   onArchive,
+  onForkSession,
   onRenameSession,
   onArchiveSession,
 }) => {
@@ -561,6 +606,7 @@ const ProjectRow: React.FC<{
                 session={session}
                 unread={unreadBySession[session.id] || 0}
                 onSessionMarkRead={onSessionMarkRead}
+                onForkSession={onForkSession}
                 onRenameSession={onRenameSession}
                 onArchiveSession={onArchiveSession}
               />
@@ -593,7 +639,7 @@ const ProjectRow: React.FC<{
   );
 };
 
-export const WorkbenchSidebar: React.FC = () => {
+export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOpenSearch }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { totalUnread, unreadSessions, inboxSessions, markRead, unreadBySession } = useWorkbenchInbox();
@@ -609,6 +655,7 @@ export const WorkbenchSidebar: React.FC = () => {
     loadMore,
     creatingSession,
     createSessionForProject,
+    forkSession,
     renameProject,
     archiveProject,
     renameSession,
@@ -669,6 +716,22 @@ export const WorkbenchSidebar: React.FC = () => {
   // popover stays OUT of any overflow box below, so it is never clipped.
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4">
+      {/* Search field — the sidebar's first item (Brand lives in AppShell).
+          Field-style button per design.pen XErMu: search glyph + muted
+          placeholder + ⌘K pill; opens the ⌘K command palette. */}
+      <Button
+        type="button"
+        variant="ghost"
+        onClick={onOpenSearch}
+        className="h-auto w-full justify-start gap-2 rounded-lg border border-border-strong bg-foreground/[0.03] px-3 py-2.5 text-left font-normal transition hover:bg-foreground/[0.05]"
+      >
+        <Search className="size-3.5 shrink-0 text-muted" />
+        <span className="flex-1 truncate text-[13px] text-muted">{t('workbench.search.entry')}</span>
+        <kbd className="shrink-0 rounded-[5px] border border-border bg-foreground/[0.06] px-1.5 py-0.5 font-mono text-[11px] font-medium leading-none text-muted">
+          ⌘K
+        </kbd>
+      </Button>
+
       {/* Inbox entry — hover opens the floating popover. */}
       <div
         className="relative"
@@ -808,6 +871,7 @@ export const WorkbenchSidebar: React.FC = () => {
                   onSessionMarkRead={markRead}
                   onRename={(next) => renameProject(project.id, next)}
                   onArchive={() => archiveProject(project.id)}
+                  onForkSession={(sessionId) => forkSession(project.id, sessionId)}
                   onRenameSession={(sessionId, title) => renameSession(project.id, sessionId, title)}
                   onArchiveSession={(sessionId) => archiveSession(project.id, sessionId)}
                 />

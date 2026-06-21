@@ -1,4 +1,8 @@
 {
+  "fork": {
+    "title": "Fork {title}",
+    "titleUntitled": "Fork"
+  },
   "common": {
     "save": "Save",
     "cancel": "Cancel",
@@ -40,7 +44,13 @@
     "updateUnavailable": "Update action is not available right now.",
     "unknownAction": "Unknown action: {action}",
     "processActionFailed": "Error processing action: {error}",
-    "agentNotConfigured": "Agent `{agent}` is not configured. Make sure the Codex CLI is installed and environment variables are set if this channel is routed to Codex.",
+    "agentNotConfigured": "Agent `{agent}` uses the {backend} backend, but that backend is not available. {hint}",
+    "agentNotConfiguredHint": {
+      "opencode": "Enable the OpenCode backend, install the OpenCode CLI, or set OPENCODE_CLI_PATH.",
+      "claude": "Enable the Claude Code backend and make sure the Claude Code CLI path is configured.",
+      "codex": "Enable the Codex backend, install the Codex CLI, or set CODEX_CLI_PATH.",
+      "generic": "Choose an enabled Agent in Agent settings, or enable the backend this Agent uses."
+    },
     "processMessageFailed": "Error: {error}",
     "streamTurnInProgress": "⚠️ A reply is already streaming for this session — wait for it to finish, then try again.",
     "sessionReset": "Session error detected. Session has been reset. Please try your message again.",
@@ -49,8 +59,12 @@
     "sessionGeneric": "An error occurred: {error}",
     "resultAttachmentUploadFailed": "Failed to upload attachment. Want me to split the result into multiple messages?",
     "resultDeliveryFailed": "⚠️ Message delivery failed. The content may be too long or incompatible. Ask me to resend it.",
+    "fileAttachmentUploadFailedWithLink": "⚠️ I could not deliver {filename} as a WeChat file. You can download it from Avibe after signing in if prompted:\n{url}",
+    "fileAttachmentUploadFailedNoLink": "⚠️ I could not deliver {filename} as a WeChat file. Please ask me to resend it or use another channel.",
     "opencodeQuestionToolDisabled": "OpenCode asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction.",
-    "opencodeQuestionToolDisabledRestored": "Restored OpenCode session asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction."
+    "opencodeQuestionToolDisabledRestored": "Restored OpenCode session asked an interactive question, but Avibe disables the OpenCode question tool. Please send a new follow-up message with your answer or direction.",
+    "opencodeEmptyResponse": "OpenCode finished without a model reply. Provider: {provider}; model: {model}; reasoning: {variant}. OpenCode did not expose a provider error for this run.",
+    "opencodeProviderRuntimeError": "OpenCode provider request failed. Provider: {provider}; model: {model}; reasoning: {variant}. Detail: {detail}"
   },
   "success": {
     "settingsUpdated": "Settings updated successfully!",
@@ -61,7 +75,8 @@
     "sessionResumedContinueDiscordThread": "💬 *Reply in the subchannel to this message* to continue with this session.",
     "sessionResumedContinueDirect": "💬 *Send your next message directly* to continue with this session.",
     "sessionResumedThreadFreshTip": "_(Sending a new message in the main channel will start a fresh session.)_",
-    "routingUpdated": "Agent routing updated!"
+    "routingUpdated": "Agent routing updated!",
+    "routingUpdateNeedsNewSession": "Use /new to create a new session for this setting change to take effect. The new session will replace the current session."
   },
   "settings": {
     "personalizationTitle": "Personalization Settings",
@@ -397,5 +412,19 @@
     "routingChoosePrefix": "Choose a value for",
     "routingSaving": "Saving routing settings...",
     "routingCanceled": "Routing update canceled."
+  },
+  "remote_access": {
+    "oauth_error": {
+      "sign_in_again": "Sign in again",
+      "cookie_hint": "Still stuck after trying again? Make sure your browser allows cookies for this site.",
+      "default_title": "Let's sign you in again",
+      "default_body": "Your sign-in didn't finish. Please try again.",
+      "invalid_oauth_state_title": "Your sign-in session expired",
+      "invalid_oauth_state_body": "The secure login link expired or couldn't be matched to this browser. This usually happens when a sign-in link sits unused for a few minutes, or is opened in a different tab or window. Start over and you'll be right back in.",
+      "oauth_exchange_failed_title": "We couldn't finish signing you in",
+      "oauth_exchange_failed_body": "Avibe Cloud didn't complete the sign-in just now. This is usually temporary — please try again.",
+      "invalid_oauth_nonce_title": "We couldn't verify this sign-in",
+      "invalid_oauth_nonce_body": "This sign-in attempt couldn't be verified, so we stopped to keep your account secure. Start over to continue."
+    }
   }
 }

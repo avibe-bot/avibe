@@ -134,6 +134,31 @@ def test_validate_strips_workbench_and_retargets_primary() -> None:
     assert workbench.primary == "avibe"
 
 
+def test_validate_derives_primary_from_enabled_without_resurrecting() -> None:
+    # ``enabled`` is the source of truth; ``primary`` is an internal default with
+    # no user-facing control. A stale primary that is NOT in the enabled set
+    # (e.g. surviving a deep config merge after the platform was disabled) must
+    # FOLLOW enabled — retarget to the first enabled platform — instead of
+    # forcing the removed platform back into ``enabled``. This is what lets the
+    # UI persist an enabled-set change by sending only ``platforms.enabled``.
+    stale = PlatformsConfig(enabled=["discord"], primary="slack")
+    stale.validate()
+    assert stale.enabled == ["discord"]
+    assert stale.primary == "discord"
+
+    # Order preserved; primary tracks the first enabled platform.
+    multi = PlatformsConfig(enabled=["telegram", "discord"], primary="slack")
+    multi.validate()
+    assert multi.enabled == ["telegram", "discord"]
+    assert multi.primary == "telegram"
+
+    # A primary still present in enabled is left untouched.
+    kept = PlatformsConfig(enabled=["slack", "discord"], primary="discord")
+    kept.validate()
+    assert kept.enabled == ["slack", "discord"]
+    assert kept.primary == "discord"
+
+
 def test_config_payload_includes_platform_catalog_and_setup_state() -> None:
     config = _base_config(
         platforms=PlatformsConfig(enabled=["slack", "discord", "telegram", "lark", "wechat"], primary="slack"),
@@ -178,14 +203,16 @@ def test_platforms_validate_allows_empty_enabled_and_anchors_avibe() -> None:
 
 
 def test_platforms_validate_keeps_non_empty_enabled_unchanged() -> None:
-    # Has-IM behavior is untouched: the primary is still force-inserted into a
-    # non-empty enabled list at the front.
+    # ``enabled`` is the source of truth: a stale primary not in the enabled set
+    # retargets to the first enabled platform; the enabled list is NOT grown to
+    # resurrect the removed platform (see
+    # test_validate_derives_primary_from_enabled_without_resurrecting).
     platforms = PlatformsConfig(enabled=["discord"], primary="slack")
 
     platforms.validate()
 
-    assert platforms.primary == "slack"
-    assert platforms.enabled == ["slack", "discord"]
+    assert platforms.primary == "discord"
+    assert platforms.enabled == ["discord"]
 
 
 def test_workbench_only_config_round_trips_with_avibe_primary() -> None:

@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import logging
 import os
@@ -123,7 +124,6 @@ def default_config():
         slack=SlackConfig(bot_token="", app_token=""),
         runtime=RuntimeConfig(default_cwd=str(work_dir)),
         agents=AgentsConfig(
-            default_backend="opencode",
             opencode=OpenCodeConfig(enabled=True, cli_path="opencode"),
             claude=ClaudeConfig(enabled=True, cli_path="claude"),
             codex=CodexConfig(enabled=False, cli_path="codex"),
@@ -569,17 +569,22 @@ def spawn_background(args, pid_path, stdout_name: str, stderr_name: str, env: di
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stdout = stdout_path.open("ab")
     stderr = stderr_path.open("ab")
-    process = subprocess.Popen(
-        args,
-        stdout=stdout,
-        stderr=stderr,
-        start_new_session=True,
-        cwd=str(get_working_dir()),
-        close_fds=True,
-        env=env,
-    )
-    stdout.close()
-    stderr.close()
+    stdin = open(os.devnull, "rb")
+    try:
+        process = subprocess.Popen(
+            args,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            start_new_session=True,
+            cwd=str(get_working_dir()),
+            close_fds=True,
+            env=env,
+        )
+    finally:
+        stdin.close()
+        stdout.close()
+        stderr.close()
     pid_path.write_text(str(process.pid), encoding="utf-8")
     return process.pid
 
@@ -595,9 +600,11 @@ def spawn_service_background_process(
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     stdout = stdout_path.open("ab")
     stderr = stderr_path.open("ab")
+    stdin = open(os.devnull, "rb")
     try:
         process = subprocess.Popen(
             args,
+            stdin=stdin,
             stdout=stdout,
             stderr=stderr,
             start_new_session=True,
@@ -606,6 +613,7 @@ def spawn_service_background_process(
             env=env,
         )
     finally:
+        stdin.close()
         stdout.close()
         stderr.close()
     return process
@@ -949,12 +957,12 @@ def resolve_localhost_family() -> str:
 def effective_ui_bind_host(config: V2Config, requested_host: str | None = None) -> str:
     """Resolve the host the UI server should bind to.
 
-    When the Avibe Cloud tunnel is enabled, bind to a wildcard so the local
+    When the Avibe Cloud tunnel is enabled, keep loopback-only configs bound
+    to loopback. For non-loopback setup hosts, bind to a wildcard so the local
     ``cloudflared`` origin (which dials ``127.0.0.1``/``[::1]``) can reach the
     UI no matter which interface IP the user typed into ``ui.setup_host``
-    (loopback, Tailscale CGNAT, LAN). The host-trust middleware in
-    ``ui_server`` still rejects untrusted peers, so widening the bind does
-    not widen exposure.
+    (Tailscale CGNAT, LAN). The host-trust middleware in ``ui_server`` still
+    rejects untrusted peers, so widening the bind does not widen exposure.
 
     Why: If the user binds to a Tailscale or LAN IP and then enables the
     tunnel, ``cloudflared`` cannot reach the UI on its loopback origin and
@@ -967,17 +975,23 @@ def effective_ui_bind_host(config: V2Config, requested_host: str | None = None) 
     setup_host = (requested_host if requested_host is not None else config.ui.setup_host) or "127.0.0.1"
     cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None)
     if cloud is not None and cloud.enabled:
-        # Pick the wildcard family that matches the user's intent so an
-        # IPv6-only setup_host stays reachable on v6.
         normalized = setup_host.strip()
         if normalized.startswith("[") and normalized.endswith("]"):
             normalized = normalized[1:-1]
         # "localhost" is ambiguous on dual-stack hosts and may even be
-        # exclusively IPv6. Resolve once and pick the wildcard that
-        # matches the family _origin_host_for_pairing will hand
-        # cloudflared, so the two sides cannot disagree.
+        # exclusively IPv6. Resolve once and bind to a literal loopback that
+        # matches the family _origin_host_for_pairing will hand cloudflared,
+        # so the two sides cannot disagree without widening the local socket.
         if normalized.lower() == "localhost":
-            return "::" if resolve_localhost_family() == "inet6" else "0.0.0.0"
+            return "::1" if resolve_localhost_family() == "inet6" else "127.0.0.1"
+        try:
+            address = ipaddress.ip_address(normalized)
+        except ValueError:
+            address = None
+        if address is not None and address.is_loopback:
+            return address.compressed
+        # Pick the wildcard family that matches the user's non-loopback intent
+        # so IPv6 setup_host values stay reachable on v6.
         if normalized in {"::", "::0"} or ":" in normalized:
             return "::"
         return "0.0.0.0"

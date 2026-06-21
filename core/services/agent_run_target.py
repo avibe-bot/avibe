@@ -9,6 +9,7 @@ sessions.
 from __future__ import annotations
 
 import logging
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import Any, Optional
 
 from sqlalchemy import Engine, select
 
+from core.message_context import build_context_session_key, resolve_context_settings_key
 from modules.im import MessageContext
 from storage.agent_session_rows import create_agent_session_row
 from storage.models import agent_sessions, scope_settings, scopes
@@ -101,7 +103,7 @@ def resolve_agent_run_target(
 
     platform = _platform_for(context, controller)
     settings_key = _settings_key_for(context)
-    session_key = f"{platform}::{settings_key}"
+    session_key = build_context_session_key(context, platform=platform, settings_key=settings_key)
     anchor = str(base_session_id or _fallback_anchor(context, platform))
     engine = _engine_for(controller)
 
@@ -250,7 +252,7 @@ def resolve_agent_run_target(
             model=agent_target.model,
             reasoning_effort=agent_target.reasoning_effort,
             workdir=resolved_new_workdir,
-            metadata={"created_via": "agent_run_target", "source": source},
+            metadata={"created_via": "agent_run_target", "source": source, "legacy_scope_key": session_key},
         )
         created = conn.execute(
             select(
@@ -346,8 +348,7 @@ def _platform_for(context: MessageContext, controller: Any) -> str:
 
 
 def _settings_key_for(context: MessageContext) -> str:
-    payload = context.platform_specific or {}
-    return str(context.user_id if payload.get("is_dm", False) else context.channel_id)
+    return resolve_context_settings_key(context)
 
 
 def _fallback_anchor(context: MessageContext, platform: str) -> str:
@@ -381,7 +382,6 @@ def _resolve_agent_target(
     """Resolve the concrete Vibe Agent/backend before a Session row exists."""
 
     scope_agent_name = _optional_str(scope_row.get("agent_name")) if scope_row else None
-    scope_backend = _supported_backend(scope_row.get("agent_backend")) if scope_row else None
     resolver = getattr(controller, "resolve_vibe_agent_for_context", None)
     if scope_agent_name and callable(resolver):
         try:
@@ -393,18 +393,8 @@ def _resolve_agent_target(
             agent = None
         if agent is not None:
             target = _agent_target_from_vibe_agent(agent, scope_row=scope_row)
-            if target is not None and (scope_backend is None or target.agent_backend == scope_backend):
+            if target is not None:
                 return target
-
-    if scope_backend:
-        return ResolvedAgentTarget(
-            agent_id=None,
-            agent_name=scope_agent_name,
-            agent_backend=scope_backend,
-            agent_variant=_agent_variant_for_backend(scope_backend, scope_row),
-            model=_optional_str(scope_row.get("model")) if scope_row else None,
-            reasoning_effort=_optional_str(scope_row.get("reasoning_effort")) if scope_row else None,
-        )
 
     if callable(resolver):
         try:
@@ -417,15 +407,7 @@ def _resolve_agent_target(
             if target is not None:
                 return target
 
-    router = getattr(controller, "agent_router", None)
-    resolved = None
-    if router is not None:
-        try:
-            resolved = router.resolve(platform, settings_key)
-        except Exception:
-            logger.debug("Failed to resolve router backend for new session", exc_info=True)
-        resolved = resolved or getattr(router, "global_default", None)
-    backend = _supported_backend(resolved) or _configured_default_backend(controller)
+    backend = _fallback_registered_backend(controller)
     if backend is None:
         from modules.agents.catalog import DEFAULT_AGENT_BACKEND
 
@@ -440,12 +422,17 @@ def _resolve_agent_target(
     )
 
 
-def _configured_default_backend(controller: Any) -> Optional[str]:
-    config = getattr(controller, "config", None)
-    agents = getattr(config, "agents", None)
-    return _supported_backend(getattr(agents, "default_backend", None)) or _supported_backend(
-        getattr(config, "default_backend", None)
-    )
+def _fallback_registered_backend(controller: Any) -> Optional[str]:
+    agent_service = getattr(controller, "agent_service", None)
+    registered = getattr(agent_service, "agents", {}) if agent_service is not None else {}
+    default_agent = _supported_backend(getattr(agent_service, "default_agent", None))
+    if default_agent and default_agent in registered:
+        return default_agent
+    for backend in registered:
+        supported = _supported_backend(backend)
+        if supported:
+            return supported
+    return None
 
 
 def _agent_target_from_vibe_agent(agent: Any, *, scope_row: Optional[dict[str, Any]]) -> Optional[ResolvedAgentTarget]:
@@ -472,8 +459,37 @@ def _supported_backend(value: Any) -> Optional[str]:
 
 
 def _agent_variant_for_backend(backend: str, scope_row: Optional[dict[str, Any]]) -> str:
-    variant = _optional_str(scope_row.get("agent_variant")) if scope_row else None
-    return variant or backend
+    routing_payload = _scope_routing_payload(scope_row)
+    if routing_payload:
+        variant = _optional_str(routing_payload.get(f"{backend}_agent"))
+        if variant:
+            return variant
+    stored_variant = _optional_str(scope_row.get("agent_variant")) if _scope_variant_applies(backend, scope_row) else None
+    if stored_variant:
+        return stored_variant
+    return backend
+
+
+def _scope_variant_applies(backend: str, scope_row: Optional[dict[str, Any]]) -> bool:
+    if not scope_row:
+        return False
+    if _optional_str(scope_row.get("agent_name")):
+        return True
+    return _optional_str(scope_row.get("agent_backend")) == backend
+
+
+def _scope_routing_payload(scope_row: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if not scope_row:
+        return {}
+    raw = scope_row.get("settings_json")
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return {}
+    routing = payload.get("routing") if isinstance(payload, dict) else None
+    return routing if isinstance(routing, dict) else {}
 
 
 def _scope_for_context(conn, context: MessageContext, platform: str, settings_key: str) -> Optional[dict[str, Any]]:
@@ -516,10 +532,10 @@ def _scope_row(conn, scope_id: str) -> Optional[dict[str, Any]]:
             scopes.c.native_id,
             scope_settings.c.workdir,
             scope_settings.c.agent_name,
-            scope_settings.c.agent_backend,
             scope_settings.c.agent_variant,
             scope_settings.c.model,
             scope_settings.c.reasoning_effort,
+            scope_settings.c.settings_json,
         )
         .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
         .where(scopes.c.id == scope_id)

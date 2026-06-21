@@ -36,7 +36,7 @@ No additional flag is required to bypass approvals—the bot always adds `--dang
 
 Configure routing via the platform **Agent Settings** UI: pick Codex for the Slack channel, Discord channel, Telegram chat, or other scope you want.
 
-Each routed scope gets its own agent override. Unrouted scopes fall back to the configured default backend.
+Each routed scope stores a Vibe Agent name. Unrouted scopes fall back to the configured default Vibe Agent.
 
 ## 4. Restart the bot and test
 

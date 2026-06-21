@@ -5,8 +5,18 @@ from typing import Callable, Optional
 
 from core.agent_auth_service import classify_auth_error
 from modules.claude_sdk_compat import TextBlock, ToolUseBlock, is_claude_sdk_buffer_error
+from modules.agents.claude_process_reaper import (
+    AVIBE_CLAUDE_SESSION_OWNER,
+    register_claude_owned_process,
+)
 
-from modules.agents.base import AgentRequest, BaseAgent
+from modules.agents.base import (
+    AGENT_RUNTIME_TURN_KEY,
+    AGENT_RUNTIME_TURN_TOKEN,
+    AGENT_TURN_TOKEN,
+    AgentRequest,
+    BaseAgent,
+)
 
 # NOTE: AskUserQuestion support is disabled because Claude Code SDK cannot
 # respond to it programmatically. See: https://github.com/anthropics/claude-code/issues/10168
@@ -37,8 +47,10 @@ class ClaudeAgent(BaseAgent):
         self._pending_assistant_message: dict[str, str] = {}
         self._native_session_ids: dict[str, str] = {}
         self._suppressed_synthetic_results: set[str] = set()
-        # Store reaction info per session as a queue (FIFO) for cleanup after result
-        # Each entry is (reaction_message_id, emoji)
+        self._suppress_receiver_runtime_release: set[str] = set()
+        # Store reaction info per runtime session for cleanup after terminal
+        # result. Under the runtime turn gate there is normally one active entry;
+        # the list shape remains for defensive cleanup of older queued state.
         self._pending_reactions: dict[str, list[tuple[str, str]]] = {}
         self._pending_requests: dict[str, list[AgentRequest]] = {}
 
@@ -68,6 +80,7 @@ class ClaudeAgent(BaseAgent):
         context = request.context
         runtime_base_session_id = request.base_session_id
         runtime_session_key = request.composite_session_id
+        turn_registered = False
 
         # Question callback handling (disabled - SDK doesn't support AskUserQuestion response)
         # if self.ENABLE_ASK_USER_QUESTION and request.message.startswith("claude_question:"):
@@ -105,10 +118,7 @@ class ClaudeAgent(BaseAgent):
             message = self._prepare_message_with_files(request)
 
             await client.query(message, session_id=runtime_session_key)
-            logger.info(f"Sent message to Claude for session {runtime_session_key}")
-
-            await self._delete_ack(context, request)
-
+            self.mark_runtime_turn_started(context)
             if (
                 runtime_session_key not in self.receiver_tasks
                 or self.receiver_tasks[runtime_session_key].done()
@@ -122,6 +132,18 @@ class ClaudeAgent(BaseAgent):
                         composite_key=runtime_session_key,
                     )
                 )
+            turn_registered = True
+            logger.info(f"Sent message to Claude for session {runtime_session_key}")
+
+            await self._delete_ack(context, request)
+        except asyncio.CancelledError:
+            if not turn_registered:
+                await self._remove_specific_pending_reaction(runtime_session_key, context, request)
+                self._remove_pending_request(runtime_session_key, request)
+                self._mark_session_idle_if_no_pending_requests(runtime_session_key)
+                await self._delete_ack(context, request)
+                self._release_service_runtime_turn(context)
+            raise
         except Exception as e:
             logger.error(f"Error processing Claude message: {e}", exc_info=True)
             # Clean up the specific reaction for this request (not FIFO)
@@ -154,9 +176,18 @@ class ClaudeAgent(BaseAgent):
             # empty terminal error result turns the dot red AND releases the
             # web-Chat stream waiter (the visible error was sent + persisted
             # above), instead of waiting out the safety timeout. No-op off-workbench.
-            await self.controller.emit_agent_message(context, "result", "", is_error=True)
+            try:
+                await self.controller.emit_agent_message(context, "result", "", is_error=True)
+            finally:
+                self._release_service_runtime_turn(context)
         finally:
             await self._delete_ack(context, request)
+
+    def _release_service_runtime_turn(self, context: MessageContext) -> None:
+        service = getattr(self.controller, "agent_service", None)
+        release = getattr(service, "release_runtime_turn", None)
+        if callable(release):
+            release(context)
 
     async def _handle_question_callback(self, request: AgentRequest) -> None:
         """Handle question-related callbacks (button clicks, modal submissions).
@@ -181,8 +212,7 @@ class ClaudeAgent(BaseAgent):
 
         sessions_to_clear = []
         for composite_id in list(self.claude_sessions.keys()):
-            base_part = composite_id.split(":")[0] if ":" in composite_id else composite_id
-            if base_part in session_bases_to_clear:
+            if self._runtime_key_matches_session_base(composite_id, session_bases_to_clear):
                 sessions_to_clear.append(composite_id)
 
         for composite_id in sessions_to_clear:
@@ -193,9 +223,28 @@ class ClaudeAgent(BaseAgent):
 
         return len(sessions_to_clear) or len(session_bases_to_clear)
 
+    def runtime_turn_keys_for_session_key(self, session_key: str) -> set[str]:
+        agent_map = self.sessions.list_agent_sessions(session_key, self.name)
+        session_bases_to_clear = set(agent_map.keys())
+        runtime_keys = set()
+        for composite_id in self.runtime_turn_keys():
+            if self._runtime_key_matches_session_base(composite_id, session_bases_to_clear):
+                runtime_keys.add(composite_id)
+        return runtime_keys
+
+    def runtime_turn_keys(self) -> set[str]:
+        return set(self.claude_sessions.keys()) | set(self.receiver_tasks.keys())
+
+    @staticmethod
+    def _runtime_key_matches_session_base(runtime_key: str, session_bases: set[str]) -> bool:
+        for session_base in session_bases:
+            if runtime_key == session_base or runtime_key.startswith(f"{session_base}:"):
+                return True
+        return False
+
     async def refresh_auth_state(self) -> None:
         """Reconnect Claude runtime so future requests load fresh auth."""
-        session_ids = set(self.claude_sessions.keys()) | set(self.receiver_tasks.keys())
+        session_ids = self.runtime_turn_keys()
 
         for composite_id in session_ids:
             await self._cleanup_runtime_session(composite_id)
@@ -329,6 +378,55 @@ class ClaudeAgent(BaseAgent):
             if not cleanup_from_receiver:
                 await self._stop_receiver_task(receiver_task)
 
+    async def force_cleanup_stuck_active_session(self, composite_key: str) -> None:
+        """Settle and drop a Claude session whose active flag is stale.
+
+        SessionHandler owns the idle timer, but ClaudeAgent owns the pending
+        request FIFO and Workbench turn tokens. Force cleanup must retire the
+        failed turn here before removing the SDK client, otherwise a later
+        result can adopt the stale request/token.
+        """
+        pending_request = self._pop_pending_request(composite_key)
+        context = getattr(pending_request, "context", None)
+        if context is not None:
+            self._adopt_pending_turn_token(context, pending_request)
+            await self._remove_result_pending_reaction(composite_key, context, pending_request)
+        else:
+            self._pending_reactions.pop(composite_key, None)
+        self._last_assistant_text.pop(composite_key, None)
+        self._pending_assistant_message.pop(composite_key, None)
+
+        self._suppress_receiver_runtime_release.add(composite_key)
+        try:
+            try:
+                await self._cleanup_runtime_session(
+                    composite_key,
+                    preserve_pending_request_state=True,
+                )
+            except Exception:
+                if context is not None:
+                    self._release_service_runtime_turn(context)
+                raise
+        finally:
+            self._suppress_receiver_runtime_release.discard(composite_key)
+
+        if context is not None:
+            try:
+                await self.controller.emit_agent_message(
+                    context,
+                    "result",
+                    "",
+                    is_error=True,
+                    level="silent",
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to emit terminal result while force-cleaning Claude session %s",
+                    composite_key,
+                    exc_info=True,
+                )
+                self._release_service_runtime_turn(context)
+
     async def handle_stop(self, request: AgentRequest) -> bool:
         composite_key = request.composite_session_id
         if composite_key not in self.claude_sessions:
@@ -336,27 +434,17 @@ class ClaudeAgent(BaseAgent):
             return False
 
         client = self.claude_sessions[composite_key]
+        if not hasattr(client, "interrupt"):
+            request.stop_failure_reason = "unsupported"
+            await self.controller.emit_agent_message(
+                request.context,
+                "notify",
+                "⚠️ This Claude session cannot be interrupted; consider /new.",
+            )
+            return False
+
         try:
-            if hasattr(client, "interrupt"):
-                await client.interrupt()
-                # A user-initiated stop is terminal but intentional, so it carries
-                # NO user-facing message: a single SILENT result settles the dot to
-                # idle + releases the SSE waiter through the outbound chokepoint
-                # WITHOUT a bubble. Done HERE, before /internal/cancel cancels the
-                # _run_turn task (the cancelled branch can't safely emit during
-                # cancellation). A genuine interrupt FAILURE below still notifies.
-                await self.controller.emit_agent_message(
-                    request.context, "result", "", level="silent"
-                )
-                return True
-            else:
-                request.stop_failure_reason = "unsupported"
-                await self.controller.emit_agent_message(
-                    request.context,
-                    "notify",
-                    "⚠️ This Claude session cannot be interrupted; consider /new.",
-                )
-                return False
+            await client.interrupt()
         except Exception as err:
             request.stop_failure_reason = "interrupt_failed"
             logger.error(f"Failed to interrupt Claude session {composite_key}: {err}")
@@ -366,6 +454,40 @@ class ClaudeAgent(BaseAgent):
                 "⚠️ Failed to interrupt Claude session. Please try /new.",
             )
             return False
+
+        stopped_request = self._pop_pending_request(composite_key)
+        self._adopt_pending_turn_token(request.context, stopped_request)
+        if stopped_request is not None:
+            try:
+                await self._remove_specific_pending_reaction(composite_key, request.context, stopped_request)
+                await self._remove_ack_reaction(stopped_request)
+            except Exception:
+                logger.debug("Failed to clear Claude stop processing indicator", exc_info=True)
+
+        self._suppress_receiver_runtime_release.add(composite_key)
+        try:
+            self._mark_session_idle_if_no_pending_requests(composite_key)
+            await self._cleanup_runtime_session(composite_key)
+        except Exception as err:
+            logger.error("Failed to clean up stopped Claude session %s: %s", composite_key, err, exc_info=True)
+            self._release_service_runtime_turn(request.context)
+            raise
+        finally:
+            self._suppress_receiver_runtime_release.discard(composite_key)
+
+        try:
+            # A user-initiated stop is terminal but intentional, so it carries
+            # NO user-facing message: a single SILENT result settles the dot to
+            # idle + releases the SSE waiter through the outbound chokepoint
+            # WITHOUT a bubble. Emit only after cleanup so the next turn cannot
+            # acquire the gate and reuse a client that this stop is still
+            # disconnecting.
+            await self.controller.emit_agent_message(request.context, "result", "", level="silent")
+        except Exception as err:
+            logger.error("Failed to emit Claude stop result for session %s: %s", composite_key, err, exc_info=True)
+            self._release_service_runtime_turn(request.context)
+
+        return True
 
     async def _receive_messages(
         self,
@@ -408,6 +530,11 @@ class ClaudeAgent(BaseAgent):
                         runtime_client = self.claude_sessions.get(composite_key)
                         if runtime_client is client:
                             setattr(runtime_client, "_vibe_native_session_id", claude_session_id)
+                            register_claude_owned_process(
+                                runtime_client,
+                                native_session_id=claude_session_id,
+                                owner=AVIBE_CLAUDE_SESSION_OWNER,
+                            )
                         logger.info(f"Captured Claude session id {claude_session_id} for {base_session_id}")
 
                     if self.claude_client._is_skip_message(message):
@@ -585,31 +712,61 @@ class ClaudeAgent(BaseAgent):
                         # stale straggler. No-op for fresh sessions / absent tokens.
                         self._adopt_pending_turn_token(context, pending_request)
 
-                        await self.emit_result_message(
-                            context,
-                            result_text,
-                            subtype=getattr(message, "subtype", "") or "",
-                            duration_ms=getattr(message, "duration_ms", 0),
-                            parse_mode="markdown",
-                            request=pending_request,
-                        )
-                        native_session_id = self._native_session_ids.get(composite_key) or self._reserved_native_session_id(
-                            context,
-                            self.name,
-                        ) or self._reserved_native_session_id(
-                            getattr(pending_request, "context", None),
-                            self.name,
-                        )
-                        if pending_request is not None and native_session_id:
-                            self._maybe_backfill_session_title(pending_request, native_session_id)
-
-                        self._discard_pending_reaction(composite_key)
-
-                        self._last_assistant_text.pop(composite_key, None)
-                        is_idle = self._mark_session_idle_if_no_pending_requests(composite_key)
-                        session = await self.session_manager.get_or_create_session(context.user_id, context.channel_id)
-                        if session and is_idle:
-                            session.session_active[composite_key] = False
+                        # A terminal result settles the turn. The pending request
+                        # was already popped above, so the idle transition must run
+                        # even if emitting the result or backfilling the title
+                        # raises — otherwise the inner ``except … continue`` below
+                        # would swallow the error, skip the mark-idle, and leave the
+                        # session pinned ``active`` (exempt from idle eviction until
+                        # the next service restart). Run it in a ``finally``.
+                        emit_failed = False
+                        try:
+                            await self.emit_result_message(
+                                context,
+                                result_text,
+                                subtype=getattr(message, "subtype", "") or "",
+                                duration_ms=getattr(message, "duration_ms", 0),
+                                parse_mode="markdown",
+                                request=pending_request,
+                            )
+                            native_session_id = self._native_session_ids.get(composite_key) or self._reserved_native_session_id(
+                                context,
+                                self.name,
+                            ) or self._reserved_native_session_id(
+                                getattr(pending_request, "context", None),
+                                self.name,
+                            )
+                            if pending_request is not None and native_session_id:
+                                self._maybe_backfill_session_title(pending_request, native_session_id)
+                        except Exception:
+                            emit_failed = True
+                            raise
+                        finally:
+                            # Settle the turn regardless of an emit/backfill
+                            # failure: clear the loading reaction and the stale
+                            # assistant-text fallback, then release the active
+                            # flag so the session can be idle-evicted.
+                            await self._remove_result_pending_reaction(
+                                composite_key,
+                                context,
+                                pending_request,
+                            )
+                            self._last_assistant_text.pop(composite_key, None)
+                            is_idle = self._mark_session_idle_if_no_pending_requests(composite_key)
+                            try:
+                                session = await self.session_manager.get_or_create_session(
+                                    context.user_id, context.channel_id
+                                )
+                                if session and is_idle:
+                                    session.session_active[composite_key] = False
+                            except Exception:
+                                logger.debug(
+                                    "claude: failed to update session_active after result for %s",
+                                    composite_key,
+                                    exc_info=True,
+                                )
+                            if emit_failed:
+                                self._release_service_runtime_turn(context)
                         continue
 
                     # Ignore UserMessage/tool results; toolcalls are emitted from ToolUseBlock.
@@ -617,6 +774,7 @@ class ClaudeAgent(BaseAgent):
                 except Exception as e:
                     logger.error(f"Error processing message from Claude: {e}", exc_info=True)
                     continue
+            await self._handle_receiver_eof(composite_key, context)
         except asyncio.CancelledError:
             # Receiver task was explicitly cancelled (e.g. /stop, /clear,
             # or a new message replacing the session).  Clean up reactions
@@ -627,6 +785,8 @@ class ClaudeAgent(BaseAgent):
                 mark_session_idle(composite_key)
             logger.info("Claude receiver cancelled for session %s", composite_key)
             await self._clear_pending_reactions(composite_key, context)
+            if composite_key not in self._suppress_receiver_runtime_release:
+                self._release_service_runtime_turn(context)
             raise
         except Exception as e:
             composite_key = composite_key or f"{base_session_id}:{working_path}"
@@ -675,6 +835,7 @@ class ClaudeAgent(BaseAgent):
                 # the 600s stream timeout and then settle idle. No-op off-workbench
                 # (Codex P2).
                 await self.controller.emit_agent_message(context, "result", "", is_error=True)
+            self._release_service_runtime_turn(context)
         # NOTE: no `finally` cleanup of pending reactions here.
         # When the receiver ends normally (stream exhausted after a result),
         # new messages may have already queued their reactions via
@@ -685,6 +846,39 @@ class ClaudeAgent(BaseAgent):
         # inside the loop.
         finally:
             self._suppressed_synthetic_results.discard(composite_key)
+
+    async def _handle_receiver_eof(self, composite_key: str, context: MessageContext) -> None:
+        """Settle a Claude receiver that ended without a ResultMessage."""
+        pending_request = self._pop_pending_request(composite_key)
+        if pending_request is None:
+            return
+
+        pending_token = str(
+            (getattr(getattr(pending_request, "context", None), "platform_specific", None) or {}).get(
+                AGENT_RUNTIME_TURN_TOKEN
+            )
+            or ""
+        )
+        if not pending_token:
+            self._pending_requests.setdefault(composite_key, []).insert(0, pending_request)
+            return
+        logger.warning("Claude receiver ended without a result for session %s", composite_key)
+        self._adopt_pending_turn_token(context, pending_request)
+        await self._remove_specific_pending_reaction(composite_key, context, pending_request)
+        await self._remove_ack_reaction(pending_request)
+        self._last_assistant_text.pop(composite_key, None)
+        self._pending_assistant_message.pop(composite_key, None)
+        self._mark_session_idle_if_no_pending_requests(composite_key)
+
+        await self._cleanup_runtime_session(
+            composite_key,
+            current_receiver_task=asyncio.current_task(),
+            preserve_pending_request_state=True,
+        )
+        try:
+            await self.controller.emit_agent_message(context, "result", "", is_error=True)
+        finally:
+            self._release_service_runtime_turn(context)
 
     async def _handle_synthetic_api_error_message(
         self,
@@ -748,7 +942,8 @@ class ClaudeAgent(BaseAgent):
     async def _remove_pending_reaction(self, composite_key: str, context: MessageContext) -> None:
         """Remove the oldest stored reaction for a session after result is sent.
 
-        Uses FIFO queue to handle multiple messages in the same session.
+        The backend turn gate normally leaves at most one pending reaction, but
+        keep FIFO cleanup for defensive compatibility with older queued state.
         """
         reactions = self._pending_reactions.get(composite_key)
         if reactions:
@@ -770,6 +965,20 @@ class ClaudeAgent(BaseAgent):
         if not reactions:
             self._pending_reactions.pop(composite_key, None)
 
+    async def _remove_result_pending_reaction(
+        self,
+        composite_key: str,
+        context: MessageContext,
+        request: Optional[AgentRequest],
+    ) -> None:
+        reactions_before = len(self._pending_reactions.get(composite_key) or [])
+        if request is not None:
+            await self._remove_specific_pending_reaction(composite_key, context, request)
+            await self._remove_ack_reaction(request)
+        reactions_after = len(self._pending_reactions.get(composite_key) or [])
+        if reactions_before and reactions_after == reactions_before:
+            self._discard_pending_reaction(composite_key)
+
     def _pop_pending_request(self, composite_key: str) -> Optional[AgentRequest]:
         requests = self._pending_requests.get(composite_key)
         if not requests:
@@ -781,37 +990,41 @@ class ClaudeAgent(BaseAgent):
 
     @staticmethod
     def _adopt_pending_turn_token(context: MessageContext, pending_request: Optional[AgentRequest]) -> None:
-        """Copy the pending turn's ``turn_token`` onto the reused receiver context.
+        """Copy the pending turn tokens onto the reused receiver context.
 
-        Claude runs one long-lived receiver per session, so the context captured
-        when it started carries the FIRST turn's ``turn_token``. The streaming
-        completion guard in ``core.message_dispatcher._stream_chunk`` correlates a
-        ``result`` emit to the live turn sink by that token; without this the
-        current turn's result would carry a stale token and be rejected, hanging
-        the SSE stream until the safety timeout. Pulling the token from the
-        FIFO-matched pending request realigns it. No-op when there's no pending
-        request or it carries no token (fail-open: completion stays ungated)."""
+        Claude runs one long-lived receiver per runtime session, so the context
+        captured when it started can carry an older turn's tokens. The web stream
+        guard uses ``turn_token`` and the shared backend runtime gate uses
+        ``agent_runtime_turn_token``; both must follow the FIFO-matched pending
+        request before any assistant/tool/result emit.
+        """
         if pending_request is None:
             return
         src = getattr(pending_request, "context", None)
-        token = (getattr(src, "platform_specific", None) or {}).get("turn_token") if src is not None else None
-        if not token:
+        src_payload = (getattr(src, "platform_specific", None) or {}) if src is not None else {}
+        token = src_payload.get(AGENT_TURN_TOKEN)
+        runtime_key = src_payload.get(AGENT_RUNTIME_TURN_KEY)
+        runtime_token = src_payload.get(AGENT_RUNTIME_TURN_TOKEN)
+        if not (token or runtime_key or runtime_token):
             return
         if context.platform_specific is None:
             context.platform_specific = {}
-        context.platform_specific["turn_token"] = token
+        if token:
+            context.platform_specific[AGENT_TURN_TOKEN] = token
+        if runtime_key:
+            context.platform_specific[AGENT_RUNTIME_TURN_KEY] = runtime_key
+        if runtime_token:
+            context.platform_specific[AGENT_RUNTIME_TURN_TOKEN] = runtime_token
 
     def _retire_failed_auth_turn(self, composite_key: str, context: MessageContext) -> None:
         """Retire a terminal auth-failure turn from the pending FIFO.
 
         The auth error IS this turn's (failed) result, so pop its pending request:
-        leaving the failed entry desyncs request↔result pairing, so the NEXT
-        successful turn would FIFO-pop this stale request and adopt its old
+        leaving the failed entry would make the next result adopt the old
         ``turn_token`` — then ``_stream_chunk`` rejects the live turn's completion
         and Stop sticks until the safety timeout. Adopt the failed turn's own token
-        and release its Chat stream now. Called from every auth-failure terminal
-        path (result / system / assistant); the dot was already settled and the
-        recovery notify persisted by ``maybe_emit_auth_recovery_message``."""
+        and release its Chat stream now. Called from auth-failure terminal paths
+        after the recovery notify has been persisted."""
         failed_request = self._pop_pending_request(composite_key)
         self._adopt_pending_turn_token(context, failed_request)
         _mark = getattr(self.controller, "mark_turn_complete", None)
@@ -847,14 +1060,14 @@ class ClaudeAgent(BaseAgent):
 
         Used on error paths to remove the current request's reaction instead of FIFO.
         """
-        if not request.ack_reaction_message_id:
+        target_id = getattr(request, "ack_reaction_message_id", None)
+        target_emoji = getattr(request, "ack_reaction_emoji", None)
+        if not target_id:
             return
         reactions = self._pending_reactions.get(composite_key)
         if not reactions:
             return
         # Find and remove the matching reaction
-        target_id = request.ack_reaction_message_id
-        target_emoji = request.ack_reaction_emoji
         for i, (msg_id, emoji) in enumerate(reactions):
             if msg_id == target_id and emoji == target_emoji:
                 reactions.pop(i)

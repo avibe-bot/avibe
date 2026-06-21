@@ -74,7 +74,7 @@ def test_normalize_response_supports_body_headers_tuple():
 def test_harness_routes_page_filter_and_return_counts(monkeypatch, tmp_path):
     from storage.background import SQLiteBackgroundTaskStore
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     store = SQLiteBackgroundTaskStore()
     try:
@@ -150,7 +150,7 @@ def test_harness_routes_page_filter_and_return_counts(monkeypatch, tmp_path):
 def test_harness_bootstrap_returns_counts_and_selected_page(monkeypatch, tmp_path):
     from storage.background import SQLiteBackgroundTaskStore
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     store = SQLiteBackgroundTaskStore()
     try:
@@ -199,7 +199,7 @@ def test_workbench_projects_bootstrap_returns_requested_session_pages(monkeypatc
     from storage.projects_service import create_project
     from storage.workbench_sessions_service import create_session
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     project_a_dir = tmp_path / "project-a"
@@ -233,7 +233,7 @@ def test_config_get_on_fresh_install_returns_default_needing_setup(monkeypatch, 
     # needs_setup=True instead of propagating FileNotFoundError as a 500 —
     # and must not create the file (the read stays a read; save_config owns
     # the first write).
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from config import paths
 
     assert not paths.get_config_path().exists()
@@ -250,7 +250,7 @@ def test_config_get_on_fresh_install_returns_default_needing_setup(monkeypatch, 
 
 
 def test_config_routes_redact_platform_and_gateway_secrets(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     payload = _full_config_payload()
     payload["slack"] = {
         **payload["slack"],
@@ -313,6 +313,247 @@ def test_config_routes_redact_platform_and_gateway_secrets(monkeypatch, tmp_path
         assert "client_secret" not in data["gateway"]
 
 
+def test_config_post_hot_reconciles_platform_enablement(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import api
+    from vibe import internal_client
+
+    payload = _full_config_payload()
+    payload["platforms"] = {"enabled": ["discord"], "primary": "discord"}
+    api.save_config(payload)
+
+    reconcile_calls = []
+    restart_calls = []
+
+    async def _reconcile_platforms():
+        reconcile_calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "added": ["slack"]}}
+
+    monkeypatch.setattr(internal_client, "reconcile_platforms", _reconcile_platforms)
+    monkeypatch.setattr(ui_server, "_schedule_service_restart_for_config_fallback", lambda: restart_calls.append(True) or {"ok": True})
+
+    next_payload = {
+        **payload,
+        "platforms": {"enabled": ["discord", "slack"], "primary": "discord"},
+        "slack": {"bot_token": "xoxb-hot-token", "app_token": "xapp-hot-token"},
+    }
+    client = app.test_client()
+    response = client.post("/api/config", json=next_payload, headers=csrf_headers(client))
+
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["platform_runtime"]["hot_reconciled"] is True
+    assert reconcile_calls == [True]
+    assert restart_calls == []
+
+
+def test_config_post_hot_reconciles_platform_runtime_credential_change(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import api
+    from vibe import internal_client
+
+    payload = _full_config_payload()
+    payload["platforms"] = {"enabled": ["discord"], "primary": "discord"}
+    api.save_config(payload)
+
+    reconcile_calls = []
+
+    async def _reconcile_platforms():
+        reconcile_calls.append(True)
+        return {"status_code": 200, "body": {"ok": True, "rebuilt": ["discord"]}}
+
+    monkeypatch.setattr(internal_client, "reconcile_platforms", _reconcile_platforms)
+
+    client = app.test_client()
+    response = client.post(
+        "/api/config",
+        json={"discord": {"bot_token": "discord-new-token-12345"}},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["platform_runtime"]["body"]["rebuilt"] == ["discord"]
+    assert reconcile_calls == [True]
+
+
+def test_platform_runtime_fields_changed_detects_primary_only_change():
+    from config.v2_config import V2Config
+
+    payload = _full_config_payload()
+    payload["platforms"] = {"enabled": ["discord", "slack"], "primary": "discord"}
+    payload["slack"] = {"bot_token": "xoxb-hot-token", "app_token": "xapp-hot-token"}
+    previous = V2Config.from_payload(payload)
+    current = V2Config.from_payload(
+        {
+            **payload,
+            "platform": "slack",
+            "platforms": {"enabled": ["discord", "slack"], "primary": "slack"},
+        }
+    )
+
+    assert (
+        ui_server._platform_runtime_fields_changed(
+            previous,
+            current,
+            {"platforms": {"enabled": ["discord", "slack"], "primary": "slack"}},
+        )
+        is True
+    )
+
+
+def test_config_post_non_platform_change_does_not_reconcile_platforms(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import api
+    from vibe import internal_client
+
+    payload = _full_config_payload()
+    payload["platforms"] = {"enabled": ["discord"], "primary": "discord"}
+    api.save_config(payload)
+
+    async def _reconcile_platforms():
+        raise AssertionError("platform reconcile should not run")
+
+    monkeypatch.setattr(internal_client, "reconcile_platforms", _reconcile_platforms)
+
+    client = app.test_client()
+    response = client.post("/api/config", json={"show_duration": False}, headers=csrf_headers(client))
+
+    assert response.status_code == 200
+    assert "platform_runtime" not in response.get_json()
+
+
+def test_config_post_schedules_service_restart_when_hot_reconcile_unavailable(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import api
+    from vibe import internal_client
+
+    payload = _full_config_payload()
+    payload["platforms"] = {"enabled": ["discord"], "primary": "discord"}
+    api.save_config(payload)
+
+    async def _reconcile_platforms():
+        raise internal_client.InternalServerUnavailable("missing socket")
+
+    restart_calls = []
+    monkeypatch.setattr(internal_client, "reconcile_platforms", _reconcile_platforms)
+    monkeypatch.setattr(
+        ui_server,
+        "_schedule_service_restart_for_config_fallback",
+        lambda: restart_calls.append(True) or {"ok": True, "restart": {"job_id": "job-hot-fallback"}},
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/config",
+        json={"platforms": {"enabled": ["discord", "slack"], "primary": "discord"}, "slack": {"bot_token": "xoxb-hot-token", "app_token": "xapp-hot-token"}},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    runtime = response.get_json()["platform_runtime"]
+    assert runtime["hot_reconciled"] is False
+    assert runtime["restart_scheduled"] is True
+    assert restart_calls == [True]
+
+
+def test_config_post_schedules_service_restart_when_hot_reconcile_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import api
+    from vibe import internal_client
+
+    payload = _full_config_payload()
+    payload["platforms"] = {"enabled": ["discord"], "primary": "discord"}
+    api.save_config(payload)
+
+    async def _reconcile_platforms():
+        return {
+            "status_code": 500,
+            "body": {"ok": False, "error": "IM thread for discord did not stop within timeout"},
+        }
+
+    restart_calls = []
+    monkeypatch.setattr(internal_client, "reconcile_platforms", _reconcile_platforms)
+    monkeypatch.setattr(
+        ui_server,
+        "_schedule_service_restart_for_config_fallback",
+        lambda: restart_calls.append(True) or {"ok": True, "restart": {"job_id": "job-hot-failure"}},
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/config",
+        json={"discord": {"bot_token": "discord-new-token-12345"}},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    runtime = response.get_json()["platform_runtime"]
+    assert runtime["hot_reconciled"] is False
+    assert runtime["restart_scheduled"] is True
+    assert runtime["body"]["error"] == "IM thread for discord did not stop within timeout"
+    assert restart_calls == [True]
+
+
+def test_config_restart_fallback_marks_pending_restart_when_restart_in_flight(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+    restart_status = {
+        "ok": None,
+        "state": "running",
+        "job_id": "job-in-flight",
+        "supervisor_pid": 4242,
+    }
+    runtime.write_json(runtime.get_restart_status_path(), restart_status)
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: True)
+    monkeypatch.setattr(
+        restart_supervisor,
+        "schedule_restart",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("must not overlap restart jobs")),
+    )
+
+    result = ui_server._schedule_service_restart_for_config_fallback()
+
+    assert result["ok"] is True
+    assert result["code"] == "restart_pending_after_in_progress"
+    assert result["restart"] == restart_status
+    pending = runtime.read_json(restart_supervisor._pending_restart_path())
+    assert pending["restart_job_id"] == "job-in-flight"
+    assert pending["trigger"] == "web-ui-config-pending"
+    assert pending["scope"] == "service"
+
+
+def test_config_restart_fallback_schedules_when_in_flight_finishes_after_marker(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import restart_supervisor
+    from vibe import runtime
+
+    runtime.get_restart_status_path().parent.mkdir(parents=True, exist_ok=True)
+    restart_status = {
+        "ok": None,
+        "state": "running",
+        "job_id": "job-in-flight",
+        "supervisor_pid": 4242,
+    }
+    runtime.write_json(runtime.get_restart_status_path(), restart_status)
+    in_flight_results = iter([True, False])
+    scheduled: list[dict] = []
+
+    monkeypatch.setattr(ui_server, "_restart_in_flight", lambda: next(in_flight_results))
+    monkeypatch.setattr(restart_supervisor, "schedule_restart", lambda **kwargs: scheduled.append(kwargs) or {"job_id": "followup"})
+    monkeypatch.setattr(runtime, "read_status", lambda: {"service_pid": 11, "ui_pid": 22})
+
+    result = ui_server._schedule_service_restart_for_config_fallback()
+
+    assert result["ok"] is True
+    assert result["code"] == "restart_scheduled_after_in_flight_finished"
+    assert result["restart"] == {"job_id": "followup"}
+    assert scheduled == [{"delay_seconds": 0.0, "trigger": "web-ui-config", "scope": "service"}]
+    assert runtime.read_json(restart_supervisor._pending_restart_path()) is None
+
+
 def test_static_ui_assets_use_cache_headers(monkeypatch, tmp_path):
     ui_dist = tmp_path / "dist"
     assets_dir = ui_dist / "assets"
@@ -373,7 +614,7 @@ def test_wechat_qr_poll_marks_bind_hint_and_schedules_managed_restart(monkeypatc
     from vibe import runtime
 
     class _Auth:
-        async def poll_status(self, session_key):
+        async def poll_status(self, session_key, verify_code=None):
             assert session_key == "qr-session"
             return {
                 "status": "confirmed",
@@ -384,9 +625,11 @@ def test_wechat_qr_poll_marks_bind_hint_and_schedules_managed_restart(monkeypatc
 
     bound_users = []
     restart_calls = []
+    persisted = []
 
     runtime.ensure_config()
     monkeypatch.setattr(ui_server, "_get_wechat_auth", lambda: _Auth())
+    monkeypatch.setattr(ui_server, "_persist_wechat_qr_credentials", lambda result: persisted.append(result.copy()))
     monkeypatch.setattr(
         ui_server,
         "_schedule_wechat_qr_login_restart",
@@ -407,12 +650,209 @@ def test_wechat_qr_poll_marks_bind_hint_and_schedules_managed_restart(monkeypatc
 
     assert response.status_code == 200
     assert response.get_json()["status"] == "confirmed"
+    assert persisted == [
+        {
+            "status": "confirmed",
+            "bot_token": "wechat-token",
+            "base_url": "https://wechat.example.com",
+            "user_id": "wx-user",
+        }
+    ]
     assert bound_users == ["wx-user"]
     assert restart_calls == [True]
 
 
+def test_wechat_qr_poll_passes_verify_code(monkeypatch):
+    class _Auth:
+        async def poll_status(self, session_key, verify_code=None):
+            assert session_key == "qr-session"
+            return {"status": "need_verifycode", "verify_code": verify_code}
+
+    monkeypatch.setattr(ui_server, "_get_wechat_auth", lambda: _Auth())
+
+    client = app.test_client()
+    response = client.post(
+        "/api/wechat/qr_login/poll",
+        json={"session_key": "qr-session", "verify_code": "1234"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {"status": "need_verifycode", "verify_code": "1234"}
+
+
+def test_persist_wechat_qr_credentials_saves_before_restart(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from vibe import api
+
+    payload = _full_config_payload()
+    payload["platforms"] = {"enabled": [], "primary": "avibe"}
+    payload["wechat"] = {
+        "bot_token": "",
+        "base_url": "https://old-wechat.example.com",
+        "cdn_base_url": "https://cdn.example.com/c2c",
+        "proxy_url": "socks5://127.0.0.1:1080",
+    }
+    api.save_config(payload)
+
+    ui_server._persist_wechat_qr_credentials(
+        {
+            "status": "confirmed",
+            "bot_token": "new-token",
+            "base_url": "https://new-wechat.example.com",
+            "user_id": "wx-user",
+        }
+    )
+
+    updated = api.load_config()
+    assert updated.wechat is not None
+    assert updated.wechat.bot_token == "new-token"
+    assert updated.wechat.base_url == "https://new-wechat.example.com"
+    assert updated.wechat.cdn_base_url == "https://cdn.example.com/c2c"
+    assert updated.wechat.proxy_url == "socks5://127.0.0.1:1080"
+    assert updated.platforms.enabled == ["wechat"]
+    assert updated.platforms.primary == "wechat"
+
+
+def test_persist_wechat_qr_credentials_seeds_fresh_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    from config import paths
+    from vibe import api
+
+    assert not paths.get_config_path().exists()
+
+    ui_server._persist_wechat_qr_credentials(
+        {
+            "status": "confirmed",
+            "bot_token": "new-token",
+            "base_url": "https://new-wechat.example.com",
+            "user_id": "wx-user",
+        }
+    )
+
+    updated = api.load_config()
+    assert updated.wechat is not None
+    assert updated.wechat.bot_token == "new-token"
+    assert updated.wechat.base_url == "https://new-wechat.example.com"
+    assert updated.platforms.enabled == ["wechat"]
+    assert updated.platforms.primary == "wechat"
+
+
+def test_wechat_qr_start_sends_saved_token_list_to_fixed_qr_host(monkeypatch):
+    class _Auth:
+        async def start_login(self, base_url=None, local_token_list=None):
+            return {
+                "session_key": "qr-session",
+                "qrcode_url": "https://wechat.example.com/qr",
+                "base_url": base_url,
+                "local_token_list": local_token_list,
+            }
+
+    monkeypatch.setattr(ui_server, "_get_wechat_auth", lambda: _Auth())
+    monkeypatch.setattr(ui_server, "_load_wechat_local_tokens", lambda: ["saved-token"])
+
+    client = app.test_client()
+    response = client.post(
+        "/api/wechat/qr_login/start",
+        json={"base_url": "https://wechat.example.com"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["base_url"] == "https://ilinkai.weixin.qq.com"
+    assert payload["local_token_list"] == ["saved-token"]
+
+
+def test_wechat_qr_poll_does_not_autobind_without_user_id(monkeypatch):
+    from vibe import runtime
+
+    class _Auth:
+        async def poll_status(self, session_key, verify_code=None):
+            assert session_key == "qr-session"
+            return {
+                "status": "confirmed",
+                "bot_token": "wechat-token",
+                "base_url": "https://wechat.example.com",
+            }
+
+    bound_users = []
+    restart_calls = []
+    persisted = []
+
+    runtime.ensure_config()
+    monkeypatch.setattr(ui_server, "_get_wechat_auth", lambda: _Auth())
+    monkeypatch.setattr(ui_server, "_persist_wechat_qr_credentials", lambda result: persisted.append(result.copy()))
+    monkeypatch.setattr(
+        ui_server,
+        "_schedule_wechat_qr_login_restart",
+        lambda: restart_calls.append(True) or {"job_id": "restart-1"},
+    )
+    monkeypatch.setattr(
+        "vibe.api.auto_bind_wechat_user",
+        lambda user_id: bound_users.append(user_id)
+        or {"ok": True, "already_bound": False, "is_admin": True, "pending_bind_menu_hint": True},
+    )
+
+    client = app.test_client()
+    response = client.post(
+        "/api/wechat/qr_login/poll",
+        json={"session_key": "qr-session"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "confirmed"
+    assert persisted == []
+    assert bound_users == []
+    assert restart_calls == []
+
+
+def test_wechat_qr_poll_blocks_restart_when_credential_persist_fails(monkeypatch):
+    from vibe import runtime
+
+    class _Auth:
+        async def poll_status(self, session_key, verify_code=None):
+            assert session_key == "qr-session"
+            return {
+                "status": "confirmed",
+                "bot_token": "wechat-token",
+                "base_url": "https://wechat.example.com",
+                "user_id": "wx-user",
+            }
+
+    restart_calls = []
+    bound_users = []
+
+    runtime.ensure_config()
+    monkeypatch.setattr(ui_server, "_get_wechat_auth", lambda: _Auth())
+    monkeypatch.setattr(
+        ui_server,
+        "_persist_wechat_qr_credentials",
+        lambda result: (_ for _ in ()).throw(RuntimeError("disk full")),
+    )
+    monkeypatch.setattr(
+        ui_server,
+        "_schedule_wechat_qr_login_restart",
+        lambda: restart_calls.append(True) or {"job_id": "restart-1"},
+    )
+    monkeypatch.setattr("vibe.api.auto_bind_wechat_user", lambda user_id: bound_users.append(user_id))
+
+    client = app.test_client()
+    response = client.post(
+        "/api/wechat/qr_login/poll",
+        json={"session_key": "qr-session"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 500
+    assert response.get_json()["error"] == "failed_to_persist_wechat_credentials"
+    assert restart_calls == []
+    assert bound_users == []
+
+
 def test_web_push_subscription_routes_roundtrip(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     client = app.test_client()
@@ -464,7 +904,7 @@ def test_web_push_status_sync_disables_previous_endpoint_for_same_device(monkeyp
     from storage import web_push_service
     from storage.db import create_sqlite_engine
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     client = app.test_client()
@@ -522,7 +962,7 @@ def test_web_push_status_sync_disables_client_known_previous_endpoint(monkeypatc
     from storage import web_push_service
     from storage.db import create_sqlite_engine
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     client = app.test_client()
@@ -585,7 +1025,7 @@ def test_web_push_status_sync_does_not_reenable_disabled_endpoint(monkeypatch, t
     from storage import web_push_service
     from storage.db import create_sqlite_engine
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     client = app.test_client()
@@ -630,7 +1070,7 @@ def test_web_push_unsubscribe_is_scoped_to_current_user(monkeypatch, tmp_path):
     from storage import web_push_service
     from storage.db import create_sqlite_engine
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     monkeypatch.setattr(ui_server, "_web_push_user_key", lambda: "remote:user-a")
 
@@ -663,7 +1103,7 @@ def test_web_push_unsubscribe_is_scoped_to_current_user(monkeypatch, tmp_path):
 
 
 def test_web_push_test_route_sends_to_enabled_subscriptions(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     sends = []
@@ -708,7 +1148,7 @@ def test_web_push_test_route_sends_to_enabled_subscriptions(monkeypatch, tmp_pat
 
 
 def test_web_push_test_route_targets_current_endpoint_only(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     sends = []
@@ -752,7 +1192,7 @@ def test_sessions_create_preserves_metadata_without_web_push_owner(monkeypatch, 
     from storage.db import create_sqlite_engine
     from storage.projects_service import create_project
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     project_dir = tmp_path / "project"

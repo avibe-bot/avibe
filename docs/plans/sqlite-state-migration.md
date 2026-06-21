@@ -119,7 +119,8 @@ Fields:
 - `role`: user permission role, currently `admin` or `member`; only meaningful
   for user scopes.
 - `workdir`: default working directory for this scope.
-- `agent_backend`: default backend, such as `codex`, `claude`, or `opencode`.
+- `agent_backend`: deprecated legacy scope backend field; ignored by current
+  Agent-first routing.
 - `agent_variant`: default agent/sub-agent name.
 - `model`: default model for this scope.
 - `reasoning_effort`: default reasoning effort when the backend supports it.
@@ -135,7 +136,7 @@ Constraints and indexes:
 - Primary key: `scope_id`. One scope has one current default settings row.
 - Index: `role` for admin/user listing.
 - Index: `workdir` for project-level grouping and management.
-- Index: `(agent_backend, model)` for Web UI filtering and bulk editing.
+- Legacy index: `(agent_backend, model)` may remain until schema cleanup.
 
 ### `agent_sessions`
 
@@ -248,7 +249,6 @@ Column fields:
 
 - `role`
 - `workdir`
-- `agent_backend`
 - `agent_variant`
 - `model`
 - `reasoning_effort`

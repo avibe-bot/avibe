@@ -245,6 +245,62 @@ class ShowPageStore:
             )
         return page
 
+    def ensure_active(self, session_id: str) -> tuple[ShowPage, bool]:
+        """Atomically ensure a page for a NON-archived session; return (page, created).
+
+        The existing-row check, the archived check and the insert all run in ONE
+        transaction so (a) a concurrent archive can't race the create (TOCTOU),
+        and (b) ``created`` is derived from the insert itself — concurrent
+        first-ensures don't both report "created" (which would otherwise double-
+        send the visualize prompt or collide on the unique key). An existing page
+        is returned untouched (archive already took it offline).
+        """
+        session_id = validate_session_id(session_id)
+        now = _utc_now_iso()
+        with self.engine.begin() as conn:
+            existing = (
+                conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
+                .mappings()
+                .first()
+            )
+            if existing is not None:
+                return _page_from_row(existing), False
+            status = conn.execute(
+                select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
+            ).scalar_one_or_none()
+            if status is None:
+                # Unknown session — don't create an orphan page row not tied to any
+                # session lifecycle/archive cleanup (other session-scoped APIs also
+                # treat a missing session as absent).
+                raise ShowPageError(
+                    "Cannot create a Show Page for an unknown session.",
+                    code="session_not_found",
+                )
+            if status == "archived":
+                raise ShowPageError(
+                    "Cannot create a Show Page for an archived session.",
+                    code="session_archived",
+                )
+            result = conn.execute(
+                insert(show_pages)
+                .prefix_with("OR IGNORE")
+                .values(
+                    session_id=session_id,
+                    visibility=VISIBILITY_PRIVATE,
+                    share_id=None,
+                    offline_at=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            created = bool(result.rowcount and result.rowcount > 0)
+            row = (
+                conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
+                .mappings()
+                .first()
+            )
+        return _page_from_row(row), created
+
     def _is_archived(self, session_id: str) -> bool:
         with self.engine.connect() as conn:
             status = conn.execute(
@@ -665,23 +721,108 @@ createRoot(document.getElementById("root")!).render(
 
 
 def _default_app_tsx() -> str:
-    return """import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+    # Placeholder shown while the agent has not authored the page yet. On the
+    # private /show/ surface the Vite runtime hot-swaps this with the real page
+    # as soon as the agent rewrites src/App.tsx, so the copy says it appears
+    # automatically; the public /p/ surface serves a static build with HMR
+    # disabled, so there the copy asks the viewer to refresh instead. We also
+    # offer the same prompt we auto-send, in case the user wants to nudge.
+    return """import { useEffect, useState } from "react"
+import { Button } from "@/components/ui/button"
 import { ThemeProvider } from "@avibe/show-ui/theme"
 
+const NUDGE_PROMPT = "Please visualize this session as a Show Page."
+
+const COPY = {
+  en: {
+    lang: "en",
+    badge: "Show Page",
+    title: "Building your Show Page",
+    bodyLive: "Your agent is turning this session into a visual page. It will appear here automatically once it is ready.",
+    bodyStatic: "Your agent is turning this session into a visual page. Refresh this page once it is ready to see it.",
+    nudge: "Taking a while? Send this to your agent:",
+    copy: "Copy",
+    copied: "Copied",
+  },
+  zh: {
+    lang: "zh",
+    badge: "Show Page",
+    title: "正在生成 Show Page",
+    bodyLive: "Agent 正在把这次会话整理成一个可视化页面，完成后会自动显示在这里，不用刷新。",
+    bodyStatic: "Agent 正在把这次会话整理成一个可视化页面，完成后刷新一下页面就能看到。",
+    nudge: "等太久了？把这句话发给 Agent 催一下：",
+    copy: "复制",
+    copied: "已复制",
+  },
+}
+
+function pickCopy() {
+  const lang = (typeof navigator !== "undefined" && navigator.language) || "en"
+  return lang.toLowerCase().startsWith("zh") ? COPY.zh : COPY.en
+}
+
+// The private /show/ surface keeps Vite HMR, so the real page hot-swaps in on
+// its own. The public /p/ surface serves a static build (HMR disabled), so a
+// viewer there has to refresh to pick up the agent's page.
+function isLiveSurface() {
+  return typeof window !== "undefined" && window.location.pathname.includes("/show/")
+}
+
 export default function App() {
+  const t = pickCopy()
+  const [copied, setCopied] = useState(false)
+  const live = isLiveSurface()
+
+  useEffect(() => {
+    document.documentElement.lang = t.lang
+  }, [t.lang])
+
+  async function copyPrompt() {
+    let ok = false
+    try {
+      await navigator.clipboard.writeText(NUDGE_PROMPT)
+      ok = true
+    } catch {
+      const field = document.getElementById("show-nudge-prompt")
+      if (field instanceof HTMLInputElement) {
+        field.select()
+        ok = document.execCommand("copy")
+      }
+    }
+    if (!ok) return
+    setCopied(true)
+    window.setTimeout(() => setCopied(false), 2000)
+  }
+
   return (
     <ThemeProvider preset="zinc">
-      <main className="page">
-        <Card className="panel">
-          <CardHeader>
-            <CardTitle>Ready to visualize</CardTitle>
-            <CardDescription>This Show Page is served by the managed React runtime.</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Button onClick={() => void fetch("./api/health")}>Call handler</Button>
-          </CardContent>
-        </Card>
+      <main className="show-shell">
+        <section className="show-card">
+          <div className="show-pulse" aria-hidden="true">
+            <span className="show-pulse-ring" />
+            <span className="show-pulse-ring delay" />
+            <span className="show-pulse-core" />
+          </div>
+          <span className="show-badge">{t.badge}</span>
+          <h1 className="show-title">{t.title}</h1>
+          <p className="show-body">{live ? t.bodyLive : t.bodyStatic}</p>
+          <div className="show-nudge">
+            <label className="show-nudge-label" htmlFor="show-nudge-prompt">
+              {t.nudge}
+            </label>
+            <div className="show-nudge-row">
+              <input
+                id="show-nudge-prompt"
+                className="show-nudge-input"
+                value={NUDGE_PROMPT}
+                readOnly
+              />
+              <Button className="show-nudge-copy" onClick={() => void copyPrompt()}>
+                {copied ? t.copied : t.copy}
+              </Button>
+            </div>
+          </div>
+        </section>
       </main>
     </ThemeProvider>
   )
@@ -690,22 +831,153 @@ export default function App() {
 
 
 def _default_styles_css() -> str:
-    return """body {
-  margin: 0;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #f6f7f9;
-  color: hsl(var(--avs-foreground));
+    return """:root {
+  color-scheme: light;
 }
 
-.page {
+body {
+  margin: 0;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: hsl(var(--avs-foreground));
+  background:
+    radial-gradient(130% 130% at 50% -20%, hsl(var(--avs-ring) / 0.10), transparent 55%),
+    hsl(var(--avs-muted));
+}
+
+.show-shell {
   min-height: 100vh;
   display: grid;
   place-items: center;
   padding: 24px;
+  box-sizing: border-box;
 }
 
-.panel {
-  width: min(560px, 100%);
+.show-card {
+  width: min(440px, 100%);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 14px;
+  padding: clamp(28px, 6vw, 44px);
+  border: 1px solid hsl(var(--avs-border));
+  border-radius: calc(var(--avs-radius, 0.5rem) + 10px);
+  background: hsl(var(--avs-background));
+  box-shadow: 0 24px 70px -32px hsl(var(--avs-foreground) / 0.30);
+}
+
+.show-pulse {
+  position: relative;
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+}
+
+.show-pulse-core {
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  background: hsl(var(--avs-ring));
+  box-shadow: 0 0 0 4px hsl(var(--avs-ring) / 0.14);
+}
+
+.show-pulse-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  border: 2px solid hsl(var(--avs-ring));
+  opacity: 0;
+  animation: show-ping 1.8s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+.show-pulse-ring.delay {
+  animation-delay: 0.9s;
+}
+
+.show-badge {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: hsl(var(--avs-muted-foreground));
+}
+
+.show-title {
+  margin: 0;
+  font-size: clamp(20px, 4.5vw, 24px);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.show-body {
+  margin: 0;
+  max-width: 34ch;
+  line-height: 1.6;
+  color: hsl(var(--avs-muted-foreground));
+}
+
+.show-nudge {
+  width: 100%;
+  margin-top: 6px;
+  padding-top: 18px;
+  border-top: 1px solid hsl(var(--avs-border));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+}
+
+.show-nudge-label {
+  font-size: 13px;
+  color: hsl(var(--avs-muted-foreground));
+}
+
+.show-nudge-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.show-nudge-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid hsl(var(--avs-border));
+  border-radius: 8px;
+  background: hsl(var(--avs-muted));
+  color: hsl(var(--avs-foreground));
+  font-size: 13px;
+}
+
+.show-nudge-input:focus-visible {
+  outline: 2px solid hsl(var(--avs-ring));
+  outline-offset: 1px;
+}
+
+.show-nudge-copy {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+@keyframes show-ping {
+  0% {
+    transform: scale(0.4);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(1.05);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .show-pulse-ring {
+    animation: none;
+    opacity: 0;
+  }
 }
 """
 

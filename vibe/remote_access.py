@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import ntpath
 import os
 import platform
@@ -31,6 +32,8 @@ from jwt import PyJWKClient
 from config import paths
 from config.v2_config import V2Config
 from vibe import api, runtime
+
+logger = logging.getLogger(__name__)
 
 CLOUDFLARED_BASE_URL = "https://github.com/cloudflare/cloudflared/releases/latest/download"
 SESSION_COOKIE_NAME = "__Host-vibe_remote_session"
@@ -672,7 +675,7 @@ def _origin_host_for_pairing(config: V2Config) -> str:
     # "localhost" is ambiguous: cloudflared and the UI server resolve it
     # independently, so on a dual-stack host they can land on different
     # families (::1 vs 127.0.0.1) and surface as a 502. Hand cloudflared
-    # a literal loopback IP whose family matches the wildcard
+    # a literal loopback IP whose family matches the bind host that
     # ``effective_ui_bind_host`` chooses, so the two sides never disagree
     # and IPv6-only hosts still work.
     if host.lower() == "localhost":
@@ -857,3 +860,93 @@ def exchange_oauth_code(config: V2Config, code: str, code_verifier: str) -> dict
     if not claims.get("email_verified"):
         raise ValueError("email_not_verified")
     return {"claims": claims, "token": token_payload}
+
+
+# --- OAuth handshake store -------------------------------------------------
+#
+# The login handshake (PKCE ``code_verifier`` + ``nonce`` + device binding) lives
+# only between the login-start redirect and the ``/auth/callback`` of one flow
+# (~5 min). iOS standalone PWAs run the cross-origin authorize step in a separate
+# in-app-browser context, so the handshake *cookie* the callback reads can belong
+# to a different ``GET /`` generation than the consent the user approved; we
+# therefore also keep the handshake here, keyed by the signed state's random id, so
+# the callback can recover it by the (signature-verified) state in the callback URL.
+#
+# Kept in process memory, not on disk: the UI server is a single process that
+# handles both the redirect and the callback, the data is short-lived, and a
+# mid-flow restart just means the user logs in again. This avoids a disk/inode DoS
+# surface entirely and makes single-use + the cap trivially atomic under one lock.
+
+OAUTH_HANDSHAKE_TTL_SECONDS = 300
+# Cap on live handshakes — bounds memory under a burst of unauthenticated login
+# starts; sheds new entries when full (preserving in-flight logins). Far above any
+# realistic concurrent-login count. (The unauthenticated /auth rate limiter is the
+# primary bound; this is a backstop.)
+OAUTH_HANDSHAKE_MAX_ENTRIES = 2048
+_OAUTH_HANDSHAKE_RID_RE = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
+# Guards prune + capacity-check + insert/pop so admission and single-use are atomic.
+_OAUTH_STORE_LOCK = threading.Lock()
+_oauth_handshakes: dict[str, dict[str, Any]] = {}
+# Throttle the "at capacity" warning so it can't itself grow the log under the flood
+# it reports.
+_OAUTH_STORE_CAPACITY_WARN_INTERVAL_SECONDS = 60.0
+_oauth_store_capacity_warned_at = 0.0
+
+
+def _prune_oauth_handshakes(now: int) -> None:
+    """Drop expired handshakes. Caller must hold ``_OAUTH_STORE_LOCK``."""
+    for rid in [rid for rid, record in _oauth_handshakes.items() if record.get("exp", 0) <= now]:
+        _oauth_handshakes.pop(rid, None)
+
+
+def _warn_oauth_store_at_capacity() -> None:
+    """Log the capacity-shed warning at most once per interval (call under the lock)."""
+    global _oauth_store_capacity_warned_at
+    now = time.monotonic()
+    if now - _oauth_store_capacity_warned_at >= _OAUTH_STORE_CAPACITY_WARN_INTERVAL_SECONDS:
+        _oauth_store_capacity_warned_at = now
+        logger.warning("oauth handshake store at capacity (>= %d); shedding writes", OAUTH_HANDSHAKE_MAX_ENTRIES)
+
+
+def store_oauth_handshake(
+    rid: str, *, nonce: str, code_verifier: str, next_target: str, device_hash: str | None = None
+) -> None:
+    """Persist a login handshake in memory, keyed by the signed state's random id.
+
+    Single-use, ``OAUTH_HANDSHAKE_TTL_SECONDS`` TTL. Invalid ids are ignored.
+    ``device_hash`` binds a later store-fallback recovery to the originating browser.
+    """
+    if not _OAUTH_HANDSHAKE_RID_RE.match(rid or ""):
+        return
+    now = int(time.time())
+    record = {
+        "nonce": nonce,
+        "code_verifier": code_verifier,
+        "next": next_target,
+        "device_hash": device_hash,
+        "exp": now + OAUTH_HANDSHAKE_TTL_SECONDS,
+    }
+    with _OAUTH_STORE_LOCK:
+        _prune_oauth_handshakes(now)
+        # At capacity (a flood of fresh entries): shed this one rather than grow
+        # unbounded, but keep in-flight logins. Re-storing an existing id is allowed
+        # (it doesn't grow the store).
+        if len(_oauth_handshakes) >= OAUTH_HANDSHAKE_MAX_ENTRIES and rid not in _oauth_handshakes:
+            _warn_oauth_store_at_capacity()
+            return
+        _oauth_handshakes[rid] = record
+
+
+def pop_oauth_handshake(rid: str | None) -> dict[str, Any] | None:
+    """Return and remove (single-use) the handshake for ``rid``; None if absent/expired.
+
+    ``dict.pop`` under the lock is atomic, so concurrent callbacks for the same
+    ``rid`` get exactly one winner.
+    """
+    if not rid or not _OAUTH_HANDSHAKE_RID_RE.match(rid):
+        return None
+    with _OAUTH_STORE_LOCK:
+        record = _oauth_handshakes.pop(rid, None)
+    if record is None or record.get("exp", 0) <= int(time.time()):
+        return None
+    return record

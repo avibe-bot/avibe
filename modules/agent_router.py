@@ -28,10 +28,10 @@ class AgentRouter:
 
     @classmethod
     def from_file(
-        cls, file_path: Optional[str], *, platform: str, default_backend: str = DEFAULT_AGENT_BACKEND
+        cls, file_path: Optional[str], *, platform: str, fallback_backend: str = DEFAULT_AGENT_BACKEND
     ) -> "AgentRouter":
         routes: Dict[str, PlatformRoute] = {}
-        global_default = default_backend
+        global_default = fallback_backend
 
         # File-based routing removed; keep defaults only.
         routes.setdefault(platform, PlatformRoute(default=global_default))

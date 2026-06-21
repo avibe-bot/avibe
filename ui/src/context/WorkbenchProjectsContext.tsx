@@ -53,6 +53,8 @@ export interface WorkbenchProjectsTree {
    *  the caller navigates (this provider is mounted outside the router). null on failure.
    *  `overrides` lets the create surfaces pin an agent/backend; omit for the server default. */
   createSessionForProject: (projectId: string, overrides?: Partial<WorkbenchSessionCreate>) => Promise<WorkbenchSession | null>;
+  /** Fork an existing session, prepend the new row to the source project, and return it for navigation. */
+  forkSession: (projectId: string, sessionId: string) => Promise<WorkbenchSession | null>;
   renameProject: (projectId: string, name: string) => Promise<void>;
   /** Persist the project's default Agent route (Project Settings) and patch the
    *  shared cache so the sidebar + Projects page reflect it. Pass an all-null
@@ -320,6 +322,19 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     }
   }, [api, applyBootstrapSessions, queueReconcile, reconcileSessions]);
 
+  const refreshCachedSessionRow = useCallback(async (sessionId: string) => {
+    const needsRefresh = Object.values(sessionsRef.current).some((state) =>
+      state.sessions?.some((session) => session.id === sessionId && !session.native_session_id),
+    );
+    if (!needsRefresh) return;
+    try {
+      const updated = await api.getSession(sessionId, { cache: false });
+      setSessions((prev) => patchSessionRow(prev, sessionId, () => updated));
+    } catch {
+      /* best-effort: reconnect reconcile will refresh the row later */
+    }
+  }, [api]);
+
   // Load the first page (append=false) or the next page (append=true) of a
   // project's sessions, with dedupe + per-project serialisation.
   const fetchSessions = useCallback(
@@ -403,10 +418,18 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
         setSessions((prev) =>
           patchSessionRow(prev, session_id, (s) => (s.agent_status === agent_status ? s : { ...s, agent_status })),
         );
+        if (agent_status !== 'running') void refreshCachedSessionRow(session_id);
+      },
+      onTurnEnd: ({ session_id }) => {
+        // The first turn can bind the native_session_id server-side, but the
+        // status event only carries the dot state. Refresh the cached row so
+        // actions gated on native binding, such as Fork session, unlock without
+        // waiting for a full sidebar reload.
+        void refreshCachedSessionRow(session_id);
       },
     });
     return disconnect;
-  }, [api, reconcileProjectTree, reconcileSessions]);
+  }, [api, reconcileProjectTree, reconcileSessions, refreshCachedSessionRow]);
 
   const toggleExpanded = useCallback(
     (projectId: string) => {
@@ -435,7 +458,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       // and would never fetch the project's existing sessions, hiding them.
       const alreadyLoaded = sessionsRef.current[projectId]?.sessions != null;
       try {
-        // No overrides → omit agent fields so the server defers to agents.default_backend.
+        // No overrides → omit agent fields so the server defers to the default Agent.
         const session = await api.createSession({ project_id: projectId, ...overrides });
         if (alreadyLoaded) {
           setSessions((prev) => {
@@ -478,13 +501,40 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
     [api],
   );
 
+  const forkSession = useCallback(
+    async (projectId: string, sessionId: string): Promise<WorkbenchSession | null> => {
+      const alreadyLoaded = sessionsRef.current[projectId]?.sessions != null;
+      try {
+        const session = await api.forkSession(sessionId);
+        if (alreadyLoaded) {
+          setSessions((prev) => {
+            const cur = prev[projectId] ?? EMPTY_SESSIONS;
+            const rows = cur.sessions ?? [];
+            return { ...prev, [projectId]: { ...cur, sessions: [session, ...rows.filter((s) => s.id !== session.id)] } };
+          });
+        }
+        setExpanded((prev) => {
+          if (prev.has(projectId)) return prev;
+          const next = new Set(prev);
+          next.add(projectId);
+          return next;
+        });
+        if (!alreadyLoaded) void fetchSessions(projectId);
+        return session;
+      } catch (err) {
+        console.error('[workbench] fork session failed', err);
+        return null;
+      }
+    },
+    [api, fetchSessions],
+  );
+
   const setProjectDefaultAgent = useCallback(
     async (projectId: string, route: ProjectDefaultAgent) => {
       // Always send the full 5-field route: a complete set is coherent whether
       // the user picked an agent (all set) or cleared it (all null → default
       // dropped). Let failures propagate — apiFetch already toasted.
       const updated = await api.updateProject(projectId, {
-        agent_backend: route.agent_backend,
         agent_name: route.agent_name,
         agent_variant: route.agent_variant,
         model: route.model,
@@ -589,6 +639,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       reloadSessions,
       creatingSession,
       createSessionForProject,
+      forkSession,
       renameProject,
       setProjectDefaultAgent,
       archiveProject,
@@ -608,6 +659,7 @@ export const WorkbenchProjectsProvider: React.FC<{ children: ReactNode }> = ({ c
       reloadSessions,
       creatingSession,
       createSessionForProject,
+      forkSession,
       renameProject,
       setProjectDefaultAgent,
       archiveProject,

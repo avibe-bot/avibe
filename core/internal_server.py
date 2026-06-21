@@ -314,6 +314,19 @@ def create_app(controller: "Controller") -> FastAPI:
             )
         return JSONResponse(status_code=202, content={"ok": True, "session_id": session_id})
 
+    @app.post("/internal/reconcile-platforms")
+    async def _reconcile_platforms() -> Any:
+        """Hot-apply the persisted platform config on the controller loop."""
+        try:
+            from config.v2_compat import to_app_config
+            from config.v2_config import V2Config
+
+            result = await controller.reconcile_platforms(to_app_config(V2Config.load()))
+            return JSONResponse(status_code=200, content=result)
+        except Exception as exc:
+            logger.exception("internal platform reconcile failed")
+            return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
     @app.get("/internal/events")
     async def _events() -> Any:
         """Long-lived SSE feed of Controller-side inbox events.
@@ -581,6 +594,7 @@ def _build_session_context(
             "reasoning_effort": session_row.get("reasoning_effort"),
             "native_session_id": session_row.get("native_session_id"),
             "workdir": session_row.get("workdir"),
+            "metadata": session_row.get("metadata") or {},
             # Carry the stored anchor so SessionHandler.get_base_session_id reuses it
             # instead of computing ``avibe_<id>`` — otherwise, after a restart, new
             # dispatches look up the native-session map under the wrong anchor and

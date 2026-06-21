@@ -52,7 +52,7 @@ class _FakeIMClient:
 
 
 def test_get_admin_user_ids_includes_all_platforms(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform("slack", {"U1": UserSettings(display_name="Slack", is_admin=True)})
@@ -67,7 +67,7 @@ def test_get_admin_user_ids_includes_all_platforms(monkeypatch, tmp_path):
 
 
 def test_update_notification_admin_dms_include_buttons_except_wechat(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform("slack", {"U1": UserSettings(display_name="Slack", is_admin=True)})
@@ -141,7 +141,7 @@ def test_fetch_update_notification_policy_reads_github_release_body():
 
 
 def test_update_notification_returns_false_when_all_admin_dms_fail(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform("discord", {"123456789012345678": UserSettings(display_name="Discord", is_admin=True)})
@@ -161,7 +161,7 @@ def test_update_notification_returns_false_when_all_admin_dms_fail(monkeypatch, 
 
 
 def test_failed_update_notification_does_not_defer_idle_auto_update(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform("discord", {"123456789012345678": UserSettings(display_name="Discord", is_admin=True)})
@@ -198,7 +198,7 @@ def test_failed_update_notification_does_not_defer_idle_auto_update(monkeypatch,
 
 
 def test_silent_release_metadata_skips_notifications_but_keeps_auto_update(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     store.set_users_for_platform("slack", {"U1": UserSettings(display_name="Slack", is_admin=True)})
@@ -243,7 +243,7 @@ def test_silent_release_metadata_skips_notifications_but_keeps_auto_update(monke
 
 
 def test_update_check_reconciles_askill_even_when_product_auto_update_disabled(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     checker = UpdateChecker(
         _StubController(SettingsStore.get_instance()),
@@ -274,7 +274,7 @@ def test_update_check_reconciles_askill_even_when_product_auto_update_disabled(m
 
 
 def test_update_check_reconciles_askill_even_when_product_checks_disabled(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     checker = UpdateChecker(_StubController(SettingsStore.get_instance()), UpdateConfig(check_interval_minutes=0))
     reconciled = []
@@ -290,7 +290,7 @@ def test_update_check_reconciles_askill_even_when_product_checks_disabled(monkey
 
 
 def test_suppressed_post_update_notification_does_not_write_marker(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     checker = UpdateChecker(_StubController(SettingsStore.get_instance()), UpdateConfig())
 
@@ -307,7 +307,7 @@ def test_suppressed_post_update_notification_does_not_write_marker(monkeypatch, 
 
 
 def test_update_marker_records_platform_for_non_slack_callbacks(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     checker = UpdateChecker(_StubController(SettingsStore.get_instance()), UpdateConfig())
 
@@ -321,7 +321,7 @@ def test_update_marker_records_platform_for_non_slack_callbacks(monkeypatch, tmp
 
 
 def test_post_update_notification_uses_unicode_emoji_for_non_slack(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     controller = _StubController(store)
@@ -339,7 +339,7 @@ def test_post_update_notification_uses_unicode_emoji_for_non_slack(monkeypatch, 
 
 
 def test_stop_returns_cancellable_task(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
 
     async def run_test():
@@ -355,7 +355,7 @@ def test_stop_returns_cancellable_task(monkeypatch, tmp_path):
 
 
 def test_start_keeps_running_for_managed_dependencies_when_product_checks_disabled(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
 
     async def run_test():

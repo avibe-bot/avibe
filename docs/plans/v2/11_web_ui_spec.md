@@ -43,7 +43,7 @@ It must align with:
 
 - New user (SaaS): installs official Slack app via OAuth, pairs a local gateway, enables a few channels, starts service.
 - New user (self-host): creates Slack app from manifest, pastes tokens, validates scopes/events, enables channels, starts service.
-- Existing user: changes default agent backend or per-channel routing, updates `custom_cwd`, or changes which channels are enabled.
+- Existing user: changes the default Agent or per-channel routing, updates `custom_cwd`, or changes which channels are enabled.
 - Troubleshooting: bot not responding, gateway offline, missing Slack scopes, invalid tokens, executor CLI missing; user opens Doctor panel to diagnose and apply fixes.
 
 ## Permissions / roles
@@ -119,12 +119,12 @@ Rules:
 
 #### Step 3: Local executors
 
-Collects: `config.agents.*` and `config.agents.default_backend`
+Collects: `config.agents.*` backend runtime settings. The legacy `config.agents.default_backend` field is deprecated.
 
 UI requirements:
 
-- Section: “Default agent backend”
-  - Dropdown: OpenCode / ClaudeCode / Codex
+- Section: “Default Agent”
+  - Dropdown: enabled Vibe Agents
   - Helper text: “Used when a channel does not override routing.”
 
 - Cards for each backend:
@@ -149,7 +149,7 @@ Backend-specific fields:
 Defaults:
 
 - OpenCode enabled by default.
-- Default backend defaults to OpenCode when available; otherwise first detected enabled backend.
+- Default Agent comes from the Agent catalog.
 
 Validation:
 
@@ -158,7 +158,7 @@ Validation:
 
 Microcopy:
 
-- If OpenCode missing: “OpenCode CLI not found. Install it first or switch the default backend.”
+- If the selected Agent's CLI is missing: show the missing backend CLI and ask the user to install it or switch Agents.
 
 #### Step 4: Slack configuration
 
@@ -298,4 +298,3 @@ Collects:
 - `settings.channels[*].enabled` is the single source of truth for channel availability.
 - Channel list loads and user can enable/disable channels; resulting `settings.json` is persisted.
 - Confusing channel enable semantics are avoided by removing the global allow-list.
-

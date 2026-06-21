@@ -18,12 +18,12 @@ services:
     env_file:
       - .env.e2e
     environment:
-      - VIBE_REMOTE_HOME=/data/vibe_remote
+      - AVIBE_HOME=/data/avibe
       - VIBE_DEPLOYMENT_ENV=integration
       - VIBE_UI_PORT=5123
       - E2E_TEST_MODE=true
     volumes:
-      - vibe-e2e-data:/data/vibe_remote
+      - vibe-e2e-data:/data/avibe
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5123/health', timeout=3)"]
       interval: 3s

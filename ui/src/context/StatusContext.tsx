@@ -80,8 +80,15 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       });
       if (!res.ok) {
         // Surface non-2xx responses as rejections so callers do not mistake a
-        // failed restart/start for success and emit positive UI feedback.
-        throw new Error(`Control action ${action} failed with status ${res.status}`);
+        // failed restart/start for success and emit positive UI feedback. Carry
+        // the server ``code`` (e.g. "restart_in_progress") so callers can react
+        // specifically instead of only showing a generic failure.
+        const body = await res.json().catch(() => ({}));
+        const err = new Error(`Control action ${action} failed with status ${res.status}`) as Error & {
+          code?: string;
+        };
+        err.code = body?.code;
+        throw err;
       }
       await refreshStatus();
       // A restart bounces the service (and this UI server), so the next poll may

@@ -8,17 +8,9 @@
 当前 vibe-remote 项目已经为 OpenCode 实现了完整的配置支持（subagent、model、reasoning effort）。
 但 Claude Code 和 Codex 在 UI 中选择后，没有对应的配置选项。
 
-**现有 UI 代码位置**: `ui/src/components/steps/ChannelList.tsx:373-459`
-
-```tsx
-{/* 当前只有 OpenCode 有配置面板 */}
-{channelConfig.routing.agent_backend === 'opencode' && (
-  <div className="space-y-3">
-    <div className="text-xs font-medium text-muted uppercase">{t('channelList.opencodeSettings')}</div>
-    {/* agent, model, reasoning_effort 选择器 */}
-  </div>
-)}
-```
+> Historical note: this plan predates Agent-first routing. The old scope
+> backend route field is deprecated and ignored; UI should derive backend from
+> the selected Vibe Agent.
 
 ## 目标
 
@@ -44,7 +36,9 @@
 @dataclass
 class RoutingSettings:
     # 通用
-    agent_backend: Optional[str] = None  # "opencode" | "claude" | "codex"
+    agent_name: Optional[str] = None
+    model: Optional[str] = None
+    reasoning_effort: Optional[str] = None
     
     # OpenCode 特定 (现有)
     opencode_agent: Optional[str] = None
@@ -72,7 +66,9 @@ interface ChannelConfig {
   show_message_types: string[];
   custom_cwd: string;
   routing: {
-    agent_backend: string | null;
+    agent_name: string | null;
+    model?: string | null;
+    reasoning_effort?: string | null;
     // OpenCode (现有)
     opencode_agent?: string | null;
     opencode_model?: string | null;
@@ -99,7 +95,7 @@ interface ChannelConfig {
 
 ```tsx
 {/* Claude Code Settings */}
-{channelConfig.routing.agent_backend === 'claude' && (
+{selectedAgent?.backend === 'claude' && (
   <div className="space-y-3">
     <div className="text-xs font-medium text-muted uppercase">{t('channelList.claudeSettings')}</div>
     <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-bg/50 p-3 rounded border border-border">
@@ -149,7 +145,7 @@ interface ChannelConfig {
 
 ```tsx
 {/* Codex Settings */}
-{channelConfig.routing.agent_backend === 'codex' && (
+{selectedAgent?.backend === 'codex' && (
   <div className="space-y-3">
     <div className="text-xs font-medium text-muted uppercase">{t('channelList.codexSettings')}</div>
     <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-bg/50 p-3 rounded border border-border">
@@ -373,7 +369,7 @@ async def get_claude_agents():
     "C12345": {
       "enabled": true,
       "routing": {
-        "agent_backend": "claude",
+        "agent_name": "claude",
         "claude_agent": "reviewer",
         "claude_model": "claude-sonnet-4"
       }
@@ -381,7 +377,7 @@ async def get_claude_agents():
     "C67890": {
       "enabled": true,
       "routing": {
-        "agent_backend": "codex",
+        "agent_name": "codex",
         "codex_model": "o3",
         "codex_reasoning_effort": "high"
       }
@@ -389,7 +385,7 @@ async def get_claude_agents():
     "C11111": {
       "enabled": true,
       "routing": {
-        "agent_backend": "opencode",
+        "agent_name": "opencode",
         "opencode_agent": "build",
         "opencode_model": "anthropic/claude-sonnet-4-20250514",
         "opencode_reasoning_effort": "medium"

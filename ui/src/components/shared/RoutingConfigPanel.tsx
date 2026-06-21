@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { Combobox } from '../ui/combobox';
 import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
 import { BackendIcon } from '../visual';
 import { CompactSelect } from '../settings/SettingsPrimitives';
 import { modelOptionLabel } from '../../lib/backendModels';
@@ -16,7 +17,6 @@ export interface RoutingConfigValue {
   custom_cwd: string;
   routing: {
     agent_name?: string | null;
-    agent_backend?: string | null;
     model?: string | null;
     reasoning_effort?: string | null;
     opencode_agent?: string | null;
@@ -31,6 +31,7 @@ export interface RoutingConfigValue {
   };
   show_message_types: string[];
   require_mention?: boolean | null;
+  require_bind?: boolean | null;
 }
 
 export interface RoutingConfigPanelProps {
@@ -103,9 +104,8 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
 
   const selectedVibeAgent = vibeAgents.find((agent) => agent.name === value.routing.agent_name) || null;
   const defaultVibeAgent = vibeAgents.find((agent) => agent.name === defaultAgentName) || null;
-  const legacyBackend = value.routing.agent_backend || null;
-  const inheritedVibeAgent = selectedVibeAgent || (!legacyBackend ? defaultVibeAgent : null);
-  const effectiveBackend = selectedVibeAgent?.backend || legacyBackend || defaultVibeAgent?.backend || globalConfig?.agents?.default_backend || 'opencode';
+  const inheritedVibeAgent = selectedVibeAgent || defaultVibeAgent;
+  const effectiveBackend = selectedVibeAgent?.backend || defaultVibeAgent?.backend || 'opencode';
   const effectiveModel = value.routing.model || inheritedVibeAgent?.model || '';
 
   const getOpenCodeReasoningOptions = (modelKey: string) => {
@@ -235,8 +235,8 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
     return ['low', 'medium', 'high', 'xhigh'].map((value) => ({ value, label: getReasoningLabel(value, value) }));
   })();
 
-  // Top row: working dir + Vibe Agent (+ optional require_mention) — dynamic grid columns
-  const topGridCols = showRequireMention ? 'md:grid-cols-3' : 'md:grid-cols-2';
+  // Top row: working dir + Vibe Agent (+ optional require_mention / require_bind) — dynamic grid columns
+  const topGridCols = showRequireMention ? 'md:grid-cols-4' : 'md:grid-cols-2';
 
   return (
     <div className={clsx('space-y-4', containerClass)}>
@@ -274,12 +274,10 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
               value={value.routing.agent_name || ''}
               onChange={(e) => {
                 const nextName = e.target.value || null;
-                const nextAgent = nextName ? vibeAgents.find((agent) => agent.name === nextName) || null : null;
                 onChange({
                   routing: {
                     ...value.routing,
                     agent_name: nextName,
-                    agent_backend: nextAgent?.backend || null,
                     model: null,
                     reasoning_effort: null,
                     opencode_model: null,
@@ -365,6 +363,52 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
                     >
                       {seg.label}
                     </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Require bind (channels only): when On, only bound users can drive the
+            agent here; unbound members are silently ignored. */}
+        {showRequireMention && (() => {
+          const on = value.require_bind === true;
+          const setBind = (next: boolean) => {
+            onChange({ require_bind: next ? true : null });
+          };
+          const segs: { id: 'off' | 'on'; label: string }[] = [
+            { id: 'off', label: t('channelList.requireBindOff') },
+            { id: 'on', label: t('channelList.requireBindOn') },
+          ];
+          return (
+            <div className="space-y-1">
+              <label className="text-xs font-medium uppercase text-muted">{t('channelList.requireBind')}</label>
+              <div
+                role="radiogroup"
+                aria-label={t('channelList.requireBind') as string}
+                className="flex h-9 items-stretch gap-0.5 rounded-md border border-border bg-foreground/[0.03] p-0.5"
+              >
+                {segs.map((seg) => {
+                  const active = (seg.id === 'on') === on;
+                  return (
+                    <Button
+                      key={seg.id}
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      role="radio"
+                      aria-checked={active}
+                      onClick={() => setBind(seg.id === 'on')}
+                      className={clsx(
+                        'h-auto flex-1 rounded-[4px] px-2.5 text-[12px] shadow-none focus-visible:ring-1',
+                        active
+                          ? 'border border-mint/30 bg-mint-soft font-bold text-mint'
+                          : 'font-medium text-muted hover:text-foreground'
+                      )}
+                    >
+                      {seg.label}
+                    </Button>
                   );
                 })}
               </div>

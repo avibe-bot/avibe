@@ -8,14 +8,14 @@ instead of storing secrets in V2Config and hoping env injection wins.
 This module owns the narrow settings.json mutation surface:
 
 - ``apply_claude_auth(...)`` upserts or removes Anthropic env vars in
-  ``settings.json``.
+  ``settings.json`` while preserving Avibe-managed Claude Code defaults.
 - ``read_claude_settings_env(...)`` reports the live on-disk state without
   leaking secrets beyond the current process.
 
-OAuth tokens minted by ``claude login`` live in the macOS keychain (or
-the OS-specific equivalent), not on disk. We have no portable way to
-inspect them, so the OAuth-signed-in signal is purely an inference from
-"no API key is configured" plus "the CLI is reachable".
+OAuth tokens minted by ``claude login`` may live in an OS keychain or in
+Claude Code's own credential file depending on platform/version. The Settings
+UI prefers ``claude auth status --json`` and uses the on-disk credential file
+as a fallback signal.
 """
 
 from __future__ import annotations
@@ -29,6 +29,14 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+# Keys Avibe always keeps in ``~/.claude/settings.json`` for Claude Code.
+# They are not auth credentials, so they intentionally stay outside
+# ``RELEVANT_ENV_KEYS`` and survive OAuth/API-key mode switches.
+MANAGED_ENV_VALUES = {
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+}
+
 # Keys we recognise inside ``~/.claude/settings.json``'s ``env`` block.
 # ``ANTHROPIC_API_KEY`` is the SDK's documented variable; relay setups
 # (e.g. Cloudflare-fronted gateways like ai-relay) prefer
@@ -39,6 +47,7 @@ RELEVANT_ENV_KEYS = (
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
 )
+OAUTH_SETTINGS_ENV_BACKUP_NAME = ".avibe-oauth-settings-env-backup.json"
 
 
 def get_claude_home(home: Path | None = None) -> Path:
@@ -62,46 +71,73 @@ def get_claude_settings_path(home: Path | None = None) -> Path:
     return get_claude_home(home) / "settings.json"
 
 
-def get_claude_credentials_path(home: Path | None = None) -> Path:
-    """Return the absolute path to ``~/.claude/credentials.json``.
+def get_claude_credentials_paths(home: Path | None = None) -> tuple[Path, ...]:
+    """Return Claude Code OAuth credential paths, newest layout first.
 
-    The Claude CLI writes OAuth tokens here on platforms that lack a
-    usable keychain (notably Linux/Docker, including the regression
-    container). The Settings UI uses presence + a token field as a
-    best-effort signal for "Claude is signed in via OAuth" since the
-    macOS keychain is not portably introspectable.
+    Claude Code currently writes OAuth tokens to
+    ``~/.claude/.credentials.json`` on Linux/Docker. Older Avibe builds
+    looked for ``credentials.json`` based on earlier CLI behavior, so keep
+    both paths readable for existing installs and tests.
     """
-    return get_claude_home(home) / "credentials.json"
+    claude_home = get_claude_home(home)
+    return (
+        claude_home / ".credentials.json",
+        claude_home / "credentials.json",
+    )
+
+
+def get_claude_credentials_path(home: Path | None = None) -> Path:
+    """Return the primary Claude Code OAuth credentials path."""
+    return get_claude_credentials_paths(home)[0]
+
+
+def clear_claude_oauth_credentials_files(home: Path | None = None) -> list[str]:
+    """Remove known file-backed Claude Code OAuth credential stores."""
+    removed: list[str] = []
+    for path in get_claude_credentials_paths(home):
+        try:
+            path.unlink()
+            removed.append(str(path))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise OSError(f"Failed to remove Claude OAuth credentials file {path}: {exc}") from exc
+    return removed
+
+
+def get_claude_oauth_settings_backup_path(home: Path | None = None) -> Path:
+    """Return Avibe's durable rollback file for Claude OAuth setup."""
+    return get_claude_home(home) / OAUTH_SETTINGS_ENV_BACKUP_NAME
 
 
 def read_claude_oauth_signed_in(home: Path | None = None) -> bool:
     """Best-effort probe for whether Claude has a usable OAuth session.
 
-    True iff ``~/.claude/credentials.json`` exists and carries something
+    True iff Claude's on-disk credentials file exists and carries something
     that looks like an OAuth token bundle. We don't attempt to introspect
     keychain-backed installs (macOS) — those return False here but the UI
     can still light up the OAuth banner after a successful in-app login.
     """
-    path = get_claude_credentials_path(home)
-    if not path.exists():
-        return False
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    if not isinstance(data, dict):
-        return False
-    # Claude writes nested ``claudeAiOauth`` payloads in newer builds; flat
-    # ``access_token``/``refresh_token`` keys also occur. Accept either.
-    nested = data.get("claudeAiOauth") if isinstance(data.get("claudeAiOauth"), dict) else None
-    if nested and any(
-        isinstance(nested.get(field), str) and nested.get(field)
-        for field in ("access_token", "refresh_token", "accessToken", "refreshToken")
-    ):
-        return True
-    for field in ("access_token", "refresh_token", "accessToken", "refreshToken"):
-        if isinstance(data.get(field), str) and data.get(field):
+    for path in get_claude_credentials_paths(home):
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        # Claude writes nested ``claudeAiOauth`` payloads in newer builds; flat
+        # ``access_token``/``refresh_token`` keys also occur. Accept either.
+        nested = data.get("claudeAiOauth") if isinstance(data.get("claudeAiOauth"), dict) else None
+        if nested and any(
+            isinstance(nested.get(field), str) and nested.get(field)
+            for field in ("access_token", "refresh_token", "accessToken", "refreshToken")
+        ):
             return True
+        for field in ("access_token", "refresh_token", "accessToken", "refreshToken"):
+            if isinstance(data.get(field), str) and data.get(field):
+                return True
     return False
 
 
@@ -153,6 +189,74 @@ def _atomic_write(path: Path, content: str, *, mode: int = 0o600) -> None:
         logger.debug("chmod %s failed: %s", path, exc)
 
 
+def _clean_relevant_env_values(env_values: Dict[str, str]) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for key in RELEVANT_ENV_KEYS:
+        raw = env_values.get(key)
+        if isinstance(raw, str) and raw.strip():
+            out[key] = raw.strip()
+    return out
+
+
+def _ensure_managed_env_values(env_block: Dict[str, Any]) -> None:
+    """Upsert Avibe-managed, non-secret Claude Code env defaults."""
+    env_block.update(MANAGED_ENV_VALUES)
+
+
+def write_claude_oauth_settings_backup(
+    env_values: Dict[str, str], home: Path | None = None
+) -> None:
+    """Persist a rollback copy of Claude settings env before OAuth cleanup.
+
+    OAuth setup has to remove API-key/base-url overrides from Claude Code's
+    ``settings.json`` before launching the OAuth control client. The rollback
+    state must survive an Avibe process restart, so it lives next to Claude's
+    settings file and uses the same private-file permissions.
+    """
+    cleaned = _clean_relevant_env_values(env_values)
+    if not cleaned:
+        clear_claude_oauth_settings_backup(home)
+        return
+    payload = {"version": 1, "env": cleaned}
+    _atomic_write(
+        get_claude_oauth_settings_backup_path(home),
+        json.dumps(payload, indent=2) + "\n",
+        mode=0o600,
+    )
+
+
+def read_claude_oauth_settings_backup(
+    home: Path | None = None,
+) -> Dict[str, str] | None:
+    """Read Avibe's pending Claude OAuth rollback backup, if present."""
+    path = get_claude_oauth_settings_backup_path(home)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Claude OAuth settings backup read failed (%s)", exc)
+        return None
+    if not isinstance(data, dict):
+        return None
+    env_values = data.get("env")
+    if not isinstance(env_values, dict):
+        return None
+    cleaned = _clean_relevant_env_values(env_values)
+    return cleaned or None
+
+
+def clear_claude_oauth_settings_backup(home: Path | None = None) -> None:
+    """Remove Avibe's pending Claude OAuth rollback backup."""
+    path = get_claude_oauth_settings_backup_path(home)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:  # pragma: no cover - best effort cleanup
+        logger.warning("Claude OAuth settings backup cleanup failed (%s)", exc)
+
+
 def apply_claude_auth(
     *,
     auth_mode: str,
@@ -166,7 +270,8 @@ def apply_claude_auth(
     ``api_key`` mode writes ``env.ANTHROPIC_API_KEY`` and removes
     ``ANTHROPIC_AUTH_TOKEN`` so header semantics cannot conflict. ``oauth``
     mode removes all Anthropic credential/base-url overrides from the env
-    block and leaves Claude's OAuth credentials untouched.
+    block and leaves Claude's OAuth credentials untouched. Both modes upsert
+    Avibe's non-secret Claude Code env defaults.
     """
     if auth_mode not in {"oauth", "api_key"}:
         raise ValueError(f"Unsupported claude auth_mode: {auth_mode!r}")
@@ -194,8 +299,8 @@ def apply_claude_auth(
     else:
         for key in RELEVANT_ENV_KEYS:
             env_block.pop(key, None)
-        if not env_block:
-            settings.pop("env", None)
+
+    _ensure_managed_env_values(env_block)
 
     _atomic_write(path, json.dumps(settings, indent=2) + "\n", mode=0o600)
     return {"settings_path": str(path)}
@@ -218,6 +323,35 @@ def read_claude_settings_env(home: Path | None = None) -> Dict[str, str]:
         if isinstance(raw, str) and raw.strip():
             out[key] = raw.strip()
     return out
+
+
+def restore_claude_settings_env(env_values: Dict[str, str], home: Path | None = None) -> None:
+    """Restore Anthropic-relevant Claude settings env values exactly.
+
+    OAuth setup temporarily removes these keys so Claude Code cannot route
+    the OAuth handshake through stale API-key settings. If that setup does
+    not complete, the caller needs to put the previous settings back without
+    changing header semantics or dropping a base-url-only relay setting.
+    """
+    path = get_claude_settings_path(home)
+    settings = _load_settings_for_write(path)
+    env_block = settings.setdefault("env", {})
+    if not isinstance(env_block, dict):
+        env_block = {}
+        settings["env"] = env_block
+
+    for key in RELEVANT_ENV_KEYS:
+        env_block.pop(key, None)
+        raw = env_values.get(key)
+        if isinstance(raw, str) and raw.strip():
+            env_block[key] = raw.strip()
+
+    _ensure_managed_env_values(env_block)
+
+    if not env_block:
+        settings.pop("env", None)
+
+    _atomic_write(path, json.dumps(settings, indent=2) + "\n", mode=0o600)
 
 
 def read_claude_auth_state(home: Path | None = None) -> Dict[str, Any]:
@@ -294,7 +428,7 @@ def build_claude_subprocess_env(
     The ``auth_mode`` toggle is the load-bearing piece — if a user picks
     OAuth in Settings but their shell exports ``ANTHROPIC_API_KEY``, the
     Claude CLI silently keeps API-key auth and never reaches
-    ``~/.claude/credentials.json``. Stripping both ``ANTHROPIC_API_KEY``
+    Claude Code's OAuth credential store. Stripping both ``ANTHROPIC_API_KEY``
     and ``ANTHROPIC_AUTH_TOKEN`` (header-semantics switch) in OAuth mode
     makes the Settings toggle authoritative.
 
@@ -321,7 +455,10 @@ def build_claude_subprocess_env(
     if claude_cfg is None and not force_oauth:
         return claude_env
 
-    auth_mode = getattr(claude_cfg, "auth_mode", "oauth") if claude_cfg is not None else "oauth"
+    configured_auth_mode = (
+        getattr(claude_cfg, "auth_mode", "oauth") if claude_cfg is not None else "oauth"
+    )
+    auth_mode = "oauth" if force_oauth else configured_auth_mode
     configured_key_raw = (getattr(claude_cfg, "api_key", None) or "").strip() if claude_cfg is not None else ""
     configured_base = (getattr(claude_cfg, "base_url", None) or "").strip() if claude_cfg is not None else ""
     settings_env = read_claude_settings_env()
@@ -344,7 +481,7 @@ def build_claude_subprocess_env(
             # it IS the OAuth setup flow. Strip every inherited
             # Anthropic credential header: an ambient
             # ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` would
-            # suppress ``~/.claude/credentials.json``, and an ambient
+            # suppress Claude Code's OAuth credential store, and an ambient
             # ``ANTHROPIC_BASE_URL`` (typically a stale relay URL from
             # the shell) would route OAuth traffic through an
             # api-key-only gateway. Both leaks have to be plugged for

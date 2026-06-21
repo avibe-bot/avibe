@@ -124,6 +124,25 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.context.platform_specific["agent_session_id"], "sesk8m4q2p7x")
         agent.controller.emit_agent_message.assert_not_awaited()
 
+    async def test_thread_started_does_not_bind_while_fork_correction_is_pending(self):
+        agent = _StubAgent()
+        agent.is_fork_correction_pending = Mock(return_value=True)
+        agent.bind_agent_session_id = Mock(wraps=agent.bind_agent_session_id)
+        handler = CodexEventHandler(agent)
+        request = SimpleNamespace(
+            base_session_id="session-1",
+            session_key="slack::channel::C1",
+            working_path="/repo",
+            context=SimpleNamespace(platform_specific={}),
+        )
+
+        await handler._on_thread_started({"thread": {"id": "thread-1"}}, request)
+
+        agent.is_fork_correction_pending.assert_called_once_with("session-1")
+        agent._session_mgr.set_thread_id.assert_not_called()
+        agent.bind_agent_session_id.assert_not_called()
+        self.assertNotIn("agent_session_id", request.context.platform_specific)
+
     async def test_retrying_error_is_suppressed(self):
         agent = _StubAgent()
         handler = CodexEventHandler(agent)
@@ -302,6 +321,33 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
 
         agent.emit_result_message.assert_not_awaited()
         agent._remove_ack_reaction.assert_not_awaited()
+
+    async def test_interrupted_completion_releases_runtime_gate_without_result(self):
+        agent = _StubAgent()
+        release_runtime_turn = Mock()
+        agent.controller.agent_service = SimpleNamespace(release_runtime_turn=release_runtime_turn)
+        handler = CodexEventHandler(agent)
+        context = SimpleNamespace(
+            platform_specific={
+                "agent_runtime_turn_key": "session-1:/repo",
+                "agent_runtime_turn_token": "R1",
+            }
+        )
+        request = SimpleNamespace(base_session_id="session-1", context=context, started_at=0)
+        agent._turn_registry.register_turn("turn-1", request)
+
+        await handler._on_turn_completed(
+            {
+                "turn": {
+                    "id": "turn-1",
+                    "status": "interrupted",
+                }
+            },
+            request,
+        )
+
+        agent.emit_result_message.assert_not_awaited()
+        release_runtime_turn.assert_called_once_with(context)
 
     async def test_auth_recovery_message_suppresses_plain_notify(self):
         agent = _StubAgent()

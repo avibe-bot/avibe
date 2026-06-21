@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import os
+import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -111,6 +112,7 @@ class FeishuBot(BaseIMClient):
         self._routing_cache: Dict[str, Dict[str, Any]] = {}
         self._stop_event: Optional[asyncio.Event] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._ws_thread: Optional[threading.Thread] = None
         self._recent_event_ids: Dict[str, float] = {}
         self._cached_token: Optional[str] = None
         self._token_expires_at: Optional[float] = None
@@ -1521,15 +1523,8 @@ class FeishuBot(BaseIMClient):
                         logger.debug("Ignoring non-mention message in channel")
                         return
                 else:
-                    if self.settings_manager:
-                        thread_active = self.sessions.is_thread_active(user_id, chat_id, root_id) if self.sessions else False
-                        scheduled_thread_active = (
-                            self.sessions.is_thread_active("scheduled", chat_id, root_id) if self.sessions else False
-                        )
-                        if not thread_active and not scheduled_thread_active:
-                            logger.debug("Ignoring message in inactive thread %s", root_id)
-                            return
-                    else:
+                    if not bot_mentioned and not self.is_scheduled_thread_active(chat_id, root_id):
+                        logger.debug("Ignoring non-mention message in thread %s", root_id)
                         return
 
             auth_result = self.check_authorization(
@@ -1868,10 +1863,10 @@ class FeishuBot(BaseIMClient):
         return str(value)
 
     @staticmethod
-    def _routing_draft_from_current(current_routing: Any) -> Dict[str, Optional[str]]:
-        backend = getattr(current_routing, "agent_backend", None) if current_routing else None
-        canonical_model = getattr(current_routing, "model", None) if current_routing else None
-        canonical_reasoning = getattr(current_routing, "reasoning_effort", None) if current_routing else None
+    def _routing_draft_from_current(
+        current_routing: Any,
+        selected_backend: Optional[str] = None,
+    ) -> Dict[str, Optional[str]]:
         fields = (
             "opencode_agent",
             "opencode_model",
@@ -1886,9 +1881,13 @@ class FeishuBot(BaseIMClient):
         draft: Dict[str, Optional[str]] = {}
         for field_name in fields:
             draft[field_name] = getattr(current_routing, field_name, None) if current_routing else None
-        if backend in {"opencode", "claude", "codex"}:
-            draft[f"{backend}_model"] = draft.get(f"{backend}_model") or canonical_model
-            draft[f"{backend}_reasoning_effort"] = draft.get(f"{backend}_reasoning_effort") or canonical_reasoning
+        if selected_backend in {"opencode", "claude", "codex"} and current_routing:
+            model = getattr(current_routing, "model", None)
+            reasoning_effort = getattr(current_routing, "reasoning_effort", None)
+            draft[f"{selected_backend}_model"] = draft.get(f"{selected_backend}_model") or model
+            draft[f"{selected_backend}_reasoning_effort"] = (
+                draft.get(f"{selected_backend}_reasoning_effort") or reasoning_effort
+            )
         return draft
 
     @staticmethod
@@ -1955,7 +1954,8 @@ class FeishuBot(BaseIMClient):
             return False
 
         draft_routing = dict(
-            cache.get("draft_routing") or self._routing_draft_from_current(cache.get("current_routing"))
+            cache.get("draft_routing")
+            or self._routing_draft_from_current(cache.get("current_routing"), cache.get("_selected_backend"))
         )
         selected_value = self._normalize_routing_field_value(self._extract_select_action_value(action))
         draft_routing[routing_field] = selected_value
@@ -1992,7 +1992,10 @@ class FeishuBot(BaseIMClient):
             logger.warning("Routing form submitted with empty backend, ignoring")
             return
 
-        draft_routing = cached.get("draft_routing") or self._routing_draft_from_current(cached.get("current_routing"))
+        draft_routing = cached.get("draft_routing") or self._routing_draft_from_current(
+            cached.get("current_routing"),
+            backend,
+        )
 
         def _val(form_key: str, routing_field: str) -> Optional[str]:
             if form_key in form_value:
@@ -2386,7 +2389,7 @@ class FeishuBot(BaseIMClient):
         cache_key = f"{channel_id or ''}:{cache_user_id}"
         self._routing_cache[cache_key] = {
             "current_routing": kwargs.get("current_routing"),
-            "draft_routing": self._routing_draft_from_current(kwargs.get("current_routing")),
+            "draft_routing": self._routing_draft_from_current(kwargs.get("current_routing"), current_backend),
             "registered_backends": registered_backends,
             "opencode_agents": kwargs.get("opencode_agents", []),
             "opencode_models": kwargs.get("opencode_models", {}),
@@ -2493,7 +2496,7 @@ class FeishuBot(BaseIMClient):
         cache_key = f"{channel_id}:{user_id}"
         cache = self._routing_cache.get(cache_key, {})
         cache["_selected_backend"] = selected_backend
-        cache.setdefault("draft_routing", self._routing_draft_from_current(current_routing))
+        cache.setdefault("draft_routing", self._routing_draft_from_current(current_routing, selected_backend))
         self._routing_cache[cache_key] = cache
 
         form_elements: list = [
@@ -3252,8 +3255,6 @@ class FeishuBot(BaseIMClient):
                 domain=self._get_sdk_domain(),
             )
 
-            import threading
-
             def _ws_thread_target():
                 try:
                     logger.info("Feishu WS thread starting, domain=%s", self._get_sdk_domain())
@@ -3262,6 +3263,7 @@ class FeishuBot(BaseIMClient):
                     logger.error("Feishu WS thread crashed: %s", exc, exc_info=True)
 
             ws_thread = threading.Thread(target=_ws_thread_target, daemon=True, name="feishu-ws")
+            self._ws_thread = ws_thread
             ws_thread.start()
 
             logger.info("Feishu WebSocket client started")
@@ -3283,17 +3285,60 @@ class FeishuBot(BaseIMClient):
 
     def stop(self) -> None:
         """Signal the bot to stop."""
-        if self._stop_event is None:
-            return
-        if self._loop and self._loop.is_running():
+        self._stop_ws_client()
+        if self._loop and self._loop.is_running() and self._stop_event is not None:
             self._loop.call_soon_threadsafe(self._stop_event.set)
-        else:
+        elif self._stop_event is not None:
             self._stop_event.set()
+        self._join_ws_thread(timeout=5.0)
+
+    def _stop_ws_client(self) -> None:
+        ws_client = self._ws_client
+        if ws_client is None:
+            return
+        disconnect = getattr(ws_client, "_disconnect", None)
+        if not callable(disconnect):
+            logger.warning("Feishu WS client has no disconnect hook; nested WS thread may leak")
+            return
+        try:
+            import lark_oapi.ws.client as ws_client_module
+
+            ws_loop = getattr(ws_client_module, "loop", None)
+            if ws_loop is not None and ws_loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(disconnect(), ws_loop)
+                future.result(timeout=5.0)
+                # lark-oapi keeps the nested thread inside module-level
+                # _select(), which is just an infinite sleep loop. Stopping the
+                # SDK loop is the only available way to release Client.start().
+                ws_loop.call_soon_threadsafe(ws_loop.stop)
+            else:
+                loop = ws_loop if ws_loop is not None and not ws_loop.is_closed() else asyncio.new_event_loop()
+                if ws_loop is None:
+                    ws_client_module.loop = loop
+                loop.run_until_complete(disconnect())
+        except Exception:
+            logger.exception("Failed to disconnect Feishu WS client")
+
+    def _join_ws_thread(self, timeout: float) -> None:
+        thread = self._ws_thread
+        if thread is None or thread is threading.current_thread():
+            return
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            logger.warning("Feishu WS thread did not stop within %.1fs", timeout)
+        else:
+            self._ws_thread = None
+
+    def verify_stopped(self) -> bool:
+        thread = self._ws_thread
+        return thread is None or not thread.is_alive()
 
     async def shutdown(self) -> None:
         """Best-effort async shutdown."""
+        self._stop_ws_client()
         if self._stop_event is not None:
             self._stop_event.set()
+        await asyncio.to_thread(self._join_ws_thread, 5.0)
 
     # ------------------------------------------------------------------
     # Misc required implementations

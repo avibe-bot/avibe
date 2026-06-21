@@ -21,7 +21,7 @@ from typing import Any, Optional
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
-from storage.models import scope_settings, scopes
+from storage.models import agents, scope_settings, scopes
 
 
 PROJECT_PLATFORM = "avibe"
@@ -101,7 +101,7 @@ _UNSET: Any = object()
 # The project's default Agent route lives on the shared scope_settings row
 # (NULL until the user sets one in Project Settings). New sessions in the
 # project inherit it; see ``workbench_sessions_service.create_session``.
-_DEFAULT_AGENT_FIELDS = ("agent_backend", "agent_name", "agent_variant", "model", "reasoning_effort")
+_DEFAULT_AGENT_FIELDS = ("agent_name", "agent_variant", "model", "reasoning_effort")
 
 # Single source of truth for the columns every project payload reads, so
 # ``list_projects`` and ``_project_payload`` can never select different shapes.
@@ -114,8 +114,8 @@ _PROJECT_COLUMNS = (
     scopes.c.last_seen_at,
     scope_settings.c.enabled,
     scope_settings.c.workdir,
-    scope_settings.c.agent_backend,
     scope_settings.c.agent_name,
+    agents.c.backend.label("agent_backend"),
     scope_settings.c.agent_variant,
     scope_settings.c.model,
     scope_settings.c.reasoning_effort,
@@ -125,13 +125,15 @@ _PROJECT_COLUMNS = (
 def _default_agent_from_row(row: Any) -> Optional[dict[str, Any]]:
     """The project's default Agent route, or ``None`` when none is set.
 
-    The default is only meaningful with a backend, so an empty ``agent_backend``
-    means "no project default" and the caller falls back to the global default.
+    The default is keyed by Agent name. Its backend is derived from the Agent
+    catalog for display only; dispatch resolves the same Agent at run time.
     """
-    backend = row["agent_backend"]
-    if not backend:
+    agent_name = row["agent_name"]
+    if not agent_name:
         return None
-    return {field: row[field] for field in _DEFAULT_AGENT_FIELDS}
+    payload = {field: row[field] for field in _DEFAULT_AGENT_FIELDS}
+    payload["agent_backend"] = row["agent_backend"]
+    return payload
 
 
 def _project_dict(row: Any) -> dict[str, Any]:
@@ -188,7 +190,10 @@ def list_projects(conn: Connection, *, include_archived: bool = False) -> list[d
 
     query = (
         select(*_PROJECT_COLUMNS)
-        .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
+        .select_from(
+            scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id)
+            .outerjoin(agents, agents.c.name == scope_settings.c.agent_name)
+        )
         .where(scopes.c.platform == PROJECT_PLATFORM, scopes.c.scope_type == PROJECT_SCOPE_TYPE)
         .order_by(scopes.c.last_seen_at.desc())
     )
@@ -271,7 +276,6 @@ def create_project(
             role=None,
             workdir=str(folder),
             agent_name=None,
-            agent_backend=None,
             agent_variant=None,
             model=None,
             reasoning_effort=None,
@@ -291,7 +295,6 @@ def update_project(
     *,
     display_name: Optional[str] = None,
     folder_path: Optional[str] = None,
-    agent_backend: Any = _UNSET,
     agent_name: Any = _UNSET,
     agent_variant: Any = _UNSET,
     model: Any = _UNSET,
@@ -326,7 +329,6 @@ def update_project(
     if folder_path is not None:
         settings_values["workdir"] = str(_resolve_folder(folder_path))
     for field_name, value in (
-        ("agent_backend", agent_backend),
         ("agent_name", agent_name),
         ("agent_variant", agent_variant),
         ("model", model),
@@ -382,7 +384,10 @@ def archive_project(conn: Connection, project_id: str) -> dict[str, Any]:
 def _project_payload(conn: Connection, scope_id: str) -> dict[str, Any]:
     row = conn.execute(
         select(*_PROJECT_COLUMNS)
-        .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
+        .select_from(
+            scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id)
+            .outerjoin(agents, agents.c.name == scope_settings.c.agent_name)
+        )
         .where(scopes.c.id == scope_id)
     ).mappings().first()
     if row is None:

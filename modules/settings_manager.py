@@ -30,7 +30,6 @@ def _routing_from_dict(payload: Optional[dict]) -> RoutingSettings:
     data = payload or {}
     return normalize_routing_settings(RoutingSettings(
         agent_name=data.get("agent_name") or data.get("agent"),
-        agent_backend=data.get("agent_backend"),
         model=data.get("model") or data.get("model_override"),
         reasoning_effort=data.get("reasoning_effort") or data.get("reasoning_effort_override"),
         opencode_agent=data.get("opencode_agent"),
@@ -141,6 +140,10 @@ class SettingsManager:
         """Check whether a user is already bound."""
         return self.store.is_bound_user(str(user_id), platform=self.platform)
 
+    def is_enabled_user(self, user_id: Union[int, str]) -> bool:
+        """Check whether a bound user is enabled for access."""
+        return self.store.is_enabled_user(str(user_id), platform=self.platform)
+
     def bind_user_with_code(
         self,
         user_id: Union[int, str],
@@ -239,6 +242,7 @@ class SettingsManager:
                 if existing is not None:
                     cs.enabled = existing.enabled
                     cs.require_mention = existing.require_mention
+                    cs.require_bind = existing.require_bind
                 channels[cid] = cs
             self.store.set_channels_for_platform(self.platform, channels)
             for uid, s in self.dm_user_settings.items():
@@ -421,13 +425,13 @@ class SettingsManager:
         self.update_user_settings(settings_key, settings)
         logger.info(
             f"Updated channel routing for {settings_key}: "
-            f"backend={routing.agent_backend}, "
+            f"agent={routing.agent_name}, "
             f"opencode_agent={routing.opencode_agent}, "
             f"opencode_model={routing.opencode_model}"
         )
 
     def clear_channel_routing(self, settings_key: Union[int, str]):
-        """Clear channel routing override (fall back to default backend)."""
+        """Clear channel routing override (fall back to the default Agent)."""
         settings = self.get_user_settings(settings_key)
         if settings.channel_routing:
             settings.channel_routing = None
@@ -484,6 +488,7 @@ class MultiSettingsManager:
     """Route settings operations to per-platform managers using scoped keys."""
 
     def __init__(self, platforms: list[str], settings_file: Optional[str] = None, primary_platform: str = "slack"):
+        self.settings_file = settings_file
         self.platform = primary_platform
         self.primary_platform = primary_platform
         self.sessions_store = SessionsStore()
@@ -500,6 +505,34 @@ class MultiSettingsManager:
             )
             for platform in platforms
         }
+        if primary_platform not in self.managers:
+            self.managers[primary_platform] = self._create_platform_manager(primary_platform)
+
+    def _create_platform_manager(self, platform: str) -> SettingsManager:
+        return SettingsManager(
+            settings_file=self.settings_file,
+            platform=platform,
+            sessions_store=self.sessions_store,
+            sessions_facade=self.sessions,
+        )
+
+    def add_platform(self, platform: str) -> SettingsManager:
+        manager = self.managers.get(platform)
+        if manager is None:
+            manager = self._create_platform_manager(platform)
+            self.managers[platform] = manager
+        return manager
+
+    def remove_platform(self, platform: str) -> None:
+        if platform == self.primary_platform:
+            return
+        self.managers.pop(platform, None)
+
+    def set_primary_platform(self, platform: str) -> None:
+        if platform not in self.managers:
+            self.add_platform(platform)
+        self.platform = platform
+        self.primary_platform = platform
 
     def get_store(self) -> SettingsStore:
         return self.managers[self.primary_platform].get_store()
@@ -531,6 +564,12 @@ class MultiSettingsManager:
             return self.managers[platform].is_bound_user(user_id)
         manager, raw = self._resolve(user_id)
         return manager.is_bound_user(raw)
+
+    def is_enabled_user(self, user_id: Union[int, str], platform: Optional[str] = None) -> bool:
+        if platform:
+            return self.managers[platform].is_enabled_user(user_id)
+        manager, raw = self._resolve(user_id)
+        return manager.is_enabled_user(raw)
 
     def bind_user_with_code(
         self,

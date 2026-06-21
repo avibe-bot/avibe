@@ -9,6 +9,13 @@ from config import paths
 logger = logging.getLogger(__name__)
 
 
+def _optional_str_dict(value: Any) -> Optional[Dict[str, str]]:
+    if not isinstance(value, dict):
+        return None
+    out = {str(key): str(item) for key, item in value.items() if isinstance(key, str) and isinstance(item, str)}
+    return out or None
+
+
 @dataclass
 class ActivePollInfo:
     """Information about an active poll that needs to be restored on restart."""
@@ -23,6 +30,9 @@ class ActivePollInfo:
     seen_tool_calls: List[str] = field(default_factory=list)
     emitted_assistant_messages: List[str] = field(default_factory=list)
     started_at: float = 0.0
+    prompt_started_at: Optional[float] = None
+    model_dict: Optional[Dict[str, str]] = None
+    reasoning_effort: Optional[str] = None
     # Ack reaction info for cleanup on restore
     ack_reaction_message_id: Optional[str] = None
     ack_reaction_emoji: Optional[str] = None
@@ -33,6 +43,7 @@ class ActivePollInfo:
     # User identity for restoring question UI context
     user_id: str = ""
     platform: str = ""
+    session_key: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -46,6 +57,9 @@ class ActivePollInfo:
             "seen_tool_calls": self.seen_tool_calls,
             "emitted_assistant_messages": self.emitted_assistant_messages,
             "started_at": self.started_at,
+            "prompt_started_at": self.prompt_started_at,
+            "model_dict": self.model_dict,
+            "reasoning_effort": self.reasoning_effort,
             "ack_reaction_message_id": self.ack_reaction_message_id,
             "ack_reaction_emoji": self.ack_reaction_emoji,
             "typing_indicator_active": self.typing_indicator_active,
@@ -53,6 +67,7 @@ class ActivePollInfo:
             "processing_indicator": self.processing_indicator,
             "user_id": self.user_id,
             "platform": self.platform,
+            "session_key": self.session_key,
         }
 
     @classmethod
@@ -80,6 +95,9 @@ class ActivePollInfo:
             seen_tool_calls=data.get("seen_tool_calls", []),
             emitted_assistant_messages=data.get("emitted_assistant_messages", []),
             started_at=data.get("started_at", 0.0),
+            prompt_started_at=data.get("prompt_started_at"),
+            model_dict=_optional_str_dict(data.get("model_dict")),
+            reasoning_effort=data.get("reasoning_effort") if isinstance(data.get("reasoning_effort"), str) else None,
             ack_reaction_message_id=data.get("ack_reaction_message_id"),
             ack_reaction_emoji=data.get("ack_reaction_emoji"),
             typing_indicator_active=bool(data.get("typing_indicator_active", False)),
@@ -87,6 +105,7 @@ class ActivePollInfo:
             processing_indicator=processing_indicator,
             user_id=data.get("user_id", ""),
             platform=data.get("platform", ""),
+            session_key=data.get("session_key", ""),
         )
 
 
@@ -318,6 +337,19 @@ class SessionsStore:
         if user_id not in self.state.active_slack_threads:
             self.state.active_slack_threads[user_id] = {}
 
+    @staticmethod
+    def _count_session_mappings(agent_maps: Dict[str, Any]) -> int:
+        return sum(len(thread_map) for thread_map in agent_maps.values() if isinstance(thread_map, dict))
+
+    def _sync_session_mappings_for_user(self, user_id: str) -> None:
+        fresh_maps = self._service.load_state().session_mappings.get(user_id, {})
+        self.state.session_mappings[user_id] = {
+            str(agent_name): dict(thread_map)
+            for agent_name, thread_map in fresh_maps.items()
+            if isinstance(thread_map, dict)
+        }
+        self._ensure_user_namespace(user_id)
+
     def get_agent_map(self, user_id: str, agent_name: str) -> Dict[str, str]:
         """Get mapping of thread_id -> session_id for a user and agent."""
         self.maybe_reload()
@@ -422,28 +454,25 @@ class SessionsStore:
 
     def remove_agent_session(self, user_id: str, agent_name: str, thread_id: str) -> bool:
         self._ensure_service()
+        self._ensure_user_namespace(user_id)
+        before = self._count_session_mappings(self.state.session_mappings[user_id])
         removed = self._service.delete_agent_session(
             scope_key=user_id,
             agent_name=agent_name,
             session_anchor=thread_id,
         )
-        agent_map = self.get_agent_map(user_id, agent_name)
-        if thread_id in agent_map:
-            del agent_map[thread_id]
-            removed = True
-        return removed
+        self._sync_session_mappings_for_user(user_id)
+        after = self._count_session_mappings(self.state.session_mappings[user_id])
+        return bool(removed or after < before)
 
     def clear_agent_sessions(self, user_id: str, agent_name: str | None = None) -> int:
         self._ensure_service()
-        removed = self._service.delete_agent_sessions(scope_key=user_id, agent_name=agent_name)
         self._ensure_user_namespace(user_id)
-        if agent_name is None:
-            count = sum(len(agent_map) for agent_map in self.state.session_mappings[user_id].values())
-            self.state.session_mappings[user_id] = {}
-            return max(removed, count)
-        count = len(self.state.session_mappings[user_id].get(agent_name, {}))
-        self.state.session_mappings[user_id][agent_name] = {}
-        return max(removed, count)
+        before = self._count_session_mappings(self.state.session_mappings[user_id])
+        removed = self._service.delete_agent_sessions(scope_key=user_id, agent_name=agent_name)
+        self._sync_session_mappings_for_user(user_id)
+        after = self._count_session_mappings(self.state.session_mappings[user_id])
+        return max(removed, max(before - after, 0))
 
     def clear_session_base(self, user_id: str, base_session_id: str) -> int:
         self._ensure_service()

@@ -276,6 +276,9 @@ class CompatTestClient:
     def post(self, url: str, **kwargs: Any) -> CompatTestResponse:
         return self.request("POST", url, **kwargs)
 
+    def patch(self, url: str, **kwargs: Any) -> CompatTestResponse:
+        return self.request("PATCH", url, **kwargs)
+
     def delete(self, url: str, **kwargs: Any) -> CompatTestResponse:
         return self.request("DELETE", url, **kwargs)
 

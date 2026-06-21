@@ -32,36 +32,33 @@ def test_ensure_data_dirs(tmp_path, monkeypatch):
     assert "free of secrets unless the user explicitly asks." in text
 
 
-def test_avibe_home_env_wins_over_legacy_env(tmp_path, monkeypatch):
+def test_avibe_home_env_sets_custom_home(tmp_path, monkeypatch):
     avibe_home = tmp_path / "custom-avibe"
-    legacy_home = tmp_path / "custom-legacy"
     monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(legacy_home))
 
     assert paths.get_vibe_remote_dir() == avibe_home.resolve()
 
     paths.ensure_data_dirs()
 
     assert (avibe_home / "state").exists()
-    assert not legacy_home.exists()
 
 
-def test_legacy_env_is_honored_without_migration(tmp_path, monkeypatch):
-    legacy_home = tmp_path / "explicit-legacy"
+def test_legacy_env_is_ignored(tmp_path, monkeypatch):
+    custom_legacy_home = tmp_path / "explicit-legacy"
     monkeypatch.delenv("AVIBE_HOME", raising=False)
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(legacy_home))
+    monkeypatch.setenv("VIBE_REMOTE_HOME", str(custom_legacy_home))
+    monkeypatch.setattr(paths.Path, "home", lambda: tmp_path)
 
-    assert paths.get_vibe_remote_dir() == legacy_home.resolve()
+    assert paths.get_vibe_remote_dir() == tmp_path / ".avibe"
 
     paths.ensure_data_dirs()
 
-    assert (legacy_home / "state").exists()
-    assert not (tmp_path / ".avibe").exists()
+    assert not custom_legacy_home.exists()
+    assert (tmp_path / ".avibe" / "state").exists()
 
 
 def test_default_prefers_existing_avibe_home(tmp_path, monkeypatch):
     monkeypatch.delenv("AVIBE_HOME", raising=False)
-    monkeypatch.delenv("VIBE_REMOTE_HOME", raising=False)
     monkeypatch.setattr(paths.Path, "home", lambda: tmp_path)
     avibe_home = tmp_path / ".avibe"
     avibe_home.mkdir()
@@ -77,7 +74,6 @@ def test_default_prefers_existing_avibe_home(tmp_path, monkeypatch):
 
 def test_default_adopts_old_user_home_without_data_loss(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("AVIBE_HOME", raising=False)
-    monkeypatch.delenv("VIBE_REMOTE_HOME", raising=False)
     monkeypatch.setattr(paths.Path, "home", lambda: tmp_path)
     old_home = tmp_path / ".vibe_remote"
     old_state = old_home / "state"
@@ -106,7 +102,6 @@ def test_default_adopts_old_user_home_without_data_loss(tmp_path, monkeypatch, c
 
 def test_existing_avibe_and_legacy_real_dirs_do_not_clobber(tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("AVIBE_HOME", raising=False)
-    monkeypatch.delenv("VIBE_REMOTE_HOME", raising=False)
     monkeypatch.setattr(paths.Path, "home", lambda: tmp_path)
     avibe_home = tmp_path / ".avibe"
     legacy_home = tmp_path / ".vibe_remote"
@@ -130,7 +125,6 @@ def test_existing_avibe_and_legacy_real_dirs_do_not_clobber(tmp_path, monkeypatc
 
 def test_symlink_creation_failure_still_uses_avibe_home(tmp_path, monkeypatch):
     monkeypatch.delenv("AVIBE_HOME", raising=False)
-    monkeypatch.delenv("VIBE_REMOTE_HOME", raising=False)
     monkeypatch.setattr(paths.Path, "home", lambda: tmp_path)
     avibe_home = tmp_path / ".avibe"
     avibe_home.mkdir()
@@ -148,7 +142,6 @@ def test_symlink_creation_failure_still_uses_avibe_home(tmp_path, monkeypatch):
 
 def test_default_new_user_uses_avibe_home(tmp_path, monkeypatch):
     monkeypatch.delenv("AVIBE_HOME", raising=False)
-    monkeypatch.delenv("VIBE_REMOTE_HOME", raising=False)
     monkeypatch.setattr(paths.Path, "home", lambda: tmp_path)
 
     assert paths.get_vibe_remote_dir() == tmp_path / ".avibe"

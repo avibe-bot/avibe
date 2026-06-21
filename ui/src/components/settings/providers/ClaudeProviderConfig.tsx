@@ -122,9 +122,9 @@ export const ClaudeProviderConfig: React.FC<{
     : t('settings.backends.claudeApiKeyMissing');
 
   const onRemoveApiKey = async () => {
-    // Drop just the API key from V2Config; leaves any OAuth tokens in
-    // ``~/.claude/credentials.json`` (or the OS keychain) alone. Lets
-    // the user clear a stale key without having to also re-do OAuth.
+    // Drop just the API key from V2Config; leaves Claude Code's own OAuth
+    // token store alone. Lets the user clear a stale key without having to
+    // also re-do OAuth.
     const confirmed = window.confirm(
       t('settings.backends.claudeApiKeyRemoveConfirm') as string,
     );
@@ -185,7 +185,14 @@ export const ClaudeProviderConfig: React.FC<{
       setEditingKey(false);
       // Claude restart is synthetic (one-shot CLI) so result.restart.ok
       // is always true; treat any falsy state defensively just in case.
-      if (result.restart?.ok === false) {
+      if (result.partial) {
+        showToast(
+          t('settings.backends.claudeSavePartial', {
+            detail: result.detail || result.warning || 'oauth_cleanup_failed',
+          }),
+          'warning',
+        );
+      } else if (result.restart?.ok === false) {
         showToast(result.restart.message || t('settings.backends.claudeSaveSuccess'), 'warning');
       } else {
         showToast(t('settings.backends.claudeSaveSuccess'), 'success');
@@ -258,12 +265,12 @@ export const ClaudeProviderConfig: React.FC<{
             {authMode === 'oauth' && (
               <BackendOAuthPanel
                 backend={BACKEND_ID}
-                // ``has_oauth_credentials`` flips when ``~/.claude/credentials.json``
-                // carries a usable token bundle — that's a real signal we can
-                // trust on Linux/Docker. macOS keychain installs still report
-                // false, but a successful in-session login flips the panel's
-                // own state anyway.
-                signedIn={!!authState?.has_oauth_credentials}
+                // Claude Code may still have account tokens in its own
+                // store after the user switches Avibe to API-key mode.
+                // The Settings UI should show OAuth as signed in only when
+                // OAuth is the currently effective Avibe auth source.
+                signedIn={authState?.active_auth_mode === 'oauth'}
+                canRemoveAuth={!!authState?.has_oauth_credentials}
                 title={t('settings.backends.claudeOauthPanelTitle')}
                 subtitle={t('settings.backends.claudeOauthPanelSubtitle')}
                 onActiveChange={setOauthFlowActive}
@@ -323,10 +330,9 @@ export const ClaudeProviderConfig: React.FC<{
                       </Button>
                       {/* Symmetric to OpenCode's Remove affordance:
                           clear the saved API key while leaving OAuth
-                          tokens in ``~/.claude/credentials.json`` /
-                          keychain intact. Without this, a stuck key
-                          keeps forcing the env-var path even after
-                          the user signed in via OAuth. */}
+                          token store intact. Without this, a stuck key
+                          keeps forcing the env-var path even after the
+                          user signed in via OAuth. */}
                       <Button
                         type="button"
                         variant="ghost"

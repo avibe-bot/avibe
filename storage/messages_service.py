@@ -11,6 +11,7 @@ land in one place.
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -19,7 +20,8 @@ from typing import Any, Iterable, Optional
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.engine import Connection
 
-from storage.models import agent_sessions, messages, scopes
+from storage.db import escape_sql_like
+from storage.models import agent_sessions, messages, scope_settings, scopes
 
 
 def _utc_now_iso() -> str:
@@ -70,6 +72,162 @@ def _row_to_payload(row: dict[str, Any]) -> dict[str, Any]:
         "delivered_at": row.get("delivered_at"),
         "read_at": row.get("read_at"),
     }
+
+
+_WS_RE = re.compile(r"\s+")
+
+# Snippet window radii (chars) either side of the matched term. Tuned for a
+# single-line result row: a little context before, a bit more after.
+_SNIPPET_BEFORE = 40
+_SNIPPET_AFTER = 50
+# Fallback head shown when the term isn't found in ``content_text`` (e.g. the
+# match lived in a non-text field) — keeps the row from rendering empty.
+_SNIPPET_FALLBACK_HEAD = 90
+
+
+def _collapse_ws(value: str) -> str:
+    """Collapse any run of whitespace/newlines to a single space (no strip)."""
+    return _WS_RE.sub(" ", value)
+
+
+def build_snippet(content_text: str, query: str) -> dict[str, str]:
+    """Split *content_text* into ``{prefix, match, suffix}`` around *query*.
+
+    The match is located case-insensitively but ``match`` carries the ORIGINAL
+    casing from the text. A window of ~``_SNIPPET_BEFORE`` chars before and
+    ~``_SNIPPET_AFTER`` after is kept; whitespace/newlines are collapsed to single
+    spaces so the row stays one line. A leading ``…`` marks a prefix truncated at
+    the start, a trailing ``…`` a suffix truncated at the end. When the query
+    isn't found, fall back to the first ~``_SNIPPET_FALLBACK_HEAD`` chars as the
+    prefix with an empty match (so the API contract — three string fields — holds
+    regardless of where the DB matched)."""
+    text = content_text or ""
+    idx = text.lower().find(query.lower())
+    if idx == -1:
+        head = text[:_SNIPPET_FALLBACK_HEAD]
+        prefix = _collapse_ws(head)
+        if len(text) > _SNIPPET_FALLBACK_HEAD:
+            prefix = f"{prefix}…"
+        return {"prefix": prefix, "match": "", "suffix": ""}
+
+    end = idx + len(query)
+    start = max(0, idx - _SNIPPET_BEFORE)
+    stop = min(len(text), end + _SNIPPET_AFTER)
+
+    prefix = _collapse_ws(text[start:idx])
+    match = text[idx:end]  # original casing
+    suffix = _collapse_ws(text[end:stop])
+    if start > 0:
+        prefix = f"…{prefix}"
+    if stop < len(text):
+        suffix = f"{suffix}…"
+    return {"prefix": prefix, "match": match, "suffix": suffix}
+
+
+def search_messages(
+    conn: Connection,
+    *,
+    query: str,
+    platform: str = "avibe",
+    types: Iterable[str] = ("user", "result"),
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Global message-content search, grouped by session.
+
+    Substring (case-insensitive) ``LIKE`` over ``messages.content_text``, scoped
+    to one ``platform`` (Workbench = ``avibe``) and a set of transcript-visible
+    ``types`` (the user's prompts + the agent's rendered ``result`` replies — both
+    land on a message the chat actually renders, so a clicked result is always
+    jumpable). Archived sessions are excluded, as are messages under an archived
+    PROJECT — ``projects_service.archive_project`` disables a project by setting
+    ``scope_settings.enabled = 0`` (its sessions stay ``active``), so the scope's
+    disabled state is the authoritative "archived project" signal here. A scope
+    with no ``scope_settings`` row is treated as enabled (legacy / folder-less
+    projects never got one). ``limit`` caps the number of
+    MATCHED messages scanned (newest first), so it bounds total work; the matches
+    are then grouped into sessions. The snippet is built in Python (see
+    :func:`build_snippet`) so the client renders ``match`` with a highlight and
+    needs no offset math.
+
+    Returns ``{"sessions": [...], "total": <#matches>, "session_count": <#sessions>}``
+    where each session is ``{session_id, title, project_id, project_name,
+    matches: [{id, author, source, type, created_at, snippet}]}``. Sessions are
+    ordered by their most-recent match; matches are newest-first within a session.
+    An empty / whitespace query short-circuits to an empty result.
+    """
+    cleaned = (query or "").strip()
+    if not cleaned:
+        return {"sessions": [], "total": 0, "session_count": 0}
+
+    like = escape_sql_like(cleaned)
+    type_list = list(types)
+    effective_limit = min(max(int(limit), 1), 200)
+
+    stmt = (
+        select(
+            messages.c.id,
+            messages.c.session_id,
+            messages.c.author,
+            messages.c.source,
+            messages.c.type,
+            messages.c.content_text,
+            messages.c.created_at,
+            agent_sessions.c.title,
+            scopes.c.native_id.label("project_id"),
+            scopes.c.display_name.label("project_name"),
+        )
+        .select_from(
+            messages.join(agent_sessions, agent_sessions.c.id == messages.c.session_id)
+            .join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
+            .join(scope_settings, scope_settings.c.scope_id == agent_sessions.c.scope_id, isouter=True)
+        )
+        .where(messages.c.platform == platform)
+        .where(messages.c.type.in_(type_list))
+        .where(messages.c.content_text.is_not(None))
+        .where(messages.c.content_text.ilike(f"%{like}%", escape="\\"))
+        # Archived sessions are soft-deleted — never surface their messages.
+        .where(agent_sessions.c.status != "archived")
+        # Archived PROJECTS are modelled as scope_settings.enabled = 0 (the
+        # sessions stay active), so exclude a disabled scope's messages too. A
+        # missing scope_settings row (legacy / folder-less project) is enabled.
+        .where(or_(scope_settings.c.enabled.is_(None), scope_settings.c.enabled != 0))
+        .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+        .limit(effective_limit)
+    )
+
+    rows = conn.execute(stmt).mappings().all()
+
+    # Group by session, preserving the newest-match-first row order: the first
+    # time a session appears is its most-recent match, so insertion order already
+    # ranks sessions by recency and matches stay newest-first within each.
+    grouped: dict[str, dict[str, Any]] = {}
+    total = 0
+    for row in rows:
+        session_id = row["session_id"]
+        bucket = grouped.get(session_id)
+        if bucket is None:
+            bucket = {
+                "session_id": session_id,
+                "title": row["title"],
+                "project_id": row["project_id"],
+                "project_name": row["project_name"],
+                "matches": [],
+            }
+            grouped[session_id] = bucket
+        bucket["matches"].append(
+            {
+                "id": row["id"],
+                "author": row["author"],
+                "source": row["source"],
+                "type": row["type"],
+                "created_at": row["created_at"],
+                "snippet": build_snippet(row["content_text"], cleaned),
+            }
+        )
+        total += 1
+
+    sessions = list(grouped.values())
+    return {"sessions": sessions, "total": total, "session_count": len(sessions)}
 
 
 def append(
@@ -199,6 +357,7 @@ def list_session_messages(
     session_id: str,
     after_id: Optional[str] = None,
     before_id: Optional[str] = None,
+    around_id: Optional[str] = None,
     limit: int = 50,
     types: Optional[Iterable[str]] = None,
     include_metadata_sources: Iterable[str] = (),
@@ -219,6 +378,14 @@ def list_session_messages(
     ``before_id`` returns the page immediately older than that row, still in
     chronological order. This powers upward history loading from the chat page.
 
+    ``around_id`` centers a window on a specific message (deep-link / search
+    jump): up to ``limit`` rows strictly older + the anchor + up to ``limit`` rows
+    strictly newer, merged chronologically. It takes precedence over
+    ``after_id`` / ``before_id`` / ``tail``. ``next_before_id`` is set when older
+    rows remain, ``next_after_id`` when newer rows remain, so the chat can page in
+    both directions from the centered window. An unknown ``around_id`` returns no
+    messages and null cursors.
+
     ``tail`` returns the most-recent ``limit`` rows (still chronological) instead
     of the oldest page — used by the Chat page's reconnect/visibility gap
     recovery, which needs the RECENT window (a long chat's oldest page would
@@ -237,6 +404,60 @@ def list_session_messages(
         else:
             query = query.where(type_filter)
     effective_limit = min(max(int(limit), 1), 500)
+    if around_id:
+        # Window centered on a specific message (deep-link / search jump). Resolve
+        # the anchor's (created_at, id); an unknown id (or one in another session)
+        # yields an empty window. ``query`` already carries the type/metadata
+        # filter, so the older/anchor/newer sub-queries inherit it — the anchor
+        # only appears if it is itself transcript-visible.
+        anchor = conn.execute(
+            select(messages.c.created_at).where(
+                messages.c.id == around_id, messages.c.session_id == session_id
+            )
+        ).scalar_one_or_none()
+        if anchor is None:
+            return {"messages": [], "next_after_id": None, "next_before_id": None}
+
+        older_q = (
+            query.where(
+                or_(
+                    messages.c.created_at < anchor,
+                    and_(messages.c.created_at == anchor, messages.c.id < around_id),
+                )
+            )
+            .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+            .limit(effective_limit + 1)
+        )
+        older = [_row_to_payload(dict(row)) for row in conn.execute(older_q).mappings().all()]
+        has_older = len(older) > effective_limit
+        older = older[:effective_limit]
+        older.reverse()
+
+        anchor_rows = [
+            _row_to_payload(dict(row))
+            for row in conn.execute(query.where(messages.c.id == around_id)).mappings().all()
+        ]
+
+        newer_q = (
+            query.where(
+                or_(
+                    messages.c.created_at > anchor,
+                    and_(messages.c.created_at == anchor, messages.c.id > around_id),
+                )
+            )
+            .order_by(messages.c.created_at.asc(), messages.c.id.asc())
+            .limit(effective_limit + 1)
+        )
+        newer = [_row_to_payload(dict(row)) for row in conn.execute(newer_q).mappings().all()]
+        has_newer = len(newer) > effective_limit
+        newer = newer[:effective_limit]
+
+        merged = older + anchor_rows + newer
+        return {
+            "messages": merged,
+            "next_after_id": newer[-1]["id"] if has_newer and newer else None,
+            "next_before_id": older[0]["id"] if has_older and older else None,
+        }
     if tail:
         # Newest ``limit`` rows, then flip back to chronological for the caller.
         query = query.order_by(messages.c.created_at.desc(), messages.c.id.desc()).limit(effective_limit + 1)
@@ -281,12 +502,13 @@ def list_session_messages(
                     and_(messages.c.created_at == anchor, messages.c.id > after_id),
                 )
             )
-    query = query.order_by(messages.c.created_at.asc(), messages.c.id.asc()).limit(effective_limit)
+    query = query.order_by(messages.c.created_at.asc(), messages.c.id.asc()).limit(effective_limit + 1)
     rows = [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
-    # Compare against the clamped page size; a caller requesting > 500
-    # would otherwise receive a full 500-row page with a null cursor and
-    # silently stop paginating.
-    next_after = rows[-1]["id"] if len(rows) == effective_limit else None
+    # Probe one extra row against the clamped page size: a full page alone does
+    # not prove there is another page, but the extra row does.
+    has_newer = len(rows) > effective_limit
+    rows = rows[:effective_limit]
+    next_after = rows[-1]["id"] if has_newer and rows else None
     return {"messages": rows, "next_after_id": next_after, "next_before_id": None}
 
 

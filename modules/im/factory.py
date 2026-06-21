@@ -14,19 +14,8 @@ class IMFactory:
     @staticmethod
     def create_client(config) -> BaseIMClient:
         clients = IMFactory.create_clients(config)
-        # Workbench-only config (``platforms.enabled`` empty, or a legacy
-        # ``["avibe"]``): ``create_clients`` skips the in-process workbench, so
-        # the built map is empty. Return the in-process ``AvibeBot`` directly —
-        # mirroring the controller's avibe fallback (``_init_modules``) — instead
-        # of constructing ``MultiIMClient(clients={}, "avibe")``, which would
-        # raise because the primary is absent from the empty map.
-        if not clients:
-            from modules.im.avibe import AvibeBot, AvibeConfig
-
-            return AvibeBot(AvibeConfig())
-        primary = getattr(getattr(config, "platforms", None), "primary", getattr(config, "platform", "slack"))
-        if len(clients) == 1 and primary in clients:
-            return clients[primary]
+        configured_primary = getattr(getattr(config, "platforms", None), "primary", getattr(config, "platform", "slack"))
+        primary = configured_primary if configured_primary in clients else (next(iter(clients)) if clients else "avibe")
         return MultiIMClient(clients, primary_platform=primary)
 
     @staticmethod

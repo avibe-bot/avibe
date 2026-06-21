@@ -14,6 +14,7 @@ import dataclasses
 
 from config.v2_config import OpenCodeConfig
 from modules.agents.opencode.agent import resolve_opencode_model_dict
+from modules.agents.opencode.utils import resolve_opencode_model_id
 
 
 def test_opencode_config_default_provider_is_unset_by_default() -> None:
@@ -58,3 +59,64 @@ def test_prefixed_model_ignores_default_provider() -> None:
         "providerID": "openai",
         "modelID": "gpt-5",
     }
+
+
+def test_model_id_uses_catalog_casing_for_unique_match() -> None:
+    catalog = {
+        "providers": [
+            {
+                "id": "glm",
+                "models": {
+                    "glm-5.2": {"id": "glm-5.2"},
+                },
+            }
+        ]
+    }
+
+    assert resolve_opencode_model_id(catalog, "glm", "GLM-5.2") == "glm-5.2"
+
+
+def test_model_id_preserves_exact_catalog_match() -> None:
+    catalog = {
+        "providers": [
+            {
+                "id": "glm",
+                "models": {
+                    "GLM-5.2": {"id": "GLM-5.2"},
+                },
+            }
+        ]
+    }
+
+    assert resolve_opencode_model_id(catalog, "glm", "GLM-5.2") == "GLM-5.2"
+
+
+def test_model_id_uses_uppercase_catalog_casing_for_unique_match() -> None:
+    catalog = {
+        "providers": [
+            {
+                "id": "vendor",
+                "models": {
+                    "GLM-5.2": {"id": "GLM-5.2"},
+                },
+            }
+        ]
+    }
+
+    assert resolve_opencode_model_id(catalog, "vendor", "glm-5.2") == "GLM-5.2"
+
+
+def test_model_id_does_not_guess_ambiguous_case_match() -> None:
+    catalog = {
+        "providers": [
+            {
+                "id": "glm",
+                "models": {
+                    "glm-5.2": {"id": "glm-5.2"},
+                    "GLM-5.2": {"id": "GLM-5.2"},
+                },
+            }
+        ]
+    }
+
+    assert resolve_opencode_model_id(catalog, "glm", "Glm-5.2") == "Glm-5.2"

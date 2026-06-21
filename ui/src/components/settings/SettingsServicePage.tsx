@@ -119,6 +119,10 @@ export const SettingsServicePage: React.FC = () => {
       title={t('settings.serviceTitle')}
       subtitle={t('settings.serviceSubtitle')}
     >
+      {/* Remote access leads the page: it's the primary thing users come here to
+          set up, so it sits at the top with a prominent cyan board + glow. */}
+      <RemoteAccess />
+
       <SettingsPanel
         title={
           <span className="inline-flex items-center gap-2">
@@ -251,8 +255,6 @@ export const SettingsServicePage: React.FC = () => {
           </div>
         </div>
       </SettingsPanel>
-
-      <RemoteAccess />
     </SettingsPageShell>
   );
 };

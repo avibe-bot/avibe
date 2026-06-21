@@ -17,7 +17,7 @@ import { useApi } from '../../context/ApiContext';
 import { useStatus } from '../../context/StatusContext';
 import { useToast } from '../../context/ToastContext';
 import { copyTextToClipboard } from '../../lib/utils';
-import { getEnabledPlatforms, getPrimaryPlatform } from '../../lib/platforms';
+import { getEnabledPlatforms } from '../../lib/platforms';
 import { withoutConfiguredSecretMarker, withSecretDraft, withSecretDrafts } from '../../lib/secretFields';
 import { EyebrowBadge, WizardCard } from '../visual';
 import { ToggleSwitch } from '../settings/SettingsPrimitives';
@@ -43,7 +43,6 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
   const [bindCode, setBindCode] = useState<string | null>(null);
   const [codeCopied, setCodeCopied] = useState(false);
   const enabledPlatforms = getEnabledPlatforms(data);
-  const primaryPlatform = getPrimaryPlatform(data);
   const discordGuildAllowlist = Array.isArray(data.discordGuildAllowlist)
     ? data.discordGuildAllowlist
     : Array.isArray(data.discord?.guild_allowlist)
@@ -88,10 +87,10 @@ export const Summary: React.FC<SummaryProps> = ({ data, onBack }) => {
     try {
       const updatedData = {
         ...data,
-        platform: primaryPlatform,
+        // No user-facing primary platform: the backend derives its internal
+        // default from ``platforms.enabled``.
         platforms: {
           enabled: enabledPlatforms,
-          primary: primaryPlatform,
         },
         slack: {
           ...data.slack,
@@ -386,12 +385,11 @@ const countConfiguredChannels = (channelConfigsByPlatform: Record<string, Record
 const buildConfigPayload = (data: any) => {
   const agents = data.agents || {};
   const enabledPlatforms = getEnabledPlatforms(data);
-  const primaryPlatform = getPrimaryPlatform(data);
   return {
-    platform: primaryPlatform,
+    // No user-facing primary platform: the backend derives its internal default
+    // from ``platforms.enabled``.
     platforms: {
       enabled: enabledPlatforms,
-      primary: primaryPlatform,
     },
     mode: data.mode || 'self_host',
     version: 'v2',
@@ -434,7 +432,6 @@ const buildConfigPayload = (data: any) => {
       default_cwd: data.default_cwd || data.runtime?.default_cwd || '_tmp',
     },
     agents: {
-      default_backend: data.default_backend || 'opencode',
       opencode: {
         ...agents.opencode,
         enabled: agents.opencode?.enabled ?? true,
@@ -502,9 +499,9 @@ const buildSettingsPayload = (data: any) => {
               show_message_types: cfg.show_message_types || [],
               custom_cwd: cfg.custom_cwd || null,
               require_mention: cfg.require_mention ?? null,
+              require_bind: cfg.require_bind ?? null,
               routing: {
                 agent_name: cfg.routing?.agent_name || null,
-                agent_backend: cfg.routing?.agent_backend || null,
                 model: cfg.routing?.model || null,
                 reasoning_effort: cfg.routing?.reasoning_effort || null,
                 opencode_agent: cfg.routing?.opencode_agent || null,

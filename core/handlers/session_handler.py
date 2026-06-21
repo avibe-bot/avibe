@@ -18,10 +18,19 @@ from modules.claude_sdk_compat import (
 )
 from modules.agents.native_sessions.base import build_resume_preview
 from modules.agents.claude_process_reaper import (
+    AVIBE_CLAUDE_PROCESS_OWNER_ENV,
+    AVIBE_CLAUDE_SESSION_OWNER,
     get_claude_client_pid,
+    register_claude_owned_process,
     reap_duplicate_claude_resume_processes,
+    reap_orphaned_claude_processes,
+)
+from config.v2_config import (
+    DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS,
+    DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
 )
 from core.avibe_cloud import avibe_cloud_url_available
+from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 
 from .base import BaseHandler
@@ -31,6 +40,7 @@ logger = logging.getLogger(__name__)
 CLAUDE_NO_CONVERSATION_RE = re.compile(r"No conversation found with session ID:\s*(\S+)")
 CLAUDE_REMOTE_DISALLOWED_TOOLS = ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]
 CLAUDE_REMOTE_PERMISSION_MODE = "bypassPermissions"
+CLAUDE_REMOTE_SANDBOX = {"enabled": False}
 
 
 class ClaudeSessionNotFoundError(RuntimeError):
@@ -100,6 +110,11 @@ class SessionHandler(BaseHandler):
         setattr(client, "_vibe_runtime_session_key", composite_key)
         if native_session_id:
             setattr(client, "_vibe_native_session_id", native_session_id)
+        register_claude_owned_process(
+            client,
+            native_session_id=native_session_id,
+            owner=AVIBE_CLAUDE_SESSION_OWNER,
+        )
 
     async def _set_claude_model_if_needed(self, client: ClaudeSDKClient, desired_model: Optional[str]) -> None:
         unknown = object()
@@ -399,7 +414,7 @@ class SessionHandler(BaseHandler):
         geteuid = getattr(os, "geteuid", None)
         return bool(geteuid and geteuid() == 0)
 
-    def _should_force_claude_sandbox(self) -> bool:
+    def _should_mark_claude_isolated_env(self) -> bool:
         if os.environ.get("IS_SANDBOX"):
             return False
         return self._running_as_root()
@@ -588,6 +603,9 @@ class SessionHandler(BaseHandler):
         stored_claude_session_id = self.sessions.get_claude_session_id(session_key, base_session_id)
         if not subagent_name and not routing_subagent:
             stored_claude_session_id = self._reserved_native_session_id(context) or stored_claude_session_id
+        fork_source_claude_session_id: Optional[str] = None
+        if not stored_claude_session_id and not subagent_name and not routing_subagent:
+            fork_source_claude_session_id = pending_native_fork_source(context, "claude")
 
         # Read routing overrides via get_channel_routing which correctly
         # resolves DM users from the users store (not the stale channels store).
@@ -601,6 +619,10 @@ class SessionHandler(BaseHandler):
 
         explicit_model = subagent_model or routing_model_for_backend(routing, "claude")
         explicit_effort = subagent_reasoning_effort or routing_reasoning_effort_for_backend(routing, "claude")
+        session_target = payload.get("agent_session_target")
+        if isinstance(session_target, dict):
+            explicit_model = subagent_model or session_target.get("model") or explicit_model
+            explicit_effort = subagent_reasoning_effort or session_target.get("reasoning_effort") or explicit_effort
 
         if not effective_agent:
             # Claude SDK model changes are control requests; only send one when
@@ -677,11 +699,12 @@ class SessionHandler(BaseHandler):
                 base_session_id=base_session_id,
                 working_path=working_path,
                 session_key=session_key,
-                stored_claude_session_id=stored_claude_session_id,
+                stored_claude_session_id=fork_source_claude_session_id or stored_claude_session_id,
                 effective_agent=effective_agent,
                 explicit_model=explicit_model,
                 explicit_effort=explicit_effort,
                 agent_system_prompt=agent_system_prompt,
+                fork_session=bool(fork_source_claude_session_id),
             )
             if not create_future.done():
                 create_future.set_result(client)
@@ -710,6 +733,7 @@ class SessionHandler(BaseHandler):
         explicit_model: Optional[str],
         explicit_effort: Optional[str],
         agent_system_prompt: Optional[str],
+        fork_session: bool = False,
     ) -> ClaudeSDKClient:
 
         # Ensure working directory exists
@@ -784,17 +808,20 @@ class SessionHandler(BaseHandler):
         from vibe.claude_config import build_claude_subprocess_env
 
         claude_env = build_claude_subprocess_env(getattr(self.config, "claude", None))
-        if self._should_force_claude_sandbox():
+        claude_env[AVIBE_CLAUDE_PROCESS_OWNER_ENV] = AVIBE_CLAUDE_SESSION_OWNER
+        if self._should_mark_claude_isolated_env():
             claude_env["IS_SANDBOX"] = "1"
-            logger.info("Detected Claude bypassPermissions running as root; forcing IS_SANDBOX=1 for Claude subprocess")
+            logger.info("Detected Claude bypassPermissions running as root; marking Claude subprocess as isolated")
 
         option_kwargs: Dict[str, Any] = {
             "permission_mode": CLAUDE_REMOTE_PERMISSION_MODE,
             "cwd": working_path,
             "system_prompt": final_system_prompt,
             "resume": stored_claude_session_id if stored_claude_session_id else None,
+            "fork_session": bool(fork_session and stored_claude_session_id),
             "extra_args": extra_args,
             "setting_sources": ["user", "project", "local"],  # Load all setting sources (user, project CLAUDE.md, local overrides)
+            "sandbox": CLAUDE_REMOTE_SANDBOX,
             # Disable interactive-only Claude Code tools that remote IM sessions
             # cannot answer programmatically.
             "disallowed_tools": CLAUDE_REMOTE_DISALLOWED_TOOLS,
@@ -820,6 +847,7 @@ class SessionHandler(BaseHandler):
         logger.info(f"  Working directory: {working_path}")
         logger.info(f"  Resume session ID: {stored_claude_session_id}")
         logger.info(f"  Options.resume: {options.resume}")
+        logger.info(f"  Options.fork_session: {getattr(options, 'fork_session', False)}")
         if effective_agent:
             logger.info(f"  Subagent: {effective_agent}")
         if effective_model:
@@ -870,7 +898,12 @@ class SessionHandler(BaseHandler):
         self.claude_sessions[composite_key] = client
         self.claude_system_prompts[composite_key] = final_system_prompt
         setattr(client, "_vibe_current_model", effective_model)
-        self.bind_claude_runtime_session(client, base_session_id, composite_key, stored_claude_session_id)
+        self.bind_claude_runtime_session(
+            client,
+            base_session_id,
+            composite_key,
+            None if fork_session else stored_claude_session_id,
+        )
         self.touch_session_activity(composite_key)
         logger.info(f"Created new Claude SDK client for {base_session_id} at {working_path}")
 
@@ -977,10 +1010,12 @@ class SessionHandler(BaseHandler):
             session_key = self._get_session_key(context)
             settings_manager = self._get_settings_manager(context)
             current_routing = settings_manager.get_channel_routing(settings_key)
-            preserve_scope_overrides = bool(current_routing and current_routing.agent_backend == agent)
+            preserve_scope_overrides = bool(
+                current_routing and self._routing_matches_backend(current_routing, agent)
+            )
 
             routing = ChannelRouting(
-                agent_backend=agent,
+                agent_name=agent,
                 model=current_routing.model if preserve_scope_overrides else None,
                 reasoning_effort=current_routing.reasoning_effort if preserve_scope_overrides else None,
                 opencode_agent=current_routing.opencode_agent if current_routing else None,
@@ -1112,6 +1147,21 @@ class SessionHandler(BaseHandler):
                 f"❌ {self._t('error.resumeSubmitFailed', error=str(e))}",
             )
 
+    def _routing_matches_backend(self, routing, backend: str) -> bool:
+        agent_name = getattr(routing, "agent_name", None)
+        if not agent_name:
+            return False
+        if str(agent_name) == str(backend):
+            return True
+        store = getattr(self.controller, "vibe_agent_store", None)
+        if store is None:
+            return False
+        try:
+            agent = store.get(str(agent_name))
+        except Exception:
+            return False
+        return bool(agent and getattr(agent, "backend", None) == backend)
+
     async def cleanup_session(self, composite_key: str, *, current_receiver_task=None):
         """Clean up a specific session by composite key"""
         receiver_task = self.receiver_tasks.pop(composite_key, None)
@@ -1198,10 +1248,39 @@ class SessionHandler(BaseHandler):
         if exc is not None:
             logger.warning("Claude receiver ended with error during cleanup: %s", exc)
 
-    async def evict_idle_sessions(self, idle_timeout: float) -> int:
-        """Disconnect Claude sessions that have been idle beyond the timeout."""
+    async def evict_idle_sessions(
+        self,
+        idle_timeout: float,
+        stuck_active_multiplier: float = DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
+        stuck_active_floor_seconds: float = DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS,
+    ) -> int:
+        """Disconnect Claude sessions that have been idle beyond the timeout.
+
+        A session is normally exempt from eviction while it is flagged
+        ``active`` (a turn is in flight). That veto is **not** absolute: if the
+        receiver coroutine never releases the flag (e.g. it stays alive but
+        blocked on ``receive_messages`` with no stream EOF), the session would
+        otherwise be pinned forever and its ``claude`` subprocess would survive
+        until the next service restart. As an independent backstop, a session
+        that is ``active`` but whose ``last_activity`` is older than
+        ``max(idle_timeout * stuck_active_multiplier,
+        stuck_active_floor_seconds)`` is force-evicted regardless of why the
+        flag was not cleared. A genuine in-flight turn keeps touching
+        ``last_activity`` via assistant/tool messages, so it normally stays well
+        under this cap. Pass ``stuck_active_multiplier <= 0`` to disable the
+        backstop. Caveat: a real turn whose single tool call runs silently for
+        longer than the cap is indistinguishable from a stuck session and would
+        be force-evicted — see ``DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER``.
+        """
         if idle_timeout <= 0:
             return 0
+
+        stuck_threshold = None
+        if stuck_active_multiplier > 0:
+            stuck_threshold = max(
+                idle_timeout * stuck_active_multiplier,
+                max(0.0, stuck_active_floor_seconds),
+            )
 
         now = time.monotonic()
         expired: list[tuple[str, float]] = []
@@ -1211,10 +1290,14 @@ class SessionHandler(BaseHandler):
                 self.session_last_activity.pop(composite_key, None)
                 self.active_sessions.discard(composite_key)
                 continue
+            idle_for = now - last_activity
             if composite_key in self.active_sessions:
+                # Stuck-active backstop: only evict once well past the cap.
+                if stuck_threshold is not None and idle_for >= stuck_threshold:
+                    expired.append((composite_key, idle_for))
                 continue
-            if now - last_activity >= idle_timeout:
-                expired.append((composite_key, now - last_activity))
+            if idle_for >= idle_timeout:
+                expired.append((composite_key, idle_for))
 
         evicted = 0
         for composite_key, idle_for in expired:
@@ -1223,17 +1306,91 @@ class SessionHandler(BaseHandler):
                 self.session_last_activity.pop(composite_key, None)
                 self.active_sessions.discard(composite_key)
                 continue
-            if composite_key in self.active_sessions:
-                continue
             if current_last_activity is None:
                 continue
-            if time.monotonic() - current_last_activity < idle_timeout:
-                continue
-            logger.info("Evicting idle Claude session %s after %.1fs idle", composite_key, idle_for)
-            await self.cleanup_session(composite_key)
+            # Re-derive the decision from current state: a session may have been
+            # touched or (de)activated between the two passes.
+            recheck_idle = time.monotonic() - current_last_activity
+            if composite_key in self.active_sessions:
+                if stuck_threshold is None or recheck_idle < stuck_threshold:
+                    continue
+                logger.warning(
+                    "Force-evicting stuck-active Claude session %s after %.1fs idle "
+                    "(>= stuck-active threshold %.1fs; multiplier=%s idle_timeout=%ss); "
+                    "receiver never released the active flag",
+                    composite_key,
+                    recheck_idle,
+                    stuck_threshold,
+                    stuck_active_multiplier,
+                    idle_timeout,
+                )
+            else:
+                if recheck_idle < idle_timeout:
+                    continue
+                logger.info("Evicting idle Claude session %s after %.1fs idle", composite_key, recheck_idle)
+            if composite_key in self.active_sessions:
+                agent_service = getattr(self.controller, "agent_service", None)
+                claude_agent = getattr(agent_service, "agents", {}).get("claude") if agent_service else None
+                force_cleanup = getattr(claude_agent, "force_cleanup_stuck_active_session", None)
+                if callable(force_cleanup):
+                    await force_cleanup(composite_key)
+                else:
+                    await self.cleanup_session(composite_key)
+            else:
+                await self.cleanup_session(composite_key)
             evicted += 1
 
         return evicted
+
+    async def reap_orphaned_claude_sessions(self) -> int:
+        """Reap leaked ``claude`` subprocesses not owned by any tracked session.
+
+        Defense-in-depth backstop for the idle-eviction path: even if a session
+        slips out of tracking (or a previous service instance left a child
+        reparented to init), the resident ``claude`` subprocess is reconciled
+        against the set of currently-tracked sessions and terminated when it has
+        no owner. See ``reap_orphaned_claude_processes`` for the safety guards.
+        """
+        owned_pids: set[int] = set()
+        tracked_resume_ids: dict[str, int] = {}
+        owner_set_complete = True
+        for client in list(self.claude_sessions.values()):
+            pid = get_claude_client_pid(client)
+            if not pid:
+                # A tracked client whose pid we cannot resolve means the owner
+                # set is incomplete: its live process would look ownerless to
+                # the in-tree sweep. Disable that sweep this round.
+                owner_set_complete = False
+                continue
+            owned_pids.add(pid)
+            native_session_id = getattr(client, "_vibe_native_session_id", None)
+            if native_session_id:
+                tracked_resume_ids[str(native_session_id)] = pid
+        # A session create in flight has spawned a subprocess (connect()) that is
+        # not yet in claude_sessions; the in-tree sweep must not touch it.
+        creates_in_flight = bool(self.claude_session_creates)
+        exclude_pids: set[int] = set()
+        watch_service = getattr(self.controller, "watch_service", None)
+        active_watch_pids = getattr(watch_service, "active_process_pids", None)
+        if callable(active_watch_pids):
+            exclude_pids.update(active_watch_pids())
+        auth_service = getattr(self.controller, "agent_auth_service", None)
+        active_auth_pids = getattr(auth_service, "active_claude_auth_client_pids", None)
+        if callable(active_auth_pids):
+            exclude_pids.update(active_auth_pids())
+        auth_pid_unknown = getattr(auth_service, "has_active_claude_auth_client_with_unknown_pid", None)
+        auth_client_pid_unknown = bool(auth_pid_unknown()) if callable(auth_pid_unknown) else False
+        # Let unexpected errors surface to the caller (``periodic_cleanup``
+        # logs them at error level); ``reap_orphaned_claude_processes`` already
+        # absorbs the expected ``ps``-read failure internally.
+        return await reap_orphaned_claude_processes(
+            owned_pids=owned_pids,
+            tracked_resume_ids=tracked_resume_ids,
+            cli_path=self._get_claude_cli_path_override(),
+            logger=logger,
+            reap_in_tree=owner_set_complete and not creates_in_flight and not auth_client_pid_unknown,
+            exclude_pids=exclude_pids,
+        )
 
     async def handle_session_error(self, composite_key: str, context: MessageContext, error: Exception):
         """Handle session-related errors"""

@@ -13,6 +13,7 @@ from core.audio_asr import (
     format_audio_transcript_echo,
 )
 from modules.agents.base import AgentRequest
+from modules.agents.catalog import display_name_for_backend, is_agent_backend
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
 
@@ -235,11 +236,8 @@ class MessageHandler(BaseHandler):
                     override_agent_name=requested_vibe_agent,
                     required=False,
                 )
-            elif callable(resolve_vibe_agent):
-                routing_agent_backend = getattr(routing, "agent_backend", None) if routing else None
-                routing_agent_name = getattr(routing, "agent_name", None) if routing else None
-                if not session_agent_backend and (routing_agent_name or not routing_agent_backend):
-                    vibe_agent = resolve_vibe_agent(context, required=False)
+            elif callable(resolve_vibe_agent) and not session_agent_backend:
+                vibe_agent = resolve_vibe_agent(context, required=False)
             if vibe_agent:
                 agent_name = vibe_agent.backend
             elif session_agent_backend:
@@ -266,8 +264,13 @@ class MessageHandler(BaseHandler):
 
             from config.v2_settings import routing_model_for_backend, routing_reasoning_effort_for_backend
 
-            scope_model_override = routing_model_for_backend(routing, agent_name)
-            scope_reasoning_override = routing_reasoning_effort_for_backend(routing, agent_name)
+            has_session_target = isinstance(session_target, dict) or bool(resolved_target.get("agent_session_id"))
+            scope_model_override = (
+                None if has_session_target else routing_model_for_backend(routing, agent_name)
+            )
+            scope_reasoning_override = (
+                None if has_session_target else routing_reasoning_effort_for_backend(routing, agent_name)
+            )
 
             # A workbench Chat session carries the user's explicit per-session
             # agent / model / effort picks in ``agent_session_target`` (the Chat
@@ -839,9 +842,30 @@ class MessageHandler(BaseHandler):
     async def _handle_missing_agent(self, context: MessageContext, agent_name: str):
         """Notify user when a requested agent backend is unavailable."""
         target = agent_name or self.controller.agent_service.default_agent
-        msg = f"❌ {self._t('error.agentNotConfigured', agent=target)}"
+        backend = self._missing_agent_backend(context, target)
+        display_backend = display_name_for_backend(backend) if backend else str(target)
+        hint_key = f"error.agentNotConfiguredHint.{backend}" if backend else "error.agentNotConfiguredHint.generic"
+        hint = self._t(hint_key)
+        msg = f"❌ {self._t('error.agentNotConfigured', agent=target, backend=display_backend, hint=hint)}"
         await self._get_im_client(context).send_message(context, msg)
         await self._stream_terminal_error(context, msg)
+
+    def _missing_agent_backend(self, context: MessageContext, target: str) -> Optional[str]:
+        payload = context.platform_specific or {}
+        resolved = payload.get("resolved_vibe_agent")
+        if isinstance(resolved, dict) and is_agent_backend(str(resolved.get("backend") or "")):
+            return str(resolved["backend"])
+        run_target = payload.get("agent_run_target") or payload.get("agent_session_target")
+        if isinstance(run_target, dict) and is_agent_backend(str(run_target.get("agent_backend") or "")):
+            return str(run_target["agent_backend"])
+        if is_agent_backend(str(target)):
+            return str(target)
+        try:
+            agent = self.controller.vibe_agent_store.get(str(target))
+        except Exception:
+            agent = None
+        backend = getattr(agent, "backend", None)
+        return str(backend) if is_agent_backend(str(backend)) else None
 
     async def _stream_terminal_error(self, context: MessageContext, text: str) -> None:
         """Surface a synchronous, no-agent-dispatched failure (missing backend,

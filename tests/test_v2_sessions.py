@@ -42,6 +42,8 @@ def test_active_thread_is_shared_across_users(tmp_path, monkeypatch):
     sessions.mark_thread_active("U1", "C1", "123.456")
 
     assert sessions.is_thread_active("U2", "C1", "123.456")
+    assert not sessions.is_thread_active_for_user("U2", "C1", "123.456")
+    assert sessions.is_thread_active_for_user("U1", "C1", "123.456")
 
 
 def test_shared_active_thread_ignores_expired_entries(tmp_path, monkeypatch):
@@ -160,6 +162,9 @@ def test_active_poll_persists_typing_cleanup_context(tmp_path, monkeypatch):
         },
         user_id="wx-user",
         platform="wechat",
+        prompt_started_at=1234.5,
+        model_dict={"providerID": "glm", "modelID": "glm-5.2"},
+        reasoning_effort="high",
     )
 
     reloaded = SessionsStore()
@@ -170,6 +175,9 @@ def test_active_poll_persists_typing_cleanup_context(tmp_path, monkeypatch):
     assert poll.typing_indicator_active is True
     assert poll.context_token == "ctx-4"
     assert poll.processing_indicator["context_token"] == "ctx-4"
+    assert poll.prompt_started_at == 1234.5
+    assert poll.model_dict == {"providerID": "glm", "modelID": "glm-5.2"}
+    assert poll.reasoning_effort == "high"
 
 
 # --- session_mappings migration tests ---

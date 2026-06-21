@@ -41,28 +41,28 @@ class _Controller:
         return f"{getattr(context, 'platform', None) or 'test'}::{self._get_settings_key(context)}"
 
 
-def test_force_claude_sandbox_in_root_container(monkeypatch) -> None:
+def test_mark_claude_isolated_env_in_root_container(monkeypatch) -> None:
     monkeypatch.delenv("IS_SANDBOX", raising=False)
     monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
 
     handler = SessionHandler(_Controller())
 
-    assert handler._should_force_claude_sandbox() is True
+    assert handler._should_mark_claude_isolated_env() is True
 
 
-def test_skip_forced_sandbox_when_env_already_set(monkeypatch) -> None:
+def test_skip_isolated_env_marker_when_env_already_set(monkeypatch) -> None:
     monkeypatch.setenv("IS_SANDBOX", "1")
     monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
 
     handler = SessionHandler(_Controller())
 
-    assert handler._should_force_claude_sandbox() is False
+    assert handler._should_mark_claude_isolated_env() is False
 
 
-def test_skip_forced_sandbox_when_not_root(monkeypatch) -> None:
+def test_skip_isolated_env_marker_when_not_root(monkeypatch) -> None:
     monkeypatch.delenv("IS_SANDBOX", raising=False)
     monkeypatch.setattr(os, "geteuid", lambda: 501, raising=False)
 
     handler = SessionHandler(_Controller())
 
-    assert handler._should_force_claude_sandbox() is False
+    assert handler._should_mark_claude_isolated_env() is False

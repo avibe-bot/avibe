@@ -210,7 +210,6 @@ def default_config(spec: TenantSpec) -> dict:
         "wechat": None,
         "runtime": {"default_cwd": TENANT_WORKDIR, "log_level": "INFO"},
         "agents": {
-            "default_backend": spec.backend,
             "opencode": {"enabled": "opencode" in enabled, "cli_path": "opencode", "error_retry_limit": 1},
             "claude": {"enabled": "claude" in enabled, "cli_path": "claude"},
             "codex": {"enabled": "codex" in enabled, "cli_path": "codex"},
@@ -234,10 +233,12 @@ def cloud_init_user_data(spec: TenantSpec) -> str:
     if spec.install_package_spec:
         install_prefix = f"export AVIBE_INSTALL_PACKAGE_SPEC={shlex.quote(spec.install_package_spec)}; "
     install_command = install_prefix + "curl -fsSL https://avibe.bot/install.sh | bash"
+    seed_default_agent_command = f"vibe agent default {shlex.quote(spec.backend)}"
     runcmd = [
         ["mkdir", "-p", TENANT_WORKDIR, f"{TENANT_HOME}/.vibe_remote/config"],
         ["chown", "-R", f"{TENANT_USER}:{TENANT_USER}", TENANT_HOME],
         ["su", "-", TENANT_USER, "-c", install_command],
+        ["su", "-", TENANT_USER, "-c", seed_default_agent_command],
         ["systemctl", "daemon-reload"],
         ["systemctl", "enable", "--now", "vibe-remote.service"],
     ]

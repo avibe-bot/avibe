@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import logging
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urljoin
 
 from config.platform_registry import get_platform_descriptor
 from modules.im import MessageContext
@@ -118,6 +120,33 @@ class ConsolidatedMessageDispatcher:
         mark = getattr(self.controller, "mark_turn_complete", None)
         if callable(mark):
             mark(context)
+
+    def _release_runtime_turn(self, context: MessageContext) -> None:
+        service = getattr(self.controller, "agent_service", None)
+        release = getattr(service, "release_runtime_turn", None)
+        if callable(release):
+            release(context)
+
+    async def _finish_processing_indicator_turn(self, context: MessageContext) -> None:
+        service = getattr(self.controller, "processing_indicator", None)
+        finish_terminal = getattr(service, "finish_terminal_turn", None)
+        if not callable(finish_terminal):
+            return
+        try:
+            await finish_terminal(context)
+        except Exception:
+            logger.debug("terminal processing-indicator cleanup failed", exc_info=True)
+
+    def _is_current_runtime_turn(self, context: MessageContext) -> bool:
+        service = getattr(self.controller, "agent_service", None)
+        matches = getattr(service, "emit_matches_runtime_turn", None)
+        if not callable(matches):
+            return True
+        try:
+            return bool(matches(context))
+        except Exception:
+            logger.debug("runtime turn guard failed open", exc_info=True)
+            return True
 
     def _t(self, key: str, **kwargs) -> str:
         translator = getattr(self.controller, "_t", None)
@@ -303,6 +332,13 @@ class ConsolidatedMessageDispatcher:
     def _supports_quick_replies(self, context: MessageContext) -> bool:
         return self._capabilities(context).supports_quick_replies
 
+    def _is_wechat_context(self, context: MessageContext) -> bool:
+        return (
+            context.platform
+            or (context.platform_specific or {}).get("platform")
+            or self.controller.config.platform
+        ) == "wechat"
+
     def _supports_message_editing(self, im_client, context: MessageContext) -> bool:
         supports_editing = getattr(im_client, "supports_message_editing", None)
         if callable(supports_editing):
@@ -470,10 +506,13 @@ class ConsolidatedMessageDispatcher:
         # ``getattr`` keeps it a no-op for controllers without the hook (mirrors
         # ``_signal_turn_complete``).
         if canonical_type == "result":
+            if not self._is_current_runtime_turn(context):
+                logger.info("Dropping stale result emit for superseded runtime turn in %s", self._get_session_key(context))
+                return None
             # Settle the avibe dot for the ACTIVE turn's terminal result (idle, or
             # failed on is_error) via the turn owner, which applies the active-turn
-            # guard + skips non-avibe contexts. ``getattr`` keeps it a no-op for stub
-            # controllers without the owner.
+            # guard + skips non-avibe contexts. Runtime gate release happens after
+            # the result path clears/persists/streams its own state.
             manager = getattr(self.controller, "session_turns", None)
             if manager is not None:
                 manager.on_terminal_result(context, is_error=is_error)
@@ -484,19 +523,24 @@ class ConsolidatedMessageDispatcher:
         # streaming — no user-facing bubble, regardless of body. An empty/stripped
         # body (e.g. a ``<silent>`` directive reduced to nothing) is silent too.
         if level == "silent" or not text or not text.strip():
-            if canonical_type == "result":
-                # A terminal result — even silent/empty — still means the turn
-                # finished: release the streaming SSE waiter so it closes now
-                # instead of hanging until the safety timeout, with no visible chunk.
-                await self._clear_consolidated_state(context)
-                self._record_agent_run_terminal_result(
-                    context,
-                    text,
-                    None,
-                    is_error=is_error,
-                )
-                self._signal_turn_complete(context)
-            return None
+            try:
+                if canonical_type == "result":
+                    # A terminal result — even silent/empty — still means the turn
+                    # finished: release the streaming SSE waiter so it closes now
+                    # instead of hanging until the safety timeout, with no visible chunk.
+                    await self._clear_consolidated_state(context)
+                    self._record_agent_run_terminal_result(
+                        context,
+                        text,
+                        None,
+                        is_error=is_error,
+                    )
+                    self._signal_turn_complete(context)
+                return None
+            finally:
+                if canonical_type == "result":
+                    await self._finish_processing_indicator_turn(context)
+                    self._release_runtime_turn(context)
 
         # Resolve the delivery target once. Routed / post_to / thread replies
         # land in a different channel than the source context, and the persisted
@@ -529,24 +573,29 @@ class ConsolidatedMessageDispatcher:
         persists_without_delivery = target_context.platform == "avibe"
 
         if (context.platform_specific or {}).get("suppress_delivery"):
-            message_id = f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
-            terminal_status = None
-            if (
-                canonical_type == "result"
-                and (context.platform_specific or {}).get("task_trigger_kind") == "agent_run"
-            ):
-                terminal_status = "failed" if is_error else "succeeded"
-            if canonical_type == "result" or (context.platform_specific or {}).get("task_trigger_kind") != "agent_run":
-                self._record_suppressed_run_message(
-                    context,
-                    text,
-                    message_id,
-                    terminal_status=terminal_status,
-                )
-            if canonical_type == "result":
-                await self._clear_consolidated_state(context)
-                self._signal_turn_complete(context)
-            return message_id
+            try:
+                message_id = f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
+                terminal_status = None
+                if (
+                    canonical_type == "result"
+                    and (context.platform_specific or {}).get("task_trigger_kind") == "agent_run"
+                ):
+                    terminal_status = "failed" if is_error else "succeeded"
+                if canonical_type == "result" or (context.platform_specific or {}).get("task_trigger_kind") != "agent_run":
+                    self._record_suppressed_run_message(
+                        context,
+                        text,
+                        message_id,
+                        terminal_status=terminal_status,
+                    )
+                if canonical_type == "result":
+                    await self._clear_consolidated_state(context)
+                    self._signal_turn_complete(context)
+                return message_id
+            finally:
+                if canonical_type == "result":
+                    await self._finish_processing_indicator_turn(context)
+                    self._release_runtime_turn(context)
 
         if canonical_type == "notify":
             try:
@@ -563,105 +612,38 @@ class ConsolidatedMessageDispatcher:
             return None
 
         if canonical_type == "result":
-            primary_message_id: Optional[str] = None
-            scheduled_anchor_message_id: Optional[str] = None
-            delivered_as_attachment = False
+            try:
+                primary_message_id: Optional[str] = None
+                scheduled_anchor_message_id: Optional[str] = None
+                delivered_as_attachment = False
 
-            # ``enhanced`` (extracted file links + quick-reply buttons) was
-            # computed above for persistence; reuse it for delivery.
-            display_text = enhanced.text if enhanced.text.strip() else text
+                # ``enhanced`` (extracted file links + quick-reply buttons) was
+                # computed above for persistence; reuse it for delivery.
+                display_text = enhanced.text if enhanced.text.strip() else text
 
-            if self._result_within_limit(context, display_text):
-                try:
-                    primary_message_id = await self._send_result_inline(
-                        im_client,
-                        target_context,
-                        display_text,
-                        enhanced.buttons if enhanced else [],
-                        parse_mode,
-                    )
-                    scheduled_anchor_message_id = primary_message_id
-                except Exception as err:
-                    if enhanced and enhanced.buttons and self._supports_quick_replies(context):
-                        logger.warning("Failed to send result with quick replies, falling back: %s", err)
-                        try:
-                            primary_message_id = await im_client.send_message(
-                                target_context, display_text, parse_mode=parse_mode
-                            )
-                            scheduled_anchor_message_id = primary_message_id
-                        except Exception as fallback_err:
-                            logger.error("Failed to send fallback result message: %s", fallback_err)
-                    else:
-                        logger.error("Failed to send result message: %s", err)
-            elif self._should_split_long_result(context):
-                try:
-                    primary_message_id = await self._send_split_result_messages(
-                        im_client,
-                        target_context,
-                        display_text,
-                        enhanced.buttons if enhanced else [],
-                        parse_mode,
-                    )
-                    scheduled_anchor_message_id = primary_message_id
-                except Exception as err:
-                    logger.error("Failed to send split result messages: %s", err)
-            else:
-                summary = self._build_result_summary(display_text, self._get_result_max_chars(context))
-                try:
-                    primary_message_id = await im_client.send_message(target_context, summary, parse_mode=parse_mode)
-                    scheduled_anchor_message_id = primary_message_id
-                except Exception as err:
-                    logger.error("Failed to send result summary: %s", err)
-
-                if (
-                    context.platform
-                    or (context.platform_specific or {}).get("platform")
-                    or self.controller.config.platform
-                ) in {"slack", "discord", "telegram", "lark"} and hasattr(im_client, "upload_markdown"):
+                if self._result_within_limit(context, display_text):
                     try:
-                        attachment_message_id = await im_client.upload_markdown(
+                        primary_message_id = await self._send_result_inline(
+                            im_client,
                             target_context,
-                            title="result.md",
-                            content=display_text,
-                            filetype="markdown",
+                            display_text,
+                            enhanced.buttons if enhanced else [],
+                            parse_mode,
                         )
-                        if primary_message_id is None:
-                            primary_message_id = attachment_message_id
-                            delivered_as_attachment = True
-                            if self._attachment_id_can_anchor_delivery(context):
-                                scheduled_anchor_message_id = attachment_message_id
+                        scheduled_anchor_message_id = primary_message_id
                     except Exception as err:
-                        logger.warning(f"Failed to upload result attachment: {err}")
-                        await im_client.send_message(
-                            target_context,
-                            self._t("error.resultAttachmentUploadFailed"),
-                            parse_mode=parse_mode,
-                        )
-
-            # --- Fallback: card content rejected (e.g. table over limit) ---
-            if primary_message_id is None and display_text:
-                logger.warning("All direct result sends failed; attempting fallback delivery")
-                file_uploaded = False
-
-                # Fallback 1: upload full content as .md file.
-                if hasattr(im_client, "upload_markdown"):
-                    try:
-                        primary_message_id = await im_client.upload_markdown(
-                            target_context,
-                            title="result.md",
-                            content=display_text,
-                            filetype="markdown",
-                        )
-                        file_uploaded = True
-                        delivered_as_attachment = True
-                        if self._attachment_id_can_anchor_delivery(context):
-                            scheduled_anchor_message_id = primary_message_id
-                        logger.info("Result delivered as .md file attachment (fallback)")
-                    except Exception as upload_err:
-                        logger.warning("upload_markdown fallback failed: %s", upload_err)
-
-                # Fallback 2: split into multiple messages.
-                if not file_uploaded:
+                        if enhanced and enhanced.buttons and self._supports_quick_replies(context):
+                            logger.warning("Failed to send result with quick replies, falling back: %s", err)
+                            try:
+                                primary_message_id = await im_client.send_message(
+                                    target_context, display_text, parse_mode=parse_mode
+                                )
+                                scheduled_anchor_message_id = primary_message_id
+                            except Exception as fallback_err:
+                                logger.error("Failed to send fallback result message: %s", fallback_err)
+                        else:
+                            logger.error("Failed to send result message: %s", err)
+                elif self._should_split_long_result(context):
                     try:
                         primary_message_id = await self._send_split_result_messages(
                             im_client,
@@ -671,91 +653,170 @@ class ConsolidatedMessageDispatcher:
                             parse_mode,
                         )
                         scheduled_anchor_message_id = primary_message_id
-                        logger.info("Result delivered via split messages (fallback)")
-                    except Exception as split_err:
-                        logger.error("Split message fallback also failed: %s", split_err)
-
-            # Explain attachment-only delivery or total failure once all attempts settle.
-            try:
-                if delivered_as_attachment:
-                    notice = self._t("info.resultDeliveredAsAttachment")
-                elif primary_message_id is None and display_text:
-                    notice = self._t("error.resultDeliveryFailed")
+                    except Exception as err:
+                        logger.error("Failed to send split result messages: %s", err)
                 else:
-                    notice = None
-                if notice:
-                    await im_client.send_message(target_context, notice, parse_mode="markdown")
-            except Exception:
-                logger.error("Failed to send delivery status notification")
+                    summary = self._build_result_summary(display_text, self._get_result_max_chars(context))
+                    try:
+                        primary_message_id = await im_client.send_message(target_context, summary, parse_mode=parse_mode)
+                        scheduled_anchor_message_id = primary_message_id
+                    except Exception as err:
+                        logger.error("Failed to send result summary: %s", err)
 
-            # Upload extracted file attachments
-            if enhanced and enhanced.files:
-                await self._upload_file_links(im_client, target_context, enhanced.files)
+                    if (
+                        context.platform
+                        or (context.platform_specific or {}).get("platform")
+                        or self.controller.config.platform
+                    ) in {"slack", "discord", "telegram", "lark"} and hasattr(im_client, "upload_markdown"):
+                        try:
+                            attachment_message_id = await im_client.upload_markdown(
+                                target_context,
+                                title="result.md",
+                                content=display_text,
+                                filetype="markdown",
+                            )
+                            if primary_message_id is None:
+                                primary_message_id = attachment_message_id
+                                delivered_as_attachment = True
+                                if self._attachment_id_can_anchor_delivery(context):
+                                    scheduled_anchor_message_id = attachment_message_id
+                        except Exception as err:
+                            logger.warning(f"Failed to upload result attachment: {err}")
+                            await im_client.send_message(
+                                target_context,
+                                self._t("error.resultAttachmentUploadFailed"),
+                                parse_mode=parse_mode,
+                            )
 
-            if scheduled_anchor_message_id:
+                # --- Fallback: card content rejected (e.g. table over limit) ---
+                if primary_message_id is None and display_text:
+                    logger.warning("All direct result sends failed; attempting fallback delivery")
+                    file_uploaded = False
+
+                    # Fallback 1: upload full content as .md file.
+                    if hasattr(im_client, "upload_markdown"):
+                        try:
+                            primary_message_id = await im_client.upload_markdown(
+                                target_context,
+                                title="result.md",
+                                content=display_text,
+                                filetype="markdown",
+                            )
+                            file_uploaded = True
+                            delivered_as_attachment = True
+                            if self._attachment_id_can_anchor_delivery(context):
+                                scheduled_anchor_message_id = primary_message_id
+                            logger.info("Result delivered as .md file attachment (fallback)")
+                        except Exception as upload_err:
+                            logger.warning("upload_markdown fallback failed: %s", upload_err)
+
+                    # Fallback 2: split into multiple messages.
+                    if not file_uploaded:
+                        try:
+                            primary_message_id = await self._send_split_result_messages(
+                                im_client,
+                                target_context,
+                                display_text,
+                                enhanced.buttons if enhanced else [],
+                                parse_mode,
+                            )
+                            scheduled_anchor_message_id = primary_message_id
+                            logger.info("Result delivered via split messages (fallback)")
+                        except Exception as split_err:
+                            logger.error("Split message fallback also failed: %s", split_err)
+
+                # Explain attachment-only delivery or total failure once all attempts settle.
                 try:
-                    self.controller.session_handler.finalize_scheduled_delivery(context, scheduled_anchor_message_id)
-                except Exception as err:
-                    logger.warning("Failed to finalize scheduled delivery anchor: %s", err)
+                    if delivered_as_attachment:
+                        notice = self._t("info.resultDeliveredAsAttachment")
+                    elif primary_message_id is None and display_text:
+                        notice = self._t("error.resultDeliveryFailed")
+                    else:
+                        notice = None
+                    if notice:
+                        await im_client.send_message(target_context, notice, parse_mode="markdown")
+                except Exception:
+                    logger.error("Failed to send delivery status notification")
 
-            # Final result closes the current turn: clear consolidated
-            # assistant/tool/system message state so the next user turn starts
-            # a fresh log message instead of appending to the previous one.
-            await self._clear_consolidated_state(context)
+                # Upload extracted file attachments
+                if enhanced and enhanced.files:
+                    await self._upload_file_links(im_client, target_context, enhanced.files)
 
-            self._record_agent_run_terminal_result(
-                context,
-                display_text,
-                primary_message_id,
-                is_error=is_error,
-            )
+                if scheduled_anchor_message_id:
+                    try:
+                        self.controller.session_handler.finalize_scheduled_delivery(context, scheduled_anchor_message_id)
+                    except Exception as err:
+                        logger.warning("Failed to finalize scheduled delivery anchor: %s", err)
 
-            # Persist the delivered result (cleaned text == what was shown).
-            # avibe always persists (SSE is its delivery); for IM a result that
-            # failed every send/upload (primary_message_id is None) is NOT
-            # recorded, matching the old outbound mirror's success-only rule.
-            if persists_without_delivery or primary_message_id is not None:
-                # A failed terminal result persists as type='error' so it shows in
-                # the transcript/inbox like any terminal message but is NOT counted
-                # as an unread agent reply (unread queries are result-only). Codex P2.
-                result_type = "error" if is_error else "result"
-                if target_context.platform == "avibe":
-                    # Keep the ``file://`` links in the persisted avibe text so the
-                    # workbench media-proxy rewrite (in ``persist_agent_message``)
-                    # can turn them into inline images / file cards. ``persist_text``
-                    # already has them stripped to plain labels for IM delivery.
-                    # Also carry the parsed quick-reply labels so the workbench can
-                    # render the button group (IM channels render native buttons
-                    # from the same ``enhanced.buttons``).
-                    avibe_enhanced = process_reply(
-                        text, include_quick_replies=quick_replies_on, keep_file_links=True
-                    )
-                    avibe_text = avibe_enhanced.text or persist_text
-                    persist_agent_message(
-                        target_context,
-                        result_type,
-                        avibe_text,
-                        quick_replies=[b.text for b in avibe_enhanced.buttons] or None,
+                # Final result closes the current turn: clear consolidated
+                # assistant/tool/system message state so the next user turn starts
+                # a fresh log message instead of appending to the previous one.
+                await self._clear_consolidated_state(context)
+
+                self._record_agent_run_terminal_result(
+                    context,
+                    display_text,
+                    primary_message_id,
+                    is_error=is_error,
+                )
+
+                # Persist the delivered result (cleaned text == what was shown).
+                # avibe always persists (SSE is its delivery); for IM a result that
+                # failed every send/upload (primary_message_id is None) is NOT
+                # recorded, matching the old outbound mirror's success-only rule.
+                if persists_without_delivery or primary_message_id is not None:
+                    # A failed terminal result persists as type='error' so it shows in
+                    # the transcript/inbox like any terminal message but is NOT counted
+                    # as an unread agent reply (unread queries are result-only). Codex P2.
+                    result_type = "error" if is_error else "result"
+                    if target_context.platform == "avibe":
+                        # Keep the ``file://`` links in the persisted avibe text so the
+                        # workbench media-proxy rewrite (in ``persist_agent_message``)
+                        # can turn them into inline images / file cards. ``persist_text``
+                        # already has them stripped to plain labels for IM delivery.
+                        # Also carry the parsed quick-reply labels so the workbench can
+                        # render the button group (IM channels render native buttons
+                        # from the same ``enhanced.buttons``).
+                        avibe_enhanced = process_reply(
+                            text, include_quick_replies=quick_replies_on, keep_file_links=True
+                        )
+                        avibe_text = avibe_enhanced.text or persist_text
+                        persist_agent_message(
+                            target_context,
+                            result_type,
+                            avibe_text,
+                            quick_replies=[b.text for b in avibe_enhanced.buttons] or None,
+                        )
+                    else:
+                        persist_agent_message(target_context, result_type, persist_text)
+
+                if primary_message_id and display_text:
+                    # Stream the delivered result to live consumers (avibe SSE).
+                    await _stream_chunk(
+                        self.controller, context, text=display_text, message_id=primary_message_id, kind="result"
                     )
                 else:
-                    persist_agent_message(target_context, result_type, persist_text)
+                    # A terminal result still completes the turn even if every IM
+                    # delivery path failed and therefore produced no durable message id.
+                    # Without this release, direct agent_run and avibe turn waiters keep
+                    # waiting forever despite the backend having already finished.
+                    self._signal_turn_complete(context)
 
-            if primary_message_id and display_text:
-                # Stream the delivered result to live consumers (avibe SSE).
-                await _stream_chunk(
-                    self.controller, context, text=display_text, message_id=primary_message_id, kind="result"
-                )
-            else:
-                # A terminal result still completes the turn even if every IM
-                # delivery path failed and therefore produced no durable message id.
-                # Without this release, direct agent_run and avibe turn waiters keep
-                # waiting forever despite the backend having already finished.
-                self._signal_turn_complete(context)
-
-            return primary_message_id
+                return primary_message_id
+            finally:
+                await self._finish_processing_indicator_turn(context)
+                self._release_runtime_turn(context)
 
         if canonical_type not in {"system", "assistant", "toolcall"}:
             canonical_type = "assistant"
+
+        if not self._is_current_runtime_turn(context):
+            logger.info(
+                "Dropping stale %s emit for superseded runtime turn in %s",
+                canonical_type,
+                self._get_session_key(context),
+            )
+            return None
 
         # Persist the intermediate log row BEFORE the mute filter so muted
         # assistant / tool_call messages still land in the store (product
@@ -989,6 +1050,8 @@ class ConsolidatedMessageDispatcher:
             logger.debug("IM client does not support upload_file_from_path; skipping file uploads")
             return
 
+        notify_wechat_failure = self._is_wechat_context(context)
+
         for fl in files:
             if not os.path.isfile(fl.path):
                 logger.warning("File not found, skipping upload: %s", fl.path)
@@ -1008,38 +1071,127 @@ class ConsolidatedMessageDispatcher:
                 upload_title = f"{upload_title}{src_ext}"
 
             try:
+                upload_result = None
                 if self._is_video_path(str(resolved)):
-                    await im_client.upload_video_from_path(
+                    upload_result = await im_client.upload_video_from_path(
                         context,
                         file_path=str(resolved),
                         title=upload_title,
                     )
                 elif getattr(fl, "is_image", False):
                     try:
-                        await im_client.upload_image_from_path(
+                        upload_result = await im_client.upload_image_from_path(
                             context,
                             file_path=str(resolved),
                             title=upload_title,
                         )
+                        if notify_wechat_failure and not upload_result:
+                            raise RuntimeError("image upload returned no message id")
                     except Exception as image_err:
                         logger.warning(
                             "Image upload failed for %s, fallback to file upload: %r",
                             fl.path,
                             image_err,
                         )
-                        await im_client.upload_file_from_path(
+                        upload_result = await im_client.upload_file_from_path(
                             context,
                             file_path=str(resolved),
                             title=upload_title,
                         )
                 else:
-                    await im_client.upload_file_from_path(
+                    upload_result = await im_client.upload_file_from_path(
                         context,
                         file_path=str(resolved),
                         title=upload_title,
+                    )
+                if notify_wechat_failure and not upload_result:
+                    await self._send_file_upload_failure_notice(
+                        im_client,
+                        context,
+                        file_path=str(resolved),
+                        file_name=upload_title,
                     )
             except NotImplementedError:
                 logger.debug("IM client does not implement file uploads; skipping")
                 return
             except Exception as err:
                 logger.warning("Failed to upload file %s: %r", fl.path, err)
+                if notify_wechat_failure:
+                    await self._send_file_upload_failure_notice(
+                        im_client,
+                        context,
+                        file_path=str(resolved),
+                        file_name=upload_title,
+                    )
+
+    def _register_public_file_download_url(
+        self,
+        context: MessageContext,
+        *,
+        file_path: str,
+        file_name: str,
+    ) -> Optional[str]:
+        """Register a local file under the existing media proxy and return a public URL."""
+        try:
+            from core.avibe_cloud import base_public_url
+            from core.message_mirror import DEFAULT_SCOPE_TYPE
+            from core.workbench_media import register_agent_reply_media
+            from storage import settings_service
+            from storage.db import create_sqlite_engine
+            from sqlalchemy import select
+            from storage.models import agent_sessions
+
+            base = base_public_url(getattr(self.controller, "config", None))
+            if not base:
+                return None
+
+            engine = create_sqlite_engine()
+            with engine.begin() as conn:
+                scope_id = settings_service.upsert_scope(
+                    conn,
+                    platform=context.platform or "wechat",
+                    scope_type=DEFAULT_SCOPE_TYPE,
+                    native_id=context.channel_id or context.user_id or "wechat",
+                    now=datetime.now(timezone.utc).isoformat(),
+                    supports_threads=bool(context.thread_id),
+                )
+                session_id = (context.platform_specific or {}).get("agent_session_id")
+                if session_id:
+                    existing_session_id = conn.execute(
+                        select(agent_sessions.c.id).where(agent_sessions.c.id == str(session_id))
+                    ).scalar_one_or_none()
+                    session_id = existing_session_id
+                token = register_agent_reply_media(
+                    conn,
+                    scope_id=scope_id,
+                    session_id=session_id,
+                    kind="file",
+                    local_path=file_path,
+                    file_name=file_name,
+                )
+        except Exception:
+            logger.warning("Failed to register fallback download link for %s", file_path, exc_info=True)
+            return None
+
+        return urljoin(base.rstrip("/") + "/", f"api/media/{token}?download=1")
+
+    async def _send_file_upload_failure_notice(
+        self,
+        im_client,
+        context: MessageContext,
+        *,
+        file_path: str,
+        file_name: str,
+    ) -> None:
+        """Tell WeChat users when native file upload failed instead of leaving only a filename."""
+        public_url = self._register_public_file_download_url(
+            context,
+            file_path=file_path,
+            file_name=file_name,
+        )
+        key = "error.fileAttachmentUploadFailedWithLink" if public_url else "error.fileAttachmentUploadFailedNoLink"
+        message = self._t(key, filename=file_name, url=public_url or "")
+        try:
+            await im_client.send_message(context, message, parse_mode="plain")
+        except Exception:
+            logger.warning("Failed to send file upload failure notice for %s", file_path, exc_info=True)

@@ -16,7 +16,7 @@ with `LIMIT 1`; the only DB-unique key is the PK `id`. Consequences:
 ## Confirmed fact (backend source of truth)
 
 When a turn dispatches, the backend is resolved in `MessageHandler` as:
-`vibe_agent.backend  >  agent_sessions.agent_backend  >  channel routing`
+`vibe_agent.backend  >  agent_sessions.agent_backend  >  new-session route seed`
 (message_handler.py:201-206), then `agent_service.handle_message(agent_name)`.
 
 So the **actual backend comes from the AGENT** — the session's `agent_name`

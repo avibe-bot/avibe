@@ -12,7 +12,7 @@ This module ships the platform-side contract that the
 ``core/handlers`` / ``message_dispatcher`` layer can call uniformly
 across every platform. The REST + SSE wiring lands in later commits and
 will register itself with the ``AvibeBot`` instance held by the
-controller (see ``IMFactory.create_client``).
+controller (see ``Controller._init_modules``).
 """
 
 from __future__ import annotations

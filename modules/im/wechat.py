@@ -398,6 +398,7 @@ class WeChatBot(BaseIMClient):
         self._sync_buf: str = ""
         self._poll_timeout_ms: int = _POLL_TIMEOUT_MS
         self._session_expired_logged: bool = False
+        self._connection_notified: bool = False
 
         # Auth manager
         self._auth_manager = WeChatAuthManager()
@@ -970,7 +971,8 @@ class WeChatBot(BaseIMClient):
             channel_id=user_id,
             thread_id=None,
             message_id=None,
-            platform_specific={"is_dm": True, "context_token": context_token},
+            platform="wechat",
+            platform_specific={"platform": "wechat", "is_dm": True, "context_token": context_token},
         )
         try:
             return await self.send_message(context, text)
@@ -981,6 +983,26 @@ class WeChatBot(BaseIMClient):
     # ------------------------------------------------------------------
     # Run / shutdown
     # ------------------------------------------------------------------
+
+    async def _notify_connection_state(self, action: str) -> None:
+        """Best-effort online-state notification for the iLink gateway."""
+        if not self.config.bot_token:
+            return
+        try:
+            if action == "start":
+                if self._connection_notified:
+                    return
+                resp = await _wechat_api_mod.notify_start(self.config.base_url, self.config.bot_token)
+            elif action == "stop":
+                if not self._connection_notified:
+                    return
+                resp = await _wechat_api_mod.notify_stop(self.config.base_url, self.config.bot_token)
+            else:
+                raise ValueError(f"unknown WeChat notify action: {action}")
+            _raise_if_wechat_api_error(resp, f"notify_{action}")
+            self._connection_notified = action == "start"
+        except Exception as exc:
+            logger.warning("WeChat notify_%s failed: %s", action, exc)
 
     def run(self) -> None:
         """Start the WeChat bot: validate config, run the async poll loop."""
@@ -1025,6 +1047,8 @@ class WeChatBot(BaseIMClient):
                     "WeChat bot session is not active; messages may fail until the session is re-authenticated",
                 )
 
+            await self._notify_connection_state("start")
+
             # Start poll loop as a background task
             self._poll_task = asyncio.create_task(self._poll_loop())
 
@@ -1040,6 +1064,8 @@ class WeChatBot(BaseIMClient):
                     await self._poll_task
                 except asyncio.CancelledError:
                     pass
+
+            await self._notify_connection_state("stop")
 
             logger.info("WeChat bot stopped")
 
@@ -1061,6 +1087,7 @@ class WeChatBot(BaseIMClient):
         """Best-effort async shutdown for platform resources."""
         if self._stop_event is not None:
             self._stop_event.set()
+        await self._notify_connection_state("stop")
         # Persist sync buffer so we don't re-process old messages on restart
         self._save_sync_buf()
 
@@ -1294,7 +1321,9 @@ class WeChatBot(BaseIMClient):
             channel_id=from_user,  # WeChat DM: channel == user
             thread_id=None,  # No threads in WeChat
             message_id=message_id,
+            platform="wechat",
             platform_specific={
+                "platform": "wechat",
                 "message": msg,
                 "is_dm": True,  # Always DM for personal messaging
                 "context_token": context_token,

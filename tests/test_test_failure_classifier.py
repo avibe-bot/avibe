@@ -19,7 +19,7 @@ from core.agent_auth_service import _classify_test_failure
         ("Error: 401 Unauthorized", "invalid_credentials"),
         ("invalid api key", "invalid_credentials"),
         ("Authentication failed: no credentials configured", "invalid_credentials"),
-        ("not logged in", "invalid_credentials"),
+        ("not logged in", "not_logged_in"),
         ("403 Forbidden", "forbidden"),
         ("Access denied for organization", "forbidden"),
         ("Model not found: gpt-9.0", "model_not_found"),

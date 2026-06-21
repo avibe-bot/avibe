@@ -35,7 +35,7 @@ class DockerEntrypointSupervisorTests(unittest.TestCase):
                     if len(args) >= 2 and args[0] == "-c":
                         code = args[1]
                         if "get_runtime_dir" in code:
-                            print(Path(os.environ["VIBE_REMOTE_HOME"]) / "runtime")
+                            print(Path(os.environ["AVIBE_HOME"]) / "runtime")
                             sys.exit(0)
                         if "run_ui_server" in code:
                             time.sleep(30)
@@ -50,7 +50,7 @@ class DockerEntrypointSupervisorTests(unittest.TestCase):
 
             env = os.environ.copy()
             env["PATH"] = f"{tmp_path}{os.pathsep}{env.get('PATH', '')}"
-            env["VIBE_REMOTE_HOME"] = str(tmp_path / "home")
+            env["AVIBE_HOME"] = str(tmp_path / "home")
 
             result = subprocess.run(
                 ["bash", str(ENTRYPOINT), "full"],
@@ -126,7 +126,8 @@ class DockerEntrypointSupervisorTests(unittest.TestCase):
                         break
                     time.sleep(0.1)
                 self.assertTrue(runtime_pid_path.exists())
-                self.assertFalse((Path(env["VIBE_REMOTE_HOME"]) / "runtime" / "vibe.pid").exists())
+                legacy_pid_path = Path(env["VIBE_REMOTE_HOME"]) / "runtime" / "vibe.pid"
+                self.assertFalse(legacy_pid_path.exists())
             finally:
                 os.killpg(proc.pid, signal.SIGTERM)
                 try:
@@ -151,7 +152,7 @@ class DockerEntrypointSupervisorTests(unittest.TestCase):
                     from pathlib import Path
 
                     args = sys.argv[1:]
-                    runtime_dir = Path(os.environ["VIBE_REMOTE_HOME"]) / "runtime"
+                    runtime_dir = Path(os.environ["AVIBE_HOME"]) / "runtime"
                     runtime_dir.mkdir(parents=True, exist_ok=True)
                     real_python = os.environ["REAL_PYTHON"]
 
@@ -189,7 +190,7 @@ class DockerEntrypointSupervisorTests(unittest.TestCase):
 
             env = os.environ.copy()
             env["PATH"] = f"{tmp_path}{os.pathsep}{env.get('PATH', '')}"
-            env["VIBE_REMOTE_HOME"] = str(tmp_path / "home")
+            env["AVIBE_HOME"] = str(tmp_path / "home")
             env["REAL_PYTHON"] = sys.executable
 
             proc = subprocess.Popen(
@@ -231,7 +232,7 @@ class DockerEntrypointSupervisorTests(unittest.TestCase):
                     from pathlib import Path
 
                     args = sys.argv[1:]
-                    runtime_dir = Path(os.environ["VIBE_REMOTE_HOME"]) / "runtime"
+                    runtime_dir = Path(os.environ["AVIBE_HOME"]) / "runtime"
                     runtime_dir.mkdir(parents=True, exist_ok=True)
                     status_path = runtime_dir / "status.json"
 
@@ -283,7 +284,7 @@ class DockerEntrypointSupervisorTests(unittest.TestCase):
 
             env = os.environ.copy()
             env["PATH"] = f"{tmp_path}{os.pathsep}{env.get('PATH', '')}"
-            env["VIBE_REMOTE_HOME"] = str(tmp_path / "home")
+            env["AVIBE_HOME"] = str(tmp_path / "home")
 
             proc = subprocess.Popen(
                 ["bash", str(ENTRYPOINT), "full"],

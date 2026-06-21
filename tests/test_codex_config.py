@@ -318,6 +318,36 @@ def test_apply_api_key_pins_credentials_store_to_file(tmp_path: Path) -> None:
     assert state["file_store_active"] is True
 
 
+def test_apply_api_key_mode_drops_oauth_tokens(tmp_path: Path) -> None:
+    """API-key mode is mutually exclusive with ChatGPT OAuth tokens."""
+    home = tmp_path
+    codex_home = home / ".codex"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "tokens": {"id_token": "abc"},
+                "last_refresh": "2026-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    codex_config.apply_codex_auth(
+        auth_mode="api_key",
+        api_key="sk-test",
+        base_url=None,
+        home=home,
+    )
+
+    auth = json.loads((codex_home / "auth.json").read_text(encoding="utf-8"))
+    assert auth["auth_mode"] == "apikey"
+    assert auth["OPENAI_API_KEY"] == "sk-test"
+    assert "tokens" not in auth
+    assert "last_refresh" not in auth
+
+
 def test_apply_oauth_leaves_credentials_store_untouched(tmp_path: Path) -> None:
     """Switching back to OAuth must not flip the user's chosen store —
     ``codex login`` may legitimately want keyring storage."""

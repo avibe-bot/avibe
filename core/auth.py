@@ -52,6 +52,18 @@ def _is_admin_protected(action: str) -> bool:
     return False
 
 
+def _is_enabled_user(store: object, user_id: str, platform: str | None) -> bool:
+    if hasattr(store, "is_enabled_user"):
+        try:
+            return store.is_enabled_user(user_id, platform=platform)
+        except TypeError:
+            return store.is_enabled_user(user_id)
+    try:
+        return store.is_bound_user(user_id, platform=platform)
+    except TypeError:
+        return store.is_bound_user(user_id)
+
+
 @dataclass
 class AuthResult:
     """Result of an authorization check."""
@@ -105,11 +117,7 @@ def check_auth(
     if is_dm:
         if action in BIND_EXEMPT_COMMANDS:
             return AuthResult(allowed=True, is_dm=True)
-        try:
-            is_bound = store.is_bound_user(user_id, platform=platform)
-        except TypeError:
-            is_bound = store.is_bound_user(user_id)
-        if not is_bound:
+        if not _is_enabled_user(store, user_id, platform):
             return AuthResult(allowed=False, denial="unbound_dm", is_dm=True)
         # DM users skip channel authorization
     else:
@@ -123,6 +131,14 @@ def check_auth(
             ch = getattr(getattr(store, "settings", None), "channels", {}).get(channel_id)
         if not ch or not ch.enabled:
             return AuthResult(allowed=False, denial="unauthorized_channel", is_dm=False)
+
+        # 2b. Optional per-channel require_bind gate: when enabled, only bound
+        # users may drive the agent in this channel. Unbound senders are denied
+        # with a denial type that maps to no message (silent ignore), so other
+        # members' chatter does not trigger the bot or spam the channel.
+        if getattr(ch, "require_bind", None):
+            if not _is_enabled_user(store, user_id, platform):
+                return AuthResult(allowed=False, denial="not_bound_channel", is_dm=False)
 
     # 3. Admin check for protected actions
     if _is_admin_protected(action):

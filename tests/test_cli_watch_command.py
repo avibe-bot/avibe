@@ -157,10 +157,10 @@ def test_watch_add_rejects_missing_cwd() -> None:
     assert payload["code"] == "invalid_watch_cwd"
 
 
-def test_watch_add_create_per_run_rejects_unresolved_legacy_scope_backend(tmp_path: Path) -> None:
+def test_watch_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     agent_store = cli.VibeAgentStore(db_path)
-    agent_store.ensure_default_agent(backend="claude")
+    default_agent = agent_store.ensure_default_agent(backend="claude")
     agent_store.create(name="codex", backend="opencode")
     agent_store.close()
     from storage.importer import ensure_sqlite_state
@@ -203,14 +203,14 @@ def test_watch_add_create_per_run_rejects_unresolved_legacy_scope_backend(tmp_pa
         patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
         patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._wait_for_watch_startup", side_effect=lambda *args, **kwargs: _startup_ok(args[0], args[1], args[2])),
     ):
-        result, payload = _capture_stderr_json(cli.cmd_watch_add, args)
+        result = cli.cmd_watch_add(args)
 
-    assert result == 1
-    assert payload["code"] == "legacy_scope_backend_unresolved"
-    assert payload["details"] == {"deliver_key": "slack::channel::C123", "agent_backend": "codex"}
-    with sqlite3.connect(db_path) as conn:
-        assert conn.execute("select count(*) from agent_sessions").fetchone()[0] == 0
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["watch"]["agent_name"] == default_agent.name
 
 
 def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:

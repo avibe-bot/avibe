@@ -216,6 +216,29 @@ async def dispatch_async(
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
+async def reconcile_platforms(
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    """Ask the controller to hot-apply the persisted platform configuration."""
+
+    target = (socket_path or default_socket_path()).expanduser().resolve()
+    if not target.exists():
+        raise InternalServerUnavailable(f"dispatch socket missing at {target}")
+    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(timeout, connect=5.0),
+        ) as client:
+            resp = await client.post("/internal/reconcile-platforms")
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+
+
 async def cancel_dispatch(session_id: str, *, socket_path: Optional[Path] = None) -> dict[str, Any]:
     """Ask the controller to cancel a running ``dispatch_turn`` for
     ``session_id``.
