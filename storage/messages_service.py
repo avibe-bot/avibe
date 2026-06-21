@@ -502,12 +502,13 @@ def list_session_messages(
                     and_(messages.c.created_at == anchor, messages.c.id > after_id),
                 )
             )
-    query = query.order_by(messages.c.created_at.asc(), messages.c.id.asc()).limit(effective_limit)
+    query = query.order_by(messages.c.created_at.asc(), messages.c.id.asc()).limit(effective_limit + 1)
     rows = [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
-    # Compare against the clamped page size; a caller requesting > 500
-    # would otherwise receive a full 500-row page with a null cursor and
-    # silently stop paginating.
-    next_after = rows[-1]["id"] if len(rows) == effective_limit else None
+    # Probe one extra row against the clamped page size: a full page alone does
+    # not prove there is another page, but the extra row does.
+    has_newer = len(rows) > effective_limit
+    rows = rows[:effective_limit]
+    next_after = rows[-1]["id"] if has_newer and rows else None
     return {"messages": rows, "next_after_id": next_after, "next_before_id": None}
 
 

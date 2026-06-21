@@ -166,6 +166,44 @@ def test_list_session_messages_cursor_uses_clamped_limit(isolated_state):
     assert page["next_after_id"] is not None
 
 
+def test_list_session_messages_full_after_page_without_extra_row_has_no_cursor(isolated_state):
+    """A full after_id page only gets a next cursor when an extra row exists."""
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_session(conn, scope_id, "ses_after_exact")
+        for index in range(4):
+            _insert_msg(
+                conn,
+                scope_id,
+                "ses_after_exact",
+                "agent",
+                f"row {index}",
+                f"2026-06-01T10:00:0{index}Z",
+                msg_type="result",
+            )
+
+    with engine.connect() as conn:
+        first = messages_service.list_session_messages(conn, session_id="ses_after_exact", limit=1)
+        exact = messages_service.list_session_messages(
+            conn,
+            session_id="ses_after_exact",
+            after_id=first["messages"][0]["id"],
+            limit=3,
+        )
+        partial = messages_service.list_session_messages(
+            conn,
+            session_id="ses_after_exact",
+            after_id=first["messages"][0]["id"],
+            limit=2,
+        )
+
+    assert [m["text"] for m in exact["messages"]] == ["row 1", "row 2", "row 3"]
+    assert exact["next_after_id"] is None
+    assert [m["text"] for m in partial["messages"]] == ["row 1", "row 2"]
+    assert partial["next_after_id"] == partial["messages"][-1]["id"]
+
+
 def test_list_session_messages_filters_to_user_facing_types(isolated_state):
     """The chat transcript scopes to user-facing types so the intermediate
     assistant / tool_call / notify rows now persisted for avibe stay out of the
