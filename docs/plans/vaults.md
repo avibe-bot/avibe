@@ -1,8 +1,11 @@
 # Vaults — secret management for agents
 
-Status: **v7 draft for discussion** (no implementation yet)
+Status: **v7 draft — architecture converged; P0 build plan drafted** (no code yet)
 Owner: Alex + agent session `sestvmy6e5c8e`
 Date: 2026-06-16 (v7, after review round 6 — scope-typed grants)
+
+> **Build plan:** the P0 implementation checklist (final DDL, module layout, commit
+> order, tests) lives in the companion **`vaults-p0-implementation.md`**.
 
 v7 changes (round 6): **grants are now scope-typed** — a grant covers a set of
 secrets defined by its scope: **`secret:NAME` (per-key) · `skill:S` · `group:G`**
