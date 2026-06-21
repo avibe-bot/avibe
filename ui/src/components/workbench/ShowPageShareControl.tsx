@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Check, Copy, Loader2, Share2 } from 'lucide-react';
+import { Check, Copy, Loader2, Plus, Share2 } from 'lucide-react';
 
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -8,6 +8,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Select } from '../ui/select';
 import { useApi } from '../../context/ApiContext';
 import { copyTextToClipboard } from '../../lib/utils';
+import { isIosDevice } from '../../lib/platform';
 import { copyHref, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 
 type ShowPagePayload = ShowPageLinkInfo & {
@@ -58,6 +59,11 @@ export const ShowPageShareControl: React.FC<{
   // select/copy yields the same link as the Copy button.
   const link = payload ? copyHref(payload) ?? '' : '';
   const canNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+  // iOS can't be triggered to "Add to Home Screen" programmatically and the Web
+  // Share sheet doesn't offer it — only Safari's own page-share menu does. So on
+  // iOS we show steps to open the link in Safari and add it there. The Show Page
+  // index.html is PWA-capable, so the result launches as a standalone app.
+  const isIos = isIosDevice();
 
   // Re-fetch on every open so a visibility/share change made elsewhere (e.g. the
   // admin Show Pages page) is reflected; keep the last payload visible while
@@ -198,6 +204,18 @@ export const ShowPageShareControl: React.FC<{
             {payload && isPublic && !payload.url_available && (
               <div className="rounded-md border border-border px-2.5 py-2 text-xs text-muted">
                 {t('chat.showPage.publicUnavailable')}
+              </div>
+            )}
+
+            {isIos && link && (
+              <div className="rounded-md border border-border bg-foreground/[0.02] px-2.5 py-2">
+                <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+                  <Plus className="size-3.5 shrink-0 text-cyan" />
+                  {t('chat.showPage.addToHomeTitle')}
+                </div>
+                <p className="mt-1 text-xs leading-relaxed text-muted">
+                  {t('chat.showPage.addToHomeBody')}
+                </p>
               </div>
             )}
           </>

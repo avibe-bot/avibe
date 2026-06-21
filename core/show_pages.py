@@ -448,6 +448,19 @@ def _default_index_html(session_id: str) -> str:
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Show Page {escaped}</title>
+    <!-- PWA: let a user "Add to Home Screen" this Show Page as a standalone app.
+         iOS reads these apple-* tags plus the page's own URL; the icons are
+         served auth-free at the Avibe origin root (see _PWA_PUBLIC_ASSETS in
+         ui_server). We intentionally do NOT link /manifest.webmanifest here: it
+         is the workbench manifest whose start_url is "/", which would hijack the
+         installed icon back to the workbench instead of opening this page. We
+         also omit apple-mobile-web-app-title so a page that sets document.title
+         keeps its own Home Screen name. -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    <link rel="icon" type="image/png" href="/logo.png">
   </head>
   <body>
     <div id="root"></div>

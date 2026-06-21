@@ -1802,7 +1802,9 @@
       "privateDesc": "只有你能查看",
       "offlineNote": "这个 Show Page 已离线，暂时无法分享。",
       "publicUnavailable": "连接 Avibe Cloud 后才能获得别人可打开的公开链接。",
-      "loadError": "无法加载这个 Show Page。"
+      "loadError": "无法加载这个 Show Page。",
+      "addToHomeTitle": "添加到主屏幕",
+      "addToHomeBody": "在 Safari 中打开此链接，点击分享按钮 →「添加到主屏幕」，即可当作 App 使用。"
     },
     "titlePlaceholder": "会话标题",
     "pickAgent": "选择 Agent",
