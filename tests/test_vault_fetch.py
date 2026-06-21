@@ -179,3 +179,34 @@ def test_fetch_rejects_host_header_override(http_server, tmp_path, capfd):
     assert code == 1
     assert json.loads(captured.err)["code"] == "forbidden_header"
     assert log == []  # never sent
+
+
+def test_set_rejects_host_auth_header(tmp_path, capfd):
+    # A stored auth-header policy is applied at fetch egress, so --auth-header Host must be
+    # rejected at set time too (otherwise it bypasses the --header Host guard).
+    vf = tmp_path / "v.txt"
+    vf.write_text("tok")
+    code = cli.cmd_vault_set(_ns(name="HOST_AUTH_KEY", from_file=str(vf), allow_host=["127.0.0.1"], auth_header="Host"))
+    captured = capfd.readouterr()
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "forbidden_header"
+
+
+def test_fetch_returns_response_even_if_audit_fails(http_server, tmp_path, capfd, monkeypatch):
+    # A bookkeeping failure after a successful (possibly side-effecting) request must not make
+    # the agent see a failure and retry — still return the real upstream response.
+    from storage import vault_service
+
+    base, log = http_server
+    _set("GH_PAT", "ghp-audit-fail", tmp_path, allow_host=["127.0.0.1"])
+    capfd.readouterr()
+
+    def _boom(*a, **k):
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr(vault_service, "record_proxy_use", _boom)
+    code = cli.cmd_vault_fetch(_ns(auth="GH_PAT", url=f"{base}/x"))
+    captured = capfd.readouterr()
+    assert code == 0
+    assert "response-ok" in captured.out
+    assert len(log) == 1

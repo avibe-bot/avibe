@@ -296,6 +296,11 @@ not landed unverified here:**
 
 - Dynamic-ask dispatcher side: provision-request audit row + per-platform IM
   deep-link rendering + name-only auto-wake-up (the web ask→save flow already works).
+  This also covers surfacing **CLI-initiated** `vibe vault request` rows in the Web
+  Vaults page (a pending-requests panel + a `/api/vault/requests` endpoint): until then
+  the page exposes only secrets + audit, so a `request --wait` is fulfilled by the user
+  adding a secret of that name (which marks the pending row fulfilled). The `request`
+  CLI message is explicit about this so it isn't misleading.
 - Outbound **redaction** tripwire (§10): the scan/redact function is pure, but wiring it
   into `core/message_dispatcher.py` (every outbound message) must be regression-verified.
 - Inline **ApprovalCard** + the new `message.updated` SSE (protected-tier approval).

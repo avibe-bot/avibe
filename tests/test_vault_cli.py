@@ -188,6 +188,14 @@ def test_from_file_preserves_trailing_newline(tmp_path):
     assert value == "-----BEGIN-----\nabc\n-----END-----\n"
 
 
+def test_from_file_preserves_crlf(tmp_path):
+    # Windows-created key files use CRLF; read_bytes().decode keeps them exact (read_text would
+    # translate CRLF/CR → LF and silently store different bytes).
+    vf = tmp_path / "win.pem"
+    vf.write_bytes(b"line1\r\nline2\r\n")
+    assert cli._read_secret_value(_ns(from_file=str(vf)), help_command="x") == "line1\r\nline2\r\n"
+
+
 def test_stdin_strips_only_one_trailing_newline(monkeypatch):
     # Interactive stdin drops the single Enter/heredoc newline, but not internal/extra ones.
     monkeypatch.setattr("sys.stdin", io.StringIO("tok\n"))

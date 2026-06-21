@@ -3232,9 +3232,10 @@ def _read_secret_value(args, *, help_command: str) -> str:
         )
     if from_file:
         try:
-            # Stored byte-exact: a trailing newline is significant for PEM/SSH keys and many
-            # tokens, so --from-file is NOT stripped.
-            value = Path(from_file).read_text(encoding="utf-8")
+            # Stored byte-exact: read bytes and decode (NOT read_text, which does universal
+            # newline translation). A trailing newline and CRLF/CR endings are significant for
+            # Windows-created PEM/SSH keys and many tokens, so --from-file is preserved verbatim.
+            value = Path(from_file).read_bytes().decode("utf-8")
         except OSError as exc:
             raise TaskCliError(f"cannot read --from-file: {exc}", code="value_file_unreadable", help_command=help_command) from exc
     else:
@@ -3456,7 +3457,11 @@ def cmd_vault_request(args):
             request_id=req["id"],
             secret_name=name,
             status="pending",
-            message=f"Asked the user to provide '{name}' on the Vaults page; then use: vibe vault run --env {name} -- <command>",
+            message=(
+                f"Recorded a request for '{name}'. The user fulfills it by adding a secret named "
+                f"{name} on the Vaults page (Add secret) — saving it marks this request fulfilled. "
+                f"Then use: vibe vault run --env {name} -- <command>"
+            ),
         )
         return 0
     except TaskCliError as exc:
@@ -3479,6 +3484,9 @@ def _build_secret_policy(args) -> dict | None:
     if auth_header and auth_query:
         raise TaskCliError("use at most one of --auth-header / --auth-query", code="invalid_auth", help_command="vibe vault set --help")
     if auth_header:
+        # A stored auth-header policy is applied at fetch egress, so it must obey the same
+        # authority-override guard as --header (otherwise --auth-header Host bypasses it).
+        _reject_forbidden_header(auth_header, help_command="vibe vault set --help")
         policy["auth"] = {"type": "header", "name": auth_header}
     elif auth_query:
         policy["auth"] = {"type": "query", "name": auth_query}
@@ -3502,6 +3510,21 @@ def _host_allowed(host, allowed) -> bool:
     return False
 
 
+# Headers that would override the request authority. The allowlist binds a secret to the URL
+# hostname, so letting any of these through (via --header OR a stored auth-header policy) could
+# route the credential-bearing request to a different vhost on the same endpoint.
+_FORBIDDEN_FETCH_HEADER_NAMES = frozenset({"host"})
+
+
+def _reject_forbidden_header(name, *, help_command: str) -> None:
+    if str(name).strip().lower() in _FORBIDDEN_FETCH_HEADER_NAMES:
+        raise TaskCliError(
+            f"the {str(name).strip()!r} header cannot be set in vault fetch (it overrides the request authority)",
+            code="forbidden_header",
+            help_command=help_command,
+        )
+
+
 def _parse_headers(specs) -> dict:
     headers: dict[str, str] = {}
     for spec in specs or []:
@@ -3509,14 +3532,7 @@ def _parse_headers(specs) -> dict:
             raise TaskCliError(f"invalid --header (expected 'Name: value'): {spec!r}", code="invalid_header", help_command="vibe vault fetch --help")
         name, _, value = spec.partition(":")
         name = name.strip()
-        if name.lower() == "host":
-            # The allowlist binds a secret to the URL hostname; a Host override would route the
-            # credential-bearing request to a different vhost on the same endpoint.
-            raise TaskCliError(
-                "the Host header cannot be overridden in vault fetch",
-                code="forbidden_header",
-                help_command="vibe vault fetch --help",
-            )
+        _reject_forbidden_header(name, help_command="vibe vault fetch --help")
         headers[name] = value.strip()
     return headers
 
@@ -3583,8 +3599,13 @@ def cmd_vault_fetch(args):
                     help_command=help_command,
                     details={"host": host, "allowed_hosts": allowed},
                 )
-            value = vault_service.open_secret_value(conn, name)
             auth = policy.get("auth") or {"type": "bearer"}
+            if auth.get("type") == "header":
+                # Defensive: set-time validation blocks new Host auth-headers; this also guards
+                # legacy / hand-edited policies. Reject BEFORE decrypting so a bad policy never
+                # even unwraps the secret.
+                _reject_forbidden_header(auth.get("name", ""), help_command=help_command)
+            value = vault_service.open_secret_value(conn, name)
 
         # Attach the credential at egress and forward (outside any DB transaction).
         target_url = url
@@ -3603,13 +3624,19 @@ def cmd_vault_fetch(args):
         with httpx.Client(timeout=30.0, follow_redirects=False, trust_env=not is_loopback) as client:
             resp = client.request(method, target_url, headers=headers, content=body)
 
-        with engine.begin() as conn:
-            vault_service.record_proxy_use(
-                conn,
-                name,
-                requester={"source": "cli", "pid": os.getpid()},
-                delivery={"host": host, "method": method, "status": resp.status_code},
-            )
+        try:
+            with engine.begin() as conn:
+                vault_service.record_proxy_use(
+                    conn,
+                    name,
+                    requester={"source": "cli", "pid": os.getpid()},
+                    delivery={"host": host, "method": method, "status": resp.status_code},
+                )
+        except Exception:
+            # The upstream request already happened (possibly a side-effecting POST/PATCH). A
+            # bookkeeping failure must not make the agent see a failure and retry — duplicating
+            # the upstream action. Contain it and still return the real response below.
+            pass
     except vault_service.SecretNotFoundError:
         _print_task_error(TaskCliError(f"secret '{args.auth}' not found", code="secret_not_found", help_command=help_command))
         return 1
