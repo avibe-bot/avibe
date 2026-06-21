@@ -63,6 +63,21 @@ def test_get_or_create_machine_key_is_idempotent_and_0600(tmp_path):
     assert mode == 0o600
 
 
+def test_existing_loose_machine_key_is_tightened_on_read(tmp_path):
+    # A key restored from backup / copied with 0644 must be repaired to 0600 before use — it
+    # decrypts every standard-tier secret and the feature relies on that mode.
+    key_path = tmp_path / "machine.key"
+    created = vault_crypto.get_or_create_machine_key(key_path)
+    os.chmod(key_path, 0o644)
+    read_back = vault_crypto.get_machine_key(key_path)  # read repairs the mode
+    assert read_back == created
+    assert stat.S_IMODE(os.stat(key_path).st_mode) == 0o600
+    # get_or_create takes the same repair path for an already-present key.
+    os.chmod(key_path, 0o640)
+    vault_crypto.get_or_create_machine_key(key_path)
+    assert stat.S_IMODE(os.stat(key_path).st_mode) == 0o600
+
+
 def test_corrupt_machine_key_length_rejected(tmp_path):
     key_path = tmp_path / "machine.key"
     key_path.write_bytes(b"too-short")

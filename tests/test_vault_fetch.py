@@ -154,18 +154,32 @@ def test_fetch_subdomain_match(http_server, tmp_path, capfd):
     assert cli._host_allowed("other.com", ["api.github.com"]) is False
 
 
-def test_fetch_output_unwritable_returns_clean_error(http_server, tmp_path, capfd):
-    # --output under a non-existent directory: the brokered request succeeds, but the write
-    # fails. The CLI must return a structured error, not a traceback (P3 #3448466179).
+def test_fetch_output_unwritable_is_preflighted_before_sending(http_server, tmp_path, capfd):
+    # --output under a non-existent directory is rejected BEFORE the credential-bearing request
+    # is sent, so a side-effecting POST never runs against a path that would fail the local
+    # write (otherwise the agent retries and duplicates the action). Structured error.
     base, log = http_server
     _set("GH_PAT", "ghp-out-secret", tmp_path, allow_host=["127.0.0.1"])
     capfd.readouterr()
     bad_out = tmp_path / "no_such_dir" / "resp.json"
-    code = cli.cmd_vault_fetch(_ns(auth="GH_PAT", url=f"{base}/x", output=str(bad_out)))
+    code = cli.cmd_vault_fetch(_ns(auth="GH_PAT", url=f"{base}/x", method="POST", output=str(bad_out)))
     captured = capfd.readouterr()
     assert code == 1
     assert json.loads(captured.err)["code"] == "output_unwritable"
-    assert len(log) == 1  # the upstream request did happen before the write failed
+    assert log == []  # preflighted → the upstream request was never sent
+
+
+def test_fetch_rejects_trace_method_before_sending(http_server, tmp_path, capfd):
+    # TRACE/TRACK/CONNECT echo the request (incl. the attached credential) into the response
+    # body, which would land on stdout — reject before decrypting or sending.
+    base, log = http_server
+    _set("GH_PAT", "ghp-trace-secret", tmp_path, allow_host=["127.0.0.1"])
+    capfd.readouterr()
+    code = cli.cmd_vault_fetch(_ns(auth="GH_PAT", url=f"{base}/x", method="TRACE"))
+    captured = capfd.readouterr()
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "method_not_allowed"
+    assert log == []  # never sent
 
 
 def test_fetch_rejects_host_header_override(http_server, tmp_path, capfd):

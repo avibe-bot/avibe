@@ -1879,7 +1879,8 @@
     "request": {
       "provide": "填写",
       "title": "提供 {{name}}",
-      "help": "Agent 请求了这个密钥。它会直接存入保险库，不会再进入聊天。"
+      "help": "Agent 请求了这个密钥。它会直接存入保险库，不会再进入聊天。",
+      "saveFailed": "保存失败，请重试。"
     },
     "history": "历史",
     "audit": {

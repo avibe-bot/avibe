@@ -29,20 +29,20 @@ export const SecretRequestCard: React.FC<{ name: string }> = ({ name }) => {
     setSaving(true);
     setErr(null);
     try {
-      await api.createVaultSecret({ name, value });
-      setSaved(true);
-      setOpen(false);
-      showToast(t('vaults.created', { name }), 'success');
-    } catch (e: any) {
-      const msg = e?.message ?? String(e);
-      if (/exist/i.test(msg)) {
-        // Already in the vault — the request is effectively satisfied.
+      // handleError:false → no global error toast and the structured body is returned, so we
+      // branch on the API code instead of regex-matching a generic "Request failed (409)".
+      const res = await api.createVaultSecret({ name, value }, { handleError: false });
+      if (res?.ok || res?.code === 'secret_exists') {
+        // Saved now, or already in the vault from another surface — either way the ask is done.
         setSaved(true);
         setOpen(false);
         showToast(t('vaults.created', { name }), 'success');
       } else {
-        setErr(msg);
+        setErr(res?.message ?? t('vaults.request.saveFailed'));
       }
+    } catch (e: any) {
+      // Network/transport failure (createVaultSecret didn't reach a structured response).
+      setErr(e?.message ?? t('vaults.request.saveFailed'));
     } finally {
       setSaving(false);
     }

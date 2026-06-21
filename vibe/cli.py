@@ -3565,6 +3565,24 @@ def cmd_vault_fetch(args):
         method = (getattr(args, "method", None) or "GET").upper()
         headers = _parse_headers(getattr(args, "header", None))
         body = _read_request_body(args)
+        if method in {"TRACE", "TRACK", "CONNECT"}:
+            # These echo the request (incl. the attached Authorization / custom-auth header) back
+            # in the response body, which fetch writes to stdout — leaking the secret value into
+            # stdout/transcripts. Reject before decrypting or sending.
+            raise TaskCliError(
+                f"method {method} is not allowed for vault fetch (it can echo the credential into the response)",
+                code="method_not_allowed",
+                help_command=help_command,
+            )
+        # Preflight --output BEFORE sending: a side-effecting request (POST/PATCH) must not run
+        # and then fail on a local write, or the agent will retry and duplicate the action.
+        output = getattr(args, "output", None)
+        if output and (not Path(output).parent.is_dir() or not os.access(Path(output).parent, os.W_OK)):
+            raise TaskCliError(
+                f"output path is not writable: {output}",
+                code="output_unwritable",
+                help_command=help_command,
+            )
         host = urlsplit(url).hostname
         if not host:
             raise TaskCliError(f"invalid --url: {url!r}", code="invalid_url", help_command=help_command)
@@ -3734,10 +3752,15 @@ def cmd_vault_export(args):
             # The consumer's pipe closed before receiving the values — nothing was delivered,
             # so don't record a delivery.
             return 1
-        with engine.begin() as conn:
-            vault_service.record_deliveries(
-                conn, sorted(set(mapping.values())), requester={"source": "cli", "pid": os.getpid()}, mode="export"
-            )
+        # The secret has already been delivered to the caller's shell; a bookkeeping failure must
+        # not make the script see a failed command (and re-run it, re-exposing the secret).
+        try:
+            with engine.begin() as conn:
+                vault_service.record_deliveries(
+                    conn, sorted(set(mapping.values())), requester={"source": "cli", "pid": os.getpid()}, mode="export"
+                )
+        except Exception:
+            pass
         return 0
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))

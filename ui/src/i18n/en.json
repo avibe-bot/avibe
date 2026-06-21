@@ -1880,7 +1880,8 @@
     "request": {
       "provide": "provide",
       "title": "Provide {{name}}",
-      "help": "The agent asked for this secret. It's saved straight to the vault and never re-enters the chat."
+      "help": "The agent asked for this secret. It's saved straight to the vault and never re-enters the chat.",
+      "saveFailed": "Couldn't save the secret. Please try again."
     },
     "history": "History",
     "audit": {
