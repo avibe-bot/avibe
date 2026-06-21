@@ -331,6 +331,7 @@ export const ChatPage: React.FC = () => {
   // queued turn that is still in flight (Codex P2). Cheap + idempotent.
   const reconcile = useCallback(async () => {
     if (!sessionId) return;
+    if (historicalWindowRef.current) return;
     try {
       // tail: the RECENT window (not the oldest page), so a missed latest row in
       // a long chat is actually recovered (Codex P2).
@@ -338,16 +339,8 @@ export const ChatPage: React.FC = () => {
       if (sessionId !== sessionIdRef.current) return; // switched chats mid-fetch
       const fresh = res.messages.filter(isTranscriptMessage);
       if (fresh.length) {
-        const tailOldestId = fresh[0].id;
-        const previousOldestId = oldestLoadedIdRef.current;
-        const previousNewestId = newestLoadedIdRef.current;
         setMessages((prev) => mergeById(prev, fresh));
-        if (
-          !historicalWindowRef.current &&
-          (!previousOldestId || !previousNewestId || tailOldestId <= previousNewestId)
-        ) {
-          setOlderCursor(res.next_before_id ?? null);
-        }
+        setOlderCursor(res.next_before_id ?? null);
       }
     } catch {
       /* keep the current transcript; the next reconnect retries */
@@ -785,10 +778,19 @@ export const ChatPage: React.FC = () => {
           void refreshQueue();
           return;
         }
-        // A turn started — show the user row. Echo de-dupes with the later
-        // message.new event if both paths observe the persisted row.
+        // A turn started — show the user row. If this send happened from a
+        // historical search window, first replace that window with the live tail;
+        // the persisted prompt belongs there, not grafted below old context.
         if (body && body.id) {
-          appendMessage(body as WorkbenchMessage);
+          if (historicalWindowRef.current) {
+            const caughtUp = await reloadLatestMessages();
+            if (sessionId === sessionIdRef.current) {
+              if (caughtUp) setJumpTarget((body as WorkbenchMessage).id);
+              else appendMessage(body as WorkbenchMessage);
+            }
+          } else {
+            appendMessage(body as WorkbenchMessage);
+          }
         }
       } catch (err: any) {
         if (sessionId === sessionIdRef.current) {
@@ -800,7 +802,7 @@ export const ChatPage: React.FC = () => {
         }
       }
     },
-    [sessionId, appendMessage, refreshQueue, markWorking],
+    [sessionId, appendMessage, refreshQueue, markWorking, reloadLatestMessages],
   );
 
   // @ mention source: all enabled Agents, filtered client-side (the set is small
@@ -1060,11 +1062,13 @@ export const ChatPage: React.FC = () => {
           return;
         }
         // Replace the transcript with the centered window. Keep the older cursor
-        // for reading above the match, but do not page downward through a gap;
-        // the down-arrow reloads the live tail instead.
+        // for reading above the match. If there are newer rows beyond this
+        // window, treat it as historical context and require the down-arrow to
+        // reload the live tail; if not, it already reaches the tail and can keep
+        // normal pinned/follow behavior.
         setMessages(window);
         setOlderCursor(res.next_before_id ?? null);
-        setHistoricalWindow(true);
+        setHistoricalWindow(Boolean(res.next_after_id));
         setJumpTarget(targetMsg);
         startHighlight(targetMsg);
         clearParam();
