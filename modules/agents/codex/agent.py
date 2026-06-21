@@ -479,12 +479,11 @@ class CodexAgent(BaseAgent):
 
                 for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
                     # A force-evicted stuck-active turn never emitted a terminal
-                    # result nor ran _release_stream_turn, so its AgentService
-                    # runtime gate (marked started in _start_turn) is still held.
-                    # Settle it before dropping the turn state, otherwise later
-                    # messages on the same runtime key queue forever (#622 ③
-                    # analog). No-op for sessions with no active turn.
-                    self._release_stuck_active_request(base_session_id)
+                    # result, so the Workbench status and SSE/runtime gate are
+                    # still owned by that turn. Settle it through the same
+                    # terminal-result path as normal completions before dropping
+                    # turn state. No-op for sessions with no active turn.
+                    await self._settle_stuck_active_request(base_session_id)
                     # Keep the persisted thread mapping so a later transport restart
                     # can resume the same Codex conversation for this Slack thread.
                     self._session_mgr.invalidate_thread(base_session_id)
@@ -496,15 +495,15 @@ class CodexAgent(BaseAgent):
 
         return evicted
 
-    def _release_stuck_active_request(self, base_session_id: str) -> None:
-        """Settle the runtime gate for a turn we are about to force-reap.
+    async def _settle_stuck_active_request(self, base_session_id: str) -> None:
+        """Settle a turn we are about to force-reap.
 
         ``_start_turn`` marks the AgentService runtime turn started; it is
-        normally released only by a terminal result or ``_release_stream_turn``.
-        The stuck-active force-eviction path emits neither, so without this the
-        runtime key stays "in turn" and later messages queue forever. The
-        release is token-guarded by its owner, so a no-op (already-settled or
-        no active turn) is safe.
+        normally settled by a terminal result, which also flips Workbench
+        ``agent_status`` out of ``running``. The stuck-active force-eviction path
+        has no backend terminal event, so emit a silent error result here. The
+        terminal-result path is token-guarded by its owner, so a no-op
+        (already-settled or no active turn) is safe.
         """
         get_active = getattr(self._turn_registry, "get_active_turn", None)
         active_turn = get_active(base_session_id) if callable(get_active) else None
@@ -523,6 +522,21 @@ class CodexAgent(BaseAgent):
         context = getattr(request, "context", None)
         if context is None:
             return
+        controller = getattr(self, "controller", None)
+        emit = getattr(controller, "emit_agent_message", None)
+        if callable(emit):
+            try:
+                await emit(context, "result", "", is_error=True, level="silent")
+                return
+            except Exception:
+                logger.warning(
+                    "Failed to emit silent terminal result for force-evicted Codex turn %s",
+                    active_turn,
+                    exc_info=True,
+                )
+
+        # Best-effort fallback for narrow test doubles or partial controllers:
+        # release the runtime gate even if the Workbench status path is absent.
         release = getattr(self._event_handler, "_release_stream_turn", None)
         if callable(release):
             release(context)

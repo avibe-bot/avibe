@@ -596,6 +596,7 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
             _release_stream_turn=lambda context: release_calls.append(context),
             release_calls=release_calls,
         )
+        agent.controller = SimpleNamespace(emit_agent_message=AsyncMock())
         agent._session_locks = {"session-1": asyncio.Lock()}
         agent.sessions = SimpleNamespace(clear_agent_session_mapping=Mock())
         return agent, stop_calls, invalidated, cleared_turns
@@ -616,8 +617,12 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cleared_turns, ["session-1"])
         self.assertEqual(agent._transports, {})
         self.assertEqual(agent._transport_last_activity, {})
-        # runtime gate of the force-reaped stuck turn must be settled
-        self.assertEqual(agent._event_handler.release_calls, ["ctx-1"])
+        # Force-reaped stuck turns must settle Workbench status + runtime gate
+        # through the shared terminal-result chokepoint.
+        agent.controller.emit_agent_message.assert_awaited_once_with(
+            "ctx-1", "result", "", is_error=True, level="silent"
+        )
+        self.assertEqual(agent._event_handler.release_calls, [])
 
     async def test_evict_idle_transports_force_evict_release_falls_back_to_latest_request(self):
         # Defensive path: if the active turn has no per-turn request mapping,
@@ -634,7 +639,10 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(evicted, 1)
         self.assertEqual(stop_calls, ["stop"])
-        self.assertEqual(agent._event_handler.release_calls, ["ctx-latest"])
+        agent.controller.emit_agent_message.assert_awaited_once_with(
+            "ctx-latest", "result", "", is_error=True, level="silent"
+        )
+        self.assertEqual(agent._event_handler.release_calls, [])
 
     async def test_evict_idle_transports_keeps_active_transport_under_stuck_cap(self):
         # active turn idle past idle_timeout (600) but under the cap (1800):
@@ -728,7 +736,8 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(invalidated, ["session-1"])
         self.assertEqual(cleared_turns, ["session-1"])
         # reclassified as normal idle: the prior turn already settled itself,
-        # so no spurious runtime-gate release fires here.
+        # so no spurious terminal result or runtime-gate release fires here.
+        agent.controller.emit_agent_message.assert_not_awaited()
         self.assertEqual(agent._event_handler.release_calls, [])
 
     async def test_evict_idle_transports_force_evict_preserves_state_when_stop_fails(self):
