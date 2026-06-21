@@ -9,7 +9,9 @@ child process spawned by ``run``) so the no-stdout-leak property is checked for 
 from __future__ import annotations
 
 import argparse
+import io
 import json
+import os
 import sys
 
 import pytest
@@ -176,6 +178,41 @@ def test_run_bad_command_does_not_deliver(tmp_path, capfd):
     cli.cmd_vault_list(_ns())
     secret = json.loads(capfd.readouterr().out)["secrets"][0]
     assert secret["use_count"] == 0
+
+
+def test_from_file_preserves_trailing_newline(tmp_path):
+    # PEM/SSH material and many tokens end in a significant newline — --from-file is byte-exact.
+    vf = tmp_path / "key.pem"
+    vf.write_text("-----BEGIN-----\nabc\n-----END-----\n")
+    value = cli._read_secret_value(_ns(from_file=str(vf)), help_command="x")
+    assert value == "-----BEGIN-----\nabc\n-----END-----\n"
+
+
+def test_stdin_strips_only_one_trailing_newline(monkeypatch):
+    # Interactive stdin drops the single Enter/heredoc newline, but not internal/extra ones.
+    monkeypatch.setattr("sys.stdin", io.StringIO("tok\n"))
+    assert cli._read_secret_value(_ns(stdin=True), help_command="x") == "tok"
+    monkeypatch.setattr("sys.stdin", io.StringIO("tok\n\n"))
+    assert cli._read_secret_value(_ns(stdin=True), help_command="x") == "tok\n"
+
+
+def test_run_non_executable_command_is_clean_error(tmp_path, capfd):
+    vf = tmp_path / "v.txt"
+    vf.write_text("v")
+    cli.cmd_vault_set(_ns(name="EXEC_KEY", from_file=str(vf)))
+    capfd.readouterr()
+    # A file that passes which() (+x, absolute path) but fails execve (no shebang / bad format)
+    # raises OSError, not FileNotFoundError → must be a structured error, not a traceback, and
+    # must not record a delivery (the child never started).
+    bad = tmp_path / "bad.bin"
+    bad.write_bytes(b"\x00\x01 not a valid executable")
+    os.chmod(bad, 0o755)
+    code = cli.cmd_vault_run(_ns(env=["EXEC_KEY"], command_argv=[str(bad)]))
+    captured = capfd.readouterr()
+    assert code == 126
+    assert json.loads(captured.err)["code"] == "command_not_executable"
+    cli.cmd_vault_list(_ns())
+    assert json.loads(capfd.readouterr().out)["secrets"][0]["use_count"] == 0
 
 
 def test_run_records_delivery_after_spawn(tmp_path, capfd):

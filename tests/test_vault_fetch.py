@@ -166,3 +166,16 @@ def test_fetch_output_unwritable_returns_clean_error(http_server, tmp_path, capf
     assert code == 1
     assert json.loads(captured.err)["code"] == "output_unwritable"
     assert len(log) == 1  # the upstream request did happen before the write failed
+
+
+def test_fetch_rejects_host_header_override(http_server, tmp_path, capfd):
+    # --header 'Host: ...' would route a host-bound credential to a different vhost on the same
+    # endpoint; reject it before the request (and before the secret is decrypted).
+    base, log = http_server
+    _set("GH_PAT", "ghp-host-secret", tmp_path, allow_host=["127.0.0.1"])
+    capfd.readouterr()
+    code = cli.cmd_vault_fetch(_ns(auth="GH_PAT", url=f"{base}/x", header=["Host: evil.example.com"]))
+    captured = capfd.readouterr()
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "forbidden_header"
+    assert log == []  # never sent

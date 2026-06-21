@@ -84,6 +84,17 @@ def test_inject_overwrites_preexisting_loose_file_as_0600(tmp_path, capfd):
     assert out.read_text() == "A_KEY=alpha-1\n"  # fully replaced, not appended
 
 
+def test_inject_dedupes_repeated_keys(tmp_path, capfd):
+    # --keys A,A renders one entry; usage/audit must reflect one delivery, not two.
+    _set("A_KEY", "alpha-1", tmp_path)
+    capfd.readouterr()
+    out = tmp_path / "dup.env"
+    assert cli.cmd_vault_inject(_ns(keys="A_KEY,A_KEY", out=str(out), format="dotenv")) == 0
+    assert json.loads(capfd.readouterr().out)["keys"] == ["A_KEY"]
+    cli.cmd_vault_list(_ns())
+    assert json.loads(capfd.readouterr().out)["secrets"][0]["use_count"] == 1
+
+
 def test_inject_payload_does_not_leak_value(tmp_path, capfd):
     _set("SECRET_KEY", "topsecret-INJECT", tmp_path)
     capfd.readouterr()

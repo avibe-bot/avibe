@@ -3232,12 +3232,17 @@ def _read_secret_value(args, *, help_command: str) -> str:
         )
     if from_file:
         try:
+            # Stored byte-exact: a trailing newline is significant for PEM/SSH keys and many
+            # tokens, so --from-file is NOT stripped.
             value = Path(from_file).read_text(encoding="utf-8")
         except OSError as exc:
             raise TaskCliError(f"cannot read --from-file: {exc}", code="value_file_unreadable", help_command=help_command) from exc
     else:
+        # Interactive/piped stdin: drop a single trailing newline (the Enter keypress / heredoc
+        # terminator) the user didn't intend as part of the secret.
         value = sys.stdin.read()
-    value = value.rstrip("\n")
+        if value.endswith("\n"):
+            value = value[:-1]
     if not value:
         raise TaskCliError("secret value is empty", code="empty_value", help_command=help_command)
     return value
@@ -3358,17 +3363,27 @@ def cmd_vault_run(args):
     try:
         proc = subprocess.Popen(command_argv, env=child_env)
     except FileNotFoundError:
-        # execve failed despite the which() preflight (e.g. a missing shebang interpreter)
-        # — the child never received the env, so do NOT record a delivery.
+        # execve found nothing despite the which() preflight (e.g. a TOCTOU removal) — the
+        # child never received the env, so do NOT record a delivery.
         _print_task_error(TaskCliError(f"command not found: {command_argv[0]!r}", code="command_not_found", help_command=help_command))
         return 127
+    except OSError as exc:
+        # which() passed but execve still failed (no shebang, wrong arch, not executable). The
+        # child never started → no delivery; return a structured error, not a traceback.
+        _print_task_error(TaskCliError(f"cannot execute {command_argv[0]!r}: {exc}", code="command_not_executable", help_command=help_command))
+        return 126
     # The secret reached the child's env at spawn time → record delivery NOW, before waiting.
     # subprocess.run blocks until exit, so a long-running child that is interrupted (or a
-    # parent that dies) would have delivered the secret but never been audited.
-    with engine.begin() as conn:
-        vault_service.record_deliveries(
-            conn, sorted(set(mapping.values())), requester={"source": "cli", "pid": os.getpid()}, mode="run"
-        )
+    # parent that dies) would have delivered the secret but never been audited. A bookkeeping
+    # failure here must not orphan the running child or crash with a traceback — contain it and
+    # still return the child's real exit code.
+    try:
+        with engine.begin() as conn:
+            vault_service.record_deliveries(
+                conn, sorted(set(mapping.values())), requester={"source": "cli", "pid": os.getpid()}, mode="run"
+            )
+    except Exception:
+        pass
     return proc.wait()
 
 
@@ -3493,7 +3508,16 @@ def _parse_headers(specs) -> dict:
         if ":" not in spec:
             raise TaskCliError(f"invalid --header (expected 'Name: value'): {spec!r}", code="invalid_header", help_command="vibe vault fetch --help")
         name, _, value = spec.partition(":")
-        headers[name.strip()] = value.strip()
+        name = name.strip()
+        if name.lower() == "host":
+            # The allowlist binds a secret to the URL hostname; a Host override would route the
+            # credential-bearing request to a different vhost on the same endpoint.
+            raise TaskCliError(
+                "the Host header cannot be overridden in vault fetch",
+                code="forbidden_header",
+                help_command="vibe vault fetch --help",
+            )
+        headers[name] = value.strip()
     return headers
 
 
@@ -3530,8 +3554,9 @@ def cmd_vault_fetch(args):
             raise TaskCliError(f"invalid --url: {url!r}", code="invalid_url", help_command=help_command)
         # Never attach a credential over plaintext: a real host must be HTTPS so domain
         # binding can't be used to downgrade transport. Loopback is exempt for local dev.
+        is_loopback = host in {"localhost", "127.0.0.1", "::1"}
         scheme = (urlsplit(url).scheme or "").lower()
-        if scheme != "https" and host not in {"localhost", "127.0.0.1", "::1"}:
+        if scheme != "https" and not is_loopback:
             raise TaskCliError(
                 f"refusing to attach a credential over plaintext {scheme or 'http'}:// to {host!r}; use https (loopback exempt)",
                 code="insecure_transport",
@@ -3573,7 +3598,9 @@ def cmd_vault_fetch(args):
         else:  # bearer (default)
             headers["Authorization"] = f"Bearer {value}"
 
-        with httpx.Client(timeout=30.0, follow_redirects=False) as client:
+        # For the loopback plaintext exemption, ignore HTTP(S)_PROXY/ALL_PROXY from the env so a
+        # credential-bearing local request can't be redirected to an external proxy.
+        with httpx.Client(timeout=30.0, follow_redirects=False, trust_env=not is_loopback) as client:
             resp = client.request(method, target_url, headers=headers, content=body)
 
         with engine.begin() as conn:
@@ -3707,6 +3734,7 @@ def cmd_vault_inject(args):
     help_command = "vibe vault inject --help"
     try:
         keys = [k.strip() for k in (getattr(args, "keys", None) or "").split(",") if k.strip()]
+        keys = list(dict.fromkeys(keys))  # dedupe, preserve order: A,A is one entry + one audit
         if not keys:
             raise TaskCliError("--keys A,B is required", code="missing_keys", help_command=help_command)
         out = getattr(args, "out", None)
@@ -3761,6 +3789,12 @@ def cmd_vault_key_export(args):
             _print_cli_payload("vault_key_export", written=True, path=str(out))
         else:
             print(json.dumps(blob, indent=2))
+            try:
+                # print() may only buffer; flush so a piped consumer actually received the blob
+                # before we audit it as exported.
+                sys.stdout.flush()
+            except BrokenPipeError:
+                return 1  # pipe closed early → blob not delivered → don't audit
         # Exporting the machine key is the most sensitive vault op (it can decrypt every
         # standard-tier secret once the passphrase is known), so record a value-free audit row
         # for the activity panel. Best-effort: an audit-write hiccup must not fail a delivered
