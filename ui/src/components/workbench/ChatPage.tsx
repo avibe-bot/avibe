@@ -339,8 +339,13 @@ export const ChatPage: React.FC = () => {
       if (sessionId !== sessionIdRef.current) return; // switched chats mid-fetch
       const fresh = res.messages.filter(isTranscriptMessage);
       if (fresh.length) {
+        const tailOldestId = fresh[0].id;
+        const previousOldestId = oldestLoadedIdRef.current;
+        const previousNewestId = newestLoadedIdRef.current;
         setMessages((prev) => mergeById(prev, fresh));
-        setOlderCursor(res.next_before_id ?? null);
+        if (!previousOldestId || !previousNewestId || tailOldestId > previousNewestId) {
+          setOlderCursor(res.next_before_id ?? null);
+        }
       }
     } catch {
       /* keep the current transcript; the next reconnect retries */
@@ -1120,10 +1125,11 @@ export const ChatPage: React.FC = () => {
   // the chat you're looking at. Reactive to the unread map, so it's race-free
   // against the cross-process event ordering.
   useEffect(() => {
+    if (historicalWindow) return;
     if (sessionId && (unreadBySession[sessionId] ?? 0) > 0) {
       void markInboxRead(sessionId);
     }
-  }, [sessionId, unreadBySession, markInboxRead]);
+  }, [sessionId, unreadBySession, markInboxRead, historicalWindow]);
 
   // The Workbench canvas creates the session and hands its first message over
   // as router state. Replay it once through the compose path so the agent turn
