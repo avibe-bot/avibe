@@ -248,7 +248,7 @@ def test_reap_orphaned_reaps_cross_restart_init_parented_match(monkeypatch):
         [
             f"{service_pid} 1 python service_main.py",
             f"100 {service_pid} /usr/local/bin/claude --resume sess-1 --model opus",
-            "300 1 /usr/local/bin/claude --resume sess-1 --model opus",
+            "300 1 /usr/local/bin/claude --output-format stream-json --verbose --resume sess-1 --input-format stream-json",
         ]
     )
     signals = _patch_orphan_env(monkeypatch, table, {300: 999.0}, {100, 300})
@@ -392,6 +392,32 @@ def test_reap_orphaned_ignores_out_of_tree_resume_match_not_init_parented(monkey
             f"{service_pid} 1 python service_main.py",
             f"100 {service_pid} /usr/local/bin/claude --resume sess-1 --model opus",
             "300 999 /usr/local/bin/claude --resume sess-1 --model opus",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {300: 999.0}, {100, 300})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids={100},
+            tracked_resume_ids={"sess-1": 100},
+            logger=logging.getLogger("test.claude_orphan"),
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []
+
+
+def test_reap_orphaned_ignores_init_parented_resume_match_without_sdk_marker(monkeypatch):
+    """A user's manual `claude --resume <id>` may become init-reparented after
+    its shell exits, but it is not an Avibe SDK session subprocess unless it
+    carries the stream-json input marker."""
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"100 {service_pid} /usr/local/bin/claude --resume sess-1 --model opus",
+            "300 1 /usr/local/bin/claude --resume sess-1 --model opus",
         ]
     )
     signals = _patch_orphan_env(monkeypatch, table, {300: 999.0}, {100, 300})

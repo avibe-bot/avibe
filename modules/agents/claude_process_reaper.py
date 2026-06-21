@@ -325,15 +325,15 @@ async def reap_orphaned_claude_processes(
         not be resolved, or a session create is in flight), otherwise a live
         tracked/connecting process could be misclassified as an orphan.
 
-    (b) **Cross-restart orphan** — a ``claude`` process reparented to init
-        (``ppid == 1``) after a previous service crashed/restarted, carrying a
+    (b) **Cross-restart orphan** — a Claude SDK session subprocess
+        (``--input-format stream-json``) reparented to init (``ppid == 1``)
+        after a previous service crashed/restarted, carrying a
         ``--resume <native_id>`` for a session we currently own under a
-        *different* pid. Requiring ``ppid == 1`` (plus the unique native id)
-        keeps this from touching a user's manually-launched ``claude --resume``
-        of the same conversation (parented to their shell) or another live
-        Avibe instance's process (parented to that instance). The trade-off is
-        that an orphan reparented to a non-init subreaper (e.g. a systemd
-        service manager) is not reaped here.
+        *different* pid. Requiring both the SDK streaming signature and
+        ``ppid == 1`` keeps this from touching a user's manually-launched
+        ``claude --resume`` of the same conversation or another live Avibe
+        instance's process. The trade-off is that an orphan reparented to a
+        non-init subreaper (e.g. a systemd service manager) is not reaped here.
 
     Safety guards:
     - ``owned_pids`` and their descendants are never reaped.
@@ -392,9 +392,9 @@ async def reap_orphaned_claude_processes(
                 candidates.add(row.pid)
 
     # (b) init-reparented (ppid == 1) cross-restart orphan carrying a tracked
-    # --resume id under a foreign pid. The ppid==1 requirement excludes a
-    # user's manual `claude --resume` (parented to a shell) and another live
-    # Avibe instance's process (parented to that instance).
+    # --resume id under a foreign pid. Require the SDK stream-json input marker
+    # too: a user's manual `claude --resume` can also become init-reparented if
+    # its launching shell exits, but it is not an Avibe SDK subprocess.
     for native_id, owner_pid in tracked_resume_ids.items():
         if not native_id:
             continue
@@ -405,7 +405,7 @@ async def reap_orphaned_claude_processes(
                 continue  # only reap true init-reparented orphans
             if row.pid == owner_pid:
                 continue
-            if _command_has_resume(row.command, native_id):
+            if _command_has_resume(row.command, native_id) and _command_has_stream_json_input(row.command):
                 candidates.add(row.pid)
 
     candidates -= owned_all
