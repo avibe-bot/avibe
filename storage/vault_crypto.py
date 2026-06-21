@@ -27,6 +27,7 @@ from pathlib import Path
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from config import paths
 
@@ -34,6 +35,14 @@ WRAP_SCHEME = "machine-aesgcm-v1"
 _KEY_BYTES = 32  # AES-256
 _NONCE_BYTES = 12  # AES-GCM standard nonce
 _NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+# Scrypt parameters for passphrase-wrapped machine-key export (§7.2). Scrypt is the
+# zero-new-dependency KDF (ships in `cryptography`); the export blob records the KDF +
+# params so a future Argon2id variant is just another ``kdf`` value (forward-compatible).
+_SCRYPT_N = 2**15
+_SCRYPT_R = 8
+_SCRYPT_P = 1
+EXPORT_SCHEME = "machine-key-export-v1"
 
 
 class VaultCryptoError(Exception):
@@ -134,3 +143,68 @@ def open_standard(sealed: Sealed, *, machine_key: bytes | None = None, key_path:
         return AESGCM(dek).decrypt(_unb64(sealed.nonce), _unb64(sealed.ciphertext), None)
     except (InvalidTag, KeyError, ValueError, TypeError) as exc:
         raise VaultCryptoError("decryption failed (wrong/missing machine key or corrupt data)") from exc
+
+
+def _derive_kek_scrypt(passphrase: bytes, salt: bytes, *, n: int = _SCRYPT_N, r: int = _SCRYPT_R, p: int = _SCRYPT_P) -> bytes:
+    return Scrypt(salt=salt, length=_KEY_BYTES, n=n, r=r, p=p).derive(passphrase)
+
+
+def export_machine_key(passphrase: str, *, key_path: Path | None = None) -> dict:
+    """Export the machine key as a passphrase-wrapped blob (§7.2).
+
+    Lets the user back up / migrate the vault's machine key independently of the state
+    dir (needed once the key moves to the OS keychain). The blob is safe to store: the
+    key is wrapped under a Scrypt-derived KEK + AES-256-GCM.
+    """
+    if not passphrase:
+        raise VaultCryptoError("a non-empty passphrase is required")
+    key = get_or_create_machine_key(key_path)
+    salt = os.urandom(16)
+    nonce = os.urandom(_NONCE_BYTES)
+    kek = _derive_kek_scrypt(passphrase.encode("utf-8"), salt)
+    ciphertext = AESGCM(kek).encrypt(nonce, key, None)
+    return {
+        "scheme": EXPORT_SCHEME,
+        "kdf": "scrypt",
+        "n": _SCRYPT_N,
+        "r": _SCRYPT_R,
+        "p": _SCRYPT_P,
+        "salt": _b64(salt),
+        "nonce": _b64(nonce),
+        "ciphertext": _b64(ciphertext),
+    }
+
+
+def import_machine_key(blob: dict, passphrase: str, *, key_path: Path | None = None, force: bool = False) -> None:
+    """Restore a machine key from :func:`export_machine_key` output.
+
+    Refuses to overwrite an existing key unless ``force`` (overwriting would orphan every
+    secret encrypted under the current key).
+    """
+    path = key_path or machine_key_path()
+    if path.exists() and not force:
+        raise VaultCryptoError(f"machine key already exists at {path}; pass force=True to overwrite")
+    if not isinstance(blob, dict) or blob.get("scheme") != EXPORT_SCHEME or blob.get("kdf") != "scrypt":
+        raise VaultCryptoError("unrecognized machine-key export blob")
+    try:
+        kek = _derive_kek_scrypt(
+            passphrase.encode("utf-8"),
+            _unb64(blob["salt"]),
+            n=int(blob["n"]),
+            r=int(blob["r"]),
+            p=int(blob["p"]),
+        )
+        key = AESGCM(kek).decrypt(_unb64(blob["nonce"]), _unb64(blob["ciphertext"]), None)
+    except (InvalidTag, KeyError, ValueError, TypeError) as exc:
+        raise VaultCryptoError("import failed (wrong passphrase or corrupt export)") from exc
+    if len(key) != _KEY_BYTES:
+        raise VaultCryptoError(f"imported key is {len(key)} bytes, expected {_KEY_BYTES}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(key)
+    os.chmod(path, 0o600)

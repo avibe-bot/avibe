@@ -3667,6 +3667,67 @@ def cmd_vault_inject(args):
         return 1
 
 
+def _read_passphrase_stdin(help_command: str) -> str:
+    data = sys.stdin.read()
+    phrase = data.split("\n", 1)[0].strip() if data else ""
+    if not phrase:
+        raise TaskCliError("a passphrase is required on stdin", code="missing_passphrase", help_command=help_command)
+    return phrase
+
+
+def cmd_vault_key_export(args):
+    from storage import vault_crypto
+
+    help_command = "vibe vault key export --help"
+    try:
+        passphrase = _read_passphrase_stdin(help_command)
+        blob = vault_crypto.export_machine_key(passphrase)
+        out = getattr(args, "out", None)
+        if out:
+            Path(out).write_text(json.dumps(blob, indent=2), encoding="utf-8")
+            try:
+                os.chmod(out, 0o600)
+            except OSError:
+                pass
+            _print_cli_payload("vault_key_export", written=True, path=str(out))
+        else:
+            print(json.dumps(blob, indent=2))
+        return 0
+    except vault_crypto.VaultCryptoError as exc:
+        _print_task_error(TaskCliError(str(exc), code="vault_key_export_failed", help_command=help_command))
+        return 1
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
+def cmd_vault_key_import(args):
+    from storage import vault_crypto
+
+    help_command = "vibe vault key import --help"
+    try:
+        passphrase = _read_passphrase_stdin(help_command)
+        try:
+            blob = json.loads(Path(args.file).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise TaskCliError(f"cannot read export file: {exc}", code="export_file_unreadable", help_command=help_command) from exc
+        vault_crypto.import_machine_key(blob, passphrase, force=bool(getattr(args, "force", False)))
+        _print_cli_payload("vault_key_import", imported=True)
+        return 0
+    except vault_crypto.VaultCryptoError as exc:
+        _print_task_error(TaskCliError(str(exc), code="vault_key_import_failed", help_command=help_command))
+        return 1
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
 def cmd_watch_add(args):
     try:
         session_policy = _validate_definition_session_policy(
@@ -6371,7 +6432,7 @@ def build_parser():
         error_help_command="vibe vault --help",
         error_hint="Run one of the vault subcommands below. Start with: vibe vault list",
     )
-    vault_subparsers = vault_parser.add_subparsers(dest="vault_command", metavar="{set,list,rm,run,fetch,request,export,inject}")
+    vault_subparsers = vault_parser.add_subparsers(dest="vault_command", metavar="{set,list,rm,run,fetch,request,export,inject,key}")
     vault_subparsers.required = True
 
     vault_set_parser = vault_subparsers.add_parser(
@@ -6488,6 +6549,40 @@ def build_parser():
     vault_inject_parser.add_argument("--out", required=True, metavar="FILE", help="Output file (written 0600)")
     vault_inject_parser.add_argument("--format", default="dotenv", choices=["dotenv", "json", "yaml", "toml"], help="Output format (default dotenv)")
     _add_json_noop(vault_inject_parser)
+
+    vault_key_parser = vault_subparsers.add_parser(
+        "key",
+        help="Back up / restore the vault machine key (for migration)",
+        description=(
+            "Export the machine key as a passphrase-wrapped blob, or import it on another "
+            "machine. The machine key encrypts standard-tier secrets at rest; back it up if "
+            "you move the vault somewhere the state dir doesn't travel with it."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault key --help",
+        error_hint="Run: vibe vault key export  |  vibe vault key import <file>",
+    )
+    vault_key_sub = vault_key_parser.add_subparsers(dest="vault_key_command", metavar="{export,import}")
+    vault_key_sub.required = True
+    vault_key_export_parser = vault_key_sub.add_parser(
+        "export",
+        help="Export the machine key (passphrase read from stdin)",
+        description="Export the machine key wrapped under a passphrase read from stdin. Writes JSON to --out or stdout.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault key export --help",
+    )
+    vault_key_export_parser.add_argument("--out", help="Write the export blob here (defaults to stdout); created 0600")
+    _add_json_noop(vault_key_export_parser)
+    vault_key_import_parser = vault_key_sub.add_parser(
+        "import",
+        help="Restore the machine key from an export (passphrase from stdin)",
+        description="Restore the machine key from an export blob. Refuses to overwrite an existing key without --force.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault key import --help",
+    )
+    vault_key_import_parser.add_argument("file", help="Export blob file produced by 'vibe vault key export'")
+    vault_key_import_parser.add_argument("--force", action="store_true", help="Overwrite an existing machine key")
+    _add_json_noop(vault_key_import_parser)
 
     vault_request_parser = vault_subparsers.add_parser(
         "request",
@@ -7229,6 +7324,12 @@ def main():
             sys.exit(cmd_vault_export(args))
         if args.vault_command == "inject":
             sys.exit(cmd_vault_inject(args))
+        if args.vault_command == "key":
+            if args.vault_key_command == "export":
+                sys.exit(cmd_vault_key_export(args))
+            if args.vault_key_command == "import":
+                sys.exit(cmd_vault_key_import(args))
+            parser.error("vault key command is required")
         parser.error("vault command is required")
     if args.command == "data":
         if args.data_command == "query":

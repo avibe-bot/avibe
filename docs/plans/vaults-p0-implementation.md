@@ -279,13 +279,15 @@ standard values; ETH preview depth. None block P0.
 P0 is complete and verified (commits 1–6). The schema is at final shape, so none of
 the below needs a migration. Status of the rest:
 
-**Headless-verifiable, ready to build (no new gates):**
+**Headless-verifiable:**
 
-- `vibe vault key export/import` — Argon2id-wrapped machine-key file for the
-  keychain-mode migration path (§7.2). Self-contained crypto + CLI; needs `argon2-cffi`.
+- `vibe vault key export/import` — passphrase-wrapped machine-key blob for backup /
+  migration (§7.2). **[done — 2026-06-21]** Uses Scrypt (zero new dep, ships in
+  `cryptography`; the blob records `kdf` so a later Argon2id variant is forward-
+  compatible — KDF choice for the protected tier is still open Q7).
 - Protected-tier **envelope wire format** (VMK + multi-wrap: password / passkey copies)
   as the shared spec — the *format* is testable headlessly even though the *decryption*
-  runs in the browser (below).
+  runs in the browser (below). *(next verifiable piece)*
 
 **Gated on the Incus regression env (live message pipeline) — built carefully there,
 not landed unverified here:**
