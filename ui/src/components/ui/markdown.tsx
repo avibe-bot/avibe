@@ -35,17 +35,27 @@ import { cn } from '@/lib/utils';
 // not sprout stray hard breaks.
 
 // Vault dynamic-ask: an agent reply may contain `$<OPENAI_API_KEY>`. When interactive,
-// we rewrite each marker (outside code spans) to an `avibe-secret:NAME` link that the
-// `a` handler renders as an inline SecretRequestCard. Code spans are left verbatim so a
-// marker shown in an example never becomes a real input card.
+// we rewrite each marker (outside code) to an `avibe-secret:NAME` link that the `a` handler
+// renders as an inline SecretRequestCard. Fenced/inline code spans AND indented (≥4-space / tab)
+// code lines are left verbatim so a marker shown in any code example never becomes a real
+// input card.
 const SECRET_LINK_SCHEME = 'avibe-secret';
 const SECRET_REQUEST_RE = /\$<([A-Z][A-Z0-9_]*)>/g;
 const CODE_SPAN_RE = /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g;
+const INDENTED_CODE_LINE_RE = /^(?: {4}|\t)/;
 
 function linkifySecretRequests(text: string): string {
   if (!text.includes('$<')) return text;
+  // Within a non-fenced/non-inline-code segment, still skip indented code lines.
   const rewrite = (segment: string) =>
-    segment.replace(SECRET_REQUEST_RE, (_m, name) => `[${name}](${SECRET_LINK_SCHEME}:${name})`);
+    segment
+      .split('\n')
+      .map((line) =>
+        INDENTED_CODE_LINE_RE.test(line)
+          ? line
+          : line.replace(SECRET_REQUEST_RE, (_m, name) => `[${name}](${SECRET_LINK_SCHEME}:${name})`),
+      )
+      .join('\n');
   // Partition on code spans; rewrite only the non-code segments (code stays verbatim).
   let result = '';
   let last = 0;

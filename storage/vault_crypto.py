@@ -78,11 +78,18 @@ def _load_key_file(path: Path) -> bytes:
     key = path.read_bytes()
     if len(key) != _KEY_BYTES:
         raise VaultCryptoError(f"machine key at {path} is {len(key)} bytes, expected {_KEY_BYTES}")
-    try:
-        if stat.S_IMODE(os.stat(path).st_mode) & 0o077:
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    if mode & 0o077:
+        # Loose perms (e.g. a 0644 backup restore). Repair to 0600; if we CAN'T (read-only FS,
+        # ownership mismatch), refuse rather than silently use a key other local users can read.
+        try:
             os.chmod(path, 0o600)
-    except OSError:
-        pass
+        except OSError as exc:
+            raise VaultCryptoError(
+                f"machine key at {path} is group/world-accessible (mode {mode:#o}) and could not be tightened to 0600"
+            ) from exc
+        if stat.S_IMODE(os.stat(path).st_mode) & 0o077:
+            raise VaultCryptoError(f"machine key at {path} remains group/world-accessible (mode {mode:#o}); refusing to use it")
     return key
 
 

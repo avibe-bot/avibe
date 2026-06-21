@@ -119,3 +119,20 @@ def test_inject_unknown_format_rejected(tmp_path, capfd):
     code = cli.cmd_vault_inject(_ns(keys="K", out=str(tmp_path / "o"), format="xml"))
     assert code == 1
     assert json.loads(capfd.readouterr().err)["code"] == "invalid_format"
+
+
+def test_inject_writes_file_even_if_audit_fails(tmp_path, capfd, monkeypatch):
+    # The secret file is already on disk once written; a bookkeeping failure must not report a
+    # failed command (callers would retry though the secret is already delivered).
+    from storage import vault_service
+
+    _set("A_KEY", "alpha-1", tmp_path)
+    capfd.readouterr()
+
+    def _boom(*a, **k):
+        raise RuntimeError("db locked")
+
+    monkeypatch.setattr(vault_service, "record_deliveries", _boom)
+    out = tmp_path / "ok.env"
+    assert cli.cmd_vault_inject(_ns(keys="A_KEY", out=str(out), format="dotenv")) == 0
+    assert out.read_text() == "A_KEY=alpha-1\n"  # delivered despite the audit failure

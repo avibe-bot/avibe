@@ -224,3 +224,24 @@ def test_fetch_returns_response_even_if_audit_fails(http_server, tmp_path, capfd
     assert code == 0
     assert "response-ok" in captured.out
     assert len(log) == 1
+
+
+def test_fetch_rejects_directory_output_before_sending(http_server, tmp_path, capfd):
+    # --output pointing at an existing directory passes a parent-only check but can never be
+    # written as a file; reject before the (possibly side-effecting) request runs.
+    base, log = http_server
+    _set("GH_PAT", "ghp-dir-out", tmp_path, allow_host=["127.0.0.1"])
+    capfd.readouterr()
+    code = cli.cmd_vault_fetch(_ns(auth="GH_PAT", url=f"{base}/x", method="POST", output=str(tmp_path)))
+    captured = capfd.readouterr()
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "output_unwritable"
+    assert log == []  # never sent
+
+
+def test_host_allowed_is_case_insensitive():
+    # Hostnames are case-insensitive; a stored uppercase entry must still match the lowercased
+    # urlsplit hostname, or a valid host-bound secret becomes unusable.
+    assert cli._host_allowed("api.github.com", ["API.GITHUB.COM"]) is True
+    assert cli._host_allowed("api.github.com", [".GitHub.com"]) is True
+    assert cli._host_allowed("API.GITHUB.COM", ["api.github.com"]) is True

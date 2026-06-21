@@ -3495,11 +3495,17 @@ def _build_secret_policy(args) -> dict | None:
 
 
 def _host_allowed(host, allowed) -> bool:
-    """Exact host match, or a leading-dot entry (``.github.com``) matching subdomains."""
+    """Exact host match, or a leading-dot entry (``.github.com``) matching subdomains.
+
+    Hostnames are case-insensitive, so both sides are lowercased — otherwise a stored
+    ``API.GITHUB.COM`` would never match the lowercase ``urlsplit().hostname`` and a valid
+    host-bound secret becomes unusable.
+    """
     if not host:
         return False
+    host = host.lower()
     for entry in allowed or []:
-        entry = str(entry).strip()
+        entry = str(entry).strip().lower()
         if not entry:
             continue
         if entry.startswith("."):
@@ -3575,14 +3581,24 @@ def cmd_vault_fetch(args):
                 help_command=help_command,
             )
         # Preflight --output BEFORE sending: a side-effecting request (POST/PATCH) must not run
-        # and then fail on a local write, or the agent will retry and duplicate the action.
+        # and then fail on a local write, or the agent will retry and duplicate the action. Check
+        # the target itself (an existing dir, or an existing file we can't write), not just the
+        # parent.
         output = getattr(args, "output", None)
-        if output and (not Path(output).parent.is_dir() or not os.access(Path(output).parent, os.W_OK)):
-            raise TaskCliError(
-                f"output path is not writable: {output}",
-                code="output_unwritable",
-                help_command=help_command,
-            )
+        if output:
+            out_path = Path(output)
+            if out_path.is_dir():
+                writable = False  # a directory target can never be written as a file
+            elif out_path.exists():
+                writable = os.access(out_path, os.W_OK)
+            else:
+                writable = out_path.parent.is_dir() and os.access(out_path.parent, os.W_OK)
+            if not writable:
+                raise TaskCliError(
+                    f"output path is not writable: {output}",
+                    code="output_unwritable",
+                    help_command=help_command,
+                )
         host = urlsplit(url).hostname
         if not host:
             raise TaskCliError(f"invalid --url: {url!r}", code="invalid_url", help_command=help_command)
@@ -3798,8 +3814,13 @@ def cmd_vault_inject(args):
             values = vault_service.resolve(conn, keys)
         # Write first; if the path is unwritable this raises and no delivery is recorded.
         _write_private_file(Path(out), _render_secrets(values, keys, fmt))
-        with engine.begin() as conn:
-            vault_service.record_deliveries(conn, keys, requester={"source": "cli", "pid": os.getpid()}, mode=f"inject:{fmt}")
+        # The file is on disk → delivered. A bookkeeping failure must not report a failed command
+        # (callers would retry though the secrets are already written), so record best-effort.
+        try:
+            with engine.begin() as conn:
+                vault_service.record_deliveries(conn, keys, requester={"source": "cli", "pid": os.getpid()}, mode=f"inject:{fmt}")
+        except Exception:
+            pass
         _print_cli_payload("vault_inject", written=True, path=str(out), format=fmt, keys=keys)
         return 0
     except vault_service.SecretNotFoundError as exc:

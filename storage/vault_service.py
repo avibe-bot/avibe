@@ -21,6 +21,7 @@ from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import IntegrityError
 
 from storage import vault_crypto
 from storage.models import vault_audit, vault_groups, vault_requests, vault_secrets
@@ -201,25 +202,31 @@ def create_secret(
     public_meta = {"preview": _preview(value)}
     if description:
         public_meta["description"] = description
-    conn.execute(
-        vault_secrets.insert().values(
-            id=_id("vlt"),
-            name=name,
-            group_name=group,
-            tags=json.dumps(tags) if tags else None,
-            kind="static",
-            protection="standard",
-            source=source,
-            ciphertext=sealed.ciphertext,
-            nonce=sealed.nonce,
-            wrap_meta=sealed.wrap_meta,
-            public_meta=json.dumps(public_meta),
-            policy=json.dumps(policy) if policy else None,
-            use_count=0,
-            created_at=now,
-            updated_at=now,
+    try:
+        conn.execute(
+            vault_secrets.insert().values(
+                id=_id("vlt"),
+                name=name,
+                group_name=group,
+                tags=json.dumps(tags) if tags else None,
+                kind="static",
+                protection="standard",
+                source=source,
+                ciphertext=sealed.ciphertext,
+                nonce=sealed.nonce,
+                wrap_meta=sealed.wrap_meta,
+                public_meta=json.dumps(public_meta),
+                policy=json.dumps(policy) if policy else None,
+                use_count=0,
+                created_at=now,
+                updated_at=now,
+            )
         )
-    )
+    except IntegrityError as exc:
+        # Two concurrent creates (e.g. Web dialog + inline card) can both pass the existence
+        # check above; the loser hits the UNIQUE(name) constraint here. Surface it as the same
+        # SecretExistsError → 409 so the racing already-fulfilled ask is handled, not a 500.
+        raise SecretExistsError(name) from exc
     audit(conn, "created", secret_name=name)
     # Any pending dynamic-ask (provision) request for this name is now satisfied,
     # regardless of which create path stored it (CLI / API / inline card) — so a
