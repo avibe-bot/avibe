@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { KeyRound } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { Badge } from './badge';
+import { Badge, badgeVariants } from './badge';
 import { Button } from './button';
 import { Input } from './input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './dialog';
 import { useApi } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
+import { cn } from '@/lib/utils';
 
 /**
  * Inline rendering of a `$<NAME>` dynamic-ask marker in an agent message. The agent
@@ -57,11 +58,13 @@ export const SecretRequestCard: React.FC<{ name: string }> = ({ name }) => {
 
   return (
     <>
-      <button type="button" onClick={() => setOpen(true)} className="align-baseline">
-        <Badge variant="warning" className="cursor-pointer align-baseline font-medium">
-          <KeyRound className="mr-1 inline size-3" />
-          {name} — {t('vaults.request.provide')}
-        </Badge>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className={cn(badgeVariants({ variant: 'warning' }), 'cursor-pointer align-baseline font-medium')}
+      >
+        <KeyRound className="mr-1 inline size-3" />
+        {name} — {t('vaults.request.provide')}
       </button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>

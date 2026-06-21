@@ -3184,6 +3184,13 @@ def _open_vault_engine():
     return create_sqlite_engine(paths.get_sqlite_state_path())
 
 
+def _is_env_name(name: str) -> bool:
+    """ASCII shell/env identifier: a letter or underscore, then letters/digits/underscores."""
+    if not name or not name[0].isascii() or not (name[0].isalpha() or name[0] == "_"):
+        return False
+    return all(c.isascii() and (c.isalnum() or c == "_") for c in name)
+
+
 def _parse_env_specs(specs) -> dict:
     """Map ENV var name -> vault secret name from ``--env`` specs.
 
@@ -3203,6 +3210,11 @@ def _parse_env_specs(specs) -> dict:
                 local = vault_name = part
             if not local or not vault_name:
                 raise TaskCliError(f"invalid --env spec: {part!r}", code="invalid_env_spec", help_command="vibe vault run --help")
+            # The local (LHS) becomes an env var name / is interpolated into `export`
+            # lines for eval — reject anything that isn't a plain identifier so it can't
+            # break the shell or smuggle in extra commands.
+            if not _is_env_name(local):
+                raise TaskCliError(f"invalid env var name: {local!r} (use [A-Za-z_][A-Za-z0-9_]*)", code="invalid_env_name", help_command="vibe vault run --help")
             mapping[local] = vault_name
     return mapping
 
@@ -3492,6 +3504,15 @@ def cmd_vault_fetch(args):
         host = urlsplit(url).hostname
         if not host:
             raise TaskCliError(f"invalid --url: {url!r}", code="invalid_url", help_command=help_command)
+        # Never attach a credential over plaintext: a real host must be HTTPS so domain
+        # binding can't be used to downgrade transport. Loopback is exempt for local dev.
+        scheme = (urlsplit(url).scheme or "").lower()
+        if scheme != "https" and host not in {"localhost", "127.0.0.1", "::1"}:
+            raise TaskCliError(
+                f"refusing to attach a credential over plaintext {scheme or 'http'}:// to {host!r}; use https (loopback exempt)",
+                code="insecure_transport",
+                help_command=help_command,
+            )
 
         engine = _open_vault_engine()
         # Read policy + decrypt in a read connection. The host check runs BEFORE the
@@ -3684,11 +3705,9 @@ def cmd_vault_key_export(args):
         blob = vault_crypto.export_machine_key(passphrase)
         out = getattr(args, "out", None)
         if out:
-            Path(out).write_text(json.dumps(blob, indent=2), encoding="utf-8")
-            try:
-                os.chmod(out, 0o600)
-            except OSError:
-                pass
+            # Create 0600 from the start (the blob holds the passphrase-wrapped key) —
+            # no window where it's world-readable under a permissive umask.
+            _write_private_file(Path(out), json.dumps(blob, indent=2) + "\n")
             _print_cli_payload("vault_key_export", written=True, path=str(out))
         else:
             print(json.dumps(blob, indent=2))

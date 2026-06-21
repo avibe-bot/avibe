@@ -126,6 +126,32 @@ def test_audit_records_events_without_value(vault):
     assert all("topsecretvalue42" not in json.dumps(r) for r in rows)
 
 
+def test_create_auto_creates_missing_group(vault):
+    engine, key_path = vault
+    # No manual group seed — create_secret must auto-create 'brandnew' so the FK holds.
+    meta = _create(engine, key_path, name="NEW_GROUP_KEY", value="v", group="brandnew")
+    assert meta["group"] == "brandnew"
+    with engine.connect() as conn:
+        from storage.models import vault_groups
+
+        groups = {r[0] for r in conn.execute(vault_groups.select().with_only_columns(vault_groups.c.name))}
+    assert "brandnew" in groups
+
+
+def test_create_fulfills_pending_provision_request(vault):
+    engine, key_path = vault
+    with engine.begin() as conn:
+        req = vs.create_provision_request(conn, "ASKED_KEY", requester={"agent": "claude"})
+    # Saving the secret through the plain create path (not fulfill_provision) must still
+    # mark the pending request fulfilled, so `request --wait` resolves.
+    _create(engine, key_path, name="ASKED_KEY", value="provided-value")
+    with engine.begin() as conn:
+        from storage.models import vault_requests
+
+        status = conn.execute(vault_requests.select().where(vault_requests.c.id == req["id"])).mappings().first()["status"]
+    assert status == "fulfilled"
+
+
 def test_provision_request_and_fulfill(vault):
     engine, key_path = vault
     with engine.begin() as conn:

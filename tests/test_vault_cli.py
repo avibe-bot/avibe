@@ -137,6 +137,13 @@ def test_rm_then_list_empty(tmp_path, capfd):
     assert json.loads(capfd.readouterr().out)["secrets"] == []
 
 
+def test_run_rejects_bad_env_name(tmp_path, capfd):
+    code = cli.cmd_vault_run(_ns(env=["BAD-NAME=KEY"], command_argv=["echo", "hi"]))
+    captured = capfd.readouterr()
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "invalid_env_name"
+
+
 def test_request_creates_pending(tmp_path, capfd):
     code = cli.cmd_vault_request(_ns(name="WANTED_KEY", reason="need it"))
     captured = capfd.readouterr()

@@ -143,6 +143,25 @@ def ensure_default_group(conn: Connection) -> None:
         )
 
 
+def _ensure_group(conn: Connection, name: str) -> None:
+    """Create the group row if it's missing so a secret's ``group_name`` FK is satisfied.
+
+    The Vaults UI / ``--group`` expose arbitrary group labels; without this an unseeded
+    group would trip the FK with a generic ``FOREIGN KEY constraint failed`` instead of
+    the group option just working.
+    """
+    if conn.execute(select(vault_groups.c.name).where(vault_groups.c.name == name)).first() is None:
+        conn.execute(
+            vault_groups.insert().values(
+                name=name,
+                description="Default group" if name == DEFAULT_GROUP else None,
+                grantable=1,
+                max_grant_ttl_seconds=900,
+                created_at=_now(),
+            )
+        )
+
+
 def _require_row(conn: Connection, name: str) -> dict[str, Any]:
     row = conn.execute(select(vault_secrets).where(vault_secrets.c.name == name)).mappings().first()
     if row is None:
@@ -176,7 +195,7 @@ def create_secret(
     if conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name)).first() is not None:
         raise SecretExistsError(name)
 
-    ensure_default_group(conn)
+    _ensure_group(conn, group)
     sealed = vault_crypto.seal_standard(value.encode("utf-8"), machine_key=machine_key, key_path=key_path)
     now = _now()
     public_meta = {"preview": _preview(value)}
@@ -202,6 +221,18 @@ def create_secret(
         )
     )
     audit(conn, "created", secret_name=name)
+    # Any pending dynamic-ask (provision) request for this name is now satisfied,
+    # regardless of which create path stored it (CLI / API / inline card) — so a
+    # `vibe vault request --wait` resolves instead of timing out.
+    conn.execute(
+        vault_requests.update()
+        .where(
+            vault_requests.c.request_type == "provision",
+            vault_requests.c.secret_name == name,
+            vault_requests.c.status == "pending",
+        )
+        .values(status="fulfilled", decided_at=_now())
+    )
     return _meta_payload(_require_row(conn, name))
 
 
@@ -284,7 +315,7 @@ def record_proxy_use(conn: Connection, name: str, *, requester: Any = None, deli
     conn.execute(
         vault_secrets.update()
         .where(vault_secrets.c.name == name)
-        .values(last_used_at=_now(), use_count=(row.get("use_count") or 0) + 1)
+        .values(last_used_at=_now(), use_count=vault_secrets.c.use_count + 1)
     )
     audit(conn, "proxied", secret_name=name, requester=requester, delivery=delivery)
 
@@ -315,7 +346,7 @@ def resolve(
         conn.execute(
             vault_secrets.update()
             .where(vault_secrets.c.name == name)
-            .values(last_used_at=_now(), use_count=(row.get("use_count") or 0) + 1)
+            .values(last_used_at=_now(), use_count=vault_secrets.c.use_count + 1)
         )
         audit(conn, "delivered", secret_name=name, requester=requester, delivery={"mode": mode})
     return out

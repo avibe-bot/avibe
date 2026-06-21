@@ -122,6 +122,17 @@ def test_fetch_denies_disallowed_host_without_hitting_it(http_server, tmp_path, 
     assert log == []  # the request was never sent
 
 
+def test_fetch_refuses_plaintext_http_to_real_host(http_server, tmp_path, capfd):
+    # A real (non-loopback) host over plaintext http must be refused before the secret
+    # is decrypted, even though the host is in allowed_hosts.
+    _set("TLS_KEY", "secret", tmp_path, allow_host=["api.example.com"])
+    capfd.readouterr()
+    code = cli.cmd_vault_fetch(_ns(auth="TLS_KEY", url="http://api.example.com/x"))
+    captured = capfd.readouterr()
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "insecure_transport"
+
+
 def test_fetch_refuses_unbound_secret(http_server, tmp_path, capfd):
     base, log = http_server
     _set("UNBOUND_KEY", "secret", tmp_path)  # no --allow-host

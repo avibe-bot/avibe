@@ -62,6 +62,11 @@ def test_cli_export_then_import_roundtrip(tmp_path, monkeypatch, capfd):
     assert cli.cmd_vault_key_export(argparse.Namespace(out=str(out))) == 0
     payload = json.loads(capfd.readouterr().out)
     assert payload["written"] is True
+    # The export blob holds the wrapped key — it must be 0600 from creation.
+    import os
+    import stat
+
+    assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
     blob = json.loads(out.read_text())
     assert blob["scheme"] == vault_crypto.EXPORT_SCHEME
 
