@@ -1370,6 +1370,38 @@ def test_reap_orphaned_sessions_excludes_active_claude_auth_clients(monkeypatch,
     assert captured["exclude_pids"] == {600}
 
 
+def test_reap_orphaned_sessions_disables_in_tree_when_auth_client_pid_unknown(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _fake_reap(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    class _AuthService:
+        @staticmethod
+        def active_claude_auth_client_pids():
+            return set()
+
+        @staticmethod
+        def has_active_claude_auth_client_with_unknown_pid():
+            return True
+
+    monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
+
+    controller = _Controller(tmp_path)
+    controller.agent_auth_service = _AuthService()
+    handler = SessionHandler(controller)
+    controller.claude_sessions[f"slack_C123:{tmp_path}"] = object()
+
+    asyncio.run(handler.reap_orphaned_claude_sessions())
+
+    assert captured["reap_in_tree"] is False
+
+
 def test_cleanup_session_swallows_cancelled_receiver_task(monkeypatch, tmp_path: Path) -> None:
     events = []
 

@@ -324,16 +324,6 @@ async def reap_orphaned_claude_processes(
         not be resolved, or a session create is in flight), otherwise a live
         tracked/connecting process could be misclassified as an orphan.
 
-    (b) **Cross-restart orphan** — a Claude SDK session subprocess
-        (``--input-format stream-json``) reparented to init (``ppid == 1``)
-        after a previous service crashed/restarted, carrying a
-        ``--resume <native_id>`` for a session we currently own under a
-        *different* pid. Requiring both the SDK streaming signature and
-        ``ppid == 1`` keeps this from touching a user's manually-launched
-        ``claude --resume`` of the same conversation or another live Avibe
-        instance's process. The trade-off is that an orphan reparented to a
-        non-init subreaper (e.g. a systemd service manager) is not reaped here.
-
     Safety guards:
     - ``owned_pids`` and their descendants are never reaped.
     - ``exclude_pids`` and their descendants are never reaped. Callers use this
@@ -400,22 +390,12 @@ async def reap_orphaned_claude_processes(
             ):
                 candidates.add(row.pid)
 
-    # (b) init-reparented (ppid == 1) cross-restart orphan carrying a tracked
-    # --resume id under a foreign pid. Require the SDK stream-json input marker
-    # too: a user's manual `claude --resume` can also become init-reparented if
-    # its launching shell exits, but it is not an Avibe SDK subprocess.
-    for native_id, owner_pid in tracked_resume_ids.items():
-        if not native_id:
-            continue
-        for row in claude_rows:
-            if row.pid in service_tree:
-                continue  # in-tree handled by (a) / the duplicate reaper
-            if row.ppid != 1:
-                continue  # only reap true init-reparented orphans
-            if row.pid == owner_pid:
-                continue
-            if _command_has_resume(row.command, native_id) and _command_has_stream_json_input(row.command):
-                candidates.add(row.pid)
+    # Do not reap out-of-tree resume matches here. ``--resume`` and
+    # ``--input-format stream-json`` are public Claude CLI/API surface, so an
+    # init-reparented external client can look identical to a previous Avibe
+    # subprocess. Without an Avibe-specific ownership marker or process lineage,
+    # the safe fallback is to leave cross-restart cleanup to the narrower
+    # duplicate-resume reaper, which scopes matches to the current runtime tree.
 
     candidates -= owned_all
     candidates -= excluded_all

@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from modules.agents.claude_agent import ClaudeAgent
+from modules.agents.service import AgentService
 
 
 class _ResultMessage:
@@ -93,6 +94,43 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         # Despite the emit failure, the turn settled: the active flag was released
         # and the pending request was popped.
         agent.emit_result_message.assert_awaited_once()
+        self.assertEqual(mark_idle_calls, [composite_key])
+        self.assertFalse(agent._has_pending_requests(composite_key))
+
+    async def test_emit_failure_releases_runtime_gate(self):
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        service = AgentService(agent.controller)
+        service.register(agent)
+        agent.controller.agent_service = service
+        composite_key = "session-1:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform_specific={
+                "agent_runtime_turn_key": composite_key,
+                "agent_runtime_turn_token": "R1",
+            },
+        )
+        pending_context = SimpleNamespace(
+            platform_specific={
+                "turn_token": "T1",
+                "agent_runtime_turn_key": composite_key,
+                "agent_runtime_turn_token": "R1",
+            },
+        )
+        agent._pending_requests[composite_key] = [SimpleNamespace(context=pending_context)]
+        gate = service._get_turn_gate(composite_key)
+        await gate.lock.acquire()
+        gate.token = "R1"
+        agent.emit_result_message = AsyncMock(side_effect=RuntimeError("boom"))
+
+        await agent._receive_messages(
+            _one_result_client(), "session-1", "/tmp/work", context, composite_key=composite_key
+        )
+
+        agent.emit_result_message.assert_awaited_once()
+        self.assertFalse(gate.lock.locked())
         self.assertEqual(mark_idle_calls, [composite_key])
         self.assertFalse(agent._has_pending_requests(composite_key))
 

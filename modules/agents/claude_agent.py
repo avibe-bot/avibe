@@ -702,6 +702,7 @@ class ClaudeAgent(BaseAgent):
                         # would swallow the error, skip the mark-idle, and leave the
                         # session pinned ``active`` (exempt from idle eviction until
                         # the next service restart). Run it in a ``finally``.
+                        emit_failed = False
                         try:
                             await self.emit_result_message(
                                 context,
@@ -720,6 +721,9 @@ class ClaudeAgent(BaseAgent):
                             )
                             if pending_request is not None and native_session_id:
                                 self._maybe_backfill_session_title(pending_request, native_session_id)
+                        except Exception:
+                            emit_failed = True
+                            raise
                         finally:
                             # Settle the turn regardless of an emit/backfill
                             # failure: clear the loading reaction and the stale
@@ -744,6 +748,8 @@ class ClaudeAgent(BaseAgent):
                                     composite_key,
                                     exc_info=True,
                                 )
+                            if emit_failed:
+                                self._release_service_runtime_turn(context)
                         continue
 
                     # Ignore UserMessage/tool results; toolcalls are emitted from ToolUseBlock.

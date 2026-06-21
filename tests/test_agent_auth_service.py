@@ -324,6 +324,30 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         pids = service.active_claude_auth_client_pids()
 
         self.assertEqual(pids, {501, 502})
+        self.assertFalse(service.has_active_claude_auth_client_with_unknown_pid())
+
+    async def test_active_claude_auth_client_unknown_pid_detected(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+        done_task = asyncio.create_task(asyncio.sleep(0))
+        await done_task
+
+        flow = AgentAuthFlow(
+            flow_id="flow-im",
+            backend="claude",
+            settings_key="C1",
+            initiator_user_id="U1",
+            context=context,
+            process=None,
+            reader_task=done_task,
+            waiter_task=done_task,
+            claude_client=SimpleNamespace(),
+        )
+        service._flows[flow.flow_key] = flow
+
+        self.assertEqual(service.active_claude_auth_client_pids(), set())
+        self.assertTrue(service.has_active_claude_auth_client_with_unknown_pid())
 
     async def test_start_setup_reports_claude_start_failure(self):
         controller = _StubController()

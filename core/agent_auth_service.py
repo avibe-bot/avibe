@@ -383,22 +383,30 @@ class AgentAuthService:
         # and runs in a worker thread to avoid blocking the auth event loop.
         self._post_web_success_hook: Optional[Any] = None
 
-    def active_claude_auth_client_pids(self) -> set[int]:
-        """Return Claude SDK client pids owned by in-progress auth flows."""
-        pids: set[int] = set()
+    def _active_claude_auth_clients(self) -> list[Any]:
+        clients: list[Any] = []
         for flow in list(self._flows.values()):
             if flow.backend != "claude" or flow.claude_client is None:
                 continue
-            pid = get_claude_client_pid(flow.claude_client)
-            if pid:
-                pids.add(pid)
+            clients.append(flow.claude_client)
         for flow in list(self._web_flows.values()):
             if flow.backend != "claude" or flow.claude_client is None:
                 continue
-            pid = get_claude_client_pid(flow.claude_client)
+            clients.append(flow.claude_client)
+        return clients
+
+    def active_claude_auth_client_pids(self) -> set[int]:
+        """Return Claude SDK client pids owned by in-progress auth flows."""
+        pids: set[int] = set()
+        for client in self._active_claude_auth_clients():
+            pid = get_claude_client_pid(client)
             if pid:
                 pids.add(pid)
         return pids
+
+    def has_active_claude_auth_client_with_unknown_pid(self) -> bool:
+        """Whether an in-progress Claude auth flow owns a client with no exposed pid."""
+        return any(get_claude_client_pid(client) is None for client in self._active_claude_auth_clients())
 
     def _t(self, key: str, **kwargs) -> str:
         lang = getattr(self.controller, "_get_lang", lambda: getattr(self.controller.config, "language", "en"))()

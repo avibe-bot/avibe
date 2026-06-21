@@ -1369,6 +1369,8 @@ class SessionHandler(BaseHandler):
         active_auth_pids = getattr(auth_service, "active_claude_auth_client_pids", None)
         if callable(active_auth_pids):
             exclude_pids.update(active_auth_pids())
+        auth_pid_unknown = getattr(auth_service, "has_active_claude_auth_client_with_unknown_pid", None)
+        auth_client_pid_unknown = bool(auth_pid_unknown()) if callable(auth_pid_unknown) else False
         # Let unexpected errors surface to the caller (``periodic_cleanup``
         # logs them at error level); ``reap_orphaned_claude_processes`` already
         # absorbs the expected ``ps``-read failure internally.
@@ -1377,7 +1379,7 @@ class SessionHandler(BaseHandler):
             tracked_resume_ids=tracked_resume_ids,
             cli_path=self._get_claude_cli_path_override(),
             logger=logger,
-            reap_in_tree=owner_set_complete and not creates_in_flight,
+            reap_in_tree=owner_set_complete and not creates_in_flight and not auth_client_pid_unknown,
             exclude_pids=exclude_pids,
         )
 
