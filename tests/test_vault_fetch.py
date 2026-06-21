@@ -245,3 +245,22 @@ def test_host_allowed_is_case_insensitive():
     assert cli._host_allowed("api.github.com", ["API.GITHUB.COM"]) is True
     assert cli._host_allowed("api.github.com", [".GitHub.com"]) is True
     assert cli._host_allowed("API.GITHUB.COM", ["api.github.com"]) is True
+
+
+def test_fetch_rejects_fifo_output_before_sending(http_server, tmp_path, capfd):
+    # A FIFO / special file passes os.access(W_OK) but write_bytes can block/fail after the
+    # credential-bearing request ran; require an existing regular file. Rejected before sending.
+    import os as _os
+
+    if not hasattr(_os, "mkfifo"):
+        pytest.skip("mkfifo not available on this platform")
+    base, log = http_server
+    _set("GH_PAT", "ghp-fifo", tmp_path, allow_host=["127.0.0.1"])
+    capfd.readouterr()
+    fifo = tmp_path / "pipe"
+    _os.mkfifo(fifo)
+    code = cli.cmd_vault_fetch(_ns(auth="GH_PAT", url=f"{base}/x", method="POST", output=str(fifo)))
+    captured = capfd.readouterr()
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "output_unwritable"
+    assert log == []  # never sent

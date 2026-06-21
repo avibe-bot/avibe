@@ -3587,10 +3587,11 @@ def cmd_vault_fetch(args):
         output = getattr(args, "output", None)
         if output:
             out_path = Path(output)
-            if out_path.is_dir():
-                writable = False  # a directory target can never be written as a file
-            elif out_path.exists():
-                writable = os.access(out_path, os.W_OK)
+            if out_path.exists():
+                # Require an existing regular file: a dir can't be written as a file, and a
+                # FIFO / device (e.g. /dev/full) passes os.access but write_bytes can block or
+                # fail AFTER the credential-bearing request already ran.
+                writable = out_path.is_file() and os.access(out_path, os.W_OK)
             else:
                 writable = out_path.parent.is_dir() and os.access(out_path.parent, os.W_OK)
             if not writable:
@@ -3894,7 +3895,7 @@ def cmd_vault_key_export(args):
 
 
 def cmd_vault_key_import(args):
-    from storage import vault_crypto
+    from storage import vault_crypto, vault_service
 
     help_command = "vibe vault key import --help"
     try:
@@ -3904,6 +3905,16 @@ def cmd_vault_key_import(args):
         except (OSError, ValueError) as exc:
             raise TaskCliError(f"cannot read export file: {exc}", code="export_file_unreadable", help_command=help_command) from exc
         vault_crypto.import_machine_key(blob, passphrase, force=bool(getattr(args, "force", False)))
+        # Replacing the machine key changes vault decryptability for every standard-tier secret;
+        # record it for the activity panel, symmetric with key export. Best-effort.
+        try:
+            engine = _open_vault_engine()
+            with engine.begin() as conn:
+                vault_service.audit(
+                    conn, "key_imported", requester={"source": "cli", "pid": os.getpid()}, delivery={"file": str(args.file)}
+                )
+        except Exception:
+            pass
         _print_cli_payload("vault_key_import", imported=True)
         return 0
     except vault_crypto.VaultCryptoError as exc:

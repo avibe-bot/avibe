@@ -1514,6 +1514,9 @@ const MessageRow = memo(function MessageRow({ message, session, messageFontSize,
         content={message.text}
         softBreaks={isUser}
         references={(message.content as { references?: MentionReference[] } | null)?.references}
+        // Only the agent's own replies may render `$<NAME>` as an interactive secret-input card;
+        // a user bubble that contains the marker stays plain text (no false "agent asked" card).
+        secretRequests={isAgent}
         className="vr-markdown--inherit-size"
       />
     )

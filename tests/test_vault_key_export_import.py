@@ -131,3 +131,22 @@ def test_cli_export_writes_audit_event(tmp_path, monkeypatch, capfd):
     assert "key_exported" in {r["event"] for r in rows}
     # The audit row never carries the passphrase.
     assert all(secret_phrase not in json.dumps(r) for r in rows)
+
+
+def test_cli_import_writes_audit_event(tmp_path, monkeypatch, capfd):
+    # Importing/replacing the machine key changes vault decryptability, so it must leave a
+    # value-free audit trail (symmetric with key export).
+    from storage.models import vault_audit
+
+    vault_crypto.get_or_create_machine_key()  # seed the isolated home so export has a key
+    out = tmp_path / "vault-key.json"
+    monkeypatch.setattr("sys.stdin", io.StringIO("pw\n"))
+    assert cli.cmd_vault_key_export(argparse.Namespace(out=str(out))) == 0
+    capfd.readouterr()
+    monkeypatch.setattr("sys.stdin", io.StringIO("pw\n"))
+    assert cli.cmd_vault_key_import(argparse.Namespace(file=str(out), force=True)) == 0
+    capfd.readouterr()
+    engine = cli._open_vault_engine()
+    with engine.connect() as conn:
+        events = {r["event"] for r in conn.execute(vault_audit.select()).mappings()}
+    assert "key_imported" in events

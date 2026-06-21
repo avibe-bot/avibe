@@ -152,15 +152,21 @@ def _ensure_group(conn: Connection, name: str) -> None:
     the group option just working.
     """
     if conn.execute(select(vault_groups.c.name).where(vault_groups.c.name == name)).first() is None:
-        conn.execute(
-            vault_groups.insert().values(
-                name=name,
-                description="Default group" if name == DEFAULT_GROUP else None,
-                grantable=1,
-                max_grant_ttl_seconds=900,
-                created_at=_now(),
+        try:
+            conn.execute(
+                vault_groups.insert().values(
+                    name=name,
+                    description="Default group" if name == DEFAULT_GROUP else None,
+                    grantable=1,
+                    max_grant_ttl_seconds=900,
+                    created_at=_now(),
+                )
             )
-        )
+        except IntegrityError:
+            # A concurrent create inserted this brand-new group between our check and insert.
+            # The row now exists (all the FK needs), so swallow the PK conflict and continue —
+            # otherwise the loser's otherwise-valid secret create would fail with a raw error.
+            pass
 
 
 def _require_row(conn: Connection, name: str) -> dict[str, Any]:
