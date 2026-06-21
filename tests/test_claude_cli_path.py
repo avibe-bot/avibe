@@ -481,6 +481,37 @@ def test_session_handler_reuses_cached_claude_client_when_system_prompt_is_uncha
     assert "slack/U456" not in first_client.options.system_prompt["append"]
 
 
+def test_session_handler_marks_claude_sdk_session_process_owner(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+    registered: list[dict[str, Any]] = []
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["options"] = options
+            self._transport = type("T", (), {"_process": type("P", (), {"pid": 4321})()})()
+
+        async def connect(self) -> None:
+            captured["connected"] = True
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(
+        session_handler_module,
+        "register_claude_owned_process",
+        lambda client, **kwargs: registered.append({"client": client, **kwargs}),
+    )
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    client = _run_session(handler, context)
+
+    assert captured["connected"] is True
+    assert captured["options"].env["AVIBE_CLAUDE_PROCESS_OWNER"] == "session"
+    assert registered == [{"client": client, "native_session_id": None, "owner": "session"}]
+
+
 def test_session_handler_coalesces_concurrent_claude_client_creates(
     monkeypatch, tmp_path: Path
 ) -> None:

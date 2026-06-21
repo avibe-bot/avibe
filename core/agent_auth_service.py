@@ -20,7 +20,12 @@ from modules.claude_sdk_compat import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
 )
-from modules.agents.claude_process_reaper import get_claude_client_pid
+from modules.agents.claude_process_reaper import (
+    AVIBE_CLAUDE_AUTH_OWNER,
+    AVIBE_CLAUDE_PROCESS_OWNER_ENV,
+    get_claude_client_pid,
+    register_claude_owned_process,
+)
 from modules.agents.catalog import WEB_OAUTH_BACKENDS
 from modules.agents.opencode.message_processor import (
     extract_opencode_response_text,
@@ -376,6 +381,7 @@ class AgentAuthService:
         self._claude_oauth_attempt_counter = 0
         self._claude_oauth_batch: ClaudeOAuthBatch | None = None
         self._claude_oauth_lock = asyncio.Lock()
+        self._claude_control_flow_starts_in_flight = 0
         self._recover_interrupted_claude_oauth_settings_backup()
         # Optional callable invoked after a successful *web* auth flow so
         # the UI-server process can ask the long-running controller to
@@ -406,6 +412,8 @@ class AgentAuthService:
 
     def has_active_claude_auth_client_with_unknown_pid(self) -> bool:
         """Whether an in-progress Claude auth flow owns a client with no exposed pid."""
+        if self._claude_control_flow_starts_in_flight > 0:
+            return True
         return any(get_claude_client_pid(client) is None for client in self._active_claude_auth_clients())
 
     def _t(self, key: str, **kwargs) -> str:
@@ -998,8 +1006,10 @@ class AgentAuthService:
         # client or follow-up probes launch.
         attempt = await self._begin_claude_oauth_attempt()
         client = None
+        self._claude_control_flow_starts_in_flight += 1
         try:
             client = await self._create_claude_control_client(context)
+            register_claude_owned_process(client, owner=AVIBE_CLAUDE_AUTH_OWNER)
             response = await self._send_claude_control_request(
                 client,
                 {
@@ -1012,6 +1022,11 @@ class AgentAuthService:
             if client is not None:
                 await self._disconnect_claude_client(client)
             raise
+        finally:
+            self._claude_control_flow_starts_in_flight = max(
+                0,
+                self._claude_control_flow_starts_in_flight - 1,
+            )
 
         manual_url = str(response.get("manualUrl") or "").strip()
         if not manual_url:
@@ -1054,6 +1069,7 @@ class AgentAuthService:
             self._resolve_backend_config("claude"),
             force_oauth=True,
         )
+        claude_env[AVIBE_CLAUDE_PROCESS_OWNER_ENV] = AVIBE_CLAUDE_AUTH_OWNER
 
         should_mark_isolated = getattr(session_handler, "_should_mark_claude_isolated_env", None)
         if callable(should_mark_isolated) and should_mark_isolated():

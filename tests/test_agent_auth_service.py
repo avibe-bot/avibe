@@ -1735,6 +1735,39 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
         self.assertTrue(captured["connected"])
         self.assertEqual(captured["options"].max_buffer_size, CLAUDE_SDK_MAX_BUFFER_SIZE)
+        self.assertEqual(captured["options"].env["AVIBE_CLAUDE_PROCESS_OWNER"], "auth")
+
+    async def test_claude_control_flow_start_in_flight_disables_unknown_pid_guard(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _create_client(_context):
+            started.set()
+            await release.wait()
+            return SimpleNamespace()
+
+        service._create_claude_control_client = AsyncMock(side_effect=_create_client)
+        service._send_claude_control_request = AsyncMock(
+            return_value={"manualUrl": "https://platform.claude.com/oauth/code"}
+        )
+        service._begin_claude_oauth_attempt = AsyncMock(return_value=None)
+
+        task = asyncio.create_task(
+            service._start_claude_control_flow(
+                MessageContext(user_id="U1", channel_id="C1"),
+                force_reset=False,
+                login_with_claude_ai=True,
+            )
+        )
+        await started.wait()
+
+        self.assertTrue(service.has_active_claude_auth_client_with_unknown_pid())
+
+        release.set()
+        await task
+        self.assertFalse(service.has_active_claude_auth_client_with_unknown_pid())
 
     async def test_verify_login_reports_opencode_segmentation_fault(self):
         controller = _StubController()

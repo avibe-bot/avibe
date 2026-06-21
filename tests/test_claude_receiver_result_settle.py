@@ -151,6 +151,32 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mark_idle_calls, [composite_key])
         self.assertFalse(agent._has_pending_requests(composite_key))
 
+    async def test_force_cleanup_suppresses_receiver_release_until_terminal_emit(self):
+        mark_idle_calls: list[str] = []
+        agent = _build_agent(mark_idle_calls)
+        composite_key = "session-3:/tmp/work"
+        context = SimpleNamespace(user_id="U1", channel_id="C1", platform_specific={})
+        agent._pending_requests[composite_key] = [SimpleNamespace(context=context)]
+        events: list[tuple[str, bool]] = []
+
+        async def _cleanup_runtime_session(key, **_kwargs):
+            events.append(("cleanup", key in agent._suppress_receiver_runtime_release))
+            agent._release_service_runtime_turn(context)
+
+        agent._cleanup_runtime_session = _cleanup_runtime_session
+        agent.controller.emit_agent_message = AsyncMock(
+            side_effect=lambda *_args, **_kwargs: events.append(("emit", False))
+        )
+        agent._remove_result_pending_reaction = AsyncMock()
+        agent._release_service_runtime_turn = lambda _context: events.append(
+            ("release", composite_key in agent._suppress_receiver_runtime_release)
+        )
+
+        await agent.force_cleanup_stuck_active_session(composite_key)
+
+        self.assertEqual(events, [("cleanup", True), ("release", True), ("emit", False)])
+        agent.controller.emit_agent_message.assert_awaited_once()
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

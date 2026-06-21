@@ -18,7 +18,10 @@ from modules.claude_sdk_compat import (
 )
 from modules.agents.native_sessions.base import build_resume_preview
 from modules.agents.claude_process_reaper import (
+    AVIBE_CLAUDE_PROCESS_OWNER_ENV,
+    AVIBE_CLAUDE_SESSION_OWNER,
     get_claude_client_pid,
+    register_claude_owned_process,
     reap_duplicate_claude_resume_processes,
     reap_orphaned_claude_processes,
 )
@@ -107,6 +110,11 @@ class SessionHandler(BaseHandler):
         setattr(client, "_vibe_runtime_session_key", composite_key)
         if native_session_id:
             setattr(client, "_vibe_native_session_id", native_session_id)
+        register_claude_owned_process(
+            client,
+            native_session_id=native_session_id,
+            owner=AVIBE_CLAUDE_SESSION_OWNER,
+        )
 
     async def _set_claude_model_if_needed(self, client: ClaudeSDKClient, desired_model: Optional[str]) -> None:
         unknown = object()
@@ -800,6 +808,7 @@ class SessionHandler(BaseHandler):
         from vibe.claude_config import build_claude_subprocess_env
 
         claude_env = build_claude_subprocess_env(getattr(self.config, "claude", None))
+        claude_env[AVIBE_CLAUDE_PROCESS_OWNER_ENV] = AVIBE_CLAUDE_SESSION_OWNER
         if self._should_mark_claude_isolated_env():
             claude_env["IS_SANDBOX"] = "1"
             logger.info("Detected Claude bypassPermissions running as root; marking Claude subprocess as isolated")

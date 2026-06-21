@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
 NODE_EXECUTABLES = {"node", "nodejs", "node.exe"}
+AVIBE_CLAUDE_PROCESS_OWNER_ENV = "AVIBE_CLAUDE_PROCESS_OWNER"
+AVIBE_CLAUDE_SESSION_OWNER = "session"
+AVIBE_CLAUDE_AUTH_OWNER = "auth"
+CLAUDE_PROCESS_REGISTRY_NAME = "claude_processes.json"
 
 
 @dataclass(frozen=True)
@@ -20,12 +26,144 @@ class ClaudeProcessRow:
     command: str
 
 
+@dataclass(frozen=True)
+class ClaudeOwnedProcess:
+    pid: int
+    native_session_id: str | None = None
+    owner: str = AVIBE_CLAUDE_SESSION_OWNER
+    started_at: float | None = None
+
+
 def get_claude_client_pid(client: object | None) -> int | None:
     """Return the SDK-managed Claude CLI pid when the current SDK exposes it."""
     transport = getattr(client, "_transport", None)
     process = getattr(transport, "_process", None)
     pid = getattr(process, "pid", None)
     return pid if isinstance(pid, int) and pid > 0 else None
+
+
+def _process_start_time(pid: int) -> float | None:
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+        )
+    except Exception:
+        return None
+    text = (result.stdout or "").strip()
+    if not text:
+        return None
+    try:
+        from email.utils import parsedate_to_datetime
+
+        return parsedate_to_datetime(text).timestamp()
+    except Exception:
+        return None
+
+
+def _process_start_times(pids: set[int]) -> dict[int, float]:
+    starts: dict[int, float] = {}
+    for pid in pids:
+        started_at = _process_start_time(pid)
+        if started_at is not None:
+            starts[pid] = started_at
+    return starts
+
+
+def _process_identity_matches(
+    record: ClaudeOwnedProcess,
+    row: ClaudeProcessRow,
+    current_started_at: float | None,
+) -> bool:
+    if record.pid != row.pid:
+        return False
+    if record.started_at is None:
+        return True
+    if current_started_at is None:
+        return False
+    return abs(current_started_at - record.started_at) < 1.0
+
+
+def _registry_path(runtime_dir: Path | None = None) -> Path:
+    if runtime_dir is not None:
+        return runtime_dir / CLAUDE_PROCESS_REGISTRY_NAME
+    from config import paths
+
+    return paths.get_runtime_dir() / CLAUDE_PROCESS_REGISTRY_NAME
+
+
+def _load_owned_process_registry(runtime_dir: Path | None = None) -> list[ClaudeOwnedProcess]:
+    path = _registry_path(runtime_dir)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    rows = payload.get("processes") if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        return []
+    records: list[ClaudeOwnedProcess] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        pid = item.get("pid")
+        if not isinstance(pid, int) or pid <= 0:
+            continue
+        native_session_id = item.get("native_session_id")
+        owner = item.get("owner") or AVIBE_CLAUDE_SESSION_OWNER
+        started_at = item.get("started_at")
+        records.append(
+            ClaudeOwnedProcess(
+                pid=pid,
+                native_session_id=str(native_session_id) if native_session_id else None,
+                owner=str(owner),
+                started_at=float(started_at) if isinstance(started_at, (int, float)) else None,
+            )
+        )
+    return records
+
+
+def register_claude_owned_process(
+    client: object | None,
+    *,
+    native_session_id: str | None = None,
+    owner: str = AVIBE_CLAUDE_SESSION_OWNER,
+    runtime_dir: Path | None = None,
+) -> None:
+    pid = get_claude_client_pid(client)
+    if not pid or os.name == "nt":
+        return
+    path = _registry_path(runtime_dir)
+    records = [record for record in _load_owned_process_registry(runtime_dir) if record.pid != pid]
+    records.append(
+        ClaudeOwnedProcess(
+            pid=pid,
+            native_session_id=str(native_session_id) if native_session_id else None,
+            owner=owner,
+            started_at=_process_start_time(pid),
+        )
+    )
+    payload = {
+        "processes": [
+            {
+                "pid": record.pid,
+                "native_session_id": record.native_session_id,
+                "owner": record.owner,
+                "started_at": record.started_at,
+            }
+            for record in records
+        ]
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+        tmp_path.replace(path)
+    except Exception:
+        logger = logging.getLogger(__name__)
+        logger.debug("Failed to persist Claude process registry", exc_info=True)
 
 
 def _run_ps() -> str:
@@ -74,8 +212,8 @@ def _command_has_stream_json_input(command: str) -> bool:
 
     The Claude Agent SDK always launches the session CLI with
     ``--input-format stream-json`` (see the SDK's subprocess transport). This
-    marker is public CLI surface, so callers must also pass explicit exclusion
-    roots for known user-owned service descendants such as managed watches.
+    marker is public CLI surface; it is only a subprocess-shape check, not an
+    ownership proof.
     """
     return _command_has_flag_value(command, "--input-format", "stream-json")
 
@@ -310,25 +448,22 @@ async def reap_orphaned_claude_processes(
     terminate_timeout: float = 2.0,
     reap_in_tree: bool = True,
     exclude_pids: set[int] | None = None,
+    owned_processes: list[ClaudeOwnedProcess] | None = None,
 ) -> int:
     """Reap leaked Claude CLI processes (defense-in-depth orphan reaper).
 
-    Two orphan classes are reaped:
-
-    (a) **In-process orphan** — a Claude SDK *session* subprocess (launched
-        with ``--input-format stream-json``) inside the current service's
-        process tree that is no longer referenced by any tracked session
-        (``owned_pids``) and is not under an explicit exclusion root. Only
-        attempted when ``reap_in_tree`` is True: the caller must pass False
-        whenever the owner set may be incomplete (a tracked client's pid could
-        not be resolved, or a session create is in flight), otherwise a live
-        tracked/connecting process could be misclassified as an orphan.
+    Only processes with a persisted Avibe ownership record are eligible. Public
+    Claude CLI flags such as ``--resume`` and ``--input-format stream-json`` are
+    not sufficient proof: user watches, other backend turns, and external SDK
+    clients can legitimately use the same flags. The caller may still disable
+    the current-tree sweep via ``reap_in_tree`` whenever the live owner set is
+    incomplete.
 
     Safety guards:
     - ``owned_pids`` and their descendants are never reaped.
     - ``exclude_pids`` and their descendants are never reaped. Callers use this
-      for managed watch/automation commands that are service descendants but
-      not Claude SDK sessions owned by ``claude_sessions``.
+      for managed watch/automation commands and in-flight auth/session startup
+      roots that are service descendants but not Claude runtime sessions.
     - The current service pid is never reaped.
     - A ``min_age_seconds`` grace window protects a freshly spawned process
       that has not yet been registered into the tracked set (TOCTOU). A
@@ -371,31 +506,36 @@ async def reap_orphaned_claude_processes(
         for row in all_rows
         if row.pid != service_pid and _command_is_claude(row.command, cli_path=cli_path)
     ]
+    row_by_pid = {row.pid: row for row in claude_rows}
+    registry = owned_processes if owned_processes is not None else _load_owned_process_registry()
+    registry_pids = {
+        record.pid
+        for record in registry
+        if record.started_at is not None and record.pid in row_by_pid
+    }
+    current_start_times = await loop.run_in_executor(None, _process_start_times, registry_pids)
 
     candidates: set[int] = set()
 
-    # (a) in-tree claude processes we no longer own. Scoped to SDK session
-    # subprocesses (``--input-format stream-json``) so a `claude` launched by
-    # another backend or a watch command is never reaped. Skipped entirely when
-    # the owner set may be incomplete (unresolved tracked pid / session create
-    # in flight), since we could not then tell a live tracked process from an
-    # orphan.
-    if reap_in_tree:
-        for row in claude_rows:
-            if (
-                row.pid in service_tree
-                and row.pid not in owned_all
-                and row.pid not in excluded_all
-                and _command_has_stream_json_input(row.command)
-            ):
+    for record in registry:
+        row = row_by_pid.get(record.pid)
+        if row is None or not _process_identity_matches(record, row, current_start_times.get(record.pid)):
+            continue
+        if record.started_at is None:
+            continue
+        in_service_tree = row.pid in service_tree
+        if record.owner != AVIBE_CLAUDE_SESSION_OWNER:
+            continue
+        if not _command_has_stream_json_input(row.command):
+            continue
+        if row.pid in owned_all or row.pid in excluded_all:
+            continue
+        if in_service_tree:
+            if reap_in_tree:
                 candidates.add(row.pid)
-
-    # Do not reap out-of-tree resume matches here. ``--resume`` and
-    # ``--input-format stream-json`` are public Claude CLI/API surface, so an
-    # init-reparented external client can look identical to a previous Avibe
-    # subprocess. Without an Avibe-specific ownership marker or process lineage,
-    # the safe fallback is to leave cross-restart cleanup to the narrower
-    # duplicate-resume reaper, which scopes matches to the current runtime tree.
+            continue
+        if record.native_session_id and record.native_session_id in tracked_resume_ids:
+            candidates.add(row.pid)
 
     candidates -= owned_all
     candidates -= excluded_all

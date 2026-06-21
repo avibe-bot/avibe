@@ -5,6 +5,10 @@ from typing import Callable, Optional
 
 from core.agent_auth_service import classify_auth_error
 from modules.claude_sdk_compat import TextBlock, ToolUseBlock, is_claude_sdk_buffer_error
+from modules.agents.claude_process_reaper import (
+    AVIBE_CLAUDE_SESSION_OWNER,
+    register_claude_owned_process,
+)
 
 from modules.agents.base import (
     AGENT_RUNTIME_TURN_KEY,
@@ -392,28 +396,36 @@ class ClaudeAgent(BaseAgent):
         self._last_assistant_text.pop(composite_key, None)
         self._pending_assistant_message.pop(composite_key, None)
 
+        self._suppress_receiver_runtime_release.add(composite_key)
         try:
-            await self._cleanup_runtime_session(
-                composite_key,
-                preserve_pending_request_state=True,
-            )
-        finally:
-            if context is not None:
-                try:
-                    await self.controller.emit_agent_message(
-                        context,
-                        "result",
-                        "",
-                        is_error=True,
-                        level="silent",
-                    )
-                except Exception:
-                    logger.debug(
-                        "Failed to emit terminal result while force-cleaning Claude session %s",
-                        composite_key,
-                        exc_info=True,
-                    )
+            try:
+                await self._cleanup_runtime_session(
+                    composite_key,
+                    preserve_pending_request_state=True,
+                )
+            except Exception:
+                if context is not None:
                     self._release_service_runtime_turn(context)
+                raise
+        finally:
+            self._suppress_receiver_runtime_release.discard(composite_key)
+
+        if context is not None:
+            try:
+                await self.controller.emit_agent_message(
+                    context,
+                    "result",
+                    "",
+                    is_error=True,
+                    level="silent",
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to emit terminal result while force-cleaning Claude session %s",
+                    composite_key,
+                    exc_info=True,
+                )
+                self._release_service_runtime_turn(context)
 
     async def handle_stop(self, request: AgentRequest) -> bool:
         composite_key = request.composite_session_id
@@ -518,6 +530,11 @@ class ClaudeAgent(BaseAgent):
                         runtime_client = self.claude_sessions.get(composite_key)
                         if runtime_client is client:
                             setattr(runtime_client, "_vibe_native_session_id", claude_session_id)
+                            register_claude_owned_process(
+                                runtime_client,
+                                native_session_id=claude_session_id,
+                                owner=AVIBE_CLAUDE_SESSION_OWNER,
+                            )
                         logger.info(f"Captured Claude session id {claude_session_id} for {base_session_id}")
 
                     if self.claude_client._is_skip_message(message):
