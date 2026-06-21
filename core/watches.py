@@ -405,6 +405,10 @@ class ManagedWatchService:
         self._store_error_fused = False
         self._store_reconcile_failures = 0
 
+    def active_process_pids(self) -> set[int]:
+        """Return active waiter process roots owned by managed watches."""
+        return {pid for pid in self._active_pids.values() if isinstance(pid, int) and pid > 0}
+
     def start(self) -> None:
         if self._running:
             return

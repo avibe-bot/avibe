@@ -22,7 +22,10 @@ from modules.agents.claude_process_reaper import (
     reap_duplicate_claude_resume_processes,
     reap_orphaned_claude_processes,
 )
-from config.v2_config import DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER
+from config.v2_config import (
+    DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS,
+    DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
+)
 from core.avibe_cloud import avibe_cloud_url_available
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
@@ -1240,6 +1243,7 @@ class SessionHandler(BaseHandler):
         self,
         idle_timeout: float,
         stuck_active_multiplier: float = DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
+        stuck_active_floor_seconds: float = DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS,
     ) -> int:
         """Disconnect Claude sessions that have been idle beyond the timeout.
 
@@ -1250,8 +1254,9 @@ class SessionHandler(BaseHandler):
         otherwise be pinned forever and its ``claude`` subprocess would survive
         until the next service restart. As an independent backstop, a session
         that is ``active`` but whose ``last_activity`` is older than
-        ``idle_timeout * stuck_active_multiplier`` is force-evicted regardless of
-        why the flag was not cleared. A genuine in-flight turn keeps touching
+        ``max(idle_timeout * stuck_active_multiplier,
+        stuck_active_floor_seconds)`` is force-evicted regardless of why the
+        flag was not cleared. A genuine in-flight turn keeps touching
         ``last_activity`` via assistant/tool messages, so it normally stays well
         under this cap. Pass ``stuck_active_multiplier <= 0`` to disable the
         backstop. Caveat: a real turn whose single tool call runs silently for
@@ -1261,9 +1266,12 @@ class SessionHandler(BaseHandler):
         if idle_timeout <= 0:
             return 0
 
-        stuck_threshold = (
-            idle_timeout * stuck_active_multiplier if stuck_active_multiplier > 0 else None
-        )
+        stuck_threshold = None
+        if stuck_active_multiplier > 0:
+            stuck_threshold = max(
+                idle_timeout * stuck_active_multiplier,
+                max(0.0, stuck_active_floor_seconds),
+            )
 
         now = time.monotonic()
         expired: list[tuple[str, float]] = []
@@ -1299,9 +1307,11 @@ class SessionHandler(BaseHandler):
                     continue
                 logger.warning(
                     "Force-evicting stuck-active Claude session %s after %.1fs idle "
-                    "(>= %sx idle_timeout=%ss); receiver never released the active flag",
+                    "(>= stuck-active threshold %.1fs; multiplier=%s idle_timeout=%ss); "
+                    "receiver never released the active flag",
                     composite_key,
                     recheck_idle,
+                    stuck_threshold,
                     stuck_active_multiplier,
                     idle_timeout,
                 )
@@ -1341,6 +1351,11 @@ class SessionHandler(BaseHandler):
         # A session create in flight has spawned a subprocess (connect()) that is
         # not yet in claude_sessions; the in-tree sweep must not touch it.
         creates_in_flight = bool(self.claude_session_creates)
+        exclude_pids: set[int] = set()
+        watch_service = getattr(self.controller, "watch_service", None)
+        active_watch_pids = getattr(watch_service, "active_process_pids", None)
+        if callable(active_watch_pids):
+            exclude_pids.update(active_watch_pids())
         # Let unexpected errors surface to the caller (``periodic_cleanup``
         # logs them at error level); ``reap_orphaned_claude_processes`` already
         # absorbs the expected ``ps``-read failure internally.
@@ -1350,6 +1365,7 @@ class SessionHandler(BaseHandler):
             cli_path=self._get_claude_cli_path_override(),
             logger=logger,
             reap_in_tree=owner_set_complete and not creates_in_flight,
+            exclude_pids=exclude_pids,
         )
 
     async def handle_session_error(self, composite_key: str, context: MessageContext, error: Exception):

@@ -220,6 +220,30 @@ def test_reap_orphaned_reaps_in_tree_no_owner_and_descendants(monkeypatch):
     assert service_pid not in killed
 
 
+def test_reap_orphaned_ignores_managed_watch_descendants(monkeypatch):
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"500 {service_pid} /bin/sh -c claude -p --input-format stream-json watch-work",
+            "501 500 /usr/local/bin/claude -p --input-format stream-json watch-work",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {501: 999.0}, {500, 501})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids=set(),
+            tracked_resume_ids={},
+            logger=logging.getLogger("test.claude_orphan"),
+            exclude_pids={500},
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []
+
+
 def test_reap_orphaned_keeps_owned_in_tree_process(monkeypatch):
     service_pid = os.getpid()
     table = "\n".join(

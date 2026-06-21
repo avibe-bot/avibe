@@ -73,10 +73,9 @@ def _command_has_stream_json_input(command: str) -> bool:
     """True if the command runs the Claude CLI in bidirectional streaming mode.
 
     The Claude Agent SDK always launches the session CLI with
-    ``--input-format stream-json`` (see the SDK's subprocess transport). A
-    user's interactive ``claude`` or a one-shot ``claude -p`` — and ``claude``
-    spawned by another backend or a watch command — does not, so this scopes
-    the in-tree orphan sweep to SDK-spawned session subprocesses only.
+    ``--input-format stream-json`` (see the SDK's subprocess transport). This
+    marker is public CLI surface, so callers must also pass explicit exclusion
+    roots for known user-owned service descendants such as managed watches.
     """
     return _command_has_flag_value(command, "--input-format", "stream-json")
 
@@ -310,6 +309,7 @@ async def reap_orphaned_claude_processes(
     min_age_seconds: float = 60.0,
     terminate_timeout: float = 2.0,
     reap_in_tree: bool = True,
+    exclude_pids: set[int] | None = None,
 ) -> int:
     """Reap leaked Claude CLI processes (defense-in-depth orphan reaper).
 
@@ -318,8 +318,7 @@ async def reap_orphaned_claude_processes(
     (a) **In-process orphan** — a Claude SDK *session* subprocess (launched
         with ``--input-format stream-json``) inside the current service's
         process tree that is no longer referenced by any tracked session
-        (``owned_pids``). Scoping to the SDK streaming signature avoids reaping
-        a ``claude`` launched by another backend or a watch command. Only
+        (``owned_pids``) and is not under an explicit exclusion root. Only
         attempted when ``reap_in_tree`` is True: the caller must pass False
         whenever the owner set may be incomplete (a tracked client's pid could
         not be resolved, or a session create is in flight), otherwise a live
@@ -337,6 +336,9 @@ async def reap_orphaned_claude_processes(
 
     Safety guards:
     - ``owned_pids`` and their descendants are never reaped.
+    - ``exclude_pids`` and their descendants are never reaped. Callers use this
+      for managed watch/automation commands that are service descendants but
+      not Claude SDK sessions owned by ``claude_sessions``.
     - The current service pid is never reaped.
     - A ``min_age_seconds`` grace window protects a freshly spawned process
       that has not yet been registered into the tracked set (TOCTOU). A
@@ -368,6 +370,12 @@ async def reap_orphaned_claude_processes(
     for pid in list(owned_all):
         owned_all.update(_descendant_pids(all_rows, pid, children))
 
+    excluded_all: set[int] = {
+        pid for pid in (exclude_pids or set()) if isinstance(pid, int) and pid > 0
+    }
+    for pid in list(excluded_all):
+        excluded_all.update(_descendant_pids(all_rows, pid, children))
+
     claude_rows = [
         row
         for row in all_rows
@@ -387,6 +395,7 @@ async def reap_orphaned_claude_processes(
             if (
                 row.pid in service_tree
                 and row.pid not in owned_all
+                and row.pid not in excluded_all
                 and _command_has_stream_json_input(row.command)
             ):
                 candidates.add(row.pid)
@@ -409,6 +418,7 @@ async def reap_orphaned_claude_processes(
                 candidates.add(row.pid)
 
     candidates -= owned_all
+    candidates -= excluded_all
     candidates.discard(service_pid)
     if not candidates:
         return 0
@@ -425,6 +435,7 @@ async def reap_orphaned_claude_processes(
     for pid in aged_candidates:
         target_pids.update(_descendant_pids(all_rows, pid, children))
     target_pids -= owned_all
+    target_pids -= excluded_all
     target_pids.discard(service_pid)
     if not target_pids:
         return 0
