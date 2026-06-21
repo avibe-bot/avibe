@@ -9,6 +9,10 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from config.v2_config import (
+    DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS,
+    DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
+)
 from core.avibe_cloud import avibe_cloud_url_available
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import (
@@ -408,6 +412,13 @@ class CodexAgent(BaseAgent):
         if not hasattr(self, "_session_locks"):
             self._session_locks = {}
 
+        # Absolute-time backstop: a transport whose turn is stuck "active"
+        # forever (turn/completed never arrives — wedged/silently-disconnected
+        # app-server) would otherwise be vetoed from eviction indefinitely and
+        # leak its app-server process until restart (#622/#623 analog). Once it
+        # has been idle past this cap, force-evict it despite the active turn.
+        stuck_active_cap = self._stuck_active_idle_eviction_cap(idle_timeout)
+
         now = time.monotonic()
         evicted = 0
 
@@ -416,10 +427,14 @@ class CodexAgent(BaseAgent):
             if transport is None:
                 self._transport_last_activity.pop(cwd, None)
                 continue
-            if self._has_active_turns_for_cwd(cwd):
-                continue
             idle_for = now - last_activity
-            if idle_for < idle_timeout:
+            has_active = self._has_active_turns_for_cwd(cwd)
+            if not self._is_transport_evictable(
+                has_active=has_active,
+                idle_for=idle_for,
+                idle_timeout=idle_timeout,
+                stuck_active_cap=stuck_active_cap,
+            ):
                 continue
 
             lock = self._transport_locks.setdefault(cwd, asyncio.Lock())
@@ -428,15 +443,30 @@ class CodexAgent(BaseAgent):
                 current_last_activity = self._transport_last_activity.get(cwd)
                 if current_transport is None or current_transport is not transport:
                     continue
-                if self._has_active_turns_for_cwd(cwd):
-                    continue
                 if current_last_activity is None:
                     continue
+                # Recheck from CURRENT state inside the lock: activity (and the
+                # active-turn flag) may have changed between the two passes.
                 idle_for = time.monotonic() - current_last_activity
-                if idle_for < idle_timeout:
+                has_active = self._has_active_turns_for_cwd(cwd)
+                if not self._is_transport_evictable(
+                    has_active=has_active,
+                    idle_for=idle_for,
+                    idle_timeout=idle_timeout,
+                    stuck_active_cap=stuck_active_cap,
+                ):
                     continue
 
-                logger.info("Evicting idle Codex transport for cwd=%s after %.1fs idle", cwd, idle_for)
+                if has_active:
+                    logger.warning(
+                        "Force-evicting stuck-active Codex transport for cwd=%s after %.1fs idle "
+                        "(active turn exceeded stuck-active cap of %.1fs; app-server presumed wedged)",
+                        cwd,
+                        idle_for,
+                        stuck_active_cap,
+                    )
+                else:
+                    logger.info("Evicting idle Codex transport for cwd=%s after %.1fs idle", cwd, idle_for)
                 try:
                     await transport.stop()
                 except Exception as exc:
@@ -448,6 +478,12 @@ class CodexAgent(BaseAgent):
                 self._cwd_inodes().pop(cwd, None)
 
                 for base_session_id in list(self._session_mgr.sessions_for_cwd(cwd)):
+                    # A force-evicted stuck-active turn never emitted a terminal
+                    # result, so the Workbench status and SSE/runtime gate are
+                    # still owned by that turn. Settle it through the same
+                    # terminal-result path as normal completions before dropping
+                    # turn state. No-op for sessions with no active turn.
+                    await self._settle_stuck_active_request(base_session_id)
                     # Keep the persisted thread mapping so a later transport restart
                     # can resume the same Codex conversation for this Slack thread.
                     self._session_mgr.invalidate_thread(base_session_id)
@@ -458,6 +494,90 @@ class CodexAgent(BaseAgent):
                 evicted += 1
 
         return evicted
+
+    async def _settle_stuck_active_request(self, base_session_id: str) -> None:
+        """Settle a turn we are about to force-reap.
+
+        ``_start_turn`` marks the AgentService runtime turn started; it is
+        normally settled by a terminal result, which also flips Workbench
+        ``agent_status`` out of ``running``. The stuck-active force-eviction path
+        has no backend terminal event, so emit a silent error result here. The
+        terminal-result path is token-guarded by its owner, so a no-op
+        (already-settled or no active turn) is safe.
+        """
+        get_active = getattr(self._turn_registry, "get_active_turn", None)
+        active_turn = get_active(base_session_id) if callable(get_active) else None
+        if not active_turn:
+            return
+
+        request = None
+        get_for_turn = getattr(self._turn_registry, "get_request_for_turn", None)
+        if callable(get_for_turn):
+            request = get_for_turn(active_turn)
+        if request is None:
+            get_latest = getattr(self._turn_registry, "get_latest_request", None)
+            if callable(get_latest):
+                request = get_latest(base_session_id)
+
+        context = getattr(request, "context", None)
+        if context is None:
+            return
+        controller = getattr(self, "controller", None)
+        emit = getattr(controller, "emit_agent_message", None)
+        if callable(emit):
+            try:
+                await emit(context, "result", "", is_error=True, level="silent")
+                return
+            except Exception:
+                logger.warning(
+                    "Failed to emit silent terminal result for force-evicted Codex turn %s",
+                    active_turn,
+                    exc_info=True,
+                )
+
+        # Best-effort fallback for narrow test doubles or partial controllers:
+        # release the runtime gate even if the Workbench status path is absent.
+        release = getattr(self._event_handler, "_release_stream_turn", None)
+        if callable(release):
+            release(context)
+
+    def _stuck_active_idle_eviction_cap(self, idle_timeout: float) -> Optional[float]:
+        """Idle cap after which an *active* transport is force-evicted.
+
+        Returns ``None`` when the backstop is disabled (multiplier <= 0), in
+        which case an active turn remains an absolute veto. Otherwise a
+        transport with an active turn is force-evicted once it has been idle for
+        ``max(idle_timeout * multiplier, floor)`` — the floor keeps the window
+        sane even when ``idle_timeout`` is configured very small.
+        """
+        multiplier = DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER
+        if multiplier <= 0:
+            return None
+        floor = max(0.0, float(DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS))
+        return max(idle_timeout * multiplier, floor)
+
+    def _is_transport_evictable(
+        self,
+        *,
+        has_active: bool,
+        idle_for: float,
+        idle_timeout: float,
+        stuck_active_cap: Optional[float],
+    ) -> bool:
+        """Decide whether an idle transport is eligible for eviction.
+
+        Pure decision (no lookups), so callers evaluate the active-turn flag
+        exactly once. An idle transport with no active turn is evictable once it
+        crosses the normal ``idle_timeout``. A transport with an active turn is
+        normally vetoed, but is force-evictable once it crosses
+        ``stuck_active_cap`` (the absolute-time backstop) — the only path that
+        reaps a wedged app-server whose ``turn/completed`` never arrived.
+        """
+        if has_active:
+            if stuck_active_cap is None:
+                return False
+            return idle_for >= stuck_active_cap
+        return idle_for >= idle_timeout
 
     # ------------------------------------------------------------------
     # Transport management
@@ -564,7 +684,15 @@ class CodexAgent(BaseAgent):
 
             # Wire up callbacks
             transport.on_notification(self._on_notification)
-            transport.on_server_request(self._on_server_request)
+            # Bind the cwd so any server request (e.g. an auto-approval) refreshes
+            # this transport's activity: a server request IS app-server liveness,
+            # and unlike notifications it isn't always tied to a resolvable
+            # turn/thread in params. Without this a turn that thinks silently and
+            # then asks for approval near the stuck-active cap could be wrongly
+            # force-evicted by the next sweep.
+            transport.on_server_request(
+                lambda req_id, method, params, _cwd=cwd: self._on_server_request(_cwd, req_id, method, params)
+            )
 
             await transport.start()
             self._transports[cwd] = transport
@@ -1102,11 +1230,15 @@ class CodexAgent(BaseAgent):
 
     async def _on_server_request(
         self,
+        cwd: str,
         req_id: int | str,
         method: str,
         params: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Handle server requests — auto-approve all."""
+        # A server request means this app-server is alive and actively driving a
+        # turn, so count it as activity for the stuck-active idle backstop.
+        self._touch_transport_activity(cwd)
         if method in (
             "item/commandExecution/requestApproval",
             "item/fileChange/requestApproval",

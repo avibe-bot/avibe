@@ -26,6 +26,28 @@ logger = logging.getLogger(__name__)
 CONFIG_LOCK = threading.RLock()
 
 DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 600
+
+# Absolute-time backstop for evicting a Codex transport whose turn is stuck
+# "active" forever (e.g. the ``codex app-server`` wedged or silently
+# disconnected after ``turn/start`` but before ``turn/completed``, so
+# ``_active_turns`` is never cleared). Without this, ``evict_idle_transports``
+# treats an active turn as an ABSOLUTE veto and the wedged app-server process
+# leaks until service restart (mirrors the Claude leak in #622/#623).
+#
+# A transport with an active turn is force-evicted once it has been idle for
+# ``max(idle_timeout * MULTIPLIER, FLOOR_SECONDS)``. Set the multiplier <= 0 to
+# disable the backstop entirely.
+#
+# TRADE-OFF: this cap is driven purely by ``last_activity`` (refreshed on every
+# Codex notification), so it CANNOT distinguish a genuinely wedged turn from a
+# legitimately long, fully-silent one. A single tool/MCP run or model "thinking"
+# phase that emits no notifications for longer than the cap will be misjudged as
+# stuck and have its transport torn down. The multiplier defaults higher than a
+# typical tool-run assumption, and the floor guarantees a >= 30 min window even
+# when ``idle_timeout`` is configured small, to keep that false-positive rare.
+DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER = 3
+DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS = 1800
+
 DEFAULT_OPENCODE_ERROR_RETRY_LIMIT = 1
 DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX = 14
 MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
