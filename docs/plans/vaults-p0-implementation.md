@@ -273,3 +273,44 @@ From `vaults.md` §17: per-key grant TTL (5 min) / skill·group (15 min); defaul
 binding this-session; "until-revoked" at launch?; "Approve once" auto-applies a
 per-key window?; launch with passkey or password-only first; reveal-on-click for
 standard values; ETH preview depth. None block P0.
+
+## 13. P1 / P2 status & gating (post-P0, 2026-06-21)
+
+P0 is complete and verified (commits 1–6). The schema is at final shape, so none of
+the below needs a migration. Status of the rest:
+
+**Headless-verifiable, ready to build (no new gates):**
+
+- `vibe vault key export/import` — Argon2id-wrapped machine-key file for the
+  keychain-mode migration path (§7.2). Self-contained crypto + CLI; needs `argon2-cffi`.
+- Protected-tier **envelope wire format** (VMK + multi-wrap: password / passkey copies)
+  as the shared spec — the *format* is testable headlessly even though the *decryption*
+  runs in the browser (below).
+
+**Gated on the Incus regression env (live message pipeline) — built carefully there,
+not landed unverified here:**
+
+- Dynamic-ask dispatcher side: provision-request audit row + per-platform IM
+  deep-link rendering + name-only auto-wake-up (the web ask→save flow already works).
+- Outbound **redaction** tripwire (§10): the scan/redact function is pure, but wiring it
+  into `core/message_dispatcher.py` (every outbound message) must be regression-verified.
+- Inline **ApprovalCard** + the new `message.updated` SSE (protected-tier approval).
+
+**Gated on a real browser (WebAuthn / WebCrypto / cross-origin iframe):**
+
+- Protected-tier **browser-side decryption** (Argon2 WASM + WebCrypto unwrap; the vault
+  password never reaches the daemon, §8.4) — the locked design is explicitly browser-side.
+- **Passkey PRF** unlock (§7.3).
+- **`local` signer**: cross-origin iframe ETH signer (`@noble/curves` + `viem` +
+  `@scure/bip39`), BIP-39 key ceremony, EIP-155/191/712 decoded approval (§8.3).
+- Scope **grants** (DEK-set cached in daemon memory) end-to-end (browser unlock → grant).
+
+**Gated on external accounts / services:**
+
+- **WalletConnect** (`external` signer) — needs a WalletConnect project id + a real wallet.
+- **MPC providers** (`mpc:*` — Privy / Web3Auth / Turnkey / Lit) — each needs a developer
+  account + cloud; cannot be created/verified in this environment.
+- **1Password import** (§13.5) — needs the `op` CLI signed in / a 1Password account.
+
+These were flagged as out of one-shot headless scope from the start; the design for each
+is locked in `vaults.md` so implementation is unambiguous when the env/accounts exist.
