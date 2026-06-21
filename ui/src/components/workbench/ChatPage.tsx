@@ -581,6 +581,7 @@ export const ChatPage: React.FC = () => {
       onMessageNew: (msg) => {
         if (msg.session_id !== sessionIdRef.current) return;
         if (!isTranscriptMessage(msg)) return;
+        if (historicalWindowRef.current) return;
         appendMessage(msg);
         // Don't clear ``working`` from a result row here: with the queue, a
         // result can belong to an EARLIER turn while a newer queued turn is
