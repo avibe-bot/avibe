@@ -247,8 +247,11 @@ stay queryable.
    `VaultsPage.tsx` (list/add/delete, masked, reuse design-system primitives) +
    ApiContext methods + i18n. `npm run build` green. **[done — 2026-06-21]**
    (Live SSE refresh deferred — page refreshes after mutations; audit view = commit 6.)
-5. `feat(vault): dynamic ask` — `reply_enhancer` `$<NAME>` + dispatcher provision +
-   `SecureInputCard` + IM deep link + end-to-end scenario.
+5. `feat(vault): dynamic ask` — `reply_enhancer` `$<NAME>` extraction (code-fence-
+   aware) + web `SecretRequestCard` (markdown transform → inline secure-input card that
+   saves to the vault). **[done — 2026-06-21]** Remaining (needs the live pipeline /
+   regression env to verify, deferred): message_dispatcher provision-request row + IM
+   deep-link rendering + name-only auto-wake-up.
 6. `feat(vault): audit tab + polish` — audit view, masked-read verification.
 
 ## 11. Test plan

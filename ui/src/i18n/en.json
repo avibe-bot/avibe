@@ -1876,6 +1876,11 @@
       "allowHostsHelp": "Comma-separated. Required to use this secret via the brokered HTTP proxy; '.example.com' matches subdomains.",
       "save": "Save",
       "cancel": "Cancel"
+    },
+    "request": {
+      "provide": "provide",
+      "title": "Provide {{name}}",
+      "help": "The agent asked for this secret. It's saved straight to the vault and never re-enters the chat."
     }
   }
 }

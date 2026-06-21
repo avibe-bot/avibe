@@ -1875,6 +1875,11 @@
       "allowHostsHelp": "逗号分隔。通过认证代理使用该密钥时必填；'.example.com' 匹配子域。",
       "save": "保存",
       "cancel": "取消"
+    },
+    "request": {
+      "provide": "填写",
+      "title": "提供 {{name}}",
+      "help": "Agent 请求了这个密钥。它会直接存入保险库，不会再进入聊天。"
     }
   }
 }

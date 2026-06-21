@@ -47,12 +47,26 @@ class QuickReplyButton:
 
 
 @dataclass
+class SecretRequest:
+    """A ``$<NAME>`` dynamic-ask marker found in agent reply text (Vaults).
+
+    The agent writes ``$<OPENAI_API_KEY>`` to ask the user for a secret; the value is
+    filled through a trusted UI channel, never the chat. The marker stays in ``.text``
+    so the web transcript can render it as a secure input card; IM replaces it with a
+    deep link in the platform formatter.
+    """
+
+    name: str
+
+
+@dataclass
 class EnhancedReply:
     """Result of processing an agent reply through the enhancer."""
 
     text: str  # Cleaned message text (file links & button block removed)
     files: List[FileLink] = field(default_factory=list)
     buttons: List[QuickReplyButton] = field(default_factory=list)
+    secret_requests: List[SecretRequest] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +119,12 @@ _PLAIN_LINKS_ONLY_RE = re.compile(r"(?:\s*\[[^\]]+\]\(" + _PLAIN_URL + r"\)\s*)+
 _SILENT_BLOCK_RE = re.compile(r"<silent\b[^>]*>.*?</silent\s*>", re.IGNORECASE | re.DOTALL)
 _UNTERMINATED_SILENT_RE = re.compile(r"<silent\b[^>]*>.*\Z", re.IGNORECASE | re.DOTALL)
 
+# Dynamic secret-ask markers: ``$<OPENAI_API_KEY>`` (ENV-style name). Matched only
+# outside fenced/inline code so a marker shown in an example isn't treated as a real
+# request — code spans are masked first.
+_SECRET_REQUEST_RE = re.compile(r"\$<([A-Z][A-Z0-9_]*)>")
+_CODE_SPAN_RE = re.compile(r"```.*?```|~~~.*?~~~|`[^`\n]*`", re.DOTALL)
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -126,13 +146,14 @@ def process_reply(
     uploaded to the platform separately).
     """
     text = strip_silent_blocks(text)
+    secret_requests = _extract_secret_requests(text)
     files = _extract_file_links(text)
     text_no_files = text if keep_file_links else (_strip_file_links(text) if files else text)
     if include_quick_replies:
         buttons, text_clean = _extract_buttons(text_no_files)
     else:
         buttons, text_clean = [], text_no_files
-    return EnhancedReply(text=text_clean.rstrip(), files=files, buttons=buttons)
+    return EnhancedReply(text=text_clean.rstrip(), files=files, buttons=buttons, secret_requests=secret_requests)
 
 
 def strip_file_links(text: str) -> str:
@@ -197,6 +218,21 @@ def _strip_file_links(text: str) -> str:
         return m.group(0)
 
     return _FILE_LINK_RE.sub(_replacer, text)
+
+
+def _extract_secret_requests(text: str) -> List[SecretRequest]:
+    """Return ordered, de-duplicated ``$<NAME>`` markers found outside code spans."""
+    if not text or "$<" not in text:
+        return []
+    masked = _CODE_SPAN_RE.sub(lambda m: " " * len(m.group(0)), text)
+    out: List[SecretRequest] = []
+    seen: set[str] = set()
+    for match in _SECRET_REQUEST_RE.finditer(masked):
+        name = match.group(1)
+        if name not in seen:
+            seen.add(name)
+            out.append(SecretRequest(name=name))
+    return out
 
 
 def _extract_buttons(text: str) -> Tuple[List[QuickReplyButton], str]:
