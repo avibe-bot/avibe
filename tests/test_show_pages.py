@@ -235,7 +235,10 @@ def test_show_page_dir_creates_default_index(monkeypatch, tmp_path):
     assert "fallback-shell" not in index_html
     # PWA "Add to Home Screen" support: standalone-capable + a real app icon.
     assert 'name="apple-mobile-web-app-capable" content="yes"' in index_html
-    assert 'rel="apple-touch-icon" href="/apple-touch-icon.png"' in index_html
+    assert 'rel="apple-touch-icon"' in index_html
+    assert 'href="/apple-touch-icon.png"' in index_html
+    # Stable id so a Show Page can override the icon by repointing this one link.
+    assert 'id="app-touch-icon"' in index_html
     # Must NOT link the workbench manifest — its start_url "/" would hijack the
     # installed Home Screen icon back to the workbench instead of this page.
     assert 'rel="manifest"' not in index_html

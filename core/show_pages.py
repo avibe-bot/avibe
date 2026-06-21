@@ -455,11 +455,14 @@ def _default_index_html(session_id: str) -> str:
          is the workbench manifest whose start_url is "/", which would hijack the
          installed icon back to the workbench instead of opening this page. We
          also omit apple-mobile-web-app-title so a page that sets document.title
-         keeps its own Home Screen name. -->
+         keeps its own Home Screen name. The apple-touch-icon carries a stable id
+         so a page can give the installed app its own icon by repointing this one
+         link's href — iOS picks the FIRST apple-touch-icon, so replace it rather
+         than appending another. -->
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+    <link rel="apple-touch-icon" id="app-touch-icon" href="/apple-touch-icon.png">
     <link rel="icon" type="image/png" href="/logo.png">
   </head>
   <body>
