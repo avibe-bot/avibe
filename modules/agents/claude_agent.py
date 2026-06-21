@@ -374,6 +374,47 @@ class ClaudeAgent(BaseAgent):
             if not cleanup_from_receiver:
                 await self._stop_receiver_task(receiver_task)
 
+    async def force_cleanup_stuck_active_session(self, composite_key: str) -> None:
+        """Settle and drop a Claude session whose active flag is stale.
+
+        SessionHandler owns the idle timer, but ClaudeAgent owns the pending
+        request FIFO and Workbench turn tokens. Force cleanup must retire the
+        failed turn here before removing the SDK client, otherwise a later
+        result can adopt the stale request/token.
+        """
+        pending_request = self._pop_pending_request(composite_key)
+        context = getattr(pending_request, "context", None)
+        if context is not None:
+            self._adopt_pending_turn_token(context, pending_request)
+            await self._remove_result_pending_reaction(composite_key, context, pending_request)
+        else:
+            self._pending_reactions.pop(composite_key, None)
+        self._last_assistant_text.pop(composite_key, None)
+        self._pending_assistant_message.pop(composite_key, None)
+
+        try:
+            await self._cleanup_runtime_session(
+                composite_key,
+                preserve_pending_request_state=True,
+            )
+        finally:
+            if context is not None:
+                try:
+                    await self.controller.emit_agent_message(
+                        context,
+                        "result",
+                        "",
+                        is_error=True,
+                        level="silent",
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to emit terminal result while force-cleaning Claude session %s",
+                        composite_key,
+                        exc_info=True,
+                    )
+                    self._release_service_runtime_turn(context)
+
     async def handle_stop(self, request: AgentRequest) -> bool:
         composite_key = request.composite_session_id
         if composite_key not in self.claude_sessions:
@@ -684,7 +725,11 @@ class ClaudeAgent(BaseAgent):
                             # failure: clear the loading reaction and the stale
                             # assistant-text fallback, then release the active
                             # flag so the session can be idle-evicted.
-                            self._discard_pending_reaction(composite_key)
+                            await self._remove_result_pending_reaction(
+                                composite_key,
+                                context,
+                                pending_request,
+                            )
                             self._last_assistant_text.pop(composite_key, None)
                             is_idle = self._mark_session_idle_if_no_pending_requests(composite_key)
                             try:
@@ -896,6 +941,20 @@ class ClaudeAgent(BaseAgent):
         reactions.pop(0)
         if not reactions:
             self._pending_reactions.pop(composite_key, None)
+
+    async def _remove_result_pending_reaction(
+        self,
+        composite_key: str,
+        context: MessageContext,
+        request: Optional[AgentRequest],
+    ) -> None:
+        reactions_before = len(self._pending_reactions.get(composite_key) or [])
+        if request is not None:
+            await self._remove_specific_pending_reaction(composite_key, context, request)
+            await self._remove_ack_reaction(request)
+        reactions_after = len(self._pending_reactions.get(composite_key) or [])
+        if reactions_before and reactions_after == reactions_before:
+            self._discard_pending_reaction(composite_key)
 
     def _pop_pending_request(self, composite_key: str) -> Optional[AgentRequest]:
         requests = self._pending_requests.get(composite_key)

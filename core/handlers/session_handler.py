@@ -1319,7 +1319,16 @@ class SessionHandler(BaseHandler):
                 if recheck_idle < idle_timeout:
                     continue
                 logger.info("Evicting idle Claude session %s after %.1fs idle", composite_key, recheck_idle)
-            await self.cleanup_session(composite_key)
+            if composite_key in self.active_sessions:
+                agent_service = getattr(self.controller, "agent_service", None)
+                claude_agent = getattr(agent_service, "agents", {}).get("claude") if agent_service else None
+                force_cleanup = getattr(claude_agent, "force_cleanup_stuck_active_session", None)
+                if callable(force_cleanup):
+                    await force_cleanup(composite_key)
+                else:
+                    await self.cleanup_session(composite_key)
+            else:
+                await self.cleanup_session(composite_key)
             evicted += 1
 
         return evicted
@@ -1356,6 +1365,10 @@ class SessionHandler(BaseHandler):
         active_watch_pids = getattr(watch_service, "active_process_pids", None)
         if callable(active_watch_pids):
             exclude_pids.update(active_watch_pids())
+        auth_service = getattr(self.controller, "agent_auth_service", None)
+        active_auth_pids = getattr(auth_service, "active_claude_auth_client_pids", None)
+        if callable(active_auth_pids):
+            exclude_pids.update(active_auth_pids())
         # Let unexpected errors surface to the caller (``periodic_cleanup``
         # logs them at error level); ``reap_orphaned_claude_processes`` already
         # absorbs the expected ``ps``-read failure internally.

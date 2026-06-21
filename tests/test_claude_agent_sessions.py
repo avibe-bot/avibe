@@ -1610,6 +1610,51 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(release_seen_state, {"client_present": False, "receiver_present": False})
         self.assertFalse(service._turn_gates[composite_key].lock.locked())
 
+    async def test_force_cleanup_stuck_active_session_retires_pending_turn(self):
+        controller = _StubController()
+        controller.emit_agent_message = AsyncMock()
+        agent = ClaudeAgent(controller)
+        composite_key = "session-1:/tmp/work"
+        pending_context = SimpleNamespace(
+            platform_specific={
+                "turn_token": "current",
+                "agent_runtime_turn_key": composite_key,
+                "agent_runtime_turn_token": "current-runtime",
+            }
+        )
+        pending_request = SimpleNamespace(
+            context=pending_context,
+            ack_reaction_message_id="m1",
+            ack_reaction_emoji="eyes",
+        )
+        next_request = SimpleNamespace(context=SimpleNamespace(platform_specific={"turn_token": "next"}))
+        agent._pending_requests[composite_key] = [pending_request, next_request]
+        agent._pending_reactions[composite_key] = [("m1", "eyes"), ("m2", "eyes")]
+        agent._last_assistant_text[composite_key] = "stale"
+        agent._pending_assistant_message[composite_key] = "pending"
+        agent._remove_ack_reaction = AsyncMock()
+
+        await agent.force_cleanup_stuck_active_session(composite_key)
+
+        controller.session_handler.cleanup_session.assert_awaited_once_with(
+            composite_key,
+            current_receiver_task=None,
+        )
+        agent._remove_ack_reaction.assert_awaited_once_with(pending_request)
+        controller.emit_agent_message.assert_awaited_once_with(
+            pending_context,
+            "result",
+            "",
+            is_error=True,
+            level="silent",
+        )
+        self.assertEqual(pending_context.platform_specific["turn_token"], "current")
+        self.assertEqual(pending_context.platform_specific["agent_runtime_turn_token"], "current-runtime")
+        self.assertEqual(agent._pending_requests[composite_key], [next_request])
+        self.assertEqual(agent._pending_reactions[composite_key], [("m2", "eyes")])
+        self.assertNotIn(composite_key, agent._last_assistant_text)
+        self.assertNotIn(composite_key, agent._pending_assistant_message)
+
     async def test_receiver_eof_adopts_pending_turn_token_when_context_is_stale(self):
         controller = _StubController()
         controller._get_session_key = lambda context: "telegram::user::U1"

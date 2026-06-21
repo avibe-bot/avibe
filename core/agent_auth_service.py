@@ -20,6 +20,7 @@ from modules.claude_sdk_compat import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
 )
+from modules.agents.claude_process_reaper import get_claude_client_pid
 from modules.agents.catalog import WEB_OAUTH_BACKENDS
 from modules.agents.opencode.message_processor import (
     extract_opencode_response_text,
@@ -381,6 +382,23 @@ class AgentAuthService:
         # reload V2Config-backed credentials. The hook receives ``(backend,)``
         # and runs in a worker thread to avoid blocking the auth event loop.
         self._post_web_success_hook: Optional[Any] = None
+
+    def active_claude_auth_client_pids(self) -> set[int]:
+        """Return Claude SDK client pids owned by in-progress auth flows."""
+        pids: set[int] = set()
+        for flow in list(self._flows.values()):
+            if flow.backend != "claude" or flow.claude_client is None:
+                continue
+            pid = get_claude_client_pid(flow.claude_client)
+            if pid:
+                pids.add(pid)
+        for flow in list(self._web_flows.values()):
+            if flow.backend != "claude" or flow.claude_client is None:
+                continue
+            pid = get_claude_client_pid(flow.claude_client)
+            if pid:
+                pids.add(pid)
+        return pids
 
     def _t(self, key: str, **kwargs) -> str:
         lang = getattr(self.controller, "_get_lang", lambda: getattr(self.controller.config, "language", "en"))()

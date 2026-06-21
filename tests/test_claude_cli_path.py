@@ -1068,6 +1068,15 @@ def test_evict_idle_sessions_force_evicts_stuck_active_session(monkeypatch, tmp_
     monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
 
     controller = _Controller(tmp_path)
+    cleanup_calls: list[str] = []
+
+    class _ClaudeAgent:
+        @staticmethod
+        async def force_cleanup_stuck_active_session(composite_key: str) -> None:
+            cleanup_calls.append(composite_key)
+            handler.clear_session_tracking(composite_key)
+
+    controller.agent_service = type("AgentService", (), {"agents": {"claude": _ClaudeAgent()}})()
     handler = SessionHandler(controller)
     context = MessageContext(user_id="U123", channel_id="C123")
 
@@ -1082,8 +1091,9 @@ def test_evict_idle_sessions_force_evicts_stuck_active_session(monkeypatch, tmp_
     evicted = asyncio.run(handler.evict_idle_sessions(600))
 
     assert evicted == 1
-    assert captured["disconnects"] == 1
-    assert composite_key not in controller.claude_sessions
+    assert cleanup_calls == [composite_key]
+    assert captured["disconnects"] == 0
+    assert composite_key in controller.claude_sessions
     assert composite_key not in handler.active_sessions
 
 
@@ -1333,6 +1343,31 @@ def test_reap_orphaned_sessions_excludes_active_watch_process_roots(monkeypatch,
     asyncio.run(handler.reap_orphaned_claude_sessions())
 
     assert captured["exclude_pids"] == {500}
+
+
+def test_reap_orphaned_sessions_excludes_active_claude_auth_clients(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _fake_reap(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    class _AuthService:
+        @staticmethod
+        def active_claude_auth_client_pids():
+            return {600}
+
+    monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
+
+    controller = _Controller(tmp_path)
+    controller.agent_auth_service = _AuthService()
+    handler = SessionHandler(controller)
+    controller.claude_sessions[f"slack_C123:{tmp_path}"] = object()
+
+    asyncio.run(handler.reap_orphaned_claude_sessions())
+
+    assert captured["exclude_pids"] == {600}
 
 
 def test_cleanup_session_swallows_cancelled_receiver_task(monkeypatch, tmp_path: Path) -> None:

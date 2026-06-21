@@ -294,6 +294,37 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         self.assertIs(flow.claude_client, mock_client)
         self.assertTrue(flow.login_prompt_sent)
 
+    async def test_active_claude_auth_client_pids_includes_im_and_web_flows(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+        done_task = asyncio.create_task(asyncio.sleep(0))
+        await done_task
+
+        def _client(pid):
+            return SimpleNamespace(_transport=SimpleNamespace(_process=SimpleNamespace(pid=pid)))
+
+        im_flow = AgentAuthFlow(
+            flow_id="flow-im",
+            backend="claude",
+            settings_key="C1",
+            initiator_user_id="U1",
+            context=context,
+            process=None,
+            reader_task=done_task,
+            waiter_task=done_task,
+            claude_client=_client(501),
+        )
+        service._flows[im_flow.flow_key] = im_flow
+        service._web_flows["web-flow"] = SimpleNamespace(
+            backend="claude",
+            claude_client=_client(502),
+        )
+
+        pids = service.active_claude_auth_client_pids()
+
+        self.assertEqual(pids, {501, 502})
+
     async def test_start_setup_reports_claude_start_failure(self):
         controller = _StubController()
         service = AgentAuthService(controller)
