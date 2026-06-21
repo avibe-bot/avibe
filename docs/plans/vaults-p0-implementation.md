@@ -148,10 +148,12 @@ key_check() / verify_machine_key()           # detect missing/mismatched key (AE
 `Sealed = (ciphertext, nonce, wrap_meta_json)`. Machine-key mode recorded in
 `state_meta`; keychain mode (P1) swaps `get_or_create_machine_key` for `keyring`.
 
-## 4. Backend service — `core/services/vault.py`
+## 4. Backend service — `storage/vault_service.py`
 
-Platform-agnostic (per codebase rule: business logic in `core/`). Direct SQLite via
-`create_sqlite_engine` for metadata; value paths go through the daemon (§7 spec).
+Data layer, sibling to `storage/messages_service.py` etc. (the codebase keeps table
+CRUD in `storage/*_service.py`; `core/services/*` is orchestration). Functions take a
+`Connection`; this module owns the one place that decrypts (`resolve`) and the one
+place that writes audit rows. The daemon UDS layer (§5) opens the engine and calls in.
 
 ```
 create_secret(name, value, *, group, tags, protection, policy)   # validates name; seal; audit 'created'
@@ -229,10 +231,12 @@ stay queryable.
 1. `feat(vault): schema + machine-key crypto` — models + Alembic migration (all
    tables, final shape) + `vault_crypto.py` (machine-key) + `data query` denylist +
    unit tests (envelope round-trip, name validation, denylist).
-2. `feat(vault): service + UDS resolve` — `core/services/vault.py` (standard
-   resolve) + `/internal/vault/*` + tests.
-3. `feat(vault): CLI` — `vibe vault set/list/rm/run/fetch/request` (+ help-only
-   `export`/`inject`); test `run` injects to child env with **no stdout leak**.
+2. `feat(vault): data service` — `storage/vault_service.py` (CRUD + standard-tier
+   resolve + provision + audit) + unit tests. **[done — 2026-06-21]**
+3. `feat(vault): UDS + CLI` — `/internal/vault/*` endpoints + `vibe vault
+   set/list/rm/run/fetch/request` (+ help-only `export`/`inject`); the UDS transport
+   and its CLI consumer land together so it's end-to-end testable. Test `run` injects
+   to child env with **no stdout leak**.
 4. `feat(vault): REST + Vaults page CRUD` — `/api/vault/*` + `VaultsPage.tsx` +
    ApiContext + `npm run build`.
 5. `feat(vault): dynamic ask` — `reply_enhancer` `$<NAME>` + dispatcher provision +
