@@ -385,7 +385,10 @@ different relations into one.)
 (holding the unlocked VMK) unwraps the DEK of each covered secret and POSTs that
 **set of DEKs** to the daemon over TLS. The daemon caches `{secret_id → DEK}` for
 the grant's window and, while live, decrypts those secrets on headless `vault run`
-with no browser and no prompt. **Blast radius = exactly the covered set** — the
+with no browser and no prompt. **It caches keys, not plaintext** — each value is
+decrypted only at the instant of a `vault run` (from the cached DEK + the DB
+ciphertext) and dropped after injection, so plaintext never sits idle in memory;
+only the 32-byte DEKs do. **Blast radius = exactly the covered set** — the
 daemon holds only those DEKs, never the VMK, so nothing outside the set is
 reachable. The covered set is **frozen at grant time** (a secret added to the
 group/skill afterward isn't auto-covered — you'd re-approve), which is the
