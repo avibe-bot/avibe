@@ -71,6 +71,19 @@ def test_inject_renders_each_format_to_0600_file(tmp_path, capfd, fmt):
         assert "A_KEY=alpha-1" in text
 
 
+def test_inject_overwrites_preexisting_loose_file_as_0600(tmp_path, capfd):
+    # If the target already exists with permissive perms, the write must NOT inherit them —
+    # the atomic 0600 temp+replace ensures the secret is never momentarily world-readable.
+    _set("A_KEY", "alpha-1", tmp_path)
+    capfd.readouterr()
+    out = tmp_path / "preexisting.env"
+    out.write_text("OLD=stale\n")
+    os.chmod(out, 0o644)
+    assert cli.cmd_vault_inject(_ns(keys="A_KEY", out=str(out), format="dotenv")) == 0
+    assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
+    assert out.read_text() == "A_KEY=alpha-1\n"  # fully replaced, not appended
+
+
 def test_inject_payload_does_not_leak_value(tmp_path, capfd):
     _set("SECRET_KEY", "topsecret-INJECT", tmp_path)
     capfd.readouterr()

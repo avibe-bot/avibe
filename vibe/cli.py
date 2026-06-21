@@ -3356,18 +3356,20 @@ def cmd_vault_run(args):
     for env_name, vault_name in mapping.items():
         child_env[env_name] = values[vault_name]
     try:
-        completed = subprocess.run(command_argv, env=child_env)
+        proc = subprocess.Popen(command_argv, env=child_env)
     except FileNotFoundError:
         # execve failed despite the which() preflight (e.g. a missing shebang interpreter)
         # — the child never received the env, so do NOT record a delivery.
         _print_task_error(TaskCliError(f"command not found: {command_argv[0]!r}", code="command_not_found", help_command=help_command))
         return 127
-    # The child received the env and ran → record delivery now (not at resolve time).
+    # The secret reached the child's env at spawn time → record delivery NOW, before waiting.
+    # subprocess.run blocks until exit, so a long-running child that is interrupted (or a
+    # parent that dies) would have delivered the secret but never been audited.
     with engine.begin() as conn:
         vault_service.record_deliveries(
             conn, sorted(set(mapping.values())), requester={"source": "cli", "pid": os.getpid()}, mode="run"
         )
-    return completed.returncode
+    return proc.wait()
 
 
 def _wait_for_provision(request_id: str, *, timeout: float, poll_interval: float = 2.0) -> bool:
@@ -3600,7 +3602,13 @@ def cmd_vault_fetch(args):
     # The response body is the upstream API's response (not a secret) — pass it through.
     output = getattr(args, "output", None)
     if output:
-        Path(output).write_bytes(resp.content)
+        try:
+            Path(output).write_bytes(resp.content)
+        except OSError as exc:
+            # The secret-bearing request already completed; a bad --output path should still
+            # yield a structured error (missing parent / permission denied), not a traceback.
+            _print_task_error(TaskCliError(f"cannot write output file: {exc}", code="output_unwritable", help_command=help_command))
+            return 1
     else:
         sys.stdout.buffer.write(resp.content)
         sys.stdout.flush()
@@ -3624,13 +3632,28 @@ def _render_secrets(values: dict, keys: list, fmt: str) -> str:
 
 
 def _write_private_file(path: Path, content: str) -> None:
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(content)
+    """Atomically write ``content`` to ``path`` as a 0600 file.
+
+    ``tempfile.mkstemp`` creates the temp file 0600 from the start, so the secret is never
+    momentarily world-readable even when ``path`` pre-existed with looser perms (``O_TRUNC``
+    would have kept the old mode until a late ``chmod``). ``os.replace`` swaps it in
+    atomically — a crash mid-write leaves either the old file or the complete new one, never
+    a truncated/partial secret.
+    """
+    import tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     try:
-        os.chmod(path, 0o600)  # tighten if the file pre-existed with looser perms
-    except OSError:
-        pass
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def cmd_vault_export(args):
@@ -3649,6 +3672,14 @@ def cmd_vault_export(args):
             values = vault_service.resolve(conn, sorted(set(mapping.values())))
         lines = [f"export {local}={shlex.quote(values[vault_name])}" for local, vault_name in mapping.items()]
         sys.stdout.write("\n".join(lines) + "\n")
+        try:
+            # write() may only buffer; flush so the downstream eval pipe has actually
+            # received the values before we record a delivery.
+            sys.stdout.flush()
+        except BrokenPipeError:
+            # The consumer's pipe closed before receiving the values — nothing was delivered,
+            # so don't record a delivery.
+            return 1
         with engine.begin() as conn:
             vault_service.record_deliveries(
                 conn, sorted(set(mapping.values())), requester={"source": "cli", "pid": os.getpid()}, mode="export"
@@ -3716,7 +3747,7 @@ def _read_passphrase_stdin(help_command: str) -> str:
 
 
 def cmd_vault_key_export(args):
-    from storage import vault_crypto
+    from storage import vault_crypto, vault_service
 
     help_command = "vibe vault key export --help"
     try:
@@ -3730,6 +3761,21 @@ def cmd_vault_key_export(args):
             _print_cli_payload("vault_key_export", written=True, path=str(out))
         else:
             print(json.dumps(blob, indent=2))
+        # Exporting the machine key is the most sensitive vault op (it can decrypt every
+        # standard-tier secret once the passphrase is known), so record a value-free audit row
+        # for the activity panel. Best-effort: an audit-write hiccup must not fail a delivered
+        # export.
+        try:
+            engine = _open_vault_engine()
+            with engine.begin() as conn:
+                vault_service.audit(
+                    conn,
+                    "key_exported",
+                    requester={"source": "cli", "pid": os.getpid()},
+                    delivery={"out": str(out) if out else "stdout"},
+                )
+        except Exception:
+            pass
         return 0
     except vault_crypto.VaultCryptoError as exc:
         _print_task_error(TaskCliError(str(exc), code="vault_key_export_failed", help_command=help_command))

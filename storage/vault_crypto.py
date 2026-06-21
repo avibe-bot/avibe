@@ -235,7 +235,20 @@ def import_machine_key(blob: dict, passphrase: str, *, key_path: Path | None = N
         os.chmod(path.parent, 0o700)
     except OSError:
         pass
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(key)
-    os.chmod(path, 0o600)
+    # Write to a 0600 temp file and atomically swap it in. With ``force`` overwriting the live
+    # key, a crash / disk-full / failed write must never truncate it — a truncated machine key
+    # would orphan every secret sealed under the old key. ``mkstemp`` creates the temp 0600 from
+    # the start; ``os.replace`` is atomic on POSIX.
+    import tempfile
+
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(key)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise

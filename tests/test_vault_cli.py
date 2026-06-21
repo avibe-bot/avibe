@@ -176,3 +176,19 @@ def test_run_bad_command_does_not_deliver(tmp_path, capfd):
     cli.cmd_vault_list(_ns())
     secret = json.loads(capfd.readouterr().out)["secrets"][0]
     assert secret["use_count"] == 0
+
+
+def test_run_records_delivery_after_spawn(tmp_path, capfd):
+    vf = tmp_path / "v.txt"
+    vf.write_text("delivered-value")
+    cli.cmd_vault_set(_ns(name="DELIVER_KEY", from_file=str(vf)))
+    capfd.readouterr()
+    # A successful run records exactly one delivery (recorded right after spawn, not after the
+    # child exits — so an interrupted long-running child is still audited).
+    code = cli.cmd_vault_run(_ns(env=["DELIVER_KEY"], command_argv=[sys.executable, "-c", "pass"]))
+    assert code == 0
+    capfd.readouterr()
+    cli.cmd_vault_list(_ns())
+    secret = json.loads(capfd.readouterr().out)["secrets"][0]
+    assert secret["use_count"] == 1
+    assert secret["last_used_at"] is not None

@@ -50,6 +50,18 @@ def test_tampered_blob_fails(tmp_path):
         vault_crypto.import_machine_key(blob, "p", key_path=tmp_path / "d" / "machine.key")
 
 
+def test_failed_force_import_preserves_existing_key(tmp_path):
+    # A failed --force import (corrupt/undecryptable blob) must NOT destroy the live key —
+    # decryption is verified before the file is touched, and the write is an atomic replace.
+    src = tmp_path / "machine.key"
+    original = vault_crypto.get_or_create_machine_key(src)
+    blob = vault_crypto.export_machine_key("right", key_path=src)
+    blob["ciphertext"] = vault_crypto._b64(b"x" * 48)  # corrupt → decrypt fails
+    with pytest.raises(VaultCryptoError):
+        vault_crypto.import_machine_key(blob, "right", key_path=src, force=True)
+    assert src.read_bytes() == original  # untouched; secrets sealed under it still open
+
+
 def test_export_refuses_when_no_machine_key(tmp_path):
     # Export must back up an EXISTING key, never mint one — minting on "export" would write a
     # fresh random key and silently orphan any secrets sealed under the key the user expected.
@@ -100,3 +112,22 @@ def test_cli_export_then_import_roundtrip(tmp_path, monkeypatch, capfd):
     monkeypatch.setattr("sys.stdin", io.StringIO("my-passphrase\n"))
     assert cli.cmd_vault_key_import(argparse.Namespace(file=str(out), force=True)) == 0
     assert json.loads(capfd.readouterr().out)["imported"] is True
+
+
+def test_cli_export_writes_audit_event(tmp_path, monkeypatch, capfd):
+    # Exporting the machine key is the most sensitive vault op, so it must leave a value-free
+    # audit trail for the activity panel.
+    from storage.models import vault_audit
+
+    vault_crypto.get_or_create_machine_key()
+    out = tmp_path / "vault-key.json"
+    secret_phrase = "super-secret-passphrase-ZZZ"
+    monkeypatch.setattr("sys.stdin", io.StringIO(secret_phrase + "\n"))
+    assert cli.cmd_vault_key_export(argparse.Namespace(out=str(out))) == 0
+    capfd.readouterr()
+    engine = cli._open_vault_engine()
+    with engine.connect() as conn:
+        rows = [dict(r) for r in conn.execute(vault_audit.select()).mappings()]
+    assert "key_exported" in {r["event"] for r in rows}
+    # The audit row never carries the passphrase.
+    assert all(secret_phrase not in json.dumps(r) for r in rows)
