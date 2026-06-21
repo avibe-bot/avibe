@@ -285,9 +285,11 @@ the below needs a migration. Status of the rest:
   migration (§7.2). **[done — 2026-06-21]** Uses Scrypt (zero new dep, ships in
   `cryptography`; the blob records `kdf` so a later Argon2id variant is forward-
   compatible — KDF choice for the protected tier is still open Q7).
-- Protected-tier **envelope wire format** (VMK + multi-wrap: password / passkey copies)
-  as the shared spec — the *format* is testable headlessly even though the *decryption*
-  runs in the browser (below). *(next verifiable piece)*
+- Protected-tier **envelope wire format** (`storage/vault_protected.py`): VMK + password
+  multi-wrap copies + DEK-under-VMK seal/open + the `wrap_meta` v1 schema, as the
+  canonical reference + test vectors the browser mirrors. **[done — 2026-06-21]**
+  Production decryption stays browser-side (§8.4); this module's unwrap is reference/
+  test only and is not wired into any daemon resolve.
 
 **Gated on the Incus regression env (live message pipeline) — built carefully there,
 not landed unverified here:**
