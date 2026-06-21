@@ -12,6 +12,12 @@ from storage.pagination import PageRequest, PageResult, page_result_from_limit_p
 
 DEFAULT_QUERY_STEP_LIMIT = 250_000
 
+# Tables whose rows must never be readable through ``vibe data query``. Vault secret
+# ciphertext is encrypted anyway, but there's no reason to expose it (or let backups
+# of a query result carry it); names/policy live behind the proper Vaults API/CLI.
+# Sibling vault tables (requests/links/grants/audit) stay queryable for inspection.
+_DENIED_TABLES = frozenset({"vault_secrets"})
+
 
 class ReadOnlyQueryError(ValueError):
     def __init__(self, message: str, *, code: str = "query_failed"):
@@ -82,7 +88,12 @@ def _validate_single_statement(sql: str) -> str:
 
 
 def _authorizer(action: int, arg1: str | None, arg2: str | None, db_name: str | None, source: str | None) -> int:
-    del arg1, arg2, db_name, source
+    del arg2, db_name, source
+    # SQLITE_READ fires per column access with the table name in ``arg1``; deny any
+    # read touching a denylisted table so the whole statement fails with a clear error
+    # rather than leaking the table or returning partial rows.
+    if action == sqlite3.SQLITE_READ and arg1 in _DENIED_TABLES:
+        return sqlite3.SQLITE_DENY
     denied_actions = {
         sqlite3.SQLITE_ALTER_TABLE,
         sqlite3.SQLITE_ATTACH,
