@@ -166,6 +166,18 @@ def _derive_kek_scrypt(passphrase: bytes, salt: bytes, *, n: int = _SCRYPT_N, r:
     return Scrypt(salt=salt, length=_KEY_BYTES, n=n, r=r, p=p).derive(passphrase)
 
 
+def _validate_scrypt_params(n: int, r: int, p: int) -> None:
+    """Bound file-controlled KDF params so a corrupt/hostile export can't OOM or hang the
+    import before authentication ever fails. N must be a power of two ≤ 2^17 (~256 MB at
+    r=8); r and p stay small."""
+    if not (isinstance(n, int) and n >= 2 and (n & (n - 1)) == 0 and n <= 2**17):
+        raise VaultCryptoError(f"scrypt N out of bounds: {n!r}")
+    if not (isinstance(r, int) and 1 <= r <= 16):
+        raise VaultCryptoError(f"scrypt r out of bounds: {r!r}")
+    if not (isinstance(p, int) and 1 <= p <= 16):
+        raise VaultCryptoError(f"scrypt p out of bounds: {p!r}")
+
+
 def export_machine_key(passphrase: str, *, key_path: Path | None = None) -> dict:
     """Export the machine key as a passphrase-wrapped blob (§7.2).
 
@@ -175,7 +187,10 @@ def export_machine_key(passphrase: str, *, key_path: Path | None = None) -> dict
     """
     if not passphrase:
         raise VaultCryptoError("a non-empty passphrase is required")
-    key = get_or_create_machine_key(key_path)
+    # Export must back up an existing key, never mint one: minting here would write a fresh
+    # random key to disk as a side effect of "export", silently orphaning any secrets that
+    # were sealed under a key the user expected to still be present.
+    key = get_machine_key(key_path)
     salt = os.urandom(16)
     nonce = os.urandom(_NONCE_BYTES)
     kek = _derive_kek_scrypt(passphrase.encode("utf-8"), salt)
@@ -204,13 +219,12 @@ def import_machine_key(blob: dict, passphrase: str, *, key_path: Path | None = N
     if not isinstance(blob, dict) or blob.get("scheme") != EXPORT_SCHEME or blob.get("kdf") != "scrypt":
         raise VaultCryptoError("unrecognized machine-key export blob")
     try:
-        kek = _derive_kek_scrypt(
-            passphrase.encode("utf-8"),
-            _unb64(blob["salt"]),
-            n=int(blob["n"]),
-            r=int(blob["r"]),
-            p=int(blob["p"]),
-        )
+        n, r, p = int(blob["n"]), int(blob["r"]), int(blob["p"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise VaultCryptoError("invalid scrypt parameters in export blob") from exc
+    _validate_scrypt_params(n, r, p)  # bound before deriving — a hostile blob can't OOM/hang us
+    try:
+        kek = _derive_kek_scrypt(passphrase.encode("utf-8"), _unb64(blob["salt"]), n=n, r=r, p=p)
         key = AESGCM(kek).decrypt(_unb64(blob["nonce"]), _unb64(blob["ciphertext"]), None)
     except (InvalidTag, KeyError, ValueError, TypeError) as exc:
         raise VaultCryptoError("import failed (wrong passphrase or corrupt export)") from exc

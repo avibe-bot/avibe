@@ -324,32 +324,43 @@ def resolve(
     conn: Connection,
     names: list[str],
     *,
-    requester: Any = None,
-    mode: str | None = None,
     machine_key: bytes | None = None,
     key_path: Path | None = None,
 ) -> dict[str, str]:
     """Decrypt and return the requested secret values (standard tier).
 
-    Records a value-free ``delivered`` audit row and bumps usage per secret. Raises
-    ``SecretNotFoundError`` for an unknown name and ``UnsupportedProtectionError`` for a
-    protected-tier secret (P1 routes those through approval instead).
+    Validates the WHOLE batch (all names exist + standard tier) BEFORE decrypting any, so a
+    missing/protected name later in the list doesn't leave earlier secrets needlessly
+    unwrapped. Does NOT audit or bump usage — the caller records delivery via
+    :func:`record_deliveries` only after the actual delivery (child spawn / file write /
+    stream) succeeds, so a failed delivery never shows as delivered.
     """
-    out: dict[str, str] = {}
+    rows: dict[str, dict[str, Any]] = {}
     for name in names:
         row = _require_row(conn, name)
         if row.get("protection") != "standard":
             raise UnsupportedProtectionError(f"{name} is protected-tier (approval is P1)")
+        rows[name] = row
+    out: dict[str, str] = {}
+    for name, row in rows.items():
         sealed = Sealed(ciphertext=row["ciphertext"], nonce=row["nonce"], wrap_meta=row["wrap_meta"])
-        value = vault_crypto.open_standard(sealed, machine_key=machine_key, key_path=key_path)
-        out[name] = value.decode("utf-8")
+        out[name] = vault_crypto.open_standard(sealed, machine_key=machine_key, key_path=key_path).decode("utf-8")
+    return out
+
+
+def record_deliveries(conn: Connection, names: list[str], *, requester: Any = None, mode: str | None = None) -> None:
+    """Bump usage + write a value-free ``delivered`` audit row per name.
+
+    Call this only AFTER the delivery action (child spawn / file write / stream) succeeds,
+    so the audit trail and usage counts never record a delivery that didn't happen.
+    """
+    for name in names:
         conn.execute(
             vault_secrets.update()
             .where(vault_secrets.c.name == name)
             .values(last_used_at=_now(), use_count=vault_secrets.c.use_count + 1)
         )
         audit(conn, "delivered", secret_name=name, requester=requester, delivery={"mode": mode})
-    return out
 
 
 def create_provision_request(

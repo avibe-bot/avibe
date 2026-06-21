@@ -70,6 +70,17 @@ def _kek_password(password: str, salt: bytes, *, n: int = _SCRYPT_N, r: int = _S
     return Scrypt(salt=salt, length=_KEY_BYTES, n=n, r=r, p=p).derive(password.encode("utf-8"))
 
 
+def _validate_scrypt_params(n: int, r: int, p: int) -> None:
+    """Bound copy-controlled KDF params so a hostile/corrupt wrap_meta can't OOM or hang
+    the unwrap before authentication fails. N is a power of two ≤ 2^17 (~256 MB at r=8)."""
+    if not (isinstance(n, int) and n >= 2 and (n & (n - 1)) == 0 and n <= 2**17):
+        raise ProtectedFormatError(f"scrypt N out of bounds: {n!r}")
+    if not (isinstance(r, int) and 1 <= r <= 16):
+        raise ProtectedFormatError(f"scrypt r out of bounds: {r!r}")
+    if not (isinstance(p, int) and 1 <= p <= 16):
+        raise ProtectedFormatError(f"scrypt p out of bounds: {p!r}")
+
+
 def _password_copy(vmk: bytes, password: str) -> dict:
     salt = os.urandom(16)
     nonce = os.urandom(_NONCE_BYTES)
@@ -115,9 +126,11 @@ def unwrap_vmk(wrap_meta: str, password: str) -> bytes:
         if copy.get("kind") != "password" or copy.get("kdf") != "scrypt":
             continue
         try:
-            kek = _kek_password(password, _unb64(copy["salt"]), n=int(copy["n"]), r=int(copy["r"]), p=int(copy["p"]))
+            n, r, p = int(copy["n"]), int(copy["r"]), int(copy["p"])
+            _validate_scrypt_params(n, r, p)  # bound before deriving; skip a copy with hostile params
+            kek = _kek_password(password, _unb64(copy["salt"]), n=n, r=r, p=p)
             return AESGCM(kek).decrypt(_unb64(copy["nonce"]), _unb64(copy["wrapped"]), None)
-        except (InvalidTag, KeyError, ValueError, TypeError):
+        except (InvalidTag, KeyError, ValueError, TypeError, ProtectedFormatError):
             continue
     raise ProtectedFormatError("no password copy could be unwrapped (wrong password?)")
 

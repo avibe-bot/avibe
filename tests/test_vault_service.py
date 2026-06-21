@@ -42,9 +42,14 @@ def test_create_returns_masked_meta_without_value(vault):
 def test_resolve_round_trip_and_usage(vault):
     engine, key_path = vault
     _create(engine, key_path, name="DB_URL", value="postgres://secret@host/db")
-    with engine.begin() as conn:
-        values = vs.resolve(conn, ["DB_URL"], requester={"agent": "claude"}, mode="env", key_path=key_path)
+    with engine.connect() as conn:
+        values = vs.resolve(conn, ["DB_URL"], key_path=key_path)
     assert values == {"DB_URL": "postgres://secret@host/db"}
+    # resolve alone neither audits nor bumps usage — delivery is recorded only after the
+    # actual delivery action succeeds.
+    with engine.begin() as conn:
+        assert vs.get_secret_meta(conn, "DB_URL")["use_count"] == 0
+        vs.record_deliveries(conn, ["DB_URL"], requester={"agent": "claude"}, mode="run")
     with engine.begin() as conn:
         meta = vs.get_secret_meta(conn, "DB_URL")
     assert meta["use_count"] == 1
@@ -117,7 +122,8 @@ def test_audit_records_events_without_value(vault):
     engine, key_path = vault
     _create(engine, key_path, name="AUD", value="topsecretvalue42")
     with engine.begin() as conn:
-        vs.resolve(conn, ["AUD"], requester={"agent": "claude"}, mode="env", key_path=key_path)
+        vs.resolve(conn, ["AUD"], key_path=key_path)
+        vs.record_deliveries(conn, ["AUD"], requester={"agent": "claude"}, mode="run")
         vs.delete_secret(conn, "AUD")
         rows = [dict(r) for r in conn.execute(vault_audit.select()).mappings()]
     events = {r["event"] for r in rows}

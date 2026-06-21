@@ -3336,13 +3336,8 @@ def cmd_vault_run(args):
                 example="vibe vault run --env OPENAI_API_KEY -- python sync.py",
             )
         engine = _open_vault_engine()
-        with engine.begin() as conn:
-            values = vault_service.resolve(
-                conn,
-                sorted(set(mapping.values())),
-                requester={"source": "cli", "pid": os.getpid()},
-                mode="run",
-            )
+        with engine.connect() as conn:
+            values = vault_service.resolve(conn, sorted(set(mapping.values())))
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
         return 1
@@ -3363,8 +3358,15 @@ def cmd_vault_run(args):
     try:
         completed = subprocess.run(command_argv, env=child_env)
     except FileNotFoundError:
+        # execve failed despite the which() preflight (e.g. a missing shebang interpreter)
+        # — the child never received the env, so do NOT record a delivery.
         _print_task_error(TaskCliError(f"command not found: {command_argv[0]!r}", code="command_not_found", help_command=help_command))
         return 127
+    # The child received the env and ran → record delivery now (not at resolve time).
+    with engine.begin() as conn:
+        vault_service.record_deliveries(
+            conn, sorted(set(mapping.values())), requester={"source": "cli", "pid": os.getpid()}, mode="run"
+        )
     return completed.returncode
 
 
@@ -3643,15 +3645,14 @@ def cmd_vault_export(args):
         if not mapping:
             raise TaskCliError("at least one --env NAME is required", code="missing_env", help_command=help_command)
         engine = _open_vault_engine()
-        with engine.begin() as conn:
-            values = vault_service.resolve(
-                conn,
-                sorted(set(mapping.values())),
-                requester={"source": "cli", "pid": os.getpid()},
-                mode="export",
-            )
+        with engine.connect() as conn:
+            values = vault_service.resolve(conn, sorted(set(mapping.values())))
         lines = [f"export {local}={shlex.quote(values[vault_name])}" for local, vault_name in mapping.items()]
         sys.stdout.write("\n".join(lines) + "\n")
+        with engine.begin() as conn:
+            vault_service.record_deliveries(
+                conn, sorted(set(mapping.values())), requester={"source": "cli", "pid": os.getpid()}, mode="export"
+            )
         return 0
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
@@ -3684,14 +3685,12 @@ def cmd_vault_inject(args):
         if fmt not in ("dotenv", "json", "yaml", "toml"):
             raise TaskCliError(f"unknown --format: {fmt!r} (dotenv|json|yaml|toml)", code="invalid_format", help_command=help_command)
         engine = _open_vault_engine()
-        with engine.begin() as conn:
-            values = vault_service.resolve(
-                conn,
-                keys,
-                requester={"source": "cli", "pid": os.getpid()},
-                mode=f"inject:{fmt}",
-            )
+        with engine.connect() as conn:
+            values = vault_service.resolve(conn, keys)
+        # Write first; if the path is unwritable this raises and no delivery is recorded.
         _write_private_file(Path(out), _render_secrets(values, keys, fmt))
+        with engine.begin() as conn:
+            vault_service.record_deliveries(conn, keys, requester={"source": "cli", "pid": os.getpid()}, mode=f"inject:{fmt}")
         _print_cli_payload("vault_inject", written=True, path=str(out), format=fmt, keys=keys)
         return 0
     except vault_service.SecretNotFoundError as exc:
