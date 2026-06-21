@@ -3238,6 +3238,7 @@ def cmd_vault_set(args):
     try:
         value = _read_secret_value(args, help_command=help_command)
         tags = list(getattr(args, "tag", None) or []) or None
+        policy = _build_secret_policy(args)
         engine = _open_vault_engine()
         with engine.begin() as conn:
             meta = vault_service.create_secret(
@@ -3247,6 +3248,7 @@ def cmd_vault_set(args):
                 group=getattr(args, "group", None) or vault_service.DEFAULT_GROUP,
                 tags=tags,
                 description=getattr(args, "description", None),
+                policy=policy,
             )
         _print_cli_payload("vault_secret", saved=True, secret=meta)
         return 0
@@ -3412,6 +3414,154 @@ def cmd_vault_request(args):
     except Exception as exc:
         _print_task_error(exc, help_command=help_command)
         return 1
+
+
+def _build_secret_policy(args) -> dict | None:
+    """Assemble the non-secret policy (allowed hosts + auth scheme) for the brokered
+    ``fetch`` mode from ``set`` flags. Returns None when nothing is configured."""
+    policy: dict = {}
+    hosts = [h.strip() for h in (getattr(args, "allow_host", None) or []) if h.strip()]
+    if hosts:
+        policy["allowed_hosts"] = hosts
+    auth_header = getattr(args, "auth_header", None)
+    auth_query = getattr(args, "auth_query", None)
+    if auth_header and auth_query:
+        raise TaskCliError("use at most one of --auth-header / --auth-query", code="invalid_auth", help_command="vibe vault set --help")
+    if auth_header:
+        policy["auth"] = {"type": "header", "name": auth_header}
+    elif auth_query:
+        policy["auth"] = {"type": "query", "name": auth_query}
+    # No auth key => fetch defaults to Authorization: Bearer <value>.
+    return policy or None
+
+
+def _host_allowed(host, allowed) -> bool:
+    """Exact host match, or a leading-dot entry (``.github.com``) matching subdomains."""
+    if not host:
+        return False
+    for entry in allowed or []:
+        entry = str(entry).strip()
+        if not entry:
+            continue
+        if entry.startswith("."):
+            if host == entry[1:] or host.endswith(entry):
+                return True
+        elif host == entry:
+            return True
+    return False
+
+
+def _parse_headers(specs) -> dict:
+    headers: dict[str, str] = {}
+    for spec in specs or []:
+        if ":" not in spec:
+            raise TaskCliError(f"invalid --header (expected 'Name: value'): {spec!r}", code="invalid_header", help_command="vibe vault fetch --help")
+        name, _, value = spec.partition(":")
+        headers[name.strip()] = value.strip()
+    return headers
+
+
+def _read_request_body(args):
+    data = getattr(args, "data", None)
+    data_file = getattr(args, "data_file", None)
+    if data is not None and data_file:
+        raise TaskCliError("use at most one of --data / --data-file", code="invalid_data", help_command="vibe vault fetch --help")
+    if data is not None:
+        return data.encode("utf-8")
+    if data_file:
+        try:
+            return Path(data_file).read_bytes()
+        except OSError as exc:
+            raise TaskCliError(f"cannot read --data-file: {exc}", code="data_file_unreadable", help_command="vibe vault fetch --help") from exc
+    return None
+
+
+def cmd_vault_fetch(args):
+    import httpx
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    from storage import vault_service
+
+    help_command = "vibe vault fetch --help"
+    try:
+        name = args.auth
+        url = args.url
+        method = (getattr(args, "method", None) or "GET").upper()
+        headers = _parse_headers(getattr(args, "header", None))
+        body = _read_request_body(args)
+        host = urlsplit(url).hostname
+        if not host:
+            raise TaskCliError(f"invalid --url: {url!r}", code="invalid_url", help_command=help_command)
+
+        engine = _open_vault_engine()
+        # Read policy + decrypt in a read connection. The host check runs BEFORE the
+        # decrypt, so a disallowed target never even unwraps the secret.
+        with engine.connect() as conn:
+            policy = vault_service.get_secret_policy(conn, name)
+            allowed = policy.get("allowed_hosts") or []
+            if not allowed:
+                raise TaskCliError(
+                    f"secret '{name}' has no allowed_hosts; it cannot be used via fetch "
+                    f"(set them with: vibe vault set {name} --allow-host <host>)",
+                    code="proxy_unbound",
+                    help_command=help_command,
+                )
+            if not _host_allowed(host, allowed):
+                raise TaskCliError(
+                    f"host {host!r} is not allowed for secret '{name}'",
+                    code="host_not_allowed",
+                    help_command=help_command,
+                    details={"host": host, "allowed_hosts": allowed},
+                )
+            value = vault_service.open_secret_value(conn, name)
+            auth = policy.get("auth") or {"type": "bearer"}
+
+        # Attach the credential at egress and forward (outside any DB transaction).
+        target_url = url
+        if auth.get("type") == "header":
+            headers[auth["name"]] = value
+        elif auth.get("type") == "query":
+            parts = urlsplit(url)
+            query = parse_qsl(parts.query, keep_blank_values=True)
+            query.append((auth["name"], value))
+            target_url = urlunsplit(parts._replace(query=urlencode(query)))
+        else:  # bearer (default)
+            headers["Authorization"] = f"Bearer {value}"
+
+        with httpx.Client(timeout=30.0, follow_redirects=False) as client:
+            resp = client.request(method, target_url, headers=headers, content=body)
+
+        with engine.begin() as conn:
+            vault_service.record_proxy_use(
+                conn,
+                name,
+                requester={"source": "cli", "pid": os.getpid()},
+                delivery={"host": host, "method": method, "status": resp.status_code},
+            )
+    except vault_service.SecretNotFoundError:
+        _print_task_error(TaskCliError(f"secret '{args.auth}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.UnsupportedProtectionError as exc:
+        _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
+        return 1
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except httpx.HTTPError as exc:
+        _print_task_error(TaskCliError(f"request failed: {exc}", code="request_failed", help_command=help_command))
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+    # The response body is the upstream API's response (not a secret) — pass it through.
+    output = getattr(args, "output", None)
+    if output:
+        Path(output).write_bytes(resp.content)
+    else:
+        sys.stdout.buffer.write(resp.content)
+        sys.stdout.flush()
+    return 0 if resp.is_success else 1
 
 
 def cmd_watch_add(args):
@@ -6118,7 +6268,7 @@ def build_parser():
         error_help_command="vibe vault --help",
         error_hint="Run one of the vault subcommands below. Start with: vibe vault list",
     )
-    vault_subparsers = vault_parser.add_subparsers(dest="vault_command", metavar="{set,list,rm,run,request}")
+    vault_subparsers = vault_parser.add_subparsers(dest="vault_command", metavar="{set,list,rm,run,fetch,request}")
     vault_subparsers.required = True
 
     vault_set_parser = vault_subparsers.add_parser(
@@ -6134,6 +6284,14 @@ def build_parser():
     vault_set_parser.add_argument("--group", help="Group (organizational label). Defaults to 'default'.")
     vault_set_parser.add_argument("--tag", action="append", help="Tag for filtering (repeatable)")
     vault_set_parser.add_argument("--description", help="Human description shown in the Vaults page")
+    vault_set_parser.add_argument(
+        "--allow-host",
+        action="append",
+        metavar="HOST",
+        help="Allow this host for 'vibe vault fetch' (repeatable; '.example.com' matches subdomains). Required to use the secret via fetch.",
+    )
+    vault_set_parser.add_argument("--auth-header", metavar="NAME", help="For fetch: attach the value as this header (default: Authorization: Bearer <value>)")
+    vault_set_parser.add_argument("--auth-query", metavar="NAME", help="For fetch: attach the value as this query parameter")
     _add_json_noop(vault_set_parser)
 
     vault_list_parser = vault_subparsers.add_parser(
@@ -6176,6 +6334,28 @@ def build_parser():
     )
     vault_run_parser.add_argument("command_argv", nargs=argparse.REMAINDER, help="-- followed by the command to run")
     _add_json_noop(vault_run_parser)
+
+    vault_fetch_parser = vault_subparsers.add_parser(
+        "fetch",
+        help="Make an authenticated HTTP request without exposing the credential",
+        description=(
+            "Forward an HTTP request with a vault secret attached at egress (Authorization: Bearer "
+            "by default). The agent never sees the credential — only the response body, which is "
+            "written to stdout (or --output). The secret must declare --allow-host (domain binding): "
+            "a request to any other host is refused before the secret is even decrypted."
+        ),
+        epilog="Example: vibe vault fetch --auth GITHUB_PAT --method POST --url https://api.github.com/repos/o/r/issues --data-file body.json",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault fetch --help",
+    )
+    vault_fetch_parser.add_argument("--auth", required=True, metavar="NAME", help="Secret to attach as the request credential")
+    vault_fetch_parser.add_argument("--url", required=True, help="Target URL (host must be in the secret's allowed_hosts)")
+    vault_fetch_parser.add_argument("--method", default="GET", help="HTTP method (default GET)")
+    vault_fetch_parser.add_argument("--header", action="append", metavar="'Name: value'", help="Extra request header (repeatable)")
+    vault_fetch_parser.add_argument("--data", help="Request body (string)")
+    vault_fetch_parser.add_argument("--data-file", help="Request body read from this file")
+    vault_fetch_parser.add_argument("--output", help="Write the response body to this file instead of stdout")
+    _add_json_noop(vault_fetch_parser)
 
     vault_request_parser = vault_subparsers.add_parser(
         "request",
@@ -6909,6 +7089,8 @@ def main():
             sys.exit(cmd_vault_rm(args))
         if args.vault_command == "run":
             sys.exit(cmd_vault_run(args))
+        if args.vault_command == "fetch":
+            sys.exit(cmd_vault_fetch(args))
         if args.vault_command == "request":
             sys.exit(cmd_vault_request(args))
         parser.error("vault command is required")

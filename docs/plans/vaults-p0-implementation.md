@@ -237,8 +237,12 @@ stay queryable.
 3. `feat(vault): CLI set/list/rm/run/request` — direct-DB + direct-crypto (standard
    tier; UDS deferred to P1, §5). End-to-end verified: `run` injects to child env with
    **no stdout leak**. **[done — 2026-06-21]**
-3b. `feat(vault): fetch/export/inject delivery` — M4 `fetch` (brokered HTTP +
-   domain binding) + help-only `export`/`inject` (formats, TTL-off). *(next)*
+3b. `feat(vault): fetch` — M4 brokered HTTP + domain binding (`set --allow-host` +
+   `--auth-header`/`--auth-query`; secret attached at egress, refused for non-allowed
+   hosts before decrypt; response body passed through, never the secret).
+   **[done — 2026-06-21]**
+3c. `feat(vault): export/inject delivery` — help-only `export` (eval stream) +
+   `inject` (dotenv/json/yaml/toml file). *(next)*
 4. `feat(vault): REST + Vaults page CRUD` — `/api/vault/*` + `VaultsPage.tsx` +
    ApiContext + `npm run build`.
 5. `feat(vault): dynamic ask` — `reply_enhancer` `$<NAME>` + dispatcher provision +

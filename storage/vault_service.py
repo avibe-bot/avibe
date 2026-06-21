@@ -93,6 +93,8 @@ def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
         "source": row.get("source"),
         "description": public_meta.get("description"),
         "preview": public_meta.get("preview", ""),
+        # Policy is non-secret (allowed hosts, auth scheme name) — safe to surface.
+        "policy": _loads(row.get("policy")) or {},
         "last_used_at": row.get("last_used_at"),
         "use_count": row.get("use_count"),
         "created_at": row.get("created_at"),
@@ -158,10 +160,15 @@ def create_secret(
     protection: str = "standard",
     description: str | None = None,
     source: str = "manual",
+    policy: dict[str, Any] | None = None,
     machine_key: bytes | None = None,
     key_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Create a standard-tier secret and return its masked metadata."""
+    """Create a standard-tier secret and return its masked metadata.
+
+    ``policy`` is a non-secret JSON dict (e.g. ``allowed_hosts`` + ``auth`` scheme for
+    the brokered ``fetch`` mode); it never contains the value.
+    """
     if not vault_crypto.is_valid_secret_name(name):
         raise InvalidSecretNameError(name)
     if protection != "standard":
@@ -188,6 +195,7 @@ def create_secret(
             nonce=sealed.nonce,
             wrap_meta=sealed.wrap_meta,
             public_meta=json.dumps(public_meta),
+            policy=json.dumps(policy) if policy else None,
             use_count=0,
             created_at=now,
             updated_at=now,
@@ -243,6 +251,42 @@ def delete_secret(conn: Connection, name: str) -> None:
         raise SecretNotFoundError(name)
     conn.execute(vault_secrets.delete().where(vault_secrets.c.name == name))
     audit(conn, "deleted", secret_name=name)
+
+
+def get_secret_policy(conn: Connection, name: str) -> dict[str, Any]:
+    """Return the secret's non-secret policy dict (allowed_hosts, auth scheme)."""
+    return _loads(_require_row(conn, name).get("policy")) or {}
+
+
+def open_secret_value(
+    conn: Connection,
+    name: str,
+    *,
+    machine_key: bytes | None = None,
+    key_path: Path | None = None,
+) -> str:
+    """Decrypt one standard-tier secret WITHOUT auditing or bumping usage.
+
+    For callers (e.g. the brokered ``fetch`` proxy) that act on the value and then
+    record their own event via :func:`record_proxy_use`. Validate any policy (e.g.
+    host allowlist) *before* calling this so a denied request never decrypts.
+    """
+    row = _require_row(conn, name)
+    if row.get("protection") != "standard":
+        raise UnsupportedProtectionError(f"{name} is protected-tier (approval is P1)")
+    sealed = Sealed(ciphertext=row["ciphertext"], nonce=row["nonce"], wrap_meta=row["wrap_meta"])
+    return vault_crypto.open_standard(sealed, machine_key=machine_key, key_path=key_path).decode("utf-8")
+
+
+def record_proxy_use(conn: Connection, name: str, *, requester: Any = None, delivery: Any = None) -> None:
+    """Bump usage + write a value-free ``proxied`` audit row after a brokered request."""
+    row = _require_row(conn, name)
+    conn.execute(
+        vault_secrets.update()
+        .where(vault_secrets.c.name == name)
+        .values(last_used_at=_now(), use_count=(row.get("use_count") or 0) + 1)
+    )
+    audit(conn, "proxied", secret_name=name, requester=requester, delivery=delivery)
 
 
 def resolve(
