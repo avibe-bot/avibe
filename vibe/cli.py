@@ -3171,6 +3171,249 @@ def cmd_session_update(args):
     return 0
 
 
+# ----- vault: secret management (design: docs/plans/vaults.md) -----
+# P0 standard-tier ops run direct-DB + direct-crypto here, matching sibling CLI
+# commands (session/task/data): the machine key is a local file, so the CLI reading
+# it is the same trust boundary as the daemon, and there is no approval to
+# orchestrate. Protected-tier resolve/sign (P1) will route through the daemon UDS,
+# because that is where the unlock factor, approval, and in-memory grants live.
+
+
+def _open_vault_engine():
+    _ensure_cli_sqlite_state()
+    return create_sqlite_engine(paths.get_sqlite_state_path())
+
+
+def _parse_env_specs(specs) -> dict:
+    """Map ENV var name -> vault secret name from ``--env`` specs.
+
+    Accepts ``NAME`` (inject as the same name), ``LOCAL=NAME`` (rename), and
+    comma-separated ``A,B`` within one flag.
+    """
+    mapping: dict[str, str] = {}
+    for spec in specs or []:
+        for part in str(spec).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "=" in part:
+                local, _, vault_name = part.partition("=")
+                local, vault_name = local.strip(), vault_name.strip()
+            else:
+                local = vault_name = part
+            if not local or not vault_name:
+                raise TaskCliError(f"invalid --env spec: {part!r}", code="invalid_env_spec", help_command="vibe vault run --help")
+            mapping[local] = vault_name
+    return mapping
+
+
+def _read_secret_value(args, *, help_command: str) -> str:
+    """Read a secret value from --stdin or --from-file. Argv values are rejected by
+    design (shell history / agent-context leakage)."""
+    from_file = getattr(args, "from_file", None)
+    use_stdin = bool(getattr(args, "stdin", False))
+    if bool(from_file) == use_stdin:  # neither, or both
+        raise TaskCliError(
+            "provide the value via exactly one of --stdin or --from-file",
+            code="missing_value_source",
+            help_command=help_command,
+        )
+    if from_file:
+        try:
+            value = Path(from_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise TaskCliError(f"cannot read --from-file: {exc}", code="value_file_unreadable", help_command=help_command) from exc
+    else:
+        value = sys.stdin.read()
+    value = value.rstrip("\n")
+    if not value:
+        raise TaskCliError("secret value is empty", code="empty_value", help_command=help_command)
+    return value
+
+
+def cmd_vault_set(args):
+    from storage import vault_service
+
+    help_command = "vibe vault set --help"
+    try:
+        value = _read_secret_value(args, help_command=help_command)
+        tags = list(getattr(args, "tag", None) or []) or None
+        engine = _open_vault_engine()
+        with engine.begin() as conn:
+            meta = vault_service.create_secret(
+                conn,
+                name=args.name,
+                value=value,
+                group=getattr(args, "group", None) or vault_service.DEFAULT_GROUP,
+                tags=tags,
+                description=getattr(args, "description", None),
+            )
+        _print_cli_payload("vault_secret", saved=True, secret=meta)
+        return 0
+    except vault_service.InvalidSecretNameError:
+        _print_task_error(TaskCliError(f"invalid secret name: {args.name!r} (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name", help_command=help_command))
+        return 1
+    except vault_service.SecretExistsError:
+        _print_task_error(TaskCliError(f"secret '{args.name}' already exists (remove it first to replace)", code="secret_exists", help_command=help_command))
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
+def cmd_vault_list(args):
+    from storage import vault_service
+
+    try:
+        engine = _open_vault_engine()
+        with engine.connect() as conn:
+            secrets = vault_service.list_secrets(conn, group=getattr(args, "group", None))
+        _print_cli_payload("vault_secrets", secrets=secrets)
+        return 0
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe vault list --help")
+        return 1
+
+
+def cmd_vault_rm(args):
+    from storage import vault_service
+
+    help_command = "vibe vault rm --help"
+    try:
+        engine = _open_vault_engine()
+        with engine.begin() as conn:
+            vault_service.delete_secret(conn, args.name)
+        _print_cli_payload("vault_secret", removed=True, name=args.name)
+        return 0
+    except vault_service.SecretNotFoundError:
+        _print_task_error(TaskCliError(f"secret '{args.name}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
+def cmd_vault_run(args):
+    from storage import vault_service
+
+    help_command = "vibe vault run --help"
+    try:
+        mapping = _parse_env_specs(getattr(args, "env", None))
+        if not mapping:
+            raise TaskCliError("at least one --env NAME is required", code="missing_env", help_command=help_command)
+        command_argv = list(getattr(args, "command_argv", None) or [])
+        if command_argv and command_argv[0] == "--":
+            command_argv = command_argv[1:]
+        if not command_argv:
+            raise TaskCliError(
+                "a command is required after --",
+                code="missing_command",
+                help_command=help_command,
+                example="vibe vault run --env OPENAI_API_KEY -- python sync.py",
+            )
+        engine = _open_vault_engine()
+        with engine.begin() as conn:
+            values = vault_service.resolve(
+                conn,
+                sorted(set(mapping.values())),
+                requester={"source": "cli", "pid": os.getpid()},
+                mode="run",
+            )
+    except vault_service.SecretNotFoundError as exc:
+        _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.UnsupportedProtectionError as exc:
+        _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
+        return 1
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+    # Build the child env and exec. Values live ONLY in the child's environment; the
+    # CLI prints nothing. The child inherits our stdio so its output passes through.
+    child_env = dict(os.environ)
+    for env_name, vault_name in mapping.items():
+        child_env[env_name] = values[vault_name]
+    try:
+        completed = subprocess.run(command_argv, env=child_env)
+    except FileNotFoundError:
+        _print_task_error(TaskCliError(f"command not found: {command_argv[0]!r}", code="command_not_found", help_command=help_command))
+        return 127
+    return completed.returncode
+
+
+def _wait_for_provision(request_id: str, *, timeout: float, poll_interval: float = 2.0) -> bool:
+    from storage.models import vault_requests
+
+    deadline = time.monotonic() + timeout
+    engine = _open_vault_engine()
+    while time.monotonic() < deadline:
+        with engine.connect() as conn:
+            row = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == request_id)).first()
+        if row and row[0] == "fulfilled":
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval, remaining))
+    return False
+
+
+def cmd_vault_request(args):
+    from storage import vault_crypto, vault_service
+
+    help_command = "vibe vault request --help"
+    try:
+        name = args.name
+        if not vault_crypto.is_valid_secret_name(name):
+            raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name", help_command=help_command)
+        engine = _open_vault_engine()
+        with engine.begin() as conn:
+            req = vault_service.create_provision_request(
+                conn,
+                name,
+                reason=getattr(args, "reason", None),
+                skill=getattr(args, "skill", None),
+                requester={"source": "cli", "pid": os.getpid()},
+            )
+        wait_seconds = getattr(args, "wait", None)
+        if wait_seconds:
+            if _wait_for_provision(req["id"], timeout=float(wait_seconds)):
+                _print_cli_payload(
+                    "vault_request",
+                    request_id=req["id"],
+                    secret_name=name,
+                    status="fulfilled",
+                    message=f"'{name}' is now available — use it via: vibe vault run --env {name} -- <command>",
+                )
+                return 0
+            _print_task_error(
+                TaskCliError(
+                    f"request for '{name}' was not fulfilled within {wait_seconds}s",
+                    code="request_timeout",
+                    help_command=help_command,
+                    details={"request_id": req["id"]},
+                )
+            )
+            return 1
+        _print_cli_payload(
+            "vault_request",
+            request_id=req["id"],
+            secret_name=name,
+            status="pending",
+            message=f"Asked the user to provide '{name}' on the Vaults page; then use: vibe vault run --env {name} -- <command>",
+        )
+        return 0
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
 def cmd_watch_add(args):
     try:
         session_policy = _validate_definition_session_policy(
@@ -5863,6 +6106,91 @@ def build_parser():
     )
     _add_json_noop(session_update_parser)
 
+    vault_parser = subparsers.add_parser(
+        "vault",
+        help="Store and deliver secrets to agents without exposing values",
+        description=(
+            "Manage Vault secrets. Values are encrypted at rest and never printed to stdout: "
+            "agents obtain them via 'vibe vault run', which injects them into a child process's "
+            "environment so the value never enters the agent's text channel."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault --help",
+        error_hint="Run one of the vault subcommands below. Start with: vibe vault list",
+    )
+    vault_subparsers = vault_parser.add_subparsers(dest="vault_command", metavar="{set,list,rm,run,request}")
+    vault_subparsers.required = True
+
+    vault_set_parser = vault_subparsers.add_parser(
+        "set",
+        help="Store a secret (value from --stdin or --from-file, never argv)",
+        description="Create a secret. The value is read from --stdin or --from-file so it never lands in shell history or an agent's argv.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault set --help",
+    )
+    vault_set_parser.add_argument("name", help="Secret name, ENV-style (^[A-Z][A-Z0-9_]*$)")
+    vault_set_parser.add_argument("--stdin", action="store_true", help="Read the value from standard input")
+    vault_set_parser.add_argument("--from-file", help="Read the value from this file")
+    vault_set_parser.add_argument("--group", help="Group (organizational label). Defaults to 'default'.")
+    vault_set_parser.add_argument("--tag", action="append", help="Tag for filtering (repeatable)")
+    vault_set_parser.add_argument("--description", help="Human description shown in the Vaults page")
+    _add_json_noop(vault_set_parser)
+
+    vault_list_parser = vault_subparsers.add_parser(
+        "list",
+        help="List secrets (names + masked metadata; never values)",
+        description="List secret names with masked metadata. Values are never shown.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault list --help",
+    )
+    vault_list_parser.add_argument("--group", help="Only list secrets in this group")
+    _add_json_noop(vault_list_parser)
+
+    vault_rm_parser = vault_subparsers.add_parser(
+        "rm",
+        help="Delete a secret",
+        description="Delete a secret by name.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault rm --help",
+    )
+    vault_rm_parser.add_argument("name", help="Secret name to delete")
+    _add_json_noop(vault_rm_parser)
+
+    vault_run_parser = vault_subparsers.add_parser(
+        "run",
+        help="Run a command with secrets injected into its environment",
+        description=(
+            "Resolve secrets and exec a command with them in its environment only. Nothing is "
+            "printed to stdout; the command's own output passes through. Safest mode: the value "
+            "lives only in the child process and never enters the agent's text channel."
+        ),
+        epilog="Example: vibe vault run --env OPENAI_API_KEY --env DB=PROD_DB_URL -- python sync.py",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault run --help",
+    )
+    vault_run_parser.add_argument(
+        "--env",
+        action="append",
+        metavar="NAME[,N2]|LOCAL=NAME",
+        help="Inject secret NAME as env var NAME (LOCAL=NAME to rename; comma-separates several). Repeatable.",
+    )
+    vault_run_parser.add_argument("command_argv", nargs=argparse.REMAINDER, help="-- followed by the command to run")
+    _add_json_noop(vault_run_parser)
+
+    vault_request_parser = vault_subparsers.add_parser(
+        "request",
+        help="Ask the user to provide a missing secret",
+        description="Record a request for a secret the user hasn't stored yet. With --wait, block until they provide it.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault request --help",
+    )
+    vault_request_parser.add_argument("name", help="Secret name being requested")
+    vault_request_parser.add_argument("--reason", help="Why the secret is needed (shown to the user)")
+    vault_request_parser.add_argument("--skill", help="Skill that needs it (shown to the user)")
+    vault_request_parser.add_argument("--wait", type=float, metavar="SECONDS", help="Block until fulfilled, up to SECONDS")
+    vault_request_parser.add_argument("--no-wait", action="store_true", help="Return immediately (default)")
+    _add_json_noop(vault_request_parser)
+
     show_parser = subparsers.add_parser(
         "show",
         help="Create, inspect, and publish session Show Pages",
@@ -6572,6 +6900,18 @@ def main():
         if args.session_command == "update":
             sys.exit(cmd_session_update(args))
         parser.error("session command is required")
+    if args.command == "vault":
+        if args.vault_command == "set":
+            sys.exit(cmd_vault_set(args))
+        if args.vault_command == "list":
+            sys.exit(cmd_vault_list(args))
+        if args.vault_command == "rm":
+            sys.exit(cmd_vault_rm(args))
+        if args.vault_command == "run":
+            sys.exit(cmd_vault_run(args))
+        if args.vault_command == "request":
+            sys.exit(cmd_vault_request(args))
+        parser.error("vault command is required")
     if args.command == "data":
         if args.data_command == "query":
             sys.exit(cmd_data_query(args))

@@ -165,19 +165,22 @@ fulfill_provision(request_id, value, *, protection)              # store secret;
 audit(event, **fields)
 ```
 
-## 5. Daemon UDS — `vibe/internal_client.py` + internal server
+## 5. Daemon UDS — deferred to P1 (not needed for standard-tier P0)
 
-New `/internal/vault/*` (the existing UDS at `~/.avibe/state/dispatch.sock`):
+**Revised (commit 3).** The original plan routed all value paths through the daemon
+UDS. For the **standard tier** that buys nothing: the machine key is a local file, so
+the CLI reading it is the same trust boundary as the daemon, there is no approval to
+orchestrate, and SQLite WAL handles CLI/daemon concurrency safely. So P0 `vibe vault`
+runs **direct-DB + direct-crypto**, matching sibling CLI commands (session/task/data),
+with no daemon dependency and full local testability.
 
-- `POST /internal/vault/resolve` `{names, mode, requester, wait_timeout}` → values.
-  P0: standard tier resolves immediately; (P1: protected → create `access` request,
-  block until decided).
-- `POST /internal/vault/provision` `{name, reason, skill, requester, wait}` → create
-  ask; optional block-until-fulfilled.
-- `GET /internal/vault/requests/{id}/wait` — long-poll.
-
-CLI talks to the daemon for value paths (one process owns decrypt + audit); metadata
-commands (`list`) may read SQLite directly like siblings.
+The daemon UDS path lands in **P1**, where it is genuinely required: protected-tier
+resolve/sign needs the unlock factor (not on disk), approval orchestration (SSE to the
+browser), and in-memory scope-grant DEKs — all owned by the long-running process.
+Planned then: `POST /internal/vault/resolve` (protected → create `access` request,
+block until approved), `POST /internal/vault/sign`, grant endpoints. (The design §7 note
+is refined accordingly: *standard*-tier value ops may be direct-DB; *protected*-tier
+value ops must go through the daemon.)
 
 ## 6. CLI — `vibe/cli.py` (argparse `vault` subparser)
 
@@ -228,15 +231,14 @@ stay queryable.
 
 ## 10. Commit sequence (one branch, atomic commits, one PR at checkpoint)
 
-1. `feat(vault): schema + machine-key crypto` — models + Alembic migration (all
-   tables, final shape) + `vault_crypto.py` (machine-key) + `data query` denylist +
-   unit tests (envelope round-trip, name validation, denylist).
+1. `feat(vault): schema + machine-key crypto + data query denylist`. **[done — 58832ae3]**
 2. `feat(vault): data service` — `storage/vault_service.py` (CRUD + standard-tier
-   resolve + provision + audit) + unit tests. **[done — 2026-06-21]**
-3. `feat(vault): UDS + CLI` — `/internal/vault/*` endpoints + `vibe vault
-   set/list/rm/run/fetch/request` (+ help-only `export`/`inject`); the UDS transport
-   and its CLI consumer land together so it's end-to-end testable. Test `run` injects
-   to child env with **no stdout leak**.
+   resolve + provision + audit). **[done — 7093ad5c]**
+3. `feat(vault): CLI set/list/rm/run/request` — direct-DB + direct-crypto (standard
+   tier; UDS deferred to P1, §5). End-to-end verified: `run` injects to child env with
+   **no stdout leak**. **[done — 2026-06-21]**
+3b. `feat(vault): fetch/export/inject delivery` — M4 `fetch` (brokered HTTP +
+   domain binding) + help-only `export`/`inject` (formats, TTL-off). *(next)*
 4. `feat(vault): REST + Vaults page CRUD` — `/api/vault/*` + `VaultsPage.tsx` +
    ApiContext + `npm run build`.
 5. `feat(vault): dynamic ask` — `reply_enhancer` `$<NAME>` + dispatcher provision +
