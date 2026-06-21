@@ -124,9 +124,23 @@
     "allPages": "全部页面",
     "sortedRecent": "按最近活动排序",
     "filterAria": "按可见性筛选",
-    "filter": { "online": "在线", "private": "私有", "public": "公开", "offline": "已下线" },
-    "status": { "private": "私有", "public": "公开", "offline": "已下线" },
-    "col": { "session": "会话", "visibility": "可见性", "link": "访问链接", "updated": "更新时间" },
+    "filter": {
+      "online": "在线",
+      "private": "私有",
+      "public": "公开",
+      "offline": "已下线"
+    },
+    "status": {
+      "private": "私有",
+      "public": "公开",
+      "offline": "已下线"
+    },
+    "col": {
+      "session": "会话",
+      "visibility": "可见性",
+      "link": "访问链接",
+      "updated": "更新时间"
+    },
     "empty": "暂无展示页面。当 Agent 会话创建展示页面后会显示在这里。",
     "emptyFiltered": "没有符合该筛选条件的展示页面。",
     "visibilityLabel": "可见性",
@@ -142,8 +156,16 @@
     "cloudOff": "Avibe Cloud 未开启——此链接仅能在本机打开。",
     "connectCloud": "连接 Avibe Cloud",
     "details": "详情",
-    "detail": { "session": "会话 ID", "workspace": "工作区", "created": "创建时间", "updated": "最近更新" },
-    "toast": { "updated": "展示页面已更新", "rotated": "分享链接已更换" }
+    "detail": {
+      "session": "会话 ID",
+      "workspace": "工作区",
+      "created": "创建时间",
+      "updated": "最近更新"
+    },
+    "toast": {
+      "updated": "展示页面已更新",
+      "rotated": "分享链接已更换"
+    }
   },
   "settings": {
     "tabs": {
@@ -193,9 +215,18 @@
       "backendsDetail": "Claude · OpenCode · Codex —— 在 Backends 标签页管理。",
       "manageBackends": "前往 Backends",
       "items": {
-        "askill": { "label": "askill", "detail": "Agent Skills 运行时 —— 驱动 Skills 页面。" },
-        "show-runtime": { "label": "Show Page 运行时", "detail": "在你本机渲染可视化 Show 页面。" },
-        "node": { "label": "Node.js", "detail": "上述运行时的共同前置依赖。" }
+        "askill": {
+          "label": "askill",
+          "detail": "Agent Skills 运行时 —— 驱动 Skills 页面。"
+        },
+        "show-runtime": {
+          "label": "Show Page 运行时",
+          "detail": "在你本机渲染可视化 Show 页面。"
+        },
+        "node": {
+          "label": "Node.js",
+          "detail": "上述运行时的共同前置依赖。"
+        }
       }
     },
     "backends": {
@@ -1816,6 +1847,34 @@
       "title": "排队中 · {{count}}",
       "sendNow": "立即发送",
       "remove": "移出队列"
+    }
+  },
+  "vaults": {
+    "title": "保险库",
+    "subtitle": "Agent 可以使用这些密钥，而它们的值永远不会进入对话。",
+    "add": "添加密钥",
+    "refresh": "刷新",
+    "loading": "加载中…",
+    "empty": "还没有密钥。添加一个——Agent 通过 CLI 获取，值不会进入聊天。",
+    "protected": "加密档",
+    "proxyBound": "已绑定代理",
+    "used": "已使用 {{count}} 次",
+    "neverUsed": "从未使用",
+    "delete": "删除",
+    "deleteConfirm": "删除密钥「{{name}}」？Agent 将无法再使用它。",
+    "deleted": "已删除 {{name}}",
+    "created": "已保存 {{name}}",
+    "dialog": {
+      "title": "添加密钥",
+      "name": "名称",
+      "value": "值",
+      "valuePlaceholder": "粘贴于此，加密存储，永不回显",
+      "group": "分组",
+      "description": "描述",
+      "allowHosts": "允许的域名（用于 vault fetch）",
+      "allowHostsHelp": "逗号分隔。通过认证代理使用该密钥时必填；'.example.com' 匹配子域。",
+      "save": "保存",
+      "cancel": "取消"
     }
   }
 }

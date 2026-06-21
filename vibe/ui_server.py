@@ -1907,6 +1907,53 @@ def settings_get():
     return jsonify(api.get_settings(request.args.get("platform") or None))
 
 
+def _vault_error_response(exc):
+    from vibe import api
+
+    if isinstance(exc, api.VaultApiError):
+        return jsonify({"ok": False, "code": exc.code, "message": str(exc)}), exc.status
+    return jsonify({"ok": False, "code": "vault_error", "message": str(exc)}), 400
+
+
+@app.route("/api/vault/secrets", methods=["GET"])
+def vault_secrets_get():
+    from vibe import api
+
+    return jsonify(api.get_vault_secrets(group=request.args.get("group") or None))
+
+
+@app.route("/api/vault/secrets", methods=["POST"])
+def vault_secrets_post():
+    from vibe import api
+
+    try:
+        return jsonify(api.create_vault_secret(request.json or {}))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/secrets/<name>", methods=["DELETE"])
+def vault_secret_delete(name):
+    from vibe import api
+
+    try:
+        return jsonify(api.delete_vault_secret(name))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/audit", methods=["GET"])
+def vault_audit_get():
+    from vibe import api
+
+    secret = request.args.get("secret") or None
+    try:
+        limit = int(request.args.get("limit") or 100)
+    except ValueError:
+        limit = 100
+    return jsonify(api.get_vault_audit(secret_name=secret, limit=limit))
+
+
 def _show_page_error_response(exc):
     code = getattr(exc, "code", "invalid_show_page_request")
     status = 409 if code == "not_public" else 400

@@ -124,9 +124,23 @@
     "allPages": "All pages",
     "sortedRecent": "Sorted by most recent",
     "filterAria": "Filter by visibility",
-    "filter": { "online": "Online", "private": "Private", "public": "Public", "offline": "Offline" },
-    "status": { "private": "Private", "public": "Public", "offline": "Offline" },
-    "col": { "session": "Session", "visibility": "Visibility", "link": "Live link", "updated": "Updated" },
+    "filter": {
+      "online": "Online",
+      "private": "Private",
+      "public": "Public",
+      "offline": "Offline"
+    },
+    "status": {
+      "private": "Private",
+      "public": "Public",
+      "offline": "Offline"
+    },
+    "col": {
+      "session": "Session",
+      "visibility": "Visibility",
+      "link": "Live link",
+      "updated": "Updated"
+    },
     "empty": "No Show Pages yet. They appear here once an agent session creates one.",
     "emptyFiltered": "No Show Pages match this filter.",
     "visibilityLabel": "Visibility",
@@ -142,8 +156,16 @@
     "cloudOff": "Avibe Cloud is off — this link only opens on this device.",
     "connectCloud": "Connect Avibe Cloud",
     "details": "Details",
-    "detail": { "session": "Session ID", "workspace": "Workspace", "created": "Created", "updated": "Last updated" },
-    "toast": { "updated": "Show Page updated", "rotated": "Share link rotated" }
+    "detail": {
+      "session": "Session ID",
+      "workspace": "Workspace",
+      "created": "Created",
+      "updated": "Last updated"
+    },
+    "toast": {
+      "updated": "Show Page updated",
+      "rotated": "Share link rotated"
+    }
   },
   "settings": {
     "tabs": {
@@ -193,9 +215,18 @@
       "backendsDetail": "Claude · OpenCode · Codex — managed in the Backends tab.",
       "manageBackends": "Manage in Backends",
       "items": {
-        "askill": { "label": "askill", "detail": "Agent Skills runtime — powers the Skills page." },
-        "show-runtime": { "label": "Show Page runtime", "detail": "Renders visual Show Pages on your machine." },
-        "node": { "label": "Node.js", "detail": "Shared prerequisite for the runtimes above." }
+        "askill": {
+          "label": "askill",
+          "detail": "Agent Skills runtime — powers the Skills page."
+        },
+        "show-runtime": {
+          "label": "Show Page runtime",
+          "detail": "Renders visual Show Pages on your machine."
+        },
+        "node": {
+          "label": "Node.js",
+          "detail": "Shared prerequisite for the runtimes above."
+        }
       }
     },
     "backends": {
@@ -1817,6 +1848,34 @@
       "title": "Queued · {{count}}",
       "sendNow": "Send now",
       "remove": "Remove from queue"
+    }
+  },
+  "vaults": {
+    "title": "Vaults",
+    "subtitle": "Secrets the agent can use without their values ever entering the conversation.",
+    "add": "Add secret",
+    "refresh": "Refresh",
+    "loading": "Loading…",
+    "empty": "No secrets yet. Add one — the agent retrieves it via the CLI without the value touching the chat.",
+    "protected": "Protected",
+    "proxyBound": "Proxy-bound",
+    "used": "used {{count}}×",
+    "neverUsed": "never used",
+    "delete": "Delete",
+    "deleteConfirm": "Delete secret \"{{name}}\"? Agents will no longer be able to use it.",
+    "deleted": "Deleted {{name}}",
+    "created": "Saved {{name}}",
+    "dialog": {
+      "title": "Add a secret",
+      "name": "Name",
+      "value": "Value",
+      "valuePlaceholder": "Pasted here, encrypted at rest, never echoed back",
+      "group": "Group",
+      "description": "Description",
+      "allowHosts": "Allowed hosts (for vault fetch)",
+      "allowHostsHelp": "Comma-separated. Required to use this secret via the brokered HTTP proxy; '.example.com' matches subdomains.",
+      "save": "Save",
+      "cancel": "Cancel"
     }
   }
 }

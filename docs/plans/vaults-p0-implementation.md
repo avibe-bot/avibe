@@ -243,8 +243,10 @@ stay queryable.
    **[done — 2026-06-21]**
 3c. `feat(vault): export/inject delivery` — help-only `export` (eval stream) +
    `inject` (dotenv/json/yaml/toml, 0600 file). **[done — 2026-06-21]**
-4. `feat(vault): REST + Vaults page CRUD` — `/api/vault/*` + `VaultsPage.tsx` +
-   ApiContext + `npm run build`.
+4. `feat(vault): REST + Vaults page CRUD` — `/api/vault/*` (api.py + ui_server.py) +
+   `VaultsPage.tsx` (list/add/delete, masked, reuse design-system primitives) +
+   ApiContext methods + i18n. `npm run build` green. **[done — 2026-06-21]**
+   (Live SSE refresh deferred — page refreshes after mutations; audit view = commit 6.)
 5. `feat(vault): dynamic ask` — `reply_enhancer` `$<NAME>` + dispatcher provision +
    `SecureInputCard` + IM deep link + end-to-end scenario.
 6. `feat(vault): audit tab + polish` — audit view, masked-read verification.

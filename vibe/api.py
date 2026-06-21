@@ -1103,6 +1103,90 @@ def set_default_vibe_agent(name: str) -> dict:
         store.close()
 
 
+# ----- Vaults (secret management; design: docs/plans/vaults.md) -----
+# Thin web-facing wrappers over storage.vault_service. Reads are masked (no values);
+# values are only ever delivered to agents via the CLI (vibe vault run/fetch/...).
+
+
+class VaultApiError(ValueError):
+    """A vault REST error carrying a stable code + HTTP status for the route layer."""
+
+    def __init__(self, message: str, *, code: str = "vault_error", status: int = 400):
+        super().__init__(message)
+        self.code = code
+        self.status = status
+
+
+def _vault_engine():
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+
+    ensure_sqlite_state(primary_platform=None)
+    return create_sqlite_engine(paths.get_sqlite_state_path())
+
+
+def get_vault_secrets(*, group: Optional[str] = None) -> dict:
+    from storage import vault_service
+
+    engine = _vault_engine()
+    with engine.connect() as conn:
+        secrets = vault_service.list_secrets(conn, group=group)
+    return {"ok": True, "secrets": secrets}
+
+
+def create_vault_secret(payload: dict) -> dict:
+    from storage import vault_service
+
+    if not isinstance(payload, dict):
+        raise VaultApiError("payload must be an object", code="invalid_payload")
+    name = str(payload.get("name") or "").strip()
+    value = payload.get("value")
+    if value is None or value == "":
+        raise VaultApiError("value is required", code="empty_value")
+    tags = payload.get("tags") if isinstance(payload.get("tags"), list) else None
+    policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else None
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            meta = vault_service.create_secret(
+                conn,
+                name=name,
+                value=str(value),
+                group=str(payload.get("group") or vault_service.DEFAULT_GROUP),
+                tags=tags,
+                description=payload.get("description"),
+                policy=policy,
+            )
+    except vault_service.InvalidSecretNameError as exc:
+        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name") from exc
+    except vault_service.SecretExistsError as exc:
+        raise VaultApiError(f"secret '{name}' already exists", code="secret_exists", status=409) from exc
+    except vault_service.UnsupportedProtectionError as exc:
+        raise VaultApiError(str(exc), code="protected_tier_unavailable") from exc
+    return {"ok": True, "secret": meta}
+
+
+def delete_vault_secret(name: str) -> dict:
+    from storage import vault_service
+
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            vault_service.delete_secret(conn, name)
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    return {"ok": True, "removed": True, "name": name}
+
+
+def get_vault_audit(*, secret_name: Optional[str] = None, limit: int = 100) -> dict:
+    from storage import vault_service
+
+    engine = _vault_engine()
+    with engine.connect() as conn:
+        events = vault_service.list_audit(conn, secret_name=secret_name, limit=limit)
+    return {"ok": True, "events": events}
+
+
 def import_vibe_agents(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Import payload must be an object")
