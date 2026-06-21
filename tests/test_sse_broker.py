@@ -11,6 +11,7 @@ take down whichever caller was publishing the event. The lock added to
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import sys
 import threading
@@ -69,10 +70,16 @@ def test_publish_survives_concurrent_subscribe_churn():
     runner = threading.Thread(target=_runner, daemon=True)
     runner.start()
 
-    async def _seed_initial_subscriber():
-        broker.subscribe()
+    async def _seed_loop():
+        return broker.subscribe()
 
-    asyncio.run_coroutine_threadsafe(_seed_initial_subscriber(), loop).result(timeout=5)
+    stable_sub_id, stable_queue = asyncio.run_coroutine_threadsafe(_seed_loop(), loop).result(timeout=5)
+
+    async def _drain_stable_subscriber() -> None:
+        while True:
+            await stable_queue.get()
+
+    drain = asyncio.run_coroutine_threadsafe(_drain_stable_subscriber(), loop)
 
     stop = threading.Event()
     errors: list[BaseException] = []
@@ -97,13 +104,24 @@ def test_publish_survives_concurrent_subscribe_churn():
             broker.unsubscribe(sub_id)
             await asyncio.sleep(0)
 
-    asyncio.run_coroutine_threadsafe(_churn(), loop).result(timeout=15)
+    async def _unsubscribe(sub_id: int) -> None:
+        broker.unsubscribe(sub_id)
 
-    stop.set()
-    publisher.join(timeout=5)
+    try:
+        asyncio.run_coroutine_threadsafe(_churn(), loop).result(timeout=15)
+    finally:
+        stop.set()
+        publisher.join(timeout=5)
 
-    loop.call_soon_threadsafe(loop.stop)
-    runner.join(timeout=5)
-    loop.close()
+        drain.cancel()
+        try:
+            drain.result(timeout=5)
+        except concurrent.futures.CancelledError:
+            pass
+
+        asyncio.run_coroutine_threadsafe(_unsubscribe(stable_sub_id), loop).result(timeout=5)
+        loop.call_soon_threadsafe(loop.stop)
+        runner.join(timeout=5)
+        loop.close()
 
     assert not errors, f"publish() raised under concurrent churn: {errors!r}"
