@@ -99,6 +99,23 @@ def get_or_create_machine_key(key_path: Path | None = None) -> bytes:
     return key
 
 
+def get_machine_key(key_path: Path | None = None) -> bytes:
+    """Return the existing machine key, or raise — never create one.
+
+    Decryption must use this (not :func:`get_or_create_machine_key`): if the key is
+    missing (state restore / partial backup / file removed), creating a fresh wrong key
+    would mask the real "key missing" problem and make a later ``vibe vault key import``
+    refuse without ``--force``.
+    """
+    path = key_path or machine_key_path()
+    if not path.exists():
+        raise VaultCryptoError(f"machine key not found at {path} (restore it with: vibe vault key import <backup>)")
+    key = path.read_bytes()
+    if len(key) != _KEY_BYTES:
+        raise VaultCryptoError(f"machine key at {path} is {len(key)} bytes, expected {_KEY_BYTES}")
+    return key
+
+
 def _b64(raw: bytes) -> str:
     return base64.b64encode(raw).decode("ascii")
 
@@ -131,7 +148,7 @@ def open_standard(sealed: Sealed, *, machine_key: bytes | None = None, key_path:
     AES-GCM authentication means a wrong machine key (or tampered ciphertext) fails
     loudly here rather than returning garbage.
     """
-    key = machine_key if machine_key is not None else get_or_create_machine_key(key_path)
+    key = machine_key if machine_key is not None else get_machine_key(key_path)
     try:
         meta = json.loads(sealed.wrap_meta)
     except (TypeError, ValueError) as exc:

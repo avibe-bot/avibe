@@ -152,3 +152,27 @@ def test_request_creates_pending(tmp_path, capfd):
     assert payload["secret_name"] == "WANTED_KEY"
     assert payload["status"] == "pending"
     assert payload["request_id"].startswith("vrq_")
+
+
+def test_request_for_existing_secret_returns_fulfilled(tmp_path, capfd):
+    vf = tmp_path / "v.txt"
+    vf.write_text("v")
+    cli.cmd_vault_set(_ns(name="HAVE_KEY", from_file=str(vf)))
+    capfd.readouterr()
+    assert cli.cmd_vault_request(_ns(name="HAVE_KEY", wait=30)) == 0  # must not block
+    assert json.loads(capfd.readouterr().out)["status"] == "fulfilled"
+
+
+def test_run_bad_command_does_not_deliver(tmp_path, capfd):
+    vf = tmp_path / "v.txt"
+    vf.write_text("v")
+    cli.cmd_vault_set(_ns(name="NODELIVER_KEY", from_file=str(vf)))
+    capfd.readouterr()
+    code = cli.cmd_vault_run(_ns(env=["NODELIVER_KEY"], command_argv=["definitely-not-a-real-binary-xyz123"]))
+    captured = capfd.readouterr()
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "command_not_found"
+    # The secret was never resolved → no usage recorded.
+    cli.cmd_vault_list(_ns())
+    secret = json.loads(capfd.readouterr().out)["secrets"][0]
+    assert secret["use_count"] == 0

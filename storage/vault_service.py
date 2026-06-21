@@ -361,9 +361,16 @@ def create_provision_request(
     requester: Any = None,
     message_id: str | None = None,
 ) -> dict[str, Any]:
-    """Record an agent's request for a missing secret (dynamic ask)."""
+    """Record an agent's request for a missing secret (dynamic ask).
+
+    If the secret already exists, the request is born ``fulfilled`` — otherwise a
+    ``request --wait`` would block forever (a create for an existing name is rejected,
+    so nothing would ever flip a pending row).
+    """
     request_id = _id("vrq")
     now = _now()
+    already = conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name)).first() is not None
+    status = "fulfilled" if already else "pending"
     conn.execute(
         vault_requests.insert().values(
             id=request_id,
@@ -371,13 +378,14 @@ def create_provision_request(
             secret_name=name,
             requester=json.dumps(requester) if requester is not None else None,
             delivery=json.dumps({"reason": reason, "skill": skill}) if (reason or skill) else None,
-            status="pending",
+            status=status,
             message_id=message_id,
             created_at=now,
+            decided_at=now if already else None,
         )
     )
     audit(conn, "provision_requested", secret_name=name, requester=requester, request_id=request_id)
-    return {"id": request_id, "secret_name": name, "status": "pending", "created_at": now}
+    return {"id": request_id, "secret_name": name, "status": status, "created_at": now}
 
 
 def fulfill_provision(

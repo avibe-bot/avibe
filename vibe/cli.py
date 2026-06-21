@@ -3325,6 +3325,16 @@ def cmd_vault_run(args):
                 help_command=help_command,
                 example="vibe vault run --env OPENAI_API_KEY -- python sync.py",
             )
+        # Preflight the command BEFORE resolving — a missing binary shouldn't decrypt the
+        # secret, bump use_count, or write a 'delivered' audit for a delivery that never
+        # reached a child.
+        if shutil.which(command_argv[0]) is None:
+            raise TaskCliError(
+                f"command not found: {command_argv[0]!r}",
+                code="command_not_found",
+                help_command=help_command,
+                example="vibe vault run --env OPENAI_API_KEY -- python sync.py",
+            )
         engine = _open_vault_engine()
         with engine.begin() as conn:
             values = vault_service.resolve(
@@ -3392,6 +3402,16 @@ def cmd_vault_request(args):
                 skill=getattr(args, "skill", None),
                 requester={"source": "cli", "pid": os.getpid()},
             )
+        if req.get("status") == "fulfilled":
+            # Secret already existed — no point waiting.
+            _print_cli_payload(
+                "vault_request",
+                request_id=req["id"],
+                secret_name=name,
+                status="fulfilled",
+                message=f"'{name}' is already in the vault — use it via: vibe vault run --env {name} -- <command>",
+            )
+            return 0
         wait_seconds = getattr(args, "wait", None)
         if wait_seconds:
             if _wait_for_provision(req["id"], timeout=float(wait_seconds)):

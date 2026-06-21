@@ -152,6 +152,14 @@ def test_create_fulfills_pending_provision_request(vault):
     assert status == "fulfilled"
 
 
+def test_request_for_existing_secret_is_born_fulfilled(vault):
+    engine, key_path = vault
+    _create(engine, key_path, name="ALREADY", value="here")
+    with engine.begin() as conn:
+        req = vs.create_provision_request(conn, "ALREADY")
+    assert req["status"] == "fulfilled"  # no pending row that --wait would block on
+
+
 def test_provision_request_and_fulfill(vault):
     engine, key_path = vault
     with engine.begin() as conn:

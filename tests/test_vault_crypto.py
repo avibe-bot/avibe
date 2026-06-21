@@ -70,6 +70,15 @@ def test_corrupt_machine_key_length_rejected(tmp_path):
         vault_crypto.get_or_create_machine_key(key_path)
 
 
+def test_open_does_not_create_a_key(tmp_path):
+    # Decrypting with a missing key must raise — never silently create a wrong key.
+    sealed = vault_crypto.seal_standard(b"v", machine_key=os.urandom(32))
+    missing = tmp_path / "absent" / "machine.key"
+    with pytest.raises(VaultCryptoError):
+        vault_crypto.open_standard(sealed, key_path=missing)
+    assert not missing.exists()
+
+
 @pytest.mark.parametrize(
     "name,valid",
     [

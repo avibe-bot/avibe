@@ -1119,9 +1119,12 @@ class VaultApiError(ValueError):
 
 def _vault_engine():
     from storage.db import create_sqlite_engine
-    from storage.importer import ensure_sqlite_state
+    from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 
-    ensure_sqlite_state(primary_platform=None)
+    # Resolve the platform from config like the other CLI/data paths — if the Vaults
+    # route is the first to initialize SQLite on an upgraded install with legacy
+    # sessions, ``ensure_sqlite_state`` requires a platform and would otherwise raise.
+    ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
     return create_sqlite_engine(paths.get_sqlite_state_path())
 
 
