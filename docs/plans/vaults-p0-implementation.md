@@ -242,7 +242,7 @@ stay queryable.
    hosts before decrypt; response body passed through, never the secret).
    **[done — 2026-06-21]**
 3c. `feat(vault): export/inject delivery` — help-only `export` (eval stream) +
-   `inject` (dotenv/json/yaml/toml file). *(next)*
+   `inject` (dotenv/json/yaml/toml, 0600 file). **[done — 2026-06-21]**
 4. `feat(vault): REST + Vaults page CRUD` — `/api/vault/*` + `VaultsPage.tsx` +
    ApiContext + `npm run build`.
 5. `feat(vault): dynamic ask` — `reply_enhancer` `$<NAME>` + dispatcher provision +

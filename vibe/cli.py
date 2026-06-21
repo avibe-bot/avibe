@@ -3564,6 +3564,109 @@ def cmd_vault_fetch(args):
     return 0 if resp.is_success else 1
 
 
+def _render_secrets(values: dict, keys: list, fmt: str) -> str:
+    """Render resolved secrets in the requested file format, preserving key order."""
+    ordered = {k: values[k] for k in keys}
+    if fmt == "json":
+        return json.dumps(ordered, indent=2) + "\n"
+    if fmt == "yaml":
+        import yaml
+
+        return yaml.safe_dump(ordered, default_flow_style=False, sort_keys=False)
+    if fmt == "toml":
+        # Flat string key-values; JSON string escaping is a valid TOML basic string.
+        return "".join(f"{k} = {json.dumps(v)}\n" for k, v in ordered.items())
+    # dotenv (default): shell-quoted so a sourced/eval'd file is safe.
+    return "".join(f"{k}={shlex.quote(v)}\n" for k, v in ordered.items())
+
+
+def _write_private_file(path: Path, content: str) -> None:
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(content)
+    try:
+        os.chmod(path, 0o600)  # tighten if the file pre-existed with looser perms
+    except OSError:
+        pass
+
+
+def cmd_vault_export(args):
+    # Advanced / not recommended (prefer 'run'): emits `export NAME=...` lines for
+    # `eval "$(vibe vault export ...)"`. The value transits the caller's shell, so this
+    # is weaker than 'run'. Help-only — not surfaced in agent-facing guidance.
+    from storage import vault_service
+
+    help_command = "vibe vault export --help"
+    try:
+        mapping = _parse_env_specs(getattr(args, "env", None))
+        if not mapping:
+            raise TaskCliError("at least one --env NAME is required", code="missing_env", help_command=help_command)
+        engine = _open_vault_engine()
+        with engine.begin() as conn:
+            values = vault_service.resolve(
+                conn,
+                sorted(set(mapping.values())),
+                requester={"source": "cli", "pid": os.getpid()},
+                mode="export",
+            )
+        lines = [f"export {local}={shlex.quote(values[vault_name])}" for local, vault_name in mapping.items()]
+        sys.stdout.write("\n".join(lines) + "\n")
+        return 0
+    except vault_service.SecretNotFoundError as exc:
+        _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.UnsupportedProtectionError as exc:
+        _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
+        return 1
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
+def cmd_vault_inject(args):
+    # Advanced / not recommended (prefer 'run'): render secrets into a 0600 file for
+    # tools that read config files. The value lands on disk. Help-only.
+    from storage import vault_service
+
+    help_command = "vibe vault inject --help"
+    try:
+        keys = [k.strip() for k in (getattr(args, "keys", None) or "").split(",") if k.strip()]
+        if not keys:
+            raise TaskCliError("--keys A,B is required", code="missing_keys", help_command=help_command)
+        out = getattr(args, "out", None)
+        if not out:
+            raise TaskCliError("--out FILE is required", code="missing_out", help_command=help_command)
+        fmt = (getattr(args, "format", None) or "dotenv").lower()
+        if fmt not in ("dotenv", "json", "yaml", "toml"):
+            raise TaskCliError(f"unknown --format: {fmt!r} (dotenv|json|yaml|toml)", code="invalid_format", help_command=help_command)
+        engine = _open_vault_engine()
+        with engine.begin() as conn:
+            values = vault_service.resolve(
+                conn,
+                keys,
+                requester={"source": "cli", "pid": os.getpid()},
+                mode=f"inject:{fmt}",
+            )
+        _write_private_file(Path(out), _render_secrets(values, keys, fmt))
+        _print_cli_payload("vault_inject", written=True, path=str(out), format=fmt, keys=keys)
+        return 0
+    except vault_service.SecretNotFoundError as exc:
+        _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.UnsupportedProtectionError as exc:
+        _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
+        return 1
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
 def cmd_watch_add(args):
     try:
         session_policy = _validate_definition_session_policy(
@@ -6268,7 +6371,7 @@ def build_parser():
         error_help_command="vibe vault --help",
         error_hint="Run one of the vault subcommands below. Start with: vibe vault list",
     )
-    vault_subparsers = vault_parser.add_subparsers(dest="vault_command", metavar="{set,list,rm,run,fetch,request}")
+    vault_subparsers = vault_parser.add_subparsers(dest="vault_command", metavar="{set,list,rm,run,fetch,request,export,inject}")
     vault_subparsers.required = True
 
     vault_set_parser = vault_subparsers.add_parser(
@@ -6356,6 +6459,35 @@ def build_parser():
     vault_fetch_parser.add_argument("--data-file", help="Request body read from this file")
     vault_fetch_parser.add_argument("--output", help="Write the response body to this file instead of stdout")
     _add_json_noop(vault_fetch_parser)
+
+    vault_export_parser = vault_subparsers.add_parser(
+        "export",
+        help="(advanced) Emit 'export NAME=...' lines for eval — prefer 'run'",
+        description=(
+            "Advanced/not recommended: print 'export NAME=value' lines for "
+            "eval \"$(vibe vault export --env A --env B)\". The value transits the caller's shell, "
+            "so this is weaker than 'run'; use only when several commands in one shell need the env."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault export --help",
+    )
+    vault_export_parser.add_argument("--env", action="append", metavar="NAME[,N2]|LOCAL=NAME", help="Secret(s) to export. Repeatable.")
+    _add_json_noop(vault_export_parser)
+
+    vault_inject_parser = vault_subparsers.add_parser(
+        "inject",
+        help="(advanced) Render secrets into a 0600 file — prefer 'run'",
+        description=(
+            "Advanced/not recommended: render secrets into a file for tools that read config files. "
+            "The value lands on disk; prefer 'run' (env-only) where possible."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault inject --help",
+    )
+    vault_inject_parser.add_argument("--keys", required=True, metavar="A,B", help="Comma-separated secret names")
+    vault_inject_parser.add_argument("--out", required=True, metavar="FILE", help="Output file (written 0600)")
+    vault_inject_parser.add_argument("--format", default="dotenv", choices=["dotenv", "json", "yaml", "toml"], help="Output format (default dotenv)")
+    _add_json_noop(vault_inject_parser)
 
     vault_request_parser = vault_subparsers.add_parser(
         "request",
@@ -7093,6 +7225,10 @@ def main():
             sys.exit(cmd_vault_fetch(args))
         if args.vault_command == "request":
             sys.exit(cmd_vault_request(args))
+        if args.vault_command == "export":
+            sys.exit(cmd_vault_export(args))
+        if args.vault_command == "inject":
+            sys.exit(cmd_vault_inject(args))
         parser.error("vault command is required")
     if args.command == "data":
         if args.data_command == "query":
