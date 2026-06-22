@@ -1721,11 +1721,23 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             vibe_agent_model=None,
             vibe_agent_reasoning_effort=None,
         )
-        transport = SimpleNamespace(send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}}))
+        turn_state_checked = False
+
+        async def turn_state(_source_session_id):
+            nonlocal turn_state_checked
+            turn_state_checked = True
+            return {"body": {"in_flight": True, "native_turn_started": True}}
+
+        async def send_request(method, params):
+            if method == "thread/fork":
+                self.assertTrue(turn_state_checked)
+            return {"thread": {"id": "thread-fork"}}
+
+        transport = SimpleNamespace(send_request=AsyncMock(side_effect=send_request))
 
         with patch(
             "vibe.internal_client.turn_state",
-            new=AsyncMock(return_value={"body": {"in_flight": True, "native_turn_started": True}}),
+            new=AsyncMock(side_effect=turn_state),
         ):
             thread_id = await agent._start_or_resume_thread(transport, request)
 

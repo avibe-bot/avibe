@@ -144,7 +144,12 @@ class OpenCodeNativeSessionProvider(NativeSessionProvider):
             return OpenCodeForkPoint(available=False)
         if last_role == "assistant":
             time_info = last_message.get("time") or {}
-            if time_info.get("completed") and not include_completed_assistant_tail:
+            finish_reason = last_message.get("finish")
+            if (
+                time_info.get("completed")
+                and finish_reason != "tool-calls"
+                and not include_completed_assistant_tail
+            ):
                 return OpenCodeForkPoint(available=False)
             for message_id, message in reversed(messages[:-1]):
                 if message.get("role") == "user":

@@ -760,6 +760,7 @@ class CodexAgent(BaseAgent):
 
         self._mark_fork_correction_pending(request.base_session_id)
         try:
+            should_trim = await self._should_rollback_forked_running_turn(fork)
             resp = await transport.send_request("thread/fork", params)
             thread_id = resp.get("id", "")
             if not thread_id:
@@ -769,7 +770,6 @@ class CodexAgent(BaseAgent):
             if not thread_id:
                 raise RuntimeError("Codex thread/fork returned no thread id")
 
-            should_trim = await self._should_rollback_forked_running_turn(fork)
             if should_trim:
                 await self._rollback_forked_running_turn(transport, thread_id)
             await self._inject_forked_session_correction(transport, request, thread_id)

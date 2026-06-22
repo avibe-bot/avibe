@@ -121,11 +121,12 @@ class OpenCodeSessionManager:
                     source_session_id,
                 )
                 return True, None
+            if getattr(source_state, "has_messages_after_anchor", False):
+                point = self._current_running_fork_point(source_session_id)
+                if point.available:
+                    return True, point.message_id
             return True, message_id
-        point = OpenCodeNativeSessionProvider().running_fork_point_before_latest_user(
-            source_session_id,
-            include_completed_assistant_tail=False,
-        )
+        point = self._current_running_fork_point(source_session_id)
         if point.available:
             return True, point.message_id
         logger.warning(
@@ -133,6 +134,12 @@ class OpenCodeSessionManager:
             source_session_id,
         )
         return True, None
+
+    def _current_running_fork_point(self, source_session_id: str):
+        return OpenCodeNativeSessionProvider().running_fork_point_before_latest_user(
+            source_session_id,
+            include_completed_assistant_tail=False,
+        )
 
     def ensure_agent_session_id(self, request: AgentRequest, session_anchor: str) -> Optional[str]:
         reserved_target_id = self._reserved_agent_session_id(request)
