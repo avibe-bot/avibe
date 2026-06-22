@@ -373,54 +373,50 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
 
       {/* Routing: Agent + Model + Reasoning effort share one row */}
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-        {/* Vibe Agent */}
+        {/* Vibe Agent — the Bot glyph lives on the label so the select keeps the
+            same plain chrome as Model / Reasoning. The inherited backend shows
+            below; per-agent backend/model/effort are intentionally omitted from
+            the options and the hint to avoid repeating what the row already
+            conveys. */}
         <div className="space-y-1">
-          <label className="text-xs font-medium uppercase text-muted">{t('channelList.agent')}</label>
-          <div className="relative">
-            <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2">
-              <Bot size={14} className="text-muted" />
-            </span>
-            <CompactSelect
-              value={value.routing.agent_name || ''}
-              onChange={(e) => {
-                const nextName = e.target.value || null;
-                onChange({
-                  routing: {
-                    ...value.routing,
-                    agent_name: nextName,
-                    model: null,
-                    reasoning_effort: null,
-                    opencode_model: null,
-                    opencode_reasoning_effort: null,
-                    claude_model: null,
-                    claude_reasoning_effort: null,
-                    codex_model: null,
-                    codex_reasoning_effort: null,
-                  },
-                });
-              }}
-              className="w-full pl-9 pr-3"
-            >
-              <option value="">
-                {defaultVibeAgent ? `${t('common.default')} · ${defaultVibeAgent.name}` : t('common.default')}
+          <label className="flex items-center gap-1.5 text-xs font-medium uppercase text-muted">
+            <Bot size={12} className="text-muted" />
+            {t('channelList.agent')}
+          </label>
+          <CompactSelect
+            value={value.routing.agent_name || ''}
+            onChange={(e) => {
+              const nextName = e.target.value || null;
+              onChange({
+                routing: {
+                  ...value.routing,
+                  agent_name: nextName,
+                  model: null,
+                  reasoning_effort: null,
+                  opencode_model: null,
+                  opencode_reasoning_effort: null,
+                  claude_model: null,
+                  claude_reasoning_effort: null,
+                  codex_model: null,
+                  codex_reasoning_effort: null,
+                },
+              });
+            }}
+            className="w-full"
+          >
+            <option value="">
+              {defaultVibeAgent ? `${t('common.default')} · ${defaultVibeAgent.name}` : t('common.default')}
+            </option>
+            {vibeAgents.map((agent) => (
+              <option key={agent.name} value={agent.name}>
+                {agent.name}
               </option>
-              {vibeAgents.map((agent) => (
-                <option key={agent.name} value={agent.name}>
-                  {agent.name}
-                  {agent.backend ? ` · ${agent.backend}` : ''}
-                  {agent.model ? ` / ${agent.model}` : ''}
-                </option>
-              ))}
-            </CompactSelect>
-          </div>
+            ))}
+          </CompactSelect>
           {inheritedVibeAgent && (
             <div className="flex items-center gap-1.5 text-[11px] text-muted">
               <BackendIcon backend={inheritedVibeAgent.backend} variant="glyph" size={12} />
-              <span className="truncate">
-                {inheritedVibeAgent.backend}
-                {inheritedVibeAgent.model ? ` / ${inheritedVibeAgent.model}` : ''}
-                {inheritedVibeAgent.reasoning_effort ? ` / ${inheritedVibeAgent.reasoning_effort}` : ''}
-              </span>
+              <span className="truncate">{inheritedVibeAgent.backend}</span>
             </div>
           )}
         </div>
