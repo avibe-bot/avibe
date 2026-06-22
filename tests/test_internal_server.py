@@ -24,6 +24,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+from sqlalchemy import select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -2020,9 +2021,17 @@ def test_flush_does_not_claim_agent_runs_when_context_build_fails(tmp_path, monk
     from storage import messages_service
     from storage.db import create_sqlite_engine
 
+    from storage.models import messages
+
     with create_sqlite_engine().begin() as conn:
         queued_rows = messages_service.list_queued(conn, session_id)
+        dedupe_rows = conn.execute(
+            select(messages)
+            .where(messages.c.session_id == session_id)
+            .where(messages.c.type == messages_service.HARNESS_DEDUPE_TYPE)
+        ).mappings().all()
     assert [row["text"] for row in queued_rows] == ["cli agent message 1", "cli agent message 2"]
+    assert dedupe_rows == []
 
     bg = SQLiteBackgroundTaskStore()
     try:

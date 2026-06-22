@@ -17,6 +17,7 @@ terminal-result move onto the manager in subsequent commits.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -407,6 +408,61 @@ def _write_coalesced_native_id_markers(conn: Any, segment: list[dict]) -> None:
             )
         except IntegrityError:
             logger.debug("queue flush: coalesced native id marker already exists for %s", native_id, exc_info=True)
+
+
+def _restore_queued_rows(conn: Any, rows: list[dict]) -> None:
+    native_ids = [
+        str(row.get("native_message_id") or "").strip()
+        for row in rows
+        if str(row.get("native_message_id") or "").strip()
+    ]
+    if native_ids:
+        conn.execute(
+            messages.delete()
+            .where(messages.c.type == messages_service.HARNESS_DEDUPE_TYPE)
+            .where(messages.c.native_message_id.in_(native_ids))
+        )
+    for row in rows:
+        payload = {
+            "id": row["id"],
+            "scope_id": row["scope_id"],
+            "session_id": row.get("session_id"),
+            "platform": row.get("platform") or "avibe",
+            "author": row.get("author") or "harness",
+            "type": messages_service.QUEUED_TYPE,
+            "author_id": row.get("author_id"),
+            "author_name": row.get("author_name"),
+            "source": row.get("source"),
+            "native_message_id": row.get("native_message_id"),
+            "parent_native_message_id": row.get("parent_native_message_id"),
+            "content_text": row.get("text") or "",
+            "content_json": json.dumps(row.get("content") or {"text": row.get("text") or ""}),
+            "metadata_json": json.dumps(row.get("metadata") or {}),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at") or row.get("created_at"),
+            "delivered_at": row.get("delivered_at"),
+            "read_at": row.get("read_at"),
+        }
+        try:
+            conn.execute(messages.insert().values(**payload))
+        except IntegrityError:
+            logger.debug("queue flush: queued row already restored or replaced for %s", row.get("id"), exc_info=True)
+
+
+def _claim_agent_run_segment_and_retire_queue(
+    conn: Any,
+    *,
+    run_ids: list[str],
+    segment: list[dict],
+) -> list[str]:
+    from storage.background import claim_queued_runs_for_workbench_in_connection
+
+    claimed_run_ids = claim_queued_runs_for_workbench_in_connection(conn, run_ids)
+    if set(claimed_run_ids) != set(run_ids):
+        return claimed_run_ids
+    messages_service.delete_queued(conn, [r["id"] for r in segment if r.get("id")])
+    _write_coalesced_native_id_markers(conn, segment)
+    return claimed_run_ids
 
 
 def _scheduled_claimed_queue_row_ids(conn: Any, segment: list[dict]) -> set[str]:
@@ -892,11 +948,13 @@ class SessionTurnManager:
             if pending_agent_run_ids:
                 retry_agent_run_flush = False
                 try:
-                    from storage.background import claim_queued_runs_for_workbench_in_connection
-
                     engine = create_sqlite_engine()
                     with engine.begin() as conn:
-                        claimed_run_ids = claim_queued_runs_for_workbench_in_connection(conn, pending_agent_run_ids)
+                        claimed_run_ids = _claim_agent_run_segment_and_retire_queue(
+                            conn,
+                            run_ids=pending_agent_run_ids,
+                            segment=pending_scheduled_segment,
+                        )
                         if set(claimed_run_ids) != set(pending_agent_run_ids):
                             queued_run_ids, stale_run_ids = inspect_queued_runs_for_workbench_in_connection(
                                 conn,
@@ -921,6 +979,7 @@ class SessionTurnManager:
                     if retry_agent_run_flush:
                         return await self.flush_queue(session_id)
                     claimed_agent_run_ids = claimed_run_ids
+                    bus.publish("queue.updated", {"session_id": session_id})
                 except Exception:
                     logger.warning(
                         "queue flush: failed to claim coalesced agent_run segment for session=%s",
@@ -938,22 +997,24 @@ class SessionTurnManager:
                         engine = create_sqlite_engine()
                         with engine.begin() as conn:
                             reset_workbench_claimed_runs_in_connection(conn, claimed_agent_run_ids)
+                            _restore_queued_rows(conn, pending_scheduled_segment)
                     except Exception:
                         logger.exception("queue flush: failed to reset claimed agent runs for session=%s", session_id)
                 logger.exception("queue flush: failed to start scheduled segment for session=%s", session_id)
                 return False
-            if pending_scheduled_segment:
-                engine = create_sqlite_engine()
-                with engine.begin() as conn:
-                    messages_service.delete_queued(conn, [r["id"] for r in pending_scheduled_segment])
-                bus.publish("queue.updated", {"session_id": session_id})
-            try:
-                engine = create_sqlite_engine()
-                with engine.begin() as conn:
-                    _write_coalesced_native_id_markers(conn, segment)
-            except Exception:
-                logger.exception("queue flush: failed to preserve coalesced native ids for session=%s", session_id)
-                return False
+            if not pending_agent_run_ids:
+                if pending_scheduled_segment:
+                    engine = create_sqlite_engine()
+                    with engine.begin() as conn:
+                        messages_service.delete_queued(conn, [r["id"] for r in pending_scheduled_segment])
+                    bus.publish("queue.updated", {"session_id": session_id})
+                try:
+                    engine = create_sqlite_engine()
+                    with engine.begin() as conn:
+                        _write_coalesced_native_id_markers(conn, segment)
+                except Exception:
+                    logger.exception("queue flush: failed to preserve coalesced native ids for session=%s", session_id)
+                    return False
         return True
 
     def turn_state(self, session_id: str) -> dict:
