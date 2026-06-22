@@ -28,7 +28,7 @@ class SessionForkSpec:
     source_backend: str
     source_message_id: Optional[str] = None
     trim_latest_running_turn: bool = False
-    opencode_fork_message_id: Optional[str] = None
+    native_turn_started: bool = False
 
     def to_metadata(self) -> dict[str, Any]:
         metadata = {
@@ -40,8 +40,8 @@ class SessionForkSpec:
             metadata["source_message_id"] = self.source_message_id
         if self.trim_latest_running_turn:
             metadata["trim_latest_running_turn"] = True
-        if self.opencode_fork_message_id:
-            metadata["opencode_fork_message_id"] = self.opencode_fork_message_id
+        if self.native_turn_started:
+            metadata["native_turn_started"] = True
         return metadata
 
 
@@ -63,6 +63,7 @@ def reserve_forked_session(
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     trim_latest_running_turn: bool = False,
+    native_turn_started: bool = False,
     db_path: Optional[Path] = None,
     title_lang: str = "en",
 ) -> SessionForkResult:
@@ -107,13 +108,6 @@ def reserve_forked_session(
                     f"agent session has no native session id to fork: {source_session_id}"
                 )
             source_message_id = _latest_source_message_id(conn, str(row["id"]))
-            opencode_fork_message_id = None
-            if trim_latest_running_turn and source_backend == "opencode":
-                opencode_fork_message_id = _opencode_fork_message_before_latest_user(
-                    conn,
-                    str(row["id"]),
-                )
-
             override_agent = agent_store.require_enabled(agent_name) if agent_name else None
             if override_agent is not None and override_agent.backend != source_backend:
                 raise SessionForkError(
@@ -136,6 +130,7 @@ def reserve_forked_session(
             target_title = _forked_session_title(source_title, title_lang)
 
             metadata = _load_metadata(row["metadata_json"])
+            metadata.pop("fork_opencode_message_id", None)
             metadata.update(
                 {
                     "created_via": "session_fork",
@@ -145,11 +140,10 @@ def reserve_forked_session(
                     "fork_source_native_session_id": source_native,
                     "fork_source_backend": source_backend,
                     "fork_trim_latest_running_turn": bool(trim_latest_running_turn),
+                    "fork_native_turn_started": bool(native_turn_started),
                     "fork_created_at": now,
                 }
             )
-            if opencode_fork_message_id:
-                metadata["fork_opencode_message_id"] = opencode_fork_message_id
             session_id = create_agent_session_row(
                 conn,
                 scope_id=row["scope_id"],
@@ -177,7 +171,7 @@ def reserve_forked_session(
             source_backend=source_backend,
             source_message_id=source_message_id,
             trim_latest_running_turn=bool(trim_latest_running_turn),
-            opencode_fork_message_id=opencode_fork_message_id,
+            native_turn_started=bool(native_turn_started),
         )
         return SessionForkResult(
             session_id=session_id,
@@ -213,12 +207,11 @@ def fork_metadata_from_request(metadata: dict[str, Any] | None) -> dict[str, Any
     }
     if bool(fork.get("trim_latest_running_turn")):
         result["trim_latest_running_turn"] = True
+    if bool(fork.get("native_turn_started")):
+        result["native_turn_started"] = True
     source_message = _clean_optional(fork.get("source_message_id"))
     if source_message:
         result["source_message_id"] = source_message
-    opencode_message = _clean_optional(fork.get("opencode_fork_message_id"))
-    if opencode_message:
-        result["opencode_fork_message_id"] = opencode_message
     return result
 
 
@@ -239,12 +232,11 @@ def fork_metadata_from_session_metadata(metadata: dict[str, Any] | None) -> dict
     }
     if bool(metadata.get("fork_trim_latest_running_turn")):
         result["trim_latest_running_turn"] = True
+    if bool(metadata.get("fork_native_turn_started")):
+        result["native_turn_started"] = True
     source_message = _clean_optional(metadata.get("fork_source_message_id"))
     if source_message:
         result["source_message_id"] = source_message
-    opencode_message = _clean_optional(metadata.get("fork_opencode_message_id"))
-    if opencode_message:
-        result["opencode_fork_message_id"] = opencode_message
     return result
 
 
@@ -320,47 +312,6 @@ def _latest_source_message_id(conn: Any, source_session_id: str) -> Optional[str
         .limit(1)
     ).scalar_one_or_none()
     return str(row) if row else None
-
-
-def _opencode_fork_message_before_latest_user(conn: Any, source_session_id: str) -> Optional[str]:
-    """Native OpenCode message id immediately before the latest user turn.
-
-    OpenCode forks at a native message point. For a running source turn, the
-    latest user message is the prompt currently being answered, so the safe fork
-    point is the visible native message before it. If Avibe has no native id for
-    that previous point, the adapter will fall back to a full native fork.
-    """
-
-    from sqlalchemy import func, or_, select
-
-    from storage.messages_service import TRANSCRIPT_TYPES
-    from storage.models import messages
-
-    rows = (
-        conn.execute(
-            select(messages.c.author, messages.c.native_message_id)
-            .where(
-                messages.c.session_id == source_session_id,
-                or_(
-                    messages.c.type.in_(list(TRANSCRIPT_TYPES)),
-                    func.json_extract(messages.c.metadata_json, "$.source") == "show_page",
-                ),
-            )
-            .order_by(messages.c.created_at.desc(), messages.c.id.desc())
-            .limit(20)
-        )
-        .mappings()
-        .all()
-    )
-    for index, row in enumerate(rows):
-        if str(row["author"] or "").strip() != "user":
-            continue
-        for previous in rows[index + 1 :]:
-            native = _clean_optional(previous["native_message_id"])
-            if native:
-                return native
-        return None
-    return None
 
 
 def _fork_session_anchor(value: Any, *, source_session_id: str, now: str) -> Optional[str]:

@@ -100,18 +100,17 @@ class OpenCodeSessionManager:
                 return target_id
         return None
 
-    async def _resolve_running_fork_message_id(
+    async def _resolve_running_fork_point(
         self,
         server: OpenCodeServerManager,
         source_session_id: str,
         directory: str,
         fork: dict,
-    ) -> Optional[str]:
-        explicit = str(fork.get("opencode_fork_message_id") or "").strip()
-        if explicit:
-            return explicit
+    ) -> tuple[bool, Optional[str]]:
         if not bool(fork.get("trim_latest_running_turn")):
-            return None
+            return True, None
+        if not bool(fork.get("native_turn_started")):
+            return True, None
         try:
             messages = await server.list_messages(source_session_id, directory)
         except Exception as err:
@@ -120,7 +119,7 @@ class OpenCodeSessionManager:
                 source_session_id,
                 err,
             )
-            return None
+            return True, None
         for index in range(len(messages) - 1, -1, -1):
             info = messages[index].get("info", {})
             if info.get("role") != "user":
@@ -128,9 +127,9 @@ class OpenCodeSessionManager:
             for previous in range(index - 1, -1, -1):
                 message_id = str(messages[previous].get("info", {}).get("id") or "").strip()
                 if message_id:
-                    return message_id
-            return None
-        return None
+                    return True, message_id
+            return False, None
+        return False, None
 
     def ensure_agent_session_id(self, request: AgentRequest, session_anchor: str) -> Optional[str]:
         reserved_target_id = self._reserved_agent_session_id(request)
@@ -295,17 +294,22 @@ class OpenCodeSessionManager:
             try:
                 if fork:
                     fork_source = str(fork.get("source_native_session_id") or "").strip()
-                    message_id = await self._resolve_running_fork_message_id(
+                    should_fork, message_id = await self._resolve_running_fork_point(
                         server,
                         fork_source,
                         request.working_path,
                         fork,
                     )
-                    session_data = await server.fork_session(
-                        fork_source,
-                        directory=request.working_path,
-                        message_id=message_id,
-                    )
+                    if should_fork:
+                        session_data = await server.fork_session(
+                            fork_source,
+                            directory=request.working_path,
+                            message_id=message_id,
+                        )
+                    else:
+                        session_data = await server.create_session(
+                            directory=request.working_path,
+                        )
                 else:
                     session_data = await server.create_session(
                         directory=request.working_path,

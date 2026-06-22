@@ -157,7 +157,7 @@ def test_reserve_forked_opencode_running_fork_records_previous_native_message(tm
                 .where(agent_sessions.c.id == source_id)
                 .values(agent_backend="opencode", agent_variant="opencode")
             )
-            previous = messages_service.append(
+            messages_service.append(
                 conn,
                 scope_id=row["scope_id"],
                 session_id=source_id,
@@ -183,12 +183,13 @@ def test_reserve_forked_opencode_running_fork_records_previous_native_message(tm
     result = reserve_forked_session(
         source_session_id=source_id,
         trim_latest_running_turn=True,
+        native_turn_started=True,
         db_path=db_path,
     )
 
     assert result.fork.source_message_id == latest_user["id"]
     assert result.fork.trim_latest_running_turn is True
-    assert result.fork.opencode_fork_message_id == "oc-msg-prev"
+    assert result.fork.native_turn_started is True
     engine = create_sqlite_engine(db_path)
     try:
         with engine.connect() as conn:
@@ -200,8 +201,9 @@ def test_reserve_forked_opencode_running_fork_records_previous_native_message(tm
 
     metadata = json.loads(forked["metadata_json"])
     assert metadata["fork_source_message_id"] == latest_user["id"]
-    assert metadata["fork_opencode_message_id"] == previous["native_message_id"]
+    assert "fork_opencode_message_id" not in metadata
     assert metadata["fork_trim_latest_running_turn"] is True
+    assert metadata["fork_native_turn_started"] is True
 
 
 def test_reserve_forked_session_uses_generic_title_for_untitled_source(tmp_path: Path) -> None:
@@ -386,7 +388,7 @@ def test_pending_native_fork_preserves_trim_metadata() -> None:
                     "source_backend": "opencode",
                     "source_message_id": "msg-avibe",
                     "trim_latest_running_turn": True,
-                    "opencode_fork_message_id": "oc-msg-prev",
+                    "native_turn_started": True,
                 },
             }
         },
@@ -398,7 +400,7 @@ def test_pending_native_fork_preserves_trim_metadata() -> None:
         "source_backend": "opencode",
         "source_message_id": "msg-avibe",
         "trim_latest_running_turn": True,
-        "opencode_fork_message_id": "oc-msg-prev",
+        "native_turn_started": True,
     }
 
 
@@ -448,7 +450,7 @@ def test_fork_metadata_from_session_metadata_preserves_trim_fields() -> None:
         "fork_source_backend": "opencode",
         "fork_source_message_id": "msg-avibe",
         "fork_trim_latest_running_turn": True,
-        "fork_opencode_message_id": "oc-msg-prev",
+        "fork_native_turn_started": True,
     }
 
     assert fork_metadata_from_session_metadata(metadata) == {
@@ -457,5 +459,5 @@ def test_fork_metadata_from_session_metadata_preserves_trim_fields() -> None:
         "source_backend": "opencode",
         "source_message_id": "msg-avibe",
         "trim_latest_running_turn": True,
-        "opencode_fork_message_id": "oc-msg-prev",
+        "native_turn_started": True,
     }

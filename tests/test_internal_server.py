@@ -712,7 +712,9 @@ def test_cancel_does_not_flush_queue(monkeypatch, tmp_path):
 def test_turn_state_reflects_in_flight():
     """``/internal/turn-state`` reports whether a turn is running, so a freshly
     loaded / reconnected Chat page can restore its Stop state."""
-    app = internal_server.create_app(_build_controller_double())
+    controller = _build_controller_double()
+    controller.agent_service.runtime_turn_started.return_value = True
+    app = internal_server.create_app(controller)
     transport = httpx.ASGITransport(app=app)
 
     async def _go():
@@ -722,7 +724,12 @@ def test_turn_state_reflects_in_flight():
             task = asyncio.create_task(asyncio.sleep(60))
             app.state.in_flight_dispatches["ses_ts"] = session_turns.Turn(
                 task=task,
-                context=MessageContext(user_id="U", channel_id="C", platform="avibe"),
+                context=MessageContext(
+                    user_id="U",
+                    channel_id="C",
+                    platform="avibe",
+                    platform_specific={"agent_session_target": {"agent_backend": "opencode"}},
+                ),
             )
             busy = (await client.get("/internal/turn-state/ses_ts")).json()
             task.cancel()
@@ -731,6 +738,8 @@ def test_turn_state_reflects_in_flight():
     idle, busy = asyncio.run(_go())
     assert idle["in_flight"] is False
     assert busy["in_flight"] is True
+    assert busy["native_turn_started"] is True
+    assert busy["backend"] == "opencode"
 
 
 def test_cancel_returns_404_when_session_not_in_flight():

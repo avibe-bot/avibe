@@ -489,7 +489,26 @@ class SessionTurnManager:
         Chat page asks this to restore its working / Stop state (Codex P2)."""
         entry = self.in_flight.get(session_id)
         active = entry is not None and not entry.task.done()
-        return {"ok": True, "session_id": session_id, "in_flight": active}
+        native_turn_started = False
+        backend = ""
+        if active and entry is not None:
+            payload = getattr(entry.context, "platform_specific", None) or {}
+            target = payload.get("agent_session_target")
+            if isinstance(target, dict):
+                backend = str(target.get("agent_backend") or "").strip()
+            service = getattr(self.controller, "agent_service", None) if self.controller is not None else None
+            started = getattr(service, "runtime_turn_started", None)
+            if callable(started):
+                native_turn_started = started(entry.context) is True
+        result = {
+            "ok": True,
+            "session_id": session_id,
+            "in_flight": active,
+            "native_turn_started": native_turn_started,
+        }
+        if backend:
+            result["backend"] = backend
+        return result
 
     async def release_for_backend_refresh(
         self,

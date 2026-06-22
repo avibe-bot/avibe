@@ -769,7 +769,7 @@ class CodexAgent(BaseAgent):
             if not thread_id:
                 raise RuntimeError("Codex thread/fork returned no thread id")
 
-            if bool(fork.get("trim_latest_running_turn")):
+            if bool(fork.get("trim_latest_running_turn")) and bool(fork.get("native_turn_started")):
                 await self._rollback_forked_running_turn(transport, thread_id)
             await self._inject_forked_session_correction(transport, request, thread_id)
         finally:
