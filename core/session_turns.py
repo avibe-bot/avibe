@@ -138,6 +138,8 @@ def _scheduled_merge_key(row: dict) -> Optional[tuple[str, ...]]:
         return None
     trigger_kind = str(spec.get("task_trigger_kind") or "").strip()
     definition_id = str(spec.get("task_definition_id") or "").strip()
+    if trigger_kind == "agent_run" and not definition_id:
+        definition_id = "agent_run"
     if not trigger_kind or not definition_id:
         return None
     delivery_override = spec.get("delivery_override") if isinstance(spec.get("delivery_override"), dict) else {}
@@ -145,8 +147,12 @@ def _scheduled_merge_key(row: dict) -> Optional[tuple[str, ...]]:
     return (
         trigger_kind,
         definition_id,
+        str(spec.get("agent_session_id") or ""),
         str(spec.get("vibe_agent_name") or ""),
         str(spec.get(SCHEDULED_TARGET_AGENT_KEY) or ""),
+        str((spec.get("agent_session_target") or {}).get("agent_name") or "")
+        if isinstance(spec.get("agent_session_target"), dict)
+        else "",
         str(spec.get("delivery_key_external") or ""),
         str(spec.get("delivery_scope_session_key") or ""),
         str(delivery_override.get("platform") or ""),
@@ -591,6 +597,8 @@ class SessionTurnManager:
                 if not rows:
                     return False
                 if _scheduled_provenance(rows[0]) is not None:
+                    from storage.background import claim_queued_runs_for_workbench_in_connection
+
                     # Scheduled segment: a leading run of same-definition harness
                     # rows within the rolling merge window runs as one scheduled
                     # turn. Rows remain visible individually while queued; only the
@@ -628,6 +636,23 @@ class SessionTurnManager:
                                     and spec.get("task_execution_id")
                                 ],
                             }
+                        run_id = str(scheduled_prov.get("task_execution_id") or "").strip()
+                        if scheduled_prov.get("task_trigger_kind") == "agent_run" and run_id:
+                            run_ids = [run_id]
+                            coalesced = scheduled_prov.get("coalesced_queue")
+                            execution_ids = coalesced.get("execution_ids") if isinstance(coalesced, dict) else None
+                            if isinstance(execution_ids, list):
+                                for execution_id in execution_ids:
+                                    execution_id = str(execution_id or "").strip()
+                                    if execution_id and execution_id not in run_ids:
+                                        run_ids.append(execution_id)
+                            claimed_run_ids = claim_queued_runs_for_workbench_in_connection(conn, run_ids)
+                            if set(claimed_run_ids) != set(run_ids):
+                                logger.info(
+                                    "queue flush: skipped coalesced agent_run segment because some runs are no longer queued: %s",
+                                    ",".join(sorted(set(run_ids) - set(claimed_run_ids))),
+                                )
+                                return False
                 else:
                     # User segment: the leading run of consecutive non-scheduled rows
                     # (stop at the first scheduled row so it stays its own turn).
@@ -731,33 +756,6 @@ class SessionTurnManager:
                 # Restore the stable scheduled:/watch:/webhook: native id so the
                 # flushed prompt persists + dedupes under it (Codex P2), not None.
                 context.message_id = scheduled_message_id
-            run_id = str(scheduled_prov.get("task_execution_id") or "").strip()
-            if scheduled_prov.get("task_trigger_kind") == "agent_run" and run_id:
-                try:
-                    from storage.background import SQLiteBackgroundTaskStore
-
-                    store = SQLiteBackgroundTaskStore()
-                    try:
-                        run_ids = [run_id]
-                        coalesced = scheduled_prov.get("coalesced_queue")
-                        execution_ids = coalesced.get("execution_ids") if isinstance(coalesced, dict) else None
-                        if isinstance(execution_ids, list):
-                            for execution_id in execution_ids:
-                                execution_id = str(execution_id or "").strip()
-                                if execution_id and execution_id not in run_ids:
-                                    run_ids.append(execution_id)
-                        claimed_run_ids = store.claim_queued_runs_for_workbench(run_ids)
-                    finally:
-                        store.close()
-                except Exception:
-                    logger.warning("queue flush: failed to mark agent_run %s running", run_id, exc_info=True)
-                    return False
-                if set(claimed_run_ids) != set(run_ids):
-                    logger.info(
-                        "queue flush: skipped coalesced agent_run segment because some runs are no longer queued: %s",
-                        ",".join(sorted(set(run_ids) - set(claimed_run_ids))),
-                    )
-                    return False
             await self._run(session_id, context, scheduled_text, source=SOURCE_SCHEDULED)
             try:
                 engine = create_sqlite_engine()

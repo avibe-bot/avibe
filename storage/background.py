@@ -111,6 +111,61 @@ def _like_contains_pattern(value: str) -> str:
     return f"%{escaped}%"
 
 
+def claim_queued_runs_for_workbench_in_connection(
+    conn: Any,
+    run_ids: list[str],
+    *,
+    started_at: Optional[str] = None,
+) -> list[str]:
+    normalized_run_ids: list[str] = []
+    seen: set[str] = set()
+    for raw_run_id in run_ids:
+        run_id = str(raw_run_id or "").strip()
+        if not run_id or run_id in seen:
+            continue
+        seen.add(run_id)
+        normalized_run_ids.append(run_id)
+    primary_run_id = normalized_run_ids[0] if normalized_run_ids else ""
+    if not primary_run_id:
+        return []
+    now = started_at or _utc_now_iso()
+    rows = {
+        row["id"]: row
+        for row in conn.execute(select(agent_runs).where(agent_runs.c.id.in_(normalized_run_ids))).mappings()
+    }
+    if set(rows) != set(normalized_run_ids):
+        return []
+    for run_id in normalized_run_ids:
+        row = rows[run_id]
+        if bool(row["cancel_requested"]) or normalize_run_status(row["status"]) == "canceled":
+            return []
+        if normalize_run_status(row["status"]) != "queued":
+            return []
+    for run_id in normalized_run_ids:
+        row = rows[run_id]
+        metadata = _json_loads(row["metadata_json"], {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["workbench_queue_holds_run"] = False
+        metadata["effective_run_id"] = primary_run_id
+        if run_id != primary_run_id:
+            metadata["coalesced_into_run_id"] = primary_run_id
+        result = conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == run_id)
+            .where(agent_runs.c.status.in_(_status_query_values("queued")))
+            .values(
+                status="running",
+                started_at=now,
+                updated_at=now,
+                metadata_json=_json_dumps(metadata),
+            )
+        )
+        if not result.rowcount:
+            raise RuntimeError(f"failed to claim queued agent run {run_id}")
+    return normalized_run_ids
+
+
 class SQLiteBackgroundTaskStore:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or paths.get_sqlite_state_path()
@@ -728,56 +783,8 @@ class SQLiteBackgroundTaskStore:
         *,
         started_at: Optional[str] = None,
     ) -> list[str]:
-        normalized_run_ids: list[str] = []
-        seen: set[str] = set()
-        for raw_run_id in run_ids:
-            run_id = str(raw_run_id or "").strip()
-            if not run_id or run_id in seen:
-                continue
-            seen.add(run_id)
-            normalized_run_ids.append(run_id)
-        primary_run_id = normalized_run_ids[0] if normalized_run_ids else ""
-        if not primary_run_id:
-            return []
         with self.engine.begin() as conn:
-            now = started_at or _utc_now_iso()
-            rows = {
-                row["id"]: row
-                for row in conn.execute(
-                    select(agent_runs).where(agent_runs.c.id.in_(normalized_run_ids))
-                ).mappings()
-            }
-            if set(rows) != set(normalized_run_ids):
-                return []
-            for run_id in normalized_run_ids:
-                row = rows[run_id]
-                if bool(row["cancel_requested"]) or normalize_run_status(row["status"]) == "canceled":
-                    return []
-                if normalize_run_status(row["status"]) != "queued":
-                    return []
-            for run_id in normalized_run_ids:
-                row = rows[run_id]
-                metadata = _json_loads(row["metadata_json"], {})
-                if not isinstance(metadata, dict):
-                    metadata = {}
-                metadata["workbench_queue_holds_run"] = False
-                metadata["effective_run_id"] = primary_run_id
-                if run_id != primary_run_id:
-                    metadata["coalesced_into_run_id"] = primary_run_id
-                result = conn.execute(
-                    update(agent_runs)
-                    .where(agent_runs.c.id == run_id)
-                    .where(agent_runs.c.status.in_(_status_query_values("queued")))
-                    .values(
-                        status="running",
-                        started_at=now,
-                        updated_at=now,
-                        metadata_json=_json_dumps(metadata),
-                    )
-                )
-                if not result.rowcount:
-                    raise RuntimeError(f"failed to claim queued agent run {run_id}")
-            return normalized_run_ids
+            return claim_queued_runs_for_workbench_in_connection(conn, run_ids, started_at=started_at)
 
     def record_run_message(
         self,

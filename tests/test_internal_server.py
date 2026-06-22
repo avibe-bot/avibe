@@ -1448,7 +1448,8 @@ def test_flush_claims_every_coalesced_agent_run(tmp_path, monkeypatch):
             "platform_specific": {
                 "task_execution_id": execution_id,
                 "task_trigger_kind": "agent_run",
-                "task_definition_id": "agent_run",
+                "task_definition_id": None,
+                "vibe_agent_name": "codex",
             },
         }
 
@@ -1542,6 +1543,76 @@ def test_coalesced_agent_run_claim_is_atomic(tmp_path, monkeypatch):
     assert stored[run_ids[2]]["metadata"]["workbench_queue_holds_run"] is True
     assert stored[run_ids[0]]["metadata"].get("effective_run_id") is None
     assert stored[run_ids[2]]["metadata"].get("effective_run_id") is None
+
+
+def test_flush_keeps_coalesced_agent_run_queue_when_claim_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import SQLiteBackgroundTaskStore
+
+    request_store = TaskExecutionStore()
+
+    def prov(execution_id: str) -> dict:
+        return {
+            "message_id": f"agent_run:{execution_id}",
+            "platform_specific": {
+                "task_execution_id": execution_id,
+                "task_trigger_kind": "agent_run",
+                "task_definition_id": None,
+                "vibe_agent_name": "codex",
+            },
+        }
+
+    queued: list[tuple[str, dict]] = []
+    run_ids: list[str] = []
+    for index in range(3):
+        request = request_store.enqueue_agent_run(
+            session_id="placeholder",
+            message=f"cli agent message {index + 1}",
+            agent_name="codex",
+        )
+        assert request_store.claim(request.id) is not None
+        request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+        queued.append((f"cli agent message {index + 1}", prov(request.id)))
+        run_ids.append(request.id)
+
+    session_id = _seed_avibe_session_with_queue(queued)
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+
+    bg = SQLiteBackgroundTaskStore()
+    try:
+        assert bg.cancel_run(run_ids[1]) is True
+    finally:
+        bg.close()
+
+    mgr, runs = _manager_capturing_runs()
+
+    assert asyncio.run(mgr.flush_queue(session_id)) is False
+    assert runs == []
+
+    with create_sqlite_engine().begin() as conn:
+        queued_rows = messages_service.list_queued(conn, session_id)
+    assert [row["text"] for row in queued_rows] == [
+        "cli agent message 1",
+        "cli agent message 2",
+        "cli agent message 3",
+    ]
+
+    bg = SQLiteBackgroundTaskStore()
+    try:
+        stored = {run_id: bg.get_run(run_id) for run_id in run_ids}
+    finally:
+        bg.close()
+
+    assert stored[run_ids[0]]["status"] == "queued"
+    assert stored[run_ids[1]]["status"] == "canceled"
+    assert stored[run_ids[2]]["status"] == "queued"
+    assert stored[run_ids[0]]["metadata"]["workbench_queue_holds_run"] is True
+    assert stored[run_ids[2]]["metadata"]["workbench_queue_holds_run"] is True
+    assert all(row["status"] != "running" for row in stored.values())
 
 
 def test_flush_marks_suppressed_first_native_id(tmp_path, monkeypatch):
