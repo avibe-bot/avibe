@@ -394,8 +394,13 @@ class SettingsManager:
         return self.MESSAGE_TYPE_ALIASES.get(message_type, message_type)
 
     def _normalize_show_message_types(self, show_message_types: Optional[List[str]]) -> List[str]:
-        """Normalize and migrate show message types to current canonical schema."""
-        allowed = {"system", "assistant", "toolcall"}
+        """Normalize and migrate show message types to current canonical schema.
+
+        "system" is deprecated and dropped here: system/init messages are never
+        pushed to users, so a legacy stored "system" value is filtered out on
+        load/save instead of leaking into settings UIs.
+        """
+        allowed = {"assistant", "toolcall"}
         if show_message_types is None:
             return DEFAULT_SHOW_MESSAGE_TYPES.copy()
         normalized: List[str] = []
