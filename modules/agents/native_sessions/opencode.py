@@ -122,23 +122,30 @@ class OpenCodeNativeSessionProvider(NativeSessionProvider):
                     (native_session_id,),
                 )
                 messages = [
-                    (str(message_id or "").strip(), parse_json_blob(message_blob).get("role"))
+                    (str(message_id or "").strip(), parse_json_blob(message_blob))
                     for message_id, message_blob, _first_seen in cursor.fetchall()
                 ]
         except Exception as exc:
             logger.warning("Failed to read OpenCode fork point for %s: %s", native_session_id, exc)
             return OpenCodeForkPoint(available=False)
 
-        for index in range(len(messages) - 1, -1, -1):
-            message_id, role = messages[index]
-            if role != "user":
-                continue
-            if index == 0:
-                return OpenCodeForkPoint(available=True, empty_history=True)
-            previous_id = messages[index - 1][0]
-            if previous_id:
-                return OpenCodeForkPoint(available=True, message_id=previous_id)
+        if not messages:
             return OpenCodeForkPoint(available=False)
+        last_message_id, last_message = messages[-1]
+        last_role = last_message.get("role")
+        if last_role == "user":
+            if last_message_id:
+                return OpenCodeForkPoint(available=True, message_id=last_message_id)
+            return OpenCodeForkPoint(available=False)
+        if last_role == "assistant":
+            time_info = last_message.get("time") or {}
+            if time_info.get("completed"):
+                return OpenCodeForkPoint(available=False)
+            for message_id, message in reversed(messages[:-1]):
+                if message.get("role") == "user":
+                    if message_id:
+                        return OpenCodeForkPoint(available=True, message_id=message_id)
+                    return OpenCodeForkPoint(available=False)
         return OpenCodeForkPoint(available=False)
 
     @classmethod

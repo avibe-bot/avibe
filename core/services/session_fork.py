@@ -16,7 +16,7 @@ from typing import Any, Optional
 from config import paths
 from vibe.i18n import t
 
-TRIM_LATEST_RUNNING_TURN_BACKENDS = {"opencode"}
+TRIM_LATEST_RUNNING_TURN_BACKENDS = {"codex", "opencode"}
 
 
 class SessionForkError(ValueError):
@@ -121,13 +121,14 @@ def reserve_forked_session(
             effective_native_turn_started = bool(native_turn_started and effective_trim_latest_running_turn)
             opencode_fork_message_id: Optional[str] = None
             opencode_fork_empty_history = False
-            if effective_native_turn_started and source_backend == "opencode":
+            if effective_trim_latest_running_turn and source_backend == "opencode":
                 fork_point = _opencode_running_fork_point(source_native)
                 if fork_point is None:
                     effective_trim_latest_running_turn = False
                     effective_native_turn_started = False
                 else:
                     opencode_fork_message_id, opencode_fork_empty_history = fork_point
+                    effective_native_turn_started = True
             source_message_id = _latest_source_message_id(conn, str(row["id"]))
             override_agent = agent_store.require_enabled(agent_name) if agent_name else None
             if override_agent is not None and override_agent.backend != source_backend:

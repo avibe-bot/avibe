@@ -4291,11 +4291,10 @@ def _session_fork_error_response(err: Exception):
 async def _session_turn_state_for_fork(session_id: str) -> dict[str, bool]:
     """Authoritative best-effort live turn check for fork trimming.
 
-    ``agent_status`` can be stale after crashes/restarts. Trimming history is
-    destructive for the fork target, so only trim when the controller's live
-    in-flight registry says the backend runtime has accepted this turn. During
-    the startup window, a full native fork is already the correct pre-prompt
-    snapshot and rollback would delete completed history.
+    ``agent_status`` can be stale after crashes/restarts. Treat any live
+    in-flight turn as a trim candidate; backend-specific reservation code then
+    verifies whether a safe native boundary exists before it persists trim
+    metadata.
     """
 
     from vibe import internal_client
@@ -4310,7 +4309,7 @@ async def _session_turn_state_for_fork(session_id: str) -> dict[str, bool]:
     return {
         "in_flight": in_flight,
         "native_turn_started": native_turn_started,
-        "trim_latest_running_turn": in_flight and native_turn_started,
+        "trim_latest_running_turn": in_flight,
     }
 
 

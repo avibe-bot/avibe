@@ -214,7 +214,7 @@ def test_opencode_running_fork_uses_persisted_native_message_point() -> None:
                 "source_backend": "opencode",
                 "trim_latest_running_turn": True,
                 "native_turn_started": True,
-                "opencode_fork_message_id": "oc-msg-2",
+                "opencode_fork_message_id": "oc-msg-3",
             },
         },
     }
@@ -223,11 +223,11 @@ def test_opencode_running_fork_uses_persisted_native_message_point() -> None:
 
     assert session_id == "oc-fork"
     server.list_messages.assert_not_awaited()
-    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id="oc-msg-2")
+    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id="oc-msg-3")
     server.create_session.assert_not_awaited()
 
 
-def test_opencode_running_first_turn_fork_creates_empty_session() -> None:
+def test_opencode_running_first_turn_fork_uses_user_boundary() -> None:
     sessions = SimpleNamespace(
         get_agent_session_id=Mock(return_value=None),
         ensure_agent_session_id=Mock(return_value="ses-fork"),
@@ -236,8 +236,8 @@ def test_opencode_running_first_turn_fork_creates_empty_session() -> None:
     )
     manager = OpenCodeSessionManager(SimpleNamespace(sessions=sessions), "opencode")
     server = SimpleNamespace(
-        fork_session=AsyncMock(),
-        create_session=AsyncMock(return_value={"id": "oc-empty"}),
+        fork_session=AsyncMock(return_value={"id": "oc-fork"}),
+        create_session=AsyncMock(),
         list_messages=AsyncMock(),
     )
     request = _request()
@@ -253,17 +253,17 @@ def test_opencode_running_first_turn_fork_creates_empty_session() -> None:
                 "source_backend": "opencode",
                 "trim_latest_running_turn": True,
                 "native_turn_started": True,
-                "opencode_fork_empty_history": True,
+                "opencode_fork_message_id": "oc-msg-1",
             },
         },
     }
 
     session_id = asyncio.run(manager.get_or_create_session_id(request, server))
 
-    assert session_id == "oc-empty"
+    assert session_id == "oc-fork"
     server.list_messages.assert_not_awaited()
-    server.create_session.assert_awaited_once_with(directory="/repo")
-    server.fork_session.assert_not_awaited()
+    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id="oc-msg-1")
+    server.create_session.assert_not_awaited()
 
 
 def test_opencode_reserved_agent_session_id_is_not_replaced() -> None:

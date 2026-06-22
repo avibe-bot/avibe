@@ -303,7 +303,7 @@ def test_fork_session_marks_running_source_for_trim(isolated_state, tmp_path, mo
     payload = response.get_json()
     assert payload["metadata"]["fork_trim_latest_running_turn"] is True
     assert payload["metadata"]["fork_native_turn_started"] is True
-    assert payload["metadata"]["fork_opencode_message_id"] == "oc-msg-2"
+    assert payload["metadata"]["fork_opencode_message_id"] == "oc-msg-3"
     in_flight.assert_awaited_once_with(session_id)
 
 
@@ -344,13 +344,16 @@ def test_fork_session_does_not_mark_claude_running_source_for_trim(isolated_stat
     assert payload["metadata"]["fork_native_turn_started"] is False
 
 
-def test_fork_session_does_not_trim_before_native_turn_starts(isolated_state, tmp_path):
+def test_fork_session_trims_post_accept_open_code_before_native_turn_starts(isolated_state, tmp_path, monkeypatch):
     from sqlalchemy import update
 
     from storage.db import create_sqlite_engine
     from storage.models import agent_sessions
     from vibe.ui_server import app
 
+    xdg_home = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
+    _seed_opencode_messages(xdg_home, "native-source-1", ["user"])
     _, session_id = _make_session(tmp_path)
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -358,9 +361,9 @@ def test_fork_session_does_not_trim_before_native_turn_starts(isolated_state, tm
             update(agent_sessions)
             .where(agent_sessions.c.id == session_id)
             .values(
-                agent_backend="codex",
-                agent_variant="codex",
-                agent_name="codex",
+                agent_backend="opencode",
+                agent_variant="opencode",
+                agent_name="opencode",
                 native_session_id="native-source-1",
                 title="Source session",
             )
@@ -382,8 +385,9 @@ def test_fork_session_does_not_trim_before_native_turn_starts(isolated_state, tm
 
     assert response.status_code == 201
     payload = response.get_json()
-    assert payload["metadata"]["fork_trim_latest_running_turn"] is False
-    assert payload["metadata"]["fork_native_turn_started"] is False
+    assert payload["metadata"]["fork_trim_latest_running_turn"] is True
+    assert payload["metadata"]["fork_native_turn_started"] is True
+    assert payload["metadata"]["fork_opencode_message_id"] == "oc-msg-1"
 
 
 def test_fork_session_rejects_unbound_source_session(isolated_state, tmp_path):
