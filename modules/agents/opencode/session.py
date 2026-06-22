@@ -12,9 +12,8 @@ import os
 import time
 from typing import Dict, Optional, Tuple
 
-from core.services.session_fork import fork_source_has_agent_output_after_anchor, pending_native_fork
+from core.services.session_fork import fork_anchor_is_terminal_agent_output, pending_native_fork
 from modules.agents.base import AgentRequest, BaseAgent
-from modules.agents.native_sessions.opencode import OpenCodeNativeSessionProvider
 
 from .server import OpenCodeServerManager
 
@@ -114,16 +113,13 @@ class OpenCodeSessionManager:
             return False, None
         message_id = str(fork.get("opencode_fork_message_id") or "").strip()
         if message_id:
+            if fork_anchor_is_terminal_agent_output(fork):
+                logger.info(
+                    "OpenCode running fork for %s kept full history because the source completed before reservation",
+                    source_session_id,
+                )
+                return True, None
             return True, message_id
-        point = OpenCodeNativeSessionProvider().running_fork_point_before_latest_user(
-            source_session_id,
-            include_completed_assistant_tail=fork_source_has_agent_output_after_anchor(fork),
-        )
-        if point.available:
-            if point.empty_history:
-                return False, None
-            if point.message_id:
-                return True, point.message_id
         logger.warning(
             "OpenCode running fork for %s has no persisted fork point; preserving source history",
             source_session_id,

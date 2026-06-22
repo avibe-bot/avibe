@@ -9,8 +9,10 @@ from sqlalchemy import select
 
 from core.services.session_fork import (
     SessionForkError,
+    fork_anchor_is_terminal_agent_output,
     fork_metadata_from_session_metadata,
     fork_source_has_agent_output_after_anchor,
+    fork_source_state,
     pending_native_fork,
     pending_native_fork_source,
     reserve_forked_session,
@@ -624,6 +626,81 @@ def test_fork_source_has_agent_output_after_anchor(tmp_path: Path, monkeypatch: 
         assert fork_source_has_agent_output_after_anchor(
             {"source_session_id": source_id, "source_message_id": user["id"]}
         ) is True
+    finally:
+        engine.dispose()
+
+
+def test_fork_source_state_identifies_completed_anchor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from config import paths
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    db_path = paths.get_sqlite_state_path()
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == source_id)).mappings().one()
+            result = messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                text="done",
+            )
+
+        fork = {"source_session_id": source_id, "source_message_id": result["id"]}
+        state = fork_source_state(fork)
+
+        assert state.anchor_is_terminal_agent_output is True
+        assert state.has_messages_after_anchor is False
+        assert state.has_terminal_agent_output_after_anchor is False
+        assert fork_anchor_is_terminal_agent_output(fork) is True
+    finally:
+        engine.dispose()
+
+
+def test_fork_source_state_tracks_nonterminal_messages_after_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from config import paths
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    db_path = paths.get_sqlite_state_path()
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == source_id)).mappings().one()
+            user = messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="user",
+                message_type="user",
+                text="do the long task",
+            )
+            messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="assistant",
+                text="thinking",
+            )
+
+        state = fork_source_state({"source_session_id": source_id, "source_message_id": user["id"]})
+
+        assert state.anchor_is_terminal_agent_output is False
+        assert state.has_messages_after_anchor is True
+        assert state.has_terminal_agent_output_after_anchor is False
     finally:
         engine.dispose()
 

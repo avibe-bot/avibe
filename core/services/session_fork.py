@@ -17,6 +17,7 @@ from config import paths
 from vibe.i18n import t
 
 TRIM_LATEST_RUNNING_TURN_BACKENDS = {"codex", "opencode"}
+TERMINAL_AGENT_OUTPUT_TYPES = {"result", "notify", "error"}
 
 
 class SessionForkError(ValueError):
@@ -62,6 +63,18 @@ class SessionForkResult:
     model: Optional[str]
     reasoning_effort: Optional[str]
     fork: SessionForkSpec
+
+
+@dataclass(frozen=True)
+class ForkSourceState:
+    anchor_author: Optional[str] = None
+    anchor_type: Optional[str] = None
+    has_messages_after_anchor: bool = False
+    has_terminal_agent_output_after_anchor: bool = False
+
+    @property
+    def anchor_is_terminal_agent_output(self) -> bool:
+        return self.anchor_author == "agent" and self.anchor_type in TERMINAL_AGENT_OUTPUT_TYPES
 
 
 def reserve_forked_session(
@@ -310,15 +323,15 @@ def pending_native_fork_source(context: Any, backend: str) -> Optional[str]:
     return str(fork.get("source_native_session_id") or "").strip() or None
 
 
-def fork_source_has_agent_output_after_anchor(fork: dict[str, Any] | None) -> bool:
-    """Whether the source has produced terminal agent output after the fork anchor."""
+def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
+    """Return source transcript state relative to the fork reservation anchor."""
 
     if not isinstance(fork, dict):
-        return False
+        return ForkSourceState()
     source_session_id = _clean_optional(fork.get("source_session_id"))
     source_message_id = _clean_optional(fork.get("source_message_id"))
     if not source_session_id or not source_message_id:
-        return False
+        return ForkSourceState()
 
     from sqlalchemy import and_, exists, select
 
@@ -331,45 +344,67 @@ def fork_source_has_agent_output_after_anchor(fork: dict[str, Any] | None) -> bo
     try:
         with engine.connect() as conn:
             anchor = conn.execute(
-                select(messages.c.created_at, messages.c.id)
+                select(messages.c.created_at, messages.c.id, messages.c.author, messages.c.type)
                 .where(messages.c.session_id == source_session_id, messages.c.id == source_message_id)
                 .limit(1)
-            ).first()
+            ).mappings().first()
             if anchor is None:
-                return False
-            anchor_created_at, anchor_id = anchor
-            return bool(
+                return ForkSourceState()
+            anchor_created_at = anchor["created_at"]
+            anchor_id = anchor["id"]
+            after_anchor = (
+                (messages.c.created_at > anchor_created_at)
+                | ((messages.c.created_at == anchor_created_at) & (messages.c.id > anchor_id))
+            )
+            has_messages_after_anchor = bool(
+                conn.execute(
+                    select(exists().where(and_(messages.c.session_id == source_session_id, after_anchor)))
+                ).scalar()
+            )
+            has_terminal_agent_output_after_anchor = bool(
                 conn.execute(
                     select(
                         exists().where(
                             and_(
                                 messages.c.session_id == source_session_id,
                                 messages.c.author == "agent",
-                                messages.c.type.in_(["result", "notify", "error"]),
-                                (
-                                    (messages.c.created_at > anchor_created_at)
-                                    | (
-                                        (messages.c.created_at == anchor_created_at)
-                                        & (messages.c.id > anchor_id)
-                                    )
-                                ),
+                                messages.c.type.in_(list(TERMINAL_AGENT_OUTPUT_TYPES)),
+                                after_anchor,
                             )
                         )
                     )
                 ).scalar()
             )
+            return ForkSourceState(
+                anchor_author=str(anchor["author"] or "").strip() or None,
+                anchor_type=str(anchor["type"] or "").strip() or None,
+                has_messages_after_anchor=has_messages_after_anchor,
+                has_terminal_agent_output_after_anchor=has_terminal_agent_output_after_anchor,
+            )
     except Exception as exc:
         import logging
 
         logging.getLogger(__name__).warning(
-            "Failed to inspect fork source output for %s after %s: %s",
+            "Failed to inspect fork source state for %s after %s: %s",
             source_session_id,
             source_message_id,
             exc,
         )
-        return False
+        return ForkSourceState()
     finally:
         engine.dispose()
+
+
+def fork_source_has_agent_output_after_anchor(fork: dict[str, Any] | None) -> bool:
+    """Whether the source produced terminal agent output after the fork anchor."""
+
+    return fork_source_state(fork).has_terminal_agent_output_after_anchor
+
+
+def fork_anchor_is_terminal_agent_output(fork: dict[str, Any] | None) -> bool:
+    """Whether the reservation anchor already points at a completed agent row."""
+
+    return fork_source_state(fork).anchor_is_terminal_agent_output
 
 
 def _load_metadata(value: Any) -> dict[str, Any]:

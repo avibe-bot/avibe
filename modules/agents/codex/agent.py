@@ -14,7 +14,7 @@ from config.v2_config import (
     DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
 )
 from core.avibe_cloud import avibe_cloud_url_available
-from core.services.session_fork import fork_source_has_agent_output_after_anchor, pending_native_fork
+from core.services.session_fork import fork_source_state, pending_native_fork
 from core.system_prompt_injection import (
     build_forked_session_correction_prompt,
     build_system_prompt_injection,
@@ -769,9 +769,7 @@ class CodexAgent(BaseAgent):
             if not thread_id:
                 raise RuntimeError("Codex thread/fork returned no thread id")
 
-            should_trim = bool(fork.get("trim_latest_running_turn")) and (
-                bool(fork.get("native_turn_started")) or fork_source_has_agent_output_after_anchor(fork)
-            )
+            should_trim = self._should_rollback_forked_running_turn(fork)
             if should_trim:
                 await self._rollback_forked_running_turn(transport, thread_id)
             await self._inject_forked_session_correction(transport, request, thread_id)
@@ -782,6 +780,18 @@ class CodexAgent(BaseAgent):
         self._remember_thread_developer_instructions(request.base_session_id, thread_id, developer_instructions)
         logger.info("Forked Codex thread %s from %s for session %s", thread_id, source_thread_id, request.base_session_id)
         return thread_id
+
+    def _should_rollback_forked_running_turn(self, fork: dict[str, Any]) -> bool:
+        """Rollback only when Codex's latest-turn rollback still targets the reserved turn."""
+
+        if not bool(fork.get("trim_latest_running_turn")):
+            return False
+        source_state = fork_source_state(fork)
+        if source_state.anchor_is_terminal_agent_output:
+            return False
+        if source_state.has_messages_after_anchor:
+            return not source_state.has_terminal_agent_output_after_anchor
+        return bool(fork.get("native_turn_started"))
 
     async def _rollback_forked_running_turn(
         self,

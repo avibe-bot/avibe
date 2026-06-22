@@ -311,7 +311,7 @@ def test_opencode_running_first_turn_fork_uses_user_boundary() -> None:
     server.create_session.assert_not_awaited()
 
 
-def test_opencode_running_fork_resolves_missing_persisted_point_from_native_db(
+def test_opencode_running_fork_without_persisted_point_preserves_source_history(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
@@ -349,11 +349,93 @@ def test_opencode_running_fork_resolves_missing_persisted_point_from_native_db(
 
     assert session_id == "oc-fork"
     server.list_messages.assert_not_awaited()
-    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id="oc-msg-3")
+    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id=None)
     server.create_session.assert_not_awaited()
 
 
-def test_opencode_completed_source_turn_uses_user_boundary_after_fork_anchor_output(
+def test_opencode_saved_boundary_is_ignored_when_source_completed_before_anchor() -> None:
+    sessions = SimpleNamespace(
+        get_agent_session_id=Mock(return_value=None),
+        ensure_agent_session_id=Mock(return_value="ses-fork"),
+        bind_agent_session=Mock(return_value="ses-fork"),
+        bind_agent_session_by_id=Mock(return_value="ses-fork"),
+    )
+    manager = OpenCodeSessionManager(SimpleNamespace(sessions=sessions), "opencode")
+    server = SimpleNamespace(
+        fork_session=AsyncMock(return_value={"id": "oc-fork"}),
+        create_session=AsyncMock(),
+        list_messages=AsyncMock(),
+    )
+    request = _request()
+    request.context.platform_specific = {
+        "agent_session_id": "ses-fork",
+        "agent_session_target": {
+            "id": "ses-fork",
+            "agent_backend": "opencode",
+            "native_session_id": "",
+            "native_session_fork": {
+                "source_session_id": "ses-source",
+                "source_native_session_id": "oc-source",
+                "source_backend": "opencode",
+                "source_message_id": "msg-result",
+                "trim_latest_running_turn": True,
+                "native_turn_started": True,
+                "opencode_fork_message_id": "oc-msg-user",
+            },
+        },
+    }
+
+    with patch("modules.agents.opencode.session.fork_anchor_is_terminal_agent_output", return_value=True):
+        session_id = asyncio.run(manager.get_or_create_session_id(request, server))
+
+    assert session_id == "oc-fork"
+    server.list_messages.assert_not_awaited()
+    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id=None)
+    server.create_session.assert_not_awaited()
+
+
+def test_opencode_saved_boundary_is_used_when_anchor_is_not_completed() -> None:
+    sessions = SimpleNamespace(
+        get_agent_session_id=Mock(return_value=None),
+        ensure_agent_session_id=Mock(return_value="ses-fork"),
+        bind_agent_session=Mock(return_value="ses-fork"),
+        bind_agent_session_by_id=Mock(return_value="ses-fork"),
+    )
+    manager = OpenCodeSessionManager(SimpleNamespace(sessions=sessions), "opencode")
+    server = SimpleNamespace(
+        fork_session=AsyncMock(return_value={"id": "oc-fork"}),
+        create_session=AsyncMock(),
+        list_messages=AsyncMock(),
+    )
+    request = _request()
+    request.context.platform_specific = {
+        "agent_session_id": "ses-fork",
+        "agent_session_target": {
+            "id": "ses-fork",
+            "agent_backend": "opencode",
+            "native_session_id": "",
+            "native_session_fork": {
+                "source_session_id": "ses-source",
+                "source_native_session_id": "oc-source",
+                "source_backend": "opencode",
+                "source_message_id": "msg-user",
+                "trim_latest_running_turn": True,
+                "native_turn_started": True,
+                "opencode_fork_message_id": "oc-msg-user",
+            },
+        },
+    }
+
+    with patch("modules.agents.opencode.session.fork_anchor_is_terminal_agent_output", return_value=False):
+        session_id = asyncio.run(manager.get_or_create_session_id(request, server))
+
+    assert session_id == "oc-fork"
+    server.list_messages.assert_not_awaited()
+    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id="oc-msg-user")
+    server.create_session.assert_not_awaited()
+
+
+def test_opencode_completed_source_turn_without_saved_boundary_preserves_source_history(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
@@ -388,12 +470,11 @@ def test_opencode_completed_source_turn_uses_user_boundary_after_fork_anchor_out
         },
     }
 
-    with patch("modules.agents.opencode.session.fork_source_has_agent_output_after_anchor", return_value=True):
-        session_id = asyncio.run(manager.get_or_create_session_id(request, server))
+    session_id = asyncio.run(manager.get_or_create_session_id(request, server))
 
     assert session_id == "oc-fork"
     server.list_messages.assert_not_awaited()
-    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id="oc-msg-1")
+    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id=None)
     server.create_session.assert_not_awaited()
 
 
