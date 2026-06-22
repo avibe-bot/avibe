@@ -142,6 +142,9 @@ def _scheduled_merge_key(row: dict) -> Optional[tuple[str, ...]]:
         definition_id = "agent_run"
     if not trigger_kind or not definition_id:
         return None
+    callback_identity = ""
+    if trigger_kind == "agent_run" and (spec.get("callback_session_id") or spec.get("source_kind") == "callback"):
+        callback_identity = str(spec.get("task_execution_id") or "")
     delivery_override = spec.get("delivery_override") if isinstance(spec.get("delivery_override"), dict) else {}
     delivery_alias = spec.get("scheduled_delivery_alias") if isinstance(spec.get("scheduled_delivery_alias"), dict) else {}
     return (
@@ -154,6 +157,7 @@ def _scheduled_merge_key(row: dict) -> Optional[tuple[str, ...]]:
         if isinstance(spec.get("agent_session_target"), dict)
         else "",
         str(spec.get("callback_session_id") or ""),
+        callback_identity,
         str(spec.get("source_kind") or ""),
         str(spec.get("source_actor") or ""),
         str(spec.get("parent_run_id") or ""),
@@ -262,13 +266,17 @@ def _scheduled_segment_native_ids(segment: list[dict]) -> list[str]:
     return native_ids
 
 
+def _scheduled_segment_execution_id(row: dict) -> str:
+    spec = (_scheduled_provenance(row) or {}).get("platform_specific") or {}
+    if not isinstance(spec, dict):
+        return ""
+    return str(spec.get("task_execution_id") or "").strip()
+
+
 def _scheduled_segment_execution_ids(segment: list[dict]) -> list[str]:
     execution_ids: list[str] = []
     for row in segment:
-        spec = (_scheduled_provenance(row) or {}).get("platform_specific") or {}
-        if not isinstance(spec, dict):
-            continue
-        execution_id = str(spec.get("task_execution_id") or "").strip()
+        execution_id = _scheduled_segment_execution_id(row)
         if execution_id and execution_id not in execution_ids:
             execution_ids.append(execution_id)
     return execution_ids
@@ -644,6 +652,31 @@ class SessionTurnManager:
                     if dropped_duplicate_segment:
                         pass
                     else:
+                        if _scheduled_segment_trigger_kind(segment) == "agent_run":
+                            run_ids = _scheduled_segment_execution_ids(segment)
+                            queued_run_ids, stale_run_ids = inspect_queued_runs_for_workbench_in_connection(conn, run_ids)
+                            if stale_run_ids:
+                                stale_set = set(stale_run_ids)
+                                stale_row_ids = [
+                                    row["id"]
+                                    for row in segment
+                                    if row.get("id") and _scheduled_segment_execution_id(row) in stale_set
+                                ]
+                                if stale_row_ids:
+                                    messages_service.delete_queued(conn, stale_row_ids)
+                                    bus.publish("queue.updated", {"session_id": session_id})
+                                logger.info(
+                                    "queue flush: removed stale coalesced agent_run rows before dispatching survivors: %s",
+                                    ",".join(sorted(stale_set)),
+                                )
+                                queued_set = set(queued_run_ids)
+                                segment = [row for row in segment if _scheduled_segment_execution_id(row) in queued_set]
+                                if not segment:
+                                    dropped_duplicate_segment = True
+
+                    if dropped_duplicate_segment:
+                        pass
+                    else:
                         scheduled_text = _build_scheduled_segment_text(segment)
                         scheduled_native_ids = _scheduled_segment_native_ids(segment)
                         prov = _scheduled_provenance(segment[0]) or {}
@@ -660,38 +693,7 @@ class SessionTurnManager:
                             }
                         run_id = str(scheduled_prov.get("task_execution_id") or "").strip()
                         if scheduled_prov.get("task_trigger_kind") == "agent_run" and run_id:
-                            run_ids = [run_id]
-                            coalesced = scheduled_prov.get("coalesced_queue")
-                            execution_ids = coalesced.get("execution_ids") if isinstance(coalesced, dict) else None
-                            if isinstance(execution_ids, list):
-                                for execution_id in execution_ids:
-                                    execution_id = str(execution_id or "").strip()
-                                    if execution_id and execution_id not in run_ids:
-                                        run_ids.append(execution_id)
-                            queued_run_ids, stale_run_ids = inspect_queued_runs_for_workbench_in_connection(conn, run_ids)
-                            if stale_run_ids:
-                                stale_set = set(stale_run_ids)
-                                stale_row_ids = [
-                                    row["id"]
-                                    for row in segment
-                                    if row.get("id")
-                                    and str(
-                                        ((_scheduled_provenance(row) or {}).get("platform_specific") or {}).get(
-                                            "task_execution_id"
-                                        )
-                                        or ""
-                                    ).strip()
-                                    in stale_set
-                                ]
-                                if stale_row_ids:
-                                    messages_service.delete_queued(conn, stale_row_ids)
-                                    bus.publish("queue.updated", {"session_id": session_id})
-                                logger.info(
-                                    "queue flush: removed stale coalesced agent_run rows before retrying: %s",
-                                    ",".join(sorted(stale_set)),
-                                )
-                                return False
-                            pending_agent_run_ids = queued_run_ids
+                            pending_agent_run_ids = _scheduled_segment_execution_ids(segment)
                             pending_scheduled_segment = segment
                 else:
                     # User segment: the leading run of consecutive non-scheduled rows

@@ -1454,7 +1454,7 @@ def test_flush_claims_every_coalesced_agent_run(tmp_path, monkeypatch):
         }
 
     queued: list[tuple[str, dict]] = []
-    for index in range(3):
+    for index in range(4):
         request = request_store.enqueue_agent_run(
             session_id="placeholder",
             message=f"cli agent message {index + 1}",
@@ -1489,7 +1489,9 @@ def test_flush_claims_every_coalesced_agent_run(tmp_path, monkeypatch):
     assert "cli agent message 1" in text
     assert "cli agent message 2" in text
     assert "cli agent message 3" in text
+    assert "cli agent message 4" in text
     execution_ids = ctx.platform_specific["coalesced_queue"]["execution_ids"]
+    assert len(execution_ids) == 4
 
     bg = SQLiteBackgroundTaskStore()
     try:
@@ -1498,19 +1500,25 @@ def test_flush_claims_every_coalesced_agent_run(tmp_path, monkeypatch):
         bg.close()
 
     assert stored[execution_ids[0]]["status"] == "running"
-    assert stored[execution_ids[1]]["status"] == "queued"
-    assert stored[execution_ids[2]]["status"] == "queued"
+    assert [stored[run_id]["status"] for run_id in execution_ids[1:]] == ["queued", "queued", "queued"]
     assert [stored[run_id]["metadata"]["effective_run_id"] for run_id in execution_ids] == [
+        execution_ids[0],
         execution_ids[0],
         execution_ids[0],
         execution_ids[0],
     ]
     assert stored[execution_ids[0]]["metadata"].get("coalesced_into_run_id") is None
-    assert stored[execution_ids[1]]["metadata"]["coalesced_into_run_id"] == execution_ids[0]
-    assert stored[execution_ids[2]]["metadata"]["coalesced_into_run_id"] == execution_ids[0]
+    assert [stored[run_id]["metadata"]["coalesced_into_run_id"] for run_id in execution_ids[1:]] == [
+        execution_ids[0],
+        execution_ids[0],
+        execution_ids[0],
+    ]
     assert stored[execution_ids[0]]["metadata"]["workbench_queue_holds_run"] is False
-    assert stored[execution_ids[1]]["metadata"]["workbench_queue_holds_run"] is True
-    assert stored[execution_ids[2]]["metadata"]["workbench_queue_holds_run"] is True
+    assert [stored[run_id]["metadata"]["workbench_queue_holds_run"] for run_id in execution_ids[1:]] == [
+        True,
+        True,
+        True,
+    ]
 
 
 def test_coalesced_agent_run_claim_is_atomic(tmp_path, monkeypatch):
@@ -1550,7 +1558,7 @@ def test_coalesced_agent_run_claim_is_atomic(tmp_path, monkeypatch):
     assert stored[run_ids[2]]["metadata"].get("effective_run_id") is None
 
 
-def test_flush_removes_stale_coalesced_agent_run_row_then_retries(tmp_path, monkeypatch):
+def test_flush_removes_stale_coalesced_agent_run_row_and_dispatches_survivors(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     from core.scheduled_tasks import TaskExecutionStore
@@ -1595,29 +1603,6 @@ def test_flush_removes_stale_coalesced_agent_run_row_then_retries(tmp_path, monk
 
     mgr, runs = _manager_capturing_runs()
 
-    assert asyncio.run(mgr.flush_queue(session_id)) is False
-    assert runs == []
-
-    with create_sqlite_engine().begin() as conn:
-        queued_rows = messages_service.list_queued(conn, session_id)
-    assert [row["text"] for row in queued_rows] == [
-        "cli agent message 1",
-        "cli agent message 3",
-    ]
-
-    bg = SQLiteBackgroundTaskStore()
-    try:
-        stored = {run_id: bg.get_run(run_id) for run_id in run_ids}
-    finally:
-        bg.close()
-
-    assert stored[run_ids[0]]["status"] == "queued"
-    assert stored[run_ids[1]]["status"] == "canceled"
-    assert stored[run_ids[2]]["status"] == "queued"
-    assert stored[run_ids[0]]["metadata"]["workbench_queue_holds_run"] is True
-    assert stored[run_ids[2]]["metadata"]["workbench_queue_holds_run"] is True
-    assert all(row["status"] != "running" for row in stored.values())
-
     assert asyncio.run(mgr.flush_queue(session_id)) is True
     assert len(runs) == 1
     text, source, ctx = runs[0]
@@ -1626,6 +1611,22 @@ def test_flush_removes_stale_coalesced_agent_run_row_then_retries(tmp_path, monk
     assert "cli agent message 3" in text
     assert "cli agent message 2" not in text
     assert ctx.platform_specific["coalesced_queue"]["execution_ids"] == [run_ids[0], run_ids[2]]
+
+    with create_sqlite_engine().begin() as conn:
+        queued_rows = messages_service.list_queued(conn, session_id)
+    assert queued_rows == []
+
+    bg = SQLiteBackgroundTaskStore()
+    try:
+        stored = {run_id: bg.get_run(run_id) for run_id in run_ids}
+    finally:
+        bg.close()
+
+    assert stored[run_ids[0]]["status"] == "running"
+    assert stored[run_ids[1]]["status"] == "canceled"
+    assert stored[run_ids[2]]["status"] == "queued"
+    assert stored[run_ids[0]]["metadata"]["workbench_queue_holds_run"] is False
+    assert stored[run_ids[2]]["metadata"]["workbench_queue_holds_run"] is True
 
 
 def test_flush_does_not_coalesce_agent_runs_with_different_callback_targets(tmp_path, monkeypatch):
