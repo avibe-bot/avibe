@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
@@ -36,6 +37,9 @@ logger = logging.getLogger(__name__)
 # a plain human turn (#84). Its PRESENCE also marks the row as a scheduled segment
 # (vs a user send) for flush_queue.
 SCHEDULED_PROVENANCE_KEY = "scheduled_provenance"
+SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS = 60
+SCHEDULED_QUEUE_BURST_HINT_THRESHOLD = 3
+SCHEDULED_QUEUE_FULL_DETAIL_LIMIT = 3
 
 # The platform_specific keys the FLUSH rebuilds fresh from the session row (avibe
 # routing). Everything ELSE the scheduled context carries is delivery / attribution
@@ -89,6 +93,97 @@ def emit_matches_active_turn(sink: dict, context: "MessageContext") -> bool:
     sink_token = sink.get("turn_token")
     ctx_token = (getattr(context, "platform_specific", None) or {}).get("turn_token")
     return not (sink_token is not None and ctx_token != sink_token)
+
+
+def _parse_queue_timestamp(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        text = str(value)
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _scheduled_provenance(row: dict) -> Optional[dict]:
+    metadata = row.get("metadata") or {}
+    provenance = metadata.get(SCHEDULED_PROVENANCE_KEY)
+    return provenance if isinstance(provenance, dict) else None
+
+
+def _scheduled_merge_key(row: dict) -> Optional[tuple[str, str]]:
+    provenance = _scheduled_provenance(row)
+    if provenance is None:
+        return None
+    spec = provenance.get("platform_specific") or {}
+    if not isinstance(spec, dict):
+        return None
+    trigger_kind = str(spec.get("task_trigger_kind") or "").strip()
+    definition_id = str(spec.get("task_definition_id") or "").strip()
+    if not trigger_kind or not definition_id:
+        return None
+    return trigger_kind, definition_id
+
+
+def _within_scheduled_merge_window(previous: dict, current: dict) -> bool:
+    prev_ts = _parse_queue_timestamp(previous.get("created_at"))
+    current_ts = _parse_queue_timestamp(current.get("created_at"))
+    if prev_ts is None or current_ts is None:
+        return False
+    delta = (current_ts - prev_ts).total_seconds()
+    return 0 <= delta <= SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS
+
+
+def _collect_scheduled_segment(rows: list[dict]) -> list[dict]:
+    if not rows:
+        return []
+    first_key = _scheduled_merge_key(rows[0])
+    if first_key is None:
+        return [rows[0]]
+    segment = [rows[0]]
+    latest = rows[0]
+    for row in rows[1:]:
+        if _scheduled_merge_key(row) != first_key:
+            break
+        if not _within_scheduled_merge_window(latest, row):
+            break
+        segment.append(row)
+        latest = row
+    return segment
+
+
+def _build_scheduled_segment_text(segment: list[dict]) -> str:
+    texts = [str(row.get("text") or "").strip() for row in segment if str(row.get("text") or "").strip()]
+    if not texts:
+        return ""
+    if len(texts) == 1:
+        return texts[0]
+
+    parts = [
+        texts[0],
+        (
+            f"\n\n[Avibe Harness] The same watch/task callback fired {len(texts)} times "
+            f"within a rolling {SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS}-second window. "
+            "The queued callbacks were coalesced into this single Agent turn."
+        ),
+    ]
+    if len(texts) <= SCHEDULED_QUEUE_FULL_DETAIL_LIMIT:
+        parts.append("\n\nCoalesced callback messages:\n" + "\n\n---\n\n".join(texts[1:]))
+    else:
+        parts.append(
+            f"\n\nLatest callback message after {len(texts) - 1} additional trigger(s):\n{texts[-1]}"
+        )
+    if len(texts) >= SCHEDULED_QUEUE_BURST_HINT_THRESHOLD:
+        parts.append(
+            "\n\nThis callback source is firing frequently. Inspect the related watch/task and pause, "
+            "remove, or update it if it is looping."
+        )
+    return "".join(parts)
 
 
 @dataclass
@@ -361,20 +456,36 @@ class SessionTurnManager:
                 rows = messages_service.list_queued(conn, session_id)
                 if not rows:
                     return False
-                if (rows[0].get("metadata") or {}).get(SCHEDULED_PROVENANCE_KEY) is not None:
-                    # Scheduled segment: exactly this one row, run on its own.
+                if _scheduled_provenance(rows[0]) is not None:
+                    # Scheduled segment: a leading run of same-definition harness
+                    # rows within the rolling merge window runs as one scheduled
+                    # turn. Rows remain visible individually while queued; only the
+                    # Agent-facing dispatch is coalesced.
                     is_scheduled = True
-                    segment = [rows[0]]
-                    scheduled_text = rows[0].get("text") or ""
-                    prov = rows[0]["metadata"][SCHEDULED_PROVENANCE_KEY] or {}
+                    segment = _collect_scheduled_segment(rows)
+                    scheduled_text = _build_scheduled_segment_text(segment)
+                    prov = _scheduled_provenance(rows[0]) or {}
                     scheduled_message_id = prov.get("message_id")
                     scheduled_prov = prov.get("platform_specific") or {}
+                    if len(segment) > 1:
+                        scheduled_prov = dict(scheduled_prov)
+                        scheduled_prov["coalesced_queue"] = {
+                            "count": len(segment),
+                            "window_seconds": SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS,
+                            "message_ids": [r.get("id") for r in segment if r.get("id")],
+                            "execution_ids": [
+                                spec.get("task_execution_id")
+                                for r in segment
+                                if isinstance((spec := (_scheduled_provenance(r) or {}).get("platform_specific") or {}), dict)
+                                and spec.get("task_execution_id")
+                            ],
+                        }
                 else:
                     # User segment: the leading run of consecutive non-scheduled rows
                     # (stop at the first scheduled row so it stays its own turn).
                     segment = []
                     for r in rows:
-                        if (r.get("metadata") or {}).get(SCHEDULED_PROVENANCE_KEY) is not None:
+                        if _scheduled_provenance(r) is not None:
                             break
                         segment.append(r)
                 messages_service.delete_queued(conn, [r["id"] for r in segment])
