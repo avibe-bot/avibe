@@ -553,8 +553,11 @@ DRAFT_TYPE = "draft"
 # This stops another tab from briefly seeing the row as a sent prompt during the
 # dispatch window (Codex P2).
 PENDING_TYPE = "pending"
+# Hidden row used only to keep native-message-id dedupe coverage after multiple
+# queued harness callbacks are coalesced into one dispatched turn.
+HARNESS_DEDUPE_TYPE = "harness_dedupe"
 # Ephemeral types that must never count as inbox activity / conversation.
-NON_CONVERSATION_TYPES = (QUEUED_TYPE, DRAFT_TYPE, PENDING_TYPE)
+NON_CONVERSATION_TYPES = (QUEUED_TYPE, DRAFT_TYPE, PENDING_TYPE, HARNESS_DEDUPE_TYPE)
 
 # The transcript-visible types — the SINGLE source of truth shared by the
 # history fetch (``list_session_messages``) AND the live ``message.new`` publish

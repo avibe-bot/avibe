@@ -150,6 +150,7 @@ def create_app(controller: "Controller") -> FastAPI:
                         message_type=messages_service.QUEUED_TYPE,
                         text=text,
                         metadata={SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)},
+                        native_message_id=getattr(context, "message_id", None),
                     )
 
         return await manager.submit(session_id, context, text, source=SOURCE_SCHEDULED, enqueue=_enqueue)

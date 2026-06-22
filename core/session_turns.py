@@ -22,8 +22,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
+from sqlalchemy.exc import IntegrityError
+
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
+from storage import messages_service
+from vibe.i18n import t as i18n_t
 
 if TYPE_CHECKING:
     from modules.im import MessageContext
@@ -116,7 +120,7 @@ def _scheduled_provenance(row: dict) -> Optional[dict]:
     return provenance if isinstance(provenance, dict) else None
 
 
-def _scheduled_merge_key(row: dict) -> Optional[tuple[str, str]]:
+def _scheduled_merge_key(row: dict) -> Optional[tuple[str, ...]]:
     provenance = _scheduled_provenance(row)
     if provenance is None:
         return None
@@ -127,7 +131,21 @@ def _scheduled_merge_key(row: dict) -> Optional[tuple[str, str]]:
     definition_id = str(spec.get("task_definition_id") or "").strip()
     if not trigger_kind or not definition_id:
         return None
-    return trigger_kind, definition_id
+    delivery_override = spec.get("delivery_override") if isinstance(spec.get("delivery_override"), dict) else {}
+    delivery_alias = spec.get("scheduled_delivery_alias") if isinstance(spec.get("scheduled_delivery_alias"), dict) else {}
+    return (
+        trigger_kind,
+        definition_id,
+        str(spec.get("delivery_key_external") or ""),
+        str(spec.get("delivery_scope_session_key") or ""),
+        str(delivery_override.get("platform") or ""),
+        str(delivery_override.get("user_id") or ""),
+        str(delivery_override.get("channel_id") or ""),
+        str(delivery_override.get("thread_id") or ""),
+        str(delivery_alias.get("mode") or ""),
+        str(delivery_alias.get("clear_source") or ""),
+        str(bool(spec.get("suppress_delivery"))),
+    )
 
 
 def _within_scheduled_merge_window(previous: dict, current: dict) -> bool:
@@ -164,26 +182,88 @@ def _build_scheduled_segment_text(segment: list[dict]) -> str:
     if len(texts) == 1:
         return texts[0]
 
+    lang = _scheduled_segment_language(segment)
     parts = [
         texts[0],
-        (
-            f"\n\n[Avibe Harness] The same watch/task callback fired {len(texts)} times "
-            f"within a rolling {SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS}-second window. "
-            "The queued callbacks were coalesced into this single Agent turn."
+        "\n\n"
+        + i18n_t(
+            "harness.queueCoalesced.summary",
+            lang,
+            count=len(texts),
+            window=SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS,
         ),
     ]
     if len(texts) <= SCHEDULED_QUEUE_FULL_DETAIL_LIMIT:
-        parts.append("\n\nCoalesced callback messages:\n" + "\n\n---\n\n".join(texts[1:]))
+        parts.append(
+            "\n\n"
+            + i18n_t("harness.queueCoalesced.messagesLabel", lang)
+            + "\n"
+            + "\n\n---\n\n".join(texts[1:])
+        )
     else:
         parts.append(
-            f"\n\nLatest callback message after {len(texts) - 1} additional trigger(s):\n{texts[-1]}"
+            "\n\n"
+            + i18n_t("harness.queueCoalesced.latestLabel", lang, additional=len(texts) - 1)
+            + f"\n{texts[-1]}"
         )
     if len(texts) >= SCHEDULED_QUEUE_BURST_HINT_THRESHOLD:
-        parts.append(
-            "\n\nThis callback source is firing frequently. Inspect the related watch/task and pause, "
-            "remove, or update it if it is looping."
-        )
+        parts.append("\n\n" + i18n_t("harness.queueCoalesced.burstHint", lang))
     return "".join(parts)
+
+
+def _scheduled_segment_language(segment: list[dict]) -> str:
+    for row in segment:
+        spec = (_scheduled_provenance(row) or {}).get("platform_specific") or {}
+        if not isinstance(spec, dict):
+            continue
+        lang = str(spec.get("language") or spec.get("lang") or "").strip()
+        if lang:
+            return lang
+    return "en"
+
+
+def _scheduled_segment_native_ids(segment: list[dict]) -> list[str]:
+    native_ids: list[str] = []
+    for row in segment:
+        native_id = str(row.get("native_message_id") or "").strip()
+        if not native_id:
+            native_id = str((_scheduled_provenance(row) or {}).get("message_id") or "").strip()
+        if native_id and native_id not in native_ids:
+            native_ids.append(native_id)
+    return native_ids
+
+
+def _write_coalesced_native_id_markers(conn: Any, segment: list[dict]) -> None:
+    """Keep native-id dedupe coverage for coalesced queued harness rows.
+
+    The first native id is restored on the dispatched context and mirrored as
+    the visible harness prompt. Later coalesced queued rows are deleted before
+    dispatch, so write hidden rows for their native ids; otherwise a waiter retry
+    for one of those callbacks would not hit ``uq_messages_platform_native``.
+    """
+    if len(segment) <= 1:
+        return
+    native_ids = _scheduled_segment_native_ids(segment)
+    if len(native_ids) <= 1:
+        return
+    first = segment[0]
+
+    for native_id in native_ids[1:]:
+        try:
+            messages_service.append(
+                conn,
+                scope_id=first["scope_id"],
+                session_id=first.get("session_id"),
+                platform=first.get("platform") or "avibe",
+                author="harness",
+                source="harness",
+                message_type=messages_service.HARNESS_DEDUPE_TYPE,
+                text="",
+                metadata={"coalesced_from": first.get("id")},
+                native_message_id=native_id,
+            )
+        except IntegrityError:
+            logger.debug("queue flush: coalesced native id marker already exists for %s", native_id, exc_info=True)
 
 
 @dataclass
@@ -473,6 +553,7 @@ class SessionTurnManager:
                             "count": len(segment),
                             "window_seconds": SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS,
                             "message_ids": [r.get("id") for r in segment if r.get("id")],
+                            "native_message_ids": _scheduled_segment_native_ids(segment),
                             "execution_ids": [
                                 spec.get("task_execution_id")
                                 for r in segment
@@ -489,6 +570,8 @@ class SessionTurnManager:
                             break
                         segment.append(r)
                 messages_service.delete_queued(conn, [r["id"] for r in segment])
+                if is_scheduled:
+                    _write_coalesced_native_id_markers(conn, segment)
                 if not is_scheduled:
                     texts = [r.get("text") for r in segment if (r.get("text") or "").strip()]
                     # Carry attachments queued in this user segment so a file
