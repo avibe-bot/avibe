@@ -261,20 +261,21 @@ class ConsolidatedMessageDispatcher:
         payload = context.platform_specific or {}
         if payload.get("task_trigger_kind") != "agent_run":
             return
-        run_id = str(payload.get("task_execution_id") or "").strip()
-        if not run_id:
+        run_ids = _coalesced_task_execution_ids(payload)
+        if not run_ids:
             return
         store = None
         try:
             store = SQLiteBackgroundTaskStore()
-            store.record_run_message(
-                run_id,
-                text=text,
-                message_id=message_id,
-                terminal_status="failed" if is_error else "succeeded",
-            )
+            for run_id in run_ids:
+                store.record_run_message(
+                    run_id,
+                    text=text,
+                    message_id=message_id,
+                    terminal_status="failed" if is_error else "succeeded",
+                )
         except Exception as err:
-            logger.warning("Failed to record agent run terminal result for %s: %s", run_id, err)
+            logger.warning("Failed to record agent run terminal result for %s: %s", ",".join(run_ids), err)
         finally:
             if store is not None:
                 store.close()

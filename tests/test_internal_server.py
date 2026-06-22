@@ -1434,6 +1434,79 @@ def test_flush_coalesces_same_scheduled_callbacks_within_window(tmp_path, monkey
     assert dedupe_native_ids == {"watch:def-watch:run-2", "watch:def-watch:run-3"}
 
 
+def test_flush_claims_every_coalesced_agent_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import SQLiteBackgroundTaskStore
+
+    request_store = TaskExecutionStore()
+
+    def prov(execution_id: str) -> dict:
+        return {
+            "message_id": f"agent_run:{execution_id}",
+            "platform_specific": {
+                "task_execution_id": execution_id,
+                "task_trigger_kind": "agent_run",
+                "task_definition_id": "agent_run",
+            },
+        }
+
+    queued: list[tuple[str, dict]] = []
+    for index in range(3):
+        request = request_store.enqueue_agent_run(
+            session_id="placeholder",
+            message=f"cli agent message {index + 1}",
+            agent_name="codex",
+        )
+        assert request_store.claim(request.id) is not None
+        request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+        queued.append((f"cli agent message {index + 1}", prov(request.id)))
+
+    session_id = _seed_avibe_session_with_queue(queued)
+
+    from sqlalchemy import update
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.models import messages
+
+    with create_sqlite_engine().begin() as conn:
+        rows = messages_service.list_queued(conn, session_id)
+        for index, row in enumerate(rows):
+            conn.execute(
+                update(messages)
+                .where(messages.c.id == row["id"])
+                .values(created_at=f"2026-06-22T00:00:0{index}Z")
+            )
+
+    mgr, runs = _manager_capturing_runs()
+
+    assert asyncio.run(mgr.flush_queue(session_id)) is True
+    assert len(runs) == 1
+    text, source, ctx = runs[0]
+    assert source == SOURCE_SCHEDULED
+    assert "cli agent message 1" in text
+    assert "cli agent message 3" in text
+    execution_ids = ctx.platform_specific["coalesced_queue"]["execution_ids"]
+
+    bg = SQLiteBackgroundTaskStore()
+    try:
+        stored = {run_id: bg.get_run(run_id) for run_id in execution_ids}
+    finally:
+        bg.close()
+
+    assert {row["status"] for row in stored.values()} == {"running"}
+    assert [stored[run_id]["metadata"]["effective_run_id"] for run_id in execution_ids] == [
+        execution_ids[0],
+        execution_ids[0],
+        execution_ids[0],
+    ]
+    assert stored[execution_ids[0]]["metadata"].get("coalesced_into_run_id") is None
+    assert stored[execution_ids[1]]["metadata"]["coalesced_into_run_id"] == execution_ids[0]
+    assert stored[execution_ids[2]]["metadata"]["coalesced_into_run_id"] == execution_ids[0]
+    assert {row["metadata"]["workbench_queue_holds_run"] for row in stored.values()} == {False}
+
+
 def test_flush_marks_suppressed_first_native_id(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 

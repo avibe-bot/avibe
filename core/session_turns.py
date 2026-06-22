@@ -738,14 +738,25 @@ class SessionTurnManager:
 
                     store = SQLiteBackgroundTaskStore()
                     try:
-                        claimed = store.claim_queued_run_for_workbench(run_id)
+                        run_ids = [run_id]
+                        coalesced = scheduled_prov.get("coalesced_queue")
+                        execution_ids = coalesced.get("execution_ids") if isinstance(coalesced, dict) else None
+                        if isinstance(execution_ids, list):
+                            for execution_id in execution_ids:
+                                execution_id = str(execution_id or "").strip()
+                                if execution_id and execution_id not in run_ids:
+                                    run_ids.append(execution_id)
+                        claimed_run_ids = store.claim_queued_runs_for_workbench(run_ids)
                     finally:
                         store.close()
                 except Exception:
                     logger.warning("queue flush: failed to mark agent_run %s running", run_id, exc_info=True)
                     return False
-                if not claimed:
-                    logger.info("queue flush: skipped agent_run %s because it is no longer queued", run_id)
+                if set(claimed_run_ids) != set(run_ids):
+                    logger.info(
+                        "queue flush: skipped coalesced agent_run segment because some runs are no longer queued: %s",
+                        ",".join(sorted(set(run_ids) - set(claimed_run_ids))),
+                    )
                     return False
             await self._run(session_id, context, scheduled_text, source=SOURCE_SCHEDULED)
             try:
