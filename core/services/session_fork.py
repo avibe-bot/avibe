@@ -36,6 +36,7 @@ class SessionForkSpec:
     native_turn_started: bool = False
     opencode_fork_message_id: Optional[str] = None
     opencode_fork_empty_history: bool = False
+    opencode_boundary_from_active_run: bool = False
 
     def to_metadata(self) -> dict[str, Any]:
         metadata = {
@@ -53,6 +54,8 @@ class SessionForkSpec:
             metadata["opencode_fork_message_id"] = self.opencode_fork_message_id
         if self.opencode_fork_empty_history:
             metadata["opencode_fork_empty_history"] = True
+        if self.opencode_boundary_from_active_run:
+            metadata["opencode_boundary_from_active_run"] = True
         return metadata
 
 
@@ -75,6 +78,7 @@ class ForkSourceState:
     latest_after_anchor_type: Optional[str] = None
     has_messages_after_anchor: bool = False
     has_terminal_agent_output_after_anchor: bool = False
+    has_user_turn_after_anchor: bool = False
 
     @property
     def anchor_is_terminal_agent_output(self) -> bool:
@@ -144,23 +148,28 @@ def reserve_forked_session(
                     f"agent session has no native session id to fork: {source_session_id}"
                 )
             source_anchor = _latest_source_message_anchor(conn, str(row["id"]))
+            source_has_active_run = _source_has_active_agent_run(conn, str(row["id"]))
             inferred_running_turn = source_anchor.is_running_user_turn or (
                 source_backend == "opencode"
-                and _source_has_active_agent_run(conn, str(row["id"]))
+                and source_has_active_run
             )
             effective_trim_latest_running_turn = bool(
                 source_backend in TRIM_LATEST_RUNNING_TURN_BACKENDS
                 and (trim_latest_running_turn or inferred_running_turn)
             )
             effective_native_turn_started = bool(
-                effective_trim_latest_running_turn and (native_turn_started or inferred_running_turn)
+                effective_trim_latest_running_turn and native_turn_started
             )
             opencode_fork_message_id: Optional[str] = None
             opencode_fork_empty_history = False
+            opencode_boundary_from_active_run = False
             if effective_trim_latest_running_turn and source_backend == "opencode":
                 fork_point = _opencode_running_fork_point(source_native)
                 if fork_point is not None:
                     opencode_fork_message_id, opencode_fork_empty_history = fork_point
+                    opencode_boundary_from_active_run = bool(
+                        source_has_active_run and not source_anchor.is_running_user_turn
+                    )
                     effective_native_turn_started = True
             source_message_id = source_anchor.message_id
             override_agent = agent_store.require_enabled(agent_name) if agent_name else None
@@ -204,6 +213,8 @@ def reserve_forked_session(
                 metadata["fork_opencode_message_id"] = opencode_fork_message_id
             if opencode_fork_empty_history:
                 metadata["fork_opencode_fork_empty_history"] = True
+            if opencode_boundary_from_active_run:
+                metadata["fork_opencode_boundary_from_active_run"] = True
             session_id = create_agent_session_row(
                 conn,
                 scope_id=row["scope_id"],
@@ -234,6 +245,7 @@ def reserve_forked_session(
             native_turn_started=effective_native_turn_started,
             opencode_fork_message_id=opencode_fork_message_id,
             opencode_fork_empty_history=opencode_fork_empty_history,
+            opencode_boundary_from_active_run=opencode_boundary_from_active_run,
         )
         return SessionForkResult(
             session_id=session_id,
@@ -276,6 +288,8 @@ def fork_metadata_from_request(metadata: dict[str, Any] | None) -> dict[str, Any
         result["opencode_fork_message_id"] = opencode_message
     if bool(fork.get("opencode_fork_empty_history")):
         result["opencode_fork_empty_history"] = True
+    if bool(fork.get("opencode_boundary_from_active_run")):
+        result["opencode_boundary_from_active_run"] = True
     source_message = _clean_optional(fork.get("source_message_id"))
     if source_message:
         result["source_message_id"] = source_message
@@ -306,6 +320,8 @@ def fork_metadata_from_session_metadata(metadata: dict[str, Any] | None) -> dict
         result["opencode_fork_message_id"] = opencode_message
     if bool(metadata.get("fork_opencode_fork_empty_history")):
         result["opencode_fork_empty_history"] = True
+    if bool(metadata.get("fork_opencode_boundary_from_active_run")):
+        result["opencode_boundary_from_active_run"] = True
     source_message = _clean_optional(metadata.get("fork_source_message_id"))
     if source_message:
         result["source_message_id"] = source_message
@@ -399,6 +415,19 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                 latest_after_anchor_author == "agent"
                 and latest_after_anchor_type in TERMINAL_AGENT_OUTPUT_TYPES
             )
+            has_user_turn_after_anchor = (
+                conn.execute(
+                    select(messages.c.id)
+                    .where(
+                        messages.c.session_id == source_session_id,
+                        messages.c.author == "user",
+                        messages.c.type == "user",
+                        after_anchor,
+                    )
+                    .limit(1)
+                ).first()
+                is not None
+            )
             return ForkSourceState(
                 anchor_author=str(anchor["author"] or "").strip() or None,
                 anchor_type=str(anchor["type"] or "").strip() or None,
@@ -406,6 +435,7 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                 latest_after_anchor_type=latest_after_anchor_type or None,
                 has_messages_after_anchor=latest_after_anchor is not None,
                 has_terminal_agent_output_after_anchor=has_terminal_agent_output_after_anchor,
+                has_user_turn_after_anchor=has_user_turn_after_anchor,
             )
     except Exception as exc:
         import logging

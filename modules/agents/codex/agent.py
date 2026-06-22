@@ -793,6 +793,8 @@ class CodexAgent(BaseAgent):
             getattr(source_state, "anchor_author", None) == "user"
             and getattr(source_state, "anchor_type", None) == "user"
         )
+        if getattr(source_state, "has_user_turn_after_anchor", False):
+            return False
         if anchor_is_running_user and bool(fork.get("native_turn_started")):
             return True
         if source_state.has_messages_after_anchor:

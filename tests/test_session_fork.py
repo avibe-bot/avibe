@@ -200,7 +200,7 @@ def test_reserve_forked_session_infers_running_user_anchor_without_live_hint(tmp
 
     assert result.fork.source_message_id == running_user["id"]
     assert result.fork.trim_latest_running_turn is True
-    assert result.fork.native_turn_started is True
+    assert result.fork.native_turn_started is False
     engine = create_sqlite_engine(db_path)
     try:
         with engine.connect() as conn:
@@ -213,7 +213,7 @@ def test_reserve_forked_session_infers_running_user_anchor_without_live_hint(tmp
     metadata = json.loads(forked["metadata_json"])
     assert metadata["fork_source_message_id"] == running_user["id"]
     assert metadata["fork_trim_latest_running_turn"] is True
-    assert metadata["fork_native_turn_started"] is True
+    assert metadata["fork_native_turn_started"] is False
 
 
 def test_reserve_forked_session_does_not_infer_trim_for_claude(tmp_path: Path) -> None:
@@ -358,6 +358,7 @@ def test_reserve_forked_opencode_running_fork_records_frozen_native_message(
     assert metadata["fork_opencode_message_id"] == "oc-msg-3"
     assert metadata["fork_trim_latest_running_turn"] is True
     assert metadata["fork_native_turn_started"] is True
+    assert "fork_opencode_boundary_from_active_run" not in metadata
 
 
 def test_reserve_forked_opencode_active_run_freezes_native_boundary_without_live_hint(
@@ -445,6 +446,7 @@ def test_reserve_forked_opencode_active_run_freezes_native_boundary_without_live
     assert metadata["fork_trim_latest_running_turn"] is True
     assert metadata["fork_native_turn_started"] is True
     assert metadata["fork_opencode_message_id"] == "oc-msg-3"
+    assert metadata["fork_opencode_boundary_from_active_run"] is True
 
 
 def test_reserve_forked_opencode_running_first_turn_records_user_boundary(
@@ -1002,6 +1004,7 @@ def test_fork_source_state_uses_latest_progress_after_anchor(
         assert state.latest_after_anchor_type == "user"
         assert state.has_messages_after_anchor is True
         assert state.has_terminal_agent_output_after_anchor is False
+        assert state.has_user_turn_after_anchor is True
     finally:
         engine.dispose()
 

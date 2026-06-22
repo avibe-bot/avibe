@@ -522,6 +522,54 @@ def test_opencode_saved_boundary_is_ignored_when_source_completed_before_anchor(
     server.create_session.assert_not_awaited()
 
 
+def test_opencode_active_run_boundary_survives_terminal_avibe_anchor() -> None:
+    sessions = SimpleNamespace(
+        get_agent_session_id=Mock(return_value=None),
+        ensure_agent_session_id=Mock(return_value="ses-fork"),
+        bind_agent_session=Mock(return_value="ses-fork"),
+        bind_agent_session_by_id=Mock(return_value="ses-fork"),
+    )
+    manager = OpenCodeSessionManager(SimpleNamespace(sessions=sessions), "opencode")
+    server = SimpleNamespace(
+        fork_session=AsyncMock(return_value={"id": "oc-fork"}),
+        create_session=AsyncMock(),
+        list_messages=AsyncMock(),
+    )
+    request = _request()
+    request.context.platform_specific = {
+        "agent_session_id": "ses-fork",
+        "agent_session_target": {
+            "id": "ses-fork",
+            "agent_backend": "opencode",
+            "native_session_id": "",
+            "native_session_fork": {
+                "source_session_id": "ses-source",
+                "source_native_session_id": "oc-source",
+                "source_backend": "opencode",
+                "source_message_id": "msg-result",
+                "trim_latest_running_turn": True,
+                "native_turn_started": True,
+                "opencode_fork_message_id": "oc-msg-user",
+                "opencode_boundary_from_active_run": True,
+            },
+        },
+    }
+
+    with patch(
+        "modules.agents.opencode.session.fork_source_state",
+        return_value=SimpleNamespace(
+            anchor_is_terminal_agent_output=True,
+            has_terminal_agent_output_after_anchor=False,
+        ),
+    ):
+        session_id = asyncio.run(manager.get_or_create_session_id(request, server))
+
+    assert session_id == "oc-fork"
+    server.list_messages.assert_not_awaited()
+    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id="oc-msg-user")
+    server.create_session.assert_not_awaited()
+
+
 def test_opencode_saved_boundary_is_ignored_when_source_completed_after_anchor() -> None:
     sessions = SimpleNamespace(
         get_agent_session_id=Mock(return_value=None),

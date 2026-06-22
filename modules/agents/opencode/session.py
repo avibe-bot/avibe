@@ -114,6 +114,8 @@ class OpenCodeSessionManager:
             return False, None
         message_id = str(fork.get("opencode_fork_message_id") or "").strip()
         if message_id:
+            if bool(fork.get("opencode_boundary_from_active_run")):
+                return True, message_id
             source_state = fork_source_state(fork)
             anchor_is_running_user = (
                 getattr(source_state, "anchor_author", None) == "user"
