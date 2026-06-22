@@ -111,6 +111,24 @@ def _like_contains_pattern(value: str) -> str:
     return f"%{escaped}%"
 
 
+def _coalesced_agent_run_metadata(rows: dict[str, Any], run_ids: list[str]) -> dict[str, Any]:
+    messages: list[dict[str, str]] = []
+    prompt_parts: list[str] = []
+    for run_id in run_ids:
+        row = rows[run_id]
+        message = str(row["message"] or row["prompt"] or "")
+        messages.append({"execution_id": run_id, "message": message})
+        if message:
+            prompt_parts.append(message)
+    metadata: dict[str, Any] = {
+        "execution_ids": run_ids,
+        "messages": messages,
+    }
+    if prompt_parts:
+        metadata["prompt"] = "\n\n---\n\n".join(prompt_parts)
+    return metadata
+
+
 def claim_queued_runs_for_workbench_in_connection(
     conn: Any,
     run_ids: list[str],
@@ -144,7 +162,7 @@ def claim_queued_runs_for_workbench_in_connection(
         metadata["workbench_queue_holds_run"] = run_id != primary_run_id
         metadata["effective_run_id"] = primary_run_id
         if run_id == primary_run_id and len(normalized_run_ids) > 1:
-            metadata["coalesced_queue"] = {"execution_ids": normalized_run_ids}
+            metadata["coalesced_queue"] = _coalesced_agent_run_metadata(rows, normalized_run_ids)
         if run_id != primary_run_id:
             metadata["coalesced_into_run_id"] = primary_run_id
             result = conn.execute(

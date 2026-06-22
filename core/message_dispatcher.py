@@ -39,6 +39,13 @@ def _coalesced_task_execution_ids(payload: dict[str, Any]) -> list[str]:
     return run_ids
 
 
+def _run_is_cancelled(run: Any) -> bool:
+    if not isinstance(run, dict):
+        return False
+    status = str(run.get("status") or "").strip().lower()
+    return bool(run.get("cancel_requested")) or status in {"canceled", "cancelled"}
+
+
 async def _stream_chunk(controller, context, *, text: str, message_id: Optional[str], kind: str) -> None:
     """Forward one durable agent message to the live streaming turn sink.
 
@@ -268,6 +275,9 @@ class ConsolidatedMessageDispatcher:
         try:
             store = SQLiteBackgroundTaskStore()
             for run_id in run_ids:
+                get_run = getattr(store, "get_run", None)
+                if callable(get_run) and _run_is_cancelled(get_run(run_id)):
+                    continue
                 store.record_run_message(
                     run_id,
                     text=text,

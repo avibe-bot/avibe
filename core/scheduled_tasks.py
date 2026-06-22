@@ -408,6 +408,26 @@ class TaskExecutionRequest:
         )
 
 
+def _agent_run_message_for_request(request: TaskExecutionRequest) -> str:
+    coalesced = (request.metadata or {}).get("coalesced_queue")
+    if isinstance(coalesced, dict):
+        prompt = str(coalesced.get("prompt") or "")
+        if prompt:
+            return prompt
+        messages = coalesced.get("messages")
+        if isinstance(messages, list):
+            parts: list[str] = []
+            for item in messages:
+                if not isinstance(item, dict):
+                    continue
+                message = str(item.get("message") or item.get("prompt") or "")
+                if message:
+                    parts.append(message)
+            if parts:
+                return "\n\n---\n\n".join(parts)
+    return str(request.message or "")
+
+
 class ScheduledTaskStore:
     def __init__(self, path: Optional[Path] = None):
         self.path = path or (paths.get_state_dir() / "scheduled_tasks.json")
@@ -1530,7 +1550,8 @@ class ScheduledTaskService:
                     agent_name=request.agent_name,
                 )
             elif request.request_type == "agent_run":
-                if not request.message:
+                message = _agent_run_message_for_request(request)
+                if not message:
                     raise ValueError("agent run requires message")
                 if not (request.session_id or request.session_key):
                     raise ValueError("agent run currently requires session_id or a resolvable session target")
@@ -1539,7 +1560,7 @@ class ScheduledTaskService:
                     session_id=request.session_id,
                     post_to=request.post_to,
                     deliver_key=request.deliver_key,
-                    message=request.message,
+                    message=message,
                     execution_id=request.id,
                     agent_name=request.agent_name,
                     metadata={

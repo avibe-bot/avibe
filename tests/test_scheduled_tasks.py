@@ -17,6 +17,7 @@ from core.scheduled_tasks import (
     ScheduledTaskStore,
     TaskExecutionRequest,
     TaskExecutionStore,
+    _agent_run_message_for_request,
     build_session_key_for_context,
     parse_session_key,
     resolve_session_id_target,
@@ -1878,8 +1879,20 @@ def test_recover_processing_keeps_coalesced_agent_run_children_held(monkeypatch,
     assert child["status"] == "queued"
     assert primary["metadata"]["workbench_queue_holds_run"] is False
     assert primary["metadata"]["coalesced_queue"]["execution_ids"] == run_ids
+    assert primary["metadata"]["coalesced_queue"]["messages"] == [
+        {"execution_id": run_ids[0], "message": "coalesced prompt 1"},
+        {"execution_id": run_ids[1], "message": "coalesced prompt 2"},
+        {"execution_id": run_ids[2], "message": "coalesced prompt 3"},
+    ]
     assert child["metadata"]["workbench_queue_holds_run"] is True
     assert child["metadata"]["coalesced_into_run_id"] == run_ids[0]
+
+    claimed = request_store.claim(run_ids[0])
+    assert claimed is not None
+    recovered_message = _agent_run_message_for_request(claimed)
+    assert "coalesced prompt 1" in recovered_message
+    assert "coalesced prompt 2" in recovered_message
+    assert "coalesced prompt 3" in recovered_message
 
 
 def test_drain_requests_reserves_watch_create_per_run_before_session_validation(tmp_path: Path) -> None:
