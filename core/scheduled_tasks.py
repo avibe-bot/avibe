@@ -1542,7 +1542,13 @@ class ScheduledTaskService:
                     message=request.message,
                     execution_id=request.id,
                     agent_name=request.agent_name,
-                    metadata=request.metadata,
+                    metadata={
+                        **(request.metadata or {}),
+                        "source_kind": request.source_kind,
+                        "source_actor": request.source_actor,
+                        "parent_run_id": request.parent_run_id,
+                        "callback_session_id": request.callback_session_id,
+                    },
                 )
                 error = result.error
                 should_complete = result.complete_on_return
@@ -1862,6 +1868,10 @@ class ScheduledTaskService:
                 # attribute the injected prompt to its precise definition.
                 "task_definition_id": task_id,
                 "vibe_agent_name": agent_name,
+                "source_kind": (metadata or {}).get("source_kind"),
+                "source_actor": (metadata or {}).get("source_actor"),
+                "parent_run_id": (metadata or {}).get("parent_run_id"),
+                "callback_session_id": (metadata or {}).get("callback_session_id"),
                 "suppress_delivery": bool(target_info.suppress_delivery) if target_info else False,
                 "agent_session_target": (
                     {

@@ -1849,6 +1849,38 @@ def test_workbench_queue_flush_recovery_preserves_session_fork_metadata(monkeypa
     assert claimed.metadata["session_fork"]["source_native_session_id"] == "thread-source"
 
 
+def test_recover_processing_keeps_coalesced_agent_run_children_held(monkeypatch, tmp_path) -> None:
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    run_ids: list[str] = []
+    for index in range(3):
+        request = request_store.enqueue_agent_run(
+            session_id=session_id,
+            message=f"coalesced prompt {index + 1}",
+            agent_name="codex",
+            metadata={"workbench_queue_holds_run": True},
+        )
+        run_ids.append(request.id)
+
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    assert sqlite_store.claim_queued_runs_for_workbench(run_ids) == run_ids
+
+    request_store.recover_processing()
+    pending = request_store.list_pending()
+
+    assert [request.id for request in pending] == [run_ids[0]]
+    primary = request_store.get_run(run_ids[0])
+    child = request_store.get_run(run_ids[1])
+    assert primary is not None
+    assert child is not None
+    assert primary["status"] == "queued"
+    assert child["status"] == "queued"
+    assert primary["metadata"]["workbench_queue_holds_run"] is False
+    assert child["metadata"]["workbench_queue_holds_run"] is True
+    assert child["metadata"]["coalesced_into_run_id"] == run_ids[0]
+
+
 def test_drain_requests_reserves_watch_create_per_run_before_session_validation(tmp_path: Path) -> None:
     request_store = TaskExecutionStore(tmp_path / "task_requests")
     request = request_store.enqueue_definition_run(

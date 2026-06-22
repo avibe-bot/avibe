@@ -153,6 +153,10 @@ def _scheduled_merge_key(row: dict) -> Optional[tuple[str, ...]]:
         str((spec.get("agent_session_target") or {}).get("agent_name") or "")
         if isinstance(spec.get("agent_session_target"), dict)
         else "",
+        str(spec.get("callback_session_id") or ""),
+        str(spec.get("source_kind") or ""),
+        str(spec.get("source_actor") or ""),
+        str(spec.get("parent_run_id") or ""),
         str(spec.get("delivery_key_external") or ""),
         str(spec.get("delivery_scope_session_key") or ""),
         str(delivery_override.get("platform") or ""),
@@ -199,6 +203,9 @@ def _build_scheduled_segment_text(segment: list[dict]) -> str:
     if len(texts) == 1:
         return texts[0]
 
+    if _scheduled_segment_trigger_kind(segment) == "agent_run":
+        return "\n\n---\n\n".join(texts)
+
     lang = _scheduled_segment_language(segment)
     parts = [
         texts[0],
@@ -228,6 +235,11 @@ def _build_scheduled_segment_text(segment: list[dict]) -> str:
     return "".join(parts)
 
 
+def _scheduled_segment_trigger_kind(segment: list[dict]) -> str:
+    spec = (_scheduled_provenance(segment[0]) or {}).get("platform_specific") or {} if segment else {}
+    return str(spec.get("task_trigger_kind") or "").strip() if isinstance(spec, dict) else ""
+
+
 def _scheduled_segment_language(segment: list[dict]) -> str:
     for row in segment:
         spec = (_scheduled_provenance(row) or {}).get("platform_specific") or {}
@@ -248,6 +260,18 @@ def _scheduled_segment_native_ids(segment: list[dict]) -> list[str]:
         if native_id and native_id not in native_ids:
             native_ids.append(native_id)
     return native_ids
+
+
+def _scheduled_segment_execution_ids(segment: list[dict]) -> list[str]:
+    execution_ids: list[str] = []
+    for row in segment:
+        spec = (_scheduled_provenance(row) or {}).get("platform_specific") or {}
+        if not isinstance(spec, dict):
+            continue
+        execution_id = str(spec.get("task_execution_id") or "").strip()
+        if execution_id and execution_id not in execution_ids:
+            execution_ids.append(execution_id)
+    return execution_ids
 
 
 def _scheduled_segment_suppresses_delivery(segment: list[dict]) -> bool:
@@ -590,6 +614,9 @@ class SessionTurnManager:
         user_row = None
         inbox_row = None
         attachment_specs: list = []
+        pending_agent_run_ids: list[str] = []
+        pending_scheduled_segment: list[dict] = []
+        claimed_agent_run_ids: list[str] = []
         try:
             engine = create_sqlite_engine()
             with engine.begin() as conn:
@@ -597,7 +624,7 @@ class SessionTurnManager:
                 if not rows:
                     return False
                 if _scheduled_provenance(rows[0]) is not None:
-                    from storage.background import claim_queued_runs_for_workbench_in_connection
+                    from storage.background import inspect_queued_runs_for_workbench_in_connection
 
                     # Scheduled segment: a leading run of same-definition harness
                     # rows within the rolling merge window runs as one scheduled
@@ -629,12 +656,7 @@ class SessionTurnManager:
                                 "window_seconds": SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS,
                                 "message_ids": [r.get("id") for r in segment if r.get("id")],
                                 "native_message_ids": scheduled_native_ids,
-                                "execution_ids": [
-                                    spec.get("task_execution_id")
-                                    for r in segment
-                                    if isinstance((spec := (_scheduled_provenance(r) or {}).get("platform_specific") or {}), dict)
-                                    and spec.get("task_execution_id")
-                                ],
+                                "execution_ids": _scheduled_segment_execution_ids(segment),
                             }
                         run_id = str(scheduled_prov.get("task_execution_id") or "").strip()
                         if scheduled_prov.get("task_trigger_kind") == "agent_run" and run_id:
@@ -646,13 +668,31 @@ class SessionTurnManager:
                                     execution_id = str(execution_id or "").strip()
                                     if execution_id and execution_id not in run_ids:
                                         run_ids.append(execution_id)
-                            claimed_run_ids = claim_queued_runs_for_workbench_in_connection(conn, run_ids)
-                            if set(claimed_run_ids) != set(run_ids):
+                            queued_run_ids, stale_run_ids = inspect_queued_runs_for_workbench_in_connection(conn, run_ids)
+                            if stale_run_ids:
+                                stale_set = set(stale_run_ids)
+                                stale_row_ids = [
+                                    row["id"]
+                                    for row in segment
+                                    if row.get("id")
+                                    and str(
+                                        ((_scheduled_provenance(row) or {}).get("platform_specific") or {}).get(
+                                            "task_execution_id"
+                                        )
+                                        or ""
+                                    ).strip()
+                                    in stale_set
+                                ]
+                                if stale_row_ids:
+                                    messages_service.delete_queued(conn, stale_row_ids)
+                                    bus.publish("queue.updated", {"session_id": session_id})
                                 logger.info(
-                                    "queue flush: skipped coalesced agent_run segment because some runs are no longer queued: %s",
-                                    ",".join(sorted(set(run_ids) - set(claimed_run_ids))),
+                                    "queue flush: removed stale coalesced agent_run rows before retrying: %s",
+                                    ",".join(sorted(stale_set)),
                                 )
                                 return False
+                            pending_agent_run_ids = queued_run_ids
+                            pending_scheduled_segment = segment
                 else:
                     # User segment: the leading run of consecutive non-scheduled rows
                     # (stop at the first scheduled row so it stays its own turn).
@@ -661,7 +701,7 @@ class SessionTurnManager:
                         if _scheduled_provenance(r) is not None:
                             break
                         segment.append(r)
-                if segment:
+                if segment and not pending_agent_run_ids:
                     messages_service.delete_queued(conn, [r["id"] for r in segment])
                 if not is_scheduled:
                     texts = [r.get("text") for r in segment if (r.get("text") or "").strip()]
@@ -756,7 +796,45 @@ class SessionTurnManager:
                 # Restore the stable scheduled:/watch:/webhook: native id so the
                 # flushed prompt persists + dedupes under it (Codex P2), not None.
                 context.message_id = scheduled_message_id
-            await self._run(session_id, context, scheduled_text, source=SOURCE_SCHEDULED)
+            if pending_agent_run_ids:
+                try:
+                    from storage.background import claim_queued_runs_for_workbench_in_connection
+
+                    engine = create_sqlite_engine()
+                    with engine.begin() as conn:
+                        claimed_run_ids = claim_queued_runs_for_workbench_in_connection(conn, pending_agent_run_ids)
+                        if set(claimed_run_ids) != set(pending_agent_run_ids):
+                            logger.info(
+                                "queue flush: skipped coalesced agent_run segment because some runs are no longer queued: %s",
+                                ",".join(sorted(set(pending_agent_run_ids) - set(claimed_run_ids))),
+                            )
+                            return False
+                        claimed_agent_run_ids = claimed_run_ids
+                except Exception:
+                    logger.warning(
+                        "queue flush: failed to claim coalesced agent_run segment for session=%s",
+                        session_id,
+                        exc_info=True,
+                    )
+                    return False
+            try:
+                await self._run(session_id, context, scheduled_text, source=SOURCE_SCHEDULED)
+            except Exception:
+                if claimed_agent_run_ids:
+                    try:
+                        from storage.background import reset_workbench_claimed_runs_in_connection
+
+                        engine = create_sqlite_engine()
+                        with engine.begin() as conn:
+                            reset_workbench_claimed_runs_in_connection(conn, claimed_agent_run_ids)
+                    except Exception:
+                        logger.exception("queue flush: failed to reset claimed agent runs for session=%s", session_id)
+                logger.exception("queue flush: failed to start scheduled segment for session=%s", session_id)
+                return False
+            if pending_scheduled_segment:
+                engine = create_sqlite_engine()
+                with engine.begin() as conn:
+                    messages_service.delete_queued(conn, [r["id"] for r in pending_scheduled_segment])
             try:
                 engine = create_sqlite_engine()
                 with engine.begin() as conn:
