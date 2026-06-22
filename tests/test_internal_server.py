@@ -1507,6 +1507,43 @@ def test_flush_claims_every_coalesced_agent_run(tmp_path, monkeypatch):
     assert {row["metadata"]["workbench_queue_holds_run"] for row in stored.values()} == {False}
 
 
+def test_coalesced_agent_run_claim_is_atomic(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import SQLiteBackgroundTaskStore
+
+    request_store = TaskExecutionStore()
+    run_ids: list[str] = []
+    for index in range(3):
+        request = request_store.enqueue_agent_run(
+            session_id="placeholder",
+            message=f"cli agent message {index + 1}",
+            agent_name="codex",
+        )
+        assert request_store.claim(request.id) is not None
+        request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+        run_ids.append(request.id)
+
+    bg = SQLiteBackgroundTaskStore()
+    try:
+        assert bg.cancel_run(run_ids[1]) is True
+        assert bg.claim_queued_runs_for_workbench(run_ids) == []
+        stored = {run_id: bg.get_run(run_id) for run_id in run_ids}
+    finally:
+        bg.close()
+
+    assert stored[run_ids[0]]["status"] == "queued"
+    assert stored[run_ids[1]]["status"] == "canceled"
+    assert stored[run_ids[2]]["status"] == "queued"
+    assert {row["status"] for row in stored.values()} == {"queued", "canceled"}
+    assert all(row["status"] != "running" for row in stored.values())
+    assert stored[run_ids[0]]["metadata"]["workbench_queue_holds_run"] is True
+    assert stored[run_ids[2]]["metadata"]["workbench_queue_holds_run"] is True
+    assert stored[run_ids[0]]["metadata"].get("effective_run_id") is None
+    assert stored[run_ids[2]]["metadata"].get("effective_run_id") is None
+
+
 def test_flush_marks_suppressed_first_native_id(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 

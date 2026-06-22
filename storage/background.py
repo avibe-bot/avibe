@@ -728,28 +728,35 @@ class SQLiteBackgroundTaskStore:
         *,
         started_at: Optional[str] = None,
     ) -> list[str]:
-        primary_run_id = next((str(run_id or "").strip() for run_id in run_ids if str(run_id or "").strip()), "")
+        normalized_run_ids: list[str] = []
+        seen: set[str] = set()
+        for raw_run_id in run_ids:
+            run_id = str(raw_run_id or "").strip()
+            if not run_id or run_id in seen:
+                continue
+            seen.add(run_id)
+            normalized_run_ids.append(run_id)
+        primary_run_id = normalized_run_ids[0] if normalized_run_ids else ""
         if not primary_run_id:
             return []
         with self.engine.begin() as conn:
             now = started_at or _utc_now_iso()
-            claimed: list[str] = []
-            seen: set[str] = set()
-            for raw_run_id in run_ids:
-                run_id = str(raw_run_id or "").strip()
-                if not run_id or run_id in seen:
-                    continue
-                seen.add(run_id)
-                row = conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
-                if not row:
-                    continue
+            rows = {
+                row["id"]: row
+                for row in conn.execute(
+                    select(agent_runs).where(agent_runs.c.id.in_(normalized_run_ids))
+                ).mappings()
+            }
+            if set(rows) != set(normalized_run_ids):
+                return []
+            for run_id in normalized_run_ids:
+                row = rows[run_id]
                 if bool(row["cancel_requested"]) or normalize_run_status(row["status"]) == "canceled":
-                    conn.execute(
-                        update(agent_runs)
-                        .where(agent_runs.c.id == run_id)
-                        .values(status="canceled", completed_at=now, updated_at=now)
-                    )
-                    continue
+                    return []
+                if normalize_run_status(row["status"]) != "queued":
+                    return []
+            for run_id in normalized_run_ids:
+                row = rows[run_id]
                 metadata = _json_loads(row["metadata_json"], {})
                 if not isinstance(metadata, dict):
                     metadata = {}
@@ -768,9 +775,9 @@ class SQLiteBackgroundTaskStore:
                         metadata_json=_json_dumps(metadata),
                     )
                 )
-                if result.rowcount:
-                    claimed.append(run_id)
-            return claimed
+                if not result.rowcount:
+                    raise RuntimeError(f"failed to claim queued agent run {run_id}")
+            return normalized_run_ids
 
     def record_run_message(
         self,
