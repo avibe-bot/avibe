@@ -769,7 +769,7 @@ class CodexAgent(BaseAgent):
             if not thread_id:
                 raise RuntimeError("Codex thread/fork returned no thread id")
 
-            should_trim = self._should_rollback_forked_running_turn(fork)
+            should_trim = await self._should_rollback_forked_running_turn(fork)
             if should_trim:
                 await self._rollback_forked_running_turn(transport, thread_id)
             await self._inject_forked_session_correction(transport, request, thread_id)
@@ -781,7 +781,7 @@ class CodexAgent(BaseAgent):
         logger.info("Forked Codex thread %s from %s for session %s", thread_id, source_thread_id, request.base_session_id)
         return thread_id
 
-    def _should_rollback_forked_running_turn(self, fork: dict[str, Any]) -> bool:
+    async def _should_rollback_forked_running_turn(self, fork: dict[str, Any]) -> bool:
         """Rollback only when Codex's latest-turn rollback still targets the reserved turn."""
 
         if not bool(fork.get("trim_latest_running_turn")):
@@ -791,7 +791,22 @@ class CodexAgent(BaseAgent):
             return False
         if source_state.has_messages_after_anchor:
             return not source_state.has_terminal_agent_output_after_anchor
-        return bool(fork.get("native_turn_started"))
+        if bool(fork.get("native_turn_started")):
+            return True
+        return await self._fork_source_turn_now_started(fork)
+
+    async def _fork_source_turn_now_started(self, fork: dict[str, Any]) -> bool:
+        source_session_id = str(fork.get("source_session_id") or "").strip()
+        if not source_session_id:
+            return False
+        from vibe import internal_client
+
+        try:
+            turn_result = await internal_client.turn_state(source_session_id)
+        except (internal_client.InternalServerTimeout, internal_client.InternalServerUnavailable):
+            return False
+        body = turn_result.get("body") or {}
+        return bool(body.get("in_flight") and body.get("native_turn_started"))
 
     async def _rollback_forked_running_turn(
         self,

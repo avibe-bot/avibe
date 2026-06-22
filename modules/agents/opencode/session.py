@@ -13,6 +13,7 @@ import time
 from typing import Dict, Optional, Tuple
 
 from core.services.session_fork import fork_source_state, pending_native_fork
+from modules.agents.native_sessions.opencode import OpenCodeNativeSessionProvider
 from modules.agents.base import AgentRequest, BaseAgent
 
 from .server import OpenCodeServerManager
@@ -121,6 +122,12 @@ class OpenCodeSessionManager:
                 )
                 return True, None
             return True, message_id
+        point = OpenCodeNativeSessionProvider().running_fork_point_before_latest_user(
+            source_session_id,
+            include_completed_assistant_tail=False,
+        )
+        if point.available:
+            return True, point.message_id
         logger.warning(
             "OpenCode running fork for %s has no persisted fork point; preserving source history",
             source_session_id,

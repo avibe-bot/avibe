@@ -70,6 +70,8 @@ class SessionForkResult:
 class ForkSourceState:
     anchor_author: Optional[str] = None
     anchor_type: Optional[str] = None
+    latest_after_anchor_author: Optional[str] = None
+    latest_after_anchor_type: Optional[str] = None
     has_messages_after_anchor: bool = False
     has_terminal_agent_output_after_anchor: bool = False
 
@@ -334,7 +336,7 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
     if not source_session_id or not source_message_id:
         return ForkSourceState()
 
-    from sqlalchemy import and_, exists, select
+    from sqlalchemy import select
 
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
@@ -357,38 +359,32 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
                 (messages.c.created_at > anchor_created_at)
                 | ((messages.c.created_at == anchor_created_at) & (messages.c.id > anchor_id))
             )
-            has_messages_after_anchor = bool(
-                conn.execute(
-                    select(
-                        exists().where(
-                            and_(
-                                messages.c.session_id == source_session_id,
-                                messages.c.author == "agent",
-                                messages.c.type.in_(list(SOURCE_PROGRESS_AGENT_OUTPUT_TYPES)),
-                                after_anchor,
-                            )
-                        )
-                    )
-                ).scalar()
+            latest_after_anchor = conn.execute(
+                select(messages.c.author, messages.c.type)
+                .where(
+                    messages.c.session_id == source_session_id,
+                    messages.c.type.in_(["user", *list(SOURCE_PROGRESS_AGENT_OUTPUT_TYPES)]),
+                    after_anchor,
+                )
+                .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+                .limit(1)
+            ).mappings().first()
+            latest_after_anchor_author = (
+                str(latest_after_anchor["author"] or "").strip() if latest_after_anchor else ""
             )
-            has_terminal_agent_output_after_anchor = bool(
-                conn.execute(
-                    select(
-                        exists().where(
-                            and_(
-                                messages.c.session_id == source_session_id,
-                                messages.c.author == "agent",
-                                messages.c.type.in_(list(TERMINAL_AGENT_OUTPUT_TYPES)),
-                                after_anchor,
-                            )
-                        )
-                    )
-                ).scalar()
+            latest_after_anchor_type = (
+                str(latest_after_anchor["type"] or "").strip() if latest_after_anchor else ""
+            )
+            has_terminal_agent_output_after_anchor = (
+                latest_after_anchor_author == "agent"
+                and latest_after_anchor_type in TERMINAL_AGENT_OUTPUT_TYPES
             )
             return ForkSourceState(
                 anchor_author=str(anchor["author"] or "").strip() or None,
                 anchor_type=str(anchor["type"] or "").strip() or None,
-                has_messages_after_anchor=has_messages_after_anchor,
+                latest_after_anchor_author=latest_after_anchor_author or None,
+                latest_after_anchor_type=latest_after_anchor_type or None,
+                has_messages_after_anchor=latest_after_anchor is not None,
                 has_terminal_agent_output_after_anchor=has_terminal_agent_output_after_anchor,
             )
     except Exception as exc:

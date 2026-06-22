@@ -311,7 +311,7 @@ def test_opencode_running_first_turn_fork_uses_user_boundary() -> None:
     server.create_session.assert_not_awaited()
 
 
-def test_opencode_running_fork_without_persisted_point_preserves_source_history(
+def test_opencode_running_fork_without_persisted_point_rechecks_native_boundary(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
@@ -349,7 +349,7 @@ def test_opencode_running_fork_without_persisted_point_preserves_source_history(
 
     assert session_id == "oc-fork"
     server.list_messages.assert_not_awaited()
-    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id=None)
+    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id="oc-msg-3")
     server.create_session.assert_not_awaited()
 
 
