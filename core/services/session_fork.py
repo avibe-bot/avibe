@@ -19,6 +19,7 @@ from vibe.i18n import t
 TRIM_LATEST_RUNNING_TURN_BACKENDS = {"codex", "opencode"}
 TERMINAL_AGENT_OUTPUT_TYPES = {"result", "error"}
 SOURCE_PROGRESS_AGENT_OUTPUT_TYPES = {"assistant", *TERMINAL_AGENT_OUTPUT_TYPES}
+ACTIVE_SOURCE_RUN_STATUSES = ("pending", "queued", "processing", "running")
 
 
 class SessionForkError(ValueError):
@@ -80,6 +81,17 @@ class ForkSourceState:
         return self.anchor_author == "agent" and self.anchor_type in TERMINAL_AGENT_OUTPUT_TYPES
 
 
+@dataclass(frozen=True)
+class SourceMessageAnchor:
+    message_id: Optional[str] = None
+    author: Optional[str] = None
+    message_type: Optional[str] = None
+
+    @property
+    def is_running_user_turn(self) -> bool:
+        return self.author == "user" and self.message_type == "user"
+
+
 def reserve_forked_session(
     *,
     source_session_id: str,
@@ -131,10 +143,18 @@ def reserve_forked_session(
                 raise SessionForkError(
                     f"agent session has no native session id to fork: {source_session_id}"
                 )
-            effective_trim_latest_running_turn = bool(
-                trim_latest_running_turn and source_backend in TRIM_LATEST_RUNNING_TURN_BACKENDS
+            source_anchor = _latest_source_message_anchor(conn, str(row["id"]))
+            inferred_running_turn = source_anchor.is_running_user_turn or (
+                source_backend == "opencode"
+                and _source_has_active_agent_run(conn, str(row["id"]))
             )
-            effective_native_turn_started = bool(native_turn_started and effective_trim_latest_running_turn)
+            effective_trim_latest_running_turn = bool(
+                source_backend in TRIM_LATEST_RUNNING_TURN_BACKENDS
+                and (trim_latest_running_turn or inferred_running_turn)
+            )
+            effective_native_turn_started = bool(
+                effective_trim_latest_running_turn and (native_turn_started or inferred_running_turn)
+            )
             opencode_fork_message_id: Optional[str] = None
             opencode_fork_empty_history = False
             if effective_trim_latest_running_turn and source_backend == "opencode":
@@ -142,7 +162,7 @@ def reserve_forked_session(
                 if fork_point is not None:
                     opencode_fork_message_id, opencode_fork_empty_history = fork_point
                     effective_native_turn_started = True
-            source_message_id = _latest_source_message_id(conn, str(row["id"]))
+            source_message_id = source_anchor.message_id
             override_agent = agent_store.require_enabled(agent_name) if agent_name else None
             if override_agent is not None and override_agent.backend != source_backend:
                 raise SessionForkError(
@@ -432,14 +452,14 @@ def _forked_session_title(source_title: str, lang: str = "en") -> str:
     return t("fork.title", lang, title=source_title) if source_title else t("fork.titleUntitled", lang)
 
 
-def _latest_source_message_id(conn: Any, source_session_id: str) -> Optional[str]:
+def _latest_source_message_anchor(conn: Any, source_session_id: str) -> SourceMessageAnchor:
     from sqlalchemy import func, or_, select
 
     from storage.messages_service import TRANSCRIPT_TYPES
     from storage.models import messages
 
     row = conn.execute(
-        select(messages.c.id)
+        select(messages.c.id, messages.c.author, messages.c.type)
         .where(
             messages.c.session_id == source_session_id,
             or_(
@@ -449,8 +469,33 @@ def _latest_source_message_id(conn: Any, source_session_id: str) -> Optional[str
         )
         .order_by(messages.c.created_at.desc(), messages.c.id.desc())
         .limit(1)
-    ).scalar_one_or_none()
-    return str(row) if row else None
+    ).mappings().first()
+    if row is None:
+        return SourceMessageAnchor()
+    return SourceMessageAnchor(
+        message_id=str(row["id"]) if row["id"] else None,
+        author=str(row["author"] or "").strip() or None,
+        message_type=str(row["type"] or "").strip() or None,
+    )
+
+
+def _source_has_active_agent_run(conn: Any, source_session_id: str) -> bool:
+    from sqlalchemy import select
+
+    from storage.models import agent_runs
+
+    return (
+        conn.execute(
+            select(agent_runs.c.id)
+            .where(
+                agent_runs.c.session_id == source_session_id,
+                agent_runs.c.status.in_(ACTIVE_SOURCE_RUN_STATUSES),
+            )
+            .order_by(agent_runs.c.created_at.desc(), agent_runs.c.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        is not None
+    )
 
 
 def _opencode_running_fork_point(source_native_session_id: str) -> Optional[tuple[Optional[str], bool]]:

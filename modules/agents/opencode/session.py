@@ -115,13 +115,23 @@ class OpenCodeSessionManager:
         message_id = str(fork.get("opencode_fork_message_id") or "").strip()
         if message_id:
             source_state = fork_source_state(fork)
-            if source_state.anchor_is_terminal_agent_output or source_state.has_terminal_agent_output_after_anchor:
+            anchor_is_running_user = (
+                getattr(source_state, "anchor_author", None) == "user"
+                and getattr(source_state, "anchor_type", None) == "user"
+            )
+            if source_state.anchor_is_terminal_agent_output:
                 logger.info(
                     "OpenCode running fork for %s kept full history because the source completed before first use",
                     source_session_id,
                 )
                 return True, None
-            if getattr(source_state, "has_messages_after_anchor", False):
+            if source_state.has_terminal_agent_output_after_anchor and not anchor_is_running_user:
+                logger.info(
+                    "OpenCode running fork for %s kept full history because the source completed before first use",
+                    source_session_id,
+                )
+                return True, None
+            if getattr(source_state, "has_messages_after_anchor", False) and not anchor_is_running_user:
                 point = self._current_running_fork_point(source_session_id)
                 if point.available:
                     return True, point.message_id

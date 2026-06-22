@@ -23,7 +23,7 @@ from modules.im import MessageContext
 from storage.agent_session_rows import create_agent_session_row
 from storage.db import create_sqlite_engine
 from storage import messages_service
-from storage.models import agent_sessions, scope_settings
+from storage.models import agent_runs, agent_sessions, scope_settings
 from storage.sessions_service import SQLiteSessionsService
 from storage.settings_service import upsert_scope
 
@@ -175,6 +175,84 @@ def test_reserve_forked_codex_running_fork_marks_trim(tmp_path: Path) -> None:
     assert metadata["fork_native_turn_started"] is True
 
 
+def test_reserve_forked_session_infers_running_user_anchor_without_live_hint(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).mappings().one()
+            running_user = messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="user",
+                message_type="user",
+                text="long running request",
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.fork.source_message_id == running_user["id"]
+    assert result.fork.trim_latest_running_turn is True
+    assert result.fork.native_turn_started is True
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            forked = conn.execute(
+                select(agent_sessions).where(agent_sessions.c.id == result.session_id)
+            ).mappings().one()
+    finally:
+        engine.dispose()
+
+    metadata = json.loads(forked["metadata_json"])
+    assert metadata["fork_source_message_id"] == running_user["id"]
+    assert metadata["fork_trim_latest_running_turn"] is True
+    assert metadata["fork_native_turn_started"] is True
+
+
+def test_reserve_forked_session_does_not_infer_trim_for_claude(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).mappings().one()
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == source_id)
+                .values(
+                    agent_backend="claude",
+                    agent_variant="claude",
+                    native_session_id="claude-source",
+                )
+            )
+            messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="user",
+                message_type="user",
+                text="active claude request",
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.fork.source_backend == "claude"
+    assert result.fork.trim_latest_running_turn is False
+    assert result.fork.native_turn_started is False
+
+
 def _seed_opencode_messages(
     xdg_home: Path,
     native_session_id: str,
@@ -280,6 +358,93 @@ def test_reserve_forked_opencode_running_fork_records_frozen_native_message(
     assert metadata["fork_opencode_message_id"] == "oc-msg-3"
     assert metadata["fork_trim_latest_running_turn"] is True
     assert metadata["fork_native_turn_started"] is True
+
+
+def test_reserve_forked_opencode_active_run_freezes_native_boundary_without_live_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    xdg_home = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
+    _seed_opencode_messages(xdg_home, "oc-source", ["user", "assistant", "user"])
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == source_id)
+                .values(
+                    agent_backend="opencode",
+                    agent_variant="opencode",
+                    native_session_id="oc-source",
+                )
+            )
+            conn.execute(
+                agent_runs.insert().values(
+                    id="run-active-source",
+                    definition_id=None,
+                    run_type="agent",
+                    status="running",
+                    source_kind="cli",
+                    source_actor=None,
+                    parent_run_id=None,
+                    agent_name="worker",
+                    agent_id="agent-worker",
+                    agent_backend="opencode",
+                    model=None,
+                    reasoning_effort=None,
+                    session_policy="resume",
+                    session_id=source_id,
+                    legacy_session_key=None,
+                    post_to=None,
+                    deliver_key=None,
+                    prompt="active source prompt",
+                    message="active source prompt",
+                    message_payload_json="{}",
+                    result_text=None,
+                    result_payload_json=None,
+                    message_ids_json=None,
+                    callback_session_id=None,
+                    callback_status=None,
+                    callback_error=None,
+                    callback_run_id=None,
+                    callback_completed_at=None,
+                    cancel_requested=0,
+                    cancel_requested_at=None,
+                    pid=None,
+                    exit_code=None,
+                    error=None,
+                    stdout=None,
+                    stderr=None,
+                    created_at="2026-06-16T00:00:01Z",
+                    started_at="2026-06-16T00:00:02Z",
+                    completed_at=None,
+                    updated_at="2026-06-16T00:00:02Z",
+                    metadata_json="{}",
+                )
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    assert result.fork.trim_latest_running_turn is True
+    assert result.fork.native_turn_started is True
+    assert result.fork.opencode_fork_message_id == "oc-msg-3"
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            forked = conn.execute(
+                select(agent_sessions).where(agent_sessions.c.id == result.session_id)
+            ).mappings().one()
+    finally:
+        engine.dispose()
+
+    metadata = json.loads(forked["metadata_json"])
+    assert metadata["fork_trim_latest_running_turn"] is True
+    assert metadata["fork_native_turn_started"] is True
+    assert metadata["fork_opencode_message_id"] == "oc-msg-3"
 
 
 def test_reserve_forked_opencode_running_first_turn_records_user_boundary(
