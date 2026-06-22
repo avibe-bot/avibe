@@ -16,6 +16,8 @@ from typing import Any, Optional
 from config import paths
 from vibe.i18n import t
 
+TRIM_LATEST_RUNNING_TURN_BACKENDS = {"codex", "opencode"}
+
 
 class SessionForkError(ValueError):
     """Raised when a Session cannot be forked."""
@@ -107,6 +109,10 @@ def reserve_forked_session(
                 raise SessionForkError(
                     f"agent session has no native session id to fork: {source_session_id}"
                 )
+            effective_trim_latest_running_turn = bool(
+                trim_latest_running_turn and source_backend in TRIM_LATEST_RUNNING_TURN_BACKENDS
+            )
+            effective_native_turn_started = bool(native_turn_started and effective_trim_latest_running_turn)
             source_message_id = _latest_source_message_id(conn, str(row["id"]))
             override_agent = agent_store.require_enabled(agent_name) if agent_name else None
             if override_agent is not None and override_agent.backend != source_backend:
@@ -139,8 +145,8 @@ def reserve_forked_session(
                     "fork_source_message_id": source_message_id,
                     "fork_source_native_session_id": source_native,
                     "fork_source_backend": source_backend,
-                    "fork_trim_latest_running_turn": bool(trim_latest_running_turn),
-                    "fork_native_turn_started": bool(native_turn_started),
+                    "fork_trim_latest_running_turn": effective_trim_latest_running_turn,
+                    "fork_native_turn_started": effective_native_turn_started,
                     "fork_created_at": now,
                 }
             )
@@ -170,8 +176,8 @@ def reserve_forked_session(
             source_native_session_id=source_native,
             source_backend=source_backend,
             source_message_id=source_message_id,
-            trim_latest_running_turn=bool(trim_latest_running_turn),
-            native_turn_started=bool(native_turn_started),
+            trim_latest_running_turn=effective_trim_latest_running_turn,
+            native_turn_started=effective_native_turn_started,
         )
         return SessionForkResult(
             session_id=session_id,

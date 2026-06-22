@@ -242,7 +242,13 @@ def test_fork_session_marks_running_source_for_trim(isolated_state, tmp_path):
         conn.execute(
             update(agent_sessions)
             .where(agent_sessions.c.id == session_id)
-            .values(native_session_id="native-source-1", title="Source session")
+            .values(
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_name="codex",
+                native_session_id="native-source-1",
+                title="Source session",
+            )
         )
         messages_service.append(
             conn,
@@ -275,6 +281,43 @@ def test_fork_session_marks_running_source_for_trim(isolated_state, tmp_path):
     in_flight.assert_awaited_once_with(session_id)
 
 
+def test_fork_session_does_not_mark_claude_running_source_for_trim(isolated_state, tmp_path):
+    from sqlalchemy import update
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == session_id)
+            .values(native_session_id="claude-source-1", title="Source session")
+        )
+
+    in_flight = AsyncMock(
+        return_value={
+            "status_code": 200,
+            "body": {"ok": True, "in_flight": True, "native_turn_started": True},
+        }
+    )
+    with (
+        patch("vibe.sse_broker.broker.publish"),
+        patch("vibe.internal_client.turn_state", in_flight),
+    ):
+        client = app.test_client()
+        headers = csrf_headers(client)
+        response = client.post(f"/api/sessions/{session_id}/fork", json={}, headers=headers)
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["metadata"]["fork_source_backend"] == "claude"
+    assert payload["metadata"]["fork_trim_latest_running_turn"] is False
+    assert payload["metadata"]["fork_native_turn_started"] is False
+
+
 def test_fork_session_does_not_trim_before_native_turn_starts(isolated_state, tmp_path):
     from sqlalchemy import update
 
@@ -288,7 +331,13 @@ def test_fork_session_does_not_trim_before_native_turn_starts(isolated_state, tm
         conn.execute(
             update(agent_sessions)
             .where(agent_sessions.c.id == session_id)
-            .values(native_session_id="native-source-1", title="Source session")
+            .values(
+                agent_backend="codex",
+                agent_variant="codex",
+                agent_name="codex",
+                native_session_id="native-source-1",
+                title="Source session",
+            )
         )
 
     in_flight = AsyncMock(
