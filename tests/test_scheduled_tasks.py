@@ -1532,6 +1532,47 @@ def test_agent_run_preserves_failed_terminal_status(tmp_path: Path, monkeypatch)
     assert completed["result_text"] == "terminal failed"
 
 
+def test_duplicate_recovered_coalesced_agent_run_settles_held_children(tmp_path: Path, monkeypatch) -> None:
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    run_ids: list[str] = []
+    for index in range(2):
+        request = request_store.enqueue_agent_run(
+            session_id=session_id,
+            message=f"coalesced prompt {index + 1}",
+            agent_name="codex",
+            metadata={"workbench_queue_holds_run": True},
+        )
+        run_ids.append(request.id)
+
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    assert sqlite_store.claim_queued_runs_for_workbench(run_ids) == run_ids
+    request_store.recover_processing()
+
+    async def _submit_scheduled(_sid, _ctx, _text):
+        return "duplicate"
+
+    async def _handle_scheduled_message(context, message, parsed_session_key=None):
+        return None
+
+    gate = SimpleNamespace(submit_scheduled=_submit_scheduled, in_flight={})
+    controller = _avibe_controller_double(gate=gate, handle_scheduled_message=_handle_scheduled_message)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+
+    asyncio.run(service._drain_requests())
+    stored = {run_id: request_store.get_run(run_id) for run_id in run_ids}
+
+    assert stored[run_ids[0]]["status"] == "succeeded"
+    assert stored[run_ids[1]]["status"] == "succeeded"
+    assert stored[run_ids[0]]["completed_at"] is not None
+    assert stored[run_ids[1]]["completed_at"] is not None
+
+
 def test_agent_run_callback_enqueues_only_result_to_caller_session(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
@@ -1892,6 +1933,34 @@ def test_recover_processing_keeps_coalesced_agent_run_children_held(monkeypatch,
     recovered_message = _agent_run_message_for_request(claimed)
     assert "coalesced prompt 1" in recovered_message
     assert "coalesced prompt 2" in recovered_message
+    assert "coalesced prompt 3" in recovered_message
+
+
+def test_recovered_coalesced_agent_run_message_filters_cancelled_child(monkeypatch, tmp_path) -> None:
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    run_ids: list[str] = []
+    for index in range(3):
+        request = request_store.enqueue_agent_run(
+            session_id=session_id,
+            message=f"coalesced prompt {index + 1}",
+            agent_name="codex",
+            metadata={"workbench_queue_holds_run": True},
+        )
+        run_ids.append(request.id)
+
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    assert sqlite_store.claim_queued_runs_for_workbench(run_ids) == run_ids
+    request_store.recover_processing()
+    assert sqlite_store.cancel_run(run_ids[1]) is True
+
+    claimed = request_store.claim(run_ids[0])
+    assert claimed is not None
+    recovered_message = _agent_run_message_for_request(claimed)
+
+    assert "coalesced prompt 1" in recovered_message
+    assert "coalesced prompt 2" not in recovered_message
     assert "coalesced prompt 3" in recovered_message
 
 

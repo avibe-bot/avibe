@@ -43,7 +43,7 @@ def _run_is_cancelled(run: Any) -> bool:
     if not isinstance(run, dict):
         return False
     status = str(run.get("status") or "").strip().lower()
-    return bool(run.get("cancel_requested")) or status in {"canceled", "cancelled"}
+    return status in {"canceled", "cancelled"}
 
 
 async def _stream_chunk(controller, context, *, text: str, message_id: Optional[str], kind: str) -> None:

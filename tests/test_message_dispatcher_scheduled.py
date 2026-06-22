@@ -363,6 +363,46 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_coalesced_agent_run_result_records_running_cancel_requested_run_terminal(self):
+        controller = _StubController()
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="scheduled",
+            channel_id="C123",
+            platform="slack",
+            platform_specific={
+                "task_trigger_kind": "agent_run",
+                "task_execution_id": "run-1",
+                "coalesced_queue": {"execution_ids": ["run-1", "run-2"]},
+            },
+        )
+        calls = []
+
+        class _Store:
+            def get_run(self, run_id):
+                if run_id == "run-1":
+                    return {"id": run_id, "status": "running", "cancel_requested": True}
+                return {"id": run_id, "status": "queued", "cancel_requested": False}
+
+            def record_run_message(self, run_id, *, text, message_id=None, terminal_status=None):
+                calls.append(("record", run_id, text, message_id, terminal_status))
+
+            def close(self):
+                calls.append(("close",))
+
+        with patch.object(message_dispatcher_module, "SQLiteBackgroundTaskStore", return_value=_Store()):
+            message_id = await dispatcher.emit_agent_message(context, "result", "shared visible result")
+
+        self.assertEqual(message_id, "bot-msg-1")
+        self.assertEqual(
+            calls,
+            [
+                ("record", "run-1", "shared visible result", "bot-msg-1", "succeeded"),
+                ("record", "run-2", "shared visible result", "bot-msg-1", "succeeded"),
+                ("close",),
+            ],
+        )
+
     async def test_suppressed_agent_run_ignores_non_result_process_messages(self):
         controller = _StubController()
         dispatcher = ConsolidatedMessageDispatcher(controller)

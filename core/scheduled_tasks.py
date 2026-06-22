@@ -183,6 +183,7 @@ class AgentRunExecutionResult:
     error: Optional[str]
     complete_on_return: bool
     requeue_on_return: bool = False
+    coalesced_completion_ids: tuple[str, ...] = ()
 
 
 def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None) -> ResolvedSessionIdTarget:
@@ -411,8 +412,10 @@ class TaskExecutionRequest:
 def _agent_run_message_for_request(request: TaskExecutionRequest) -> str:
     coalesced = (request.metadata or {}).get("coalesced_queue")
     if isinstance(coalesced, dict):
+        live_execution_ids = _live_coalesced_agent_run_ids(request)
+        live_set = set(live_execution_ids) if live_execution_ids is not None else None
         prompt = str(coalesced.get("prompt") or "")
-        if prompt:
+        if prompt and live_set is None:
             return prompt
         messages = coalesced.get("messages")
         if isinstance(messages, list):
@@ -420,12 +423,43 @@ def _agent_run_message_for_request(request: TaskExecutionRequest) -> str:
             for item in messages:
                 if not isinstance(item, dict):
                     continue
+                execution_id = str(item.get("execution_id") or "").strip()
+                if live_set is not None and execution_id not in live_set:
+                    continue
                 message = str(item.get("message") or item.get("prompt") or "")
                 if message:
                     parts.append(message)
             if parts:
                 return "\n\n---\n\n".join(parts)
     return str(request.message or "")
+
+
+def _live_coalesced_agent_run_ids(request: TaskExecutionRequest) -> list[str] | None:
+    coalesced = (request.metadata or {}).get("coalesced_queue")
+    if not isinstance(coalesced, dict):
+        return None
+    execution_ids = coalesced.get("execution_ids")
+    if not isinstance(execution_ids, list):
+        return None
+    run_ids: list[str] = []
+    seen: set[str] = set()
+    for value in execution_ids:
+        run_id = str(value or "").strip()
+        if run_id and run_id not in seen:
+            seen.add(run_id)
+            run_ids.append(run_id)
+    if not run_ids:
+        return []
+    store = SQLiteBackgroundTaskStore()
+    try:
+        queued_ids, _stale_ids = store.inspect_queued_runs_for_workbench(run_ids)
+    finally:
+        store.close()
+    live = [request.id]
+    for run_id in queued_ids:
+        if run_id not in live:
+            live.append(run_id)
+    return live
 
 
 class ScheduledTaskStore:
@@ -1144,6 +1178,27 @@ class TaskExecutionStore:
         tmp_path.replace(completed_path)
         processing_path.unlink(missing_ok=True)
 
+    def complete_coalesced(
+        self,
+        request: TaskExecutionRequest,
+        run_ids: list[str],
+        *,
+        ok: bool,
+        error: Optional[str] = None,
+    ) -> None:
+        if self._sqlite is not None:
+            from storage.background import complete_coalesced_agent_runs_for_workbench_in_connection
+
+            with self._sqlite.engine.begin() as conn:
+                complete_coalesced_agent_runs_for_workbench_in_connection(
+                    conn,
+                    run_ids,
+                    ok=ok,
+                    error=error,
+                )
+            return
+        self.complete(request, ok=ok, error=error)
+
 
 class ScheduledTaskService:
     """Controller-owned runtime that executes persisted scheduled tasks."""
@@ -1507,6 +1562,7 @@ class ScheduledTaskService:
     async def _execute_claimed_request(self, request: TaskExecutionRequest) -> None:
         error: Optional[str] = None
         should_complete = True
+        coalesced_completion_ids: list[str] = []
         task_id = request.task_id
         session_key = request.session_key
         session_id = request.session_id
@@ -1575,6 +1631,7 @@ class ScheduledTaskService:
                 should_complete = result.complete_on_return
                 if result.requeue_on_return:
                     self.request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+                coalesced_completion_ids = list(result.coalesced_completion_ids)
             else:
                 raise ValueError(f"unknown task request type: {request.request_type}")
         except asyncio.CancelledError:
@@ -1587,14 +1644,22 @@ class ScheduledTaskService:
             should_complete = True
         finally:
             if should_complete:
-                self.request_store.complete(
-                    request,
-                    ok=not error,
-                    error=error,
-                    task_id=task_id,
-                    session_key=session_key,
-                    session_id=session_id,
-                )
+                if coalesced_completion_ids:
+                    self.request_store.complete_coalesced(
+                        request,
+                        coalesced_completion_ids,
+                        ok=not error,
+                        error=error,
+                    )
+                else:
+                    self.request_store.complete(
+                        request,
+                        ok=not error,
+                        error=error,
+                        task_id=task_id,
+                        session_key=session_key,
+                        session_id=session_id,
+                    )
                 await self._drain_callbacks()
 
     async def _execute_task(
@@ -1681,7 +1746,18 @@ class ScheduledTaskService:
             if state == "enqueued":
                 return AgentRunExecutionResult(error=None, complete_on_return=False, requeue_on_return=True)
             if state == "duplicate":
-                return AgentRunExecutionResult(error=None, complete_on_return=True)
+                live_ids = _live_coalesced_agent_run_ids(
+                    TaskExecutionRequest(
+                        id=execution_id,
+                        request_type="agent_run",
+                        metadata=metadata or {},
+                    )
+                )
+                return AgentRunExecutionResult(
+                    error=None,
+                    complete_on_return=True,
+                    coalesced_completion_ids=tuple(live_ids or [execution_id]),
+                )
             return AgentRunExecutionResult(error=None, complete_on_return=False)
 
         async def _noop_chunk(_envelope: dict) -> None:

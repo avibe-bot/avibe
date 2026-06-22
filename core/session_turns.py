@@ -303,6 +303,44 @@ def _scheduled_segment_rows_for_execution_ids(segment: list[dict], execution_ids
     return [row for row in segment if _scheduled_segment_execution_id(row) in execution_ids]
 
 
+def _filter_coalesced_agent_run_provenance(provenance: dict, execution_ids: list[str]) -> dict:
+    if not execution_ids:
+        return provenance
+    execution_set = set(execution_ids)
+    coalesced = provenance.get("coalesced_queue")
+    if not isinstance(coalesced, dict):
+        return provenance
+    filtered = dict(coalesced)
+    raw_ids = coalesced.get("execution_ids")
+    if isinstance(raw_ids, list):
+        filtered["execution_ids"] = [
+            str(value)
+            for value in raw_ids
+            if str(value or "").strip() in execution_set
+        ]
+    raw_messages = coalesced.get("messages")
+    if isinstance(raw_messages, list):
+        messages = [
+            item
+            for item in raw_messages
+            if isinstance(item, dict)
+            and str(item.get("execution_id") or "").strip() in execution_set
+        ]
+        filtered["messages"] = messages
+        prompt_parts = [
+            str(item.get("message") or item.get("prompt") or "")
+            for item in messages
+            if str(item.get("message") or item.get("prompt") or "")
+        ]
+        if prompt_parts:
+            filtered["prompt"] = "\n\n---\n\n".join(prompt_parts)
+        else:
+            filtered.pop("prompt", None)
+    result = dict(provenance)
+    result["coalesced_queue"] = filtered
+    return result
+
+
 def _scheduled_segment_suppresses_delivery(segment: list[dict]) -> bool:
     for row in segment:
         spec = (_scheduled_provenance(row) or {}).get("platform_specific") or {}
@@ -716,7 +754,11 @@ class SessionTurnManager:
                             }
                         run_id = str(scheduled_prov.get("task_execution_id") or "").strip()
                         if scheduled_prov.get("task_trigger_kind") == "agent_run" and run_id:
-                            pending_agent_run_ids = _scheduled_segment_execution_ids(segment)
+                            pending_agent_run_ids = list(queued_run_ids)
+                            scheduled_prov = _filter_coalesced_agent_run_provenance(
+                                scheduled_prov,
+                                pending_agent_run_ids,
+                            )
                             pending_scheduled_segment = segment
                 else:
                     # User segment: the leading run of consecutive non-scheduled rows

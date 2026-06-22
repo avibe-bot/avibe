@@ -129,6 +129,50 @@ def _coalesced_agent_run_metadata(rows: dict[str, Any], run_ids: list[str]) -> d
     return metadata
 
 
+def complete_coalesced_agent_runs_for_workbench_in_connection(
+    conn: Any,
+    run_ids: list[str],
+    *,
+    ok: bool,
+    error: Optional[str] = None,
+    completed_at: Optional[str] = None,
+) -> list[str]:
+    normalized_run_ids: list[str] = []
+    seen: set[str] = set()
+    for raw_run_id in run_ids:
+        run_id = str(raw_run_id or "").strip()
+        if not run_id or run_id in seen:
+            continue
+        seen.add(run_id)
+        normalized_run_ids.append(run_id)
+    if not normalized_run_ids:
+        return []
+    rows = {
+        row["id"]: row
+        for row in conn.execute(select(agent_runs).where(agent_runs.c.id.in_(normalized_run_ids))).mappings()
+    }
+    now = completed_at or _utc_now_iso()
+    completed_ids: list[str] = []
+    for run_id in normalized_run_ids:
+        row = rows.get(run_id)
+        if row is None:
+            continue
+        status = normalize_run_status(row["status"])
+        values: dict[str, Any] = {"updated_at": now}
+        if bool(row["cancel_requested"]) or status == "canceled":
+            values["status"] = "canceled"
+            values["completed_at"] = now
+        else:
+            values["status"] = "succeeded" if ok else "failed"
+            values["completed_at"] = now
+            if error is not None:
+                values["error"] = error
+        result = conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(**values))
+        if result.rowcount:
+            completed_ids.append(run_id)
+    return completed_ids
+
+
 def claim_queued_runs_for_workbench_in_connection(
     conn: Any,
     run_ids: list[str],
