@@ -846,6 +846,7 @@ class SessionTurnManager:
                 engine = create_sqlite_engine()
                 with engine.begin() as conn:
                     messages_service.delete_queued(conn, [r["id"] for r in pending_scheduled_segment])
+                bus.publish("queue.updated", {"session_id": session_id})
             try:
                 engine = create_sqlite_engine()
                 with engine.begin() as conn:

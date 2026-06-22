@@ -1872,6 +1872,7 @@ class ScheduledTaskService:
                 "source_actor": (metadata or {}).get("source_actor"),
                 "parent_run_id": (metadata or {}).get("parent_run_id"),
                 "callback_session_id": (metadata or {}).get("callback_session_id"),
+                "coalesced_queue": (metadata or {}).get("coalesced_queue"),
                 "suppress_delivery": bool(target_info.suppress_delivery) if target_info else False,
                 "agent_session_target": (
                     {

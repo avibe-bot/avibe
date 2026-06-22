@@ -1877,6 +1877,7 @@ def test_recover_processing_keeps_coalesced_agent_run_children_held(monkeypatch,
     assert primary["status"] == "queued"
     assert child["status"] == "queued"
     assert primary["metadata"]["workbench_queue_holds_run"] is False
+    assert primary["metadata"]["coalesced_queue"]["execution_ids"] == run_ids
     assert child["metadata"]["workbench_queue_holds_run"] is True
     assert child["metadata"]["coalesced_into_run_id"] == run_ids[0]
 

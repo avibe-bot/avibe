@@ -143,6 +143,8 @@ def claim_queued_runs_for_workbench_in_connection(
             metadata = {}
         metadata["workbench_queue_holds_run"] = run_id != primary_run_id
         metadata["effective_run_id"] = primary_run_id
+        if run_id == primary_run_id and len(normalized_run_ids) > 1:
+            metadata["coalesced_queue"] = {"execution_ids": normalized_run_ids}
         if run_id != primary_run_id:
             metadata["coalesced_into_run_id"] = primary_run_id
             result = conn.execute(

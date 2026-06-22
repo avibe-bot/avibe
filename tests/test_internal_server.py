@@ -1601,6 +1601,11 @@ def test_flush_removes_stale_coalesced_agent_run_row_and_dispatches_survivors(tm
     finally:
         bg.close()
 
+    from core.inbox_events import bus
+
+    published: list[tuple[str, dict]] = []
+    monkeypatch.setattr(bus, "publish", lambda event, payload: published.append((event, payload)))
+
     mgr, runs = _manager_capturing_runs()
 
     assert asyncio.run(mgr.flush_queue(session_id)) is True
@@ -1627,6 +1632,7 @@ def test_flush_removes_stale_coalesced_agent_run_row_and_dispatches_survivors(tm
     assert stored[run_ids[2]]["status"] == "queued"
     assert stored[run_ids[0]]["metadata"]["workbench_queue_holds_run"] is False
     assert stored[run_ids[2]]["metadata"]["workbench_queue_holds_run"] is True
+    assert published.count(("queue.updated", {"session_id": session_id})) >= 2
 
 
 def test_flush_does_not_coalesce_agent_runs_with_different_callback_targets(tmp_path, monkeypatch):
