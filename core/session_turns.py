@@ -56,6 +56,7 @@ SCHEDULED_QUEUE_FULL_DETAIL_LIMIT = 3
 _FLUSH_REBUILT_KEYS = frozenset(
     {"platform", "is_dm", "workbench_session_id", "agent_session_id", "agent_session_target", "turn_token"}
 )
+SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 
 
 def capture_scheduled_provenance(context: "MessageContext") -> dict:
@@ -72,9 +73,15 @@ def capture_scheduled_provenance(context: "MessageContext") -> dict:
       ``delivery_override`` can't be silently missed (Codex P1 #3338692433).
     """
     spec = getattr(context, "platform_specific", None) or {}
+    captured_spec = {k: v for k, v in spec.items() if k not in _FLUSH_REBUILT_KEYS}
+    target = spec.get("agent_session_target")
+    if isinstance(target, dict):
+        target_agent = str(target.get("agent_name") or "").strip()
+        if target_agent:
+            captured_spec.setdefault(SCHEDULED_TARGET_AGENT_KEY, target_agent)
     return {
         "message_id": getattr(context, "message_id", None),
-        "platform_specific": {k: v for k, v in spec.items() if k not in _FLUSH_REBUILT_KEYS},
+        "platform_specific": captured_spec,
     }
 
 
@@ -139,9 +146,7 @@ def _scheduled_merge_key(row: dict) -> Optional[tuple[str, ...]]:
         trigger_kind,
         definition_id,
         str(spec.get("vibe_agent_name") or ""),
-        str((spec.get("agent_session_target") or {}).get("agent_name") or "")
-        if isinstance(spec.get("agent_session_target"), dict)
-        else "",
+        str(spec.get(SCHEDULED_TARGET_AGENT_KEY) or ""),
         str(spec.get("delivery_key_external") or ""),
         str(spec.get("delivery_scope_session_key") or ""),
         str(delivery_override.get("platform") or ""),
@@ -239,6 +244,14 @@ def _scheduled_segment_native_ids(segment: list[dict]) -> list[str]:
     return native_ids
 
 
+def _scheduled_segment_suppresses_delivery(segment: list[dict]) -> bool:
+    for row in segment:
+        spec = (_scheduled_provenance(row) or {}).get("platform_specific") or {}
+        if isinstance(spec, dict) and bool(spec.get("suppress_delivery")):
+            return True
+    return False
+
+
 def _write_coalesced_native_id_markers(conn: Any, segment: list[dict]) -> None:
     """Keep native-id dedupe coverage for coalesced queued harness rows.
 
@@ -247,14 +260,16 @@ def _write_coalesced_native_id_markers(conn: Any, segment: list[dict]) -> None:
     dispatch, so write hidden rows for their native ids; otherwise a waiter retry
     for one of those callbacks would not hit ``uq_messages_platform_native``.
     """
-    if len(segment) <= 1:
-        return
     native_ids = _scheduled_segment_native_ids(segment)
-    if len(native_ids) <= 1:
+    if not native_ids:
         return
     first = segment[0]
+    suppresses_delivery = _scheduled_segment_suppresses_delivery(segment)
+    marker_ids = native_ids if suppresses_delivery else native_ids[1:]
+    if not marker_ids:
+        return
 
-    for native_id in native_ids[1:]:
+    for native_id in marker_ids:
         try:
             messages_service.append(
                 conn,
@@ -265,7 +280,7 @@ def _write_coalesced_native_id_markers(conn: Any, segment: list[dict]) -> None:
                 source="harness",
                 message_type=messages_service.HARNESS_DEDUPE_TYPE,
                 text="",
-                metadata={"coalesced_from": first.get("id")},
+                metadata={"coalesced_from": first.get("id"), "suppressed_delivery": suppresses_delivery},
                 native_message_id=native_id,
             )
         except IntegrityError:
@@ -552,6 +567,7 @@ class SessionTurnManager:
         scheduled_prov: dict = {}
         scheduled_message_id = None
         scheduled_native_ids: list[str] = []
+        dropped_duplicate_segment = False
         user_row = None
         inbox_row = None
         attachment_specs: list = []
@@ -571,26 +587,30 @@ class SessionTurnManager:
                     if _scheduled_segment_has_claimed_native_id(conn, segment):
                         messages_service.delete_queued(conn, [r["id"] for r in segment])
                         bus.publish("queue.updated", {"session_id": session_id})
-                        return False
-                    scheduled_text = _build_scheduled_segment_text(segment)
-                    scheduled_native_ids = _scheduled_segment_native_ids(segment)
-                    prov = _scheduled_provenance(rows[0]) or {}
-                    scheduled_message_id = scheduled_native_ids[0] if scheduled_native_ids else None
-                    scheduled_prov = prov.get("platform_specific") or {}
-                    if len(segment) > 1:
-                        scheduled_prov = dict(scheduled_prov)
-                        scheduled_prov["coalesced_queue"] = {
-                            "count": len(segment),
-                            "window_seconds": SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS,
-                            "message_ids": [r.get("id") for r in segment if r.get("id")],
-                            "native_message_ids": scheduled_native_ids,
-                            "execution_ids": [
-                                spec.get("task_execution_id")
-                                for r in segment
-                                if isinstance((spec := (_scheduled_provenance(r) or {}).get("platform_specific") or {}), dict)
-                                and spec.get("task_execution_id")
-                            ],
-                        }
+                        dropped_duplicate_segment = True
+                        segment = []
+                    if dropped_duplicate_segment:
+                        pass
+                    else:
+                        scheduled_text = _build_scheduled_segment_text(segment)
+                        scheduled_native_ids = _scheduled_segment_native_ids(segment)
+                        prov = _scheduled_provenance(rows[0]) or {}
+                        scheduled_message_id = scheduled_native_ids[0] if scheduled_native_ids else None
+                        scheduled_prov = prov.get("platform_specific") or {}
+                        if len(segment) > 1:
+                            scheduled_prov = dict(scheduled_prov)
+                            scheduled_prov["coalesced_queue"] = {
+                                "count": len(segment),
+                                "window_seconds": SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS,
+                                "message_ids": [r.get("id") for r in segment if r.get("id")],
+                                "native_message_ids": scheduled_native_ids,
+                                "execution_ids": [
+                                    spec.get("task_execution_id")
+                                    for r in segment
+                                    if isinstance((spec := (_scheduled_provenance(r) or {}).get("platform_specific") or {}), dict)
+                                    and spec.get("task_execution_id")
+                                ],
+                            }
                 else:
                     # User segment: the leading run of consecutive non-scheduled rows
                     # (stop at the first scheduled row so it stays its own turn).
@@ -599,7 +619,8 @@ class SessionTurnManager:
                         if _scheduled_provenance(r) is not None:
                             break
                         segment.append(r)
-                messages_service.delete_queued(conn, [r["id"] for r in segment])
+                if segment:
+                    messages_service.delete_queued(conn, [r["id"] for r in segment])
                 if is_scheduled:
                     _write_coalesced_native_id_markers(conn, segment)
                 if not is_scheduled:
@@ -649,6 +670,9 @@ class SessionTurnManager:
         except Exception:
             logger.exception("queue flush: failed to claim/merge for session=%s", session_id)
             return False
+
+        if dropped_duplicate_segment:
+            return await self.flush_queue(session_id)
 
         # Surface the flushed (merged) user message + bump the inbox card so other
         # workbench views re-rank / flip 'replied' without waiting for the result
