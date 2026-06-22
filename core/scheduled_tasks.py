@@ -1606,6 +1606,7 @@ class ScheduledTaskService:
                     agent_name=request.agent_name,
                 )
             elif request.request_type == "agent_run":
+                coalesced_completion_ids = _live_coalesced_agent_run_ids(request) or []
                 message = _agent_run_message_for_request(request)
                 if not message:
                     raise ValueError("agent run requires message")

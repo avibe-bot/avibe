@@ -137,6 +137,8 @@ def _agent_run_merge_definition_id(spec: dict) -> str:
     and their prompt builder always includes every queued message verbatim.
     """
     execution_id = str(spec.get("task_execution_id") or "").strip()
+    if "source_kind" not in spec and "callback_session_id" not in spec:
+        return f"agent_run:{execution_id}" if execution_id else ""
     if spec.get("callback_session_id") or spec.get("source_kind") == "callback":
         return f"agent_run:{execution_id}" if execution_id else ""
     return "agent_run"
@@ -282,25 +284,45 @@ def _scheduled_segment_execution_id(row: dict) -> str:
     return str(spec.get("task_execution_id") or "").strip()
 
 
+def _scheduled_row_execution_ids(row: dict) -> list[str]:
+    execution_ids: list[str] = []
+    execution_id = _scheduled_segment_execution_id(row)
+    if execution_id:
+        execution_ids.append(execution_id)
+    spec = (_scheduled_provenance(row) or {}).get("platform_specific") or {}
+    coalesced = spec.get("coalesced_queue") if isinstance(spec, dict) else None
+    coalesced_ids = coalesced.get("execution_ids") if isinstance(coalesced, dict) else None
+    if isinstance(coalesced_ids, list):
+        for value in coalesced_ids:
+            coalesced_id = str(value or "").strip()
+            if coalesced_id and coalesced_id not in execution_ids:
+                execution_ids.append(coalesced_id)
+    return execution_ids
+
+
 def _scheduled_segment_execution_ids(segment: list[dict]) -> list[str]:
     execution_ids: list[str] = []
     for row in segment:
-        execution_id = _scheduled_segment_execution_id(row)
-        if execution_id and execution_id not in execution_ids:
-            execution_ids.append(execution_id)
-        spec = (_scheduled_provenance(row) or {}).get("platform_specific") or {}
-        coalesced = spec.get("coalesced_queue") if isinstance(spec, dict) else None
-        coalesced_ids = coalesced.get("execution_ids") if isinstance(coalesced, dict) else None
-        if isinstance(coalesced_ids, list):
-            for value in coalesced_ids:
-                coalesced_id = str(value or "").strip()
-                if coalesced_id and coalesced_id not in execution_ids:
-                    execution_ids.append(coalesced_id)
+        for execution_id in _scheduled_row_execution_ids(row):
+            if execution_id not in execution_ids:
+                execution_ids.append(execution_id)
     return execution_ids
 
 
 def _scheduled_segment_rows_for_execution_ids(segment: list[dict], execution_ids: set[str]) -> list[dict]:
-    return [row for row in segment if _scheduled_segment_execution_id(row) in execution_ids]
+    return [row for row in segment if set(_scheduled_row_execution_ids(row)) & execution_ids]
+
+
+def _scheduled_segment_stale_row_ids(segment: list[dict], queued_ids: set[str]) -> list[str]:
+    row_ids: list[str] = []
+    for row in segment:
+        row_id = row.get("id")
+        if not row_id:
+            continue
+        represented = set(_scheduled_row_execution_ids(row))
+        if represented and not (represented & queued_ids):
+            row_ids.append(row_id)
+    return row_ids
 
 
 def _filter_coalesced_agent_run_provenance(provenance: dict, execution_ids: list[str]) -> dict:
@@ -338,6 +360,9 @@ def _filter_coalesced_agent_run_provenance(provenance: dict, execution_ids: list
             filtered.pop("prompt", None)
     result = dict(provenance)
     result["coalesced_queue"] = filtered
+    current_id = str(result.get("task_execution_id") or "").strip()
+    if current_id not in execution_set:
+        result["task_execution_id"] = execution_ids[0]
     return result
 
 
@@ -716,11 +741,8 @@ class SessionTurnManager:
                             queued_run_ids, stale_run_ids = inspect_queued_runs_for_workbench_in_connection(conn, run_ids)
                             if stale_run_ids:
                                 stale_set = set(stale_run_ids)
-                                stale_row_ids = [
-                                    row["id"]
-                                    for row in segment
-                                    if row.get("id") and _scheduled_segment_execution_id(row) in stale_set
-                                ]
+                                queued_set = set(queued_run_ids)
+                                stale_row_ids = _scheduled_segment_stale_row_ids(segment, queued_set)
                                 if stale_row_ids:
                                     messages_service.delete_queued(conn, stale_row_ids)
                                     bus.publish("queue.updated", {"session_id": session_id})
@@ -728,7 +750,6 @@ class SessionTurnManager:
                                     "queue flush: removed stale coalesced agent_run rows before dispatching survivors: %s",
                                     ",".join(sorted(stale_set)),
                                 )
-                                queued_set = set(queued_run_ids)
                                 segment = _scheduled_segment_rows_for_execution_ids(segment, queued_set)
                                 if not segment:
                                     dropped_duplicate_segment = True
@@ -752,13 +773,18 @@ class SessionTurnManager:
                                 if _scheduled_segment_trigger_kind(segment) == "agent_run"
                                 else _scheduled_segment_execution_ids(segment),
                             }
-                        run_id = str(scheduled_prov.get("task_execution_id") or "").strip()
-                        if scheduled_prov.get("task_trigger_kind") == "agent_run" and run_id:
+                        if scheduled_prov.get("task_trigger_kind") == "agent_run" and queued_run_ids:
                             pending_agent_run_ids = list(queued_run_ids)
                             scheduled_prov = _filter_coalesced_agent_run_provenance(
                                 scheduled_prov,
                                 pending_agent_run_ids,
                             )
+                            scheduled_message_id = f"agent_run:{pending_agent_run_ids[0]}"
+                            coalesced = scheduled_prov.get("coalesced_queue")
+                            if isinstance(coalesced, dict):
+                                coalesced_prompt = str(coalesced.get("prompt") or "")
+                                if coalesced_prompt:
+                                    scheduled_text = coalesced_prompt
                             pending_scheduled_segment = segment
                 else:
                     # User segment: the leading run of consecutive non-scheduled rows
@@ -877,11 +903,10 @@ class SessionTurnManager:
                                 pending_agent_run_ids,
                             )
                             stale_set = set(stale_run_ids)
-                            stale_row_ids = [
-                                row["id"]
-                                for row in pending_scheduled_segment
-                                if row.get("id") and _scheduled_segment_execution_id(row) in stale_set
-                            ]
+                            stale_row_ids = _scheduled_segment_stale_row_ids(
+                                pending_scheduled_segment,
+                                set(queued_run_ids),
+                            )
                             if stale_row_ids:
                                 messages_service.delete_queued(conn, stale_row_ids)
                                 bus.publish("queue.updated", {"session_id": session_id})

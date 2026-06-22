@@ -1450,6 +1450,8 @@ def test_flush_claims_every_coalesced_agent_run(tmp_path, monkeypatch):
                 "task_trigger_kind": "agent_run",
                 "task_definition_id": None,
                 "vibe_agent_name": "codex",
+                "source_kind": None,
+                "callback_session_id": None,
             },
         }
 
@@ -1574,6 +1576,8 @@ def test_flush_removes_stale_coalesced_agent_run_row_and_dispatches_survivors(tm
                 "task_trigger_kind": "agent_run",
                 "task_definition_id": None,
                 "vibe_agent_name": "codex",
+                "source_kind": None,
+                "callback_session_id": None,
             },
         }
 
@@ -1648,6 +1652,8 @@ def test_flush_preserves_recovered_coalesced_agent_run_children(tmp_path, monkey
             "task_trigger_kind": "agent_run",
             "task_definition_id": None,
             "vibe_agent_name": "codex",
+            "source_kind": None,
+            "callback_session_id": None,
         }
         if coalesced_ids:
             platform_specific["coalesced_queue"] = {"execution_ids": coalesced_ids}
@@ -1694,6 +1700,75 @@ def test_flush_preserves_recovered_coalesced_agent_run_children(tmp_path, monkey
     ]
 
 
+def test_flush_retargets_recovered_coalesced_row_when_primary_is_stale(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    from core.scheduled_tasks import TaskExecutionStore
+    from storage.background import SQLiteBackgroundTaskStore
+
+    request_store = TaskExecutionStore()
+
+    def prov(execution_id: str, coalesced_ids: list[str]) -> dict:
+        return {
+            "message_id": f"agent_run:{execution_id}",
+            "platform_specific": {
+                "task_execution_id": execution_id,
+                "task_trigger_kind": "agent_run",
+                "task_definition_id": None,
+                "vibe_agent_name": "codex",
+                "source_kind": None,
+                "callback_session_id": None,
+                "coalesced_queue": {
+                    "execution_ids": coalesced_ids,
+                    "messages": [
+                        {"execution_id": coalesced_ids[0], "message": "stale primary prompt"},
+                        {"execution_id": coalesced_ids[1], "message": "surviving child prompt"},
+                    ],
+                },
+            },
+        }
+
+    run_ids: list[str] = []
+    for index in range(2):
+        request = request_store.enqueue_agent_run(
+            session_id="placeholder",
+            message=f"coalesced message {index + 1}",
+            agent_name="codex",
+        )
+        assert request_store.claim(request.id) is not None
+        request_store.requeue(request.id, metadata={"workbench_queue_holds_run": index != 0})
+        run_ids.append(request.id)
+
+    session_id = _seed_avibe_session_with_queue(
+        [("stale primary prompt", prov(run_ids[0], run_ids))]
+    )
+
+    bg = SQLiteBackgroundTaskStore()
+    try:
+        assert bg.cancel_run(run_ids[0]) is True
+    finally:
+        bg.close()
+
+    mgr, runs = _manager_capturing_runs()
+
+    assert asyncio.run(mgr.flush_queue(session_id)) is True
+    assert len(runs) == 1
+    text, source, ctx = runs[0]
+    assert source == SOURCE_SCHEDULED
+    assert text == "surviving child prompt"
+    assert ctx.message_id == f"agent_run:{run_ids[1]}"
+    assert ctx.platform_specific["task_execution_id"] == run_ids[1]
+    assert ctx.platform_specific["coalesced_queue"]["execution_ids"] == [run_ids[1]]
+
+    bg = SQLiteBackgroundTaskStore()
+    try:
+        stored = {run_id: bg.get_run(run_id) for run_id in run_ids}
+    finally:
+        bg.close()
+    assert stored[run_ids[0]]["status"] == "canceled"
+    assert stored[run_ids[1]]["status"] == "running"
+
+
 def test_flush_retries_when_agent_run_claim_finds_late_stale_row(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
@@ -1713,6 +1788,8 @@ def test_flush_retries_when_agent_run_claim_finds_late_stale_row(tmp_path, monke
                 "task_trigger_kind": "agent_run",
                 "task_definition_id": None,
                 "vibe_agent_name": "codex",
+                "source_kind": None,
+                "callback_session_id": None,
             },
         }
 
@@ -1855,6 +1932,48 @@ def test_flush_does_not_coalesce_callback_backed_agent_runs(tmp_path, monkeypatc
     assert "coalesced_queue" not in ctx.platform_specific
 
 
+def test_flush_isolates_legacy_agent_runs_without_source_provenance(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    from core.scheduled_tasks import TaskExecutionStore
+
+    request_store = TaskExecutionStore()
+
+    def prov(execution_id: str) -> dict:
+        return {
+            "message_id": f"agent_run:{execution_id}",
+            "platform_specific": {
+                "task_execution_id": execution_id,
+                "task_trigger_kind": "agent_run",
+                "task_definition_id": None,
+                "vibe_agent_name": "codex",
+            },
+        }
+
+    queued: list[tuple[str, dict]] = []
+    for index in range(2):
+        request = request_store.enqueue_agent_run(
+            session_id="placeholder",
+            message=f"legacy callback message {index + 1}",
+            agent_name="codex",
+            callback_session_id=f"caller-{index + 1}",
+        )
+        assert request_store.claim(request.id) is not None
+        request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+        queued.append((f"legacy callback message {index + 1}", prov(request.id)))
+
+    session_id = _seed_avibe_session_with_queue(queued)
+
+    mgr, runs = _manager_capturing_runs()
+
+    assert asyncio.run(mgr.flush_queue(session_id)) is True
+    assert len(runs) == 1
+    text, source, ctx = runs[0]
+    assert source == SOURCE_SCHEDULED
+    assert text == "legacy callback message 1"
+    assert "coalesced_queue" not in ctx.platform_specific
+
+
 def test_flush_does_not_claim_agent_runs_when_context_build_fails(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
@@ -1871,6 +1990,8 @@ def test_flush_does_not_claim_agent_runs_when_context_build_fails(tmp_path, monk
                 "task_trigger_kind": "agent_run",
                 "task_definition_id": None,
                 "vibe_agent_name": "codex",
+                "source_kind": None,
+                "callback_session_id": None,
             },
         }
 
