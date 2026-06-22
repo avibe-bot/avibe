@@ -14,6 +14,7 @@ from typing import Dict, Optional, Tuple
 
 from core.services.session_fork import pending_native_fork
 from modules.agents.base import AgentRequest, BaseAgent
+from modules.agents.native_sessions.opencode import OpenCodeNativeSessionProvider
 
 from .server import OpenCodeServerManager
 
@@ -109,18 +110,22 @@ class OpenCodeSessionManager:
     ) -> tuple[bool, Optional[str]]:
         if not bool(fork.get("trim_latest_running_turn")):
             return True, None
-        if not bool(fork.get("native_turn_started")):
-            return True, None
         if bool(fork.get("opencode_fork_empty_history")):
             return False, None
         message_id = str(fork.get("opencode_fork_message_id") or "").strip()
         if message_id:
             return True, message_id
+        point = OpenCodeNativeSessionProvider().running_fork_point_before_latest_user(source_session_id)
+        if point.available:
+            if point.empty_history:
+                return False, None
+            if point.message_id:
+                return True, point.message_id
         logger.warning(
-            "OpenCode running fork for %s has no persisted fork point; falling back to a full fork",
+            "OpenCode running fork for %s has no persisted fork point; creating an empty fork target",
             source_session_id,
         )
-        return True, None
+        return False, None
 
     def ensure_agent_session_id(self, request: AgentRequest, session_anchor: str) -> Optional[str]:
         reserved_target_id = self._reserved_agent_session_id(request)

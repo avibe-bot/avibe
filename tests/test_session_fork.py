@@ -326,13 +326,13 @@ def test_reserve_forked_opencode_running_first_turn_records_user_boundary(
     assert "fork_opencode_fork_empty_history" not in metadata
 
 
-def test_reserve_forked_opencode_idle_completed_tail_does_not_mark_trim(
+def test_reserve_forked_opencode_missing_boundary_preserves_trim_intent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db_path = tmp_path / "vibe.sqlite"
     xdg_home = tmp_path / "xdg"
     monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
-    _seed_opencode_messages(xdg_home, "oc-source", ["user", "assistant"])
+    _seed_opencode_messages(xdg_home, "oc-source", [])
     source_id = _seed_source_session(db_path, tmp_path)
     engine = create_sqlite_engine(db_path)
     try:
@@ -356,7 +356,7 @@ def test_reserve_forked_opencode_idle_completed_tail_does_not_mark_trim(
         db_path=db_path,
     )
 
-    assert result.fork.trim_latest_running_turn is False
+    assert result.fork.trim_latest_running_turn is True
     assert result.fork.native_turn_started is False
 
 

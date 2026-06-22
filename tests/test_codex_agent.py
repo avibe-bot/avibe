@@ -1624,7 +1624,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             "thread-fork",
         )
 
-    async def test_start_or_resume_thread_skips_running_fork_rollback_before_native_start(self):
+    async def test_start_or_resume_thread_preserves_running_fork_rollback_before_native_start(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
         agent.codex_config = SimpleNamespace(default_model=None)
@@ -1672,8 +1672,11 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread_id, "thread-fork")
         self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
             "thread/fork",
+            "thread/rollback",
             "thread/inject_items",
         ])
+        rollback_params = transport.send_request.await_args_list[1].args[1]
+        self.assertEqual(rollback_params, {"threadId": "thread-fork", "numTurns": 1})
 
     async def test_resume_thread_skips_reserved_native_for_explicit_subagent(self):
         # Explicit per-turn subagent: it has its own thread; must NOT resume the

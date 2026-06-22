@@ -123,10 +123,7 @@ def reserve_forked_session(
             opencode_fork_empty_history = False
             if effective_trim_latest_running_turn and source_backend == "opencode":
                 fork_point = _opencode_running_fork_point(source_native)
-                if fork_point is None:
-                    effective_trim_latest_running_turn = False
-                    effective_native_turn_started = False
-                else:
+                if fork_point is not None:
                     opencode_fork_message_id, opencode_fork_empty_history = fork_point
                     effective_native_turn_started = True
             source_message_id = _latest_source_message_id(conn, str(row["id"]))
