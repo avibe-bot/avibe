@@ -1128,6 +1128,85 @@ def test_scheduled_gate_busy_enqueues_and_leaves_chat_turn_untouched(monkeypatch
     assert transcript["messages"] == []
 
 
+def test_scheduled_gate_busy_duplicate_native_id_is_skipped(monkeypatch, tmp_path):
+    """A retried harness callback already sitting in the queue is a duplicate,
+    not a scheduler failure."""
+    from core.services import sessions as sessions_service
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn, platform="avibe", scope_type="project", native_id="proj_sched_dup", now="2026-05-31T00:00:00Z"
+        )
+        _seed_project_workdir(conn, scope_id, tmp_path)
+        session = sessions_service.create_session(
+            conn, scope_id=scope_id, agent_backend="claude", agent_name="worker"
+        )
+    session_id = session["id"]
+
+    async def _explode_dispatch_turn(*args, **kwargs):
+        raise AssertionError("a busy scheduled run must enqueue, not dispatch a turn")
+
+    monkeypatch.setattr(session_turns, "dispatch_turn", _explode_dispatch_turn)
+
+    controller = _build_controller_double()
+    app = internal_server.create_app(controller)
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id=session_id,
+        platform="avibe",
+        message_id="watch:def-watch:run-1",
+        platform_specific={
+            "task_execution_id": "run-1",
+            "task_trigger_kind": "watch",
+            "task_definition_id": "def-watch",
+        },
+    )
+
+    async def _go():
+        async def _busy():
+            await asyncio.sleep(60)
+
+        chat_task = asyncio.create_task(_busy())
+        app.state.in_flight_dispatches[session_id] = session_turns.Turn(
+            task=chat_task,
+            context=MessageContext(
+                user_id="U",
+                channel_id="C",
+                platform="avibe",
+                message_id="watch:def-watch:running",
+            ),
+        )
+        try:
+            first = await controller.session_turn_gate.submit_scheduled(session_id, ctx, "first")
+            second = await controller.session_turn_gate.submit_scheduled(session_id, ctx, "duplicate")
+            running_ctx = MessageContext(
+                user_id="workbench",
+                channel_id=session_id,
+                platform="avibe",
+                message_id="watch:def-watch:running",
+            )
+            running_duplicate = await controller.session_turn_gate.submit_scheduled(
+                session_id,
+                running_ctx,
+                "running duplicate",
+            )
+        finally:
+            chat_task.cancel()
+        return first, second, running_duplicate
+
+    assert asyncio.run(_go()) == ("enqueued", "duplicate", "duplicate")
+    with engine.connect() as conn:
+        queued = messages_service.list_queued(conn, session_id)
+    assert [row["text"] for row in queued] == ["first"]
+
+
 def test_scheduled_gate_cancel_stops_scheduled_run(monkeypatch, tmp_path):
     """Stop works for a scheduled run: because the run goes through ``_run_turn``
     it registers the scheduled ``context`` in ``in_flight``, so
@@ -1379,6 +1458,41 @@ def test_flush_does_not_coalesce_scheduled_callbacks_with_different_delivery(tmp
     assert [row["text"] for row in remaining] == ["different delivery"]
 
 
+def test_flush_does_not_coalesce_scheduled_callbacks_with_different_agent(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    def prov(execution_id: str, agent_name: str) -> dict:
+        return {
+            "message_id": f"watch:def-watch:{execution_id}",
+            "platform_specific": {
+                "task_execution_id": execution_id,
+                "task_trigger_kind": "watch",
+                "task_definition_id": "def-watch",
+                "vibe_agent_name": agent_name,
+            },
+        }
+
+    session_id = _seed_avibe_session_with_queue(
+        [
+            ("codex callback", prov("run-1", "codex")),
+            ("claude callback", prov("run-2", "claude")),
+        ]
+    )
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+
+    mgr, runs = _manager_capturing_runs()
+
+    assert asyncio.run(mgr.flush_queue(session_id)) is True
+    text, source, ctx = runs[0]
+    assert (text, source) == ("codex callback", SOURCE_SCHEDULED)
+    assert ctx.platform_specific["vibe_agent_name"] == "codex"
+    with create_sqlite_engine().begin() as conn:
+        remaining = messages_service.list_queued(conn, session_id)
+    assert [row["text"] for row in remaining] == ["claude callback"]
+
+
 def test_flush_coalesced_scheduled_copy_uses_i18n(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
@@ -1406,6 +1520,96 @@ def test_flush_coalesced_scheduled_copy_uses_i18n(tmp_path, monkeypatch):
     text = runs[0][0]
     assert "同一个 watch/task callback" in text
     assert "已合并的 callback 消息" in text
+
+
+def test_flush_preserves_scheduled_prompt_whitespace(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    session_id = _seed_avibe_session_with_queue(
+        [
+            (
+                "  indented: true\n",
+                {
+                    "message_id": "watch:def-watch:run-1",
+                    "platform_specific": {
+                        "task_execution_id": "run-1",
+                        "task_trigger_kind": "watch",
+                        "task_definition_id": "def-watch",
+                    },
+                },
+            )
+        ]
+    )
+
+    mgr, runs = _manager_capturing_runs()
+
+    assert asyncio.run(mgr.flush_queue(session_id)) is True
+    assert runs[0][0] == "  indented: true\n"
+
+
+def test_flush_skips_scheduled_callback_when_native_id_already_claimed(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    session_id = _seed_avibe_session_with_queue(
+        [
+            (
+                "duplicate callback",
+                {
+                    "message_id": "watch:def-watch:run-2",
+                    "platform_specific": {
+                        "task_execution_id": "run-2",
+                        "task_trigger_kind": "watch",
+                        "task_definition_id": "def-watch",
+                    },
+                },
+            )
+        ]
+    )
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+
+    with create_sqlite_engine().begin() as conn:
+        queued = messages_service.list_queued(conn, session_id)
+        messages_service.delete_queued(conn, [queued[0]["id"]])
+        messages_service.append(
+            conn,
+            scope_id=queued[0]["scope_id"],
+            session_id=session_id,
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type=messages_service.HARNESS_DEDUPE_TYPE,
+            text="",
+            metadata={"coalesced_from": "older-row"},
+            native_message_id="watch:def-watch:run-2",
+        )
+        messages_service.append(
+            conn,
+            scope_id=queued[0]["scope_id"],
+            session_id=session_id,
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type=messages_service.QUEUED_TYPE,
+            text="duplicate callback",
+            metadata={
+                session_turns.SCHEDULED_PROVENANCE_KEY: {
+                    "message_id": "watch:def-watch:run-2",
+                    "platform_specific": {
+                        "task_execution_id": "run-2",
+                        "task_trigger_kind": "watch",
+                        "task_definition_id": "def-watch",
+                    },
+                }
+            },
+            native_message_id=None,
+        )
+
+    mgr, runs = _manager_capturing_runs()
+
+    assert asyncio.run(mgr.flush_queue(session_id)) is False
+    assert runs == []
+    with create_sqlite_engine().begin() as conn:
+        assert messages_service.list_queued(conn, session_id) == []
 
 
 def test_flush_does_not_coalesce_scheduled_callbacks_outside_window(tmp_path, monkeypatch):

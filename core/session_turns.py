@@ -22,11 +22,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
 from storage import messages_service
+from storage.models import messages
 from vibe.i18n import t as i18n_t
 
 if TYPE_CHECKING:
@@ -136,6 +138,10 @@ def _scheduled_merge_key(row: dict) -> Optional[tuple[str, ...]]:
     return (
         trigger_kind,
         definition_id,
+        str(spec.get("vibe_agent_name") or ""),
+        str((spec.get("agent_session_target") or {}).get("agent_name") or "")
+        if isinstance(spec.get("agent_session_target"), dict)
+        else "",
         str(spec.get("delivery_key_external") or ""),
         str(spec.get("delivery_scope_session_key") or ""),
         str(delivery_override.get("platform") or ""),
@@ -176,7 +182,7 @@ def _collect_scheduled_segment(rows: list[dict]) -> list[dict]:
 
 
 def _build_scheduled_segment_text(segment: list[dict]) -> str:
-    texts = [str(row.get("text") or "").strip() for row in segment if str(row.get("text") or "").strip()]
+    texts = [str(row.get("text") or "") for row in segment if str(row.get("text") or "")]
     if not texts:
         return ""
     if len(texts) == 1:
@@ -264,6 +270,24 @@ def _write_coalesced_native_id_markers(conn: Any, segment: list[dict]) -> None:
             )
         except IntegrityError:
             logger.debug("queue flush: coalesced native id marker already exists for %s", native_id, exc_info=True)
+
+
+def _scheduled_segment_has_claimed_native_id(conn: Any, segment: list[dict]) -> bool:
+    native_ids = _scheduled_segment_native_ids(segment)
+    if not native_ids:
+        return False
+    queued_ids = {str(row.get("id") or "") for row in segment if row.get("id")}
+    platform = str(segment[0].get("platform") or "avibe")
+    claimed = (
+        conn.execute(
+            select(messages.c.id)
+            .where(messages.c.platform == platform)
+            .where(messages.c.native_message_id.in_(native_ids))
+        )
+        .scalars()
+        .all()
+    )
+    return any(str(row_id) not in queued_ids for row_id in claimed)
 
 
 @dataclass
@@ -544,6 +568,10 @@ class SessionTurnManager:
                     # Agent-facing dispatch is coalesced.
                     is_scheduled = True
                     segment = _collect_scheduled_segment(rows)
+                    if _scheduled_segment_has_claimed_native_id(conn, segment):
+                        messages_service.delete_queued(conn, [r["id"] for r in segment])
+                        bus.publish("queue.updated", {"session_id": session_id})
+                        return False
                     scheduled_text = _build_scheduled_segment_text(segment)
                     scheduled_native_ids = _scheduled_segment_native_ids(segment)
                     prov = _scheduled_provenance(rows[0]) or {}

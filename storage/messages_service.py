@@ -294,6 +294,21 @@ def append(
     return _row_to_payload(payload)
 
 
+def native_message_exists(conn: Connection, *, platform: str, native_message_id: str) -> bool:
+    """True when a platform/native message id has already been recorded."""
+    platform = str(platform or "").strip()
+    native_message_id = str(native_message_id or "").strip()
+    if not platform or not native_message_id:
+        return False
+    row_id = conn.execute(
+        select(messages.c.id)
+        .where(messages.c.platform == platform)
+        .where(messages.c.native_message_id == native_message_id)
+        .limit(1)
+    ).scalar_one_or_none()
+    return row_id is not None
+
+
 def get_quick_reply_chosen(conn: Connection, session_id: str, message_id: str) -> Optional[str]:
     """The label already chosen for *message_id*'s quick-reply group, or None.
 
