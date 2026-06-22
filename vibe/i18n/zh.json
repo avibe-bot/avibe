@@ -348,7 +348,7 @@
   },
   "messageType": {
     "system": "系统",
-    "assistant": "助手",
+    "assistant": "喃喃自语",
     "toolcall": "工具调用",
     "result": "结果",
     "systemDesc": "系统初始化和状态消息",

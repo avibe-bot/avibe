@@ -235,12 +235,14 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
     return ['low', 'medium', 'high', 'xhigh'].map((value) => ({ value, label: getReasoningLabel(value, value) }));
   })();
 
-  // Top row: working dir + Vibe Agent (+ optional require_mention / require_bind) — dynamic grid columns
-  const topGridCols = showRequireMention ? 'md:grid-cols-4' : 'md:grid-cols-2';
+  // Access row: working dir (+ optional require_mention / require_bind for
+  // channels). The Agent selector lives in the routing row below so it shares a
+  // line with Model + Reasoning effort.
+  const accessGridCols = showRequireMention ? 'md:grid-cols-3' : 'md:grid-cols-1';
 
   return (
     <div className={clsx('space-y-4', containerClass)}>
-      <div className={clsx('grid grid-cols-1 gap-3', topGridCols)}>
+      <div className={clsx('grid grid-cols-1 gap-3', accessGridCols)}>
         {/* Working directory */}
         <div className="space-y-1">
           <label className="text-xs font-medium uppercase text-muted">{t('channelList.workingDirectory')}</label>
@@ -261,58 +263,6 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
               <FolderOpen size={14} />
             </button>
           </div>
-        </div>
-
-        {/* Vibe Agent */}
-        <div className="space-y-1">
-          <label className="text-xs font-medium uppercase text-muted">{t('channelList.agent')}</label>
-          <div className="relative">
-            <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2">
-              <Bot size={14} className="text-muted" />
-            </span>
-            <CompactSelect
-              value={value.routing.agent_name || ''}
-              onChange={(e) => {
-                const nextName = e.target.value || null;
-                onChange({
-                  routing: {
-                    ...value.routing,
-                    agent_name: nextName,
-                    model: null,
-                    reasoning_effort: null,
-                    opencode_model: null,
-                    opencode_reasoning_effort: null,
-                    claude_model: null,
-                    claude_reasoning_effort: null,
-                    codex_model: null,
-                    codex_reasoning_effort: null,
-                  },
-                });
-              }}
-              className="w-full pl-9 pr-3"
-            >
-              <option value="">
-                {defaultVibeAgent ? `${t('common.default')} · ${defaultVibeAgent.name}` : t('common.default')}
-              </option>
-              {vibeAgents.map((agent) => (
-                <option key={agent.name} value={agent.name}>
-                  {agent.name}
-                  {agent.backend ? ` · ${agent.backend}` : ''}
-                  {agent.model ? ` / ${agent.model}` : ''}
-                </option>
-              ))}
-            </CompactSelect>
-          </div>
-          {inheritedVibeAgent && (
-            <div className="flex items-center gap-1.5 text-[11px] text-muted">
-              <BackendIcon backend={inheritedVibeAgent.backend} variant="glyph" size={12} />
-              <span className="truncate">
-                {inheritedVibeAgent.backend}
-                {inheritedVibeAgent.model ? ` / ${inheritedVibeAgent.model}` : ''}
-                {inheritedVibeAgent.reasoning_effort ? ` / ${inheritedVibeAgent.reasoning_effort}` : ''}
-              </span>
-            </div>
-          )}
         </div>
 
         {/* Require @mention (channels only) */}
@@ -355,7 +305,11 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
                       aria-checked={active}
                       onClick={() => setMention(seg.id)}
                       className={clsx(
-                        'flex-1 rounded-[4px] px-2.5 text-[12px] transition-colors',
+                        // The "inherit" label carries the inherited state in
+                        // parentheses, so it needs more room than on/off to
+                        // avoid wrapping.
+                        'whitespace-nowrap rounded-[4px] px-2 text-[12px] transition-colors',
+                        seg.id === 'inherit' ? 'flex-[1.6]' : 'flex-1',
                         active
                           ? 'border border-mint/30 bg-mint-soft font-bold text-mint'
                           : 'font-medium text-muted hover:text-foreground'
@@ -417,8 +371,59 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
         })()}
       </div>
 
-      {/* Scope-level overrides */}
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+      {/* Routing: Agent + Model + Reasoning effort share one row */}
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        {/* Vibe Agent */}
+        <div className="space-y-1">
+          <label className="text-xs font-medium uppercase text-muted">{t('channelList.agent')}</label>
+          <div className="relative">
+            <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2">
+              <Bot size={14} className="text-muted" />
+            </span>
+            <CompactSelect
+              value={value.routing.agent_name || ''}
+              onChange={(e) => {
+                const nextName = e.target.value || null;
+                onChange({
+                  routing: {
+                    ...value.routing,
+                    agent_name: nextName,
+                    model: null,
+                    reasoning_effort: null,
+                    opencode_model: null,
+                    opencode_reasoning_effort: null,
+                    claude_model: null,
+                    claude_reasoning_effort: null,
+                    codex_model: null,
+                    codex_reasoning_effort: null,
+                  },
+                });
+              }}
+              className="w-full pl-9 pr-3"
+            >
+              <option value="">
+                {defaultVibeAgent ? `${t('common.default')} · ${defaultVibeAgent.name}` : t('common.default')}
+              </option>
+              {vibeAgents.map((agent) => (
+                <option key={agent.name} value={agent.name}>
+                  {agent.name}
+                  {agent.backend ? ` · ${agent.backend}` : ''}
+                  {agent.model ? ` / ${agent.model}` : ''}
+                </option>
+              ))}
+            </CompactSelect>
+          </div>
+          {inheritedVibeAgent && (
+            <div className="flex items-center gap-1.5 text-[11px] text-muted">
+              <BackendIcon backend={inheritedVibeAgent.backend} variant="glyph" size={12} />
+              <span className="truncate">
+                {inheritedVibeAgent.backend}
+                {inheritedVibeAgent.model ? ` / ${inheritedVibeAgent.model}` : ''}
+                {inheritedVibeAgent.reasoning_effort ? ` / ${inheritedVibeAgent.reasoning_effort}` : ''}
+              </span>
+            </div>
+          )}
+        </div>
         <div className="space-y-1">
           <label className="text-xs font-medium uppercase text-muted">{t('channelList.model')}</label>
           {modelOverrideControl}
@@ -452,9 +457,9 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
           </span>
         </div>
         <div className="flex flex-wrap gap-2 text-sm">
-          {['system', 'assistant', 'toolcall'].map((msgType) => {
+          {['assistant', 'toolcall'].map((msgType) => {
             const checked = (value.show_message_types || []).includes(msgType);
-            const label = msgType === 'toolcall' ? 'Toolcall' : msgType.charAt(0).toUpperCase() + msgType.slice(1);
+            const label = t(`channelList.messageType.${msgType}`);
             return (
               <button
                 key={msgType}

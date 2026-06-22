@@ -375,14 +375,17 @@ class SettingsManager:
         self.update_user_settings(user_id, settings)
 
     def get_available_message_types(self) -> List[str]:
-        """Get list of available message types that can be hidden"""
-        return ["system", "assistant", "toolcall"]
+        """Get list of available message types that can be hidden.
+
+        ``system`` is intentionally excluded: system/init messages are never
+        pushed to users, so there is nothing for the toggle to control.
+        """
+        return ["assistant", "toolcall"]
 
     def get_message_type_display_names(self) -> Dict[str, str]:
         """Get display names for message types"""
         return {
-            "system": "System",
-            "assistant": "Assistant",
+            "assistant": "Muttering",
             "toolcall": "Toolcall",
         }
 
