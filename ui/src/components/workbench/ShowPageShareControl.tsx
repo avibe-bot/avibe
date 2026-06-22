@@ -8,7 +8,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Select } from '../ui/select';
 import { useApi } from '../../context/ApiContext';
 import { copyTextToClipboard } from '../../lib/utils';
-import { isIosDevice } from '../../lib/platform';
+import { isIosDevice, isStandalonePwa } from '../../lib/platform';
 import { copyHref, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 
 type ShowPagePayload = ShowPageLinkInfo & {
@@ -60,10 +60,13 @@ export const ShowPageShareControl: React.FC<{
   const link = payload ? copyHref(payload) ?? '' : '';
   const canNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
   // iOS can't be triggered to "Add to Home Screen" programmatically and the Web
-  // Share sheet doesn't offer it — only Safari's own page-share menu does. So on
-  // iOS we show steps to open the link in Safari and add it there. The Show Page
-  // index.html is PWA-capable, so the result launches as a standalone app.
+  // Share sheet doesn't offer it — only Safari's own page-share menu does (the
+  // page index.html is PWA-capable, so the result launches standalone). The steps
+  // differ by context: in Safari, tap Share → Add to Home Screen; in the installed
+  // PWA the page can't hand off to Safari (a same-origin link stays in the in-app
+  // browser), so the user must copy the link and open it in Safari themselves.
   const isIos = isIosDevice();
+  const iosStandalone = isStandalonePwa();
 
   // Re-fetch on every open so a visibility/share change made elsewhere (e.g. the
   // admin Show Pages page) is reflected; keep the last payload visible while
@@ -214,7 +217,9 @@ export const ShowPageShareControl: React.FC<{
                   {t('chat.showPage.addToHomeTitle')}
                 </div>
                 <p className="mt-1 text-xs leading-relaxed text-muted">
-                  {t('chat.showPage.addToHomeBody')}
+                  {iosStandalone
+                    ? t('chat.showPage.addToHomeBodyPwa')
+                    : t('chat.showPage.addToHomeBodySafari')}
                 </p>
               </div>
             )}
