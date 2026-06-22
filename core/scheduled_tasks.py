@@ -462,6 +462,52 @@ def _live_coalesced_agent_run_ids(request: TaskExecutionRequest) -> list[str] | 
     return live
 
 
+def _retire_stale_agent_run_queue_rows(
+    *,
+    session_id: Optional[str],
+    execution_ids: list[str],
+) -> int:
+    """Drop old queued Workbench rows for recovered direct Agent Runs.
+
+    A crash can happen after the run rows are claimed but before flush_queue
+    deletes the queued harness rows. On restart the primary run is recovered and
+    submitted here; leaving the old queued rows in place makes their native ids
+    look like delivered duplicates even though they are only stale queue state.
+    """
+    normalized_ids: list[str] = []
+    seen: set[str] = set()
+    for raw_execution_id in execution_ids:
+        execution_id = str(raw_execution_id or "").strip()
+        if not execution_id or execution_id in seen:
+            continue
+        seen.add(execution_id)
+        normalized_ids.append(execution_id)
+    if not session_id or not normalized_ids:
+        return 0
+
+    from storage import messages_service
+    from storage.models import messages
+
+    native_ids = [f"agent_run:{execution_id}" for execution_id in normalized_ids]
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        row_ids = [
+            str(row_id)
+            for row_id in conn.execute(
+                select(messages.c.id)
+                .where(messages.c.session_id == session_id)
+                .where(messages.c.platform == "avibe")
+                .where(messages.c.type == messages_service.QUEUED_TYPE)
+                .where(messages.c.native_message_id.in_(native_ids))
+            ).scalars()
+            if row_id
+        ]
+        if not row_ids:
+            return 0
+        messages_service.delete_queued(conn, row_ids)
+        return len(row_ids)
+
+
 class ScheduledTaskStore:
     def __init__(self, path: Optional[Path] = None):
         self.path = path or (paths.get_state_dir() / "scheduled_tasks.json")
@@ -1743,6 +1789,24 @@ class ScheduledTaskService:
 
         gate = getattr(self.controller, "session_turn_gate", None)
         if target.platform == "avibe" and session_id and gate is not None:
+            stale_queue_rows = _retire_stale_agent_run_queue_rows(
+                session_id=session_id,
+                execution_ids=_live_coalesced_agent_run_ids(
+                    TaskExecutionRequest(
+                        id=execution_id,
+                        request_type="agent_run",
+                        metadata=metadata or {},
+                    )
+                )
+                or [execution_id],
+            )
+            if stale_queue_rows:
+                try:
+                    from core.inbox_events import bus
+
+                    bus.publish("queue.updated", {"session_id": session_id})
+                except Exception:
+                    logger.debug("agent_run recovery: queue.updated publish failed", exc_info=True)
             state = await gate.submit_scheduled(session_id, context, message)
             if state == "enqueued":
                 return AgentRunExecutionResult(error=None, complete_on_return=False, requeue_on_return=True)
