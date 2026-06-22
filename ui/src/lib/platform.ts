@@ -27,3 +27,23 @@ export function isStandalonePwa(): boolean {
     (!!window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
   );
 }
+
+// iOS in-app webviews (IM/social apps) and alternative browsers (Chrome/Firefox
+// on iOS) can't reach Safari's "Add to Home Screen" page-share flow, so callers
+// that nudge toward it must exclude them. Real Safari carries both a "Version/<n>"
+// and a "Safari" token, which WKWebView-based in-app browsers and CriOS/FxiOS/etc.
+// lack. Shared so the InstallHint nudge and the Show Page share hint agree.
+const NON_SAFARI_IOS_UA = /CriOS|FxiOS|EdgiOS|OPiOS|mercury/i;
+const IN_APP_BROWSER_UA =
+  /MicroMessenger|FBAN|FBAV|FB_IAB|Instagram|Line\/|Twitter|WhatsApp|Snapchat|DingTalk|QQ\/|QQTheme|Slack|Discord|Feishu|Lark|; wv\)/i;
+
+export function isRealMobileSafari(): boolean {
+  if (!isIosDevice()) return false;
+  const ua = navigator.userAgent || '';
+  return (
+    /Safari/.test(ua) &&
+    /Version\//.test(ua) &&
+    !NON_SAFARI_IOS_UA.test(ua) &&
+    !IN_APP_BROWSER_UA.test(ua)
+  );
+}

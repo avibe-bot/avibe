@@ -4,9 +4,8 @@ from pathlib import Path
 
 
 AVIBE_HOME_ENV = "AVIBE_HOME"
-LEGACY_VIBE_REMOTE_HOME_ENV = "VIBE_REMOTE_HOME"
 AVIBE_HOME_DIRNAME = ".avibe"
-LEGACY_VIBE_REMOTE_HOME_DIRNAME = ".vibe_remote"
+LEGACY_HOME_DIRNAME = ".vibe_remote"
 HOME_MIGRATION_NOTICE_PATH = "state/home_migration_notice"
 
 
@@ -19,7 +18,7 @@ def _default_avibe_dir(home: Path | None = None) -> Path:
 
 
 def _legacy_vibe_remote_dir(home: Path | None = None) -> Path:
-    return (home or Path.home()) / LEGACY_VIBE_REMOTE_HOME_DIRNAME
+    return (home or Path.home()) / LEGACY_HOME_DIRNAME
 
 
 def _is_symlink_to(path: Path, target: Path) -> bool:
@@ -59,10 +58,6 @@ def get_vibe_remote_dir() -> Path:
     if custom:
         return _expand_path(custom)
 
-    legacy_custom = os.environ.get(LEGACY_VIBE_REMOTE_HOME_ENV)
-    if legacy_custom:
-        return _expand_path(legacy_custom)
-
     avibe_dir = _default_avibe_dir()
     legacy_dir = _legacy_vibe_remote_dir()
     if avibe_dir.exists() or avibe_dir.is_symlink():
@@ -75,10 +70,10 @@ def get_vibe_remote_dir() -> Path:
 def migrate_default_home() -> Path:
     """Adopt the default avibe home while preserving legacy path compatibility.
 
-    Explicit home env vars are honored as-is and never migrated. The migration
+    Explicit ``AVIBE_HOME`` is honored as-is and never migrated. The migration
     only applies to default homes under ``Path.home()``.
     """
-    if os.environ.get(AVIBE_HOME_ENV) or os.environ.get(LEGACY_VIBE_REMOTE_HOME_ENV):
+    if os.environ.get(AVIBE_HOME_ENV):
         return get_vibe_remote_dir()
 
     avibe_dir = _default_avibe_dir()

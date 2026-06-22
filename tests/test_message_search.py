@@ -2,7 +2,7 @@
 window mode on ``list_session_messages`` — Phase 1 of the message-search feature.
 
 Mirrors the fixture pattern in ``tests/test_messages_service.py``: an isolated
-``VIBE_REMOTE_HOME`` (so the live ``~/.avibe`` is never touched), a SQLite engine
+``AVIBE_HOME`` (so the live ``~/.avibe`` is never touched), a SQLite engine
 from ``create_sqlite_engine``, and direct inserts that control ``created_at`` /
 ``type`` / ``platform`` / ``content_text``.
 """
@@ -25,7 +25,7 @@ from storage.settings_service import upsert_scope
 
 @pytest.fixture()
 def isolated_state(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     yield tmp_path
 

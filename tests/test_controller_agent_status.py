@@ -91,7 +91,7 @@ def test_run_marks_running_at_acceptance_before_dispatch(monkeypatch, tmp_path):
     accept-time write closes the startup window where a cross-backend PATCH
     could land while the row still read idle."""
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from storage.importer import ensure_sqlite_state
 
     ensure_sqlite_state()

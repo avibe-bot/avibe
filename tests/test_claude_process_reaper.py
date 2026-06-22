@@ -169,3 +169,411 @@ def test_reap_duplicate_claude_resume_processes_ignores_unrelated_unique_match(m
 
     assert reaped == 0
     assert signals == []
+
+
+def _patch_orphan_env(monkeypatch, table: str, ages: dict[int, float], alive: set[int]):
+    def fake_kill(pid, sig):
+        if sig == 0:
+            if pid not in alive:
+                raise ProcessLookupError
+            return
+        alive.discard(pid)
+
+    monkeypatch.setattr(claude_process_reaper, "_run_ps", lambda: table)
+    monkeypatch.setattr(claude_process_reaper, "_process_ages", lambda pids: ages)
+    signals: list[tuple[int, int]] = []
+    real_kill = fake_kill
+
+    def recording_kill(pid, sig):
+        if sig != 0:
+            signals.append((pid, sig))
+        return real_kill(pid, sig)
+
+    monkeypatch.setattr(claude_process_reaper.os, "kill", recording_kill)
+    return signals
+
+
+def test_reap_orphaned_reaps_in_tree_no_owner_and_descendants(monkeypatch):
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"100 {service_pid} /usr/local/bin/claude --resume sess-1 --model opus",
+            f"101 {service_pid} /usr/local/bin/claude --output-format stream-json --verbose --resume sess-2 --input-format stream-json",
+            "102 101 node helper.js",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {101: 999.0, 102: 999.0}, {100, 101, 102})
+    monkeypatch.setattr(claude_process_reaper, "_process_start_times", lambda pids: {pid: 123.0 for pid in pids})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids={100},
+            tracked_resume_ids={"sess-1": 100},
+            logger=logging.getLogger("test.claude_orphan"),
+            owned_processes=[
+                claude_process_reaper.ClaudeOwnedProcess(
+                    pid=101,
+                    native_session_id="sess-2",
+                    started_at=123.0,
+                )
+            ],
+        )
+    )
+
+    assert reaped == 2
+    killed = {pid for pid, _ in signals}
+    assert 101 in killed and 102 in killed
+    assert 100 not in killed
+    assert service_pid not in killed
+
+
+def test_reap_orphaned_ignores_managed_watch_descendants(monkeypatch):
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"500 {service_pid} /bin/sh -c claude -p --input-format stream-json watch-work",
+            "501 500 /usr/local/bin/claude -p --input-format stream-json watch-work",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {501: 999.0}, {500, 501})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids=set(),
+            tracked_resume_ids={},
+            logger=logging.getLogger("test.claude_orphan"),
+            exclude_pids={500},
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []
+
+
+def test_reap_orphaned_keeps_owned_in_tree_process(monkeypatch):
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"100 {service_pid} /usr/local/bin/claude --resume sess-1 --model opus",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {100: 999.0}, {100})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids={100},
+            tracked_resume_ids={"sess-1": 100},
+            logger=logging.getLogger("test.claude_orphan"),
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []
+
+
+def test_reap_orphaned_ignores_cross_restart_init_parented_match(monkeypatch):
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"100 {service_pid} /usr/local/bin/claude --resume sess-1 --model opus",
+            "300 1 /usr/local/bin/claude --output-format stream-json --verbose --resume sess-1 --input-format stream-json",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {300: 999.0}, {100, 300})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids={100},
+            tracked_resume_ids={"sess-1": 100},
+            logger=logging.getLogger("test.claude_orphan"),
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []
+
+
+def test_reap_orphaned_respects_min_age_grace_window(monkeypatch):
+    """A freshly spawned, not-yet-tracked process must not be reaped (TOCTOU)."""
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"101 {service_pid} /usr/local/bin/claude --output-format stream-json --verbose --resume sess-2 --input-format stream-json",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {101: 5.0}, {101})
+    monkeypatch.setattr(claude_process_reaper, "_process_start_times", lambda pids: {pid: 123.0 for pid in pids})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids=set(),
+            tracked_resume_ids={},
+            logger=logging.getLogger("test.claude_orphan"),
+            owned_processes=[claude_process_reaper.ClaudeOwnedProcess(pid=101, started_at=123.0)],
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []
+
+
+def test_reap_orphaned_skips_when_age_unknown(monkeypatch):
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"101 {service_pid} /usr/local/bin/claude --output-format stream-json --verbose --resume sess-2 --input-format stream-json",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {}, {101})
+    monkeypatch.setattr(claude_process_reaper, "_process_start_times", lambda pids: {pid: 123.0 for pid in pids})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids=set(),
+            tracked_resume_ids={},
+            logger=logging.getLogger("test.claude_orphan"),
+            owned_processes=[claude_process_reaper.ClaudeOwnedProcess(pid=101, started_at=123.0)],
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []
+
+
+def test_reap_orphaned_ignores_unrelated_out_of_tree_claude(monkeypatch):
+    """Out-of-tree claude not matching any tracked --resume id is left alone."""
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            "300 1 /usr/local/bin/claude --resume someone-elses-session",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {300: 999.0}, {300})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids=set(),
+            tracked_resume_ids={"sess-1": 100},
+            logger=logging.getLogger("test.claude_orphan"),
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []
+
+
+def test_reap_orphaned_ignores_in_tree_non_sdk_claude(monkeypatch):
+    """An in-tree `claude` that is NOT an SDK session subprocess (no
+    --input-format stream-json) — e.g. launched by another backend or a watch
+    command — must not be reaped even though it is unowned and old."""
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"401 {service_pid} /usr/local/bin/claude -p run-a-build",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {401: 999.0}, {401})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids=set(),
+            tracked_resume_ids={},
+            logger=logging.getLogger("test.claude_orphan"),
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []
+
+
+def test_reap_orphaned_skips_in_tree_sweep_when_disabled(monkeypatch):
+    """reap_in_tree=False (incomplete owner set) must not touch in-tree pids."""
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"101 {service_pid} /usr/local/bin/claude --output-format stream-json --verbose --resume sess-2 --input-format stream-json",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {101: 999.0}, {101})
+    monkeypatch.setattr(claude_process_reaper, "_process_start_times", lambda pids: {pid: 123.0 for pid in pids})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids=set(),
+            tracked_resume_ids={},
+            logger=logging.getLogger("test.claude_orphan"),
+            reap_in_tree=False,
+            owned_processes=[claude_process_reaper.ClaudeOwnedProcess(pid=101, started_at=123.0)],
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []
+
+
+def test_reap_orphaned_ignores_out_of_tree_resume_match_not_init_parented(monkeypatch):
+    """A user's manual `claude --resume <id>` (parented to a shell, not init)
+    must not be reaped even though the resume id matches a tracked session."""
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"100 {service_pid} /usr/local/bin/claude --resume sess-1 --model opus",
+            "300 999 /usr/local/bin/claude --resume sess-1 --model opus",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {300: 999.0}, {100, 300})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids={100},
+            tracked_resume_ids={"sess-1": 100},
+            logger=logging.getLogger("test.claude_orphan"),
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []
+
+
+def test_reap_orphaned_ignores_init_parented_resume_match_without_sdk_marker(monkeypatch):
+    """A user's manual `claude --resume <id>` may become init-reparented after
+    its shell exits, but it is not an Avibe SDK session subprocess unless it
+    carries the stream-json input marker."""
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"100 {service_pid} /usr/local/bin/claude --resume sess-1 --model opus",
+            "300 1 /usr/local/bin/claude --resume sess-1 --model opus",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {300: 999.0}, {100, 300})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids={100},
+            tracked_resume_ids={"sess-1": 100},
+            logger=logging.getLogger("test.claude_orphan"),
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []
+
+
+def test_reap_orphaned_ignores_external_init_parented_stream_json_resume_client(monkeypatch):
+    """External programmatic Claude clients use public stream-json/resume flags too."""
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"100 {service_pid} /usr/local/bin/claude --resume sess-1 --model opus",
+            "300 1 /usr/local/bin/claude --output-format stream-json --verbose --resume sess-1 --input-format stream-json",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {300: 999.0}, {100, 300})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids={100},
+            tracked_resume_ids={"sess-1": 100},
+            logger=logging.getLogger("test.claude_orphan"),
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []
+
+
+def test_reap_orphaned_reaps_registry_owned_out_of_tree_resume_match(monkeypatch):
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"100 {service_pid} /usr/local/bin/claude --resume sess-1 --model opus",
+            "300 1 /usr/local/bin/claude --output-format stream-json --verbose --resume sess-1 --input-format stream-json",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {300: 999.0}, {100, 300})
+    monkeypatch.setattr(claude_process_reaper, "_process_start_times", lambda pids: {pid: 123.0 for pid in pids})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids={100},
+            tracked_resume_ids={"sess-1": 100},
+            logger=logging.getLogger("test.claude_orphan"),
+            owned_processes=[
+                claude_process_reaper.ClaudeOwnedProcess(
+                    pid=300,
+                    native_session_id="sess-1",
+                    started_at=123.0,
+                )
+            ],
+        )
+    )
+
+    assert reaped == 1
+    assert (300, signal.SIGTERM) in signals
+
+
+def test_reap_orphaned_ignores_registered_out_of_tree_without_birth_identity(monkeypatch):
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"100 {service_pid} /usr/local/bin/claude --resume sess-1 --model opus",
+            "300 1 /usr/local/bin/claude --output-format stream-json --verbose --resume sess-1 --input-format stream-json",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {300: 999.0}, {100, 300})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids={100},
+            tracked_resume_ids={"sess-1": 100},
+            logger=logging.getLogger("test.claude_orphan"),
+            owned_processes=[
+                claude_process_reaper.ClaudeOwnedProcess(
+                    pid=300,
+                    native_session_id="sess-1",
+                )
+            ],
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []
+
+
+def test_reap_orphaned_ignores_other_backend_stream_json_descendant_without_registry(monkeypatch):
+    service_pid = os.getpid()
+    table = "\n".join(
+        [
+            f"{service_pid} 1 python service_main.py",
+            f"700 {service_pid} /usr/local/bin/codex app-server",
+            "701 700 /usr/local/bin/claude --output-format stream-json --verbose --resume sess-9 --input-format stream-json",
+        ]
+    )
+    signals = _patch_orphan_env(monkeypatch, table, {701: 999.0}, {700, 701})
+
+    reaped = asyncio.run(
+        claude_process_reaper.reap_orphaned_claude_processes(
+            owned_pids=set(),
+            tracked_resume_ids={},
+            logger=logging.getLogger("test.claude_orphan"),
+            owned_processes=[],
+        )
+    )
+
+    assert reaped == 0
+    assert signals == []

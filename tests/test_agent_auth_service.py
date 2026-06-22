@@ -39,15 +39,15 @@ class _IsolatedClaudeConfigDirMixin:
 
 @contextmanager
 def _temporary_vibe_home(tmp_path: Path):
-    previous_home = os.environ.get("VIBE_REMOTE_HOME")
-    os.environ["VIBE_REMOTE_HOME"] = str(tmp_path)
+    previous_home = os.environ.get("AVIBE_HOME")
+    os.environ["AVIBE_HOME"] = str(tmp_path)
     try:
         yield
     finally:
         if previous_home is None:
-            os.environ.pop("VIBE_REMOTE_HOME", None)
+            os.environ.pop("AVIBE_HOME", None)
         else:
-            os.environ["VIBE_REMOTE_HOME"] = previous_home
+            os.environ["AVIBE_HOME"] = previous_home
 
 
 class _StubIMClient:
@@ -293,6 +293,61 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
         flow = service._flows["C1:claude"]
         self.assertIs(flow.claude_client, mock_client)
         self.assertTrue(flow.login_prompt_sent)
+
+    async def test_active_claude_auth_client_pids_includes_im_and_web_flows(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+        done_task = asyncio.create_task(asyncio.sleep(0))
+        await done_task
+
+        def _client(pid):
+            return SimpleNamespace(_transport=SimpleNamespace(_process=SimpleNamespace(pid=pid)))
+
+        im_flow = AgentAuthFlow(
+            flow_id="flow-im",
+            backend="claude",
+            settings_key="C1",
+            initiator_user_id="U1",
+            context=context,
+            process=None,
+            reader_task=done_task,
+            waiter_task=done_task,
+            claude_client=_client(501),
+        )
+        service._flows[im_flow.flow_key] = im_flow
+        service._web_flows["web-flow"] = SimpleNamespace(
+            backend="claude",
+            claude_client=_client(502),
+        )
+
+        pids = service.active_claude_auth_client_pids()
+
+        self.assertEqual(pids, {501, 502})
+        self.assertFalse(service.has_active_claude_auth_client_with_unknown_pid())
+
+    async def test_active_claude_auth_client_unknown_pid_detected(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        context = MessageContext(user_id="U1", channel_id="C1")
+        done_task = asyncio.create_task(asyncio.sleep(0))
+        await done_task
+
+        flow = AgentAuthFlow(
+            flow_id="flow-im",
+            backend="claude",
+            settings_key="C1",
+            initiator_user_id="U1",
+            context=context,
+            process=None,
+            reader_task=done_task,
+            waiter_task=done_task,
+            claude_client=SimpleNamespace(),
+        )
+        service._flows[flow.flow_key] = flow
+
+        self.assertEqual(service.active_claude_auth_client_pids(), set())
+        self.assertTrue(service.has_active_claude_auth_client_with_unknown_pid())
 
     async def test_start_setup_reports_claude_start_failure(self):
         controller = _StubController()
@@ -1680,6 +1735,39 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
 
         self.assertTrue(captured["connected"])
         self.assertEqual(captured["options"].max_buffer_size, CLAUDE_SDK_MAX_BUFFER_SIZE)
+        self.assertEqual(captured["options"].env["AVIBE_CLAUDE_PROCESS_OWNER"], "auth")
+
+    async def test_claude_control_flow_start_in_flight_disables_unknown_pid_guard(self):
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _create_client(_context):
+            started.set()
+            await release.wait()
+            return SimpleNamespace()
+
+        service._create_claude_control_client = AsyncMock(side_effect=_create_client)
+        service._send_claude_control_request = AsyncMock(
+            return_value={"manualUrl": "https://platform.claude.com/oauth/code"}
+        )
+        service._begin_claude_oauth_attempt = AsyncMock(return_value=None)
+
+        task = asyncio.create_task(
+            service._start_claude_control_flow(
+                MessageContext(user_id="U1", channel_id="C1"),
+                force_reset=False,
+                login_with_claude_ai=True,
+            )
+        )
+        await started.wait()
+
+        self.assertTrue(service.has_active_claude_auth_client_with_unknown_pid())
+
+        release.set()
+        await task
+        self.assertFalse(service.has_active_claude_auth_client_with_unknown_pid())
 
     async def test_verify_login_reports_opencode_segmentation_fault(self):
         controller = _StubController()

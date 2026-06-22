@@ -104,6 +104,22 @@ class _StubClaudeAgentOptions:
         self.continue_conversation = False
 
 
+def _disconnect_counting_client(captured: dict[str, Any]):
+    """Stub ClaudeSDKClient that records how many times it was disconnected."""
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["disconnects"] = 0
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            captured["disconnects"] += 1
+
+    return _StubClaudeSDKClient
+
+
 def test_to_app_config_preserves_claude_cli_path() -> None:
     v2 = V2Config(
         mode="self_host",
@@ -463,6 +479,37 @@ def test_session_handler_reuses_cached_claude_client_when_system_prompt_is_uncha
     assert "`slack/<user_id>`" in first_client.options.system_prompt["append"]
     assert "slack/U123" not in first_client.options.system_prompt["append"]
     assert "slack/U456" not in first_client.options.system_prompt["append"]
+
+
+def test_session_handler_marks_claude_sdk_session_process_owner(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+    registered: list[dict[str, Any]] = []
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["options"] = options
+            self._transport = type("T", (), {"_process": type("P", (), {"pid": 4321})()})()
+
+        async def connect(self) -> None:
+            captured["connected"] = True
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+    monkeypatch.setattr(
+        session_handler_module,
+        "register_claude_owned_process",
+        lambda client, **kwargs: registered.append({"client": client, **kwargs}),
+    )
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    client = _run_session(handler, context)
+
+    assert captured["connected"] is True
+    assert captured["options"].env["AVIBE_CLAUDE_PROCESS_OWNER"] == "session"
+    assert registered == [{"client": client, "native_session_id": None, "owner": "session"}]
 
 
 def test_session_handler_coalesces_concurrent_claude_client_creates(
@@ -1032,6 +1079,358 @@ def test_session_handler_keeps_active_claude_session(monkeypatch, tmp_path: Path
     assert evicted == 0
     assert captured["disconnects"] == 0
     assert composite_key in controller.claude_sessions
+
+
+def test_evict_idle_sessions_force_evicts_stuck_active_session(monkeypatch, tmp_path: Path) -> None:
+    """The active flag is not an absolute veto.
+
+    Regression for the no-EOF / blocked-receiver leak: a receiver coroutine that
+    stays alive but blocked never releases the per-turn ``active`` flag, so the
+    session is pinned in ``active_sessions`` forever and its ``last_activity`` is
+    frozen. Once that frozen activity is older than the absolute cap
+    (``idle_timeout * multiplier``), the backstop must force-evict it. This is
+    distinct from the stream-exhausted path covered elsewhere, which relies on
+    the receiver actually terminating to release the flag.
+    """
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    cleanup_calls: list[str] = []
+
+    class _ClaudeAgent:
+        @staticmethod
+        async def force_cleanup_stuck_active_session(composite_key: str) -> None:
+            cleanup_calls.append(composite_key)
+            handler.clear_session_tracking(composite_key)
+
+    controller.agent_service = type("AgentService", (), {"agents": {"claude": _ClaudeAgent()}})()
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    _run_session(handler, context)
+
+    composite_key = f"slack_C123:{tmp_path}"
+    # Stuck-active: active flag set, but activity frozen 2000s ago. With the
+    # default 3x multiplier the cap is 1800s, so 2000s > cap -> force-evict.
+    handler.session_last_activity[composite_key] = -1000.0
+    handler.active_sessions.add(composite_key)
+
+    evicted = asyncio.run(handler.evict_idle_sessions(600))
+
+    assert evicted == 1
+    assert cleanup_calls == [composite_key]
+    assert captured["disconnects"] == 0
+    assert composite_key in controller.claude_sessions
+    assert composite_key not in handler.active_sessions
+
+
+def test_evict_idle_sessions_keeps_stuck_active_below_cap(monkeypatch, tmp_path: Path) -> None:
+    """An active session below the absolute cap is still protected."""
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    _run_session(handler, context)
+
+    composite_key = f"slack_C123:{tmp_path}"
+    # Idle for 1700s: past idle_timeout (600) but below the 1800s absolute cap.
+    handler.session_last_activity[composite_key] = -700.0
+    handler.active_sessions.add(composite_key)
+
+    evicted = asyncio.run(handler.evict_idle_sessions(600))
+
+    assert evicted == 0
+    assert captured["disconnects"] == 0
+    assert composite_key in controller.claude_sessions
+    assert composite_key in handler.active_sessions
+
+
+def test_evict_idle_sessions_stuck_cap_floor_dominates_small_timeout(monkeypatch, tmp_path: Path) -> None:
+    """A tiny idle timeout must not shrink the active-turn grace below 30min."""
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    _run_session(handler, context)
+
+    composite_key = f"slack_C123:{tmp_path}"
+    # idle_timeout=60 would make a 180s multiplier window; the 1800s floor
+    # dominates, so 1000s of quiet active time stays protected.
+    handler.session_last_activity[composite_key] = 0.0
+    handler.active_sessions.add(composite_key)
+
+    evicted = asyncio.run(handler.evict_idle_sessions(60))
+
+    assert evicted == 0
+    assert captured["disconnects"] == 0
+    assert composite_key in controller.claude_sessions
+    assert composite_key in handler.active_sessions
+
+
+def test_evict_idle_sessions_stuck_active_backstop_can_be_disabled(monkeypatch, tmp_path: Path) -> None:
+    """``stuck_active_multiplier <= 0`` restores the absolute active veto."""
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    _run_session(handler, context)
+
+    composite_key = f"slack_C123:{tmp_path}"
+    handler.session_last_activity[composite_key] = -100000.0
+    handler.active_sessions.add(composite_key)
+
+    evicted = asyncio.run(handler.evict_idle_sessions(600, stuck_active_multiplier=0))
+
+    assert evicted == 0
+    assert captured["disconnects"] == 0
+    assert composite_key in controller.claude_sessions
+
+
+def test_evict_idle_sessions_spares_session_refreshed_between_passes(monkeypatch, tmp_path: Path) -> None:
+    """The recheck pass re-reads ``last_activity`` from current state.
+
+    A session that looked idle in the collect pass but was touched (a new
+    message arrived) before the recheck pass must NOT be evicted.
+    """
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    _run_session(handler, context)
+
+    composite_key = f"slack_C123:{tmp_path}"
+
+    class _RefreshingActivity(dict):
+        # Collect pass iterates .items() and sees the stale 0.0 (idle 1000s);
+        # the recheck pass calls .get() and sees a freshly-touched 900.0
+        # (idle 100s < idle_timeout), so the session must be spared.
+        def get(self, key, default=None):
+            return 900.0
+
+    handler.session_last_activity = _RefreshingActivity({composite_key: 0.0})
+
+    evicted = asyncio.run(handler.evict_idle_sessions(600))
+
+    assert evicted == 0
+    assert captured["disconnects"] == 0
+    assert composite_key in controller.claude_sessions
+
+
+def test_evict_idle_sessions_evicts_stuck_active_deactivated_between_passes(monkeypatch, tmp_path: Path) -> None:
+    """Stuck-active in the collect pass, deactivated before recheck.
+
+    It must still be evicted — via the normal idle path — since by the recheck
+    pass it is no longer active and is well past ``idle_timeout``.
+    """
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _disconnect_counting_client(captured))
+    monkeypatch.setattr(session_handler_module.time, "monotonic", lambda: 1000.0)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(user_id="U123", channel_id="C123")
+
+    _run_session(handler, context)
+
+    composite_key = f"slack_C123:{tmp_path}"
+    # Idle 2000s (>= 1800 stuck cap and >= 600 idle_timeout).
+    handler.session_last_activity[composite_key] = -1000.0
+
+    class _DeactivatingActiveSet(set):
+        def __init__(self, target_key: str):
+            super().__init__()
+            self.target_key = target_key
+            self.add(target_key)
+            self._checks = 0
+
+        def __contains__(self, item):
+            if item == self.target_key:
+                self._checks += 1
+                # active in the collect pass, deactivated by the recheck pass
+                return self._checks < 2
+            return super().__contains__(item)
+
+    handler.active_sessions = _DeactivatingActiveSet(composite_key)
+
+    evicted = asyncio.run(handler.evict_idle_sessions(600))
+
+    assert evicted == 1
+    assert captured["disconnects"] == 1
+    assert composite_key not in controller.claude_sessions
+
+
+def test_reap_orphaned_sessions_disables_in_tree_sweep_when_pid_unresolved(monkeypatch, tmp_path: Path) -> None:
+    """If a tracked client's pid cannot be resolved, the in-tree sweep is
+    disabled so the live process is not misclassified as an orphan."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_reap(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: None)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    composite_key = f"slack_C123:{tmp_path}"
+    controller.claude_sessions[composite_key] = object()  # tracked but pid unresolved
+
+    asyncio.run(handler.reap_orphaned_claude_sessions())
+
+    assert captured["reap_in_tree"] is False
+
+
+def test_reap_orphaned_sessions_disables_in_tree_sweep_when_create_in_flight(monkeypatch, tmp_path: Path) -> None:
+    """A session create in flight (subprocess spawned, not yet tracked) disables
+    the in-tree sweep."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_reap(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    handler.claude_session_creates["slack_C123:/in/flight"] = object()
+
+    asyncio.run(handler.reap_orphaned_claude_sessions())
+
+    assert captured["reap_in_tree"] is False
+
+
+def test_reap_orphaned_sessions_enables_in_tree_sweep_when_owner_set_complete(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _fake_reap(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    controller.claude_sessions[f"slack_C123:{tmp_path}"] = object()
+
+    asyncio.run(handler.reap_orphaned_claude_sessions())
+
+    assert captured["reap_in_tree"] is True
+
+
+def test_reap_orphaned_sessions_excludes_active_watch_process_roots(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _fake_reap(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    class _WatchService:
+        @staticmethod
+        def active_process_pids():
+            return {500}
+
+    monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
+
+    controller = _Controller(tmp_path)
+    controller.watch_service = _WatchService()
+    handler = SessionHandler(controller)
+    controller.claude_sessions[f"slack_C123:{tmp_path}"] = object()
+
+    asyncio.run(handler.reap_orphaned_claude_sessions())
+
+    assert captured["exclude_pids"] == {500}
+
+
+def test_reap_orphaned_sessions_excludes_active_claude_auth_clients(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _fake_reap(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    class _AuthService:
+        @staticmethod
+        def active_claude_auth_client_pids():
+            return {600}
+
+    monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
+
+    controller = _Controller(tmp_path)
+    controller.agent_auth_service = _AuthService()
+    handler = SessionHandler(controller)
+    controller.claude_sessions[f"slack_C123:{tmp_path}"] = object()
+
+    asyncio.run(handler.reap_orphaned_claude_sessions())
+
+    assert captured["exclude_pids"] == {600}
+
+
+def test_reap_orphaned_sessions_disables_in_tree_when_auth_client_pid_unknown(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _fake_reap(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    class _AuthService:
+        @staticmethod
+        def active_claude_auth_client_pids():
+            return set()
+
+        @staticmethod
+        def has_active_claude_auth_client_with_unknown_pid():
+            return True
+
+    monkeypatch.setattr(session_handler_module, "reap_orphaned_claude_processes", _fake_reap)
+    monkeypatch.setattr(session_handler_module, "get_claude_client_pid", lambda client: 4321)
+
+    controller = _Controller(tmp_path)
+    controller.agent_auth_service = _AuthService()
+    handler = SessionHandler(controller)
+    controller.claude_sessions[f"slack_C123:{tmp_path}"] = object()
+
+    asyncio.run(handler.reap_orphaned_claude_sessions())
+
+    assert captured["reap_in_tree"] is False
 
 
 def test_cleanup_session_swallows_cancelled_receiver_task(monkeypatch, tmp_path: Path) -> None:

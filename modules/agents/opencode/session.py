@@ -12,7 +12,8 @@ import os
 import time
 from typing import Dict, Optional, Tuple
 
-from core.services.session_fork import pending_native_fork_source
+from core.services.session_fork import fork_source_state, pending_native_fork
+from modules.agents.native_sessions.opencode import OpenCodeNativeSessionProvider
 from modules.agents.base import AgentRequest, BaseAgent
 
 from .server import OpenCodeServerManager
@@ -99,6 +100,46 @@ class OpenCodeSessionManager:
             if target_id:
                 return target_id
         return None
+
+    async def _resolve_running_fork_point(
+        self,
+        server: OpenCodeServerManager,
+        source_session_id: str,
+        directory: str,
+        fork: dict,
+    ) -> tuple[bool, Optional[str]]:
+        if not bool(fork.get("trim_latest_running_turn")):
+            return True, None
+        if bool(fork.get("opencode_fork_empty_history")):
+            return False, None
+        message_id = str(fork.get("opencode_fork_message_id") or "").strip()
+        if message_id:
+            source_state = fork_source_state(fork)
+            if source_state.anchor_is_terminal_agent_output or source_state.has_terminal_agent_output_after_anchor:
+                logger.info(
+                    "OpenCode running fork for %s kept full history because the source completed before first use",
+                    source_session_id,
+                )
+                return True, None
+            if getattr(source_state, "has_messages_after_anchor", False):
+                point = self._current_running_fork_point(source_session_id)
+                if point.available:
+                    return True, point.message_id
+            return True, message_id
+        point = self._current_running_fork_point(source_session_id)
+        if point.available:
+            return True, point.message_id
+        logger.warning(
+            "OpenCode running fork for %s has no persisted fork point; preserving source history",
+            source_session_id,
+        )
+        return True, None
+
+    def _current_running_fork_point(self, source_session_id: str):
+        return OpenCodeNativeSessionProvider().running_fork_point_before_latest_user(
+            source_session_id,
+            include_completed_assistant_tail=False,
+        )
 
     def ensure_agent_session_id(self, request: AgentRequest, session_anchor: str) -> Optional[str]:
         reserved_target_id = self._reserved_agent_session_id(request)
@@ -259,13 +300,26 @@ class OpenCodeSessionManager:
         )
 
         if not session_id:
-            fork_source = pending_native_fork_source(request.context, self._agent_name)
+            fork = pending_native_fork(request.context, self._agent_name)
             try:
-                if fork_source:
-                    session_data = await server.fork_session(
+                if fork:
+                    fork_source = str(fork.get("source_native_session_id") or "").strip()
+                    should_fork, message_id = await self._resolve_running_fork_point(
+                        server,
                         fork_source,
-                        directory=request.working_path,
+                        request.working_path,
+                        fork,
                     )
+                    if should_fork:
+                        session_data = await server.fork_session(
+                            fork_source,
+                            directory=request.working_path,
+                            message_id=message_id,
+                        )
+                    else:
+                        session_data = await server.create_session(
+                            directory=request.working_path,
+                        )
                 else:
                     session_data = await server.create_session(
                         directory=request.working_path,
@@ -273,11 +327,11 @@ class OpenCodeSessionManager:
                 session_id = session_data.get("id")
                 if session_id:
                     self.bind_agent_session_id(request, anchor, session_id)
-                    if fork_source:
+                    if fork:
                         logger.info(
                             "Forked OpenCode session %s from %s for %s",
                             session_id,
-                            fork_source,
+                            str(fork.get("source_native_session_id") or "").strip(),
                             request.base_session_id,
                         )
                     else:

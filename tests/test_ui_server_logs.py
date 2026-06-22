@@ -15,7 +15,7 @@ def _set_mtime(path, timestamp: str) -> None:
 
 
 def test_logs_endpoint_returns_multiple_sources(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
 
     (paths.get_logs_dir() / "vibe_remote.log").write_text(
@@ -50,7 +50,7 @@ def test_logs_endpoint_returns_multiple_sources(monkeypatch, tmp_path):
 
 
 def test_logs_endpoint_returns_aggregated_all_view(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
 
     service_log = paths.get_logs_dir() / "vibe_remote.log"
@@ -87,7 +87,7 @@ def test_logs_endpoint_returns_aggregated_all_view(monkeypatch, tmp_path):
 
 
 def test_logs_endpoint_caps_aggregated_all_view_to_requested_lines(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
 
     (paths.get_logs_dir() / "vibe_remote.log").write_text(
@@ -136,7 +136,7 @@ def test_logs_endpoint_caps_aggregated_all_view_to_requested_lines(monkeypatch, 
 
 
 def test_logs_endpoint_keeps_traceback_exception_summary_with_error_entry(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
 
     (paths.get_logs_dir() / "vibe_remote.log").write_text(
@@ -159,7 +159,7 @@ def test_logs_endpoint_keeps_traceback_exception_summary_with_error_entry(monkey
 
 
 def test_logs_endpoint_preserves_recent_unstructured_logs_in_all_view(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
 
     service_log = paths.get_logs_dir() / "vibe_remote.log"
@@ -191,7 +191,7 @@ def test_logs_endpoint_preserves_recent_unstructured_logs_in_all_view(monkeypatc
 
 
 def test_logs_endpoint_falls_back_to_service_for_unknown_source(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
 
     (paths.get_logs_dir() / "vibe_remote.log").write_text(
@@ -210,7 +210,7 @@ def test_logs_endpoint_falls_back_to_service_for_unknown_source(monkeypatch, tmp
 
 
 def test_status_endpoint_degrades_when_pid_probe_raises(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_runtime_pid_path().write_text("12345", encoding="utf-8")
     runtime.write_status("running", detail="pid=12345", service_pid=12345)
@@ -231,7 +231,7 @@ def test_status_endpoint_degrades_when_pid_probe_raises(monkeypatch, tmp_path):
 
 
 def test_control_start_reuses_running_service_without_stop(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     runtime.write_status("running", detail="already running", service_pid=12345, ui_pid=67890)
     calls = []
@@ -250,7 +250,7 @@ def test_control_start_reuses_running_service_without_stop(monkeypatch, tmp_path
 
 
 def test_control_stop_uses_locked_service_stop(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     runtime.write_status("running", detail="running", service_pid=12345, ui_pid=67890)
     paths.get_runtime_pid_path().write_text("12345", encoding="utf-8")
@@ -269,7 +269,7 @@ def test_control_stop_uses_locked_service_stop(monkeypatch, tmp_path):
 
 
 def test_control_restart_schedules_restart_job(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     runtime.write_status("running", detail="running", service_pid=12345, ui_pid=67890)
     paths.get_runtime_pid_path().write_text("12345", encoding="utf-8")
@@ -304,7 +304,7 @@ def test_control_restart_schedules_restart_job(monkeypatch, tmp_path):
 def test_control_restart_rejects_overlapping_restart(monkeypatch, tmp_path):
     """A restart already in flight (live supervisor) blocks a second one so two
     jobs can't race on the same pid files + lock."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe.ui_server import app
     import vibe.restart_supervisor as restart_supervisor
 
@@ -333,7 +333,7 @@ def test_control_restart_rejects_overlapping_restart(monkeypatch, tmp_path):
 def test_control_restart_ignores_dead_supervisor(monkeypatch, tmp_path):
     """A 'running' status whose supervisor pid is dead is stale and must NOT
     block a new restart."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe.ui_server import app
     import vibe.restart_supervisor as restart_supervisor
 
@@ -361,7 +361,7 @@ def test_control_restart_ignores_stale_pidless_seed(monkeypatch, tmp_path):
     """A pid-less 'scheduled' seed older than the grace window (the supervisor
     died before recording its pid) is stale and must NOT block restarts forever;
     a FRESH pid-less seed still blocks (the child is just starting)."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     import time as _time
 
     from vibe.ui_server import app

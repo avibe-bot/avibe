@@ -92,100 +92,40 @@ Hard rule:
 
 ### Regression Testing (Incus)
 
-When the user says `回归测试`, treat it as:
+When the user says `回归测试`, update the latest code into the existing **local**
+Incus regression environment, preserve accumulated product state unless reset is
+explicitly requested, then let the user verify Slack, Discord, Feishu/Lark, and
+WeChat behavior.
 
-- update the latest code into the existing **local** Incus-based regression environment
-- let the user verify behavior on Slack, Discord, Feishu/Lark, and WeChat
-- preserve previously accumulated regression config/state unless the user explicitly asks for a reset
+Entry points:
 
-The regression environment is local developer infrastructure only. It must be
-created, inspected, updated, and destroyed through the local Incus runner in this
-repo. Remote Incus hosts, remote tenant instances, demo instances, and
-customer/user environments are not regression environments and must not be used
-as fallbacks for development testing.
+- default: `./scripts/run_regression.sh`
+- direct: `python3 scripts/incus_regression.py up --target master`
+- macOS/Lima: `INCUS_CMD="limactl shell avibe-incus-regression -- sudo incus" ./scripts/run_regression.sh`
 
-The local master regression environment runs a single unified Incus system
-container with all four IM platforms enabled simultaneously.
+Hard rules:
 
-Standard path:
+- local Incus only for development regression; never use `--remote`, SSH, remote
+  tenant projects, demos, or customer/user environments unless explicitly asked
+  for remote ops
+- use the runner, not raw Incus commands; it owns naming, source sync, state
+  preparation, readiness checks, Show Runtime setup, metadata, and cleanup
+- `master` is the long-running unified four-platform environment; keep it online,
+  preserve product state, sync source, and restart the service in place
+- `worktree` targets are temporary isolated environments; delete with
+  `python3 scripts/incus_regression.py delete --target worktree --yes` or
+  `cleanup-stale --yes` when merged, abandoned, or stale
+- never use `--reset-config` / `--reset-all`, wipe regression state, or overwrite
+  Avibe Cloud pairing / `remote_access` just to make probes pass unless asked
+- after any regression update, verify service health before reporting success
 
-- default command: `./scripts/run_regression.sh`
-- direct runner: `python3 scripts/incus_regression.py up --target master`
+State and lookup notes:
 
-Connection standard (the one supported way to connect — all platforms, all agents):
-
-- The runner reaches Incus through the `INCUS_CMD` knob only: it builds every
-  command as `${INCUS_CMD:-incus}`. This is the single supported connection
-  mechanism for development regression on every platform.
-  - Linux (native daemon): leave `INCUS_CMD` unset (defaults to `incus`), or set
-    `INCUS_CMD="sudo incus"` when the user is not in the `incus-admin` group.
-  - macOS (Lima): `INCUS_CMD="limactl shell avibe-incus-regression -- sudo incus"`
-    (see the macOS note below).
-- `--remote` is a *different axis* — it selects **which** Incus daemon to target,
-  not **how** to connect — and is **not** a development-regression connection
-  method. It is only a rare escape hatch for operating on a genuinely remote
-  Incus host; never use it to reach the local regression environment. Do not
-  enable a TLS listener / client cert / named remote on the regression VM to
-  "connect that way": the daemon is unix-socket-only by design and `INCUS_CMD`
-  is the standard.
-
-Connecting to Incus on macOS (Lima):
-
-- macOS has no native Incus daemon. The regression environment runs inside the
-  Lima VM `avibe-incus-regression`, and `incusd` there listens **only on its unix
-  socket** (no TLS `core.https_address`, no guest→host socket forward). So a plain
-  host `incus` (default `local` remote) has nothing to dial and the runner aborts
-  with "you must connect to a remote server".
-- Drive the runner through the VM with the `INCUS_CMD` knob (the runner splices it
-  in place of `incus`):
-
-  ```
-  INCUS_CMD="limactl shell avibe-incus-regression -- sudo incus" ./scripts/run_regression.sh
-  ```
-
-  Optionally add the Lima user to the `incus-admin` group inside the VM to drop the
-  `sudo`. This is the supported way to run the regression CLI on macOS — not a hack.
-- Symptom when this is missing: `incus info` fails, so `up` wrongly concludes the
-  instance does not exist, takes the create path, and trips the host-port preflight
-  on the UI port the already-running env is forwarding (e.g. 15130). The fix is the
-  connection above — not removing the preflight, which is correctly skipped once the
-  client can see the existing instance.
-
-Rules:
-
-- use local Incus only; do not pass `--remote`, switch Incus remotes, SSH to a
-  remote host, or inspect remote tenant projects for development regression
-  unless the user explicitly asks for remote operations outside the development
-  workflow
-- `master` is the long-running local regression environment; keep it online and
-  preserve its product state across code updates
-- a normal master update should sync source and restart the Avibe service inside
-  the existing local Incus instance, not recreate the environment or reseed data
-- do **not** use `--reset-config` or `--reset-all` unless the user explicitly requests reset behavior
-- do **not** disable or overwrite preserved `remote_access` / Avibe Cloud pairing state just to make local probes pass; the regression environment is also used to test remote access, so preserve and fix the host/binding path instead
-- when Avibe Cloud remote access is enabled in regression, prefer binding the Incus UI proxy to loopback for local maintenance access (`REGRESSION_PORT_BIND_HOST=127.0.0.1`) while keeping the remote public URL active for product testing
-- use `--target master` for the long-running master regression environment
-- use `--target worktree` for isolated temporary worktree regression environments
-- after running the script, verify the service is healthy before handing back to the user
-- prefer Incus regression over local `vibe` whenever validating cross-platform behavior, setup wizard behavior, or user-facing IM flows
-- always use `./scripts/run_regression.sh` or `python3 scripts/incus_regression.py`; do not run raw Incus commands directly because the runner owns naming, state preparation, source sync, runtime readiness checks, and worktree cleanup metadata
-- the script stores worktree regression metadata under the primary checkout's `.runtime/incus-regression/` by default, even when invoked from a task worktree
-- the script reads `.env.regression` from the current worktree first, then falls back to the primary checkout
-- temporary worktree environments should be deleted with `python3 scripts/incus_regression.py delete --target worktree --yes` or cleaned with `cleanup-stale --yes`
-- the regression container uses `/home/avibe` as a persistent real home; product state should live under `/home/avibe/.avibe`, with `/home/avibe/.vibe_remote` as the compatibility symlink
-- the script must prepare and verify Show Runtime before reporting success; if Show Runtime cannot be installed or executed, treat the regression update as failed
-- for branch/master regression, `REGRESSION_SHOW_RUNTIME_SOURCE` defaults to `github-source` because source checkouts do not necessarily include a packaged release manifest; release/pre-release installs should use the packaged manifest path
-
-Worktree behavior:
-
-- code is synced from the worktree where the script is invoked
-- `master` uses the long-running Incus project/instance and preserves product state
-- non-master worktrees use temporary isolated local Incus project/instances
-- after a worktree is merged, abandoned, or no longer needed, delete its
-  regression environment with `python3 scripts/incus_regression.py delete
-  --target worktree --yes`; use `cleanup-stale --yes` to remove environments for
-  worktree paths that no longer exist
-- worktree mappings live in `.runtime/incus-regression/worktrees.json`
+- regression product state lives under `/home/avibe/.avibe`; `/home/avibe/.vibe_remote` is only the compatibility symlink
+- metadata lives under the primary checkout's `.runtime/incus-regression/`, even
+  when the runner is invoked from a task worktree
+- `.env.regression` is read from the current worktree first, then the primary checkout
+- branch/master source checkouts default `REGRESSION_SHOW_RUNTIME_SOURCE=github-source`; packaged release installs should use the packaged manifest path
 
 ## 4. Configuration and Routing Model
 
@@ -281,38 +221,12 @@ Source-of-truth rule:
 
 ### Frontend (UI)
 
-- source lives in `ui/`
-- build command: `npm run build` from `ui/`
-- built assets land in `ui/dist/` and are served by `vibe/ui_server.py`
-
-Reuse design-system primitives — do not re-roll:
-
-- buttons must use `Button` from `ui/src/components/ui/button.tsx`; pick a `variant` + `size` rather than hand-rolling `<button>` with custom Tailwind classes. Icon-only triggers use `variant="ghost" size="icon"` (with a `className` size override when the surrounding row is tight).
-- status pills must use `Badge` (or `badgeVariants()` applied to a `<button>` when the pill needs to be clickable) from `ui/src/components/ui/badge.tsx`; pick a semantic variant (`success` / `warning` / `info` / `destructive` / `secondary`) instead of redefining border/bg/text colors.
-- the same rule applies to every other primitive under `ui/src/components/ui/` (`Card`, `Input`, `Label`, `Popover`, `Dialog`, `Combobox`, `Separator`, ...): if a primitive already exists, extend it via `variant`, `size`, or `className` overrides — do not duplicate it inline.
-- if no existing primitive fits, add a new variant (or a new primitive in `ui/src/components/ui/`) so the next caller can reuse it. Prefer adjusting the design-system layer over re-implementing the visual locally in a feature component.
-- the source of truth for visual tokens (colors, radii, spacing, variant names) is `design.pen` — extend primitives to match its variant names so design ↔ code stay aligned.
-
-**Reuse-first methodology (the reuse ladder).** This generalizes the rules above; it applies to shared backend logic too, not just UI:
-
-- **Inventory before you build.** Survey what already exists — primitives, tokens, services, and how sibling features solved the same problem — and build from that inventory, not from scratch.
-- **Walk the ladder in order:** reuse as-is → extend it (new `variant` / `size` / prop / arg) → promote a near-duplicate that lives in a feature folder into the shared layer so every caller gets it → only then build new, as a real reusable unit in its proper home, never an inline one-off.
-- **Extract on the third repeat.** When the same markup / logic / constant recurs in ~3 places, lift it into one shared component or util and retrofit the existing callers. Touching N call sites with the same pattern means extracting the pattern, not pasting it N times — one concept, one home.
-- Prefer extending the shared / design-system layer over patching the symptom in a feature file; the next caller should inherit the fix for free. Don't rush past reuse for speed — a clean, reusable change beats a fast local hack.
-
-**Match the design pixel-for-pixel.** UI that drifts from the design is a defect, not a detail:
-
-- `design.pen` is the visual source of truth; "looks roughly right" is not done.
-- **Map every value to an exact token or class** — each size, weight, spacing, radius, color, and shadow corresponds to a specific token / utility. Look it up; don't eyeball it. If a needed token is missing, add it to the token layer first instead of hardcoding a one-off.
-- **Verify by side-by-side comparison, not memory.** Render the built surface at the design's target viewport, place it next to the exported design frame, enumerate the deltas (spacing, type scale, color, radius, shadow, alignment), and fix until they match before calling it done.
-- Confirm the utility classes you used actually resolve to the intended values — a class that silently no-ops (missing or aliased token) looks fine in code and wrong on screen.
-
-Important packaging caveat:
-
-- the installed `vibe` command uses packaged UI assets, not raw `ui/dist/` from the repo by default
-- for local preview of packaged CLI/UI changes, build the UI and reinstall from a normal wheel; do not use `uv tool install --force --editable .` for the live local CLI
-- do not run `python3 -m pip install -e .` against the system Python for validation; editable installs belong in a temporary venv or another explicitly isolated environment
-- do not restart local `vibe` just to verify UI changes unless the user explicitly requests a local-service workflow and the session impact is understood
+- source lives in `ui/`; build with `cd ui && npm run build`; `ui/dist/` is served by `vibe/ui_server.py`
+- reuse `ui/src/components/ui/` primitives first (`Button`, `Badge`, `Card`, `Input`, `Popover`, `Dialog`, etc.); extend via variants/sizes/props before creating new primitives
+- follow the reuse ladder for UI and shared backend logic: inventory existing patterns -> reuse -> extend -> promote near-duplicates -> create a reusable unit only when needed; extract on the third repeat
+- `design.pen` is the visual source of truth; map spacing, type, radius, color, and shadow to exact tokens/classes, add missing tokens instead of hardcoding, and verify against the exported frame when visual fidelity matters
+- installed `vibe` uses packaged UI assets, not raw repo `ui/dist/`; for packaged CLI/UI preview, build UI and reinstall from a normal wheel, not `uv tool install --force --editable .`
+- do not run editable installs against system Python, and do not restart local `vibe` for UI checks unless the user explicitly requests that local-service workflow
 
 ## 7. Testing and Validation
 

@@ -19,7 +19,7 @@ from storage.settings_service import upsert_scope
 
 @pytest.fixture
 def engine():
-    # conftest's autouse fixture isolates VIBE_REMOTE_HOME per test.
+    # conftest's autouse fixture isolates AVIBE_HOME per test.
     ensure_sqlite_state()
     return create_sqlite_engine()
 

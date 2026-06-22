@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Check, Copy, Loader2, Share2 } from 'lucide-react';
+import { Check, Copy, Loader2, Plus, Share2 } from 'lucide-react';
 
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -8,6 +8,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Select } from '../ui/select';
 import { useApi } from '../../context/ApiContext';
 import { copyTextToClipboard } from '../../lib/utils';
+import { isIosDevice, isRealMobileSafari, isStandalonePwa } from '../../lib/platform';
 import { copyHref, type ShowPageLinkInfo } from '../../lib/showPageLinks';
 
 type ShowPagePayload = ShowPageLinkInfo & {
@@ -58,6 +59,14 @@ export const ShowPageShareControl: React.FC<{
   // select/copy yields the same link as the Copy button.
   const link = payload ? copyHref(payload) ?? '' : '';
   const canNativeShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+  // "Add to Home Screen" only works where Safari's page-share flow is reachable:
+  // real iOS Safari (tapping opens the Show Page top-level, then the user shares
+  // that), or an installed iOS standalone PWA (a same-origin link stays trapped in
+  // scope, so the user copies the link and opens it in Safari). iOS Chrome/Firefox
+  // and IM in-app browsers report iOS too but can't reach that flow, so we don't
+  // show steps they can't complete — matching the InstallHint nudge's gating.
+  const iosStandalone = isIosDevice() && isStandalonePwa();
+  const showAddToHome = !!link && (iosStandalone || isRealMobileSafari());
 
   // Re-fetch on every open so a visibility/share change made elsewhere (e.g. the
   // admin Show Pages page) is reflected; keep the last payload visible while
@@ -198,6 +207,36 @@ export const ShowPageShareControl: React.FC<{
             {payload && isPublic && !payload.url_available && (
               <div className="rounded-md border border-border px-2.5 py-2 text-xs text-muted">
                 {t('chat.showPage.publicUnavailable')}
+              </div>
+            )}
+
+            {showAddToHome && (
+              <div className="rounded-md border border-border bg-foreground/[0.02] px-2.5 py-2">
+                <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
+                  <Plus className="size-3.5 shrink-0 text-cyan" />
+                  {t('chat.showPage.addToHomeTitle')}
+                </div>
+                {iosStandalone ? (
+                  // Installed PWA: a same-origin link can't hand off to Safari
+                  // (it stays trapped in scope), so the user must copy the link
+                  // and open it in Safari — the Copy button above does that.
+                  <p className="mt-1 text-xs leading-relaxed text-muted">
+                    {t('chat.showPage.addToHomeBodyPwa')}
+                  </p>
+                ) : (
+                  // Safari: the popover sits in the workbench while the Show Page
+                  // is framed, so Safari's own Share targets the workbench URL.
+                  // Open the Show Page top-level first (new tab) — then the user's
+                  // Share → Add to Home Screen captures the Show Page, not us.
+                  <a
+                    href={link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-1 block text-xs leading-relaxed text-foreground underline underline-offset-2"
+                  >
+                    {t('chat.showPage.addToHomeBodySafari')}
+                  </a>
+                )}
               </div>
             )}
           </>

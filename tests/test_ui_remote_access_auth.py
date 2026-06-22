@@ -98,7 +98,7 @@ def _cloudflare_headers() -> dict[str, str]:
 
 
 def test_remote_host_redirects_to_vibe_cloud_login(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
 
     response = app.test_client().get(
@@ -122,7 +122,7 @@ def test_login_redirect_sets_persistent_handshake_cookie(monkeypatch, tmp_path):
     # cross-origin authorize excursion, so the callback can't read the handshake
     # back and deterministically fails with invalid_oauth_state. The handshake
     # cookie must be persistent. Regression guard for the PWA login dead-end.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
 
     with app.test_request_context("/dashboard", base_url="https://alex.avibe.bot"):
@@ -137,7 +137,7 @@ def test_login_redirect_sets_stable_device_binding_cookie(monkeypatch, tmp_path)
     # The store-fallback recovery is bound to this persistent per-browser device
     # cookie, which (unlike the per-flow handshake state) survives the iOS authorize
     # excursion. The login redirect must seed it, long-lived.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
 
     with app.test_request_context("/dashboard", base_url="https://alex.avibe.bot"):
@@ -154,7 +154,7 @@ def test_login_redirect_sets_stable_device_binding_cookie(monkeypatch, tmp_path)
 
 
 def test_remote_setup_route_requires_vibe_cloud_login(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
 
     response = app.test_client().get(
@@ -173,7 +173,7 @@ def test_remote_setup_route_requires_vibe_cloud_login(monkeypatch, tmp_path):
 
 
 def test_remote_config_get_without_session_returns_login_required(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
     response = app.test_client().get(
@@ -192,7 +192,7 @@ def test_api_config_blocked_host_returns_machine_readable_error(monkeypatch, tmp
     503 with a machine-readable ``error`` code (not a redirect, not an opaque
     body). The guard reads this to show an explicit "access blocked" screen
     instead of bouncing the visitor to the setup wizard."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
     response = app.test_client().get(
@@ -207,7 +207,7 @@ def test_api_config_blocked_host_returns_machine_readable_error(monkeypatch, tmp
 
 
 def test_remote_host_strips_retry_marker_from_oauth_next(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
 
     response = app.test_client().get(
@@ -226,7 +226,7 @@ def test_remote_host_strips_retry_marker_from_oauth_next(monkeypatch, tmp_path):
 
 
 def test_remote_host_with_explicit_port_still_requires_login(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
     response = app.test_client().get("/dashboard", base_url="https://alex.avibe.bot:443", follow_redirects=False)
@@ -236,7 +236,7 @@ def test_remote_host_with_explicit_port_still_requires_login(monkeypatch, tmp_pa
 
 
 def test_remote_host_with_trailing_dot_still_requires_login(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
     response = app.test_client().get("/dashboard", base_url="https://alex.avibe.bot.", follow_redirects=False)
@@ -246,7 +246,7 @@ def test_remote_host_with_trailing_dot_still_requires_login(monkeypatch, tmp_pat
 
 
 def test_remote_health_does_not_require_remote_access_cookie(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
     response = app.test_client().get(
@@ -261,7 +261,7 @@ def test_remote_health_does_not_require_remote_access_cookie(monkeypatch, tmp_pa
 
 
 def test_localhost_does_not_require_remote_access_cookie(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
     response = app.test_client().get("/health", base_url="http://127.0.0.1:5123")
@@ -272,7 +272,7 @@ def test_localhost_does_not_require_remote_access_cookie(monkeypatch, tmp_path):
 def test_live_request_cannot_spoof_test_remote_addr_header(monkeypatch, tmp_path):
     """The compatibility test-client shim accepts an environ_base REMOTE_ADDR,
     but the transport header it uses must not be honored on live ASGI traffic."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
     async def _exercise():
@@ -291,7 +291,7 @@ def test_live_request_cannot_spoof_test_remote_addr_header(monkeypatch, tmp_path
 
 
 def test_docker_loopback_host_requires_explicit_trust(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.delenv("VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS", raising=False)
     _save_config(tmp_path)
 
@@ -306,7 +306,7 @@ def test_docker_loopback_host_requires_explicit_trust(monkeypatch, tmp_path):
 
 
 def test_docker_loopback_health_probe_is_allowed_when_explicitly_trusted(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS", "1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST", "127.0.0.1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_PEER_IPS", "172.17.0.1")
@@ -322,7 +322,7 @@ def test_docker_loopback_health_probe_is_allowed_when_explicitly_trusted(monkeyp
 
 
 def test_docker_loopback_status_probe_is_allowed_when_explicitly_trusted(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS", "1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST", "127.0.0.1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_PEER_IPS", "172.17.0.1")
@@ -338,7 +338,7 @@ def test_docker_loopback_status_probe_is_allowed_when_explicitly_trusted(monkeyp
 
 
 def test_docker_loopback_probe_accepts_ipv4_mapped_peer(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS", "1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST", "127.0.0.1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_PEER_IPS", "172.17.0.1")
@@ -354,7 +354,7 @@ def test_docker_loopback_probe_accepts_ipv4_mapped_peer(monkeypatch, tmp_path):
 
 
 def test_docker_loopback_trust_does_not_bypass_ui_auth(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS", "1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST", "127.0.0.1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_PEER_IPS", "172.17.0.1")
@@ -371,7 +371,7 @@ def test_docker_loopback_trust_does_not_bypass_ui_auth(monkeypatch, tmp_path):
 
 
 def test_docker_loopback_trust_requires_loopback_port_binding(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS", "1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST", "0.0.0.0")
     _save_config(tmp_path)
@@ -387,7 +387,7 @@ def test_docker_loopback_trust_requires_loopback_port_binding(monkeypatch, tmp_p
 
 
 def test_docker_loopback_ui_requires_loopback_port_binding(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS", "1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST", "0.0.0.0")
     _save_config(tmp_path)
@@ -403,7 +403,7 @@ def test_docker_loopback_ui_requires_loopback_port_binding(monkeypatch, tmp_path
 
 
 def test_docker_loopback_trust_still_rejects_non_local_host(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS", "1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST", "127.0.0.1")
     _save_config(tmp_path)
@@ -419,7 +419,7 @@ def test_docker_loopback_trust_still_rejects_non_local_host(monkeypatch, tmp_pat
 
 
 def test_docker_loopback_trust_rejects_untrusted_peer(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS", "1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST", "127.0.0.1")
     _save_config(tmp_path)
@@ -435,7 +435,7 @@ def test_docker_loopback_trust_rejects_untrusted_peer(monkeypatch, tmp_path):
 
 
 def test_docker_loopback_trust_requires_configured_peer_ip(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS", "1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST", "127.0.0.1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_PEER_IPS", "172.17.0.1")
@@ -451,7 +451,7 @@ def test_docker_loopback_trust_requires_configured_peer_ip(monkeypatch, tmp_path
 
 
 def test_docker_loopback_trust_accepts_runtime_default_gateway(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS", "1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST", "127.0.0.1")
     monkeypatch.delenv("VIBE_REMOTE_DOCKER_LOOPBACK_PEER_IPS", raising=False)
@@ -476,7 +476,7 @@ def test_docker_loopback_trust_accepts_runtime_default_gateway(monkeypatch, tmp_
 
 
 def test_docker_loopback_trust_rejects_same_network_container_peer(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS", "1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST", "127.0.0.1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_PEER_IPS", "172.17.0.1")
@@ -493,7 +493,7 @@ def test_docker_loopback_trust_rejects_same_network_container_peer(monkeypatch, 
 
 
 def test_docker_loopback_trust_rejects_non_gateway_peer_on_dynamic_bridge(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS", "1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST", "127.0.0.1")
     monkeypatch.delenv("VIBE_REMOTE_DOCKER_LOOPBACK_PEER_IPS", raising=False)
@@ -518,7 +518,7 @@ def test_docker_loopback_trust_rejects_non_gateway_peer_on_dynamic_bridge(monkey
 
 
 def test_docker_loopback_trust_accepts_ipv4_mapped_configured_peer(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setenv("VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS", "1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST", "127.0.0.1")
     monkeypatch.setenv("VIBE_REMOTE_DOCKER_LOOPBACK_PEER_IPS", "172.17.0.1")
@@ -534,7 +534,7 @@ def test_docker_loopback_trust_accepts_ipv4_mapped_configured_peer(monkeypatch, 
 
 
 def test_unmatched_non_local_host_fails_closed_when_remote_access_enabled(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
     response = app.test_client().get(
@@ -549,7 +549,7 @@ def test_unmatched_non_local_host_fails_closed_when_remote_access_enabled(monkey
 
 
 def test_loopback_proxy_with_public_host_mismatch_fails_closed(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
     response = app.test_client().get(
@@ -563,7 +563,7 @@ def test_loopback_proxy_with_public_host_mismatch_fails_closed(monkeypatch, tmp_
 
 
 def test_loopback_proxy_with_partial_forwarded_metadata_fails_closed(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
     response = app.test_client().get(
@@ -579,7 +579,7 @@ def test_loopback_proxy_with_partial_forwarded_metadata_fails_closed(monkeypatch
 
 
 def test_loopback_origin_proxy_with_loopback_host_is_allowed(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
     response = app.test_client().get(
@@ -597,7 +597,7 @@ def test_loopback_origin_proxy_with_loopback_host_is_allowed(monkeypatch, tmp_pa
 
 
 def test_remote_host_allows_valid_remote_session(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     client = app.test_client()
     client.set_cookie(remote_access.SESSION_COOKIE_NAME, remote_access.make_session_cookie(config, "alex@example.com", "user-1"), domain="alex.avibe.bot")
@@ -625,7 +625,7 @@ def _forged_session_cookie(config: V2Config, exp: int, *, email: str = "alex@exa
 
 
 def test_remote_host_does_not_renew_fresh_cookie(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     client = app.test_client()
     client.set_cookie(
@@ -643,7 +643,7 @@ def test_remote_host_does_not_renew_fresh_cookie(monkeypatch, tmp_path):
 def test_remote_host_renews_cookie_past_half_ttl(monkeypatch, tmp_path):
     import time as _time
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     near_exp = int(_time.time()) + (remote_access.SESSION_TTL_SECONDS // 2) - 60
     cookie = _forged_session_cookie(config, near_exp)
@@ -674,7 +674,7 @@ def test_remote_host_does_not_renew_cookie_on_rejected_post(monkeypatch, tmp_pat
     keep a stolen session alive indefinitely."""
     import time as _time
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     near_exp = int(_time.time()) + (remote_access.SESSION_TTL_SECONDS // 2) - 60
     cookie = _forged_session_cookie(config, near_exp)
@@ -766,7 +766,7 @@ def test_spoofed_loopback_host_is_not_local_when_peer_is_remote(monkeypatch):
 
 
 def test_cloudflare_forwarded_request_with_loopback_host_fails_closed(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
     response = app.test_client().get(
@@ -781,7 +781,7 @@ def test_cloudflare_forwarded_request_with_loopback_host_fails_closed(monkeypatc
 
 
 def test_remote_host_fails_closed_when_disabled_but_hostname_still_matches(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     config.remote_access.vibe_cloud.enabled = False
     config.save()
@@ -798,7 +798,7 @@ def test_remote_host_fails_closed_when_disabled_but_hostname_still_matches(monke
 
 
 def test_unmatched_non_local_host_fails_closed_when_remote_access_disabled(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     config.remote_access.vibe_cloud.enabled = False
     config.save()
@@ -815,7 +815,7 @@ def test_unmatched_non_local_host_fails_closed_when_remote_access_disabled(monke
 
 
 def test_remote_host_fails_closed_when_public_url_is_invalid(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     config.remote_access.vibe_cloud.public_url = "alex.avibe.bot"
     config.save()
@@ -832,7 +832,7 @@ def test_remote_host_fails_closed_when_public_url_is_invalid(monkeypatch, tmp_pa
 
 
 def test_remote_host_fails_closed_when_public_url_is_http(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     config.remote_access.vibe_cloud.public_url = "http://alex.avibe.bot"
     config.save()
@@ -849,7 +849,7 @@ def test_remote_host_fails_closed_when_public_url_is_http(monkeypatch, tmp_path)
 
 
 def test_remote_host_fails_closed_when_public_url_contains_userinfo(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     config.remote_access.vibe_cloud.public_url = "https://user:pass@alex.avibe.bot"
     config.save()
@@ -866,7 +866,7 @@ def test_remote_host_fails_closed_when_public_url_contains_userinfo(monkeypatch,
 
 
 def test_remote_host_fails_closed_when_public_url_is_empty(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     config.remote_access.vibe_cloud.public_url = ""
     config.save()
@@ -883,7 +883,7 @@ def test_remote_host_fails_closed_when_public_url_is_empty(monkeypatch, tmp_path
 
 
 def test_remote_host_fails_closed_when_session_secret_is_empty(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     config.remote_access.vibe_cloud.session_secret = ""
     config.save()
@@ -895,7 +895,7 @@ def test_remote_host_fails_closed_when_session_secret_is_empty(monkeypatch, tmp_
 
 
 def test_config_post_rotates_session_secret_when_remote_access_is_disabled(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     old_secret = config.remote_access.vibe_cloud.session_secret
     client = app.test_client()
@@ -917,7 +917,7 @@ def test_config_post_rotates_session_secret_when_remote_access_is_disabled(monke
 
 
 def test_config_post_skips_reconcile_when_remote_access_is_unchanged(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     client = app.test_client()
     reconcile_calls = []
@@ -936,7 +936,7 @@ def test_config_post_skips_reconcile_when_remote_access_is_unchanged(monkeypatch
 
 
 def test_config_post_returns_saved_config_when_remote_reconcile_fails(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     old_secret = config.remote_access.vibe_cloud.session_secret
     client = app.test_client()
@@ -960,7 +960,7 @@ def test_config_post_returns_saved_config_when_remote_reconcile_fails(monkeypatc
 
 
 def test_config_post_reconciles_after_releasing_config_lock(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     client = app.test_client()
     lock_states = []
@@ -983,7 +983,7 @@ def test_config_post_reconciles_after_releasing_config_lock(monkeypatch, tmp_pat
 
 
 def test_config_post_reconciles_from_fresh_config(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     client = app.test_client()
     reconcile_args = []
@@ -1006,7 +1006,7 @@ def test_config_post_reconciles_from_fresh_config(monkeypatch, tmp_path):
 
 
 def test_remote_callback_rejects_nonce_mismatch(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     client = app.test_client()
 
@@ -1039,7 +1039,7 @@ def test_remote_callback_rejects_nonce_mismatch(monkeypatch, tmp_path):
 
 
 def test_remote_callback_rejects_when_remote_access_is_disabled(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     client = app.test_client()
     oauth_cookie = ui_server._make_oauth_cookie(
@@ -1071,7 +1071,7 @@ def test_remote_callback_rejects_when_remote_access_is_disabled(monkeypatch, tmp
 
 
 def test_remote_callback_restarts_oauth_when_state_cookie_was_lost(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     client = app.test_client()
     state = ui_server._make_oauth_state(
@@ -1094,7 +1094,7 @@ def test_remote_callback_restarts_oauth_when_state_cookie_was_lost(monkeypatch, 
 
 
 def test_remote_callback_does_not_restart_oauth_twice(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     client = app.test_client()
     state = ui_server._make_oauth_state(
@@ -1115,7 +1115,7 @@ def test_remote_callback_does_not_restart_oauth_twice(monkeypatch, tmp_path):
 
 
 def test_remote_callback_renders_relogin_page_for_legacy_state(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     client = app.test_client()
 
@@ -1136,7 +1136,7 @@ def test_remote_callback_recovers_via_store_when_cookie_state_desyncs(monkeypatc
     # runs in a separate in-app-browser context. The callback must still complete by
     # recovering the PKCE secrets from the server-side store, keyed by the signed URL
     # state. Regression guard for the deterministic PWA invalid_oauth_state dead-end.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     secret = config.remote_access.vibe_cloud.session_secret
     client = app.test_client()
@@ -1192,7 +1192,7 @@ def test_remote_callback_recovers_via_store_when_cookie_state_desyncs(monkeypatc
 
 
 def test_oauth_handshake_store_is_single_use_and_expires(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
     remote_access.store_oauth_handshake("rid-abc", nonce="n", code_verifier="v", next_target="/x")
@@ -1217,7 +1217,7 @@ def test_oauth_handshake_store_caps_entries(monkeypatch, tmp_path):
     # The store is written on every unauthenticated redirect; a hard cap prevents
     # unbounded inode growth under a burst. At capacity, new writes are shed and
     # existing in-flight entries are preserved.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     monkeypatch.setattr(remote_access, "OAUTH_HANDSHAKE_MAX_ENTRIES", 3)
 
@@ -1234,7 +1234,7 @@ def test_oauth_handshake_cap_holds_under_concurrency(monkeypatch, tmp_path):
     # lock, many threads could pass the count check before any writes.
     import threading
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     monkeypatch.setattr(remote_access, "OAUTH_HANDSHAKE_MAX_ENTRIES", 5)
 
@@ -1259,7 +1259,7 @@ def test_oauth_handshake_cap_holds_under_concurrency(monkeypatch, tmp_path):
 def test_unauthenticated_auth_requests_are_rate_limited(monkeypatch, tmp_path):
     # Root-level bound: a flood of unauthenticated login-start requests from one
     # client is 429'd, instead of each one doing handshake/cookie/log work.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     monkeypatch.setattr(ui_server, "_AUTH_RATELIMIT_MAX_PER_WINDOW", 3)
     client = app.test_client()
@@ -1281,7 +1281,7 @@ def test_auth_rate_limit_ignores_untrusted_forwarded_ip(monkeypatch, tmp_path):
     # A direct (non-loopback) peer can't dodge the limit by rotating CF-Connecting-IP:
     # the forwarded IP is trusted only from the loopback tunnel peer, so such a peer
     # is keyed by its real address and the rotating header is ignored.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     monkeypatch.setattr(ui_server, "_AUTH_RATELIMIT_MAX_PER_WINDOW", 3)
     client = app.test_client()
@@ -1303,7 +1303,7 @@ def test_auth_rate_limit_ignores_untrusted_forwarded_ip(monkeypatch, tmp_path):
 def test_auth_rate_limit_table_is_bounded(monkeypatch, tmp_path):
     # The limiter's own table is hard-capped (LRU eviction), so a burst of distinct
     # clients can't drive unbounded in-process memory growth.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     monkeypatch.setattr(ui_server, "_AUTH_RATELIMIT_MAX_TRACKED_CLIENTS", 3)
     client = app.test_client()
@@ -1341,7 +1341,7 @@ def test_oauth_diag_log_is_rate_limited(monkeypatch):
 def test_oauth_error_page_localizes_from_accept_language(monkeypatch, tmp_path):
     # The re-login page copy must come from vibe/i18n and honor the browser's
     # Accept-Language (the only server-readable locale signal pre-auth).
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     client = app.test_client()
 
@@ -1364,7 +1364,7 @@ def test_remote_callback_refuses_store_fallback_without_device_binding(monkeypat
     # isn't the one that started the flow. The store record is bound to the attacker's
     # device id; the victim's browser presents its own (different) device cookie plus a
     # stale handshake cookie, so the store-fallback must refuse — no token exchange.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     secret = config.remote_access.vibe_cloud.session_secret
     client = app.test_client()
@@ -1413,7 +1413,7 @@ def test_oauth_handshake_pop_is_atomic_single_use_under_concurrency(monkeypatch,
     import threading
     from unittest import mock
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
     remote_access.store_oauth_handshake("race-rid000", nonce="n", code_verifier="v", next_target="/")
 
@@ -1444,7 +1444,7 @@ def test_oauth_handshake_pop_is_atomic_single_use_under_concurrency(monkeypatch,
 
 
 def test_remote_callback_accepts_html_escaped_state_separator(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     client = app.test_client()
     oauth_cookie = ui_server._make_oauth_cookie(
@@ -1480,7 +1480,7 @@ def test_remote_callback_accepts_html_escaped_state_separator(monkeypatch, tmp_p
 
 
 def test_remote_callback_sanitizes_protocol_relative_next(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
     client = app.test_client()
     oauth_cookie = ui_server._make_oauth_cookie(
@@ -1521,7 +1521,7 @@ def _save_config_with_setup_host(tmp_path, host: str) -> V2Config:
 
 
 def test_setup_host_lan_request_is_treated_as_local(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "192.168.2.3")
     _mock_interface(monkeypatch, "192.168.2.3", 24)
 
@@ -1535,7 +1535,7 @@ def test_setup_host_lan_request_is_treated_as_local(monkeypatch, tmp_path):
 
 
 def test_setup_host_request_from_self_is_treated_as_local(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "192.168.2.3")
     _mock_interface(monkeypatch, "192.168.2.3", 24)
 
@@ -1549,7 +1549,7 @@ def test_setup_host_request_from_self_is_treated_as_local(monkeypatch, tmp_path)
 
 
 def test_setup_host_with_public_peer_is_not_local(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "192.168.2.3")
 
     response = app.test_client().get(
@@ -1567,7 +1567,7 @@ def test_setup_host_lan_peer_with_tailscale_setup_is_not_local(monkeypatch, tmp_
     """Wildcard-bind regression guard: a LAN peer cannot inherit setup-host
     trust by spoofing the Host header to a Tailscale setup_host that lives
     in a different private block."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "100.97.103.112")
 
     response = app.test_client().get(
@@ -1584,7 +1584,7 @@ def test_setup_host_lan_peer_with_tailscale_setup_is_not_local(monkeypatch, tmp_
 def test_setup_host_tailscale_peer_with_lan_setup_is_not_local(monkeypatch, tmp_path):
     """Inverse of the LAN-vs-Tailscale check: a Tailscale peer cannot inherit
     setup-host trust by spoofing the Host header to a LAN setup_host."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "192.168.2.3")
 
     response = app.test_client().get(
@@ -1601,7 +1601,7 @@ def test_setup_host_tailscale_peer_with_lan_setup_is_not_local(monkeypatch, tmp_
 def test_setup_host_tailscale_peer_with_tailscale_setup_is_local(monkeypatch, tmp_path):
     """Same-block trust still works: a Tailscale peer can inherit setup-host
     trust when setup_host is also in 100.64/10."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "100.97.103.112")
 
     response = app.test_client().get(
@@ -1619,7 +1619,7 @@ def test_setup_host_rfc1918_peer_outside_interface_subnet_is_not_local(monkeypat
     /24 mask. Pre-wildcard, the kernel only let in peers on the same
     interface subnet — _local_interface_network restores that scoping
     using the actual netmask."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "10.1.2.3")
     _mock_interface(monkeypatch, "10.1.2.3", 24)
 
@@ -1636,7 +1636,7 @@ def test_setup_host_rfc1918_peer_outside_interface_subnet_is_not_local(monkeypat
 
 def test_setup_host_rfc1918_peer_in_same_interface_subnet_is_local(monkeypatch, tmp_path):
     """Same-subnet RFC1918 peer still inherits trust (typical home/office LAN)."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "10.1.2.3")
     _mock_interface(monkeypatch, "10.1.2.3", 24)
 
@@ -1652,7 +1652,7 @@ def test_setup_host_rfc1918_peer_in_same_interface_subnet_is_local(monkeypatch, 
 def test_setup_host_192168_peer_outside_interface_subnet_is_not_local(monkeypatch, tmp_path):
     """A peer on 192.168.2/24 cannot spoof Host=192.168.1.5 when the
     interface mask is /24."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "192.168.1.5")
     _mock_interface(monkeypatch, "192.168.1.5", 24)
 
@@ -1671,7 +1671,7 @@ def test_setup_host_with_16_prefix_includes_peer_in_same_16(monkeypatch, tmp_pat
     """When the interface mask is /16, a peer on a different /24 within
     the same /16 still inherits trust — fixed-/24 estimates were too
     narrow for /16 LANs."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "192.168.1.5")
     _mock_interface(monkeypatch, "192.168.1.5", 16)
 
@@ -1687,7 +1687,7 @@ def test_setup_host_with_16_prefix_includes_peer_in_same_16(monkeypatch, tmp_pat
 def test_setup_host_with_20_prefix_includes_peer_in_same_20(monkeypatch, tmp_path):
     """/20 corporate networks (4096 addresses) are honored without
     artificially narrowing to /24."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "10.1.16.5")
     _mock_interface(monkeypatch, "10.1.16.5", 20)
 
@@ -1703,7 +1703,7 @@ def test_setup_host_with_20_prefix_includes_peer_in_same_20(monkeypatch, tmp_pat
 def test_setup_host_with_20_prefix_excludes_peer_outside_20(monkeypatch, tmp_path):
     """/20 still excludes peers outside the /20 (peer in next /20 is not
     on the same routed subnet)."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "10.1.16.5")
     _mock_interface(monkeypatch, "10.1.16.5", 20)
 
@@ -1722,7 +1722,7 @@ def test_setup_host_unknown_to_local_interfaces_is_not_local(monkeypatch, tmp_pa
     """If setup_host is not configured on any local interface, deny trust
     rather than guess a subnet — this preserves the kernel's pre-wildcard
     "no matching interface, no traffic" semantics."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "192.168.99.99")
     _mock_no_interfaces(monkeypatch)
 
@@ -1740,7 +1740,7 @@ def test_setup_host_unknown_to_local_interfaces_is_not_local(monkeypatch, tmp_pa
 def test_setup_host_ipv6_with_56_prefix_includes_peer_in_same_56(monkeypatch, tmp_path):
     """A non-/64 IPv6 LAN (e.g. /56 prefix delegated to the home network)
     is honored without artificially narrowing to /64."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "fd00:0:0:1::5")
     _mock_interface(monkeypatch, "fd00:0:0:1::5", 56)
 
@@ -1755,7 +1755,7 @@ def test_setup_host_ipv6_with_56_prefix_includes_peer_in_same_56(monkeypatch, tm
 
 def test_setup_host_ipv6_with_64_prefix_excludes_peer_outside_64(monkeypatch, tmp_path):
     """Default IPv6 LAN /64 still scopes peers correctly."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "fd00::5")
     _mock_interface(monkeypatch, "fd00::5", 64)
 
@@ -1784,7 +1784,7 @@ def test_setup_host_tunnel_off_allows_routed_peer_outside_interface_subnet(monke
     setup_host across a /16 corporate or campus net must have been routed
     legitimately, so the application layer should not add a second-pass
     subnet gate (regression noted in Codex review of #252)."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_tunnel_off_with_setup_host(tmp_path, "10.1.2.3")
     _mock_interface(monkeypatch, "10.1.2.3", 24)
 
@@ -1800,7 +1800,7 @@ def test_setup_host_tunnel_off_allows_routed_peer_outside_interface_subnet(monke
 def test_setup_host_tunnel_off_still_rejects_public_peer(monkeypatch, tmp_path):
     """Tunnel-off relaxation of the subnet gate must not relax the
     private-peer requirement: a public peer is still untrusted."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_tunnel_off_with_setup_host(tmp_path, "10.1.2.3")
 
     response = app.test_client().get(
@@ -1819,7 +1819,7 @@ def test_setup_host_tunnel_on_still_enforces_subnet_gate(monkeypatch, tmp_path):
     wildcard bind requires the application-layer subnet gate, so the same
     cross-subnet peer that is allowed when the tunnel is off must be
     rejected when the tunnel is on."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "10.1.2.3")
     _mock_interface(monkeypatch, "10.1.2.3", 24)
 
@@ -1835,7 +1835,7 @@ def test_setup_host_tunnel_on_still_enforces_subnet_gate(monkeypatch, tmp_path):
 
 
 def test_setup_host_mismatched_host_header_is_not_local(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "192.168.2.3")
 
     response = app.test_client().get(
@@ -1850,7 +1850,7 @@ def test_setup_host_mismatched_host_header_is_not_local(monkeypatch, tmp_path):
 
 
 def test_setup_host_wildcard_allows_actual_lan_interface_host(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setattr(ui_server, "_is_containerized_runtime", lambda: False)
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     _mock_interface(monkeypatch, "192.168.2.3", 24)
@@ -1865,7 +1865,7 @@ def test_setup_host_wildcard_allows_actual_lan_interface_host(monkeypatch, tmp_p
 
 
 def test_setup_host_wildcard_allows_bare_metal_eth_lan_interface(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setattr(ui_server, "_is_containerized_runtime", lambda: False)
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     _mock_interface(monkeypatch, "192.168.2.3", 24, name="eth0")
@@ -1880,7 +1880,7 @@ def test_setup_host_wildcard_allows_bare_metal_eth_lan_interface(monkeypatch, tm
 
 
 def test_setup_host_wildcard_does_not_trust_container_eth_interface(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setattr(ui_server, "_is_containerized_runtime", lambda: True)
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     _mock_interface(monkeypatch, "192.168.2.3", 24, name="eth0")
@@ -1897,7 +1897,7 @@ def test_setup_host_wildcard_does_not_trust_container_eth_interface(monkeypatch,
 
 
 def test_setup_host_wildcard_does_not_trust_unconfigured_lan_host(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     _mock_no_interfaces(monkeypatch)
 
@@ -1913,7 +1913,7 @@ def test_setup_host_wildcard_does_not_trust_unconfigured_lan_host(monkeypatch, t
 
 
 def test_setup_host_wildcard_does_not_trust_docker_bridge_interface(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     _mock_interface(monkeypatch, "172.17.0.1", 16, name="docker0")
 
@@ -1929,7 +1929,7 @@ def test_setup_host_wildcard_does_not_trust_docker_bridge_interface(monkeypatch,
 
 
 def test_setup_host_wildcard_does_not_trust_cni_bridge_interface(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     _mock_interface(monkeypatch, "192.168.2.3", 24, name="cni0")
 
@@ -1945,7 +1945,7 @@ def test_setup_host_wildcard_does_not_trust_cni_bridge_interface(monkeypatch, tm
 
 
 def test_setup_host_wildcard_does_not_trust_flannel_interface(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     _mock_interface(monkeypatch, "10.244.0.1", 24, name="flannel.1")
 
@@ -1961,7 +1961,7 @@ def test_setup_host_wildcard_does_not_trust_flannel_interface(monkeypatch, tmp_p
 
 
 def test_setup_host_wildcard_does_not_trust_bridge_interface_in_cgnat_range(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     _mock_interface(monkeypatch, "100.97.103.112", 32, name="docker0")
 
@@ -1977,7 +1977,7 @@ def test_setup_host_wildcard_does_not_trust_bridge_interface_in_cgnat_range(monk
 
 
 def test_setup_host_wildcard_rejects_peer_outside_interface_subnet(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     _mock_interface(monkeypatch, "192.168.1.5", 24)
 
@@ -1993,7 +1993,7 @@ def test_setup_host_wildcard_rejects_peer_outside_interface_subnet(monkeypatch, 
 
 
 def test_setup_host_wildcard_rejects_public_peer(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     _mock_interface(monkeypatch, "192.168.2.3", 24)
 
@@ -2009,7 +2009,7 @@ def test_setup_host_wildcard_rejects_public_peer(monkeypatch, tmp_path):
 
 
 def test_setup_host_wildcard_with_reverse_proxy_header_is_not_local(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     _mock_interface(monkeypatch, "192.168.2.3", 24)
 
@@ -2026,7 +2026,7 @@ def test_setup_host_wildcard_with_reverse_proxy_header_is_not_local(monkeypatch,
 
 
 def test_setup_host_wildcard_with_reverse_proxy_header_skips_interface_probe(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     monkeypatch.setattr(
         ui_server,
@@ -2047,7 +2047,7 @@ def test_setup_host_wildcard_with_reverse_proxy_header_skips_interface_probe(mon
 
 
 def test_setup_host_wildcard_allows_actual_tailscale_interface_host(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     _mock_interface(monkeypatch, "100.97.103.112", 32, name="tailscale0")
     _mock_tailscale_whois(monkeypatch, "100.97.103.5")
@@ -2062,7 +2062,7 @@ def test_setup_host_wildcard_allows_actual_tailscale_interface_host(monkeypatch,
 
 
 def test_setup_host_wildcard_rejects_tailscale_peer_without_whois(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     _mock_interface(monkeypatch, "100.97.103.112", 32, name="tailscale0")
     monkeypatch.setattr(ui_server, "_TAILSCALE_PEER_CACHE", {})
@@ -2080,7 +2080,7 @@ def test_setup_host_wildcard_rejects_tailscale_peer_without_whois(monkeypatch, t
 
 
 def test_setup_host_wildcard_rejects_tailscale_subnet_router_peer(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     _mock_interface(monkeypatch, "100.97.103.112", 32, name="tailscale0")
     _mock_tailscale_whois(monkeypatch, "100.97.103.5", allowed_ips=["100.97.103.5/32", "192.168.50.0/24"])
@@ -2097,7 +2097,7 @@ def test_setup_host_wildcard_rejects_tailscale_subnet_router_peer(monkeypatch, t
 
 
 def test_setup_host_wildcard_does_not_trust_unconfigured_tailscale_host(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     _mock_no_interfaces(monkeypatch)
 
@@ -2113,7 +2113,7 @@ def test_setup_host_wildcard_does_not_trust_unconfigured_tailscale_host(monkeypa
 
 
 def test_setup_host_ipv6_wildcard_allows_actual_private_interface_host(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setattr(ui_server, "_is_containerized_runtime", lambda: False)
     _save_config_with_setup_host(tmp_path, "::")
     _mock_interface(monkeypatch, "fd00::5", 64)
@@ -2128,7 +2128,7 @@ def test_setup_host_ipv6_wildcard_allows_actual_private_interface_host(monkeypat
 
 
 def test_setup_host_ipv6_wildcard_allows_tailscale_ula_interface_host(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "::")
     _mock_interface(monkeypatch, "fd7a:115c:a1e0::5", 128, name="tailscale0")
     _mock_tailscale_whois(monkeypatch, "fd7a:115c:a1e0::20")
@@ -2143,7 +2143,7 @@ def test_setup_host_ipv6_wildcard_allows_tailscale_ula_interface_host(monkeypatc
 
 
 def test_setup_host_ipv6_wildcard_does_not_trust_bridge_in_tailscale_ula_range(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "::")
     _mock_interface(monkeypatch, "fd7a:115c:a1e0::5", 64, name="docker0")
 
@@ -2159,7 +2159,7 @@ def test_setup_host_ipv6_wildcard_does_not_trust_bridge_in_tailscale_ula_range(m
 
 
 def test_setup_host_wildcard_does_not_trust_generic_utun_tunnel(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     _mock_interface(monkeypatch, "100.97.103.112", 32, name="utun4")
     monkeypatch.setattr(ui_server, "_tailscale_local_addresses", lambda: frozenset())
@@ -2176,7 +2176,7 @@ def test_setup_host_wildcard_does_not_trust_generic_utun_tunnel(monkeypatch, tmp
 
 
 def test_setup_host_wildcard_trusts_utun_when_tailscale_reports_local_ip(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "0.0.0.0")
     address = ipaddress.ip_address("100.97.103.112")
     _mock_interface(monkeypatch, str(address), 32, name="utun4")
@@ -2193,7 +2193,7 @@ def test_setup_host_wildcard_trusts_utun_when_tailscale_reports_local_ip(monkeyp
 
 
 def test_setup_host_ipv6_wildcard_does_not_trust_generic_utun_tunnel(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "::")
     _mock_interface(monkeypatch, "fd7a:115c:a1e0::5", 128, name="utun4")
     monkeypatch.setattr(ui_server, "_tailscale_local_addresses", lambda: frozenset())
@@ -2210,7 +2210,7 @@ def test_setup_host_ipv6_wildcard_does_not_trust_generic_utun_tunnel(monkeypatch
 
 
 def test_setup_host_ipv6_wildcard_trusts_utun_when_tailscale_reports_local_ip(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "::")
     address = ipaddress.ip_address("fd7a:115c:a1e0::5")
     _mock_interface(monkeypatch, str(address), 128, name="utun4")
@@ -2227,7 +2227,7 @@ def test_setup_host_ipv6_wildcard_trusts_utun_when_tailscale_reports_local_ip(mo
 
 
 def test_setup_host_with_cloudflare_metadata_is_not_local(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "192.168.2.3")
 
     response = app.test_client().get(
@@ -2249,7 +2249,7 @@ def test_setup_host_with_reverse_proxy_header_is_not_local(monkeypatch, tmp_path
     looks "local" — but X-Forwarded-For (or any other forwarded header) tells
     us the actual client is unknown, so the request must not be trusted.
     """
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "192.168.2.3")
 
     response = app.test_client().get(
@@ -2271,7 +2271,7 @@ def test_settings_get_serves_json_even_for_browser_accept(monkeypatch, tmp_path)
     user-facing /settings URL is handled by the static catch-all instead, so
     the API path itself never collides with a UI route anymore.
     """
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
     response = app.test_client().get(
@@ -2289,7 +2289,7 @@ def test_settings_get_returns_json_for_fetch_callers(monkeypatch, tmp_path):
     """fetch() from the SPA hits /settings without an explicit text/html in
     Accept; the handler must keep returning JSON so getSettings() works.
     """
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config(tmp_path)
 
     response = app.test_client().get(

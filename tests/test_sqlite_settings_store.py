@@ -533,7 +533,7 @@ def test_settings_load_ignores_row_model_without_agent_name(tmp_path: Path) -> N
 
 
 def test_settings_store_bootstrap_uses_config_primary_platform(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_config_path().write_text(
         json.dumps({"platform": "discord", "platforms": {"enabled": ["discord"], "primary": "discord"}}),

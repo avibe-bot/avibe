@@ -30,7 +30,7 @@ def _fake_stop_runtime(calls, *, ui_stopped=True, ui_pid=None, service_stopped=T
 
 
 def test_schedule_restart_spawns_supervisor_and_records_status(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_runtime_pid_path().write_text("12345", encoding="utf-8")
     calls = {}
@@ -65,7 +65,7 @@ def test_schedule_restart_spawns_supervisor_and_records_status(monkeypatch, tmp_
 
 
 def test_schedule_restart_can_prepare_show_runtime_after_restart(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     calls = {}
 
@@ -93,7 +93,7 @@ def test_schedule_restart_marks_status_failed_when_spawn_fails(monkeypatch, tmp_
     # The "scheduled" status is seeded before spawning; if the spawn fails, no
     # child will overwrite it, so schedule_restart must mark it failed (otherwise
     # `vibe status` shows a permanently pending restart that never ran).
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
 
     monkeypatch.setattr(restart_supervisor, "get_restart_invocation_command", lambda vibe_path=None: ["/bin/vibe", "restart"])
@@ -116,7 +116,7 @@ def test_schedule_restart_marks_status_failed_when_spawn_fails(monkeypatch, tmp_
 
 
 def test_restart_job_stops_and_starts_service(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_runtime_pid_path().write_text("111", encoding="utf-8")
     calls = []
@@ -151,7 +151,7 @@ def test_restart_job_stops_and_starts_service(monkeypatch, tmp_path):
 
 
 def test_restart_job_prepares_show_runtime_after_service_start(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_runtime_pid_path().write_text("111", encoding="utf-8")
     calls = []
@@ -189,7 +189,7 @@ def test_restart_job_prepares_show_runtime_after_service_start(monkeypatch, tmp_
 
 
 def test_restart_job_schedules_pending_followup_after_success(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_runtime_pid_path().write_text("111", encoding="utf-8")
     calls = []
@@ -239,7 +239,7 @@ def test_restart_job_schedules_pending_followup_after_success(monkeypatch, tmp_p
 
 
 def test_restart_job_aborts_when_stop_fails(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_runtime_pid_path().write_text("111", encoding="utf-8")
     calls = []
@@ -264,7 +264,7 @@ def test_restart_job_aborts_when_stop_fails(monkeypatch, tmp_path):
 
 
 def test_restart_job_continues_when_old_pid_already_exited(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_runtime_pid_path().write_text("111", encoding="utf-8")
     calls = []
@@ -287,7 +287,7 @@ def test_restart_job_continues_when_old_pid_already_exited(monkeypatch, tmp_path
 
 
 def test_restart_job_adopts_slow_starting_service_pid(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_runtime_pid_path().write_text("111", encoding="utf-8")
     calls = []
@@ -322,7 +322,7 @@ def test_restart_job_adopts_slow_starting_service_pid(monkeypatch, tmp_path):
 
 
 def test_restart_job_marks_start_runtime_failed(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_runtime_pid_path().write_text("111", encoding="utf-8")
 
@@ -345,7 +345,7 @@ def test_restart_job_marks_start_runtime_failed(monkeypatch, tmp_path):
 
 
 def test_restart_job_waits_for_service_lock_release_before_start(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_runtime_pid_path().write_text("111", encoding="utf-8")
     calls = []
@@ -372,7 +372,7 @@ def test_restart_job_waits_for_service_lock_release_before_start(monkeypatch, tm
 
 
 def test_restart_job_fails_when_service_lock_does_not_release(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_runtime_pid_path().write_text("111", encoding="utf-8")
     calls = []
@@ -396,7 +396,7 @@ def test_restart_job_fails_when_service_lock_does_not_release(monkeypatch, tmp_p
 
 
 def test_start_runtime_processes_starts_service_and_ui(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     calls = []
     config = SimpleNamespace(
         ui=SimpleNamespace(setup_port=5123),
@@ -446,7 +446,7 @@ def test_start_runtime_processes_starts_service_and_ui(monkeypatch, tmp_path):
 
 
 def test_stop_runtime_for_restart_stops_ui_and_service(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     calls = []
     ui_entered = threading.Event()
@@ -487,7 +487,7 @@ def test_stop_runtime_for_restart_stops_ui_and_service(monkeypatch, tmp_path):
 def test_schedule_restart_service_scope_adds_flag(monkeypatch, tmp_path):
     """A service-only restart passes ``--scope service`` to the supervisor job;
     the default ``all`` scope adds no flag (back-compat for CLI/upgrade)."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
 
     commands: list[list[str]] = []
@@ -512,7 +512,7 @@ def test_schedule_restart_service_scope_adds_flag(monkeypatch, tmp_path):
 def test_restart_job_service_scope_keeps_ui(monkeypatch, tmp_path):
     """scope='service' restarts only the service: the UI is neither stopped nor
     started, so its recorded pid is preserved across the restart."""
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_runtime_pid_path().write_text("111", encoding="utf-8")
     calls = []

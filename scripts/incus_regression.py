@@ -504,7 +504,7 @@ def cloud_init_user_data() -> str:
         Group={SERVICE_USER}
         WorkingDirectory={SOURCE_DIR}
         Environment=HOME={SERVICE_HOME}
-        Environment=VIBE_REMOTE_HOME=
+        Environment=AVIBE_HOME=
         Environment=VIBE_DEPLOYMENT_ENV=regression
         Environment=VIBE_INTERNAL_DISPATCH_SOCKET=/tmp/vibe_remote/dispatch.sock
         Environment=PYTHONUNBUFFERED=1

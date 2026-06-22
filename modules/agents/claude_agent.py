@@ -5,6 +5,10 @@ from typing import Callable, Optional
 
 from core.agent_auth_service import classify_auth_error
 from modules.claude_sdk_compat import TextBlock, ToolUseBlock, is_claude_sdk_buffer_error
+from modules.agents.claude_process_reaper import (
+    AVIBE_CLAUDE_SESSION_OWNER,
+    register_claude_owned_process,
+)
 
 from modules.agents.base import (
     AGENT_RUNTIME_TURN_KEY,
@@ -374,6 +378,55 @@ class ClaudeAgent(BaseAgent):
             if not cleanup_from_receiver:
                 await self._stop_receiver_task(receiver_task)
 
+    async def force_cleanup_stuck_active_session(self, composite_key: str) -> None:
+        """Settle and drop a Claude session whose active flag is stale.
+
+        SessionHandler owns the idle timer, but ClaudeAgent owns the pending
+        request FIFO and Workbench turn tokens. Force cleanup must retire the
+        failed turn here before removing the SDK client, otherwise a later
+        result can adopt the stale request/token.
+        """
+        pending_request = self._pop_pending_request(composite_key)
+        context = getattr(pending_request, "context", None)
+        if context is not None:
+            self._adopt_pending_turn_token(context, pending_request)
+            await self._remove_result_pending_reaction(composite_key, context, pending_request)
+        else:
+            self._pending_reactions.pop(composite_key, None)
+        self._last_assistant_text.pop(composite_key, None)
+        self._pending_assistant_message.pop(composite_key, None)
+
+        self._suppress_receiver_runtime_release.add(composite_key)
+        try:
+            try:
+                await self._cleanup_runtime_session(
+                    composite_key,
+                    preserve_pending_request_state=True,
+                )
+            except Exception:
+                if context is not None:
+                    self._release_service_runtime_turn(context)
+                raise
+        finally:
+            self._suppress_receiver_runtime_release.discard(composite_key)
+
+        if context is not None:
+            try:
+                await self.controller.emit_agent_message(
+                    context,
+                    "result",
+                    "",
+                    is_error=True,
+                    level="silent",
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to emit terminal result while force-cleaning Claude session %s",
+                    composite_key,
+                    exc_info=True,
+                )
+                self._release_service_runtime_turn(context)
+
     async def handle_stop(self, request: AgentRequest) -> bool:
         composite_key = request.composite_session_id
         if composite_key not in self.claude_sessions:
@@ -477,6 +530,11 @@ class ClaudeAgent(BaseAgent):
                         runtime_client = self.claude_sessions.get(composite_key)
                         if runtime_client is client:
                             setattr(runtime_client, "_vibe_native_session_id", claude_session_id)
+                            register_claude_owned_process(
+                                runtime_client,
+                                native_session_id=claude_session_id,
+                                owner=AVIBE_CLAUDE_SESSION_OWNER,
+                            )
                         logger.info(f"Captured Claude session id {claude_session_id} for {base_session_id}")
 
                     if self.claude_client._is_skip_message(message):
@@ -654,31 +712,61 @@ class ClaudeAgent(BaseAgent):
                         # stale straggler. No-op for fresh sessions / absent tokens.
                         self._adopt_pending_turn_token(context, pending_request)
 
-                        await self.emit_result_message(
-                            context,
-                            result_text,
-                            subtype=getattr(message, "subtype", "") or "",
-                            duration_ms=getattr(message, "duration_ms", 0),
-                            parse_mode="markdown",
-                            request=pending_request,
-                        )
-                        native_session_id = self._native_session_ids.get(composite_key) or self._reserved_native_session_id(
-                            context,
-                            self.name,
-                        ) or self._reserved_native_session_id(
-                            getattr(pending_request, "context", None),
-                            self.name,
-                        )
-                        if pending_request is not None and native_session_id:
-                            self._maybe_backfill_session_title(pending_request, native_session_id)
-
-                        self._discard_pending_reaction(composite_key)
-
-                        self._last_assistant_text.pop(composite_key, None)
-                        is_idle = self._mark_session_idle_if_no_pending_requests(composite_key)
-                        session = await self.session_manager.get_or_create_session(context.user_id, context.channel_id)
-                        if session and is_idle:
-                            session.session_active[composite_key] = False
+                        # A terminal result settles the turn. The pending request
+                        # was already popped above, so the idle transition must run
+                        # even if emitting the result or backfilling the title
+                        # raises — otherwise the inner ``except … continue`` below
+                        # would swallow the error, skip the mark-idle, and leave the
+                        # session pinned ``active`` (exempt from idle eviction until
+                        # the next service restart). Run it in a ``finally``.
+                        emit_failed = False
+                        try:
+                            await self.emit_result_message(
+                                context,
+                                result_text,
+                                subtype=getattr(message, "subtype", "") or "",
+                                duration_ms=getattr(message, "duration_ms", 0),
+                                parse_mode="markdown",
+                                request=pending_request,
+                            )
+                            native_session_id = self._native_session_ids.get(composite_key) or self._reserved_native_session_id(
+                                context,
+                                self.name,
+                            ) or self._reserved_native_session_id(
+                                getattr(pending_request, "context", None),
+                                self.name,
+                            )
+                            if pending_request is not None and native_session_id:
+                                self._maybe_backfill_session_title(pending_request, native_session_id)
+                        except Exception:
+                            emit_failed = True
+                            raise
+                        finally:
+                            # Settle the turn regardless of an emit/backfill
+                            # failure: clear the loading reaction and the stale
+                            # assistant-text fallback, then release the active
+                            # flag so the session can be idle-evicted.
+                            await self._remove_result_pending_reaction(
+                                composite_key,
+                                context,
+                                pending_request,
+                            )
+                            self._last_assistant_text.pop(composite_key, None)
+                            is_idle = self._mark_session_idle_if_no_pending_requests(composite_key)
+                            try:
+                                session = await self.session_manager.get_or_create_session(
+                                    context.user_id, context.channel_id
+                                )
+                                if session and is_idle:
+                                    session.session_active[composite_key] = False
+                            except Exception:
+                                logger.debug(
+                                    "claude: failed to update session_active after result for %s",
+                                    composite_key,
+                                    exc_info=True,
+                                )
+                            if emit_failed:
+                                self._release_service_runtime_turn(context)
                         continue
 
                     # Ignore UserMessage/tool results; toolcalls are emitted from ToolUseBlock.
@@ -888,6 +976,20 @@ class ClaudeAgent(BaseAgent):
         reactions.pop(0)
         if not reactions:
             self._pending_reactions.pop(composite_key, None)
+
+    async def _remove_result_pending_reaction(
+        self,
+        composite_key: str,
+        context: MessageContext,
+        request: Optional[AgentRequest],
+    ) -> None:
+        reactions_before = len(self._pending_reactions.get(composite_key) or [])
+        if request is not None:
+            await self._remove_specific_pending_reaction(composite_key, context, request)
+            await self._remove_ack_reaction(request)
+        reactions_after = len(self._pending_reactions.get(composite_key) or [])
+        if reactions_before and reactions_after == reactions_before:
+            self._discard_pending_reaction(composite_key)
 
     def _pop_pending_request(self, composite_key: str) -> Optional[AgentRequest]:
         requests = self._pending_requests.get(composite_key)

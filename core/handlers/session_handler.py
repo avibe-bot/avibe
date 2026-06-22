@@ -18,8 +18,16 @@ from modules.claude_sdk_compat import (
 )
 from modules.agents.native_sessions.base import build_resume_preview
 from modules.agents.claude_process_reaper import (
+    AVIBE_CLAUDE_PROCESS_OWNER_ENV,
+    AVIBE_CLAUDE_SESSION_OWNER,
     get_claude_client_pid,
+    register_claude_owned_process,
     reap_duplicate_claude_resume_processes,
+    reap_orphaned_claude_processes,
+)
+from config.v2_config import (
+    DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS,
+    DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
 )
 from core.avibe_cloud import avibe_cloud_url_available
 from core.services.session_fork import pending_native_fork_source
@@ -102,6 +110,11 @@ class SessionHandler(BaseHandler):
         setattr(client, "_vibe_runtime_session_key", composite_key)
         if native_session_id:
             setattr(client, "_vibe_native_session_id", native_session_id)
+        register_claude_owned_process(
+            client,
+            native_session_id=native_session_id,
+            owner=AVIBE_CLAUDE_SESSION_OWNER,
+        )
 
     async def _set_claude_model_if_needed(self, client: ClaudeSDKClient, desired_model: Optional[str]) -> None:
         unknown = object()
@@ -795,6 +808,7 @@ class SessionHandler(BaseHandler):
         from vibe.claude_config import build_claude_subprocess_env
 
         claude_env = build_claude_subprocess_env(getattr(self.config, "claude", None))
+        claude_env[AVIBE_CLAUDE_PROCESS_OWNER_ENV] = AVIBE_CLAUDE_SESSION_OWNER
         if self._should_mark_claude_isolated_env():
             claude_env["IS_SANDBOX"] = "1"
             logger.info("Detected Claude bypassPermissions running as root; marking Claude subprocess as isolated")
@@ -1234,10 +1248,39 @@ class SessionHandler(BaseHandler):
         if exc is not None:
             logger.warning("Claude receiver ended with error during cleanup: %s", exc)
 
-    async def evict_idle_sessions(self, idle_timeout: float) -> int:
-        """Disconnect Claude sessions that have been idle beyond the timeout."""
+    async def evict_idle_sessions(
+        self,
+        idle_timeout: float,
+        stuck_active_multiplier: float = DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
+        stuck_active_floor_seconds: float = DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_FLOOR_SECONDS,
+    ) -> int:
+        """Disconnect Claude sessions that have been idle beyond the timeout.
+
+        A session is normally exempt from eviction while it is flagged
+        ``active`` (a turn is in flight). That veto is **not** absolute: if the
+        receiver coroutine never releases the flag (e.g. it stays alive but
+        blocked on ``receive_messages`` with no stream EOF), the session would
+        otherwise be pinned forever and its ``claude`` subprocess would survive
+        until the next service restart. As an independent backstop, a session
+        that is ``active`` but whose ``last_activity`` is older than
+        ``max(idle_timeout * stuck_active_multiplier,
+        stuck_active_floor_seconds)`` is force-evicted regardless of why the
+        flag was not cleared. A genuine in-flight turn keeps touching
+        ``last_activity`` via assistant/tool messages, so it normally stays well
+        under this cap. Pass ``stuck_active_multiplier <= 0`` to disable the
+        backstop. Caveat: a real turn whose single tool call runs silently for
+        longer than the cap is indistinguishable from a stuck session and would
+        be force-evicted — see ``DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER``.
+        """
         if idle_timeout <= 0:
             return 0
+
+        stuck_threshold = None
+        if stuck_active_multiplier > 0:
+            stuck_threshold = max(
+                idle_timeout * stuck_active_multiplier,
+                max(0.0, stuck_active_floor_seconds),
+            )
 
         now = time.monotonic()
         expired: list[tuple[str, float]] = []
@@ -1247,10 +1290,14 @@ class SessionHandler(BaseHandler):
                 self.session_last_activity.pop(composite_key, None)
                 self.active_sessions.discard(composite_key)
                 continue
+            idle_for = now - last_activity
             if composite_key in self.active_sessions:
+                # Stuck-active backstop: only evict once well past the cap.
+                if stuck_threshold is not None and idle_for >= stuck_threshold:
+                    expired.append((composite_key, idle_for))
                 continue
-            if now - last_activity >= idle_timeout:
-                expired.append((composite_key, now - last_activity))
+            if idle_for >= idle_timeout:
+                expired.append((composite_key, idle_for))
 
         evicted = 0
         for composite_key, idle_for in expired:
@@ -1259,17 +1306,91 @@ class SessionHandler(BaseHandler):
                 self.session_last_activity.pop(composite_key, None)
                 self.active_sessions.discard(composite_key)
                 continue
-            if composite_key in self.active_sessions:
-                continue
             if current_last_activity is None:
                 continue
-            if time.monotonic() - current_last_activity < idle_timeout:
-                continue
-            logger.info("Evicting idle Claude session %s after %.1fs idle", composite_key, idle_for)
-            await self.cleanup_session(composite_key)
+            # Re-derive the decision from current state: a session may have been
+            # touched or (de)activated between the two passes.
+            recheck_idle = time.monotonic() - current_last_activity
+            if composite_key in self.active_sessions:
+                if stuck_threshold is None or recheck_idle < stuck_threshold:
+                    continue
+                logger.warning(
+                    "Force-evicting stuck-active Claude session %s after %.1fs idle "
+                    "(>= stuck-active threshold %.1fs; multiplier=%s idle_timeout=%ss); "
+                    "receiver never released the active flag",
+                    composite_key,
+                    recheck_idle,
+                    stuck_threshold,
+                    stuck_active_multiplier,
+                    idle_timeout,
+                )
+            else:
+                if recheck_idle < idle_timeout:
+                    continue
+                logger.info("Evicting idle Claude session %s after %.1fs idle", composite_key, recheck_idle)
+            if composite_key in self.active_sessions:
+                agent_service = getattr(self.controller, "agent_service", None)
+                claude_agent = getattr(agent_service, "agents", {}).get("claude") if agent_service else None
+                force_cleanup = getattr(claude_agent, "force_cleanup_stuck_active_session", None)
+                if callable(force_cleanup):
+                    await force_cleanup(composite_key)
+                else:
+                    await self.cleanup_session(composite_key)
+            else:
+                await self.cleanup_session(composite_key)
             evicted += 1
 
         return evicted
+
+    async def reap_orphaned_claude_sessions(self) -> int:
+        """Reap leaked ``claude`` subprocesses not owned by any tracked session.
+
+        Defense-in-depth backstop for the idle-eviction path: even if a session
+        slips out of tracking (or a previous service instance left a child
+        reparented to init), the resident ``claude`` subprocess is reconciled
+        against the set of currently-tracked sessions and terminated when it has
+        no owner. See ``reap_orphaned_claude_processes`` for the safety guards.
+        """
+        owned_pids: set[int] = set()
+        tracked_resume_ids: dict[str, int] = {}
+        owner_set_complete = True
+        for client in list(self.claude_sessions.values()):
+            pid = get_claude_client_pid(client)
+            if not pid:
+                # A tracked client whose pid we cannot resolve means the owner
+                # set is incomplete: its live process would look ownerless to
+                # the in-tree sweep. Disable that sweep this round.
+                owner_set_complete = False
+                continue
+            owned_pids.add(pid)
+            native_session_id = getattr(client, "_vibe_native_session_id", None)
+            if native_session_id:
+                tracked_resume_ids[str(native_session_id)] = pid
+        # A session create in flight has spawned a subprocess (connect()) that is
+        # not yet in claude_sessions; the in-tree sweep must not touch it.
+        creates_in_flight = bool(self.claude_session_creates)
+        exclude_pids: set[int] = set()
+        watch_service = getattr(self.controller, "watch_service", None)
+        active_watch_pids = getattr(watch_service, "active_process_pids", None)
+        if callable(active_watch_pids):
+            exclude_pids.update(active_watch_pids())
+        auth_service = getattr(self.controller, "agent_auth_service", None)
+        active_auth_pids = getattr(auth_service, "active_claude_auth_client_pids", None)
+        if callable(active_auth_pids):
+            exclude_pids.update(active_auth_pids())
+        auth_pid_unknown = getattr(auth_service, "has_active_claude_auth_client_with_unknown_pid", None)
+        auth_client_pid_unknown = bool(auth_pid_unknown()) if callable(auth_pid_unknown) else False
+        # Let unexpected errors surface to the caller (``periodic_cleanup``
+        # logs them at error level); ``reap_orphaned_claude_processes`` already
+        # absorbs the expected ``ps``-read failure internally.
+        return await reap_orphaned_claude_processes(
+            owned_pids=owned_pids,
+            tracked_resume_ids=tracked_resume_ids,
+            cli_path=self._get_claude_cli_path_override(),
+            logger=logger,
+            reap_in_tree=owner_set_complete and not creates_in_flight and not auth_client_pid_unknown,
+            exclude_pids=exclude_pids,
+        )
 
     async def handle_session_error(self, composite_key: str, context: MessageContext, error: Exception):
         """Handle session-related errors"""

@@ -2517,7 +2517,7 @@ def test_telegram_list_chats_returns_discovered_groups(tmp_path, monkeypatch):
 
 
 def test_vibe_agent_api_crud_and_settings_catalog(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
 
     created = api.create_vibe_agent(
         {
@@ -2543,7 +2543,7 @@ def test_vibe_agent_api_crud_and_settings_catalog(tmp_path, monkeypatch):
 
 
 def test_vibe_agent_catalog_ensures_builtin_defaults_for_enabled_backends(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
 
     listed = api.get_vibe_agents()
     names = {agent["name"] for agent in listed["agents"]}
@@ -2553,7 +2553,7 @@ def test_vibe_agent_catalog_ensures_builtin_defaults_for_enabled_backends(tmp_pa
 
 
 def test_builtin_default_agent_enabled_state_follows_backend_config(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
         store.ensure_builtin_default_agents(["opencode", "claude"])
@@ -2607,7 +2607,7 @@ def test_enabled_agent_backends_respect_explicit_disabled_backend():
 
 
 def test_user_can_disable_builtin_default_agent_without_catalog_reenabling_it(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
         store.ensure_builtin_default_agents(["opencode"])
@@ -2620,7 +2620,7 @@ def test_user_can_disable_builtin_default_agent_without_catalog_reenabling_it(tm
 
 
 def test_disabled_agent_cannot_be_set_as_default(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
         store.create(name="reviewer", backend="codex", enabled=False)
@@ -2631,7 +2631,7 @@ def test_disabled_agent_cannot_be_set_as_default(tmp_path, monkeypatch):
 
 
 def test_vibe_agent_api_rejects_non_boolean_enabled(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
 
     with pytest.raises(ValueError, match="Agent enabled must be a JSON boolean"):
         api.create_vibe_agent({"name": "reviewer", "backend": "codex", "enabled": "false"})
@@ -2644,7 +2644,7 @@ def test_vibe_agent_api_rejects_non_boolean_enabled(tmp_path, monkeypatch):
 
 
 def test_builtin_default_agent_uses_first_enabled_backend_when_no_default_exists(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
         store.ensure_builtin_default_agents(["opencode", "claude", "codex"])
@@ -2654,7 +2654,7 @@ def test_builtin_default_agent_uses_first_enabled_backend_when_no_default_exists
 
 
 def test_api_builtin_default_agents_ignore_legacy_config_default_backend(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     config = V2Config(
         mode="self_host",
         version="v2",
@@ -2674,7 +2674,7 @@ def test_api_builtin_default_agents_ignore_legacy_config_default_backend(tmp_pat
 
 
 def test_builtin_default_agent_does_not_reuse_conflicting_user_agent(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
         store.create(name="opencode", backend="codex")
@@ -2685,7 +2685,7 @@ def test_builtin_default_agent_does_not_reuse_conflicting_user_agent(tmp_path, m
 
 
 def test_builtin_default_agent_does_not_lock_existing_user_agent(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     store = VibeAgentStore()
     try:
         created = store.create(name="opencode", backend="opencode")
@@ -2700,7 +2700,7 @@ def test_builtin_default_agent_does_not_lock_existing_user_agent(tmp_path, monke
 
 
 def test_vibe_agent_import_reports_unreadable_file_as_client_error(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     missing_file = tmp_path / "missing-agent.md"
 
     with pytest.raises(ValueError, match="Unable to read or parse agent import file"):
@@ -2708,7 +2708,7 @@ def test_vibe_agent_import_reports_unreadable_file_as_client_error(tmp_path, mon
 
 
 def test_vibe_agent_import_rejects_non_markdown_direct_file(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     secret_file = tmp_path / "config.json"
     secret_file.write_text('{"token":"secret"}', encoding="utf-8")
 
@@ -2717,7 +2717,7 @@ def test_vibe_agent_import_rejects_non_markdown_direct_file(tmp_path, monkeypatc
 
 
 def test_vibe_agent_import_rejects_markdown_without_agent_frontmatter(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     notes_file = tmp_path / "private-notes.md"
     notes_file.write_text("# Private notes\n\nnon-agent content\n", encoding="utf-8")
 
@@ -2726,7 +2726,7 @@ def test_vibe_agent_import_rejects_markdown_without_agent_frontmatter(tmp_path, 
 
 
 def test_vibe_agent_import_allows_uppercase_markdown_extension(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     agent_file = tmp_path / "Reviewer.MD"
     agent_file.write_text("---\nname: reviewer\n---\nReview carefully.\n", encoding="utf-8")
 
@@ -2737,7 +2737,7 @@ def test_vibe_agent_import_allows_uppercase_markdown_extension(tmp_path, monkeyp
 
 
 def test_vibe_agent_import_skips_invalid_global_agent_file(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     valid_file = tmp_path / "valid.md"
     invalid_file = tmp_path / "invalid.md"
     valid_file.write_text("---\nname: reviewer\n---\nReview carefully.\n", encoding="utf-8")
@@ -2758,7 +2758,7 @@ def test_vibe_agent_import_skips_invalid_global_agent_file(tmp_path, monkeypatch
 
 
 def test_vibe_agent_api_rejects_backend_update(tmp_path, monkeypatch):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path / ".vibe_remote"))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".vibe_remote"))
     api.create_vibe_agent({"name": "worker", "backend": "codex"})
 
     with pytest.raises(ValueError, match="backend is immutable"):

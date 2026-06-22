@@ -1653,6 +1653,8 @@ class ScheduledTaskService:
             state = await gate.submit_scheduled(session_id, context, message)
             if state == "enqueued":
                 return AgentRunExecutionResult(error=None, complete_on_return=False, requeue_on_return=True)
+            if state == "duplicate":
+                return AgentRunExecutionResult(error=None, complete_on_return=True)
             return AgentRunExecutionResult(error=None, complete_on_return=False)
 
         async def _noop_chunk(_envelope: dict) -> None:

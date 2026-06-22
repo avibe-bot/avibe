@@ -74,7 +74,7 @@ def test_normalize_response_supports_body_headers_tuple():
 def test_harness_routes_page_filter_and_return_counts(monkeypatch, tmp_path):
     from storage.background import SQLiteBackgroundTaskStore
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     store = SQLiteBackgroundTaskStore()
     try:
@@ -150,7 +150,7 @@ def test_harness_routes_page_filter_and_return_counts(monkeypatch, tmp_path):
 def test_harness_bootstrap_returns_counts_and_selected_page(monkeypatch, tmp_path):
     from storage.background import SQLiteBackgroundTaskStore
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     store = SQLiteBackgroundTaskStore()
     try:
@@ -199,7 +199,7 @@ def test_workbench_projects_bootstrap_returns_requested_session_pages(monkeypatc
     from storage.projects_service import create_project
     from storage.workbench_sessions_service import create_session
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     project_a_dir = tmp_path / "project-a"
@@ -233,7 +233,7 @@ def test_config_get_on_fresh_install_returns_default_needing_setup(monkeypatch, 
     # needs_setup=True instead of propagating FileNotFoundError as a 500 —
     # and must not create the file (the read stays a read; save_config owns
     # the first write).
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from config import paths
 
     assert not paths.get_config_path().exists()
@@ -250,7 +250,7 @@ def test_config_get_on_fresh_install_returns_default_needing_setup(monkeypatch, 
 
 
 def test_config_routes_redact_platform_and_gateway_secrets(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     payload = _full_config_payload()
     payload["slack"] = {
         **payload["slack"],
@@ -314,7 +314,7 @@ def test_config_routes_redact_platform_and_gateway_secrets(monkeypatch, tmp_path
 
 
 def test_config_post_hot_reconciles_platform_enablement(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import api
     from vibe import internal_client
 
@@ -348,7 +348,7 @@ def test_config_post_hot_reconciles_platform_enablement(monkeypatch, tmp_path):
 
 
 def test_config_post_hot_reconciles_platform_runtime_credential_change(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import api
     from vibe import internal_client
 
@@ -402,7 +402,7 @@ def test_platform_runtime_fields_changed_detects_primary_only_change():
 
 
 def test_config_post_non_platform_change_does_not_reconcile_platforms(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import api
     from vibe import internal_client
 
@@ -423,7 +423,7 @@ def test_config_post_non_platform_change_does_not_reconcile_platforms(monkeypatc
 
 
 def test_config_post_schedules_service_restart_when_hot_reconcile_unavailable(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import api
     from vibe import internal_client
 
@@ -457,7 +457,7 @@ def test_config_post_schedules_service_restart_when_hot_reconcile_unavailable(mo
 
 
 def test_config_post_schedules_service_restart_when_hot_reconcile_fails(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import api
     from vibe import internal_client
 
@@ -495,7 +495,7 @@ def test_config_post_schedules_service_restart_when_hot_reconcile_fails(monkeypa
 
 
 def test_config_restart_fallback_marks_pending_restart_when_restart_in_flight(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import restart_supervisor
     from vibe import runtime
 
@@ -526,7 +526,7 @@ def test_config_restart_fallback_marks_pending_restart_when_restart_in_flight(mo
 
 
 def test_config_restart_fallback_schedules_when_in_flight_finishes_after_marker(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import restart_supervisor
     from vibe import runtime
 
@@ -682,7 +682,7 @@ def test_wechat_qr_poll_passes_verify_code(monkeypatch):
 
 
 def test_persist_wechat_qr_credentials_saves_before_restart(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from vibe import api
 
     payload = _full_config_payload()
@@ -715,7 +715,7 @@ def test_persist_wechat_qr_credentials_saves_before_restart(monkeypatch, tmp_pat
 
 
 def test_persist_wechat_qr_credentials_seeds_fresh_config(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     from config import paths
     from vibe import api
 
@@ -852,7 +852,7 @@ def test_wechat_qr_poll_blocks_restart_when_credential_persist_fails(monkeypatch
 
 
 def test_web_push_subscription_routes_roundtrip(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     client = app.test_client()
@@ -904,7 +904,7 @@ def test_web_push_status_sync_disables_previous_endpoint_for_same_device(monkeyp
     from storage import web_push_service
     from storage.db import create_sqlite_engine
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     client = app.test_client()
@@ -962,7 +962,7 @@ def test_web_push_status_sync_disables_client_known_previous_endpoint(monkeypatc
     from storage import web_push_service
     from storage.db import create_sqlite_engine
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     client = app.test_client()
@@ -1025,7 +1025,7 @@ def test_web_push_status_sync_does_not_reenable_disabled_endpoint(monkeypatch, t
     from storage import web_push_service
     from storage.db import create_sqlite_engine
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     client = app.test_client()
@@ -1070,7 +1070,7 @@ def test_web_push_unsubscribe_is_scoped_to_current_user(monkeypatch, tmp_path):
     from storage import web_push_service
     from storage.db import create_sqlite_engine
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     monkeypatch.setattr(ui_server, "_web_push_user_key", lambda: "remote:user-a")
 
@@ -1103,7 +1103,7 @@ def test_web_push_unsubscribe_is_scoped_to_current_user(monkeypatch, tmp_path):
 
 
 def test_web_push_test_route_sends_to_enabled_subscriptions(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     sends = []
@@ -1148,7 +1148,7 @@ def test_web_push_test_route_sends_to_enabled_subscriptions(monkeypatch, tmp_pat
 
 
 def test_web_push_test_route_targets_current_endpoint_only(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
 
     sends = []
@@ -1192,7 +1192,7 @@ def test_sessions_create_preserves_metadata_without_web_push_owner(monkeypatch, 
     from storage.db import create_sqlite_engine
     from storage.projects_service import create_project
 
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     project_dir = tmp_path / "project"

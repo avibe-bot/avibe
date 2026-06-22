@@ -27,7 +27,7 @@ def _write_restart_status(status: dict) -> None:
 
 
 def test_restart_in_progress_true_while_job_pid_alive(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _write_restart_status({"ok": None, "state": "running", "supervisor_pid": 4242, "supervisor_started_at": 1000.0})
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 4242)
@@ -40,7 +40,7 @@ def test_restart_in_progress_false_when_pid_reused(monkeypatch, tmp_path):
     # Pid is alive but its start time no longer matches what the job recorded —
     # the pid was reused (e.g. after a reboot) by an unrelated process, so the
     # restart is not actually in progress and recovery must proceed.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _write_restart_status({"ok": None, "state": "running", "supervisor_pid": 4242, "supervisor_started_at": 1000.0})
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 4242)
@@ -53,7 +53,7 @@ def test_restart_in_progress_false_when_job_pid_dead(monkeypatch, tmp_path):
     # The P2: a killed restart job or a reboot leaves ok=None + state=running with
     # a now-dead pid. The supervisor must treat it as stale, not in progress, so
     # it can exit nonzero and let systemd recover instead of looping "restarting".
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _write_restart_status({"ok": None, "state": "running", "supervisor_pid": 4242})
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: False)
@@ -63,7 +63,7 @@ def test_restart_in_progress_false_when_job_pid_dead(monkeypatch, tmp_path):
 
 def test_restart_in_progress_false_without_recorded_pid(monkeypatch, tmp_path):
     # An older "running" status with no job pid can't be confirmed alive → stale.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _write_restart_status({"ok": None, "state": "running"})
 
@@ -74,7 +74,7 @@ def test_restart_in_progress_false_for_scheduled_restart(monkeypatch, tmp_path):
     # A delayed restart is only sleeping ("scheduled") and hasn't stopped the
     # service yet, so a crash during the delay must still be recovered — even
     # though the job process is alive.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _write_restart_status({"ok": None, "state": "scheduled", "supervisor_pid": 4242})
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: True)
@@ -83,7 +83,7 @@ def test_restart_in_progress_false_for_scheduled_restart(monkeypatch, tmp_path):
 
 
 def test_restart_in_progress_false_when_completed(monkeypatch, tmp_path):
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _write_restart_status({"ok": True, "state": "succeeded", "supervisor_pid": 4242})
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: True)
@@ -97,7 +97,7 @@ def test_main_recovers_when_restart_leaves_unready_service(monkeypatch, tmp_path
     # not adopt the unready pid and loop forever — it must exit nonzero so systemd
     # recovers the service. Old ready pid 100 is dead; the file now points at the
     # hung pid 200 (alive, not recorded); the UI (333) is alive; no restart active.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_runtime_pid_path().write_text("200", encoding="utf-8")
     paths.get_runtime_ui_pid_path().write_text("333", encoding="utf-8")
@@ -126,7 +126,7 @@ def test_main_backs_off_during_active_restart(monkeypatch, tmp_path):
     # write "restarting" and keep waiting, never exit for systemd. Guards the
     # TOCTOU where the restart begins after the loop-top: the recovery branch
     # re-reads _restart_in_progress() before exiting.
-    monkeypatch.setenv("VIBE_REMOTE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     paths.get_runtime_ui_pid_path().write_text("333", encoding="utf-8")
 

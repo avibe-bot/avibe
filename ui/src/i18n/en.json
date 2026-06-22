@@ -1803,7 +1803,10 @@
       "privateDesc": "Only you can view",
       "offlineNote": "This Show Page is offline and can't be shared right now.",
       "publicUnavailable": "Connect Avibe Cloud to get a public link others can open.",
-      "loadError": "Couldn't load this Show Page."
+      "loadError": "Couldn't load this Show Page.",
+      "addToHomeTitle": "Add to Home Screen",
+      "addToHomeBodySafari": "Tap here to open in a new tab, then Share → “Add to Home Screen”.",
+      "addToHomeBodyPwa": "Copy the link above and open it in Safari, then tap Share → “Add to Home Screen”."
     },
     "titlePlaceholder": "Session title",
     "pickAgent": "Pick an agent",

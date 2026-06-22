@@ -565,6 +565,217 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._transport_last_activity["/tmp/work"], 950.0)
         agent.sessions.clear_agent_session_mapping.assert_not_called()
 
+    @staticmethod
+    def _make_evict_agent(*, active_turn, last_activity=0.0):
+        """Build a bare CodexAgent wired for evict_idle_transports tests."""
+        agent = object.__new__(CodexAgent)
+        stop_calls = []
+
+        async def stop_transport():
+            stop_calls.append("stop")
+
+        agent._transports = {"/tmp/work": SimpleNamespace(stop=stop_transport)}
+        agent._transport_last_activity = {"/tmp/work": last_activity}
+        agent._transport_locks = {"/tmp/work": asyncio.Lock()}
+        invalidated = []
+        cleared_turns = []
+        agent._session_mgr = SimpleNamespace(
+            sessions_for_cwd=lambda cwd: ["session-1"] if cwd == "/tmp/work" else [],
+            invalidate_thread=lambda base_session_id: invalidated.append(base_session_id),
+        )
+        request = SimpleNamespace(context="ctx-1", base_session_id="session-1")
+        agent._turn_registry = SimpleNamespace(
+            get_active_turn=lambda base_session_id: active_turn,
+            has_pending_turn_start=lambda base_session_id: False,
+            get_request_for_turn=lambda turn_id: request if turn_id == active_turn else None,
+            get_latest_request=lambda base_session_id: request,
+            clear_session=lambda base_session_id: cleared_turns.append(base_session_id),
+        )
+        release_calls = []
+        agent._event_handler = SimpleNamespace(
+            _release_stream_turn=lambda context: release_calls.append(context),
+            release_calls=release_calls,
+        )
+        agent.controller = SimpleNamespace(emit_agent_message=AsyncMock())
+        agent._session_locks = {"session-1": asyncio.Lock()}
+        agent.sessions = SimpleNamespace(clear_agent_session_mapping=Mock())
+        return agent, stop_calls, invalidated, cleared_turns
+
+    async def test_evict_idle_transports_force_evicts_stuck_active_transport(self):
+        # active turn that has been idle WAY past the stuck-active cap
+        # (max(600*3, 1800) = 1800s) must be force-evicted — the leak fix.
+        agent, stop_calls, invalidated, cleared_turns = self._make_evict_agent(
+            active_turn="turn-1", last_activity=0.0
+        )
+
+        with patch.object(_MODULE.time, "monotonic", return_value=2000.0):
+            evicted = await agent.evict_idle_transports(600)
+
+        self.assertEqual(evicted, 1)
+        self.assertEqual(stop_calls, ["stop"])
+        self.assertEqual(invalidated, ["session-1"])
+        self.assertEqual(cleared_turns, ["session-1"])
+        self.assertEqual(agent._transports, {})
+        self.assertEqual(agent._transport_last_activity, {})
+        # Force-reaped stuck turns must settle Workbench status + runtime gate
+        # through the shared terminal-result chokepoint.
+        agent.controller.emit_agent_message.assert_awaited_once_with(
+            "ctx-1", "result", "", is_error=True, level="silent"
+        )
+        self.assertEqual(agent._event_handler.release_calls, [])
+
+    async def test_evict_idle_transports_force_evict_release_falls_back_to_latest_request(self):
+        # Defensive path: if the active turn has no per-turn request mapping,
+        # the runtime gate is still settled via get_latest_request.
+        agent, stop_calls, _invalidated, _cleared = self._make_evict_agent(
+            active_turn="turn-1", last_activity=0.0
+        )
+        fallback_request = SimpleNamespace(context="ctx-latest", base_session_id="session-1")
+        agent._turn_registry.get_request_for_turn = lambda turn_id: None
+        agent._turn_registry.get_latest_request = lambda base_session_id: fallback_request
+
+        with patch.object(_MODULE.time, "monotonic", return_value=2000.0):
+            evicted = await agent.evict_idle_transports(600)
+
+        self.assertEqual(evicted, 1)
+        self.assertEqual(stop_calls, ["stop"])
+        agent.controller.emit_agent_message.assert_awaited_once_with(
+            "ctx-latest", "result", "", is_error=True, level="silent"
+        )
+        self.assertEqual(agent._event_handler.release_calls, [])
+
+    async def test_evict_idle_transports_keeps_active_transport_under_stuck_cap(self):
+        # active turn idle past idle_timeout (600) but under the cap (1800):
+        # still vetoed, NOT force-evicted.
+        agent, stop_calls, _invalidated, cleared_turns = self._make_evict_agent(
+            active_turn="turn-1", last_activity=0.0
+        )
+
+        with patch.object(_MODULE.time, "monotonic", return_value=1000.0):
+            evicted = await agent.evict_idle_transports(600)
+
+        self.assertEqual(evicted, 0)
+        self.assertEqual(stop_calls, [])
+        self.assertIn("/tmp/work", agent._transports)
+        self.assertEqual(cleared_turns, [])
+
+    async def test_evict_idle_transports_stuck_cap_floor_dominates_small_timeout(self):
+        # With a tiny idle_timeout (100s) the multiplier window (300s) is below
+        # the 1800s floor, so the floor governs: idle 1000s < 1800s stays vetoed.
+        agent, stop_calls, _invalidated, _cleared = self._make_evict_agent(
+            active_turn="turn-1", last_activity=0.0
+        )
+
+        with patch.object(_MODULE.time, "monotonic", return_value=1000.0):
+            evicted = await agent.evict_idle_transports(100)
+
+        self.assertEqual(evicted, 0)
+        self.assertEqual(stop_calls, [])
+        self.assertIn("/tmp/work", agent._transports)
+
+    async def test_evict_idle_transports_stuck_backstop_disabled(self):
+        # multiplier <= 0 disables the backstop: an active turn is an absolute
+        # veto again, no matter how long it has been idle.
+        agent, stop_calls, _invalidated, cleared_turns = self._make_evict_agent(
+            active_turn="turn-1", last_activity=0.0
+        )
+
+        with patch.object(_MODULE, "DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER", 0):
+            with patch.object(_MODULE.time, "monotonic", return_value=1_000_000.0):
+                evicted = await agent.evict_idle_transports(600)
+
+        self.assertEqual(evicted, 0)
+        self.assertEqual(stop_calls, [])
+        self.assertIn("/tmp/work", agent._transports)
+        self.assertEqual(cleared_turns, [])
+
+    async def test_evict_idle_transports_force_evict_skips_when_activity_refreshed(self):
+        # Race: pass 1 sees a stuck-active candidate (idle past the 1800s cap),
+        # but a fresh notification updates last_activity before the locked
+        # recheck. The recheck recomputes idle from current state and bails.
+        agent, stop_calls, _invalidated, _cleared = self._make_evict_agent(
+            active_turn="turn-1", last_activity=0.0
+        )
+        lock = asyncio.Lock()
+        await lock.acquire()
+        agent._transport_locks = {"/tmp/work": lock}
+
+        with patch.object(_MODULE.time, "monotonic", return_value=2000.0):
+            eviction_task = asyncio.create_task(agent.evict_idle_transports(600))
+            await asyncio.sleep(0)
+            # fresh activity: idle recomputed as 2000-1900=100s, well under cap
+            agent._transport_last_activity["/tmp/work"] = 1900.0
+            lock.release()
+            evicted = await eviction_task
+
+        self.assertEqual(evicted, 0)
+        self.assertEqual(stop_calls, [])
+        self.assertIn("/tmp/work", agent._transports)
+
+    async def test_evict_idle_transports_reclassifies_when_turn_clears_between_passes(self):
+        # Race: pass 1 sees a stuck-active candidate, but the turn completes
+        # (active flag clears) before the locked recheck while activity stays
+        # stale. The recheck reclassifies it as a NORMAL idle eviction.
+        agent, stop_calls, invalidated, cleared_turns = self._make_evict_agent(
+            active_turn="turn-1", last_activity=0.0
+        )
+        lock = asyncio.Lock()
+        await lock.acquire()
+        agent._transport_locks = {"/tmp/work": lock}
+
+        with patch.object(_MODULE.time, "monotonic", return_value=2000.0):
+            eviction_task = asyncio.create_task(agent.evict_idle_transports(600))
+            await asyncio.sleep(0)
+            # turn finished between the two passes; activity unchanged (stale)
+            agent._turn_registry.get_active_turn = lambda base_session_id: None
+            lock.release()
+            evicted = await eviction_task
+
+        self.assertEqual(evicted, 1)
+        self.assertEqual(stop_calls, ["stop"])
+        self.assertEqual(invalidated, ["session-1"])
+        self.assertEqual(cleared_turns, ["session-1"])
+        # reclassified as normal idle: the prior turn already settled itself,
+        # so no spurious terminal result or runtime-gate release fires here.
+        agent.controller.emit_agent_message.assert_not_awaited()
+        self.assertEqual(agent._event_handler.release_calls, [])
+
+    async def test_evict_idle_transports_force_evict_preserves_state_when_stop_fails(self):
+        # Stuck-active force-eviction path: if transport.stop() raises, the
+        # transport and its bookkeeping must be left intact (next sweep retries).
+        agent = object.__new__(CodexAgent)
+        invalidated = []
+        cleared_turns = []
+
+        async def stop_transport():
+            raise RuntimeError("boom")
+
+        transport = SimpleNamespace(stop=stop_transport)
+        lock = asyncio.Lock()
+        agent._transports = {"/tmp/work": transport}
+        agent._transport_last_activity = {"/tmp/work": 0.0}
+        agent._transport_locks = {"/tmp/work": lock}
+        agent._session_mgr = SimpleNamespace(
+            sessions_for_cwd=lambda cwd: ["session-1"] if cwd == "/tmp/work" else [],
+            invalidate_thread=lambda base_session_id: invalidated.append(base_session_id),
+        )
+        agent._turn_registry = SimpleNamespace(
+            get_active_turn=lambda base_session_id: "turn-1",
+            has_pending_turn_start=lambda base_session_id: False,
+            clear_session=lambda base_session_id: cleared_turns.append(base_session_id),
+        )
+        agent._session_locks = {"session-1": asyncio.Lock()}
+        agent.sessions = SimpleNamespace(clear_agent_session_mapping=Mock())
+
+        with patch.object(_MODULE.time, "monotonic", return_value=2000.0):
+            evicted = await agent.evict_idle_transports(600)
+
+        self.assertEqual(evicted, 0)
+        self.assertIs(agent._transports["/tmp/work"], transport)
+        self.assertEqual(agent._transport_last_activity["/tmp/work"], 0.0)
+        self.assertEqual(invalidated, [])
+        self.assertEqual(cleared_turns, [])
+
     async def test_get_or_create_transport_fast_path_waits_for_transport_lock(self):
         agent = object.__new__(CodexAgent)
         lock = asyncio.Lock()
@@ -1353,6 +1564,382 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         agent.sessions.bind_agent_session.assert_not_called()
         self.assertFalse(agent.is_fork_correction_pending("ses-target"))
 
+    async def test_start_or_resume_thread_rolls_back_running_fork_before_correction(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_id=Mock(return_value=None),
+            ensure_agent_session_id=Mock(return_value="ses-target"),
+            bind_agent_session=Mock(return_value="ses-target"),
+        )
+        agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent._fork_correction_pending_base_sessions = set()
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            context=SimpleNamespace(
+                platform="avibe",
+                platform_specific={
+                    "agent_session_target": {
+                        "id": "ses-target",
+                        "agent_backend": "codex",
+                        "native_session_id": "",
+                        "native_session_fork": {
+                            "source_session_id": "ses-source",
+                            "source_native_session_id": "thread-source",
+                            "source_backend": "codex",
+                            "trim_latest_running_turn": True,
+                            "native_turn_started": True,
+                        },
+                    }
+                },
+                user_id="scheduled",
+                channel_id="ses-target",
+                thread_id=None,
+            ),
+            base_session_id="ses-target",
+            session_key="avibe::project::proj_1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_model=None,
+            vibe_agent_reasoning_effort=None,
+        )
+        transport = SimpleNamespace(send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}}))
+
+        thread_id = await agent._start_or_resume_thread(transport, request)
+
+        self.assertEqual(thread_id, "thread-fork")
+        self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
+            "thread/fork",
+            "thread/rollback",
+            "thread/inject_items",
+        ])
+        rollback_params = transport.send_request.await_args_list[1].args[1]
+        self.assertEqual(rollback_params, {"threadId": "thread-fork", "numTurns": 1})
+        agent.sessions.bind_agent_session.assert_called_once_with(
+            "avibe::project::proj_1",
+            "codex",
+            "ses-target",
+            "thread-fork",
+        )
+
+    async def test_start_or_resume_thread_skips_running_fork_rollback_before_native_start(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_id=Mock(return_value=None),
+            ensure_agent_session_id=Mock(return_value="ses-target"),
+            bind_agent_session=Mock(return_value="ses-target"),
+        )
+        agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent._fork_correction_pending_base_sessions = set()
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            context=SimpleNamespace(
+                platform="avibe",
+                platform_specific={
+                    "agent_session_target": {
+                        "id": "ses-target",
+                        "agent_backend": "codex",
+                        "native_session_id": "",
+                        "native_session_fork": {
+                            "source_session_id": "ses-source",
+                            "source_native_session_id": "thread-source",
+                            "source_backend": "codex",
+                            "trim_latest_running_turn": True,
+                            "native_turn_started": False,
+                        },
+                    }
+                },
+                user_id="scheduled",
+                channel_id="ses-target",
+                thread_id=None,
+            ),
+            base_session_id="ses-target",
+            session_key="avibe::project::proj_1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_model=None,
+            vibe_agent_reasoning_effort=None,
+        )
+        transport = SimpleNamespace(send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}}))
+
+        with patch(
+            "vibe.internal_client.turn_state",
+            new=AsyncMock(return_value={"body": {"in_flight": False, "native_turn_started": False}}),
+        ):
+            thread_id = await agent._start_or_resume_thread(transport, request)
+
+        self.assertEqual(thread_id, "thread-fork")
+        self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
+            "thread/fork",
+            "thread/inject_items",
+        ])
+
+    async def test_start_or_resume_thread_rolls_back_pre_start_fork_after_source_started(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_id=Mock(return_value=None),
+            ensure_agent_session_id=Mock(return_value="ses-target"),
+            bind_agent_session=Mock(return_value="ses-target"),
+        )
+        agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent._fork_correction_pending_base_sessions = set()
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            context=SimpleNamespace(
+                platform="avibe",
+                platform_specific={
+                    "agent_session_target": {
+                        "id": "ses-target",
+                        "agent_backend": "codex",
+                        "native_session_id": "",
+                        "native_session_fork": {
+                            "source_session_id": "ses-source",
+                            "source_native_session_id": "thread-source",
+                            "source_backend": "codex",
+                            "source_message_id": "msg-user",
+                            "trim_latest_running_turn": True,
+                            "native_turn_started": False,
+                        },
+                    }
+                },
+                user_id="scheduled",
+                channel_id="ses-target",
+                thread_id=None,
+            ),
+            base_session_id="ses-target",
+            session_key="avibe::project::proj_1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_model=None,
+            vibe_agent_reasoning_effort=None,
+        )
+        turn_state_checked = False
+
+        async def turn_state(_source_session_id):
+            nonlocal turn_state_checked
+            turn_state_checked = True
+            return {"body": {"in_flight": True, "native_turn_started": True}}
+
+        async def send_request(method, params):
+            if method == "thread/fork":
+                self.assertTrue(turn_state_checked)
+            return {"thread": {"id": "thread-fork"}}
+
+        transport = SimpleNamespace(send_request=AsyncMock(side_effect=send_request))
+
+        with patch(
+            "vibe.internal_client.turn_state",
+            new=AsyncMock(side_effect=turn_state),
+        ):
+            thread_id = await agent._start_or_resume_thread(transport, request)
+
+        self.assertEqual(thread_id, "thread-fork")
+        self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
+            "thread/fork",
+            "thread/rollback",
+            "thread/inject_items",
+        ])
+
+    async def test_start_or_resume_thread_rolls_back_pre_start_fork_after_source_output(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_id=Mock(return_value=None),
+            ensure_agent_session_id=Mock(return_value="ses-target"),
+            bind_agent_session=Mock(return_value="ses-target"),
+        )
+        agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent._fork_correction_pending_base_sessions = set()
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            context=SimpleNamespace(
+                platform="avibe",
+                platform_specific={
+                    "agent_session_target": {
+                        "id": "ses-target",
+                        "agent_backend": "codex",
+                        "native_session_id": "",
+                        "native_session_fork": {
+                            "source_session_id": "ses-source",
+                            "source_native_session_id": "thread-source",
+                            "source_backend": "codex",
+                            "source_message_id": "msg-user",
+                            "trim_latest_running_turn": True,
+                            "native_turn_started": False,
+                        },
+                    }
+                },
+                user_id="scheduled",
+                channel_id="ses-target",
+                thread_id=None,
+            ),
+            base_session_id="ses-target",
+            session_key="avibe::project::proj_1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_model=None,
+            vibe_agent_reasoning_effort=None,
+        )
+        transport = SimpleNamespace(send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}}))
+
+        with patch.object(
+            _MODULE,
+            "fork_source_state",
+            return_value=SimpleNamespace(
+                anchor_is_terminal_agent_output=False,
+                latest_after_anchor_author="agent",
+                latest_after_anchor_type="assistant",
+                has_messages_after_anchor=True,
+                has_terminal_agent_output_after_anchor=False,
+            ),
+        ):
+            thread_id = await agent._start_or_resume_thread(transport, request)
+
+        self.assertEqual(thread_id, "thread-fork")
+        self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
+            "thread/fork",
+            "thread/rollback",
+            "thread/inject_items",
+        ])
+        rollback_params = transport.send_request.await_args_list[1].args[1]
+        self.assertEqual(rollback_params, {"threadId": "thread-fork", "numTurns": 1})
+
+    async def test_start_or_resume_thread_skips_running_fork_rollback_when_anchor_completed(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_id=Mock(return_value=None),
+            ensure_agent_session_id=Mock(return_value="ses-target"),
+            bind_agent_session=Mock(return_value="ses-target"),
+        )
+        agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent._fork_correction_pending_base_sessions = set()
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            context=SimpleNamespace(
+                platform="avibe",
+                platform_specific={
+                    "agent_session_target": {
+                        "id": "ses-target",
+                        "agent_backend": "codex",
+                        "native_session_id": "",
+                        "native_session_fork": {
+                            "source_session_id": "ses-source",
+                            "source_native_session_id": "thread-source",
+                            "source_backend": "codex",
+                            "source_message_id": "msg-result",
+                            "trim_latest_running_turn": True,
+                            "native_turn_started": True,
+                        },
+                    }
+                },
+                user_id="scheduled",
+                channel_id="ses-target",
+                thread_id=None,
+            ),
+            base_session_id="ses-target",
+            session_key="avibe::project::proj_1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_model=None,
+            vibe_agent_reasoning_effort=None,
+        )
+        transport = SimpleNamespace(send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}}))
+
+        with patch.object(
+            _MODULE,
+            "fork_source_state",
+            return_value=SimpleNamespace(
+                anchor_is_terminal_agent_output=True,
+                latest_after_anchor_author=None,
+                latest_after_anchor_type=None,
+                has_messages_after_anchor=False,
+                has_terminal_agent_output_after_anchor=False,
+            ),
+        ):
+            thread_id = await agent._start_or_resume_thread(transport, request)
+
+        self.assertEqual(thread_id, "thread-fork")
+        self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
+            "thread/fork",
+            "thread/inject_items",
+        ])
+
+    async def test_start_or_resume_thread_skips_running_fork_rollback_after_source_completed(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(config=SimpleNamespace(platform="avibe", reply_enhancements=False))
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(
+            get_agent_session_id=Mock(return_value=None),
+            ensure_agent_session_id=Mock(return_value="ses-target"),
+            bind_agent_session=Mock(return_value="ses-target"),
+        )
+        agent._session_mgr = SimpleNamespace(set_thread_id=Mock())
+        agent._fork_correction_pending_base_sessions = set()
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            context=SimpleNamespace(
+                platform="avibe",
+                platform_specific={
+                    "agent_session_target": {
+                        "id": "ses-target",
+                        "agent_backend": "codex",
+                        "native_session_id": "",
+                        "native_session_fork": {
+                            "source_session_id": "ses-source",
+                            "source_native_session_id": "thread-source",
+                            "source_backend": "codex",
+                            "source_message_id": "msg-user",
+                            "trim_latest_running_turn": True,
+                            "native_turn_started": False,
+                        },
+                    }
+                },
+                user_id="scheduled",
+                channel_id="ses-target",
+                thread_id=None,
+            ),
+            base_session_id="ses-target",
+            session_key="avibe::project::proj_1",
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+            vibe_agent_model=None,
+            vibe_agent_reasoning_effort=None,
+        )
+        transport = SimpleNamespace(send_request=AsyncMock(return_value={"thread": {"id": "thread-fork"}}))
+
+        with patch.object(
+            _MODULE,
+            "fork_source_state",
+            return_value=SimpleNamespace(
+                anchor_is_terminal_agent_output=False,
+                latest_after_anchor_author="agent",
+                latest_after_anchor_type="result",
+                has_messages_after_anchor=True,
+                has_terminal_agent_output_after_anchor=True,
+            ),
+        ):
+            thread_id = await agent._start_or_resume_thread(transport, request)
+
+        self.assertEqual(thread_id, "thread-fork")
+        self.assertEqual([call.args[0] for call in transport.send_request.await_args_list], [
+            "thread/fork",
+            "thread/inject_items",
+        ])
+
     async def test_resume_thread_skips_reserved_native_for_explicit_subagent(self):
         # Explicit per-turn subagent: it has its own thread; must NOT resume the
         # reserved MAIN native.
@@ -1910,6 +2497,49 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         agent._session_mgr = SimpleNamespace(sessions_for_cwd=lambda cwd: [])
         agent.codex_config = SimpleNamespace(binary="codex", extra_args=[])
         return agent
+
+    async def test_server_request_refreshes_transport_activity(self):
+        # An auto-approved server request must refresh the bound cwd's activity
+        # so the stuck-active idle backstop doesn't force-evict a live turn that
+        # recently asked for approval.
+        agent = self._agent()
+        agent._transport_last_activity = {"/tmp/work": 0.0}
+
+        with patch.object(_MODULE.time, "monotonic", return_value=1234.0):
+            result = await agent._on_server_request(
+                "/tmp/work",
+                7,
+                "item/commandExecution/requestApproval",
+                {"itemId": "item-1"},
+            )
+
+        self.assertEqual(result, {"approved": True})
+        self.assertEqual(agent._transport_last_activity["/tmp/work"], 1234.0)
+
+    async def test_get_or_create_transport_binds_cwd_into_server_request_cb(self):
+        # The server-request callback registered on the transport must carry the
+        # cwd, so invoking it (as the transport would) refreshes that cwd.
+        import tempfile
+
+        agent = self._agent()
+        captured = {}
+
+        with tempfile.TemporaryDirectory() as cwd:
+            fresh = SimpleNamespace(
+                is_initialized=True,
+                start=AsyncMock(),
+                on_notification=Mock(),
+                on_server_request=Mock(side_effect=lambda cb: captured.update(cb=cb)),
+            )
+            with patch.object(_MODULE, "CodexTransport", return_value=fresh):
+                await agent._get_or_create_transport(cwd)
+
+            self.assertIn("cb", captured)
+            with patch.object(_MODULE.time, "monotonic", return_value=999.0):
+                result = await captured["cb"](1, "item/fileChange/requestApproval", {"itemId": "x"})
+
+            self.assertEqual(result, {"approved": True})
+            self.assertEqual(agent._transport_last_activity[cwd], 999.0)
 
     async def test_cached_transport_evicted_when_cwd_inode_changes(self):
         import tempfile

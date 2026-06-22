@@ -4288,22 +4288,66 @@ def _session_fork_error_response(err: Exception):
     return jsonify({"error": message, "code": "session_fork_failed"}), 400
 
 
-@app.route("/api/sessions/<session_id>/fork", methods=["POST"])
-def sessions_fork(session_id: str):
+async def _session_turn_state_for_fork(session_id: str) -> dict[str, bool]:
+    """Authoritative best-effort live turn check for fork trimming.
+
+    ``agent_status`` can be stale after crashes/restarts. Treat any live
+    in-flight turn as a trim candidate; backend-specific reservation code then
+    verifies whether a safe native boundary exists before it persists trim
+    metadata.
+    """
+
+    from vibe import internal_client
+
+    try:
+        turn_result = await internal_client.turn_state(session_id)
+    except (internal_client.InternalServerUnavailable, internal_client.InternalServerTimeout):
+        return {"in_flight": False, "native_turn_started": False}
+    body = turn_result.get("body") or {}
+    in_flight = bool(body.get("in_flight"))
+    native_turn_started = bool(body.get("native_turn_started"))
+    return {
+        "in_flight": in_flight,
+        "native_turn_started": native_turn_started,
+        "trim_latest_running_turn": in_flight,
+    }
+
+
+def _reserve_forked_session_for_ui(
+    session_id: str,
+    *,
+    trim_latest_running_turn: bool,
+    native_turn_started: bool,
+) -> dict:
     from core.services import sessions as workbench_sessions_service
     from core.services import settings as settings_service
-    from core.services.session_fork import SessionForkError, reserve_forked_session
+    from core.services.session_fork import reserve_forked_session
+
+    title_lang = settings_service.load_config_or_default().language
+    result = reserve_forked_session(
+        source_session_id=session_id,
+        title_lang=title_lang,
+        trim_latest_running_turn=trim_latest_running_turn,
+        native_turn_started=native_turn_started,
+    )
+    engine = _projects_engine()
+    with engine.connect() as conn:
+        return workbench_sessions_service.get_session(conn, result.session_id)
+
+
+@app.route("/api/sessions/<session_id>/fork", methods=["POST"])
+async def sessions_fork(session_id: str):
+    from core.services.session_fork import SessionForkError
     from vibe.sse_broker import broker
 
     try:
-        # Use the saved global UI language (the same source other backend-generated
-        # strings use) so the forked title matches the chosen UI, not the browser's
-        # Accept-Language header which can differ from the user's selected language.
-        title_lang = settings_service.load_config_or_default().language
-        result = reserve_forked_session(source_session_id=session_id, title_lang=title_lang)
-        engine = _projects_engine()
-        with engine.connect() as conn:
-            session = workbench_sessions_service.get_session(conn, result.session_id)
+        fork_turn_state = await _session_turn_state_for_fork(session_id)
+        session = await asyncio.to_thread(
+            _reserve_forked_session_for_ui,
+            session_id,
+            trim_latest_running_turn=bool(fork_turn_state.get("trim_latest_running_turn")),
+            native_turn_started=bool(fork_turn_state.get("native_turn_started")),
+        )
     except SessionForkError as err:
         return _session_fork_error_response(err)
     except LookupError as err:

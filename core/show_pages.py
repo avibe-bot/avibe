@@ -448,6 +448,22 @@ def _default_index_html(session_id: str) -> str:
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Show Page {escaped}</title>
+    <!-- PWA: let a user "Add to Home Screen" this Show Page as a standalone app.
+         We declare it standalone-capable but DELIBERATELY ship no apple-touch-icon
+         or apple-mobile-web-app-title here. A page customizes its installed icon
+         and name by editing this file (a custom <title> / apple-mobile-web-app-title
+         and a relative apple-touch-icon.png), and a static default would compete
+         with that: iOS picks the FIRST apple-touch-icon in source order, so a
+         default link could shadow the page's own icon when a page appends rather
+         than replaces. With none declared, a customized page's icon is the only
+         one (it wins), and an un-customized page falls back to the Avibe origin's
+         /apple-touch-icon.png (served auth-free; see _PWA_PUBLIC_ASSETS in
+         ui_server) via iOS's root-directory icon lookup. We also do NOT link
+         /manifest.webmanifest: the workbench manifest's start_url "/" would hijack
+         the installed icon back to the workbench. -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
   </head>
   <body>
     <div id="root"></div>

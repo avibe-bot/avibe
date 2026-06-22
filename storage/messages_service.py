@@ -294,6 +294,21 @@ def append(
     return _row_to_payload(payload)
 
 
+def native_message_exists(conn: Connection, *, platform: str, native_message_id: str) -> bool:
+    """True when a platform/native message id has already been recorded."""
+    platform = str(platform or "").strip()
+    native_message_id = str(native_message_id or "").strip()
+    if not platform or not native_message_id:
+        return False
+    row_id = conn.execute(
+        select(messages.c.id)
+        .where(messages.c.platform == platform)
+        .where(messages.c.native_message_id == native_message_id)
+        .limit(1)
+    ).scalar_one_or_none()
+    return row_id is not None
+
+
 def get_quick_reply_chosen(conn: Connection, session_id: str, message_id: str) -> Optional[str]:
     """The label already chosen for *message_id*'s quick-reply group, or None.
 
@@ -502,12 +517,13 @@ def list_session_messages(
                     and_(messages.c.created_at == anchor, messages.c.id > after_id),
                 )
             )
-    query = query.order_by(messages.c.created_at.asc(), messages.c.id.asc()).limit(effective_limit)
+    query = query.order_by(messages.c.created_at.asc(), messages.c.id.asc()).limit(effective_limit + 1)
     rows = [_row_to_payload(dict(row)) for row in conn.execute(query).mappings().all()]
-    # Compare against the clamped page size; a caller requesting > 500
-    # would otherwise receive a full 500-row page with a null cursor and
-    # silently stop paginating.
-    next_after = rows[-1]["id"] if len(rows) == effective_limit else None
+    # Probe one extra row against the clamped page size: a full page alone does
+    # not prove there is another page, but the extra row does.
+    has_newer = len(rows) > effective_limit
+    rows = rows[:effective_limit]
+    next_after = rows[-1]["id"] if has_newer and rows else None
     return {"messages": rows, "next_after_id": next_after, "next_before_id": None}
 
 
@@ -552,8 +568,11 @@ DRAFT_TYPE = "draft"
 # This stops another tab from briefly seeing the row as a sent prompt during the
 # dispatch window (Codex P2).
 PENDING_TYPE = "pending"
+# Hidden row used only to keep native-message-id dedupe coverage after multiple
+# queued harness callbacks are coalesced into one dispatched turn.
+HARNESS_DEDUPE_TYPE = "harness_dedupe"
 # Ephemeral types that must never count as inbox activity / conversation.
-NON_CONVERSATION_TYPES = (QUEUED_TYPE, DRAFT_TYPE, PENDING_TYPE)
+NON_CONVERSATION_TYPES = (QUEUED_TYPE, DRAFT_TYPE, PENDING_TYPE, HARNESS_DEDUPE_TYPE)
 
 # The transcript-visible types — the SINGLE source of truth shared by the
 # history fetch (``list_session_messages``) AND the live ``message.new`` publish

@@ -78,6 +78,16 @@ def _write_fake_node(path: Path, version: str = "v22.16.0") -> None:
     )
 
 
+def _write_missing_node(path: Path) -> None:
+    _write_executable(
+        path,
+        """\
+        #!/usr/bin/env bash
+        exit 127
+        """,
+    )
+
+
 def _write_fake_file(path: Path, mapping: dict[Path, str]) -> None:
     cases = "\n".join(
         f'        "{target}") echo "${{prefix}}{description}" ;;' for target, description in mapping.items()
@@ -174,6 +184,7 @@ def test_install_script_installs_node_when_missing(tmp_path):
     uv_log = tmp_path / "uv-tool-bin-dir.txt"
 
     _write_fake_uv(path_dir / "uv", uv_log)
+    _write_missing_node(path_dir / "node")
     _write_fake_uname(path_dir / "uname", machine="arm64")
     _write_executable(
         path_dir / "brew",
@@ -263,6 +274,7 @@ def test_install_script_continues_when_node_install_fails(tmp_path):
     uv_log = tmp_path / "uv-tool-bin-dir.txt"
 
     _write_fake_uv(path_dir / "uv", uv_log)
+    _write_missing_node(path_dir / "node")
     _write_fake_uname(path_dir / "uname", machine="arm64")
     _write_executable(
         path_dir / "brew",
