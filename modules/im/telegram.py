@@ -2067,7 +2067,6 @@ class TelegramBot(BaseIMClient):
 
     def _settings_message_type_label(self, msg_type: str) -> str:
         display_names = {
-            "system": self._t("messageType.system"),
             "assistant": self._t("messageType.assistant"),
             "toolcall": self._t("messageType.toolcall"),
         }

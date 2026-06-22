@@ -13,7 +13,10 @@ from config import paths
 logger = logging.getLogger(__name__)
 
 DEFAULT_SHOW_MESSAGE_TYPES: List[str] = ["assistant"]
-ALLOWED_MESSAGE_TYPES = {"system", "assistant", "toolcall"}
+# "system" is deprecated: system/init messages are never pushed to users, so it
+# is no longer a user-facing toggle. Normalizing against this set drops any
+# legacy "system" value still stored in show_message_types.
+ALLOWED_MESSAGE_TYPES = {"assistant", "toolcall"}
 SCHEMA_VERSION = 5
 SCOPED_KEY_SEP = "::"
 

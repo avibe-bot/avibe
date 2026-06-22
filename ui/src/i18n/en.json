@@ -1157,7 +1157,11 @@
     "useGlobalDefault": "Use global default",
     "backend": "Backend",
     "showMessageTypes": "Show Message Types",
-    "showMessageTypesHint": "Control which message types are displayed in Slack:\n\n• System: Agent startup/status messages\n• Assistant: Agent responses and explanations\n• Toolcall: Tool execution details (one-line summary)\n\nNote: The agent's final result is always shown regardless of these settings.",
+    "showMessageTypesHint": "Control which message types are shown in the conversation:\n\n• Muttering: Agent responses and explanations\n• Toolcall: Tool execution details (one-line summary)\n\nNote: The agent's final result is always shown regardless of these settings.",
+    "messageType": {
+      "assistant": "Muttering",
+      "toolcall": "Toolcall"
+    },
     "opencodeSettings": "OpenCode Settings",
     "claudeSettings": "Claude Settings",
     "codexSettings": "Codex Settings",
@@ -1177,7 +1181,7 @@
     "requireMention": "Require @Mention",
     "requireMentionOn": "Require @mention",
     "requireMentionOff": "Don't require @mention",
-    "requireBind": "Bound users only",
+    "requireBind": "Allowed Users",
     "requireBindOn": "Bound only",
     "requireBindOff": "Anyone",
     "mentionStatusOn": "Require @",

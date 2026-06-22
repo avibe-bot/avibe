@@ -19,6 +19,7 @@ from config.v2_settings import (
     _make_scoped_key,
     _split_scoped_key,
     normalize_routing_settings,
+    normalize_show_message_types,
 )
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.models import auth_codes, scope_settings, scopes
@@ -78,7 +79,7 @@ class SQLiteSettingsService:
                     require_mention=_nullable_bool_int(item.require_mention),
                     settings_json=_json_dumps(
                         {
-                            "show_message_types": item.show_message_types,
+                            "show_message_types": normalize_show_message_types(item.show_message_types),
                             "routing": routing,
                             "require_bind": item.require_bind,
                         }
@@ -156,7 +157,7 @@ class SQLiteSettingsService:
                             "bound_at": item.bound_at or "",
                             "dm_chat_id": item.dm_chat_id or "",
                             "pending_bind_menu_hint": bool(item.pending_bind_menu_hint),
-                            "show_message_types": item.show_message_types,
+                            "show_message_types": normalize_show_message_types(item.show_message_types),
                             "routing": routing,
                         }
                     ),
@@ -233,7 +234,7 @@ class SQLiteSettingsService:
             key = _make_scoped_key(str(row["platform"]), str(row["native_id"]))
             result[key] = ChannelSettings(
                 enabled=bool(row["enabled"]),
-                show_message_types=_json_list(payload.get("show_message_types")),
+                show_message_types=normalize_show_message_types(_json_list(payload.get("show_message_types"))),
                 custom_cwd=row["workdir"],
                 routing=_routing_from_row(row, payload),
                 require_mention=_nullable_bool(row["require_mention"]),
@@ -272,7 +273,7 @@ class SQLiteSettingsService:
                 is_admin=str(row["role"] or "").lower() in {"admin", "owner"},
                 bound_at=str(payload.get("bound_at") or ""),
                 enabled=bool(row["enabled"]),
-                show_message_types=_json_list(payload.get("show_message_types")),
+                show_message_types=normalize_show_message_types(_json_list(payload.get("show_message_types"))),
                 custom_cwd=row["workdir"],
                 routing=_routing_from_row(row, payload),
                 dm_chat_id=str(payload.get("dm_chat_id") or ""),

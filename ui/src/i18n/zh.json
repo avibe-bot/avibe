@@ -1157,7 +1157,11 @@
     "useGlobalDefault": "使用全局默认值",
     "backend": "后端",
     "showMessageTypes": "显示的消息类型",
-    "showMessageTypesHint": "控制在 Slack 中显示哪些消息类型：\n\n• System：Agent 启动/状态消息\n• Assistant：Agent 的回复和解释\n• Toolcall：工具执行详情（单行摘要）\n\n注意：Agent 的最终结果消息会始终显示，不受此设置影响。",
+    "showMessageTypesHint": "控制在对话中显示哪些消息类型：\n\n• 喃喃自语：Agent 的回复和解释\n• 工具调用：工具执行详情（单行摘要）\n\n注意：Agent 的最终结果消息会始终显示，不受此设置影响。",
+    "messageType": {
+      "assistant": "喃喃自语",
+      "toolcall": "工具调用"
+    },
     "opencodeSettings": "OpenCode 设置",
     "claudeSettings": "Claude 设置",
     "codexSettings": "Codex 设置",
@@ -1177,7 +1181,7 @@
     "requireMention": "需要 @提及",
     "requireMentionOn": "需要@",
     "requireMentionOff": "不用@",
-    "requireBind": "仅限已绑定用户",
+    "requireBind": "允许对话的用户",
     "requireBindOn": "仅绑定用户",
     "requireBindOff": "所有人",
     "mentionStatusOn": "需要 @",

@@ -348,7 +348,7 @@
   },
   "messageType": {
     "system": "System",
-    "assistant": "Assistant",
+    "assistant": "Muttering",
     "toolcall": "Toolcall",
     "result": "Result",
     "systemDesc": "System initialization and status messages",
