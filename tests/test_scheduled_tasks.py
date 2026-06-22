@@ -1596,7 +1596,7 @@ def test_recovered_agent_run_retires_stale_queued_native_rows_before_gate(
     request_store.recover_processing()
 
     from storage import messages_service
-    from storage.models import agent_sessions
+    from storage.models import agent_sessions, messages
 
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -1655,6 +1655,12 @@ def test_recovered_agent_run_retires_stale_queued_native_rows_before_gate(
     assert "coalesced prompt 2" in submitted[0]
     with engine.connect() as conn:
         assert messages_service.list_queued(conn, session_id) == []
+        dedupe_rows = conn.execute(
+            select(messages.c.native_message_id, messages.c.type)
+            .where(messages.c.session_id == session_id)
+            .where(messages.c.type == messages_service.HARNESS_DEDUPE_TYPE)
+        ).all()
+    assert {row.native_message_id for row in dedupe_rows} == {f"agent_run:{run_ids[1]}"}
     stored = {run_id: request_store.get_run(run_id) for run_id in run_ids}
     assert stored[run_ids[0]]["status"] == "running"
     assert stored[run_ids[1]]["status"] == "queued"

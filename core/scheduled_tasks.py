@@ -467,12 +467,14 @@ def _retire_stale_agent_run_queue_rows(
     session_id: Optional[str],
     execution_ids: list[str],
 ) -> int:
-    """Drop old queued Workbench rows for recovered direct Agent Runs.
+    """Retire old queued Workbench rows for recovered direct Agent Runs.
 
     A crash can happen after the run rows are claimed but before flush_queue
     deletes the queued harness rows. On restart the primary run is recovered and
     submitted here; leaving the old queued rows in place makes their native ids
     look like delivered duplicates even though they are only stale queue state.
+    Child rows still need their native ids preserved as dedupe markers because
+    only the primary prompt is re-mirrored as a visible harness row.
     """
     normalized_ids: list[str] = []
     seen: set[str] = set()
@@ -489,22 +491,39 @@ def _retire_stale_agent_run_queue_rows(
     from storage.models import messages
 
     native_ids = [f"agent_run:{execution_id}" for execution_id in normalized_ids]
+    primary_native_id = native_ids[0]
     engine = create_sqlite_engine()
     with engine.begin() as conn:
-        row_ids = [
-            str(row_id)
-            for row_id in conn.execute(
-                select(messages.c.id)
+        rows = list(
+            conn.execute(
+                select(messages.c.id, messages.c.native_message_id)
                 .where(messages.c.session_id == session_id)
                 .where(messages.c.platform == "avibe")
                 .where(messages.c.type == messages_service.QUEUED_TYPE)
                 .where(messages.c.native_message_id.in_(native_ids))
-            ).scalars()
-            if row_id
-        ]
+            )
+        )
+        primary_row_ids = [str(row.id) for row in rows if str(row.native_message_id or "") == primary_native_id]
+        marker_row_ids = [str(row.id) for row in rows if str(row.native_message_id or "") != primary_native_id]
+        if marker_row_ids:
+            conn.execute(
+                messages.update()
+                .where(messages.c.id.in_(marker_row_ids))
+                .values(
+                    author="harness",
+                    source="harness",
+                    type=messages_service.HARNESS_DEDUPE_TYPE,
+                    content_text="",
+                    content_json=json.dumps({"text": ""}),
+                    metadata_json=json.dumps({"coalesced_from": primary_native_id, "recovered_queue_row": True}),
+                    updated_at=_utc_now_iso(),
+                )
+            )
+        row_ids = primary_row_ids + marker_row_ids
         if not row_ids:
             return 0
-        messages_service.delete_queued(conn, row_ids)
+        if primary_row_ids:
+            messages_service.delete_queued(conn, primary_row_ids)
         return len(row_ids)
 
 
