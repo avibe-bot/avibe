@@ -210,15 +210,29 @@ def inspect_queued_runs_for_workbench_in_connection(conn: Any, run_ids: list[str
     }
     queued_run_ids: list[str] = []
     stale_run_ids: list[str] = []
+    cancel_requested_run_ids: list[str] = []
     for run_id in normalized_run_ids:
         row = rows.get(run_id)
         if row is None:
             stale_run_ids.append(run_id)
             continue
-        if bool(row["cancel_requested"]) or normalize_run_status(row["status"]) != "queued":
+        if bool(row["cancel_requested"]):
+            if normalize_run_status(row["status"]) == "queued":
+                cancel_requested_run_ids.append(run_id)
+            stale_run_ids.append(run_id)
+            continue
+        if normalize_run_status(row["status"]) != "queued":
             stale_run_ids.append(run_id)
             continue
         queued_run_ids.append(run_id)
+    if cancel_requested_run_ids:
+        now = _utc_now_iso()
+        conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id.in_(cancel_requested_run_ids))
+            .where(agent_runs.c.status.in_(_status_query_values("queued")))
+            .values(status="canceled", completed_at=now, updated_at=now)
+        )
     return queued_run_ids, stale_run_ids
 
 
@@ -872,6 +886,10 @@ class SQLiteBackgroundTaskStore:
     ) -> list[str]:
         with self.engine.begin() as conn:
             return claim_queued_runs_for_workbench_in_connection(conn, run_ids, started_at=started_at)
+
+    def inspect_queued_runs_for_workbench(self, run_ids: list[str]) -> tuple[list[str], list[str]]:
+        with self.engine.begin() as conn:
+            return inspect_queued_runs_for_workbench_in_connection(conn, run_ids)
 
     def record_run_message(
         self,

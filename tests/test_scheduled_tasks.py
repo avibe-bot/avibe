@@ -1895,6 +1895,35 @@ def test_recover_processing_keeps_coalesced_agent_run_children_held(monkeypatch,
     assert "coalesced prompt 3" in recovered_message
 
 
+def test_inspect_queued_runs_finalizes_cancel_requested_queued_agent_run(monkeypatch, tmp_path) -> None:
+    _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="placeholder",
+        message="queued cancel request",
+        agent_name="codex",
+        metadata={"workbench_queue_holds_run": True},
+    )
+    bg = request_store._sqlite
+    assert bg is not None
+    bg.update_run_status(
+        request.id,
+        status="queued",
+        updated_at="2026-06-22T00:00:00Z",
+        cancel_requested=True,
+        cancel_requested_at="2026-06-22T00:00:01Z",
+    )
+
+    queued_run_ids, stale_run_ids = bg.inspect_queued_runs_for_workbench([request.id])
+
+    assert queued_run_ids == []
+    assert stale_run_ids == [request.id]
+    stored = bg.get_run(request.id)
+    assert stored is not None
+    assert stored["status"] == "canceled"
+    assert stored["completed_at"] is not None
+
+
 def test_drain_requests_reserves_watch_create_per_run_before_session_validation(tmp_path: Path) -> None:
     request_store = TaskExecutionStore(tmp_path / "task_requests")
     request = request_store.enqueue_definition_run(

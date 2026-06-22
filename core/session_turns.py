@@ -288,7 +288,19 @@ def _scheduled_segment_execution_ids(segment: list[dict]) -> list[str]:
         execution_id = _scheduled_segment_execution_id(row)
         if execution_id and execution_id not in execution_ids:
             execution_ids.append(execution_id)
+        spec = (_scheduled_provenance(row) or {}).get("platform_specific") or {}
+        coalesced = spec.get("coalesced_queue") if isinstance(spec, dict) else None
+        coalesced_ids = coalesced.get("execution_ids") if isinstance(coalesced, dict) else None
+        if isinstance(coalesced_ids, list):
+            for value in coalesced_ids:
+                coalesced_id = str(value or "").strip()
+                if coalesced_id and coalesced_id not in execution_ids:
+                    execution_ids.append(coalesced_id)
     return execution_ids
+
+
+def _scheduled_segment_rows_for_execution_ids(segment: list[dict], execution_ids: set[str]) -> list[dict]:
+    return [row for row in segment if _scheduled_segment_execution_id(row) in execution_ids]
 
 
 def _scheduled_segment_suppresses_delivery(segment: list[dict]) -> bool:
@@ -679,7 +691,7 @@ class SessionTurnManager:
                                     ",".join(sorted(stale_set)),
                                 )
                                 queued_set = set(queued_run_ids)
-                                segment = [row for row in segment if _scheduled_segment_execution_id(row) in queued_set]
+                                segment = _scheduled_segment_rows_for_execution_ids(segment, queued_set)
                                 if not segment:
                                     dropped_duplicate_segment = True
 
@@ -698,7 +710,9 @@ class SessionTurnManager:
                                 "window_seconds": SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS,
                                 "message_ids": [r.get("id") for r in segment if r.get("id")],
                                 "native_message_ids": scheduled_native_ids,
-                                "execution_ids": _scheduled_segment_execution_ids(segment),
+                                "execution_ids": queued_run_ids
+                                if _scheduled_segment_trigger_kind(segment) == "agent_run"
+                                else _scheduled_segment_execution_ids(segment),
                             }
                         run_id = str(scheduled_prov.get("task_execution_id") or "").strip()
                         if scheduled_prov.get("task_trigger_kind") == "agent_run" and run_id:
@@ -808,6 +822,7 @@ class SessionTurnManager:
                 # flushed prompt persists + dedupes under it (Codex P2), not None.
                 context.message_id = scheduled_message_id
             if pending_agent_run_ids:
+                retry_agent_run_flush = False
                 try:
                     from storage.background import claim_queued_runs_for_workbench_in_connection
 
@@ -815,12 +830,30 @@ class SessionTurnManager:
                     with engine.begin() as conn:
                         claimed_run_ids = claim_queued_runs_for_workbench_in_connection(conn, pending_agent_run_ids)
                         if set(claimed_run_ids) != set(pending_agent_run_ids):
+                            queued_run_ids, stale_run_ids = inspect_queued_runs_for_workbench_in_connection(
+                                conn,
+                                pending_agent_run_ids,
+                            )
+                            stale_set = set(stale_run_ids)
+                            stale_row_ids = [
+                                row["id"]
+                                for row in pending_scheduled_segment
+                                if row.get("id") and _scheduled_segment_execution_id(row) in stale_set
+                            ]
+                            if stale_row_ids:
+                                messages_service.delete_queued(conn, stale_row_ids)
+                                bus.publish("queue.updated", {"session_id": session_id})
                             logger.info(
                                 "queue flush: skipped coalesced agent_run segment because some runs are no longer queued: %s",
                                 ",".join(sorted(set(pending_agent_run_ids) - set(claimed_run_ids))),
                             )
-                            return False
-                        claimed_agent_run_ids = claimed_run_ids
+                            if queued_run_ids:
+                                retry_agent_run_flush = True
+                            else:
+                                return False
+                    if retry_agent_run_flush:
+                        return await self.flush_queue(session_id)
+                    claimed_agent_run_ids = claimed_run_ids
                 except Exception:
                     logger.warning(
                         "queue flush: failed to claim coalesced agent_run segment for session=%s",
