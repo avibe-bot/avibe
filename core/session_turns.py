@@ -287,22 +287,35 @@ def _write_coalesced_native_id_markers(conn: Any, segment: list[dict]) -> None:
             logger.debug("queue flush: coalesced native id marker already exists for %s", native_id, exc_info=True)
 
 
-def _scheduled_segment_has_claimed_native_id(conn: Any, segment: list[dict]) -> bool:
+def _scheduled_claimed_queue_row_ids(conn: Any, segment: list[dict]) -> set[str]:
     native_ids = _scheduled_segment_native_ids(segment)
     if not native_ids:
-        return False
-    queued_ids = {str(row.get("id") or "") for row in segment if row.get("id")}
+        return set()
+    native_by_row_id = {
+        str(row.get("id") or ""): str(row.get("native_message_id") or (_scheduled_provenance(row) or {}).get("message_id") or "").strip()
+        for row in segment
+        if row.get("id")
+    }
+    native_to_row_ids: dict[str, set[str]] = {}
+    for row_id, native_id in native_by_row_id.items():
+        if native_id:
+            native_to_row_ids.setdefault(native_id, set()).add(row_id)
     platform = str(segment[0].get("platform") or "avibe")
-    claimed = (
+    rows = (
         conn.execute(
-            select(messages.c.id)
+            select(messages.c.id, messages.c.native_message_id)
             .where(messages.c.platform == platform)
             .where(messages.c.native_message_id.in_(native_ids))
         )
-        .scalars()
         .all()
     )
-    return any(str(row_id) not in queued_ids for row_id in claimed)
+    claimed_row_ids: set[str] = set()
+    segment_row_ids = set(native_by_row_id)
+    for row_id, native_id in rows:
+        if str(row_id) in segment_row_ids:
+            continue
+        claimed_row_ids.update(native_to_row_ids.get(str(native_id or ""), set()))
+    return claimed_row_ids
 
 
 @dataclass
@@ -583,18 +596,22 @@ class SessionTurnManager:
                     # turn. Rows remain visible individually while queued; only the
                     # Agent-facing dispatch is coalesced.
                     is_scheduled = True
-                    segment = _collect_scheduled_segment(rows)
-                    if _scheduled_segment_has_claimed_native_id(conn, segment):
-                        messages_service.delete_queued(conn, [r["id"] for r in segment])
+                    initial_segment = _collect_scheduled_segment(rows)
+                    claimed_row_ids = _scheduled_claimed_queue_row_ids(conn, initial_segment)
+                    if claimed_row_ids:
+                        messages_service.delete_queued(conn, list(claimed_row_ids))
                         bus.publish("queue.updated", {"session_id": session_id})
-                        dropped_duplicate_segment = True
-                        segment = []
+                        segment = [r for r in initial_segment if str(r.get("id") or "") not in claimed_row_ids]
+                        if not segment:
+                            dropped_duplicate_segment = True
+                    else:
+                        segment = initial_segment
                     if dropped_duplicate_segment:
                         pass
                     else:
                         scheduled_text = _build_scheduled_segment_text(segment)
                         scheduled_native_ids = _scheduled_segment_native_ids(segment)
-                        prov = _scheduled_provenance(rows[0]) or {}
+                        prov = _scheduled_provenance(segment[0]) or {}
                         scheduled_message_id = scheduled_native_ids[0] if scheduled_native_ids else None
                         scheduled_prov = prov.get("platform_specific") or {}
                         if len(segment) > 1:
@@ -621,8 +638,6 @@ class SessionTurnManager:
                         segment.append(r)
                 if segment:
                     messages_service.delete_queued(conn, [r["id"] for r in segment])
-                if is_scheduled:
-                    _write_coalesced_native_id_markers(conn, segment)
                 if not is_scheduled:
                     texts = [r.get("text") for r in segment if (r.get("text") or "").strip()]
                     # Carry attachments queued in this user segment so a file
@@ -733,6 +748,13 @@ class SessionTurnManager:
                     logger.info("queue flush: skipped agent_run %s because it is no longer queued", run_id)
                     return False
             await self._run(session_id, context, scheduled_text, source=SOURCE_SCHEDULED)
+            try:
+                engine = create_sqlite_engine()
+                with engine.begin() as conn:
+                    _write_coalesced_native_id_markers(conn, segment)
+            except Exception:
+                logger.exception("queue flush: failed to preserve coalesced native ids for session=%s", session_id)
+                return False
         return True
 
     def turn_state(self, session_id: str) -> dict:
