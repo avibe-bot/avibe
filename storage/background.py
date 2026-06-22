@@ -237,6 +237,77 @@ def claim_queued_runs_for_workbench_in_connection(
     return normalized_run_ids
 
 
+def _refresh_recovered_coalesced_workbench_runs_in_connection(conn: Any, *, now: str) -> None:
+    rows = list(
+        conn.execute(
+            select(agent_runs)
+            .where(agent_runs.c.run_type == "agent_run")
+            .where(agent_runs.c.status.in_(_status_query_values("queued")))
+        ).mappings()
+    )
+    rows_by_id = {row["id"]: row for row in rows}
+    processed: set[str] = set()
+    for row in rows:
+        run_id = str(row["id"] or "")
+        if run_id in processed:
+            continue
+        metadata = _json_loads(row["metadata_json"], {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        coalesced = metadata.get("coalesced_queue") if isinstance(metadata, dict) else None
+        raw_ids = coalesced.get("execution_ids") if isinstance(coalesced, dict) else None
+        if not isinstance(raw_ids, list):
+            continue
+        run_ids: list[str] = []
+        for value in raw_ids:
+            coalesced_id = str(value or "").strip()
+            if coalesced_id and coalesced_id not in run_ids:
+                run_ids.append(coalesced_id)
+        if run_id not in run_ids:
+            run_ids.insert(0, run_id)
+        live_ids = [
+            candidate
+            for candidate in run_ids
+            if candidate in rows_by_id
+            and not bool(rows_by_id[candidate]["cancel_requested"])
+            and normalize_run_status(rows_by_id[candidate]["status"]) == "queued"
+        ]
+        if not live_ids:
+            processed.update(run_ids)
+            continue
+        primary_id = live_ids[0]
+        live_rows = {candidate: rows_by_id[candidate] for candidate in live_ids}
+        primary_metadata = _json_loads(rows_by_id[primary_id]["metadata_json"], {})
+        if not isinstance(primary_metadata, dict):
+            primary_metadata = {}
+        primary_metadata["workbench_queue_holds_run"] = False
+        primary_metadata["effective_run_id"] = primary_id
+        primary_metadata.pop("coalesced_into_run_id", None)
+        if len(live_ids) > 1:
+            primary_metadata["coalesced_queue"] = _coalesced_agent_run_metadata(live_rows, live_ids)
+        else:
+            primary_metadata.pop("coalesced_queue", None)
+        conn.execute(
+            update(agent_runs)
+            .where(agent_runs.c.id == primary_id)
+            .values(metadata_json=_json_dumps(primary_metadata), updated_at=now)
+        )
+        for child_id in live_ids[1:]:
+            child_metadata = _json_loads(rows_by_id[child_id]["metadata_json"], {})
+            if not isinstance(child_metadata, dict):
+                child_metadata = {}
+            child_metadata["workbench_queue_holds_run"] = True
+            child_metadata["effective_run_id"] = primary_id
+            child_metadata["coalesced_into_run_id"] = primary_id
+            child_metadata.pop("coalesced_queue", None)
+            conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == child_id)
+                .values(metadata_json=_json_dumps(child_metadata), updated_at=now)
+            )
+        processed.update(run_ids)
+
+
 def inspect_queued_runs_for_workbench_in_connection(conn: Any, run_ids: list[str]) -> tuple[list[str], list[str]]:
     normalized_run_ids: list[str] = []
     seen: set[str] = set()
@@ -974,12 +1045,14 @@ class SQLiteBackgroundTaskStore:
 
     def recover_processing_runs(self) -> None:
         with self.engine.begin() as conn:
+            now = _utc_now_iso()
             conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.status.in_(_status_query_values("running")))
                 .where(agent_runs.c.run_type != "watch_runtime")
-                .values(status="queued", started_at=None, pid=None)
+                .values(status="queued", started_at=None, pid=None, updated_at=now)
             )
+            _refresh_recovered_coalesced_workbench_runs_in_connection(conn, now=now)
 
     def write_watch_runtime(self, payload: dict[str, Any], *, updated_at: str) -> None:
         watches = payload.get("watches", {}) if isinstance(payload, dict) else {}

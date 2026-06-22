@@ -1574,6 +1574,36 @@ def test_duplicate_recovered_coalesced_agent_run_settles_held_children(tmp_path:
     assert stored[run_ids[1]]["completed_at"] is not None
 
 
+def test_recover_processing_rebuilds_coalesced_metadata_without_queue_rows(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    run_ids: list[str] = []
+    for index in range(3):
+        request = request_store.enqueue_agent_run(
+            session_id=session_id,
+            message=f"coalesced prompt {index + 1}",
+            agent_name="codex",
+            metadata={"workbench_queue_holds_run": True},
+        )
+        run_ids.append(request.id)
+
+    sqlite_store = request_store._sqlite
+    assert sqlite_store is not None
+    assert sqlite_store.claim_queued_runs_for_workbench(run_ids) == run_ids
+
+    request_store.recover_processing()
+    pending = request_store.list_pending()
+
+    assert [request.id for request in pending] == [run_ids[0]]
+    assert pending[0].metadata["coalesced_queue"]["execution_ids"] == run_ids
+    assert _agent_run_message_for_request(pending[0]) == (
+        "coalesced prompt 1\n\n---\n\ncoalesced prompt 2\n\n---\n\ncoalesced prompt 3"
+    )
+
+
 def test_recovered_agent_run_retires_stale_queued_native_rows_before_gate(
     tmp_path: Path,
     monkeypatch,

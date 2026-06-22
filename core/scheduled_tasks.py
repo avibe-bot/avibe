@@ -1627,7 +1627,7 @@ class ScheduledTaskService:
     async def _execute_claimed_request(self, request: TaskExecutionRequest) -> None:
         error: Optional[str] = None
         should_complete = True
-        coalesced_completion_ids: list[str] = []
+        coalesced_completion_ids: list[str] = _live_coalesced_agent_run_ids(request) or []
         task_id = request.task_id
         session_key = request.session_key
         session_id = request.session_id
@@ -1671,7 +1671,6 @@ class ScheduledTaskService:
                     agent_name=request.agent_name,
                 )
             elif request.request_type == "agent_run":
-                coalesced_completion_ids = _live_coalesced_agent_run_ids(request) or []
                 message = _agent_run_message_for_request(request)
                 if not message:
                     raise ValueError("agent run requires message")
