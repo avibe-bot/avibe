@@ -12,7 +12,7 @@ import os
 import time
 from typing import Dict, Optional, Tuple
 
-from core.services.session_fork import fork_anchor_is_terminal_agent_output, pending_native_fork
+from core.services.session_fork import fork_source_state, pending_native_fork
 from modules.agents.base import AgentRequest, BaseAgent
 
 from .server import OpenCodeServerManager
@@ -113,9 +113,10 @@ class OpenCodeSessionManager:
             return False, None
         message_id = str(fork.get("opencode_fork_message_id") or "").strip()
         if message_id:
-            if fork_anchor_is_terminal_agent_output(fork):
+            source_state = fork_source_state(fork)
+            if source_state.anchor_is_terminal_agent_output or source_state.has_terminal_agent_output_after_anchor:
                 logger.info(
-                    "OpenCode running fork for %s kept full history because the source completed before reservation",
+                    "OpenCode running fork for %s kept full history because the source completed before first use",
                     source_session_id,
                 )
                 return True, None

@@ -705,6 +705,84 @@ def test_fork_source_state_tracks_nonterminal_messages_after_anchor(
         engine.dispose()
 
 
+def test_fork_source_state_ignores_notify_as_terminal_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from config import paths
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    db_path = paths.get_sqlite_state_path()
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == source_id)).mappings().one()
+            notify = messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="notify",
+                text="still working",
+            )
+
+        fork = {"source_session_id": source_id, "source_message_id": notify["id"]}
+        state = fork_source_state(fork)
+
+        assert state.anchor_is_terminal_agent_output is False
+        assert state.has_messages_after_anchor is False
+        assert state.has_terminal_agent_output_after_anchor is False
+        assert fork_anchor_is_terminal_agent_output(fork) is False
+    finally:
+        engine.dispose()
+
+
+def test_fork_source_state_ignores_operational_rows_after_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from config import paths
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    db_path = paths.get_sqlite_state_path()
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == source_id)).mappings().one()
+            user = messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="user",
+                message_type="user",
+                text="do the long task",
+            )
+            for message_type in ("queued", "pending", "draft", "notify"):
+                messages_service.append(
+                    conn,
+                    scope_id=row["scope_id"],
+                    session_id=source_id,
+                    platform="avibe",
+                    author="agent",
+                    message_type=message_type,
+                    text=message_type,
+                )
+
+        state = fork_source_state({"source_session_id": source_id, "source_message_id": user["id"]})
+
+        assert state.anchor_is_terminal_agent_output is False
+        assert state.has_messages_after_anchor is False
+        assert state.has_terminal_agent_output_after_anchor is False
+    finally:
+        engine.dispose()
+
+
 def test_fork_metadata_from_session_metadata_uses_pending_row_fields() -> None:
     metadata = {
         "created_via": "session_fork",

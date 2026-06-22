@@ -17,7 +17,8 @@ from config import paths
 from vibe.i18n import t
 
 TRIM_LATEST_RUNNING_TURN_BACKENDS = {"codex", "opencode"}
-TERMINAL_AGENT_OUTPUT_TYPES = {"result", "notify", "error"}
+TERMINAL_AGENT_OUTPUT_TYPES = {"result", "error"}
+SOURCE_PROGRESS_AGENT_OUTPUT_TYPES = {"assistant", *TERMINAL_AGENT_OUTPUT_TYPES}
 
 
 class SessionForkError(ValueError):
@@ -358,7 +359,16 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
             )
             has_messages_after_anchor = bool(
                 conn.execute(
-                    select(exists().where(and_(messages.c.session_id == source_session_id, after_anchor)))
+                    select(
+                        exists().where(
+                            and_(
+                                messages.c.session_id == source_session_id,
+                                messages.c.author == "agent",
+                                messages.c.type.in_(list(SOURCE_PROGRESS_AGENT_OUTPUT_TYPES)),
+                                after_anchor,
+                            )
+                        )
+                    )
                 ).scalar()
             )
             has_terminal_agent_output_after_anchor = bool(
