@@ -12,7 +12,7 @@ from config import paths
 from storage.db import create_sqlite_engine, sqlite_url
 
 INITIAL_REVISION = "20260501_0001"
-LATEST_SCHEMA_REVISION = "20260610_0022"
+LATEST_SCHEMA_REVISION = "20260622_0023"
 REMOVE_LEGACY_DEFAULT_AGENT_REVISION = "20260530_0008"
 INITIAL_TABLES = {
     "state_meta",
@@ -508,20 +508,22 @@ def _ensure_messages_query_indexes(conn: sqlite3.Connection, tables: set[str]) -
         'create index if not exists ix_messages_mark_read '
         'on messages (session_id, author, read_at, created_at, id)'
     )
+    conn.execute("drop index if exists ix_messages_inbox_activity")
     conn.execute(
-        "create index if not exists ix_messages_inbox_activity "
+        "create index ix_messages_inbox_activity "
         "on messages (platform, session_id, created_at desc, id desc) "
-        "where session_id is not null and type not in ('queued', 'draft', 'pending')"
+        "where session_id is not null and type not in ('queued', 'draft', 'pending', 'harness_dedupe')"
     )
     conn.execute(
         "create index if not exists ix_messages_inbox_agent_reply "
         "on messages (platform, session_id, created_at desc, id desc) "
         "where session_id is not null and type in ('result', 'notify', 'error')"
     )
+    conn.execute("drop index if exists ix_messages_inbox_user_send")
     conn.execute(
-        "create index if not exists ix_messages_inbox_user_send "
+        "create index ix_messages_inbox_user_send "
         "on messages (platform, session_id, created_at desc, id desc) "
-        "where session_id is not null and author = 'user' and type not in ('queued', 'draft', 'pending')"
+        "where session_id is not null and author = 'user' and type not in ('queued', 'draft', 'pending', 'harness_dedupe')"
     )
 
 

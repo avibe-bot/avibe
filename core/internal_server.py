@@ -38,6 +38,7 @@ from typing import Any, Optional, TYPE_CHECKING
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from sqlalchemy.exc import IntegrityError
 
 from config import paths
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
@@ -125,6 +126,24 @@ def create_app(controller: "Controller") -> FastAPI:
         if not session_id:
             return await manager.submit(None, context, text, source=SOURCE_SCHEDULED)
 
+        native_message_id = str(getattr(context, "message_id", None) or "").strip()
+        if native_message_id:
+            active = manager.in_flight.get(session_id)
+            active_message_id = str(getattr(getattr(active, "context", None), "message_id", None) or "").strip()
+            if active_message_id == native_message_id:
+                return "duplicate"
+            from storage import messages_service
+            from storage.db import create_sqlite_engine
+
+            engine = create_sqlite_engine()
+            with engine.connect() as conn:
+                if messages_service.native_message_exists(
+                    conn,
+                    platform="avibe",
+                    native_message_id=native_message_id,
+                ):
+                    return "duplicate"
+
         def _enqueue() -> None:
             from core.message_mirror import _scope_id_for_session
             from core.session_turns import SCHEDULED_PROVENANCE_KEY, capture_scheduled_provenance
@@ -140,17 +159,21 @@ def create_app(controller: "Controller") -> FastAPI:
             with engine.begin() as conn:
                 scope_id = _scope_id_for_session(conn, session_id)
                 if scope_id is not None:
-                    messages_service.append(
-                        conn,
-                        scope_id=scope_id,
-                        session_id=session_id,
-                        platform="avibe",
-                        author="harness",
-                        source="harness",
-                        message_type=messages_service.QUEUED_TYPE,
-                        text=text,
-                        metadata={SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)},
-                    )
+                    try:
+                        messages_service.append(
+                            conn,
+                            scope_id=scope_id,
+                            session_id=session_id,
+                            platform="avibe",
+                            author="harness",
+                            source="harness",
+                            message_type=messages_service.QUEUED_TYPE,
+                            text=text,
+                            metadata={SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context)},
+                            native_message_id=native_message_id or None,
+                        )
+                    except IntegrityError:
+                        logger.info("scheduled turn duplicate native id already queued: %s", native_message_id)
 
         return await manager.submit(session_id, context, text, source=SOURCE_SCHEDULED, enqueue=_enqueue)
 

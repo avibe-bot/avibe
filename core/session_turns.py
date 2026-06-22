@@ -19,10 +19,17 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Optional
+
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
+from storage import messages_service
+from storage.models import messages
+from vibe.i18n import t as i18n_t
 
 if TYPE_CHECKING:
     from modules.im import MessageContext
@@ -36,6 +43,9 @@ logger = logging.getLogger(__name__)
 # a plain human turn (#84). Its PRESENCE also marks the row as a scheduled segment
 # (vs a user send) for flush_queue.
 SCHEDULED_PROVENANCE_KEY = "scheduled_provenance"
+SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS = 60
+SCHEDULED_QUEUE_BURST_HINT_THRESHOLD = 3
+SCHEDULED_QUEUE_FULL_DETAIL_LIMIT = 3
 
 # The platform_specific keys the FLUSH rebuilds fresh from the session row (avibe
 # routing). Everything ELSE the scheduled context carries is delivery / attribution
@@ -46,6 +56,7 @@ SCHEDULED_PROVENANCE_KEY = "scheduled_provenance"
 _FLUSH_REBUILT_KEYS = frozenset(
     {"platform", "is_dm", "workbench_session_id", "agent_session_id", "agent_session_target", "turn_token"}
 )
+SCHEDULED_TARGET_AGENT_KEY = "scheduled_target_agent_name"
 
 
 def capture_scheduled_provenance(context: "MessageContext") -> dict:
@@ -62,9 +73,15 @@ def capture_scheduled_provenance(context: "MessageContext") -> dict:
       ``delivery_override`` can't be silently missed (Codex P1 #3338692433).
     """
     spec = getattr(context, "platform_specific", None) or {}
+    captured_spec = {k: v for k, v in spec.items() if k not in _FLUSH_REBUILT_KEYS}
+    target = spec.get("agent_session_target")
+    if isinstance(target, dict):
+        target_agent = str(target.get("agent_name") or "").strip()
+        if target_agent:
+            captured_spec.setdefault(SCHEDULED_TARGET_AGENT_KEY, target_agent)
     return {
         "message_id": getattr(context, "message_id", None),
-        "platform_specific": {k: v for k, v in spec.items() if k not in _FLUSH_REBUILT_KEYS},
+        "platform_specific": captured_spec,
     }
 
 
@@ -89,6 +106,216 @@ def emit_matches_active_turn(sink: dict, context: "MessageContext") -> bool:
     sink_token = sink.get("turn_token")
     ctx_token = (getattr(context, "platform_specific", None) or {}).get("turn_token")
     return not (sink_token is not None and ctx_token != sink_token)
+
+
+def _parse_queue_timestamp(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        text = str(value)
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        parsed = datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _scheduled_provenance(row: dict) -> Optional[dict]:
+    metadata = row.get("metadata") or {}
+    provenance = metadata.get(SCHEDULED_PROVENANCE_KEY)
+    return provenance if isinstance(provenance, dict) else None
+
+
+def _scheduled_merge_key(row: dict) -> Optional[tuple[str, ...]]:
+    provenance = _scheduled_provenance(row)
+    if provenance is None:
+        return None
+    spec = provenance.get("platform_specific") or {}
+    if not isinstance(spec, dict):
+        return None
+    trigger_kind = str(spec.get("task_trigger_kind") or "").strip()
+    definition_id = str(spec.get("task_definition_id") or "").strip()
+    if not trigger_kind or not definition_id:
+        return None
+    delivery_override = spec.get("delivery_override") if isinstance(spec.get("delivery_override"), dict) else {}
+    delivery_alias = spec.get("scheduled_delivery_alias") if isinstance(spec.get("scheduled_delivery_alias"), dict) else {}
+    return (
+        trigger_kind,
+        definition_id,
+        str(spec.get("vibe_agent_name") or ""),
+        str(spec.get(SCHEDULED_TARGET_AGENT_KEY) or ""),
+        str(spec.get("delivery_key_external") or ""),
+        str(spec.get("delivery_scope_session_key") or ""),
+        str(delivery_override.get("platform") or ""),
+        str(delivery_override.get("user_id") or ""),
+        str(delivery_override.get("channel_id") or ""),
+        str(delivery_override.get("thread_id") or ""),
+        str(delivery_alias.get("mode") or ""),
+        str(delivery_alias.get("clear_source") or ""),
+        str(bool(spec.get("suppress_delivery"))),
+    )
+
+
+def _within_scheduled_merge_window(previous: dict, current: dict) -> bool:
+    prev_ts = _parse_queue_timestamp(previous.get("created_at"))
+    current_ts = _parse_queue_timestamp(current.get("created_at"))
+    if prev_ts is None or current_ts is None:
+        return False
+    delta = (current_ts - prev_ts).total_seconds()
+    return 0 <= delta <= SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS
+
+
+def _collect_scheduled_segment(rows: list[dict]) -> list[dict]:
+    if not rows:
+        return []
+    first_key = _scheduled_merge_key(rows[0])
+    if first_key is None:
+        return [rows[0]]
+    segment = [rows[0]]
+    latest = rows[0]
+    for row in rows[1:]:
+        if _scheduled_merge_key(row) != first_key:
+            break
+        if not _within_scheduled_merge_window(latest, row):
+            break
+        segment.append(row)
+        latest = row
+    return segment
+
+
+def _build_scheduled_segment_text(segment: list[dict]) -> str:
+    texts = [str(row.get("text") or "") for row in segment if str(row.get("text") or "")]
+    if not texts:
+        return ""
+    if len(texts) == 1:
+        return texts[0]
+
+    lang = _scheduled_segment_language(segment)
+    parts = [
+        texts[0],
+        "\n\n"
+        + i18n_t(
+            "harness.queueCoalesced.summary",
+            lang,
+            count=len(texts),
+            window=SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS,
+        ),
+    ]
+    if len(texts) <= SCHEDULED_QUEUE_FULL_DETAIL_LIMIT:
+        parts.append(
+            "\n\n"
+            + i18n_t("harness.queueCoalesced.messagesLabel", lang)
+            + "\n"
+            + "\n\n---\n\n".join(texts[1:])
+        )
+    else:
+        parts.append(
+            "\n\n"
+            + i18n_t("harness.queueCoalesced.latestLabel", lang, additional=len(texts) - 1)
+            + f"\n{texts[-1]}"
+        )
+    if len(texts) >= SCHEDULED_QUEUE_BURST_HINT_THRESHOLD:
+        parts.append("\n\n" + i18n_t("harness.queueCoalesced.burstHint", lang))
+    return "".join(parts)
+
+
+def _scheduled_segment_language(segment: list[dict]) -> str:
+    for row in segment:
+        spec = (_scheduled_provenance(row) or {}).get("platform_specific") or {}
+        if not isinstance(spec, dict):
+            continue
+        lang = str(spec.get("language") or spec.get("lang") or "").strip()
+        if lang:
+            return lang
+    return "en"
+
+
+def _scheduled_segment_native_ids(segment: list[dict]) -> list[str]:
+    native_ids: list[str] = []
+    for row in segment:
+        native_id = str(row.get("native_message_id") or "").strip()
+        if not native_id:
+            native_id = str((_scheduled_provenance(row) or {}).get("message_id") or "").strip()
+        if native_id and native_id not in native_ids:
+            native_ids.append(native_id)
+    return native_ids
+
+
+def _scheduled_segment_suppresses_delivery(segment: list[dict]) -> bool:
+    for row in segment:
+        spec = (_scheduled_provenance(row) or {}).get("platform_specific") or {}
+        if isinstance(spec, dict) and bool(spec.get("suppress_delivery")):
+            return True
+    return False
+
+
+def _write_coalesced_native_id_markers(conn: Any, segment: list[dict]) -> None:
+    """Keep native-id dedupe coverage for coalesced queued harness rows.
+
+    The first native id is restored on the dispatched context and mirrored as
+    the visible harness prompt. Later coalesced queued rows are deleted before
+    dispatch, so write hidden rows for their native ids; otherwise a waiter retry
+    for one of those callbacks would not hit ``uq_messages_platform_native``.
+    """
+    native_ids = _scheduled_segment_native_ids(segment)
+    if not native_ids:
+        return
+    first = segment[0]
+    suppresses_delivery = _scheduled_segment_suppresses_delivery(segment)
+    marker_ids = native_ids if suppresses_delivery else native_ids[1:]
+    if not marker_ids:
+        return
+
+    for native_id in marker_ids:
+        try:
+            messages_service.append(
+                conn,
+                scope_id=first["scope_id"],
+                session_id=first.get("session_id"),
+                platform=first.get("platform") or "avibe",
+                author="harness",
+                source="harness",
+                message_type=messages_service.HARNESS_DEDUPE_TYPE,
+                text="",
+                metadata={"coalesced_from": first.get("id"), "suppressed_delivery": suppresses_delivery},
+                native_message_id=native_id,
+            )
+        except IntegrityError:
+            logger.debug("queue flush: coalesced native id marker already exists for %s", native_id, exc_info=True)
+
+
+def _scheduled_claimed_queue_row_ids(conn: Any, segment: list[dict]) -> set[str]:
+    native_ids = _scheduled_segment_native_ids(segment)
+    if not native_ids:
+        return set()
+    native_by_row_id = {
+        str(row.get("id") or ""): str(row.get("native_message_id") or (_scheduled_provenance(row) or {}).get("message_id") or "").strip()
+        for row in segment
+        if row.get("id")
+    }
+    native_to_row_ids: dict[str, set[str]] = {}
+    for row_id, native_id in native_by_row_id.items():
+        if native_id:
+            native_to_row_ids.setdefault(native_id, set()).add(row_id)
+    platform = str(segment[0].get("platform") or "avibe")
+    rows = (
+        conn.execute(
+            select(messages.c.id, messages.c.native_message_id)
+            .where(messages.c.platform == platform)
+            .where(messages.c.native_message_id.in_(native_ids))
+        )
+        .all()
+    )
+    claimed_row_ids: set[str] = set()
+    segment_row_ids = set(native_by_row_id)
+    for row_id, native_id in rows:
+        if str(row_id) in segment_row_ids:
+            continue
+        claimed_row_ids.update(native_to_row_ids.get(str(native_id or ""), set()))
+    return claimed_row_ids
 
 
 @dataclass
@@ -352,6 +579,8 @@ class SessionTurnManager:
         scheduled_text = ""
         scheduled_prov: dict = {}
         scheduled_message_id = None
+        scheduled_native_ids: list[str] = []
+        dropped_duplicate_segment = False
         user_row = None
         inbox_row = None
         attachment_specs: list = []
@@ -361,23 +590,54 @@ class SessionTurnManager:
                 rows = messages_service.list_queued(conn, session_id)
                 if not rows:
                     return False
-                if (rows[0].get("metadata") or {}).get(SCHEDULED_PROVENANCE_KEY) is not None:
-                    # Scheduled segment: exactly this one row, run on its own.
+                if _scheduled_provenance(rows[0]) is not None:
+                    # Scheduled segment: a leading run of same-definition harness
+                    # rows within the rolling merge window runs as one scheduled
+                    # turn. Rows remain visible individually while queued; only the
+                    # Agent-facing dispatch is coalesced.
                     is_scheduled = True
-                    segment = [rows[0]]
-                    scheduled_text = rows[0].get("text") or ""
-                    prov = rows[0]["metadata"][SCHEDULED_PROVENANCE_KEY] or {}
-                    scheduled_message_id = prov.get("message_id")
-                    scheduled_prov = prov.get("platform_specific") or {}
+                    initial_segment = _collect_scheduled_segment(rows)
+                    claimed_row_ids = _scheduled_claimed_queue_row_ids(conn, initial_segment)
+                    if claimed_row_ids:
+                        messages_service.delete_queued(conn, list(claimed_row_ids))
+                        bus.publish("queue.updated", {"session_id": session_id})
+                        segment = [r for r in initial_segment if str(r.get("id") or "") not in claimed_row_ids]
+                        if not segment:
+                            dropped_duplicate_segment = True
+                    else:
+                        segment = initial_segment
+                    if dropped_duplicate_segment:
+                        pass
+                    else:
+                        scheduled_text = _build_scheduled_segment_text(segment)
+                        scheduled_native_ids = _scheduled_segment_native_ids(segment)
+                        prov = _scheduled_provenance(segment[0]) or {}
+                        scheduled_message_id = scheduled_native_ids[0] if scheduled_native_ids else None
+                        scheduled_prov = prov.get("platform_specific") or {}
+                        if len(segment) > 1:
+                            scheduled_prov = dict(scheduled_prov)
+                            scheduled_prov["coalesced_queue"] = {
+                                "count": len(segment),
+                                "window_seconds": SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS,
+                                "message_ids": [r.get("id") for r in segment if r.get("id")],
+                                "native_message_ids": scheduled_native_ids,
+                                "execution_ids": [
+                                    spec.get("task_execution_id")
+                                    for r in segment
+                                    if isinstance((spec := (_scheduled_provenance(r) or {}).get("platform_specific") or {}), dict)
+                                    and spec.get("task_execution_id")
+                                ],
+                            }
                 else:
                     # User segment: the leading run of consecutive non-scheduled rows
                     # (stop at the first scheduled row so it stays its own turn).
                     segment = []
                     for r in rows:
-                        if (r.get("metadata") or {}).get(SCHEDULED_PROVENANCE_KEY) is not None:
+                        if _scheduled_provenance(r) is not None:
                             break
                         segment.append(r)
-                messages_service.delete_queued(conn, [r["id"] for r in segment])
+                if segment:
+                    messages_service.delete_queued(conn, [r["id"] for r in segment])
                 if not is_scheduled:
                     texts = [r.get("text") for r in segment if (r.get("text") or "").strip()]
                     # Carry attachments queued in this user segment so a file
@@ -426,6 +686,9 @@ class SessionTurnManager:
             logger.exception("queue flush: failed to claim/merge for session=%s", session_id)
             return False
 
+        if dropped_duplicate_segment:
+            return await self.flush_queue(session_id)
+
         # Surface the flushed (merged) user message + bump the inbox card so other
         # workbench views re-rank / flip 'replied' without waiting for the result
         # (Codex P2). A scheduled segment has NO user row — its prompt is mirrored by
@@ -457,6 +720,10 @@ class SessionTurnManager:
             # (fresh-routing) context, then run as SOURCE_SCHEDULED — not a plain user
             # turn — so suppress_delivery / the delivery target / the task attribution
             # carry through the queue (#84).
+            #
+            # The coalesced native-id set is split deliberately: the first id is
+            # assigned to this visible harness prompt, while later ids have already
+            # been preserved as hidden dedupe marker rows during the queue claim.
             if context.platform_specific is None:
                 context.platform_specific = {}
             context.platform_specific.update(scheduled_prov)
@@ -481,6 +748,13 @@ class SessionTurnManager:
                     logger.info("queue flush: skipped agent_run %s because it is no longer queued", run_id)
                     return False
             await self._run(session_id, context, scheduled_text, source=SOURCE_SCHEDULED)
+            try:
+                engine = create_sqlite_engine()
+                with engine.begin() as conn:
+                    _write_coalesced_native_id_markers(conn, segment)
+            except Exception:
+                logger.exception("queue flush: failed to preserve coalesced native ids for session=%s", session_id)
+                return False
         return True
 
     def turn_state(self, session_id: str) -> dict:

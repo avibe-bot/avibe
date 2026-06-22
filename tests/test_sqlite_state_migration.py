@@ -16,7 +16,13 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260610_0022"
+HEAD_REVISION = "20260622_0023"
+
+
+def _index_sql(conn: sqlite3.Connection, name: str) -> str:
+    row = conn.execute("select sql from sqlite_master where type = 'index' and name = ?", (name,)).fetchone()
+    assert row is not None
+    return str(row[0] or "")
 
 
 def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
@@ -67,6 +73,8 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "ix_messages_inbox_activity" in message_indexes
         assert "ix_messages_inbox_agent_reply" in message_indexes
         assert "ix_messages_inbox_user_send" in message_indexes
+        assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_activity")
+        assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_user_send")
         agent_session_indexes = {
             row[1]
             for row in conn.execute(
@@ -175,6 +183,9 @@ def test_run_migrations_repairs_head_indexes_before_stamping_head(tmp_path: Path
     assert "ix_messages_inbox_activity" in message_indexes
     assert "ix_messages_inbox_agent_reply" in message_indexes
     assert "ix_messages_inbox_user_send" in message_indexes
+    with sqlite3.connect(db_path) as conn:
+        assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_activity")
+        assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_user_send")
     assert "ix_agent_sessions_scope_status_activity" in agent_session_indexes
 
 
@@ -203,6 +214,23 @@ def test_run_migrations_adds_agent_events_from_previous_head(tmp_path: Path) -> 
     assert "ix_agent_events_session_type_created_id" in agent_event_indexes
     assert "ix_agent_events_scope_created_id" in agent_event_indexes
     assert "ix_agent_events_turn_sequence_id" in agent_event_indexes
+
+
+def test_run_migrations_rebuilds_inbox_indexes_for_harness_dedupe(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+
+    run_migrations(db_path, revision="20260610_0022")
+    with sqlite3.connect(db_path) as conn:
+        assert "harness_dedupe" not in _index_sql(conn, "ix_messages_inbox_activity")
+        assert "harness_dedupe" not in _index_sql(conn, "ix_messages_inbox_user_send")
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        version = conn.execute("select version_num from alembic_version").fetchone()
+        assert version == (HEAD_REVISION,)
+        assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_activity")
+        assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_user_send")
 
 
 def test_scope_agent_backfill_migrates_explicit_agent_routes(tmp_path: Path) -> None:
