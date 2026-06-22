@@ -795,8 +795,12 @@ class CodexAgent(BaseAgent):
         )
         if getattr(source_state, "has_user_turn_after_anchor", False):
             return False
-        if anchor_is_running_user and bool(fork.get("native_turn_started")):
-            return True
+        if anchor_is_running_user:
+            if source_state.has_messages_after_anchor:
+                return True
+            if bool(fork.get("native_turn_started")):
+                return True
+            return await self._fork_source_turn_now_started(fork)
         if source_state.has_messages_after_anchor:
             return not source_state.has_terminal_agent_output_after_anchor
         if bool(fork.get("native_turn_started")):

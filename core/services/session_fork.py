@@ -196,6 +196,7 @@ def reserve_forked_session(
             metadata = _load_metadata(row["metadata_json"])
             metadata.pop("fork_opencode_message_id", None)
             metadata.pop("fork_opencode_fork_empty_history", None)
+            metadata.pop("fork_opencode_boundary_from_active_run", None)
             metadata.update(
                 {
                     "created_via": "session_fork",

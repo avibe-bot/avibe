@@ -496,6 +496,54 @@ def test_reserve_forked_opencode_running_first_turn_records_user_boundary(
     assert "fork_opencode_fork_empty_history" not in metadata
 
 
+def test_reserve_forked_session_clears_stale_opencode_active_run_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    xdg_home = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
+    _seed_opencode_messages(xdg_home, "oc-source", ["user"])
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == source_id)
+                .values(
+                    agent_backend="opencode",
+                    agent_variant="opencode",
+                    native_session_id="oc-source",
+                    metadata_json=json.dumps(
+                        {
+                            "created_via": "session_fork",
+                            "fork_opencode_message_id": "stale-oc-msg",
+                            "fork_opencode_fork_empty_history": True,
+                            "fork_opencode_boundary_from_active_run": True,
+                        }
+                    ),
+                )
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            forked = conn.execute(
+                select(agent_sessions).where(agent_sessions.c.id == result.session_id)
+            ).mappings().one()
+    finally:
+        engine.dispose()
+
+    metadata = json.loads(forked["metadata_json"])
+    assert "fork_opencode_message_id" not in metadata
+    assert "fork_opencode_fork_empty_history" not in metadata
+    assert "fork_opencode_boundary_from_active_run" not in metadata
+
+
 def test_reserve_forked_opencode_missing_boundary_preserves_trim_intent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
