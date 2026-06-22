@@ -103,7 +103,12 @@ class OpenCodeNativeSessionProvider(NativeSessionProvider):
         item.last_agent_tail = build_tail_preview(preview or fallback)
         return item
 
-    def running_fork_point_before_latest_user(self, native_session_id: str) -> OpenCodeForkPoint:
+    def running_fork_point_before_latest_user(
+        self,
+        native_session_id: str,
+        *,
+        include_completed_assistant_tail: bool = False,
+    ) -> OpenCodeForkPoint:
         """Return the immutable fork point that excludes the latest user turn."""
 
         if not self.db_path.exists():
@@ -139,7 +144,7 @@ class OpenCodeNativeSessionProvider(NativeSessionProvider):
             return OpenCodeForkPoint(available=False)
         if last_role == "assistant":
             time_info = last_message.get("time") or {}
-            if time_info.get("completed"):
+            if time_info.get("completed") and not include_completed_assistant_tail:
                 return OpenCodeForkPoint(available=False)
             for message_id, message in reversed(messages[:-1]):
                 if message.get("role") == "user":

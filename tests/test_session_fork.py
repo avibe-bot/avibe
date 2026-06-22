@@ -10,6 +10,7 @@ from sqlalchemy import select
 from core.services.session_fork import (
     SessionForkError,
     fork_metadata_from_session_metadata,
+    fork_source_has_agent_output_after_anchor,
     pending_native_fork,
     pending_native_fork_source,
     reserve_forked_session,
@@ -580,6 +581,51 @@ def test_pending_native_fork_source_uses_target_session_metadata() -> None:
     )
 
     assert pending_native_fork_source(ctx, "codex") == "thread-source"
+
+
+def test_fork_source_has_agent_output_after_anchor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from config import paths
+    from storage.importer import ensure_sqlite_state
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    db_path = paths.get_sqlite_state_path()
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == source_id)).mappings().one()
+            user = messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="user",
+                message_type="user",
+                text="do the long task",
+            )
+
+        assert fork_source_has_agent_output_after_anchor(
+            {"source_session_id": source_id, "source_message_id": user["id"]}
+        ) is False
+
+        with engine.begin() as conn:
+            row = conn.execute(select(agent_sessions).where(agent_sessions.c.id == source_id)).mappings().one()
+            messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                text="done",
+            )
+
+        assert fork_source_has_agent_output_after_anchor(
+            {"source_session_id": source_id, "source_message_id": user["id"]}
+        ) is True
+    finally:
+        engine.dispose()
 
 
 def test_fork_metadata_from_session_metadata_uses_pending_row_fields() -> None:

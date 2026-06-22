@@ -12,7 +12,7 @@ import os
 import time
 from typing import Dict, Optional, Tuple
 
-from core.services.session_fork import pending_native_fork
+from core.services.session_fork import fork_source_has_agent_output_after_anchor, pending_native_fork
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.native_sessions.opencode import OpenCodeNativeSessionProvider
 
@@ -115,17 +115,20 @@ class OpenCodeSessionManager:
         message_id = str(fork.get("opencode_fork_message_id") or "").strip()
         if message_id:
             return True, message_id
-        point = OpenCodeNativeSessionProvider().running_fork_point_before_latest_user(source_session_id)
+        point = OpenCodeNativeSessionProvider().running_fork_point_before_latest_user(
+            source_session_id,
+            include_completed_assistant_tail=fork_source_has_agent_output_after_anchor(fork),
+        )
         if point.available:
             if point.empty_history:
                 return False, None
             if point.message_id:
                 return True, point.message_id
         logger.warning(
-            "OpenCode running fork for %s has no persisted fork point; creating an empty fork target",
+            "OpenCode running fork for %s has no persisted fork point; preserving source history",
             source_session_id,
         )
-        return False, None
+        return True, None
 
     def ensure_agent_session_id(self, request: AgentRequest, session_anchor: str) -> Optional[str]:
         reserved_target_id = self._reserved_agent_session_id(request)

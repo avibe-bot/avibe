@@ -14,7 +14,7 @@ from config.v2_config import (
     DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
 )
 from core.avibe_cloud import avibe_cloud_url_available
-from core.services.session_fork import pending_native_fork
+from core.services.session_fork import fork_source_has_agent_output_after_anchor, pending_native_fork
 from core.system_prompt_injection import (
     build_forked_session_correction_prompt,
     build_system_prompt_injection,
@@ -769,7 +769,10 @@ class CodexAgent(BaseAgent):
             if not thread_id:
                 raise RuntimeError("Codex thread/fork returned no thread id")
 
-            if bool(fork.get("trim_latest_running_turn")):
+            should_trim = bool(fork.get("trim_latest_running_turn")) and (
+                bool(fork.get("native_turn_started")) or fork_source_has_agent_output_after_anchor(fork)
+            )
+            if should_trim:
                 await self._rollback_forked_running_turn(transport, thread_id)
             await self._inject_forked_session_correction(transport, request, thread_id)
         finally:

@@ -310,6 +310,68 @@ def pending_native_fork_source(context: Any, backend: str) -> Optional[str]:
     return str(fork.get("source_native_session_id") or "").strip() or None
 
 
+def fork_source_has_agent_output_after_anchor(fork: dict[str, Any] | None) -> bool:
+    """Whether the source has produced terminal agent output after the fork anchor."""
+
+    if not isinstance(fork, dict):
+        return False
+    source_session_id = _clean_optional(fork.get("source_session_id"))
+    source_message_id = _clean_optional(fork.get("source_message_id"))
+    if not source_session_id or not source_message_id:
+        return False
+
+    from sqlalchemy import and_, exists, select
+
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
+    from storage.models import messages
+
+    ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.connect() as conn:
+            anchor = conn.execute(
+                select(messages.c.created_at, messages.c.id)
+                .where(messages.c.session_id == source_session_id, messages.c.id == source_message_id)
+                .limit(1)
+            ).first()
+            if anchor is None:
+                return False
+            anchor_created_at, anchor_id = anchor
+            return bool(
+                conn.execute(
+                    select(
+                        exists().where(
+                            and_(
+                                messages.c.session_id == source_session_id,
+                                messages.c.author == "agent",
+                                messages.c.type.in_(["result", "notify", "error"]),
+                                (
+                                    (messages.c.created_at > anchor_created_at)
+                                    | (
+                                        (messages.c.created_at == anchor_created_at)
+                                        & (messages.c.id > anchor_id)
+                                    )
+                                ),
+                            )
+                        )
+                    )
+                ).scalar()
+            )
+    except Exception as exc:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Failed to inspect fork source output for %s after %s: %s",
+            source_session_id,
+            source_message_id,
+            exc,
+        )
+        return False
+    finally:
+        engine.dispose()
+
+
 def _load_metadata(value: Any) -> dict[str, Any]:
     try:
         loaded = json.loads(value or "{}")
