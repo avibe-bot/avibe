@@ -527,6 +527,7 @@ class SessionTurnManager:
         scheduled_text = ""
         scheduled_prov: dict = {}
         scheduled_message_id = None
+        scheduled_native_ids: list[str] = []
         user_row = None
         inbox_row = None
         attachment_specs: list = []
@@ -544,8 +545,9 @@ class SessionTurnManager:
                     is_scheduled = True
                     segment = _collect_scheduled_segment(rows)
                     scheduled_text = _build_scheduled_segment_text(segment)
+                    scheduled_native_ids = _scheduled_segment_native_ids(segment)
                     prov = _scheduled_provenance(rows[0]) or {}
-                    scheduled_message_id = prov.get("message_id")
+                    scheduled_message_id = scheduled_native_ids[0] if scheduled_native_ids else None
                     scheduled_prov = prov.get("platform_specific") or {}
                     if len(segment) > 1:
                         scheduled_prov = dict(scheduled_prov)
@@ -553,7 +555,7 @@ class SessionTurnManager:
                             "count": len(segment),
                             "window_seconds": SCHEDULED_QUEUE_MERGE_WINDOW_SECONDS,
                             "message_ids": [r.get("id") for r in segment if r.get("id")],
-                            "native_message_ids": _scheduled_segment_native_ids(segment),
+                            "native_message_ids": scheduled_native_ids,
                             "execution_ids": [
                                 spec.get("task_execution_id")
                                 for r in segment
@@ -651,6 +653,10 @@ class SessionTurnManager:
             # (fresh-routing) context, then run as SOURCE_SCHEDULED — not a plain user
             # turn — so suppress_delivery / the delivery target / the task attribution
             # carry through the queue (#84).
+            #
+            # The coalesced native-id set is split deliberately: the first id is
+            # assigned to this visible harness prompt, while later ids have already
+            # been preserved as hidden dedupe marker rows during the queue claim.
             if context.platform_specific is None:
                 context.platform_specific = {}
             context.platform_specific.update(scheduled_prov)
