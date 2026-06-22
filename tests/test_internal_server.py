@@ -1672,6 +1672,49 @@ def test_flush_does_not_coalesce_agent_runs_with_different_callback_targets(tmp_
     assert "coalesced_queue" not in ctx.platform_specific
 
 
+def test_flush_does_not_coalesce_callback_backed_agent_runs(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    from core.scheduled_tasks import TaskExecutionStore
+
+    request_store = TaskExecutionStore()
+
+    def prov(execution_id: str) -> dict:
+        return {
+            "message_id": f"agent_run:{execution_id}",
+            "platform_specific": {
+                "task_execution_id": execution_id,
+                "task_trigger_kind": "agent_run",
+                "task_definition_id": None,
+                "vibe_agent_name": "codex",
+                "callback_session_id": "same-caller",
+            },
+        }
+
+    queued: list[tuple[str, dict]] = []
+    for index in range(2):
+        request = request_store.enqueue_agent_run(
+            session_id="placeholder",
+            message=f"callback agent message {index + 1}",
+            agent_name="codex",
+            callback_session_id="same-caller",
+        )
+        assert request_store.claim(request.id) is not None
+        request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+        queued.append((f"callback agent message {index + 1}", prov(request.id)))
+
+    session_id = _seed_avibe_session_with_queue(queued)
+
+    mgr, runs = _manager_capturing_runs()
+
+    assert asyncio.run(mgr.flush_queue(session_id)) is True
+    assert len(runs) == 1
+    text, source, ctx = runs[0]
+    assert source == SOURCE_SCHEDULED
+    assert text == "callback agent message 1"
+    assert "coalesced_queue" not in ctx.platform_specific
+
+
 def test_flush_does_not_claim_agent_runs_when_context_build_fails(tmp_path, monkeypatch):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 

@@ -129,6 +129,19 @@ def _scheduled_provenance(row: dict) -> Optional[dict]:
     return provenance if isinstance(provenance, dict) else None
 
 
+def _agent_run_merge_definition_id(spec: dict) -> str:
+    """Return the coalescing bucket for direct Agent Run queue rows.
+
+    Callback-backed runs can deliver results into different caller sessions, so
+    keep those rows isolated by execution id. Plain CLI/direct runs may coalesce,
+    and their prompt builder always includes every queued message verbatim.
+    """
+    execution_id = str(spec.get("task_execution_id") or "").strip()
+    if spec.get("callback_session_id") or spec.get("source_kind") == "callback":
+        return f"agent_run:{execution_id}" if execution_id else ""
+    return "agent_run"
+
+
 def _scheduled_merge_key(row: dict) -> Optional[tuple[str, ...]]:
     provenance = _scheduled_provenance(row)
     if provenance is None:
@@ -139,12 +152,9 @@ def _scheduled_merge_key(row: dict) -> Optional[tuple[str, ...]]:
     trigger_kind = str(spec.get("task_trigger_kind") or "").strip()
     definition_id = str(spec.get("task_definition_id") or "").strip()
     if trigger_kind == "agent_run" and not definition_id:
-        definition_id = "agent_run"
+        definition_id = _agent_run_merge_definition_id(spec)
     if not trigger_kind or not definition_id:
         return None
-    callback_identity = ""
-    if trigger_kind == "agent_run" and (spec.get("callback_session_id") or spec.get("source_kind") == "callback"):
-        callback_identity = str(spec.get("task_execution_id") or "")
     delivery_override = spec.get("delivery_override") if isinstance(spec.get("delivery_override"), dict) else {}
     delivery_alias = spec.get("scheduled_delivery_alias") if isinstance(spec.get("scheduled_delivery_alias"), dict) else {}
     return (
@@ -157,7 +167,6 @@ def _scheduled_merge_key(row: dict) -> Optional[tuple[str, ...]]:
         if isinstance(spec.get("agent_session_target"), dict)
         else "",
         str(spec.get("callback_session_id") or ""),
-        callback_identity,
         str(spec.get("source_kind") or ""),
         str(spec.get("source_actor") or ""),
         str(spec.get("parent_run_id") or ""),
