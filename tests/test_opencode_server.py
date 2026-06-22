@@ -192,6 +192,31 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         body = fake_session.posts[0]["json"]
         self.assertNotIn("variant", body)
 
+    async def test_fork_session_sends_message_id_when_provided(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        fake_session = _FakeSession()
+
+        def _post(url, json=None, headers=None):
+            fake_session.posts.append({"url": url, "json": json, "headers": headers})
+            return _FakeResponse(status=200, json_data={"id": "oc-fork"})
+
+        fake_session.post = _post
+
+        async def _fake_get_http_session():
+            return fake_session
+
+        manager._get_http_session = _fake_get_http_session  # type: ignore[method-assign]
+
+        result = await manager.fork_session("oc-source", directory="/tmp/work", message_id="oc-msg-prev")
+
+        self.assertEqual(result, {"id": "oc-fork"})
+        self.assertEqual(len(fake_session.posts), 1)
+        self.assertEqual(fake_session.posts[0]["json"], {"messageID": "oc-msg-prev"})
+        self.assertEqual(
+            fake_session.posts[0]["headers"],
+            {"x-opencode-directory": "/tmp/work"},
+        )
+
     async def test_load_opencode_user_config_supports_jsonc(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_home = Path(tmp_dir)

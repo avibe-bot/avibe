@@ -77,7 +77,11 @@ def test_opencode_forks_pending_native_source() -> None:
         bind_agent_session_by_id=Mock(return_value="ses-fork"),
     )
     manager = OpenCodeSessionManager(SimpleNamespace(sessions=sessions), "opencode")
-    server = SimpleNamespace(fork_session=AsyncMock(return_value={"id": "oc-fork"}), create_session=AsyncMock())
+    server = SimpleNamespace(
+        fork_session=AsyncMock(return_value={"id": "oc-fork"}),
+        create_session=AsyncMock(),
+        list_messages=AsyncMock(),
+    )
     request = _request()
     request.context.platform_specific = {
         "agent_session_id": "ses-fork",
@@ -96,7 +100,7 @@ def test_opencode_forks_pending_native_source() -> None:
     session_id = asyncio.run(manager.get_or_create_session_id(request, server))
 
     assert session_id == "oc-fork"
-    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo")
+    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id=None)
     server.create_session.assert_not_awaited()
     sessions.bind_agent_session_by_id.assert_called_once_with(
         "ses-fork",
@@ -106,6 +110,87 @@ def test_opencode_forks_pending_native_source() -> None:
         vibe_agent_name=None,
         vibe_agent_backend=None,
     )
+
+
+def test_opencode_running_fork_passes_native_message_point() -> None:
+    sessions = SimpleNamespace(
+        get_agent_session_id=Mock(return_value=None),
+        ensure_agent_session_id=Mock(return_value="ses-fork"),
+        bind_agent_session=Mock(return_value="ses-fork"),
+        bind_agent_session_by_id=Mock(return_value="ses-fork"),
+    )
+    manager = OpenCodeSessionManager(SimpleNamespace(sessions=sessions), "opencode")
+    server = SimpleNamespace(
+        fork_session=AsyncMock(return_value={"id": "oc-fork"}),
+        create_session=AsyncMock(),
+        list_messages=AsyncMock(),
+    )
+    request = _request()
+    request.context.platform_specific = {
+        "agent_session_id": "ses-fork",
+        "agent_session_target": {
+            "id": "ses-fork",
+            "agent_backend": "opencode",
+            "native_session_id": "",
+            "native_session_fork": {
+                "source_session_id": "ses-source",
+                "source_native_session_id": "oc-source",
+                "source_backend": "opencode",
+                "trim_latest_running_turn": True,
+                "opencode_fork_message_id": "oc-msg-prev",
+            },
+        },
+    }
+
+    session_id = asyncio.run(manager.get_or_create_session_id(request, server))
+
+    assert session_id == "oc-fork"
+    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id="oc-msg-prev")
+    server.list_messages.assert_not_awaited()
+    server.create_session.assert_not_awaited()
+
+
+def test_opencode_running_fork_infers_native_message_point_from_source_messages() -> None:
+    sessions = SimpleNamespace(
+        get_agent_session_id=Mock(return_value=None),
+        ensure_agent_session_id=Mock(return_value="ses-fork"),
+        bind_agent_session=Mock(return_value="ses-fork"),
+        bind_agent_session_by_id=Mock(return_value="ses-fork"),
+    )
+    manager = OpenCodeSessionManager(SimpleNamespace(sessions=sessions), "opencode")
+    server = SimpleNamespace(
+        fork_session=AsyncMock(return_value={"id": "oc-fork"}),
+        create_session=AsyncMock(),
+        list_messages=AsyncMock(
+            return_value=[
+                {"info": {"id": "oc-msg-1", "role": "user"}},
+                {"info": {"id": "oc-msg-2", "role": "assistant"}},
+                {"info": {"id": "oc-msg-3", "role": "user"}},
+            ]
+        ),
+    )
+    request = _request()
+    request.context.platform_specific = {
+        "agent_session_id": "ses-fork",
+        "agent_session_target": {
+            "id": "ses-fork",
+            "agent_backend": "opencode",
+            "native_session_id": "",
+            "native_session_fork": {
+                "source_session_id": "ses-source",
+                "source_native_session_id": "oc-source",
+                "source_backend": "opencode",
+                "trim_latest_running_turn": True,
+            },
+        },
+    }
+
+    session_id = asyncio.run(manager.get_or_create_session_id(request, server))
+
+    assert session_id == "oc-fork"
+    server.list_messages.assert_awaited_once_with("oc-source", "/repo")
+    server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id="oc-msg-2")
+    server.create_session.assert_not_awaited()
 
 
 def test_opencode_reserved_agent_session_id_is_not_replaced() -> None:

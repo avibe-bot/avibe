@@ -9,6 +9,7 @@ from sqlalchemy import select
 from core.services.session_fork import (
     SessionForkError,
     fork_metadata_from_session_metadata,
+    pending_native_fork,
     pending_native_fork_source,
     reserve_forked_session,
 )
@@ -139,6 +140,68 @@ def test_reserve_forked_session_copies_row_and_applies_overrides(tmp_path: Path)
     assert row["title"] == "Fork Source"
     assert metadata["fork_source_message_id"] == visible_message["id"]
     assert metadata["fork_source_session_title"] == "Source"
+    assert metadata["fork_trim_latest_running_turn"] is False
+
+
+def test_reserve_forked_opencode_running_fork_records_previous_native_message(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).mappings().one()
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == source_id)
+                .values(agent_backend="opencode", agent_variant="opencode")
+            )
+            previous = messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                text="completed answer",
+                native_message_id="oc-msg-prev",
+            )
+            latest_user = messages_service.append(
+                conn,
+                scope_id=row["scope_id"],
+                session_id=source_id,
+                platform="avibe",
+                author="user",
+                message_type="user",
+                text="do the long task",
+                native_message_id="oc-msg-user",
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(
+        source_session_id=source_id,
+        trim_latest_running_turn=True,
+        db_path=db_path,
+    )
+
+    assert result.fork.source_message_id == latest_user["id"]
+    assert result.fork.trim_latest_running_turn is True
+    assert result.fork.opencode_fork_message_id == "oc-msg-prev"
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            forked = conn.execute(
+                select(agent_sessions).where(agent_sessions.c.id == result.session_id)
+            ).mappings().one()
+    finally:
+        engine.dispose()
+
+    metadata = json.loads(forked["metadata_json"])
+    assert metadata["fork_source_message_id"] == latest_user["id"]
+    assert metadata["fork_opencode_message_id"] == previous["native_message_id"]
+    assert metadata["fork_trim_latest_running_turn"] is True
 
 
 def test_reserve_forked_session_uses_generic_title_for_untitled_source(tmp_path: Path) -> None:
@@ -308,6 +371,37 @@ def test_pending_native_fork_source_requires_empty_target_native() -> None:
     assert pending_native_fork_source(ctx, "codex") is None
 
 
+def test_pending_native_fork_preserves_trim_metadata() -> None:
+    ctx = MessageContext(
+        user_id="U1",
+        channel_id="C1",
+        platform_specific={
+            "agent_session_target": {
+                "id": "ses-target",
+                "agent_backend": "opencode",
+                "native_session_id": "",
+                "native_session_fork": {
+                    "source_session_id": "ses-source",
+                    "source_native_session_id": "oc-source",
+                    "source_backend": "opencode",
+                    "source_message_id": "msg-avibe",
+                    "trim_latest_running_turn": True,
+                    "opencode_fork_message_id": "oc-msg-prev",
+                },
+            }
+        },
+    )
+
+    assert pending_native_fork(ctx, "opencode") == {
+        "source_session_id": "ses-source",
+        "source_native_session_id": "oc-source",
+        "source_backend": "opencode",
+        "source_message_id": "msg-avibe",
+        "trim_latest_running_turn": True,
+        "opencode_fork_message_id": "oc-msg-prev",
+    }
+
+
 def test_pending_native_fork_source_uses_target_session_metadata() -> None:
     ctx = MessageContext(
         user_id="U1",
@@ -344,3 +438,24 @@ def test_fork_metadata_from_session_metadata_uses_pending_row_fields() -> None:
         "source_backend": "codex",
     }
     assert fork_metadata_from_session_metadata({"created_via": "session_fork"}) is None
+
+
+def test_fork_metadata_from_session_metadata_preserves_trim_fields() -> None:
+    metadata = {
+        "created_via": "session_fork",
+        "fork_source_session_id": "ses-source",
+        "fork_source_native_session_id": "oc-source",
+        "fork_source_backend": "opencode",
+        "fork_source_message_id": "msg-avibe",
+        "fork_trim_latest_running_turn": True,
+        "fork_opencode_message_id": "oc-msg-prev",
+    }
+
+    assert fork_metadata_from_session_metadata(metadata) == {
+        "source_session_id": "ses-source",
+        "source_native_session_id": "oc-source",
+        "source_backend": "opencode",
+        "source_message_id": "msg-avibe",
+        "trim_latest_running_turn": True,
+        "opencode_fork_message_id": "oc-msg-prev",
+    }

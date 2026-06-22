@@ -12,7 +12,7 @@ import os
 import time
 from typing import Dict, Optional, Tuple
 
-from core.services.session_fork import pending_native_fork_source
+from core.services.session_fork import pending_native_fork
 from modules.agents.base import AgentRequest, BaseAgent
 
 from .server import OpenCodeServerManager
@@ -98,6 +98,38 @@ class OpenCodeSessionManager:
             target_id = str(session_target.get("id") or "").strip()
             if target_id:
                 return target_id
+        return None
+
+    async def _resolve_running_fork_message_id(
+        self,
+        server: OpenCodeServerManager,
+        source_session_id: str,
+        directory: str,
+        fork: dict,
+    ) -> Optional[str]:
+        explicit = str(fork.get("opencode_fork_message_id") or "").strip()
+        if explicit:
+            return explicit
+        if not bool(fork.get("trim_latest_running_turn")):
+            return None
+        try:
+            messages = await server.list_messages(source_session_id, directory)
+        except Exception as err:
+            logger.warning(
+                "Failed to inspect OpenCode source session %s for running fork point: %s",
+                source_session_id,
+                err,
+            )
+            return None
+        for index in range(len(messages) - 1, -1, -1):
+            info = messages[index].get("info", {})
+            if info.get("role") != "user":
+                continue
+            for previous in range(index - 1, -1, -1):
+                message_id = str(messages[previous].get("info", {}).get("id") or "").strip()
+                if message_id:
+                    return message_id
+            return None
         return None
 
     def ensure_agent_session_id(self, request: AgentRequest, session_anchor: str) -> Optional[str]:
@@ -259,12 +291,20 @@ class OpenCodeSessionManager:
         )
 
         if not session_id:
-            fork_source = pending_native_fork_source(request.context, self._agent_name)
+            fork = pending_native_fork(request.context, self._agent_name)
             try:
-                if fork_source:
+                if fork:
+                    fork_source = str(fork.get("source_native_session_id") or "").strip()
+                    message_id = await self._resolve_running_fork_message_id(
+                        server,
+                        fork_source,
+                        request.working_path,
+                        fork,
+                    )
                     session_data = await server.fork_session(
                         fork_source,
                         directory=request.working_path,
+                        message_id=message_id,
                     )
                 else:
                     session_data = await server.create_session(
@@ -273,11 +313,11 @@ class OpenCodeSessionManager:
                 session_id = session_data.get("id")
                 if session_id:
                     self.bind_agent_session_id(request, anchor, session_id)
-                    if fork_source:
+                    if fork:
                         logger.info(
                             "Forked OpenCode session %s from %s for %s",
                             session_id,
-                            fork_source,
+                            str(fork.get("source_native_session_id") or "").strip(),
                             request.base_session_id,
                         )
                     else:

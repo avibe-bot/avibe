@@ -4288,8 +4288,26 @@ def _session_fork_error_response(err: Exception):
     return jsonify({"error": message, "code": "session_fork_failed"}), 400
 
 
+async def _session_in_flight_for_fork(session_id: str) -> bool:
+    """Authoritative best-effort live turn check for fork trimming.
+
+    ``agent_status`` can be stale after crashes/restarts. Trimming history is
+    destructive for the fork target, so only trim when the controller's live
+    in-flight registry explicitly says this source Session is still running.
+    """
+
+    from vibe import internal_client
+
+    try:
+        turn_result = await internal_client.turn_state(session_id)
+    except (internal_client.InternalServerUnavailable, internal_client.InternalServerTimeout):
+        return False
+    body = turn_result.get("body") or {}
+    return bool(body.get("in_flight"))
+
+
 @app.route("/api/sessions/<session_id>/fork", methods=["POST"])
-def sessions_fork(session_id: str):
+async def sessions_fork(session_id: str):
     from core.services import sessions as workbench_sessions_service
     from core.services import settings as settings_service
     from core.services.session_fork import SessionForkError, reserve_forked_session
@@ -4300,7 +4318,11 @@ def sessions_fork(session_id: str):
         # strings use) so the forked title matches the chosen UI, not the browser's
         # Accept-Language header which can differ from the user's selected language.
         title_lang = settings_service.load_config_or_default().language
-        result = reserve_forked_session(source_session_id=session_id, title_lang=title_lang)
+        result = reserve_forked_session(
+            source_session_id=session_id,
+            title_lang=title_lang,
+            trim_latest_running_turn=await _session_in_flight_for_fork(session_id),
+        )
         engine = _projects_engine()
         with engine.connect() as conn:
             session = workbench_sessions_service.get_session(conn, result.session_id)
