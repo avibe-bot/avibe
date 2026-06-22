@@ -216,11 +216,27 @@ export const ShowPageShareControl: React.FC<{
                   <Plus className="size-3.5 shrink-0 text-cyan" />
                   {t('chat.showPage.addToHomeTitle')}
                 </div>
-                <p className="mt-1 text-xs leading-relaxed text-muted">
-                  {iosStandalone
-                    ? t('chat.showPage.addToHomeBodyPwa')
-                    : t('chat.showPage.addToHomeBodySafari')}
-                </p>
+                {iosStandalone ? (
+                  // Installed PWA: a same-origin link can't hand off to Safari
+                  // (it stays trapped in scope), so the user must copy the link
+                  // and open it in Safari — the Copy button above does that.
+                  <p className="mt-1 text-xs leading-relaxed text-muted">
+                    {t('chat.showPage.addToHomeBodyPwa')}
+                  </p>
+                ) : (
+                  // Safari: the popover sits in the workbench while the Show Page
+                  // is framed, so Safari's own Share targets the workbench URL.
+                  // Open the Show Page top-level first (new tab) — then the user's
+                  // Share → Add to Home Screen captures the Show Page, not us.
+                  <a
+                    href={link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-1 block text-xs leading-relaxed text-foreground underline underline-offset-2"
+                  >
+                    {t('chat.showPage.addToHomeBodySafari')}
+                  </a>
+                )}
               </div>
             )}
           </>
