@@ -16,7 +16,7 @@ from typing import Any, Optional
 from config import paths
 from vibe.i18n import t
 
-TRIM_LATEST_RUNNING_TURN_BACKENDS = {"codex", "opencode"}
+TRIM_LATEST_RUNNING_TURN_BACKENDS = {"opencode"}
 
 
 class SessionForkError(ValueError):
@@ -31,6 +31,8 @@ class SessionForkSpec:
     source_message_id: Optional[str] = None
     trim_latest_running_turn: bool = False
     native_turn_started: bool = False
+    opencode_fork_message_id: Optional[str] = None
+    opencode_fork_empty_history: bool = False
 
     def to_metadata(self) -> dict[str, Any]:
         metadata = {
@@ -44,6 +46,10 @@ class SessionForkSpec:
             metadata["trim_latest_running_turn"] = True
         if self.native_turn_started:
             metadata["native_turn_started"] = True
+        if self.opencode_fork_message_id:
+            metadata["opencode_fork_message_id"] = self.opencode_fork_message_id
+        if self.opencode_fork_empty_history:
+            metadata["opencode_fork_empty_history"] = True
         return metadata
 
 
@@ -113,6 +119,15 @@ def reserve_forked_session(
                 trim_latest_running_turn and source_backend in TRIM_LATEST_RUNNING_TURN_BACKENDS
             )
             effective_native_turn_started = bool(native_turn_started and effective_trim_latest_running_turn)
+            opencode_fork_message_id: Optional[str] = None
+            opencode_fork_empty_history = False
+            if effective_native_turn_started and source_backend == "opencode":
+                fork_point = _opencode_running_fork_point(source_native)
+                if fork_point is None:
+                    effective_trim_latest_running_turn = False
+                    effective_native_turn_started = False
+                else:
+                    opencode_fork_message_id, opencode_fork_empty_history = fork_point
             source_message_id = _latest_source_message_id(conn, str(row["id"]))
             override_agent = agent_store.require_enabled(agent_name) if agent_name else None
             if override_agent is not None and override_agent.backend != source_backend:
@@ -137,6 +152,7 @@ def reserve_forked_session(
 
             metadata = _load_metadata(row["metadata_json"])
             metadata.pop("fork_opencode_message_id", None)
+            metadata.pop("fork_opencode_fork_empty_history", None)
             metadata.update(
                 {
                     "created_via": "session_fork",
@@ -150,6 +166,10 @@ def reserve_forked_session(
                     "fork_created_at": now,
                 }
             )
+            if opencode_fork_message_id:
+                metadata["fork_opencode_message_id"] = opencode_fork_message_id
+            if opencode_fork_empty_history:
+                metadata["fork_opencode_fork_empty_history"] = True
             session_id = create_agent_session_row(
                 conn,
                 scope_id=row["scope_id"],
@@ -178,6 +198,8 @@ def reserve_forked_session(
             source_message_id=source_message_id,
             trim_latest_running_turn=effective_trim_latest_running_turn,
             native_turn_started=effective_native_turn_started,
+            opencode_fork_message_id=opencode_fork_message_id,
+            opencode_fork_empty_history=opencode_fork_empty_history,
         )
         return SessionForkResult(
             session_id=session_id,
@@ -215,6 +237,11 @@ def fork_metadata_from_request(metadata: dict[str, Any] | None) -> dict[str, Any
         result["trim_latest_running_turn"] = True
     if bool(fork.get("native_turn_started")):
         result["native_turn_started"] = True
+    opencode_message = _clean_optional(fork.get("opencode_fork_message_id"))
+    if opencode_message:
+        result["opencode_fork_message_id"] = opencode_message
+    if bool(fork.get("opencode_fork_empty_history")):
+        result["opencode_fork_empty_history"] = True
     source_message = _clean_optional(fork.get("source_message_id"))
     if source_message:
         result["source_message_id"] = source_message
@@ -240,6 +267,11 @@ def fork_metadata_from_session_metadata(metadata: dict[str, Any] | None) -> dict
         result["trim_latest_running_turn"] = True
     if bool(metadata.get("fork_native_turn_started")):
         result["native_turn_started"] = True
+    opencode_message = _clean_optional(metadata.get("fork_opencode_message_id"))
+    if opencode_message:
+        result["opencode_fork_message_id"] = opencode_message
+    if bool(metadata.get("fork_opencode_fork_empty_history")):
+        result["opencode_fork_empty_history"] = True
     source_message = _clean_optional(metadata.get("fork_source_message_id"))
     if source_message:
         result["source_message_id"] = source_message
@@ -318,6 +350,15 @@ def _latest_source_message_id(conn: Any, source_session_id: str) -> Optional[str
         .limit(1)
     ).scalar_one_or_none()
     return str(row) if row else None
+
+
+def _opencode_running_fork_point(source_native_session_id: str) -> Optional[tuple[Optional[str], bool]]:
+    from modules.agents.native_sessions.opencode import OpenCodeNativeSessionProvider
+
+    point = OpenCodeNativeSessionProvider().running_fork_point_before_latest_user(source_native_session_id)
+    if not point.available:
+        return None
+    return point.message_id, point.empty_history
 
 
 def _fork_session_anchor(value: Any, *, source_session_id: str, now: str) -> Optional[str]:

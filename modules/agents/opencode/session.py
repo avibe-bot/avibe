@@ -111,25 +111,16 @@ class OpenCodeSessionManager:
             return True, None
         if not bool(fork.get("native_turn_started")):
             return True, None
-        try:
-            messages = await server.list_messages(source_session_id, directory)
-        except Exception as err:
-            logger.warning(
-                "Failed to inspect OpenCode source session %s for running fork point: %s",
-                source_session_id,
-                err,
-            )
-            return True, None
-        for index in range(len(messages) - 1, -1, -1):
-            info = messages[index].get("info", {})
-            if info.get("role") != "user":
-                continue
-            for previous in range(index - 1, -1, -1):
-                message_id = str(messages[previous].get("info", {}).get("id") or "").strip()
-                if message_id:
-                    return True, message_id
+        if bool(fork.get("opencode_fork_empty_history")):
             return False, None
-        return False, None
+        message_id = str(fork.get("opencode_fork_message_id") or "").strip()
+        if message_id:
+            return True, message_id
+        logger.warning(
+            "OpenCode running fork for %s has no persisted fork point; falling back to a full fork",
+            source_session_id,
+        )
+        return True, None
 
     def ensure_agent_session_id(self, request: AgentRequest, session_anchor: str) -> Optional[str]:
         reserved_target_id = self._reserved_agent_session_id(request)

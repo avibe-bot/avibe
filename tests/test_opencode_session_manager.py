@@ -188,7 +188,7 @@ def test_opencode_startup_window_fork_does_not_infer_message_point() -> None:
     server.create_session.assert_not_awaited()
 
 
-def test_opencode_running_fork_infers_native_message_point_from_source_messages() -> None:
+def test_opencode_running_fork_uses_persisted_native_message_point() -> None:
     sessions = SimpleNamespace(
         get_agent_session_id=Mock(return_value=None),
         ensure_agent_session_id=Mock(return_value="ses-fork"),
@@ -199,13 +199,7 @@ def test_opencode_running_fork_infers_native_message_point_from_source_messages(
     server = SimpleNamespace(
         fork_session=AsyncMock(return_value={"id": "oc-fork"}),
         create_session=AsyncMock(),
-        list_messages=AsyncMock(
-            return_value=[
-                {"info": {"id": "oc-msg-1", "role": "user"}},
-                {"info": {"id": "oc-msg-2", "role": "assistant"}},
-                {"info": {"id": "oc-msg-3", "role": "user"}},
-            ]
-        ),
+        list_messages=AsyncMock(),
     )
     request = _request()
     request.context.platform_specific = {
@@ -220,6 +214,7 @@ def test_opencode_running_fork_infers_native_message_point_from_source_messages(
                 "source_backend": "opencode",
                 "trim_latest_running_turn": True,
                 "native_turn_started": True,
+                "opencode_fork_message_id": "oc-msg-2",
             },
         },
     }
@@ -227,7 +222,7 @@ def test_opencode_running_fork_infers_native_message_point_from_source_messages(
     session_id = asyncio.run(manager.get_or_create_session_id(request, server))
 
     assert session_id == "oc-fork"
-    server.list_messages.assert_awaited_once_with("oc-source", "/repo")
+    server.list_messages.assert_not_awaited()
     server.fork_session.assert_awaited_once_with("oc-source", directory="/repo", message_id="oc-msg-2")
     server.create_session.assert_not_awaited()
 
@@ -243,7 +238,7 @@ def test_opencode_running_first_turn_fork_creates_empty_session() -> None:
     server = SimpleNamespace(
         fork_session=AsyncMock(),
         create_session=AsyncMock(return_value={"id": "oc-empty"}),
-        list_messages=AsyncMock(return_value=[{"info": {"id": "oc-msg-1", "role": "user"}}]),
+        list_messages=AsyncMock(),
     )
     request = _request()
     request.context.platform_specific = {
@@ -258,6 +253,7 @@ def test_opencode_running_first_turn_fork_creates_empty_session() -> None:
                 "source_backend": "opencode",
                 "trim_latest_running_turn": True,
                 "native_turn_started": True,
+                "opencode_fork_empty_history": True,
             },
         },
     }
@@ -265,7 +261,7 @@ def test_opencode_running_first_turn_fork_creates_empty_session() -> None:
     session_id = asyncio.run(manager.get_or_create_session_id(request, server))
 
     assert session_id == "oc-empty"
-    server.list_messages.assert_awaited_once_with("oc-source", "/repo")
+    server.list_messages.assert_not_awaited()
     server.create_session.assert_awaited_once_with(directory="/repo")
     server.fork_session.assert_not_awaited()
 

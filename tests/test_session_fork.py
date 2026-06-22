@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -143,8 +144,61 @@ def test_reserve_forked_session_copies_row_and_applies_overrides(tmp_path: Path)
     assert metadata["fork_trim_latest_running_turn"] is False
 
 
-def test_reserve_forked_opencode_running_fork_records_previous_native_message(tmp_path: Path) -> None:
+def test_reserve_forked_codex_running_fork_does_not_mark_trim(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
+    source_id = _seed_source_session(db_path, tmp_path)
+
+    result = reserve_forked_session(
+        source_session_id=source_id,
+        trim_latest_running_turn=True,
+        native_turn_started=True,
+        db_path=db_path,
+    )
+
+    assert result.fork.source_backend == "codex"
+    assert result.fork.trim_latest_running_turn is False
+    assert result.fork.native_turn_started is False
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(agent_sessions).where(agent_sessions.c.id == result.session_id)
+            ).mappings().one()
+    finally:
+        engine.dispose()
+
+    metadata = json.loads(row["metadata_json"])
+    assert metadata["fork_trim_latest_running_turn"] is False
+    assert metadata["fork_native_turn_started"] is False
+
+
+def _seed_opencode_messages(xdg_home: Path, native_session_id: str, roles: list[str]) -> None:
+    db_path = xdg_home / "opencode" / "opencode.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE message (id TEXT PRIMARY KEY, data TEXT)")
+        conn.execute(
+            "CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, message_id TEXT, time_created INTEGER, data TEXT)"
+        )
+        for index, role in enumerate(roles, start=1):
+            message_id = f"oc-msg-{index}"
+            conn.execute(
+                "INSERT INTO message (id, data) VALUES (?, ?)",
+                (message_id, json.dumps({"role": role})),
+            )
+            conn.execute(
+                "INSERT INTO part (id, session_id, message_id, time_created, data) VALUES (?, ?, ?, ?, ?)",
+                (f"part-{index}", native_session_id, message_id, index, json.dumps({"type": "text"})),
+            )
+
+
+def test_reserve_forked_opencode_running_fork_records_frozen_native_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    xdg_home = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
+    _seed_opencode_messages(xdg_home, "oc-source", ["user", "assistant", "user"])
     source_id = _seed_source_session(db_path, tmp_path)
     engine = create_sqlite_engine(db_path)
     try:
@@ -155,7 +209,11 @@ def test_reserve_forked_opencode_running_fork_records_previous_native_message(tm
             conn.execute(
                 agent_sessions.update()
                 .where(agent_sessions.c.id == source_id)
-                .values(agent_backend="opencode", agent_variant="opencode")
+                .values(
+                    agent_backend="opencode",
+                    agent_variant="opencode",
+                    native_session_id="oc-source",
+                )
             )
             messages_service.append(
                 conn,
@@ -190,6 +248,7 @@ def test_reserve_forked_opencode_running_fork_records_previous_native_message(tm
     assert result.fork.source_message_id == latest_user["id"]
     assert result.fork.trim_latest_running_turn is True
     assert result.fork.native_turn_started is True
+    assert result.fork.opencode_fork_message_id == "oc-msg-2"
     engine = create_sqlite_engine(db_path)
     try:
         with engine.connect() as conn:
@@ -201,9 +260,55 @@ def test_reserve_forked_opencode_running_fork_records_previous_native_message(tm
 
     metadata = json.loads(forked["metadata_json"])
     assert metadata["fork_source_message_id"] == latest_user["id"]
-    assert "fork_opencode_message_id" not in metadata
+    assert metadata["fork_opencode_message_id"] == "oc-msg-2"
     assert metadata["fork_trim_latest_running_turn"] is True
     assert metadata["fork_native_turn_started"] is True
+
+
+def test_reserve_forked_opencode_running_first_turn_records_empty_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    xdg_home = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
+    _seed_opencode_messages(xdg_home, "oc-source", ["user"])
+    source_id = _seed_source_session(db_path, tmp_path)
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == source_id)
+                .values(
+                    agent_backend="opencode",
+                    agent_variant="opencode",
+                    native_session_id="oc-source",
+                )
+            )
+    finally:
+        engine.dispose()
+
+    result = reserve_forked_session(
+        source_session_id=source_id,
+        trim_latest_running_turn=True,
+        native_turn_started=True,
+        db_path=db_path,
+    )
+
+    assert result.fork.trim_latest_running_turn is True
+    assert result.fork.native_turn_started is True
+    assert result.fork.opencode_fork_empty_history is True
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            forked = conn.execute(
+                select(agent_sessions).where(agent_sessions.c.id == result.session_id)
+            ).mappings().one()
+    finally:
+        engine.dispose()
+
+    metadata = json.loads(forked["metadata_json"])
+    assert metadata["fork_opencode_fork_empty_history"] is True
 
 
 def test_reserve_forked_session_uses_generic_title_for_untitled_source(tmp_path: Path) -> None:
@@ -389,6 +494,7 @@ def test_pending_native_fork_preserves_trim_metadata() -> None:
                     "source_message_id": "msg-avibe",
                     "trim_latest_running_turn": True,
                     "native_turn_started": True,
+                    "opencode_fork_message_id": "oc-msg-2",
                 },
             }
         },
@@ -401,6 +507,7 @@ def test_pending_native_fork_preserves_trim_metadata() -> None:
         "source_message_id": "msg-avibe",
         "trim_latest_running_turn": True,
         "native_turn_started": True,
+        "opencode_fork_message_id": "oc-msg-2",
     }
 
 
@@ -451,6 +558,7 @@ def test_fork_metadata_from_session_metadata_preserves_trim_fields() -> None:
         "fork_source_message_id": "msg-avibe",
         "fork_trim_latest_running_turn": True,
         "fork_native_turn_started": True,
+        "fork_opencode_message_id": "oc-msg-2",
     }
 
     assert fork_metadata_from_session_metadata(metadata) == {
@@ -460,4 +568,5 @@ def test_fork_metadata_from_session_metadata_preserves_trim_fields() -> None:
         "source_message_id": "msg-avibe",
         "trim_latest_running_turn": True,
         "native_turn_started": True,
+        "opencode_fork_message_id": "oc-msg-2",
     }
