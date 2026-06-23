@@ -955,14 +955,22 @@ export const ChatPage: React.FC = () => {
   );
 
   // Pull a queued message back into the composer (to edit / resend) and drop it
-  // from the queue — it's no longer queued, it's back in the input. Append so a
-  // draft already in the box isn't clobbered.
+  // from the queue. Delete server-side FIRST and only append the text once the
+  // row is actually gone — otherwise a failed delete would leave the message
+  // both queued (still scheduled to send) and editable in the composer, i.e. a
+  // duplicate turn. Append (not replace) so an existing draft isn't clobbered.
   const recallQueued = useCallback(
-    (item: WorkbenchMessage) => {
-      if (item.text) composerRef.current?.appendText(item.text);
-      void removeQueued(item.id);
+    async (item: WorkbenchMessage) => {
+      if (!sessionId) return;
+      try {
+        await api.removeQueuedMessage(sessionId, item.id);
+        setQueue((prev) => prev.filter((m) => m.id !== item.id));
+        if (item.text) composerRef.current?.appendText(item.text);
+      } catch {
+        void refreshQueue(); // delete failed → leave it queued, don't stage the text
+      }
     },
-    [removeQueued],
+    [api, sessionId, refreshQueue],
   );
 
   const sendQueueNow = useCallback(async () => {
@@ -1389,6 +1397,11 @@ const QueueRow: React.FC<{
     if (window.getSelection()?.toString()) return;
     setExpanded((v) => !v);
   };
+  // A queued send can carry uploaded files (content.attachments). Recall only
+  // pulls text, so offer it only for text-only rows — recalling an attachment
+  // row would silently drop the files. Such rows can still be deleted or sent.
+  const att = (item.content as Record<string, unknown> | undefined)?.attachments;
+  const canRecall = !(Array.isArray(att) && att.length > 0);
   return (
     <div className="flex items-start gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5">
       <div
@@ -1409,17 +1422,19 @@ const QueueRow: React.FC<{
       >
         {item.text}
       </div>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        onClick={() => onRecall(item)}
-        aria-label={t('chat.queue.recall')}
-        title={t('chat.queue.recall')}
-        className="size-6 shrink-0 text-muted hover:text-foreground"
-      >
-        <Undo2 className="size-3.5" />
-      </Button>
+      {canRecall && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          onClick={() => onRecall(item)}
+          aria-label={t('chat.queue.recall')}
+          title={t('chat.queue.recall')}
+          className="size-6 shrink-0 text-muted hover:text-foreground"
+        >
+          <Undo2 className="size-3.5" />
+        </Button>
+      )}
       <Button
         type="button"
         variant="ghost"
