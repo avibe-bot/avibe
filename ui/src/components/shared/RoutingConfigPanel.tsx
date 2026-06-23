@@ -267,14 +267,23 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
           }}
           agents={vibeAgents}
           onChange={(patch) => {
-            // The picker emits PARTIAL patches (a model-only pick is just
-            // {model}); merge only the keys present so changing model/effort
-            // doesn't clear the chosen agent. A present field wins (incl. an
-            // explicit null that clears it); an absent field keeps its value.
+            // The picker emits PARTIAL patches; merge only the keys present.
             const next = { ...value.routing };
-            if ('agent_name' in patch) next.agent_name = patch.agent_name ?? null;
-            if ('model' in patch) next.model = patch.model ?? null;
-            if ('reasoning_effort' in patch) next.reasoning_effort = patch.reasoning_effort ?? null;
+            if ('agent_name' in patch) {
+              // Picking/clearing the agent re-seeds it: INHERIT the agent's
+              // current defaults (null model/effort) rather than freezing its
+              // present model/effort as overrides — so the scope keeps following
+              // future changes to the agent's defaults, matching the old
+              // selector. (Re-picking the agent also resets a prior override.)
+              next.agent_name = patch.agent_name ?? null;
+              next.model = null;
+              next.reasoning_effort = null;
+            } else {
+              // A model / effort column change is an explicit override on top of
+              // the current (selected or inherited) agent; preserve the agent.
+              if ('model' in patch) next.model = patch.model ?? null;
+              if ('reasoning_effort' in patch) next.reasoning_effort = patch.reasoning_effort ?? null;
+            }
             onChange({ routing: clearLegacyOverrides(next) });
           }}
           defaultLabel={
