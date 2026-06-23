@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { FileText, Globe2, Play, RotateCw, Server, Square } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -17,6 +18,14 @@ export const SettingsServicePage: React.FC = () => {
   const { t } = useTranslation();
   const { status, control } = useStatus();
   const api = useApi();
+  const navigate = useNavigate();
+  // Back-compat: Remote Access moved to its own page. Old deep links to the
+  // former in-page anchor (#remote-access) land here, so forward them.
+  useEffect(() => {
+    if (window.location.hash === '#remote-access') {
+      navigate('/admin/remote-access', { replace: true });
+    }
+  }, [navigate]);
   const [config, setConfig] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [uiSaving, setUiSaving] = useState(false);

@@ -257,33 +257,31 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
         </label>
         <AgentRoutePicker
           value={{
-            // Inheriting the default agent (no explicit agent_name) while
-            // overriding model/effort still needs a backend to resolve the
-            // model/effort columns — fall back to the default agent's backend.
+            // Resolve the DISPLAYED route. An explicit agent with an empty
+            // model/effort means "inherit that agent's", so fall back to the
+            // selected agent's own model/effort — otherwise the effort column
+            // resolves options against the backend defaults instead of the
+            // inherited model (e.g. a Claude agent's xhigh/max would vanish).
+            // agent_backend also falls back to the default agent so the columns
+            // resolve while inheriting the global default.
             agent_backend: selectedVibeAgent?.backend ?? defaultVibeAgent?.backend ?? null,
             agent_name: value.routing.agent_name ?? null,
-            model: value.routing.model ?? null,
-            reasoning_effort: value.routing.reasoning_effort ?? null,
+            model: value.routing.model ?? selectedVibeAgent?.model ?? null,
+            reasoning_effort: value.routing.reasoning_effort ?? selectedVibeAgent?.reasoning_effort ?? null,
           }}
           agents={vibeAgents}
           onChange={(patch) => {
-            // The picker emits PARTIAL patches; merge only the keys present.
+            // Concrete routes, matching the workbench picker + the other call
+            // sites: merge only the keys PRESENT in the (partial) patch. A
+            // present field wins (incl. an explicit null that clears it); an
+            // absent field keeps its stored value. We deliberately do NOT
+            // special-case agent picks to null model/effort — that discarded the
+            // first model pick on an inherited-default route, where the pick
+            // arrives as the materialized agent_name + the chosen model together.
             const next = { ...value.routing };
-            if ('agent_name' in patch) {
-              // Picking/clearing the agent re-seeds it: INHERIT the agent's
-              // current defaults (null model/effort) rather than freezing its
-              // present model/effort as overrides — so the scope keeps following
-              // future changes to the agent's defaults, matching the old
-              // selector. (Re-picking the agent also resets a prior override.)
-              next.agent_name = patch.agent_name ?? null;
-              next.model = null;
-              next.reasoning_effort = null;
-            } else {
-              // A model / effort column change is an explicit override on top of
-              // the current (selected or inherited) agent; preserve the agent.
-              if ('model' in patch) next.model = patch.model ?? null;
-              if ('reasoning_effort' in patch) next.reasoning_effort = patch.reasoning_effort ?? null;
-            }
+            if ('agent_name' in patch) next.agent_name = patch.agent_name ?? null;
+            if ('model' in patch) next.model = patch.model ?? null;
+            if ('reasoning_effort' in patch) next.reasoning_effort = patch.reasoning_effort ?? null;
             onChange({ routing: clearLegacyOverrides(next) });
           }}
           defaultLabel={
