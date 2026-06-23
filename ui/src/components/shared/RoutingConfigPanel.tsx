@@ -257,22 +257,26 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
         </label>
         <AgentRoutePicker
           value={{
-            agent_backend: selectedVibeAgent?.backend ?? null,
+            // Inheriting the default agent (no explicit agent_name) while
+            // overriding model/effort still needs a backend to resolve the
+            // model/effort columns — fall back to the default agent's backend.
+            agent_backend: selectedVibeAgent?.backend ?? defaultVibeAgent?.backend ?? null,
             agent_name: value.routing.agent_name ?? null,
             model: value.routing.model ?? null,
             reasoning_effort: value.routing.reasoning_effort ?? null,
           }}
           agents={vibeAgents}
-          onChange={(patch) =>
-            onChange({
-              routing: clearLegacyOverrides({
-                ...value.routing,
-                agent_name: patch.agent_name ?? null,
-                model: patch.model ?? null,
-                reasoning_effort: patch.reasoning_effort ?? null,
-              }),
-            })
-          }
+          onChange={(patch) => {
+            // The picker emits PARTIAL patches (a model-only pick is just
+            // {model}); merge only the keys present so changing model/effort
+            // doesn't clear the chosen agent. A present field wins (incl. an
+            // explicit null that clears it); an absent field keeps its value.
+            const next = { ...value.routing };
+            if ('agent_name' in patch) next.agent_name = patch.agent_name ?? null;
+            if ('model' in patch) next.model = patch.model ?? null;
+            if ('reasoning_effort' in patch) next.reasoning_effort = patch.reasoning_effort ?? null;
+            onChange({ routing: clearLegacyOverrides(next) });
+          }}
           defaultLabel={
             defaultVibeAgent ? `${t('common.default')} · ${defaultVibeAgent.name}` : t('common.default')
           }
@@ -286,7 +290,13 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
                 }
               : undefined
           }
-          isDefaultRoute={!value.routing.agent_name}
+          // Only a FULLY-inheriting scope (no overrides at all) displays the
+          // default route. A scope that inherits the agent but overrides
+          // model/effort must show its own values, not the default agent's,
+          // otherwise the override is masked and silently overwritten.
+          isDefaultRoute={
+            !value.routing.agent_name && !value.routing.model && !value.routing.reasoning_effort
+          }
           align="start"
           triggerClassName="w-full"
         />

@@ -330,7 +330,7 @@ function AppRoutes() {
         <Route path="/settings/messaging" element={<Navigate to="/admin/settings/messaging" replace />} />
         <Route path="/settings/diagnostics" element={<Navigate to="/admin/settings/diagnostics" replace />} />
         <Route path="/settings/logs" element={<Navigate to="/admin/settings/logs" replace />} />
-        <Route path="/remote-access" element={<Navigate to="/admin/settings/service" replace />} />
+        <Route path="/remote-access" element={<Navigate to="/admin/remote-access" replace />} />
         <Route path="/doctor" element={<Navigate to="/admin/settings/diagnostics" replace />} />
         <Route path="/doctor/logs" element={<Navigate to="/admin/logs" replace />} />
       </Route>
