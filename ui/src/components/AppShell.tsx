@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, FolderTree, Hash, Inbox, LayoutDashboard, LayoutGrid, Menu, MonitorPlay, Plus, Settings, SlidersHorizontal, Sparkles, Users } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Bot, ChevronDown, FolderTree, Globe, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, MonitorPlay, PlugZap, Plus, Settings, SlidersHorizontal, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -21,23 +21,34 @@ import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms'
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
 
 type ShellNavItem = {
-  to: string;
+  // Optional: a parent that only groups children (no page of its own) omits `to`
+  // and renders as a collapsible toggle instead of a link.
+  to?: string;
   label: string;
   icon: React.ComponentType<{ className?: string }>;
   match?: (pathname: string) => boolean;
   badge?: number;
+  children?: ShellNavItem[];
 };
+
+const isItemActive = (item: ShellNavItem, pathname: string): boolean =>
+  item.match
+    ? item.match(pathname)
+    : item.to
+      ? pathname === item.to || pathname.startsWith(`${item.to}/`)
+      : false;
 
 // Mirrors design.pen kSWgv (VR/Sidebar): 240px width, fill --surface,
 // right border, padding [20,16]. Mint-soft active state with mint glow.
 const ShellNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
   const location = useLocation();
+  if (item.children && item.children.length > 0) return <ShellNavGroup item={item} />;
   const active = item.match ? item.match(location.pathname) : location.pathname === item.to;
   const Icon = item.icon;
 
   return (
     <NavLink
-      to={item.to}
+      to={item.to ?? '#'}
       className={clsx(
         'group flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-colors',
         active
@@ -51,6 +62,42 @@ const ShellNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
   );
 };
 
+// Collapsible parent for a nested submenu (e.g. 通讯平台 → 平台 / 群组 / 私聊).
+// Auto-expands when one of its children is the active route; the parent has no
+// page of its own, so it's a toggle button rather than a link.
+const ShellNavGroup: React.FC<{ item: ShellNavItem }> = ({ item }) => {
+  const location = useLocation();
+  const Icon = item.icon;
+  const childActive = (item.children ?? []).some((child) => isItemActive(child, location.pathname));
+  const [open, setOpen] = useState(childActive);
+  useEffect(() => {
+    if (childActive) setOpen(true);
+  }, [childActive]);
+
+  return (
+    <div className="flex flex-col gap-0.5">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className={clsx(
+          'group flex w-full items-center gap-2.5 rounded-lg border border-transparent px-3 py-2.5 text-[13px] font-medium transition-colors hover:bg-foreground/[0.04]',
+          childActive ? 'text-foreground' : 'text-muted hover:text-foreground'
+        )}
+      >
+        <Icon className={clsx('size-4', childActive ? 'text-mint' : 'text-muted group-hover:text-foreground')} />
+        <span className="flex-1 text-left">{item.label}</span>
+        <ChevronDown className={clsx('size-3.5 shrink-0 text-muted transition-transform', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <div className="ml-3 flex flex-col gap-0.5 border-l border-border pl-2">
+          {item.children!.map((child) => <ShellNavLink key={child.to} item={child} />)}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
   const location = useLocation();
   const active = item.match ? item.match(location.pathname) : location.pathname === item.to;
@@ -58,7 +105,7 @@ const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
 
   return (
     <NavLink
-      to={item.to}
+      to={item.to ?? '#'}
       className={clsx(
         'flex min-w-0 flex-1 flex-col items-center justify-center gap-1 rounded-lg px-1 py-2 text-[10px] transition-colors',
         active ? 'bg-mint/[0.08] text-mint' : 'text-muted'
@@ -188,18 +235,52 @@ export const AppShell: React.FC = () => {
 
   const adminItems: ShellNavItem[] = [
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
-    ...(hasChannelPlatforms ? [{ to: '/admin/groups', label: t('nav.channels'), icon: Hash }] : []),
-    { to: '/admin/users', label: t('nav.users'), icon: Users },
+    { to: '/admin/remote-access', label: t('nav.remoteAccess'), icon: Globe },
+    {
+      // 通讯平台: groups everything about connecting messaging platforms — the
+      // platform credentials (was a Settings tab), plus the group + DM scopes.
+      label: t('nav.messagingPlatforms'),
+      icon: LinkIcon,
+      match: (p) =>
+        p.startsWith('/admin/settings/platforms') ||
+        p.startsWith('/admin/groups') ||
+        p.startsWith('/admin/users'),
+      children: [
+        { to: '/admin/settings/platforms', label: t('settings.tabs.platforms'), icon: PlugZap },
+        ...(hasChannelPlatforms ? [{ to: '/admin/groups', label: t('nav.channels'), icon: Hash }] : []),
+        { to: '/admin/users', label: t('nav.users'), icon: MessageCircle },
+      ],
+    },
+    {
+      to: '/admin/settings/backends',
+      label: t('nav.backends'),
+      icon: Bot,
+      match: (p) => p.startsWith('/admin/settings/backends'),
+    },
     { to: '/admin/show-pages', label: t('nav.showPages'), icon: MonitorPlay },
     {
-      to: '/admin/settings/service',
-      label: t('nav.settings'),
+      // 高级设置: the remaining Settings tabs (messaging leads). Platforms +
+      // backends moved out to their own sidebar destinations above, so exclude
+      // their routes from the active match.
+      to: '/admin/settings/messaging',
+      label: t('nav.advancedSettings'),
       icon: Settings,
-      match: (pathname) => pathname.startsWith('/admin/settings'),
+      match: (p) =>
+        p.startsWith('/admin/settings') &&
+        !p.startsWith('/admin/settings/platforms') &&
+        !p.startsWith('/admin/settings/backends'),
     },
   ];
 
   const items: ShellNavItem[] = shellMode === 'admin' ? adminItems : [];
+
+  // Mobile can't nest, so a parent collapses to a single tab that opens its
+  // first child (e.g. 通讯平台 → 平台).
+  const mobileAdminItems: ShellNavItem[] = adminItems.map((item) =>
+    item.children && item.children.length > 0
+      ? { ...item, to: item.children[0].to, children: undefined }
+      : item
+  );
 
   // Workbench mobile tabs flatten the (desktop-only) WorkbenchSidebar into a
   // bottom tab bar: Inbox / Projects / Capabilities / More, around a center
@@ -374,7 +455,7 @@ export const AppShell: React.FC = () => {
       {showBottomNav && (
         shellMode === 'admin' ? (
           <MobileTabBar
-            items={[{ to: '/', label: t('nav.workbench'), icon: Sparkles }, ...adminItems]}
+            items={[{ to: '/', label: t('nav.workbench'), icon: Sparkles }, ...mobileAdminItems]}
           />
         ) : (
           <MobileTabBar

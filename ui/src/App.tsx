@@ -15,6 +15,7 @@ import { Dashboard } from './components/Dashboard';
 import { ChannelList } from './components/steps/ChannelList';
 import { UserList } from './components/steps/UserList';
 import { ShowPagesPage } from './components/ShowPagesPage';
+import { RemoteAccessPage } from './components/RemoteAccessPage';
 import { SettingsDiagnosticsPage } from './components/settings/SettingsDiagnosticsPage';
 import { SettingsBackendsPage } from './components/settings/SettingsBackendsPage';
 import { SettingsDependenciesPage } from './components/settings/SettingsDependenciesPage';
@@ -288,6 +289,7 @@ function AppRoutes() {
         {/* Control Panel mode — existing pages moved under /admin/* */}
         <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
         <Route path="/admin/dashboard" element={<Dashboard />} />
+        <Route path="/admin/remote-access" element={<RemoteAccessPage />} />
         <Route path="/admin/groups" element={<ChannelList isPage />} />
         <Route path="/admin/users" element={<UserList />} />
         <Route path="/admin/show-pages" element={<ShowPagesPage />} />

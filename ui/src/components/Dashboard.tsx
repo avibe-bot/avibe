@@ -429,7 +429,7 @@ export const Dashboard: React.FC = () => {
           hint={cloudHint}
           icon={<Cloud className="size-4" />}
           cloudHomeUrl="https://avibe.bot"
-          settingsHref="/admin/settings/service#remote-access"
+          settingsHref="/admin/remote-access"
           publicUrl={cloudPublicHref}
         />
       </div>

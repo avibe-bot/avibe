@@ -6,7 +6,6 @@ import clsx from 'clsx';
 import { useStatus } from '@/context/StatusContext';
 import { useApi } from '@/context/ApiContext';
 import { apiFetch } from '@/lib/apiFetch';
-import { RemoteAccess } from '@/components/RemoteAccess';
 import { SettingsPageShell } from './SettingsPageShell';
 import { CompactField, SettingsPanel, SettingsRow } from './SettingsPrimitives';
 import { Button } from '@/components/ui/button';
@@ -119,9 +118,6 @@ export const SettingsServicePage: React.FC = () => {
       title={t('settings.serviceTitle')}
       subtitle={t('settings.serviceSubtitle')}
     >
-      {/* Remote access leads the page: it's the primary thing users come here to
-          set up, so it sits at the top with a prominent cyan board + glow. */}
-      <RemoteAccess />
 
       <SettingsPanel
         title={
