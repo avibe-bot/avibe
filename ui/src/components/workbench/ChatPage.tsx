@@ -961,13 +961,24 @@ export const ChatPage: React.FC = () => {
   // duplicate turn. Append (not replace) so an existing draft isn't clobbered.
   const recallQueued = useCallback(
     async (item: WorkbenchMessage) => {
-      if (!sessionId) return;
+      const sid = sessionId;
+      if (!sid) return;
       try {
-        await api.removeQueuedMessage(sessionId, item.id);
+        const { removed } = await api.removeQueuedMessage(sid, item.id);
+        // Bail if the user switched sessions during the request — otherwise we'd
+        // stage the old row's text into a different session's composer.
+        if (sessionIdRef.current !== sid) return;
+        // ``removed: false`` means the row was already gone (double-click, or a
+        // concurrent flush/other tab). Don't stage the text — that would requeue
+        // a duplicate — just resync the queue.
+        if (!removed) {
+          void refreshQueue();
+          return;
+        }
         setQueue((prev) => prev.filter((m) => m.id !== item.id));
         if (item.text) composerRef.current?.appendText(item.text);
       } catch {
-        void refreshQueue(); // delete failed → leave it queued, don't stage the text
+        if (sessionIdRef.current === sid) void refreshQueue();
       }
     },
     [api, sessionId, refreshQueue],
@@ -1397,11 +1408,13 @@ const QueueRow: React.FC<{
     if (window.getSelection()?.toString()) return;
     setExpanded((v) => !v);
   };
-  // A queued send can carry uploaded files (content.attachments). Recall only
-  // pulls text, so offer it only for text-only rows — recalling an attachment
-  // row would silently drop the files. Such rows can still be deleted or sent.
+  // Offer recall only for the user's own text-only queued prompts:
+  //  - harness/scheduled rows (source !== 'user') carry provenance flush_queue
+  //    needs (suppress-delivery, native-id dedupe) that a plain recall would drop;
+  //  - recall can't carry uploaded files (content.attachments), so an attachment
+  //    row would silently lose them. Both can still be deleted or left to send.
   const att = (item.content as Record<string, unknown> | undefined)?.attachments;
-  const canRecall = !(Array.isArray(att) && att.length > 0);
+  const canRecall = item.source === 'user' && !(Array.isArray(att) && att.length > 0);
   return (
     <div className="flex items-start gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5">
       <div
