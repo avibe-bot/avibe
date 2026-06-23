@@ -157,6 +157,14 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 }, ref) {
   const { t } = useTranslation();
   const [value, setValue] = useState('');
+  // The mention editor (Lexical) OWNS its text, so we don't mirror every
+  // keystroke into ``value`` there — a fast third-party IME (e.g. a voice
+  // keyboard like Typeless) inserts text in bursts, and re-rendering on each
+  // burst can interrupt its in-progress insertion and truncate the input. For
+  // that path we keep the live text in ``valueRef`` and track only whether the
+  // box is non-empty (``hasText``) for the Send button; ``value`` still backs the
+  // plain-textarea (home) path. See onChange below.
+  const [hasText, setHasText] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const valueRef = useRef('');
   // Seed once from a saved draft, but only while the box is untouched so a
@@ -182,8 +190,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   // Mentions upgrade the plain textarea to a Lexical editor (chat composer only,
   // gated on the caller wiring both search sources). The editor owns the rich
-  // content; ``value`` mirrors its serialized marker text for the send/draft path
-  // and ``referencesRef`` holds the resolved sidecar for the send payload.
+  // content; ``valueRef`` holds its live serialized marker text for the
+  // send/draft path (``hasText`` gates the Send button) and ``referencesRef``
+  // holds the resolved sidecar for the send payload.
   const useMentions = Boolean(onSearchAgents && onSearchSessions);
   const mentionRef = useRef<MentionEditorHandle | null>(null);
   const referencesRef = useRef<MentionReference[]>([]);
@@ -197,10 +206,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [initialDraft, useMentions]);
 
   // Keep a ref of the latest value so the async voice-fill can append without a
-  // stale closure.
+  // stale closure. The mention path keeps ``valueRef`` current itself (in
+  // onChange), since it doesn't drive ``value`` — so don't clobber it here.
   useEffect(() => {
+    if (useMentions) return;
     valueRef.current = value;
-  }, [value]);
+  }, [value, useMentions]);
 
   // Auto-grow the textarea with its content. ``min-h-9`` floors it at the 36px
   // send-button height so a single line sits vertically centered against the
@@ -426,11 +437,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const trimmed = value.trim();
   const readyAttachments = attachments.filter((a) => a.status === 'ready');
   const uploading = attachments.some((a) => a.status === 'uploading');
+  // The mention path doesn't mirror its text into ``value`` (see onChange), so
+  // its "is there text?" signal comes from ``hasText``; the textarea path reads
+  // ``value`` directly.
+  const hasComposerText = useMentions ? hasText : trimmed.length > 0;
   // Send on text OR a ready attachment (attachment-only runs a turn so the agent
   // reads the files); blocked while an upload is still in flight, and while
   // recording so neither the Send button nor the Enter key can fire mid-record.
   const canSubmit =
-    (trimmed.length > 0 || readyAttachments.length > 0) && !uploading && !disabled && !recording;
+    (hasComposerText || readyAttachments.length > 0) && !uploading && !disabled && !recording;
 
   const update = (next: string) => {
     setValue(next);
@@ -439,13 +454,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
 
   const submit = async () => {
     if (!canSubmit || pendingRef.current) return;
-    const submitted = trimmed;
+    // Mention path: the live text lives in valueRef (value isn't mirrored there).
+    const submitted = (useMentions ? valueRef.current : value).trim();
     const sent = readyAttachments;
     const sentRefs = referencesRef.current;
     pendingRef.current = true;
     // Clear optimistically so the box can't be re-submitted and a slow send can't
     // wipe text typed in the meantime.
     setValue('');
+    setHasText(false);
     onDraftChange?.('');
     setAttachments([]);
     referencesRef.current = [];
@@ -582,8 +599,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             // no-ops without a session, so this gate is also defense in depth.
             onPasteFiles={mediaEnabled ? (files) => void uploadFiles(files) : undefined}
             onChange={(text, references, isDraftSeed) => {
-              setValue(text);
+              // The editor owns the text; keep the live copy in a ref (no
+              // re-render) so a fast IME isn't interrupted mid-insert, and only
+              // re-render when the empty/non-empty state actually flips (React
+              // bails on an unchanged boolean). Send/draft read valueRef/text.
+              valueRef.current = text;
               referencesRef.current = references;
+              setHasText(text.trim().length > 0);
               // A mount-time draft RESTORE is not a user edit: re-persisting it
               // is at best a redundant write, and under a stale-props remount it
               // would save the previous session's draft under this session id
