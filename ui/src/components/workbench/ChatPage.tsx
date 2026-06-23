@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Bell, Bot, ChevronDown, Clock, GitFork, Info, Loader2, MessageSquare, Pencil, Presentation, UploadCloud, X } from 'lucide-react';
+import { ArrowLeft, Bell, Bot, ChevronDown, Clock, GitFork, Info, Loader2, MessageSquare, Pencil, Presentation, Undo2, UploadCloud, X } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
@@ -954,6 +954,17 @@ export const ChatPage: React.FC = () => {
     [api, sessionId, refreshQueue],
   );
 
+  // Pull a queued message back into the composer (to edit / resend) and drop it
+  // from the queue — it's no longer queued, it's back in the input. Append so a
+  // draft already in the box isn't clobbered.
+  const recallQueued = useCallback(
+    (item: WorkbenchMessage) => {
+      if (item.text) composerRef.current?.appendText(item.text);
+      void removeQueued(item.id);
+    },
+    [removeQueued],
+  );
+
   const sendQueueNow = useCallback(async () => {
     // "立即发送": interrupt the running turn + flush the queue now. The queue
     // flushes as one merged turn, so this runs the whole queue.
@@ -1336,7 +1347,7 @@ export const ChatPage: React.FC = () => {
           onQuoteSelection={quoteSelectionToComposer}
           onAskInNewSession={askInNewSession}
         />
-        <QueueStrip queue={queue} onRemove={removeQueued} onSendNow={sendQueueNow} />
+        <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
         {/* key by session so the composer remounts per session — its draft-seeding
             + local value reset, instead of carrying across sessions (Codex P2). */}
         <Compose
@@ -1364,28 +1375,58 @@ export const ChatPage: React.FC = () => {
 // One queued message. Its text is a single truncated line by default; clicking
 // it expands to the full wrapped text (and clicking again collapses it) so a
 // long queued prompt can be read without sending it.
-const QueueRow: React.FC<{ item: WorkbenchMessage; onRemove: (id: string) => void }> = ({ item, onRemove }) => {
+const QueueRow: React.FC<{
+  item: WorkbenchMessage;
+  onRemove: (id: string) => void;
+  onRecall: (item: WorkbenchMessage) => void;
+}> = ({ item, onRemove, onRecall }) => {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
+  // A plain selectable element (not a <button>) so desktop users can drag-select
+  // the text; a click still toggles expand/collapse — unless the click ended a
+  // text selection, in which case we leave the selection alone.
+  const toggle = () => {
+    if (window.getSelection()?.toString()) return;
+    setExpanded((v) => !v);
+  };
   return (
     <div className="flex items-start gap-2 rounded-lg bg-surface-2 px-2.5 py-1.5">
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={toggle}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            setExpanded((v) => !v);
+          }
+        }}
         aria-expanded={expanded}
         className={clsx(
-          'min-w-0 flex-1 text-left text-[12px] text-foreground',
+          'min-w-0 flex-1 cursor-pointer select-text text-left text-[12px] text-foreground',
           expanded ? 'whitespace-pre-wrap break-words' : 'truncate',
         )}
       >
         {item.text}
-      </button>
+      </div>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        onClick={() => onRecall(item)}
+        aria-label={t('chat.queue.recall')}
+        title={t('chat.queue.recall')}
+        className="size-6 shrink-0 text-muted hover:text-foreground"
+      >
+        <Undo2 className="size-3.5" />
+      </Button>
       <Button
         type="button"
         variant="ghost"
         size="icon"
         onClick={() => onRemove(item.id)}
         aria-label={t('chat.queue.remove')}
+        title={t('chat.queue.remove')}
         className="size-6 shrink-0 text-muted hover:text-destructive"
       >
         <X className="size-3.5" />
@@ -1397,8 +1438,9 @@ const QueueRow: React.FC<{ item: WorkbenchMessage; onRemove: (id: string) => voi
 const QueueStrip: React.FC<{
   queue: WorkbenchMessage[];
   onRemove: (id: string) => void;
+  onRecall: (item: WorkbenchMessage) => void;
   onSendNow: () => void;
-}> = ({ queue, onRemove, onSendNow }) => {
+}> = ({ queue, onRemove, onRecall, onSendNow }) => {
   const { t } = useTranslation();
   if (queue.length === 0) return null;
   return (
@@ -1415,7 +1457,7 @@ const QueueStrip: React.FC<{
         </div>
         <div className="flex max-h-32 flex-col gap-1 overflow-y-auto">
           {queue.map((item) => (
-            <QueueRow key={item.id} item={item} onRemove={onRemove} />
+            <QueueRow key={item.id} item={item} onRemove={onRemove} onRecall={onRecall} />
           ))}
         </div>
       </div>

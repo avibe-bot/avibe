@@ -1885,6 +1885,7 @@
     "queue": {
       "title": "Queued · {{count}}",
       "sendNow": "Send now",
+      "recall": "Recall to input",
       "remove": "Remove from queue"
     }
   }

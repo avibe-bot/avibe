@@ -1884,6 +1884,7 @@
     "queue": {
       "title": "排队中 · {{count}}",
       "sendNow": "立即发送",
+      "recall": "撤回到输入框",
       "remove": "移出队列"
     }
   }
