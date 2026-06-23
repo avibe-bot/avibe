@@ -183,6 +183,7 @@ Source-of-truth rule:
 - PR descriptions must name the changed capability and list the affected scenario IDs when a scenario catalog exists
 - PR descriptions must state which evidence layers were updated: unit, contract, scenario, and residual manual checks
 - after opening a PR, use the `background-watch-hook` skill to keep a review-fix loop running until Codex review passes
+- use the skill's bundled `wait_pr.py` / `wait_action.py` for PR review and CI watches; do not hand-roll PR waiters
 - by default, create the review watch immediately after the PR is opened; do not wait for the user to remind you unless they explicitly say not to keep a watch
 - keep expensive full-suite gates on GitHub CI by default, then require those CI checks to pass before merge
 
