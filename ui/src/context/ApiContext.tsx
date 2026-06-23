@@ -41,6 +41,8 @@ export type ApiContextType = {
   /** Create the session's Show Page if absent; resolves to `{ existed, ... }`. */
   ensureShowPage: (sessionId: string) => Promise<any>;
   rotateShowPageShare: (sessionId: string) => Promise<any>;
+  /** Set a custom public link suffix (public pages only); rejects on a taken/invalid id. */
+  setShowPageShareId: (sessionId: string, shareId: string) => Promise<any>;
   getBindCodes: () => Promise<any>;
   createBindCode: (type: string, expiresAt?: string) => Promise<any>;
   deleteBindCode: (code: string) => Promise<any>;
@@ -1569,6 +1571,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setShowPageVisibility: (sessionId, visibility) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/visibility`, { visibility }),
     ensureShowPage: (sessionId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/ensure`, {}),
     rotateShowPageShare: (sessionId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/rotate-share`, {}),
+    setShowPageShareId: (sessionId, shareId) => postJson(`/api/show-pages/${encodeURIComponent(sessionId)}/share-id`, { share_id: shareId }),
     getBindCodes: () => getJson('/api/bind-codes'),
     createBindCode: (type, expiresAt) => postJson('/api/bind-codes', { type, expires_at: expiresAt }),
     deleteBindCode: (code) => deleteJson(`/api/bind-codes/${encodeURIComponent(code)}`),

@@ -34,3 +34,14 @@ export function displayLink(page: ShowPageLinkInfo): string | null {
   const href = liveHref(page);
   return href ? href.replace(/^https?:\/\//, '') : null;
 }
+
+// Custom public link suffix (the /p/<share_id>/ segment). Mirrors the server
+// rule in core/show_pages.validate_share_id so the field can give instant
+// feedback before the request; the server stays the authority on uniqueness.
+export const SHARE_ID_MIN_LENGTH = 3;
+export const SHARE_ID_MAX_LENGTH = 64;
+const SHARE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{1,62}[A-Za-z0-9]$/;
+
+export function isValidShareId(value: string): boolean {
+  return SHARE_ID_RE.test(value.trim());
+}

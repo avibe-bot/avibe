@@ -10,6 +10,7 @@ import { useApi } from '../../context/ApiContext';
 import { copyTextToClipboard } from '../../lib/utils';
 import { isIosDevice, isRealMobileSafari, isStandalonePwa } from '../../lib/platform';
 import { copyHref, type ShowPageLinkInfo } from '../../lib/showPageLinks';
+import { ShowPageShareIdField } from './ShowPageShareIdField';
 
 type ShowPagePayload = ShowPageLinkInfo & {
   url_available: boolean;
@@ -203,6 +204,23 @@ export const ShowPageShareControl: React.FC<{
                 {isPublic ? t('chat.showPage.publicDesc') : t('chat.showPage.privateDesc')}
               </p>
             </div>
+
+            {payload && isPublic && (
+              <div>
+                <div className="mb-1.5 text-sm">{t('chat.showPage.customLink')}</div>
+                <ShowPageShareIdField
+                  sessionId={sessionId}
+                  shareId={payload.share_id}
+                  disabled={busy}
+                  onSaved={(res) => {
+                    // Authoritative server state, same handling as a visibility
+                    // change: apply it and invalidate any in-flight refresh read.
+                    setPayload(res as ShowPagePayload);
+                    reqSeq.current += 1;
+                  }}
+                />
+              </div>
+            )}
 
             {payload && isPublic && !payload.url_available && (
               <div className="rounded-md border border-border px-2.5 py-2 text-xs text-muted">

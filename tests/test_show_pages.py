@@ -155,6 +155,221 @@ def test_rotate_share_requires_public(monkeypatch, tmp_path):
         store.close()
 
 
+def _expect_show_page_error(fn, code):
+    try:
+        fn()
+    except ShowPageError as exc:
+        assert exc.code == code, f"expected {code}, got {exc.code}"
+    else:
+        raise AssertionError(f"expected ShowPageError({code})")
+
+
+def test_set_share_id_sets_custom_public_suffix(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+
+    store = ShowPageStore()
+    try:
+        store.ensure("ses123")
+        public_page = store.update_visibility("ses123", "public")
+        random_share_id = public_page.share_id
+        assert random_share_id
+
+        updated, previous = store.set_share_id("ses123", "q3-roadmap")
+        assert updated.share_id == "q3-roadmap"
+        assert previous == random_share_id
+        # The custom suffix resolves; the auto-generated one is revoked.
+        assert store.get_by_share_id("q3-roadmap").session_id == "ses123"
+        assert store.get_by_share_id(random_share_id) is None
+        # public_url reflects the custom suffix.
+        assert show_page_payload(public_page)  # original payload still builds
+        assert show_page_payload(updated)["public_url"].endswith("/p/q3-roadmap/")
+
+        # A custom suffix survives a private/public round-trip (not regenerated).
+        store.update_visibility("ses123", "private")
+        back = store.update_visibility("ses123", "public")
+        assert back.share_id == "q3-roadmap"
+    finally:
+        store.close()
+
+
+def test_set_share_id_requires_public(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+
+    store = ShowPageStore()
+    try:
+        store.ensure("ses123")  # defaults to private
+        _expect_show_page_error(lambda: store.set_share_id("ses123", "my-demo"), "not_public")
+    finally:
+        store.close()
+
+
+def test_set_share_id_rejects_taken_suffix(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+
+    store = ShowPageStore()
+    try:
+        store.update_visibility("ses-a", "public")
+        store.update_visibility("ses-b", "public")
+        store.set_share_id("ses-a", "shared-demo")
+        _expect_show_page_error(lambda: store.set_share_id("ses-b", "shared-demo"), "share_id_taken")
+        # The original owner keeps the suffix.
+        assert store.get_by_share_id("shared-demo").session_id == "ses-a"
+    finally:
+        store.close()
+
+
+def test_set_share_id_rejects_invalid_format(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+
+    store = ShowPageStore()
+    try:
+        store.update_visibility("ses123", "public")
+        for bad in ["no", "-bad", "bad-", "a b", "a/b", "汉字"]:
+            _expect_show_page_error(lambda b=bad: store.set_share_id("ses123", b), "invalid_share_id")
+        _expect_show_page_error(lambda: store.set_share_id("ses123", "   "), "missing_share_id")
+    finally:
+        store.close()
+
+
+def test_set_share_id_is_idempotent(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+
+    store = ShowPageStore()
+    try:
+        store.update_visibility("ses123", "public")
+        first, _ = store.set_share_id("ses123", "stable-link")
+        again, previous = store.set_share_id("ses123", "stable-link")
+        assert again.share_id == "stable-link"
+        assert previous == "stable-link"
+        # Re-saving the same value is a no-op, not a self-collision rewrite.
+        assert again.updated_at == first.updated_at
+    finally:
+        store.close()
+
+
+def test_set_share_id_rejects_archived_session(monkeypatch, tmp_path):
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions
+    from storage.settings_service import upsert_scope
+    from storage import messages_service
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    ensure_sqlite_state()
+
+    store = ShowPageStore()
+    try:
+        # Make it public while no session row exists (so not archived yet).
+        store.update_visibility("ses-arch", "public")
+        now = messages_service._utc_now_iso()
+        engine = create_sqlite_engine()
+        with engine.begin() as conn:
+            scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_arch", now=now)
+            conn.execute(
+                agent_sessions.insert().values(
+                    id="ses-arch",
+                    scope_id=scope_id,
+                    agent_backend="codex",
+                    agent_variant="default",
+                    session_anchor="anchor_arch",
+                    native_session_id="",
+                    status="archived",
+                    metadata_json="{}",
+                    created_at=now,
+                    updated_at=now,
+                    last_active_at=now,
+                )
+            )
+        _expect_show_page_error(lambda: store.set_share_id("ses-arch", "later-name"), "session_archived")
+    finally:
+        store.close()
+
+
+def test_show_update_set_share_id_cli(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    # Keep the CLI hermetic: skip the best-effort session prewarm side effect.
+    monkeypatch.setattr(cli, "_prewarm_show_page_session_best_effort", lambda *a, **k: None)
+
+    store = ShowPageStore()
+    try:
+        store.update_visibility("ses123", "public")
+        store.update_visibility("ses-other", "public")
+    finally:
+        store.close()
+
+    parser = cli.build_parser()
+    ok_args = parser.parse_args(["show", "update", "--session-id", "ses123", "--share-id", "demo-link", "--json"])
+    assert cli.cmd_show_update(ok_args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["share_id"] == "demo-link"
+    assert payload["public_url"].endswith("/p/demo-link/")
+
+    # A taken suffix on another public page exits 1 with a machine-readable code.
+    taken_args = parser.parse_args(["show", "update", "--session-id", "ses-other", "--share-id", "demo-link", "--json"])
+    assert cli.cmd_show_update(taken_args) == 1
+    error = json.loads(capsys.readouterr().err)
+    assert error["code"] == "share_id_taken"
+
+
+def test_show_update_share_id_archived_creates_no_page(monkeypatch, tmp_path, capsys):
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions
+    from storage.settings_service import upsert_scope
+    from storage import messages_service
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    _save_config()
+    ensure_sqlite_state()
+    monkeypatch.setattr(cli, "_prewarm_show_page_session_best_effort", lambda *a, **k: None)
+
+    now = messages_service._utc_now_iso()
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_arch_cli", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses-arch-cli",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor_arch_cli",
+                native_session_id="",
+                status="archived",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+
+    args = cli.build_parser().parse_args(
+        ["show", "update", "--session-id", "ses-arch-cli", "--share-id", "demo", "--json"]
+    )
+    assert cli.cmd_show_update(args) == 1
+    assert json.loads(capsys.readouterr().err)["code"] == "session_archived"
+
+    # The failed command must NOT have materialized a Show Page row for the
+    # archived session (the CLI no longer pre-ensures before the store guard).
+    store = ShowPageStore()
+    try:
+        assert store.get("ses-arch-cli") is None
+    finally:
+        store.close()
+
+
 def test_store_lists_pages_by_updated_time_and_visibility(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()

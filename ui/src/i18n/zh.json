@@ -141,6 +141,17 @@
     "shareLink": "分享链接",
     "rotate": "更换链接",
     "rotateHint": "生成新链接并使当前链接立即失效。",
+    "shareId": {
+      "label": "自定义链接",
+      "hint": "3–64 位，可用字母、数字、短横线或下划线，需唯一。",
+      "placeholder": "my-page",
+      "toast": { "saved": "自定义链接已更新" },
+      "errors": {
+        "taken": "这个自定义链接已被占用，换一个。",
+        "invalid": "请使用 3–64 位字母、数字、短横线或下划线，且首尾为字母或数字。",
+        "generic": "更新自定义链接失败。"
+      }
+    },
     "cloudOff": "Avibe Cloud 未开启——此链接仅能在本机打开。",
     "connectCloud": "连接 Avibe Cloud",
     "details": "详情",
@@ -518,6 +529,11 @@
     "retry": "重试"
   },
   "errors": {
+    "share_id_taken": "这个自定义链接已被占用，换一个。",
+    "invalid_share_id": "自定义链接只能用 3–64 位字母、数字、短横线或下划线，且首尾为字母或数字。",
+    "missing_share_id": "请先输入自定义链接。",
+    "not_public": "请先把展示页面设为公开，再修改链接。",
+    "session_archived": "该会话已归档，无法修改它的展示页面。",
     "project_no_folder": "这个项目没有配置本地文件夹。",
     "project_not_found": "找不到这个项目。",
     "remote_access_host_mismatch": "这个地址无法打开 Avibe 控制台。请用你的 https://<你的子域>.avibe.bot 链接打开，或在运行 Avibe 的机器上访问 http://127.0.0.1:5123。",
@@ -1804,6 +1820,7 @@
       "visibilityPrivate": "私有",
       "publicDesc": "任何人都可以通过链接查看",
       "privateDesc": "只有你能查看",
+      "customLink": "自定义链接",
       "offlineNote": "这个 Show Page 已离线，暂时无法分享。",
       "publicUnavailable": "连接 Avibe Cloud 后才能获得别人可打开的公开链接。",
       "loadError": "无法加载这个 Show Page。",

@@ -482,7 +482,7 @@ def _show_examples_text() -> str:
           list     List existing Show Pages across sessions.
           path     Create or resolve the local workspace.
           status   Inspect local path, visibility, active URL, and share state.
-          update   Switch visibility, rotate public share links, or take the page offline.
+          update   Switch visibility, set a custom public link, rotate share links, or take the page offline.
           mark     Add an assistant mark event to the session.
           event    Record a generic annotation-layer event.
 
@@ -548,6 +548,7 @@ def _show_update_examples_text() -> str:
 
         Examples:
           vibe show update --session-id sesk8m4q2p7x --visibility public
+          vibe show update --session-id sesk8m4q2p7x --share-id q3-roadmap
           vibe show update --session-id sesk8m4q2p7x --visibility private
           vibe show update --session-id sesk8m4q2p7x --visibility offline
           vibe show update --session-id sesk8m4q2p7x --rotate-share
@@ -556,6 +557,8 @@ def _show_update_examples_text() -> str:
           private uses the authenticated /show/<session-id>/ URL.
           public uses a short /p/<share-id>/ URL and disables the private path.
           offline takes the page down without deleting local files.
+          --share-id sets a custom /p/<share-id>/ suffix (3-64 chars, unique);
+            allowed only while public, and it replaces the previous public URL.
           --rotate-share is allowed only while the page is public.
         """
     )
@@ -4916,11 +4919,6 @@ def cmd_show_update(args):
 
     store = _load_show_page_store()
     try:
-        existing = store.ensure(args.session_id)
-        previous = show_page_payload(existing)
-        previous_active_url = previous.get("active_url")
-        previous_public_url = previous.get("public_url")
-        previous_private_url = previous.get("private_url")
         extra: dict = {}
 
         if getattr(args, "rotate_share", False):
@@ -4931,15 +4929,35 @@ def cmd_show_update(args):
                 "message_detail": "Previous public share URL was revoked.",
             }
             message = "Public share link rotated."
+        elif getattr(args, "share_id", None) is not None:
+            # ``is not None`` so an explicit empty --share-id reaches
+            # validate_share_id (a clear missing_share_id) instead of falling
+            # through to a confusing visibility error.
+            updated, previous_share_id = store.set_share_id(args.session_id, args.share_id)
+            extra = {
+                "previous_share_id": previous_share_id,
+            }
+            if previous_share_id and previous_share_id != updated.share_id:
+                extra["previous_public_url"] = public_url(previous_share_id)
+                extra["message_detail"] = "Previous public share URL was revoked."
+            message = "Custom public link set."
         else:
+            # Read the prior state for the transition message WITHOUT creating a
+            # page first: update_visibility owns the archived guard + ensure, so
+            # an archived/terminal session is rejected before any row (and its
+            # /show/ route) is materialized. rotate_share / set_share_id guard
+            # themselves the same way, so neither needs a pre-ensure either.
+            existing = store.get(args.session_id)
+            previous = show_page_payload(existing) if existing else None
+            previous_visibility = existing.visibility if existing else "private"
             updated = store.update_visibility(args.session_id, args.visibility)
             message = f"Show Page is now {updated.visibility}."
-            if existing.visibility == "private" and updated.visibility == "public":
-                extra["previous_private_url"] = previous_private_url
-            elif existing.visibility == "public" and updated.visibility == "private":
-                extra["previous_public_url"] = previous_public_url
+            if previous_visibility == "private" and updated.visibility == "public":
+                extra["previous_private_url"] = previous["private_url"] if previous else None
+            elif previous_visibility == "public" and updated.visibility == "private":
+                extra["previous_public_url"] = previous["public_url"] if previous else None
             elif updated.visibility == "offline":
-                extra["previous_active_url"] = previous_active_url
+                extra["previous_active_url"] = previous["active_url"] if previous else None
                 message = "Show Page has been taken offline. Local files were not deleted."
 
         if updated.visibility != "offline":
@@ -6105,12 +6123,15 @@ def build_parser():
 
     show_update_parser = show_subparsers.add_parser(
         "update",
-        help="Update visibility or rotate the public share link",
-        description="Switch a Show Page between private, public, and offline states, or rotate its public share link.",
+        help="Update visibility, set a custom public link, or rotate the share link",
+        description=(
+            "Switch a Show Page between private, public, and offline states, set a custom "
+            "public link suffix, or rotate its public share link."
+        ),
         epilog=_show_update_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe show update --help",
-        error_hint="Pass --visibility private|public|offline or --rotate-share.",
+        error_hint="Pass --visibility private|public|offline, --share-id SLUG, or --rotate-share.",
     )
     show_update_parser.add_argument("--session-id", required=True, help="Agent Session ID for the Show Page.")
     show_update_action = show_update_parser.add_mutually_exclusive_group(required=True)
@@ -6118,6 +6139,15 @@ def build_parser():
         "--visibility",
         choices=("private", "public", "offline"),
         help="Set the active Show Page visibility.",
+    )
+    show_update_action.add_argument(
+        "--share-id",
+        metavar="SLUG",
+        help=(
+            "Set a custom public link suffix (the /p/<SLUG>/ segment): 3-64 chars, "
+            "letters/numbers/dash/underscore, must be unique. Allowed only while public; "
+            "replaces the previous public URL."
+        ),
     )
     show_update_action.add_argument(
         "--rotate-share",

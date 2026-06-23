@@ -2275,8 +2275,15 @@ def settings_get():
 
 def _show_page_error_response(exc):
     code = getattr(exc, "code", "invalid_show_page_request")
-    status = 409 if code == "not_public" else 400
-    return jsonify({"ok": False, "code": code, "message": str(exc)}), status
+    # A conflict (not a malformed request) when the page is in the wrong state or
+    # the chosen suffix is already claimed.
+    status = 409 if code in {"not_public", "share_id_taken"} else 400
+    message = str(exc)
+    # Structured ``error`` so the Web UI's shared handler localizes via
+    # ``errors.<code>`` and falls back to the human message (not the raw code)
+    # for any code without an i18n key; top-level ``code``/``message`` stay for
+    # the CLI/any direct consumer.
+    return jsonify({"ok": False, "error": {"code": code, "message": message}, "code": code, "message": message}), status
 
 
 @app.route("/api/show-pages", methods=["GET"])
@@ -2316,6 +2323,18 @@ def show_page_rotate_share_post(session_id):
 
     try:
         return jsonify(api.rotate_show_page_share(session_id))
+    except ShowPageError as exc:
+        return _show_page_error_response(exc)
+
+
+@app.route("/api/show-pages/<session_id>/share-id", methods=["POST"])
+def show_page_set_share_id_post(session_id):
+    from core.show_pages import ShowPageError
+    from vibe import api
+
+    payload = request.json or {}
+    try:
+        return jsonify(api.set_show_page_share_id(session_id, str(payload.get("share_id") or "")))
     except ShowPageError as exc:
         return _show_page_error_response(exc)
 

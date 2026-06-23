@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urljoin
 
 from sqlalchemy import insert, or_, select, update
+from sqlalchemy.exc import IntegrityError
 
 from config import paths
 from config.v2_config import V2Config
@@ -30,6 +31,13 @@ SHOW_EVENT_WRITE_TOKEN_HEADER = "X-Vibe-Show-Token"
 SHOW_CLI_EVENT_TOKEN_HEADER = "X-Vibe-Show-Cli-Token"
 SHOW_RUNTIME_RECOVERY_LOADING_DELAY_SECONDS = 30
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+# A custom public share suffix lands directly in the ``/p/<share_id>/`` URL, so
+# keep it to URL-safe slug characters: start and end alphanumeric, with dash and
+# underscore allowed in between. 3–64 chars balances "memorable" against trivial
+# squatting/guessing of an already-public page.
+SHARE_ID_MIN_LENGTH = 3
+SHARE_ID_MAX_LENGTH = 64
+_SHARE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{1,62}[A-Za-z0-9]$")
 _LIKE_ESCAPE = "\\"
 
 
@@ -61,6 +69,20 @@ def validate_session_id(session_id: str) -> str:
         raise ShowPageError(
             "Session ID may contain only letters, numbers, underscore, dash, dot, and colon.",
             code="invalid_session_id",
+        )
+    return value
+
+
+def validate_share_id(share_id: str) -> str:
+    value = (share_id or "").strip()
+    if not value:
+        raise ShowPageError("A custom link is required.", code="missing_share_id")
+    if not _SHARE_ID_PATTERN.fullmatch(value):
+        raise ShowPageError(
+            "A custom link may contain only letters, numbers, dash, and underscore, "
+            f"must start and end with a letter or number, and be {SHARE_ID_MIN_LENGTH}–"
+            f"{SHARE_ID_MAX_LENGTH} characters long.",
+            code="invalid_share_id",
         )
     return value
 
@@ -373,6 +395,81 @@ class ShowPageStore:
                 update(show_pages)
                 .where(show_pages.c.session_id == session_id)
                 .values(share_id=new_share_id, updated_at=now)
+            )
+        updated = self.get(session_id)
+        assert updated is not None
+        return updated, previous_share_id
+
+    def set_share_id(self, session_id: str, share_id: str) -> tuple[ShowPage, str | None]:
+        """Set a custom public share suffix; return (page, previous_share_id).
+
+        A custom suffix is just a chosen value for the same ``share_id`` that
+        ``rotate_share`` would otherwise randomize, so this mirrors that method:
+        archived sessions are terminal (guarded before ``ensure`` materializes a
+        page), and the suffix can only be set while the page is public. Setting a
+        new value revokes the previous public URL, exactly like a rotate.
+        """
+        session_id = validate_session_id(session_id)
+        new_share_id = validate_share_id(share_id)
+        # Pre-guard before ``ensure`` so a stale/direct call never materializes a
+        # default page for an archived (terminal) session. The in-txn re-reads
+        # below are the atomic authority for the concurrent-archive / concurrent
+        # visibility-flip race.
+        if self._is_archived(session_id):
+            raise ShowPageError(
+                "Cannot change the share link of an archived session.",
+                code="session_archived",
+            )
+        self.ensure(session_id)
+        now = _utc_now_iso()
+        previous_share_id: str | None = None
+        try:
+            with self.engine.begin() as conn:
+                # Read visibility, archive status, and the current suffix in the
+                # SAME transaction as the write so a concurrent flip to private/
+                # offline, an archive, or another session claiming the suffix
+                # can't slip between the check and the update; raising rolls back.
+                row = (
+                    conn.execute(select(show_pages).where(show_pages.c.session_id == session_id).limit(1))
+                    .mappings()
+                    .first()
+                )
+                if row is None or row["visibility"] != VISIBILITY_PUBLIC:
+                    raise ShowPageError(
+                        "A custom link can only be set while the Show Page is public.",
+                        code="not_public",
+                    )
+                status = conn.execute(
+                    select(agent_sessions.c.status).where(agent_sessions.c.id == session_id)
+                ).scalar_one_or_none()
+                if status == "archived":
+                    raise ShowPageError(
+                        "Cannot change the share link of an archived session.",
+                        code="session_archived",
+                    )
+                previous_share_id = row["share_id"]
+                if new_share_id != previous_share_id:
+                    # Idempotent when unchanged (skips the write, so no self-
+                    # collision and no updated_at churn). Otherwise reject a
+                    # suffix held by another session; the unique constraint is
+                    # the final authority (IntegrityError below).
+                    taken_by = conn.execute(
+                        select(show_pages.c.session_id).where(show_pages.c.share_id == new_share_id).limit(1)
+                    ).scalar_one_or_none()
+                    if taken_by is not None and taken_by != session_id:
+                        raise ShowPageError(
+                            "That custom link is already taken. Pick another.",
+                            code="share_id_taken",
+                        )
+                    conn.execute(
+                        update(show_pages)
+                        .where(show_pages.c.session_id == session_id)
+                        .values(share_id=new_share_id, updated_at=now)
+                    )
+        except IntegrityError:
+            raise ShowPageError(
+                "That custom link is already taken. Pick another.",
+                code="share_id_taken",
             )
         updated = self.get(session_id)
         assert updated is not None

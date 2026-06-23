@@ -141,6 +141,17 @@
     "shareLink": "Share link",
     "rotate": "Rotate link",
     "rotateHint": "Generates a new link and disables the current one.",
+    "shareId": {
+      "label": "Custom link",
+      "hint": "3–64 letters, numbers, dash, or underscore. Must be unique.",
+      "placeholder": "my-page",
+      "toast": { "saved": "Custom link updated" },
+      "errors": {
+        "taken": "That custom link is already taken. Pick another.",
+        "invalid": "Use 3–64 letters, numbers, dash, or underscore, starting and ending with a letter or number.",
+        "generic": "Couldn't update the custom link."
+      }
+    },
     "cloudOff": "Avibe Cloud is off — this link only opens on this device.",
     "connectCloud": "Connect Avibe Cloud",
     "details": "Details",
@@ -518,6 +529,11 @@
     "retry": "Retry"
   },
   "errors": {
+    "share_id_taken": "That custom link is already taken. Pick another.",
+    "invalid_share_id": "A custom link may use only 3–64 letters, numbers, dash, or underscore, starting and ending with a letter or number.",
+    "missing_share_id": "Enter a custom link first.",
+    "not_public": "Make the Show Page public first to change its link.",
+    "session_archived": "This session is archived, so its Show Page can't be changed.",
     "project_no_folder": "This project has no local folder configured.",
     "project_not_found": "Project not found.",
     "remote_access_host_mismatch": "This address can't open the Avibe control panel. Open it from your https://<your-slug>.avibe.bot link, or http://127.0.0.1:5123 on the machine running Avibe.",
@@ -1805,6 +1821,7 @@
       "visibilityPrivate": "Private",
       "publicDesc": "Anyone with the link can view",
       "privateDesc": "Only you can view",
+      "customLink": "Custom link",
       "offlineNote": "This Show Page is offline and can't be shared right now.",
       "publicUnavailable": "Connect Avibe Cloud to get a public link others can open.",
       "loadError": "Couldn't load this Show Page.",
