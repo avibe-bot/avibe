@@ -711,30 +711,21 @@ class UpdateChecker:
         try:
             im_client = self._get_im_client_for_platform(resolved_platform)
             if channel_id and message_id and resolved_platform == "slack":
-                try:
-                    await im_client.web_client.chat_update(channel=channel_id, ts=message_id, text=failure_text)
-                    logger.info("Updated original message with post-update failure notification")
-                    return
-                except Exception as e:
-                    logger.error("Failed to update Slack post-update failure message: %s", e)
+                await im_client.web_client.chat_update(channel=channel_id, ts=message_id, text=failure_text)
+                logger.info("Updated original message with post-update failure notification")
+                return
             if channel_id and message_id:
-                try:
-                    context = MessageContext(user_id="system", channel_id=channel_id, platform=resolved_platform)
-                    await im_client.edit_message(context, message_id, text=failure_text)
-                    logger.info("Updated %s message with post-update failure notification", resolved_platform)
-                    return
-                except Exception as e:
-                    logger.error("Failed to edit %s post-update failure message: %s", resolved_platform, e)
+                context = MessageContext(user_id="system", channel_id=channel_id, platform=resolved_platform)
+                await im_client.edit_message(context, message_id, text=failure_text)
+                logger.info("Updated %s message with post-update failure notification", resolved_platform)
+                return
 
             admin_ids = self._get_admin_user_ids()
             if admin_ids:
                 for uid in admin_ids:
-                    try:
-                        admin_client, raw_user_id, _ = self._get_im_client_for_user(uid)
-                        await admin_client.send_dm(raw_user_id, failure_text)
-                        logger.info("Sent post-update failure notification to admin %s", uid)
-                    except Exception as e:
-                        logger.error("Failed to send post-update failure notification to admin %s: %s", uid, e)
+                    admin_client, raw_user_id, _ = self._get_im_client_for_user(uid)
+                    await admin_client.send_dm(raw_user_id, failure_text)
+                    logger.info("Sent post-update failure notification to admin %s", uid)
             elif resolved_platform == "slack":
                 owner_id = await self._get_workspace_owner_id()
                 if owner_id:
@@ -742,16 +733,6 @@ class UpdateChecker:
                     if dm_channel:
                         await im_client.web_client.chat_postMessage(channel=dm_channel, text=failure_text)
                         logger.info("Sent post-update failure notification to %s", owner_id)
-            elif resolved_platform == "discord":
-                channel_id = self._get_default_notification_channel_id()
-                if channel_id:
-                    context = MessageContext(user_id="system", channel_id=channel_id, platform="discord")
-                    await self.controller.get_im_client_for_context(context).send_message(
-                        context,
-                        failure_text,
-                        parse_mode="markdown",
-                    )
-                    logger.info("Sent Discord post-update failure notification to channel %s", channel_id)
         except Exception as e:
             logger.error("Failed to send post-update failure notification: %s", e)
 
