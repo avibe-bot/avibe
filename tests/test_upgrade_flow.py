@@ -240,6 +240,85 @@ def test_has_newer_version_handles_prerelease_without_packaging():
     assert has_newer_version("2.2.9.dev2", "2.2.9.dev1") is True
 
 
+def test_has_newer_version_ignores_local_build_segment():
+    # Regression: a source/dev install reports a setuptools-scm local version
+    # such as "3.0.4rc4.dev0+gf6ca08af6.d20260624". The old parser could not
+    # parse it and fell back to comparing only pure-digit components, so it
+    # ranked the build below the latest stable on PyPI ("3.0.3"). That made the
+    # updater "upgrade" on every cycle, restart, and DM "updated to 3.0.3" once
+    # a minute forever. The local segment must be ignored and the dev/rc build
+    # must sort correctly.
+    local_build = "3.0.4rc4.dev0+gf6ca08af6.d20260624"
+    assert has_newer_version("3.0.3", local_build) is False
+    assert has_newer_version(local_build, "3.0.3") is True
+    assert has_newer_version("3.0.4rc4", local_build) is True
+    assert has_newer_version(local_build, "3.0.4rc4") is False
+    assert has_newer_version("3.0.4+meta", "3.0.4") is False
+    assert has_newer_version("3.0.4", "3.0.4+meta") is False
+    assert has_newer_version("2.2.9rc1.dev2", "2.2.9rc1.dev1") is True
+    # Two local builds of the same release are incomparable -> treated equal.
+    assert has_newer_version("3.0.4+build2", "3.0.4+build1") is False
+    assert has_newer_version("3.0.4+build1", "3.0.4+build2") is False
+
+
+def test_has_newer_version_orders_dev_before_prerelease():
+    # A dev release of a final sorts before that release's alphas/betas/rcs.
+    assert has_newer_version("2.2.9a1", "2.2.9.dev1") is True
+    assert has_newer_version("2.2.9.dev1", "2.2.9a1") is False
+
+
+def test_get_latest_version_info_no_update_for_local_dev_build(monkeypatch, tmp_path):
+    # Integration-level guard for the notification/restart loop: a local dev
+    # build whose release is ahead of everything on PyPI must report no update.
+    metadata_path = tmp_path / "metadata.json"
+    metadata_path.write_text(
+        """
+        {
+          "info": {"version": "3.0.3"},
+          "releases": {
+            "3.0.2": [{}],
+            "3.0.3": [{}]
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VIBE_UPDATE_METADATA_URL", metadata_path.as_uri())
+
+    info = get_latest_version_info("3.0.4rc4.dev0+gf6ca08af6.d20260624")
+
+    assert info["has_update"] is False
+
+
+def test_get_latest_version_info_offers_rc_to_local_dev_build(monkeypatch, tmp_path):
+    # A dev build is treated as a pre-release, so a matching-release rc on PyPI
+    # is a legitimate upgrade and must be offered. Locks in the allow_prereleases
+    # policy so a future change can't silently regress it.
+    metadata_path = tmp_path / "metadata.json"
+    metadata_path.write_text(
+        """
+        {
+          "info": {"version": "3.0.4rc1"},
+          "releases": {
+            "3.0.3": [{}],
+            "3.0.4rc1": [{}]
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("VIBE_UPDATE_METADATA_URL", metadata_path.as_uri())
+
+    info = get_latest_version_info("3.0.4.dev0+gf6ca08af6.d20260624")
+
+    assert info == {
+        "current": "3.0.4.dev0+gf6ca08af6.d20260624",
+        "latest": "3.0.4rc1",
+        "has_update": True,
+        "error": None,
+    }
+
+
 def test_get_running_vibe_path_prefers_cached_launcher(monkeypatch):
     monkeypatch.setenv("VIBE_CURRENT_EXECUTABLE", "/custom/bin/vibe")
     monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
