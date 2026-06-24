@@ -29,7 +29,10 @@ type ShellNavItem = {
   match?: (pathname: string) => boolean;
   badge?: number;
   children?: ShellNavItem[];
-  // Mobile-tab extras: `onClick` makes the tab a button (e.g. 菜单 opens the
+  // `defaultOpen` makes a group start expanded (used in the mobile 更多 sheet so
+  // 通讯平台 shows its children without a second tap).
+  defaultOpen?: boolean;
+  // Mobile-tab extras: `onClick` makes the tab a button (e.g. 更多 opens the
   // nav sheet) instead of a link; `variant: 'workbench'` renders the emphasized
   // green circle for the back-to-workbench tab.
   onClick?: () => void;
@@ -74,7 +77,7 @@ const ShellNavGroup: React.FC<{ item: ShellNavItem }> = ({ item }) => {
   const location = useLocation();
   const Icon = item.icon;
   const childActive = (item.children ?? []).some((child) => isItemActive(child, location.pathname));
-  const [open, setOpen] = useState(childActive);
+  const [open, setOpen] = useState(childActive || !!item.defaultOpen);
   useEffect(() => {
     if (childActive) setOpen(true);
   }, [childActive]);
@@ -115,12 +118,16 @@ const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
   );
   const inner = (
     <>
-      <span className="relative">
+      {/* Fixed-height icon slot so every tab's icon row is the same height and
+          centers on one line — the workbench circle no longer protrudes above
+          its siblings. */}
+      <span className="relative flex h-7 items-center justify-center">
         {isWorkbench ? (
           // Emphasized green circle — the back-to-workbench tab, mirroring the
-          // desktop sidebar's distinct mint mode-switch button.
-          <span className="grid size-9 -translate-y-0.5 place-items-center rounded-full border border-mint/45 bg-mint/[0.14] shadow-[0_0_14px_-3px_rgba(91,255,160,0.6)]">
-            <Icon className="size-[18px] text-mint" />
+          // desktop sidebar's distinct mint mode-switch button. Sized to fill the
+          // slot so it sits on the same baseline as the plain icons.
+          <span className="grid size-7 place-items-center rounded-full border border-mint/45 bg-mint/[0.14] shadow-[0_0_12px_-3px_rgba(91,255,160,0.6)]">
+            <Icon className="size-4 text-mint" />
           </span>
         ) : (
           <Icon className="size-4" />
@@ -207,7 +214,7 @@ export const AppShell: React.FC = () => {
   const [config, setConfig] = useState<any>(null);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  // The mobile admin nav sheet (opened from the 菜单 tab). Close it whenever the
+  // The mobile admin nav sheet (opened from the 更多 tab). Close it whenever the
   // route changes so tapping any item in the sheet dismisses it.
   const [adminMenuOpen, setAdminMenuOpen] = useState(false);
   // Mirror the iOS visual-viewport height into --app-vvh. The MOBILE shell is a
@@ -322,7 +329,11 @@ export const AppShell: React.FC = () => {
   // The 更多 sheet shows the OVERFLOW — admin sections not already on the bottom
   // bar (控制台 + 高级设置) — so nothing is duplicated.
   const adminBottomBarPaths = new Set(['/admin/dashboard', '/admin/settings/messaging']);
-  const adminSheetItems = adminItems.filter((item) => !item.to || !adminBottomBarPaths.has(item.to));
+  const adminSheetItems = adminItems
+    .filter((item) => !item.to || !adminBottomBarPaths.has(item.to))
+    // Groups start expanded in the sheet (the sheet is transient — show the
+    // children up front). The desktop sidebar keeps its collapse-by-default.
+    .map((item) => (item.children ? { ...item, defaultOpen: true } : item));
 
   // Workbench mobile tabs flatten the (desktop-only) WorkbenchSidebar into a
   // bottom tab bar: Inbox / Projects / Capabilities / More, around a center
@@ -506,7 +517,7 @@ export const AppShell: React.FC = () => {
       )}
 
       {/* Mobile admin nav sheet — the full nested adminItems (groups expand),
-          opened from the 菜单 tab. Mounted only in the admin shell on mobile. */}
+          opened from the 更多 tab. Mounted only in the admin shell on mobile. */}
       {shellMode === 'admin' && adminMenuOpen && (
         <div className="fixed inset-0 z-50 md:hidden" role="dialog" aria-modal="true">
           <button
@@ -515,10 +526,11 @@ export const AppShell: React.FC = () => {
             onClick={() => setAdminMenuOpen(false)}
             className="absolute inset-0 bg-background/70 backdrop-blur-sm"
           />
-          <div className="absolute inset-x-0 bottom-0 max-h-[82vh] overflow-y-auto rounded-t-2xl border-t border-border bg-surface px-3 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-2">
+          {/* Floats as a card ABOVE the bottom tab bar (not flush to the screen
+              edge) so the list sits clear of the nav and the thumb-tap zone. */}
+          <div className="absolute inset-x-2 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] max-h-[68vh] overflow-y-auto rounded-2xl border border-border bg-surface px-3 pb-3 pt-1 shadow-2xl">
             <div className="relative flex items-center justify-center py-2">
-              <span className="absolute top-1 h-1 w-9 rounded-full bg-foreground/20" />
-              <span className="mt-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
+              <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
                 {t('appShell.moreSettings')}
               </span>
               <button
