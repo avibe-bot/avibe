@@ -92,7 +92,6 @@
     "projects": "Projects",
     "capabilities": "Capabilities",
     "more": "More",
-    "menu": "Menu",
     "workbench": "Workbench"
   },
   "more": {
@@ -562,6 +561,7 @@
     "title": "Avibe OS",
     "subtitle": "Agent OS · Workbench",
     "workspaceLabel": "Workspace",
+    "moreSettings": "More Settings",
     "openControlPanel": "Settings",
     "backToWorkbench": "Back to Workbench",
     "newSession": "New",

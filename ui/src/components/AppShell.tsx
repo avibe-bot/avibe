@@ -308,7 +308,7 @@ export const AppShell: React.FC = () => {
   const adminMobileTabs: ShellNavItem[] = [
     { to: '/', label: t('nav.workbench'), icon: Sparkles, variant: 'workbench' },
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
-    { label: t('nav.menu'), icon: Menu, onClick: () => setAdminMenuOpen(true), match: () => adminMenuOpen },
+    { label: t('nav.more'), icon: Menu, onClick: () => setAdminMenuOpen(true), match: () => adminMenuOpen },
     {
       to: '/admin/settings/messaging',
       label: t('nav.advancedSettings'),
@@ -319,6 +319,10 @@ export const AppShell: React.FC = () => {
         !p.startsWith('/admin/settings/backends'),
     },
   ];
+  // The 更多 sheet shows the OVERFLOW — admin sections not already on the bottom
+  // bar (控制台 + 高级设置) — so nothing is duplicated.
+  const adminBottomBarPaths = new Set(['/admin/dashboard', '/admin/settings/messaging']);
+  const adminSheetItems = adminItems.filter((item) => !item.to || !adminBottomBarPaths.has(item.to));
 
   // Workbench mobile tabs flatten the (desktop-only) WorkbenchSidebar into a
   // bottom tab bar: Inbox / Projects / Capabilities / More, around a center
@@ -515,7 +519,7 @@ export const AppShell: React.FC = () => {
             <div className="relative flex items-center justify-center py-2">
               <span className="absolute top-1 h-1 w-9 rounded-full bg-foreground/20" />
               <span className="mt-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
-                {t('appShell.workspaceLabel')}
+                {t('appShell.moreSettings')}
               </span>
               <button
                 type="button"
@@ -527,7 +531,7 @@ export const AppShell: React.FC = () => {
               </button>
             </div>
             <nav className="flex flex-col gap-0.5 pb-2">
-              {adminItems.map((item) => <ShellNavLink key={item.to ?? item.label} item={item} />)}
+              {adminSheetItems.map((item) => <ShellNavLink key={item.to ?? item.label} item={item} />)}
             </nav>
           </div>
         </div>
