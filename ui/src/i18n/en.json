@@ -1865,6 +1865,8 @@
       "effort": "Effort",
       "newAgent": "New agent",
       "noModels": "No models found",
+      "searchModels": "Search models",
+      "noModelMatch": "No matching models",
       "effortOptions": {
         "minimal": "Minimal",
         "low": "Low",

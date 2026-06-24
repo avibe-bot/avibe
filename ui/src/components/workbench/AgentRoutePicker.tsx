@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { Bot, ChevronDown, Loader2, Plus, Sparkles } from 'lucide-react';
+import { Bot, ChevronDown, Loader2, Plus, Search, Sparkles } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
@@ -10,6 +10,7 @@ import { fetchBackendModels, modelOptionLabel } from '../../lib/backendModels';
 import { resolveEffortOptions } from '../../lib/effortOptions';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { Button } from '../ui/button';
+import { Input } from '../ui/input';
 
 // The route fields the picker reads. A subset of WorkbenchSession (chat) and of
 // WorkbenchSessionCreate (the create flow), so both can pass their object directly.
@@ -88,6 +89,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const [claudeReasoning, setClaudeReasoning] = useState<Record<string, { value: string; label: string }[]>>({});
   const [loadingModels, setLoadingModels] = useState(false);
   const [patching, setPatching] = useState(false);
+  // Free-text filter for the model column — long backends (OpenCode) list dozens.
+  const [modelQuery, setModelQuery] = useState('');
 
   const hasExplicitRoute = Boolean(value.agent_name || value.agent_backend);
   const routeIsDefault = isDefaultRoute ?? !hasExplicitRoute;
@@ -201,8 +204,24 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     };
   }, [open, backend, api, modelsByBackend]);
 
+  // Start each open (and every backend switch) from the full, unfiltered list.
+  useEffect(() => {
+    setModelQuery('');
+  }, [backend, open]);
+
   const models = modelsByBackend[backend] ?? [];
   const modelLabels = modelLabelsByBackend[backend] ?? {};
+  // Show the search field only when the list is long enough to warrant it, so
+  // claude/codex (a handful of models) stay uncluttered.
+  const showModelSearch = models.length > 8;
+  const trimmedQuery = modelQuery.trim().toLowerCase();
+  const filteredModels = trimmedQuery
+    ? models.filter(
+        (m) =>
+          m.toLowerCase().includes(trimmedQuery) ||
+          modelOptionLabel(m, modelLabels).toLowerCase().includes(trimmedQuery),
+      )
+    : models;
   const effortOptions = useMemo(
     () => resolveEffortOptions(backend, currentModel, claudeReasoning),
     [backend, currentModel, claudeReasoning],
@@ -260,10 +279,11 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
           <ChevronDown className="ml-auto size-3 shrink-0 text-muted" />
         </Button>
       </PopoverTrigger>
-      <PopoverContent align={align} className="z-50 max-h-[70vh] w-[620px] max-w-[92vw] overflow-y-auto p-0">
+      <PopoverContent align={align} className="z-50 max-h-[70vh] w-[680px] max-w-[92vw] overflow-y-auto p-0">
         {/* On phones the three columns stack into one scrollable list; sm+ keeps
-            the side-by-side cascading menu. */}
-        <div className="grid grid-cols-1 divide-y divide-border sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+            the side-by-side cascading menu. Model gets the widest track (long ids)
+            and Effort the narrowest (short labels). */}
+        <div className="grid grid-cols-1 divide-y divide-border sm:grid-cols-[1fr_1.35fr_0.7fr] sm:divide-x sm:divide-y-0">
           {/* Column 1 — Agent */}
           <RouteColumn title={t('chat.picker.agent')}>
             {/* Default option: clears the route back to inherited defaults after
@@ -335,6 +355,21 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
 
           {/* Column 2 — Model (lazy-loaded for the active backend) */}
           <RouteColumn title={t('chat.picker.model')}>
+            {showModelSearch && (
+              <div className="sticky top-0 z-10 -mx-1.5 mb-1 bg-panel px-1.5 pb-1 pt-0.5">
+                <div className="flex items-center gap-1.5 rounded-md border border-border bg-surface-2 px-2 focus-within:border-cyan/50">
+                  <Search className="size-3 shrink-0 text-muted" />
+                  <Input
+                    variant="bare"
+                    value={modelQuery}
+                    onChange={(e) => setModelQuery(e.target.value)}
+                    placeholder={t('chat.picker.searchModels')}
+                    aria-label={t('chat.picker.searchModels')}
+                    className="h-7 flex-1 text-[11px]"
+                  />
+                </div>
+              </div>
+            )}
             {loadingModels && models.length === 0 ? (
               <div className="flex items-center gap-1.5 px-2 py-3 text-[11px] text-muted">
                 <Loader2 className="size-3 animate-spin" />
@@ -342,8 +377,10 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
               </div>
             ) : models.length === 0 ? (
               <div className="px-2 py-3 text-[11px] text-muted">{t('chat.picker.noModels')}</div>
+            ) : filteredModels.length === 0 ? (
+              <div className="px-2 py-3 text-[11px] text-muted">{t('chat.picker.noModelMatch')}</div>
             ) : (
-              models.map((model) => (
+              filteredModels.map((model) => (
                 <RouteItem
                   key={model}
                   active={model === currentModel}
@@ -360,7 +397,12 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                     void applyPatch(patch);
                   }}
                 >
-                  <span className="flex-1 truncate font-mono text-[11px]">{modelOptionLabel(model, modelLabels)}</span>
+                  {/* Full id always visible (wraps instead of truncating); the
+                      provider/vendor prefix on OpenCode ids is de-emphasized so the
+                      model name itself stands out. */}
+                  <span className="min-w-0 flex-1 whitespace-normal break-words text-left font-mono text-[11px] leading-snug">
+                    <ModelName label={modelOptionLabel(model, modelLabels)} />
+                  </span>
                 </RouteItem>
               ))
             )}
@@ -414,3 +456,17 @@ const RouteItem: React.FC<{
     {children}
   </Button>
 );
+
+// Renders a model id with its OpenCode-style `provider/vendor/` prefix muted so
+// the model name (the last path segment, what actually differs) reads first.
+// No `/` (claude / codex) → the whole id shows plainly.
+const ModelName: React.FC<{ label: string }> = ({ label }) => {
+  const cut = label.lastIndexOf('/');
+  if (cut < 0) return <>{label}</>;
+  return (
+    <>
+      <span className="text-muted">{label.slice(0, cut + 1)}</span>
+      {label.slice(cut + 1)}
+    </>
+  );
+};

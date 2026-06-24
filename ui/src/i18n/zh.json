@@ -1864,6 +1864,8 @@
       "effort": "思考强度",
       "newAgent": "新建 Agent",
       "noModels": "未找到模型",
+      "searchModels": "搜索模型",
+      "noModelMatch": "无匹配模型",
       "effortOptions": {
         "minimal": "极简",
         "low": "低",
