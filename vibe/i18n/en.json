@@ -117,6 +117,7 @@
     "restartRequired": "Upgrade complete. Please restart Avibe.",
     "restartRequiredShort": "Upgrade completed - restart required",
     "restartRequiredSlack": "✅ *Upgrade complete*\n\nPlease restart Avibe to apply the update.",
+    "postUpdateVersionMismatch": "❌ Avibe update did not take effect. Tried to update to `{target}`, but the service is still running `{current}`. Automatic retries for this version have been paused; please check the install path and restart logs.",
     "updated": "✅ Avibe has been updated to `{version}`",
     "updatedSlack": "✅ *Avibe Updated Successfully*\n\nNow running version `{version}`",
     "availablePlain": "Avibe update available: {current} → {latest} ({releaseUrl})",
