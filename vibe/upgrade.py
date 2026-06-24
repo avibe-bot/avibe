@@ -21,12 +21,30 @@ CURRENT_VIBE_EXECUTABLE_ENV = "VIBE_CURRENT_EXECUTABLE"
 SHOW_RUNTIME_SKIP_ENV = "VIBE_INSTALL_SKIP_SHOW_RUNTIME"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 UV_FALLBACK_BIN_DIRS = (".local/bin", ".cargo/bin")
+# PEP 440-ish parser: release + optional pre-release (a/b/rc) + optional
+# post + optional dev, plus a local version segment (``+local``) that we
+# accept but ignore for ordering. Word forms (alpha/beta/preview) are listed
+# before their single-letter aliases so the alternation does not match a bare
+# leading letter (e.g. the "a" in "alpha").
 _VERSION_RE = re.compile(
     r"^\s*v?(?P<release>\d+(?:\.\d+)*)"
-    r"(?:(?:[.-])?(?P<stage>a|b|rc|dev)(?P<stage_num>\d+))?"
-    r"(?:(?:[.-])?post(?P<post_num>\d+))?\s*$"
+    r"(?:[._-]?(?P<pre>alpha|beta|preview|pre|rc|a|b|c)[._-]?(?P<pre_num>\d+)?)?"
+    r"(?:[._-]?(?P<post>post)[._-]?(?P<post_num>\d+)?)?"
+    r"(?:[._-]?(?P<dev>dev)[._-]?(?P<dev_num>\d+)?)?"
+    r"(?:\+(?P<local>[a-z0-9._-]+))?\s*$",
+    re.IGNORECASE,
 )
-_STAGE_ORDER = {"dev": 0, "a": 1, "b": 2, "rc": 3, "final": 4}
+# Relative ordering of pre-release stages: a/alpha < b/beta < c/rc/pre/preview.
+_PRE_ORDER = {
+    "a": 0,
+    "alpha": 0,
+    "b": 1,
+    "beta": 1,
+    "c": 2,
+    "rc": 2,
+    "pre": 2,
+    "preview": 2,
+}
 
 
 @dataclass(frozen=True)
@@ -263,24 +281,65 @@ def _normalize_release_parts(parts: tuple[int, ...]) -> tuple[int, ...]:
     return tuple(normalized)
 
 
-def _parse_version(value: str) -> tuple[tuple[int, ...], int, int, int, int] | None:
+def _parse_version_parts(
+    value: str,
+) -> tuple[tuple[int, ...], tuple[int, int] | None, int | None, int | None] | None:
+    """Split a version into (release, pre, post, dev).
+
+    ``pre`` is ``(stage_order, num)`` for a/b/rc releases, else ``None``.
+    ``post`` / ``dev`` are the numeric component, or ``None`` when absent.
+    The local segment (``+...``) is matched but intentionally discarded: per
+    PEP 440 it does not affect ordering.
+    """
     match = _VERSION_RE.match(value)
     if not match:
         return None
 
-    release = tuple(int(part) for part in match.group("release").split("."))
-    stage = match.group("stage") or "final"
-    stage_num = int(match.group("stage_num") or "0")
-    post_num = int(match.group("post_num") or "0")
-    has_post = 1 if match.group("post_num") else 0
-    return (_normalize_release_parts(release), _STAGE_ORDER[stage], stage_num, has_post, post_num)
+    release = _normalize_release_parts(
+        tuple(int(part) for part in match.group("release").split("."))
+    )
+    pre = None
+    if match.group("pre"):
+        pre = (_PRE_ORDER[match.group("pre").lower()], int(match.group("pre_num") or "0"))
+    post = int(match.group("post_num") or "0") if match.group("post") else None
+    dev = int(match.group("dev_num") or "0") if match.group("dev") else None
+    return (release, pre, post, dev)
+
+
+def _version_key(
+    parts: tuple[tuple[int, ...], tuple[int, int] | None, int | None, int | None],
+) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+    """Build a totally-ordered, all-int comparison key (PEP 440 ordering).
+
+    Bands are plain int tuples so they never compare a number against a tuple.
+    Within a release: ``X.devN`` < ``Xa/b/rcN`` < ``X`` (final) < ``X.postN``,
+    and a trailing ``.devN`` sorts before the same version without it.
+    """
+    release, pre, post, dev = parts
+    if pre is None and post is None and dev is not None:
+        pre_band: tuple[int, ...] = (0,)  # bare X.devN sorts before any pre/final of X
+    elif pre is None:
+        pre_band = (2,)  # final (or post-only) sorts after pre-releases
+    else:
+        pre_band = (1, pre[0], pre[1])
+    post_band = (0,) if post is None else (1, post)
+    dev_band = (1,) if dev is None else (0, dev)  # a dev release sorts before the non-dev
+    return (release, pre_band, post_band, dev_band)
+
+
+def _parse_version(
+    value: str,
+) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]] | None:
+    parts = _parse_version_parts(value)
+    return None if parts is None else _version_key(parts)
 
 
 def _is_prerelease_version(value: str) -> bool:
-    parsed = _parse_version(value)
-    if parsed is None:
+    parts = _parse_version_parts(value)
+    if parts is None:
         return False
-    return parsed[1] < _STAGE_ORDER["final"]
+    _release, pre, _post, dev = parts
+    return pre is not None or dev is not None
 
 
 def _is_yanked_release(files: object) -> bool:
@@ -327,10 +386,21 @@ def has_newer_version(candidate: str, current: str) -> bool:
     if latest_parsed is not None and current_parsed is not None:
         return latest_parsed > current_parsed
 
+    # Fallback for strings the parser cannot handle: compare the leading
+    # integer of each of the first three dotted components. Stop at the first
+    # component without a leading digit so we never silently drop a position
+    # (e.g. treating "3.0.4rc4" as [3, 0] and ranking it below "3.0.3").
+    def _loose_parts(text: str) -> list[int]:
+        parts: list[int] = []
+        for chunk in text.split(".")[:3]:
+            digits = re.match(r"\d+", chunk)
+            if not digits:
+                break
+            parts.append(int(digits.group()))
+        return parts
+
     try:
-        current_parts = [int(x) for x in current.split(".")[:3] if x.isdigit()]
-        latest_parts = [int(x) for x in candidate.split(".")[:3] if x.isdigit()]
-        return latest_parts > current_parts
+        return _loose_parts(candidate) > _loose_parts(current)
     except (ValueError, AttributeError):
         return candidate != current
 
