@@ -711,21 +711,30 @@ class UpdateChecker:
         try:
             im_client = self._get_im_client_for_platform(resolved_platform)
             if channel_id and message_id and resolved_platform == "slack":
-                await im_client.web_client.chat_update(channel=channel_id, ts=message_id, text=failure_text)
-                logger.info("Updated original message with post-update failure notification")
-                return
+                try:
+                    await im_client.web_client.chat_update(channel=channel_id, ts=message_id, text=failure_text)
+                    logger.info("Updated original message with post-update failure notification")
+                    return
+                except Exception as e:
+                    logger.error("Failed to update Slack post-update failure message: %s", e)
             if channel_id and message_id:
-                context = MessageContext(user_id="system", channel_id=channel_id, platform=resolved_platform)
-                await im_client.edit_message(context, message_id, text=failure_text)
-                logger.info("Updated %s message with post-update failure notification", resolved_platform)
-                return
+                try:
+                    context = MessageContext(user_id="system", channel_id=channel_id, platform=resolved_platform)
+                    await im_client.edit_message(context, message_id, text=failure_text)
+                    logger.info("Updated %s message with post-update failure notification", resolved_platform)
+                    return
+                except Exception as e:
+                    logger.error("Failed to edit %s post-update failure message: %s", resolved_platform, e)
 
             admin_ids = self._get_admin_user_ids()
             if admin_ids:
                 for uid in admin_ids:
-                    admin_client, raw_user_id, _ = self._get_im_client_for_user(uid)
-                    await admin_client.send_dm(raw_user_id, failure_text)
-                    logger.info("Sent post-update failure notification to admin %s", uid)
+                    try:
+                        admin_client, raw_user_id, _ = self._get_im_client_for_user(uid)
+                        await admin_client.send_dm(raw_user_id, failure_text)
+                        logger.info("Sent post-update failure notification to admin %s", uid)
+                    except Exception as e:
+                        logger.error("Failed to send post-update failure notification to admin %s: %s", uid, e)
             elif resolved_platform == "slack":
                 owner_id = await self._get_workspace_owner_id()
                 if owner_id:
@@ -733,6 +742,16 @@ class UpdateChecker:
                     if dm_channel:
                         await im_client.web_client.chat_postMessage(channel=dm_channel, text=failure_text)
                         logger.info("Sent post-update failure notification to %s", owner_id)
+            elif resolved_platform == "discord":
+                channel_id = self._get_default_notification_channel_id()
+                if channel_id:
+                    context = MessageContext(user_id="system", channel_id=channel_id, platform="discord")
+                    await self.controller.get_im_client_for_context(context).send_message(
+                        context,
+                        failure_text,
+                        parse_mode="markdown",
+                    )
+                    logger.info("Sent Discord post-update failure notification to channel %s", channel_id)
         except Exception as e:
             logger.error("Failed to send post-update failure notification: %s", e)
 
@@ -974,14 +993,13 @@ class UpdateChecker:
                     # Write marker only if restart is scheduled
                     if suppress_post_update_notification:
                         logger.info("Post-update notification suppressed for %s", target_version)
-                        self._remove_update_marker()
-                    else:
-                        self._write_update_marker(
-                            target_version,
-                            channel_id=channel_id,
-                            message_id=message_id,
-                            platform=platform,
-                        )
+                    self._write_update_marker(
+                        target_version,
+                        channel_id=channel_id,
+                        message_id=message_id,
+                        platform=platform,
+                        suppress_success_notification=suppress_post_update_notification,
+                    )
                 else:
                     logger.warning("Upgrade completed without restart; manual restart required")
                 return result
@@ -998,6 +1016,7 @@ class UpdateChecker:
         channel_id: Optional[str] = None,
         message_id: Optional[str] = None,
         platform: Optional[str] = None,
+        suppress_success_notification: bool = False,
     ) -> None:
         """Write a marker file to trigger post-update notification."""
         try:
@@ -1007,6 +1026,8 @@ class UpdateChecker:
                 "version": version,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
+            if suppress_success_notification:
+                data["suppress_success_notification"] = True
             # Store message coordinates for updating the original message after restart
             if channel_id and message_id:
                 data["channel_id"] = channel_id
@@ -1070,9 +1091,12 @@ class UpdateChecker:
             platform = data.get("platform") or getattr(self.controller.config, "platform", "slack")
             if channel_id:
                 platform = data.get("platform") or _infer_channel_platform(channel_id)
-            im_client = self._get_im_client_for_platform(platform)
             if self.state.blocked_auto_update_version == target_version:
                 self._clear_blocked_auto_update()
+            if data.get("suppress_success_notification"):
+                logger.info("Post-update success notification suppressed for %s", target_version)
+                return
+            im_client = self._get_im_client_for_platform(platform)
             success_text = self._t("update.updated", version=target_version)
             success_blocks = [
                 {

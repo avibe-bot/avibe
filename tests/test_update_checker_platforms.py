@@ -11,7 +11,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from config.v2_settings import SettingsStore, UserSettings
+from config.v2_settings import ChannelSettings, SettingsStore, UserSettings
 from config.v2_config import UpdateConfig
 from core import update_checker
 from core.update_checker import UpdateChecker
@@ -35,12 +35,16 @@ class _StubController:
         self.im_client = object()
         self.im_clients = {}
 
+    def get_im_client_for_context(self, context):
+        return self.im_clients.get(context.platform) or self.im_client
+
 
 class _FakeIMClient:
     def __init__(self, message_id="msg-1"):
         self.message_id = message_id
         self.dm_calls = []
         self.edit_calls = []
+        self.message_calls = []
 
     async def send_dm(self, user_id: str, text: str, **kwargs):
         self.dm_calls.append((user_id, text, kwargs))
@@ -49,6 +53,10 @@ class _FakeIMClient:
     async def edit_message(self, context, message_id: str, text: str, **kwargs):
         self.edit_calls.append((context, message_id, text, kwargs))
         return True
+
+    async def send_message(self, context, text: str, **kwargs):
+        self.message_calls.append((context, text, kwargs))
+        return self.message_id
 
 
 def test_get_admin_user_ids_includes_all_platforms(monkeypatch, tmp_path):
@@ -293,7 +301,7 @@ def test_update_check_reconciles_askill_even_when_product_checks_disabled(monkey
     assert reconciled == [True]
 
 
-def test_suppressed_post_update_notification_does_not_write_marker(monkeypatch, tmp_path):
+def test_suppressed_post_update_notification_writes_verification_marker(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     checker = UpdateChecker(_StubController(SettingsStore.get_instance()), UpdateConfig())
@@ -307,7 +315,9 @@ def test_suppressed_post_update_notification_does_not_write_marker(monkeypatch, 
 
     assert result["ok"] is True
     marker = tmp_path / "state" / "pending_update_notification.json"
-    assert not marker.exists()
+    data = json.loads(marker.read_text(encoding="utf-8"))
+    assert data["version"] == "1.0.1"
+    assert data["suppress_success_notification"] is True
 
 
 def test_update_marker_records_platform_for_non_slack_callbacks(monkeypatch, tmp_path):
@@ -341,6 +351,29 @@ def test_post_update_notification_uses_unicode_emoji_for_non_slack(monkeypatch, 
     _, _, text, _ = telegram_client.edit_calls[0]
     assert text == "✅ Avibe has been updated to `1.0.1`"
     assert ":white_check_mark:" not in text
+
+
+def test_suppressed_post_update_marker_verifies_without_success_message(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    controller = _StubController(SettingsStore.get_instance())
+    telegram_client = _FakeIMClient()
+    controller.im_clients = {"telegram": telegram_client}
+    checker = UpdateChecker(controller, UpdateConfig())
+    checker._write_update_marker(
+        "1.0.1",
+        channel_id="123456",
+        message_id="42",
+        platform="telegram",
+        suppress_success_notification=True,
+    )
+    monkeypatch.setattr("vibe.__version__", "1.0.1", raising=False)
+
+    asyncio.run(checker.check_and_send_post_update_notification())
+
+    assert telegram_client.edit_calls == []
+    marker = tmp_path / "state" / "pending_update_notification.json"
+    assert not marker.exists()
 
 
 def test_auto_update_skips_unattended_source_checkout_install(monkeypatch, tmp_path):
@@ -414,6 +447,100 @@ def test_restartless_auto_update_blocks_same_version_retry_and_notifies(monkeypa
     assert "`3.0.3`" in text
     assert checker.state.blocked_auto_update_version == "3.0.4"
     assert checker.state.blocked_auto_update_reason == "restart_not_scheduled"
+
+
+def test_post_update_failure_notification_uses_discord_fallback_channel(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    store = SettingsStore.get_instance()
+    store.update_channel("123456789012345678", ChannelSettings(enabled=True), platform="discord")
+    controller = _StubController(store)
+    controller.config.platform = "discord"
+    discord_client = _FakeIMClient()
+    controller.im_clients = {"discord": discord_client}
+    controller.im_client = discord_client
+    checker = UpdateChecker(controller, UpdateConfig())
+
+    asyncio.run(
+        checker._send_post_update_failure_notification(
+            target_version="3.0.4",
+            running_version="3.0.3",
+            platform="discord",
+        )
+    )
+
+    assert discord_client.message_calls
+    context, text, kwargs = discord_client.message_calls[0]
+    assert context.platform == "discord"
+    assert context.channel_id == "123456789012345678"
+    assert "did not take effect" in text
+    assert kwargs["parse_mode"] == "markdown"
+
+
+def test_post_update_failure_notification_continues_after_admin_dm_failure(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    store = SettingsStore.get_instance()
+    store.set_users_for_platform("telegram", {"bad": UserSettings(display_name="Bad", is_admin=True)})
+    store.set_users_for_platform("discord", {"good": UserSettings(display_name="Good", is_admin=True)})
+    store.save()
+    controller = _StubController(store)
+
+    class _FailingDMClient(_FakeIMClient):
+        async def send_dm(self, user_id: str, text: str, **kwargs):
+            raise RuntimeError("dm failed")
+
+    bad_client = _FailingDMClient()
+    good_client = _FakeIMClient()
+    controller.im_clients = {"telegram": bad_client, "discord": good_client}
+    checker = UpdateChecker(controller, UpdateConfig())
+
+    asyncio.run(
+        checker._send_post_update_failure_notification(
+            target_version="3.0.4",
+            running_version="3.0.3",
+        )
+    )
+
+    assert bad_client.dm_calls == []
+    assert good_client.dm_calls
+    user_id, text, _ = good_client.dm_calls[0]
+    assert user_id == "good"
+    assert "did not take effect" in text
+
+
+def test_post_update_failure_notification_falls_back_after_edit_failure(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    store = SettingsStore.get_instance()
+    store.set_users_for_platform("telegram", {"admin": UserSettings(display_name="Admin", is_admin=True)})
+    store.save()
+    controller = _StubController(store)
+
+    class _FailingEditClient(_FakeIMClient):
+        async def edit_message(self, context, message_id: str, text: str, **kwargs):
+            self.edit_calls.append((context, message_id, text, kwargs))
+            raise RuntimeError("edit failed")
+
+    telegram_client = _FailingEditClient()
+    controller.im_clients = {"telegram": telegram_client}
+    checker = UpdateChecker(controller, UpdateConfig())
+
+    asyncio.run(
+        checker._send_post_update_failure_notification(
+            target_version="3.0.4",
+            running_version="3.0.3",
+            channel_id="123456",
+            message_id="42",
+            platform="telegram",
+        )
+    )
+
+    assert telegram_client.edit_calls
+    assert telegram_client.dm_calls
+    user_id, text, _ = telegram_client.dm_calls[0]
+    assert user_id == "admin"
+    assert "did not take effect" in text
 
 
 def test_install_failure_auto_update_remains_retryable(monkeypatch, tmp_path):
