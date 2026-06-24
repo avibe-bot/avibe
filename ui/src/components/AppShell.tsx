@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, Bot, ChevronDown, FolderTree, Globe, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, MonitorPlay, PlugZap, Plus, Settings, SlidersHorizontal, Sparkles } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Bot, ChevronDown, FolderTree, Globe, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, MonitorPlay, PlugZap, Plus, Settings, SlidersHorizontal, Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -29,6 +29,11 @@ type ShellNavItem = {
   match?: (pathname: string) => boolean;
   badge?: number;
   children?: ShellNavItem[];
+  // Mobile-tab extras: `onClick` makes the tab a button (e.g. 菜单 opens the
+  // nav sheet) instead of a link; `variant: 'workbench'` renders the emphasized
+  // green circle for the back-to-workbench tab.
+  onClick?: () => void;
+  variant?: 'workbench';
 };
 
 const isItemActive = (item: ShellNavItem, pathname: string): boolean =>
@@ -102,17 +107,24 @@ const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
   const location = useLocation();
   const active = item.match ? item.match(location.pathname) : location.pathname === item.to;
   const Icon = item.icon;
+  const isWorkbench = item.variant === 'workbench';
 
-  return (
-    <NavLink
-      to={item.to ?? '#'}
-      className={clsx(
-        'flex min-w-0 flex-1 flex-col items-center justify-center gap-1 rounded-lg px-1 py-2 text-[10px] transition-colors',
-        active ? 'bg-mint/[0.08] text-mint' : 'text-muted'
-      )}
-    >
+  const className = clsx(
+    'flex min-w-0 flex-1 flex-col items-center justify-center gap-1 rounded-lg px-1 py-2 text-[10px] transition-colors',
+    isWorkbench ? 'text-mint' : active ? 'bg-mint/[0.08] text-mint' : 'text-muted'
+  );
+  const inner = (
+    <>
       <span className="relative">
-        <Icon className="size-4" />
+        {isWorkbench ? (
+          // Emphasized green circle — the back-to-workbench tab, mirroring the
+          // desktop sidebar's distinct mint mode-switch button.
+          <span className="grid size-9 -translate-y-0.5 place-items-center rounded-full border border-mint/45 bg-mint/[0.14] shadow-[0_0_14px_-3px_rgba(91,255,160,0.6)]">
+            <Icon className="size-[18px] text-mint" />
+          </span>
+        ) : (
+          <Icon className="size-4" />
+        )}
         {item.badge ? (
           <span className="absolute -right-2 -top-1.5 min-w-[14px] rounded-full bg-mint px-1 text-center font-mono text-[9px] font-bold leading-[14px] text-background">
             {item.badge > 99 ? '99+' : item.badge}
@@ -120,8 +132,13 @@ const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
         ) : null}
       </span>
       <span className="max-w-full truncate">{item.label}</span>
-    </NavLink>
+    </>
   );
+
+  if (item.onClick) {
+    return <button type="button" onClick={item.onClick} className={className}>{inner}</button>;
+  }
+  return <NavLink to={item.to ?? '#'} className={className}>{inner}</NavLink>;
 };
 
 type CenterButton = { label: string; icon: React.ComponentType<{ className?: string }>; to?: string; onClick?: () => void };
@@ -138,7 +155,7 @@ const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButton }> =
     return (
       <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-surface/96 px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] backdrop-blur md:hidden">
         <div className="flex items-end justify-between gap-1">
-          {items.map((item) => <MobileNavLink key={item.to} item={item} />)}
+          {items.map((item) => <MobileNavLink key={item.to ?? item.label} item={item} />)}
         </div>
       </nav>
     );
@@ -190,6 +207,9 @@ export const AppShell: React.FC = () => {
   const [config, setConfig] = useState<any>(null);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  // The mobile admin nav sheet (opened from the 菜单 tab). Close it whenever the
+  // route changes so tapping any item in the sheet dismisses it.
+  const [adminMenuOpen, setAdminMenuOpen] = useState(false);
   // Mirror the iOS visual-viewport height into --app-vvh. The MOBILE shell is a
   // static locked column that does NOT read it (resizing the shell mid-focus
   // fought iOS's scroll-into-view and flung the input off-screen); only the md+
@@ -217,6 +237,12 @@ export const AppShell: React.FC = () => {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
+
+  // Close the mobile admin nav sheet on any route change (tapping an item in it
+  // navigates, which should dismiss the sheet).
+  useEffect(() => {
+    setAdminMenuOpen(false);
+  }, [location.pathname]);
 
   const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
   const isRunning = status.state === 'running';
@@ -274,13 +300,25 @@ export const AppShell: React.FC = () => {
 
   const items: ShellNavItem[] = shellMode === 'admin' ? adminItems : [];
 
-  // Mobile can't nest, so a parent collapses to a single tab that opens its
-  // first child (e.g. 通讯平台 → 平台).
-  const mobileAdminItems: ShellNavItem[] = adminItems.map((item) =>
-    item.children && item.children.length > 0
-      ? { ...item, to: item.children[0].to, children: undefined }
-      : item
-  );
+  // A bottom tab bar can't hold the nested admin nav (6 sections, one with a
+  // submenu), so mobile keeps a trimmed 4-tab bar — back-to-workbench (emphasized
+  // green circle), 控制台, 菜单 (opens the full nested nav sheet below), 高级设置 —
+  // and the 菜单 sheet renders the same nested adminItems so every page is
+  // reachable + groups expand. See ``adminMenuOpen``.
+  const adminMobileTabs: ShellNavItem[] = [
+    { to: '/', label: t('nav.workbench'), icon: Sparkles, variant: 'workbench' },
+    { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
+    { label: t('nav.menu'), icon: Menu, onClick: () => setAdminMenuOpen(true), match: () => adminMenuOpen },
+    {
+      to: '/admin/settings/messaging',
+      label: t('nav.advancedSettings'),
+      icon: Settings,
+      match: (p) =>
+        p.startsWith('/admin/settings') &&
+        !p.startsWith('/admin/settings/platforms') &&
+        !p.startsWith('/admin/settings/backends'),
+    },
+  ];
 
   // Workbench mobile tabs flatten the (desktop-only) WorkbenchSidebar into a
   // bottom tab bar: Inbox / Projects / Capabilities / More, around a center
@@ -454,15 +492,45 @@ export const AppShell: React.FC = () => {
 
       {showBottomNav && (
         shellMode === 'admin' ? (
-          <MobileTabBar
-            items={[{ to: '/', label: t('nav.workbench'), icon: Sparkles }, ...mobileAdminItems]}
-          />
+          <MobileTabBar items={adminMobileTabs} />
         ) : (
           <MobileTabBar
             items={workbenchTabs}
             center={{ onClick: () => setNewSessionOpen(true), label: t('appShell.newSession'), icon: Plus }}
           />
         )
+      )}
+
+      {/* Mobile admin nav sheet — the full nested adminItems (groups expand),
+          opened from the 菜单 tab. Mounted only in the admin shell on mobile. */}
+      {shellMode === 'admin' && adminMenuOpen && (
+        <div className="fixed inset-0 z-50 md:hidden" role="dialog" aria-modal="true">
+          <button
+            type="button"
+            aria-label={t('common.close')}
+            onClick={() => setAdminMenuOpen(false)}
+            className="absolute inset-0 bg-background/70 backdrop-blur-sm"
+          />
+          <div className="absolute inset-x-0 bottom-0 max-h-[82vh] overflow-y-auto rounded-t-2xl border-t border-border bg-surface px-3 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-2">
+            <div className="relative flex items-center justify-center py-2">
+              <span className="absolute top-1 h-1 w-9 rounded-full bg-foreground/20" />
+              <span className="mt-1.5 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
+                {t('appShell.workspaceLabel')}
+              </span>
+              <button
+                type="button"
+                aria-label={t('common.close')}
+                onClick={() => setAdminMenuOpen(false)}
+                className="absolute right-1 top-1.5 grid size-8 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+            <nav className="flex flex-col gap-0.5 pb-2">
+              {adminItems.map((item) => <ShellNavLink key={item.to ?? item.label} item={item} />)}
+            </nav>
+          </div>
+        </div>
       )}
 
       <NewSessionSheet
