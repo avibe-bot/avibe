@@ -331,6 +331,13 @@ class UpdateChecker:
 
         return True, None
 
+    def _running_version_satisfies_target(self, running_version: str, target_version: str) -> bool:
+        running = str(running_version or "").strip()
+        target = str(target_version or "").strip()
+        if not running or not target:
+            return False
+        return running == target or has_newer_version(running, target)
+
     async def _check_loop(self) -> None:
         """Main loop for periodic update checking."""
         # Initial delay to let the service fully start
@@ -443,12 +450,16 @@ class UpdateChecker:
                         update_kwargs["suppress_post_update_notification"] = True
                     result = await self._perform_update(latest, **update_kwargs)
                     if not result.get("ok"):
-                        self._block_auto_update(
+                        logger.warning(
+                            "Auto-update to %s failed and will be retried on a later check: %s",
                             latest,
-                            f"upgrade_failed:{result.get('message') or 'unknown'}",
-                            current_version=current,
+                            result.get("message") or "unknown",
                         )
                     elif not result.get("restarting"):
+                        await self._send_post_update_failure_notification(
+                            target_version=str(latest),
+                            running_version=str(current),
+                        )
                         self._block_auto_update(
                             latest,
                             "restart_not_scheduled",
@@ -1036,7 +1047,7 @@ class UpdateChecker:
             # Use the target version from marker (more reliable than __version__ in edge cases)
             target_version = data.get("version", "unknown")
             running_version = str(__version__ or "").strip()
-            if running_version != str(target_version).strip():
+            if not self._running_version_satisfies_target(running_version, str(target_version)):
                 logger.warning(
                     "Suppressing post-update success notification: expected %s but still running %s",
                     target_version,
