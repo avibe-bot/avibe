@@ -9,6 +9,7 @@ import os
 import re
 import signal
 import struct
+import sys
 import termios
 import time
 from dataclasses import dataclass
@@ -308,10 +309,14 @@ def _spawn_env(*, persistent: bool) -> dict[str, str]:
     env["TERM"] = "xterm-256color"
     if persistent:
         env["TMUX"] = ""
+    # macOS lacks a C.UTF-8 locale; fall back to one that exists there so inner
+    # programs don't warn on startup. Only override a missing/C/POSIX locale — a
+    # real UTF-8 locale inherited from the user is kept as-is.
+    utf8_fallback = "en_US.UTF-8" if sys.platform == "darwin" else "C.UTF-8"
     for key in ("LANG", "LC_CTYPE"):
         value = env.get(key, "")
         if not value or value in {"C", "POSIX"}:
-            env[key] = "C.UTF-8"
+            env[key] = utf8_fallback
     return env
 
 
