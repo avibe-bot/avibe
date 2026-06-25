@@ -40,6 +40,7 @@ from core.show_pages import (
     show_event_write_token,
 )
 from core.show_session_events import show_event_payload_session_mismatch
+from core.terminal_service import TerminalService, TerminalServiceError, sanitize_session_id
 from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
 from vibe.i18n import get_supported_languages, t
 from vibe.runtime import get_ui_dist_path, get_working_dir
@@ -106,6 +107,9 @@ _SHOW_RUNTIME_PUBLIC_REACT_REFRESH_SHIM_PATH = (
     f"/_show-runtime/react-refresh-shim-{_SHOW_RUNTIME_PUBLIC_SHIM_VERSION}.js"
 )
 _SHOW_RUNTIME_COMPRESSIBLE_MIN_BYTES = 1024
+TERMINAL_ENABLED_ENV = "VIBE_UI_ENABLE_TERMINAL"
+TERMINAL_IDLE_TIMEOUT_ENV = "VIBE_UI_TERMINAL_IDLE_TIMEOUT_SECONDS"
+TERMINAL_MAX_SESSIONS_ENV = "VIBE_UI_TERMINAL_MAX_SESSIONS"
 
 STRUCTURED_LOG_PATTERN = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\s+-\s+([\w.]+)\s+-\s+(\w+)\s+-\s+(.*)$")
 LEVEL_HINT_PATTERN = re.compile(r"\b(DEBUG|INFO|WARNING|ERROR|CRITICAL)\b")
@@ -1911,6 +1915,40 @@ async def public_show_runtime_hmr_websocket(websocket: WebSocket, share_id: str)
         await websocket.close(code=1011)
 
 
+@app.websocket("/api/terminal/{session_id}")
+async def terminal_websocket(websocket: WebSocket, session_id: str):
+    if not _env_flag_enabled(TERMINAL_ENABLED_ENV):
+        await websocket.close(code=1008)
+        return
+    if _websocket_has_forwarded_metadata(websocket):
+        await websocket.close(code=1008)
+        return
+    if not _websocket_origin_matches_host(websocket):
+        await websocket.close(code=1008)
+        return
+    if not _show_runtime_websocket_authorized(websocket):
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    remote_addr = _websocket_client_host(websocket) or "unknown"
+    safe_session_id = sanitize_session_id(session_id)
+    logger.info("terminal.session_open session=%s remote_addr=%s", safe_session_id, remote_addr)
+    try:
+        service = get_terminal_service()
+        service.start_reaper()
+        await service.handle_websocket(websocket, session_id)
+    except TerminalServiceError as exc:
+        await websocket.close(code=1013 if str(exc) == "too_many_sessions" else 1011)
+    except WebSocketDisconnect:
+        return
+    except Exception:
+        logger.debug("Terminal websocket failed", exc_info=True)
+        await websocket.close(code=1011)
+    finally:
+        logger.info("terminal.session_close session=%s remote_addr=%s", safe_session_id, remote_addr)
+
+
 def _show_runtime_websocket_authorized(websocket: WebSocket) -> bool:
     config = _load_remote_access_config()
     if config is None:
@@ -1927,6 +1965,33 @@ def _show_runtime_websocket_authorized(websocket: WebSocket) -> bool:
         config,
         websocket.cookies.get(remote_access.SESSION_COOKIE_NAME),
     ) is not None
+
+
+def _websocket_origin_matches_host(websocket: WebSocket) -> bool:
+    origin = _request_origin(websocket.headers.get("origin"))
+    if not origin:
+        return False
+    parsed = urlparse(origin)
+    origin_host = _normalized_host(parsed.netloc)
+    request_host = _websocket_normalized_host(websocket)
+    if origin_host != request_host:
+        return False
+    return _origin_port(parsed.netloc, parsed.scheme) == _origin_port(websocket.headers.get("host"), websocket.url.scheme)
+
+
+def _origin_port(netloc: str | None, scheme: str) -> int | None:
+    parsed = urlparse(f"//{netloc or ''}")
+    try:
+        if parsed.port is not None:
+            return parsed.port
+    except ValueError:
+        return None
+    scheme = {"ws": "http", "wss": "https"}.get(scheme, scheme)
+    if scheme == "https":
+        return 443
+    if scheme == "http":
+        return 80
+    return None
 
 
 def _websocket_is_local_request(websocket: WebSocket, config: V2Config | None = None) -> bool:
@@ -4727,6 +4792,179 @@ def search_messages_list():
     return jsonify(result)
 
 
+# =============================================================================
+# Workbench: File Browser
+# =============================================================================
+
+
+def _file_browser_error_response(exc: Exception):
+    from core.file_browser_service import FileBrowserError
+
+    if isinstance(exc, FileBrowserError):
+        return jsonify({"ok": False, "error": {"code": exc.code, "message": exc.message}}), exc.status_code
+    logger.exception("file browser request failed")
+    return jsonify({"ok": False, "error": {"code": "internal_error", "message": "Internal server error"}}), 500
+
+
+async def _dispatch_native_ui_request(starlette_request: FastAPIRequest, handler: Callable[[], Any]):
+    return await app.dispatch_native_request(starlette_request, handler)
+
+
+@app.get("/api/files/list", include_in_schema=False)
+async def files_list(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.list_directory,
+                    request.args.get("path") or "",
+                    show_hidden=request.args.get("show_hidden") == "1",
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.get("/api/files/meta", include_in_schema=False)
+async def files_meta(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        try:
+            return jsonify(await asyncio.to_thread(file_browser_service.metadata, request.args.get("path") or ""))
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.get("/api/files/content", include_in_schema=False)
+async def files_content(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        try:
+            content = await asyncio.to_thread(
+                file_browser_service.file_content,
+                request.args.get("path") or "",
+                download=request.args.get("download") == "1",
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+        return FastAPIResponse(
+            content=content.data,
+            media_type=content.mime,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
+                "Cache-Control": "private, no-store",
+                "Content-Disposition": f"{content.disposition}; filename*=UTF-8''{quote(content.path.name)}",
+            },
+        )
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.put("/api/files/write", include_in_schema=False)
+async def files_write(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.write_file,
+                    payload.get("path") or "",
+                    payload.get("content"),
+                    expected_mtime=payload.get("expected_mtime"),
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/files/mkdir", include_in_schema=False)
+async def files_mkdir(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(await asyncio.to_thread(file_browser_service.make_directory, payload.get("path") or ""))
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/files/rename", include_in_schema=False)
+async def files_rename(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.rename_path,
+                    payload.get("path") or "",
+                    payload.get("new_name") or "",
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/files/move", include_in_schema=False)
+async def files_move(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.move_path,
+                    payload.get("src") or "",
+                    payload.get("dst") or "",
+                    overwrite=bool(payload.get("overwrite")),
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/files/delete", include_in_schema=False)
+async def files_delete(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.delete_path,
+                    payload.get("path") or "",
+                    recursive=bool(payload.get("recursive")),
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 # Content types the media proxy is willing to serve ``inline``. Anything else —
 # text/html, image/svg+xml, xml, application/octet-stream, unknown — is forced to
 # ``attachment`` so a preview-open of agent-produced ACTIVE content can't execute
@@ -7155,6 +7393,7 @@ def _reconcile_remote_access_for_ui_start(config: V2Config | None) -> None:
 
 _inbox_bridge_task: "asyncio.Task | None" = None
 _startup_dependency_reconcile_task: "asyncio.Task | None" = None
+_terminal_service: TerminalService | None = None
 
 
 async def _start_inbox_bridge() -> None:
@@ -7180,6 +7419,32 @@ async def _stop_inbox_bridge() -> None:
 
 app.add_event_handler("startup", _start_inbox_bridge)
 app.add_event_handler("shutdown", _stop_inbox_bridge)
+
+
+def get_terminal_service() -> TerminalService:
+    global _terminal_service
+    if _terminal_service is None:
+        _terminal_service = TerminalService(
+            idle_timeout_seconds=int(os.environ.get(TERMINAL_IDLE_TIMEOUT_ENV, "3600")),
+            max_sessions=int(os.environ.get(TERMINAL_MAX_SESSIONS_ENV, "8")),
+        )
+    return _terminal_service
+
+
+async def _start_terminal_service() -> None:
+    if _env_flag_enabled(TERMINAL_ENABLED_ENV):
+        get_terminal_service().start_reaper()
+
+
+async def _stop_terminal_service() -> None:
+    global _terminal_service
+    service, _terminal_service = _terminal_service, None
+    if service is not None:
+        await service.shutdown()
+
+
+app.add_event_handler("startup", _start_terminal_service)
+app.add_event_handler("shutdown", _stop_terminal_service)
 
 
 async def _reconcile_startup_dependencies_task() -> None:

@@ -276,6 +276,9 @@ class CompatTestClient:
     def post(self, url: str, **kwargs: Any) -> CompatTestResponse:
         return self.request("POST", url, **kwargs)
 
+    def put(self, url: str, **kwargs: Any) -> CompatTestResponse:
+        return self.request("PUT", url, **kwargs)
+
     def patch(self, url: str, **kwargs: Any) -> CompatTestResponse:
         return self.request("PATCH", url, **kwargs)
 
@@ -405,6 +408,43 @@ class CompatApp(FastAPI):
 
     def test_client(self) -> CompatTestClient:
         return CompatTestClient(self)
+
+    async def dispatch_native_request(
+        self,
+        starlette_request: FastAPIRequest,
+        func: Callable[..., Any],
+    ) -> Response:
+        """Run a native FastAPI endpoint through the shared UI request hooks.
+
+        New async FastAPI routes can avoid the legacy ``@app.route`` shim while
+        still inheriting the remote-access, CSRF, and response hooks registered
+        through ``before_request`` / ``after_request`` during the migration.
+        """
+        remote_addr = _test_remote_addr_from_scope(starlette_request.scope)
+        if remote_addr:
+            starlette_request.scope["vibe_remote_addr"] = remote_addr
+        compat_request = CompatRequest(starlette_request)
+        token_request = _request_var.set(compat_request)
+        token_g = _g_var.set(type("CompatG", (), {})())
+        try:
+            response: Response | None = None
+            try:
+                for before in self._before_request_handlers:
+                    result = await run_maybe_async(before)
+                    if result is not None:
+                        response = normalize_response(result)
+                        break
+                if response is None:
+                    compat_request._json_payload = await _read_json_payload(starlette_request)
+                    response = normalize_response(await run_maybe_async(func))
+            except Exception as exc:
+                response = await self._handle_compat_exception(exc)
+            for after in reversed(self._after_request_handlers):
+                response = normalize_response(await run_maybe_async(after, response))
+            return response
+        finally:
+            _g_var.reset(token_g)
+            _request_var.reset(token_request)
 
     @contextlib.contextmanager
     def test_request_context(
