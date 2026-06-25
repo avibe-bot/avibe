@@ -888,6 +888,8 @@ def exchange_oauth_code(config: V2Config, code: str, code_verifier: str) -> dict
         raise OAuthCodeExchangeError("invalid_audience", str(exc)) from exc
     except jwt.ExpiredSignatureError as exc:
         raise OAuthCodeExchangeError("expired_id_token", str(exc)) from exc
+    except jwt.ImmatureSignatureError as exc:
+        raise OAuthCodeExchangeError("immature_id_token", str(exc)) from exc
     except jwt.InvalidTokenError as exc:
         raise OAuthCodeExchangeError("invalid_id_token", str(exc)) from exc
     except Exception as exc:

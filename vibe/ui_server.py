@@ -1346,6 +1346,7 @@ _OAUTH_EXCHANGE_ERROR_PAGE_BY_REASON = {
     "invalid_issuer": "remote_pairing_mismatch",
     "invalid_audience": "remote_pairing_mismatch",
     "expired_id_token": "oauth_time_mismatch",
+    "immature_id_token": "oauth_time_mismatch",
 }
 
 _OAUTH_DIAGNOSTIC_DETAIL_MAX_CHARS = 240

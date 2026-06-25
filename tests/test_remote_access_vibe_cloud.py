@@ -145,6 +145,36 @@ def test_exchange_oauth_code_reports_instance_mismatch(monkeypatch) -> None:
     assert exc_info.value.reason == "invalid_instance_id"
 
 
+def test_exchange_oauth_code_reports_immature_token_as_clock_mismatch(monkeypatch) -> None:
+    config = _config()
+
+    class ResponseStub:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"id_token": "id-token"}
+
+    class JwkClientStub:
+        def __init__(self, uri):
+            self.uri = uri
+
+        def get_signing_key_from_jwt(self, id_token):
+            return type("SigningKey", (), {"key": "secret"})()
+
+    def decode(*args, **kwargs):
+        raise remote_access.jwt.ImmatureSignatureError("The token is not yet valid")
+
+    monkeypatch.setattr(remote_access.requests, "post", lambda *args, **kwargs: ResponseStub())
+    monkeypatch.setattr(remote_access, "PyJWKClient", JwkClientStub)
+    monkeypatch.setattr(remote_access.jwt, "decode", decode)
+
+    with pytest.raises(remote_access.OAuthCodeExchangeError) as exc_info:
+        remote_access.exchange_oauth_code(config, "code-1", "verifier-1")
+
+    assert exc_info.value.reason == "immature_id_token"
+
+
 def test_pair_redeems_key_and_starts_connector(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
