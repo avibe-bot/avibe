@@ -2062,9 +2062,10 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
     if not _terminal_enabled():
         await websocket.close(code=1008)
         return
-    if _websocket_has_forwarded_metadata(websocket):
-        await websocket.close(code=1008)
-        return
+    # NOTE: do not reject forwarded metadata here — when the workbench is reached
+    # through Avibe Cloud / Cloudflare the request legitimately carries X-Forwarded
+    # headers. `_show_runtime_websocket_authorized` already distinguishes local
+    # (no-forwarded loopback) from remote (valid session cookie), so let it decide.
     if not _websocket_origin_matches_host(websocket):
         await websocket.close(code=1008)
         return

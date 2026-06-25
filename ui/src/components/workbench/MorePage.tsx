@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ArrowRight, Link as LinkIcon, LogOut, SlidersHorizontal } from 'lucide-react';
+import { ArrowRight, FolderTree, Link as LinkIcon, LogOut, SlidersHorizontal, SquareTerminal } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
@@ -66,6 +66,40 @@ export const MorePage: React.FC = () => {
         </span>
         <ArrowRight className="size-[18px] shrink-0 text-cyan" />
       </Link>
+
+      {/* Apps — the desktop sidebar's Apps launcher, surfaced for mobile where
+          there is no sidebar. */}
+      <div className="flex flex-col gap-2">
+        <div className="px-1 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
+          {t('apps.title')}
+        </div>
+        <Link
+          to="/apps/files"
+          className="flex items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3.5 transition hover:bg-foreground/[0.04]"
+        >
+          <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-mint/[0.12]">
+            <FolderTree className="size-[18px] text-mint" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-[15px] font-semibold">{t('apps.fileBrowser.label')}</span>
+            <span className="block truncate text-[11.5px] text-muted">{t('apps.fileBrowser.desc')}</span>
+          </span>
+          <ArrowRight className="size-[18px] shrink-0 text-muted" />
+        </Link>
+        <Link
+          to="/apps/terminal"
+          className="flex items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3.5 transition hover:bg-foreground/[0.04]"
+        >
+          <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-foreground/[0.05]">
+            <SquareTerminal className="size-[18px] text-foreground" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-[15px] font-semibold">{t('apps.terminal.label')}</span>
+            <span className="block truncate text-[11.5px] text-muted">{t('apps.terminal.desc')}</span>
+          </span>
+          <ArrowRight className="size-[18px] shrink-0 text-muted" />
+        </Link>
+      </div>
 
       {/* Appearance — reuse the existing toggles as touch rows. */}
       <div className="rounded-xl border border-border bg-surface">

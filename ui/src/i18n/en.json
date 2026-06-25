@@ -608,6 +608,7 @@
       "empty": "This folder is empty.",
       "noPreview": "No in-app preview for this file type.",
       "download": "Download",
+      "tooLarge": "This file is too large to edit in the browser. Download it to view it instead.",
       "refresh": "Refresh",
       "newFolder": "New folder",
       "newFolderPrompt": "New folder name",
@@ -625,6 +626,7 @@
       "tagline": "A real shell, in your browser.",
       "persistent": "Persistent",
       "reconnect": "Reconnect",
+      "exitCode": "exit {{code}}",
       "disabled": "Terminal unavailable: it may be turned off on the server (VIBE_UI_ENABLE_TERMINAL=0) or this session isn't authorized.",
       "status": {
         "connecting": "Connecting…",

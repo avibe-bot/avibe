@@ -608,6 +608,7 @@
       "empty": "这个文件夹是空的。",
       "noPreview": "这种文件类型暂不支持应用内预览。",
       "download": "下载",
+      "tooLarge": "文件太大,无法在浏览器里编辑。请下载后查看。",
       "refresh": "刷新",
       "newFolder": "新建文件夹",
       "newFolderPrompt": "新文件夹名称",
@@ -625,6 +626,7 @@
       "tagline": "在浏览器里跑真实 shell。",
       "persistent": "持久会话",
       "reconnect": "重新连接",
+      "exitCode": "退出码 {{code}}",
       "disabled": "终端不可用:可能在服务端被关掉(VIBE_UI_ENABLE_TERMINAL=0),或当前会话未获授权。",
       "status": {
         "connecting": "连接中…",

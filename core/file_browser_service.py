@@ -83,7 +83,7 @@ def resolve_safe_path(raw: str) -> Path:
 def _expanded_absolute_path(raw: str) -> Path:
     if not isinstance(raw, str) or not raw.strip():
         raise FileBrowserError("invalid_path", "Path is required", 400)
-    expanded = Path(os.path.expanduser(raw.strip()))
+    expanded = Path(os.path.expanduser(raw))
     if not expanded.is_absolute():
         raise FileBrowserError("invalid_path", "Path must be absolute", 400)
     return expanded
@@ -302,9 +302,13 @@ def _run_mutation(op: str, path: Path, func, **audit_extra: Any):
 
 def _fsync_dir(path: Path) -> None:
     # Persist the directory entry change (e.g. an os.replace rename) so the new
-    # name survives a crash, not just the file's contents.
+    # name survives a crash, not just the file's contents. Best-effort: some
+    # platforms (Windows) lack O_DIRECTORY or can't fsync a directory.
+    flags = getattr(os, "O_DIRECTORY", None)
+    if flags is None:
+        return
     try:
-        dir_fd = os.open(path, os.O_DIRECTORY)
+        dir_fd = os.open(path, flags)
     except OSError:
         return
     try:
@@ -357,6 +361,13 @@ def write_file(raw_path: str, content: str, *, expected_mtime: float | None = No
                 handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
+            if expected_mtime is not None:
+                try:
+                    disk_mtime = _mtime_seconds(target.stat())
+                except FileNotFoundError as exc:
+                    raise ConflictError("conflict", "File was removed before save") from exc
+                if abs(disk_mtime - float(expected_mtime)) > 1e-6:
+                    raise ConflictError("conflict", "File changed on disk")
             os.replace(temp_name, target)
             temp_name = ""
             _fsync_dir(parent)
@@ -440,7 +451,12 @@ def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
 
     def _move() -> dict[str, Any]:
         try:
-            if _exists_no_follow(target) and overwrite:
+            # Re-check at move time: shutil.move()/os.rename() replaces an existing
+            # destination on POSIX, so without this a no-overwrite move would
+            # silently clobber a file created after the earlier precheck.
+            if _exists_no_follow(target):
+                if not overwrite:
+                    raise ConflictError("exists", "Destination already exists")
                 if _is_dir_no_follow(target):
                     target.rmdir()
                 else:

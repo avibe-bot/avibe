@@ -139,9 +139,11 @@ class TerminalService:
             await self.close(existing)
         async with self._lock:
             self._forget_finished_locked()
+            # Reclaim this id's detached slot BEFORE the cap check, so reconnecting
+            # to an existing (detached) session is never rejected as "too many".
+            self._detached_tmux_sessions.pop(session_id, None)
             if len(self._connections) + len(self._detached_tmux_sessions) >= self.max_sessions:
                 raise TerminalServiceError("too_many_sessions")
-            self._detached_tmux_sessions.pop(session_id, None)
         persistent = False
         tmux_binary = resolve_tmux_binary()
         if tmux_binary:
@@ -203,13 +205,26 @@ class TerminalService:
         await asyncio.to_thread(fcntl.ioctl, connection.master_fd, termios.TIOCSWINSZ, payload)
         connection.touch()
 
+    async def _write_all(self, fd: int, data: bytes) -> None:
+        # master_fd is non-blocking (see _pump_output), so a single os.write can
+        # accept only part of a large frame or raise EAGAIN (easy to hit by pasting
+        # a long command). Loop until every byte is written.
+        view = memoryview(data)
+        while view:
+            try:
+                written = os.write(fd, view)
+            except BlockingIOError:
+                await asyncio.sleep(0.005)
+                continue
+            view = view[written:]
+
     async def _pump_input(self, websocket: WebSocket, connection: TerminalConnection) -> None:
         while True:
             message = await websocket.receive()
             if message["type"] == "websocket.disconnect":
                 raise WebSocketDisconnect(message.get("code", 1000))
             if bytes_payload := message.get("bytes"):
-                await asyncio.to_thread(os.write, connection.master_fd, bytes_payload)
+                await self._write_all(connection.master_fd, bytes_payload)
                 connection.touch()
             elif text_payload := message.get("text"):
                 await self._handle_control_message(connection, text_payload)

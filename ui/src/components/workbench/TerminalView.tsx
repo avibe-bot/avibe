@@ -163,7 +163,7 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
         />
         <span>
           {t(`apps.terminal.status.${status}`)}
-          {status === 'closed' && exitCode != null ? ` · exit ${exitCode}` : ''}
+          {status === 'closed' && exitCode != null ? ` · ${t('apps.terminal.exitCode', { code: exitCode })}` : ''}
         </span>
         {status === 'ready' && persistent && (
           <span className="rounded-full border border-border px-1.5 text-[10px]">{t('apps.terminal.persistent')}</span>

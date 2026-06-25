@@ -23,7 +23,11 @@ import { Button } from '../ui/button';
 // main bundle until a text file is actually opened.
 const FileEditorPane = lazy(() => import('./FileEditorPane').then((m) => ({ default: m.FileEditorPane })));
 
-type Selected = { path: string; name: string; kind: string; mime: string | null; mtime: number | null };
+type Selected = { path: string; name: string; kind: string; mime: string | null; mtime: number | null; size: number | null };
+
+// Above this size, offer a download instead of loading the file into CodeMirror
+// (mirrors the in-page preview cap; the backend allows /api/files/content up to 25MB).
+const MAX_EDIT_BYTES = 1024 * 1024;
 
 // Whole-machine Finder: favorites rail (pinned projects + OS defaults), a
 // breadcrumb + dir/file list (left), and a content pane (right) that views or
@@ -79,7 +83,7 @@ export const AppsFileBrowserPage: React.FC = () => {
       navigate(full);
     } else {
       fileMeta(full)
-        .then((m) => setSelected({ path: full, name: entry.name, kind: m.kind, mime: m.mime, mtime: m.mtime }))
+        .then((m) => setSelected({ path: full, name: entry.name, kind: m.kind, mime: m.mime, mtime: m.mtime, size: m.size }))
         .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to open'));
     }
   };
@@ -293,7 +297,8 @@ const ContentPane: React.FC<{ selected: Selected | null }> = ({ selected }) => {
       </div>
     );
   }
-  if (previewKind(selected.name, selected.mime || undefined)) {
+  const tooLargeToEdit = selected.size != null && selected.size > MAX_EDIT_BYTES;
+  if (previewKind(selected.name, selected.mime || undefined) && !tooLargeToEdit) {
     return (
       <Suspense
         fallback={<div className="grid flex-1 place-items-center text-[12px] text-muted">{t('common.loading')}</div>}
@@ -306,7 +311,9 @@ const ContentPane: React.FC<{ selected: Selected | null }> = ({ selected }) => {
     <div className="grid flex-1 place-items-center p-6 text-center">
       <div className="flex flex-col items-center gap-3">
         <FileIcon className="size-8 text-muted" />
-        <div className="text-[12.5px] text-muted">{t('apps.fileBrowser.noPreview')}</div>
+        <div className="text-[12.5px] text-muted">
+          {tooLargeToEdit ? t('apps.fileBrowser.tooLarge') : t('apps.fileBrowser.noPreview')}
+        </div>
         <a
           href={contentUrl(selected.path, true)}
           className="inline-flex items-center gap-1.5 rounded-md border border-border-strong px-3 py-1.5 text-[12px] text-foreground transition hover:bg-foreground/[0.04]"
