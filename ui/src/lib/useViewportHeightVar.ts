@@ -43,7 +43,7 @@ export function useViewportHeightVar(): void {
       // would lift the composer off the bottom), so drop the override and fall back
       // to 100dvh. But zoom and the keyboard can be up together (zoom, then focus the
       // composer) — then we still need the inset, so only bail when the keyboard is
-      // closed; isSoftKeyboardOpen()'s resting baseline already nets out the zoom.
+      // closed; isSoftKeyboardOpen() is scale-aware, so it still fires while zoomed.
       if (vv.scale > 1 && !isSoftKeyboardOpen()) {
         document.documentElement.style.removeProperty('--app-vvh');
         return;
