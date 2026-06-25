@@ -4727,6 +4727,179 @@ def search_messages_list():
     return jsonify(result)
 
 
+# =============================================================================
+# Workbench: File Browser
+# =============================================================================
+
+
+def _file_browser_error_response(exc: Exception):
+    from core.file_browser_service import FileBrowserError
+
+    if isinstance(exc, FileBrowserError):
+        return jsonify({"ok": False, "error": {"code": exc.code, "message": exc.message}}), exc.status_code
+    logger.exception("file browser request failed")
+    return jsonify({"ok": False, "error": {"code": "internal_error", "message": "Internal server error"}}), 500
+
+
+async def _dispatch_native_ui_request(starlette_request: FastAPIRequest, handler: Callable[[], Any]):
+    return await app.dispatch_native_request(starlette_request, handler)
+
+
+@app.get("/api/files/list", include_in_schema=False)
+async def files_list(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.list_directory,
+                    request.args.get("path") or "",
+                    show_hidden=request.args.get("show_hidden") == "1",
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.get("/api/files/meta", include_in_schema=False)
+async def files_meta(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        try:
+            return jsonify(await asyncio.to_thread(file_browser_service.metadata, request.args.get("path") or ""))
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.get("/api/files/content", include_in_schema=False)
+async def files_content(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        try:
+            content = await asyncio.to_thread(
+                file_browser_service.file_content,
+                request.args.get("path") or "",
+                download=request.args.get("download") == "1",
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+        return FastAPIResponse(
+            content=content.data,
+            media_type=content.mime,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
+                "Cache-Control": "private, no-store",
+                "Content-Disposition": f"{content.disposition}; filename*=UTF-8''{quote(content.path.name)}",
+            },
+        )
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.put("/api/files/write", include_in_schema=False)
+async def files_write(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.write_file,
+                    payload.get("path") or "",
+                    payload.get("content"),
+                    expected_mtime=payload.get("expected_mtime"),
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/files/mkdir", include_in_schema=False)
+async def files_mkdir(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(await asyncio.to_thread(file_browser_service.make_directory, payload.get("path") or ""))
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/files/rename", include_in_schema=False)
+async def files_rename(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.rename_path,
+                    payload.get("path") or "",
+                    payload.get("new_name") or "",
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/files/move", include_in_schema=False)
+async def files_move(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.move_path,
+                    payload.get("src") or "",
+                    payload.get("dst") or "",
+                    overwrite=bool(payload.get("overwrite")),
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/files/delete", include_in_schema=False)
+async def files_delete(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.delete_path,
+                    payload.get("path") or "",
+                    recursive=bool(payload.get("recursive")),
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 # Content types the media proxy is willing to serve ``inline``. Anything else —
 # text/html, image/svg+xml, xml, application/octet-stream, unknown — is forced to
 # ``attachment`` so a preview-open of agent-produced ACTIVE content can't execute
