@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
 import socket
 import asyncio
 from collections import namedtuple
@@ -1088,6 +1089,64 @@ def test_remote_callback_explains_clock_mismatch(monkeypatch, tmp_path):
     assert "oauth_time_mismatch" in response.text
     assert "Check this machine&#x27;s clock" in response.text
     assert "reason: expired_id_token" in response.text
+
+
+def test_remote_callback_redacts_quoted_oauth_details(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+
+    with app.test_request_context("/dashboard", base_url="https://alex.avibe.bot"):
+        redirect = ui_server._redirect_to_vibe_cloud_login(config)
+    oauth_cookie = redirect.headers["Set-Cookie"].split(";", 1)[0].split("=", 1)[1]
+    client.set_cookie(ui_server.REMOTE_OAUTH_COOKIE_NAME, oauth_cookie, domain="alex.avibe.bot")
+
+    def exchange(cfg, code, verifier):
+        raise remote_access.OAuthCodeExchangeError(
+            "token_endpoint_rejected",
+            '{"code":"secret-code","code_verifier":"secret-verifier","detail":"bad code"}',
+        )
+
+    monkeypatch.setattr(remote_access, "exchange_oauth_code", exchange)
+
+    state = ui_server._read_oauth_cookie(config.remote_access.vibe_cloud.session_secret, oauth_cookie)["state"]
+    response = client.get(f"/auth/callback?code=test-code&state={state}", base_url="https://alex.avibe.bot")
+
+    assert response.status_code == 400
+    assert "detail:" in response.text
+    assert "code=&lt;redacted&gt;" in response.text
+    assert "code_verifier=&lt;redacted&gt;" in response.text
+    assert "secret-code" not in response.text
+    assert "secret-verifier" not in response.text
+    assert "test-code" not in response.text
+
+
+def test_remote_callback_log_omits_raw_oauth_rejection_detail(monkeypatch, tmp_path, caplog):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+
+    with app.test_request_context("/dashboard", base_url="https://alex.avibe.bot"):
+        redirect = ui_server._redirect_to_vibe_cloud_login(config)
+    oauth_cookie = redirect.headers["Set-Cookie"].split(";", 1)[0].split("=", 1)[1]
+    client.set_cookie(ui_server.REMOTE_OAUTH_COOKIE_NAME, oauth_cookie, domain="alex.avibe.bot")
+
+    def exchange(cfg, code, verifier):
+        raise remote_access.OAuthCodeExchangeError("token_endpoint_rejected", '{"code":"secret-code"}')
+
+    monkeypatch.setattr(remote_access, "exchange_oauth_code", exchange)
+    with ui_server._oauth_diag_log_lock:
+        ui_server._oauth_diag_log_state.pop("exchange_failed", None)
+    caplog.set_level(logging.WARNING, logger="vibe.ui_server")
+
+    state = ui_server._read_oauth_cookie(config.remote_access.vibe_cloud.session_secret, oauth_cookie)["state"]
+    response = client.get(f"/auth/callback?code=test-code&state={state}", base_url="https://alex.avibe.bot")
+
+    assert response.status_code == 400
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "reason=token_endpoint_rejected" in messages
+    assert "secret-code" not in messages
+    assert "test-code" not in messages
 
 
 def test_remote_callback_rejects_when_remote_access_is_disabled(monkeypatch, tmp_path):

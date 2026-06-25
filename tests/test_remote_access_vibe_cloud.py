@@ -110,6 +110,13 @@ def test_exchange_oauth_code_wraps_token_endpoint_rejection(monkeypatch) -> None
     assert exc_info.value.detail == "invalid_code"
 
 
+def test_oauth_code_exchange_error_string_omits_rejection_detail() -> None:
+    error = remote_access.OAuthCodeExchangeError("token_endpoint_rejected", '{"code":"secret-code"}')
+
+    assert str(error) == "token_endpoint_rejected"
+    assert "secret-code" not in str(error)
+
+
 def test_exchange_oauth_code_reports_instance_mismatch(monkeypatch) -> None:
     config = _config()
 

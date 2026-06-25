@@ -58,8 +58,7 @@ class BackendRequestError(Exception):
 
 class OAuthCodeExchangeError(Exception):
     def __init__(self, reason: str, detail: str | None = None):
-        message = reason if not detail else f"{reason}: {detail}"
-        super().__init__(message)
+        super().__init__(reason)
         self.reason = reason
         self.detail = detail or ""
 

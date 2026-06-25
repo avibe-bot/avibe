@@ -1351,8 +1351,8 @@ _OAUTH_EXCHANGE_ERROR_PAGE_BY_REASON = {
 
 _OAUTH_DIAGNOSTIC_DETAIL_MAX_CHARS = 240
 _OAUTH_DIAGNOSTIC_SECRET_PATTERN = re.compile(
-    r"(?i)\b(code|state|id_token|access_token|refresh_token|code_verifier|nonce)"
-    r"(\s*[=:]\s*|%3d)[^&\s,;}]+"
+    r"(?i)(?P<key_quote>['\"]?)\b(?P<key>code_verifier|id_token|access_token|refresh_token|code|state|nonce)\b(?P=key_quote)"
+    r"(?P<sep>\s*[=:]\s*|%3d)(?P<value_quote>['\"]?)[^&\s,;}]+(?P=value_quote)"
 )
 
 
@@ -1368,7 +1368,7 @@ def _sanitize_oauth_diagnostic_detail(value: str | None) -> str:
     if not value:
         return ""
     compact = " ".join(str(value).split())
-    redacted = _OAUTH_DIAGNOSTIC_SECRET_PATTERN.sub(lambda match: f"{match.group(1)}=<redacted>", compact)
+    redacted = _OAUTH_DIAGNOSTIC_SECRET_PATTERN.sub(lambda match: f"{match.group('key')}=<redacted>", compact)
     if len(redacted) <= _OAUTH_DIAGNOSTIC_DETAIL_MAX_CHARS:
         return redacted
     return redacted[: _OAUTH_DIAGNOSTIC_DETAIL_MAX_CHARS - 1].rstrip() + "..."
@@ -2982,7 +2982,8 @@ def remote_access_auth_callback():
         claims = result["claims"]
     except Exception as exc:
         # Unauthenticated-reachable (valid handshake + bad code), so rate-limited.
-        _log_oauth_diag("exchange_failed", "vibe cloud oauth code exchange failed: %s", exc)
+        reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__
+        _log_oauth_diag("exchange_failed", "vibe cloud oauth code exchange failed: reason=%s", reason)
         error, diagnostics = _oauth_exchange_error_diagnostics(exc)
         return _oauth_callback_error_response(error, next_target=next_target, diagnostics=diagnostics)
     if claims.get("nonce") != handshake_nonce:
