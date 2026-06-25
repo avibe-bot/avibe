@@ -181,6 +181,24 @@ async def _open_releases_reserved_slot_on_cancel(monkeypatch, tmp_path):
     spawn_started = asyncio.Event()
     original_spawn = asyncio.create_subprocess_exec
 
+    # Track the PTY master fds so we can assert the cancelled spawn closed its own.
+    opened_masters: list[int] = []
+    real_openpty = terminal_service.os.openpty
+    closed_fds: list[int] = []
+    real_close_fd = terminal_service._close_fd
+
+    def tracking_openpty():
+        master, slave = real_openpty()
+        opened_masters.append(master)
+        return master, slave
+
+    def tracking_close_fd(fd: int) -> None:
+        closed_fds.append(fd)
+        real_close_fd(fd)
+
+    monkeypatch.setattr(terminal_service.os, "openpty", tracking_openpty)
+    monkeypatch.setattr(terminal_service, "_close_fd", tracking_close_fd)
+
     async def delayed_spawn(*_args, **_kwargs):
         spawn_started.set()
         await asyncio.sleep(60)
@@ -194,6 +212,9 @@ async def _open_releases_reserved_slot_on_cancel(monkeypatch, tmp_path):
         await open_task
 
     assert service._reserved_sessions == set()
+    # The PTY master opened for the cancelled spawn must be closed, not leaked.
+    assert opened_masters, "openpty was not called"
+    assert opened_masters[0] in closed_fds
 
     monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", original_spawn)
     connection = await service.open("next")
@@ -226,6 +247,61 @@ async def _ready_frame_failure_closes_connection(monkeypatch, tmp_path):
         assert service._connections == {}
     finally:
         await service.shutdown()
+
+
+def test_detached_session_tracked_when_client_exits(monkeypatch, tmp_path):
+    asyncio.run(_detached_session_tracked_when_client_exits(monkeypatch, tmp_path))
+
+
+async def _detached_session_tracked_when_client_exits(monkeypatch, tmp_path):
+    # A persistent (tmux) connection whose client process has already exited — e.g. the
+    # user hit tmux's detach key while the session/server stays alive — must still be
+    # recorded as detached, or it goes uncounted against max_sessions, unreaped by the
+    # idle timeout, and unkilled on shutdown.
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+
+    class _ExitedProcess:
+        returncode = 0
+        pid = None
+
+        async def wait(self) -> int:
+            return 0
+
+    fd = os.open(os.devnull, os.O_RDWR)
+    connection = terminal_service.TerminalConnection(
+        session_id="detached",
+        process=_ExitedProcess(),
+        master_fd=fd,
+        persistent=True,
+        attached_at=0.0,
+        last_seen=0.0,
+    )
+
+    await service._cleanup_connection(connection, detach=True)
+
+    assert "detached" in service._detached_tmux_sessions
+
+
+def test_spawn_env_drops_c_lc_all(monkeypatch):
+    # LC_ALL overrides LANG/LC_CTYPE; an inherited C/POSIX LC_ALL must be dropped so the
+    # UTF-8 fallback actually takes effect.
+    monkeypatch.setenv("LC_ALL", "C")
+    monkeypatch.delenv("LANG", raising=False)
+    monkeypatch.delenv("LC_CTYPE", raising=False)
+
+    env = terminal_service._spawn_env(persistent=False)
+
+    assert "LC_ALL" not in env
+    assert env["LANG"].endswith("UTF-8")
+    assert env["LC_CTYPE"].endswith("UTF-8")
+
+
+def test_spawn_env_keeps_real_lc_all(monkeypatch):
+    monkeypatch.setenv("LC_ALL", "en_US.UTF-8")
+
+    env = terminal_service._spawn_env(persistent=False)
+
+    assert env["LC_ALL"] == "en_US.UTF-8"
 
 
 def test_sanitize_session_id_allows_only_contract_chars():

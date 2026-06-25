@@ -198,7 +198,10 @@ class TerminalService:
                     env=_spawn_env(persistent=persistent),
                     preexec_fn=os.setsid if hasattr(os, "setsid") else None,
                 )
-            except Exception:
+            except BaseException:
+                # Close the PTY master on cancellation too (CancelledError is a
+                # BaseException, not Exception) — otherwise a cancelled spawn leaks the fd
+                # even though the outer handler restores the reserved-slot accounting.
                 _close_fd(master_fd)
                 raise
             finally:
@@ -230,20 +233,28 @@ class TerminalService:
 
     async def _cleanup_connection(self, connection: TerminalConnection, *, detach: bool = True) -> None:
         _close_fd(connection.master_fd)
-        if connection.process.returncode is not None:
+        client_exited = connection.process.returncode is not None
+        if connection.persistent:
+            if detach:
+                # Normal close/reaper path: detach the tmux client (SIGHUP) and leave the
+                # tmux server running so the session can be reattached; the reaper expires
+                # it later. The client may have already exited on its own (e.g. the user
+                # hit tmux's detach key) while the session/server stays alive — record it
+                # either way, or the session goes uncounted against max_sessions, unreaped
+                # by the idle timeout, and unkilled on shutdown.
+                if not client_exited:
+                    await _terminate_process(connection.process, signal.SIGHUP)
+                async with self._lock:
+                    self._detached_tmux_sessions[connection.session_id] = time.monotonic()
+            else:
+                # Service shutdown: tear the tmux session down for real so `vibe stop` does
+                # not leave an orphaned tmux server (and its shell processes) running.
+                await _kill_tmux_session(connection.session_id)
+                if not client_exited:
+                    await _terminate_process(connection.process, signal.SIGHUP)
             return
-        if connection.persistent and detach:
-            # Normal close/reaper path: detach the tmux client (SIGHUP) and leave the tmux
-            # server running so the session can be reattached; the reaper expires it later.
-            await _terminate_process(connection.process, signal.SIGHUP)
-            async with self._lock:
-                self._detached_tmux_sessions[connection.session_id] = time.monotonic()
-        elif connection.persistent:
-            # Service shutdown: tear the tmux session down for real so `vibe stop` does not
-            # leave an orphaned tmux server (and its shell processes) running.
-            await _kill_tmux_session(connection.session_id)
-            await _terminate_process(connection.process, signal.SIGHUP)
-        else:
+        # Ephemeral shell: terminate it if it is still running.
+        if not client_exited:
             await _terminate_process(connection.process, signal.SIGTERM)
 
     async def resize(self, connection: TerminalConnection, cols: int, rows: int) -> None:
@@ -387,6 +398,11 @@ def _spawn_env(*, persistent: bool) -> dict[str, str]:
         value = env.get(key, "")
         if not value or value in {"C", "POSIX"}:
             env[key] = utf8_fallback
+    # LC_ALL overrides LANG/LC_CTYPE; an inherited C/POSIX LC_ALL would defeat the UTF-8
+    # fallback set above, so drop it and let the UTF-8 LANG/LC_CTYPE take effect. A real
+    # inherited locale is left untouched, mirroring the LANG/LC_CTYPE handling.
+    if env.get("LC_ALL", "") in {"C", "POSIX"}:
+        env.pop("LC_ALL", None)
     return env
 
 
