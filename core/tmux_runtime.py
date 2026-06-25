@@ -135,6 +135,8 @@ class TmuxRuntimeManager:
                         **self._failure(str(signing.get("reason") or "tmux_codesign_failed"), manifest=manifest, archive=archive),
                         "signing": signing,
                     }
+                if not _tmux_binary_runnable(binary):
+                    return self._failure("tmux_binary_not_runnable", manifest=manifest, archive=archive)
                 if install_dir.exists():
                     shutil.rmtree(install_dir)
                 install_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -613,6 +615,7 @@ def _reason_message(reason: str) -> str:
         "tmux_archive_size_mismatch": "tmux archive size did not match the pinned manifest.",
         "tmux_platform_unsupported": "No pinned tmux runtime is available for this platform.",
         "tmux_manifest_missing": "tmux runtime manifest is missing.",
+        "tmux_binary_not_runnable": "tmux runtime binary could not be executed after installation.",
         "tmux_install_failed": "tmux runtime install failed.",
     }
     return messages.get(reason, reason)

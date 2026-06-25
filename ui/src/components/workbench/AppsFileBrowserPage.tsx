@@ -204,6 +204,11 @@ export const AppsFileBrowserPage: React.FC = () => {
                 {error}
               </div>
             )}
+            {listing?.truncated && (
+              <div className="mx-2 mt-2 rounded-md border border-border bg-foreground/[0.03] px-2.5 py-1.5 text-[11.5px] text-muted">
+                {t('apps.fileBrowser.listTruncated', { count: listing.limit ?? listing.entries.length })}
+              </div>
+            )}
             <div className="flex flex-col gap-0.5 p-2">
               {loading && !listing && (
                 <div className="grid place-items-center py-6">

@@ -16,6 +16,8 @@ export type FsListing = {
   path: string;
   parent: string | null;
   entries: FsEntry[];
+  truncated?: boolean;
+  limit?: number;
 };
 
 export type FsMeta = {
@@ -39,10 +41,15 @@ export class FilesApiError extends Error {
   }
 }
 
+const FILE_BROWSER_ERROR_KEYS: Record<string, string> = {
+  file_not_utf8: 'apps.fileBrowser.errors.file_not_utf8',
+};
+
 export function fileBrowserErrorMessage(error: unknown, t: (key: string) => string, fallback: string): string {
   if (error instanceof FilesApiError) {
-    const translated = t(`apps.fileBrowser.errors.${error.code}`);
-    return translated === `apps.fileBrowser.errors.${error.code}` ? error.message : translated;
+    const key = FILE_BROWSER_ERROR_KEYS[error.code] ?? `apps.fileBrowser.errors.${error.code}`;
+    const translated = t(key);
+    return translated === key ? error.message : translated;
   }
   return error instanceof Error ? error.message : fallback;
 }
@@ -108,7 +115,15 @@ export async function readText(path: string): Promise<string> {
   if (!res.ok) {
     await parse(res); // throws a FilesApiError
   }
-  return res.text();
+  const body = await res.arrayBuffer();
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(body);
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new FilesApiError('file_not_utf8', "This file isn't valid UTF-8 text.");
+    }
+    throw error;
+  }
 }
 
 export async function writeFile(

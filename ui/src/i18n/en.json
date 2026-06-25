@@ -618,11 +618,13 @@
       "save": "Save",
       "unsaved": "Unsaved changes",
       "conflict": "This file changed on disk since you opened it. Reload before saving to avoid overwriting it.",
+      "listTruncated": "Only the first {{count}} entries are shown.",
       "errors": {
         "conflict": "This file changed on disk since you opened it. Reload before saving to avoid overwriting it.",
         "not_found": "Path not found.",
         "permission_denied": "Permission denied.",
         "too_large": "This file is too large.",
+        "file_not_utf8": "This file isn't valid UTF-8 text, so it can't be edited safely — download it instead.",
         "not_dir": "Path is not a folder.",
         "not_file": "Path is not a regular file.",
         "is_symlink": "Symbolic links cannot be edited here.",

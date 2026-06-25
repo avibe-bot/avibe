@@ -618,11 +618,13 @@
       "save": "保存",
       "unsaved": "有未保存的修改",
       "conflict": "打开后该文件在磁盘上已被改动。请先重新加载再保存,以免覆盖。",
+      "listTruncated": "当前只显示前 {{count}} 个条目。",
       "errors": {
         "conflict": "打开后该文件在磁盘上已被改动。请先重新加载再保存,以免覆盖。",
         "not_found": "找不到这个路径。",
         "permission_denied": "没有权限访问。",
         "too_large": "这个文件太大。",
+        "file_not_utf8": "该文件不是有效的 UTF-8 文本，无法安全编辑，请改为下载。",
         "not_dir": "这个路径不是文件夹。",
         "not_file": "这个路径不是普通文件。",
         "is_symlink": "这里不能编辑符号链接。",

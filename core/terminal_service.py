@@ -102,7 +102,13 @@ class TerminalService:
     async def handle_websocket(self, websocket: WebSocket, raw_session_id: str) -> None:
         session_id = sanitize_session_id(raw_session_id)
         connection = await self.open(session_id)
-        await websocket.send_text(json.dumps({"type": "ready", "persistent": connection.persistent}))
+        try:
+            await websocket.send_text(json.dumps({"type": "ready", "persistent": connection.persistent}))
+        except BaseException:
+            # The browser can drop right after accept; open() already registered the PTY, so
+            # close it here or it leaks against max_sessions until the service restarts.
+            await self.close(connection)
+            raise
         output_task = asyncio.create_task(self._pump_output(websocket, connection), name=f"terminal-output-{session_id}")
         input_task = asyncio.create_task(self._pump_input(websocket, connection), name=f"terminal-input-{session_id}")
         wait_task = asyncio.create_task(connection.process.wait(), name=f"terminal-process-{session_id}")
@@ -210,7 +216,8 @@ class TerminalService:
                 self._reserved_sessions.discard(session_id)
                 self._connections[session_id] = connection
             return connection
-        except Exception:
+        except (Exception, asyncio.CancelledError):
+            # CancelledError is a BaseException on Python 3.8+, so include it explicitly.
             async with self._lock:
                 self._reserved_sessions.discard(session_id)
             raise

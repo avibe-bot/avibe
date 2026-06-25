@@ -93,6 +93,28 @@ def test_bad_checksum_is_rejected(tmp_path: Path) -> None:
     assert manager.resolve_binary() is None
 
 
+def test_install_rejects_non_runnable_binary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    manifest_path = _write_manifest(tmp_path, archive)
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest_path)
+    manifest = manager._load_manifest()
+    assert manifest is not None
+    archive_spec = manager._manifest_archive_for_platform(manifest)
+    assert archive_spec is not None
+    install_dir = manager._manifest_install_dir(manifest, archive_spec)
+    install_dir.mkdir(parents=True)
+    sentinel = install_dir / "old-install"
+    sentinel.write_text("keep me", encoding="utf-8")
+
+    monkeypatch.setattr(tmux_runtime, "_tmux_binary_runnable", lambda _binary: False)
+
+    result = manager.ensure(force=True)
+
+    assert result["ok"] is False
+    assert result["reason"] == "tmux_binary_not_runnable"
+    assert sentinel.read_text(encoding="utf-8") == "keep me"
+
+
 def test_resolve_tmux_binary_returns_none_when_absent(tmp_path: Path) -> None:
     archive = _write_tmux_archive(tmp_path)
     manifest = _write_manifest(tmp_path, archive)

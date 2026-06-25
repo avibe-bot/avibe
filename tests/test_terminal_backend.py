@@ -167,6 +167,67 @@ async def _terminal_open_reserves_session_slot_during_spawn(monkeypatch, tmp_pat
         await service.shutdown()
 
 
+def test_open_releases_reserved_slot_on_cancel(monkeypatch, tmp_path):
+    asyncio.run(_open_releases_reserved_slot_on_cancel(monkeypatch, tmp_path))
+
+
+async def _open_releases_reserved_slot_on_cancel(monkeypatch, tmp_path):
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(terminal_service.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: None)
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=1)
+    spawn_started = asyncio.Event()
+    original_spawn = asyncio.create_subprocess_exec
+
+    async def delayed_spawn(*_args, **_kwargs):
+        spawn_started.set()
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", delayed_spawn)
+
+    open_task = asyncio.create_task(service.open("cancelled"))
+    await spawn_started.wait()
+    open_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await open_task
+
+    assert service._reserved_sessions == set()
+
+    monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", original_spawn)
+    connection = await service.open("next")
+    try:
+        assert service._connections["next"] is connection
+    finally:
+        await service.shutdown()
+
+
+def test_ready_frame_failure_closes_connection(monkeypatch, tmp_path):
+    asyncio.run(_ready_frame_failure_closes_connection(monkeypatch, tmp_path))
+
+
+async def _ready_frame_failure_closes_connection(monkeypatch, tmp_path):
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(terminal_service.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: None)
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=1)
+
+    class _DisconnectingWebSocket(_FakeWebSocket):
+        async def send_text(self, payload: str) -> None:
+            raise RuntimeError("client dropped before ready")
+
+    with pytest.raises(RuntimeError, match="client dropped"):
+        await service.handle_websocket(_DisconnectingWebSocket([]), "drop")
+
+    try:
+        assert service._connections == {}
+    finally:
+        await service.shutdown()
+
+
 def test_sanitize_session_id_allows_only_contract_chars():
     assert sanitize_session_id("../bad session!") == "bad_session"
     assert sanitize_session_id("abc-DEF_123") == "abc-DEF_123"
