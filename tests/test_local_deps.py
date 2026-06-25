@@ -69,6 +69,16 @@ def _installable_avault_release(monkeypatch, *, target: str = "macos-arm64", sha
 
     monkeypatch.setattr(api.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(api.shutil, "which", lambda _binary: None)
+    def fake_candidate_cli_paths(binary: str):
+        expanded = api.Path(api.os.path.expanduser(binary))
+        has_path_separator = api.os.sep in binary or (api.os.altsep is not None and api.os.altsep in binary)
+        if expanded.is_absolute() or has_path_separator:
+            return [expanded]
+        if binary == "avault":
+            return [api.Path.home() / ".local" / "bin" / "avault"]
+        return []
+
+    monkeypatch.setattr(api, "_candidate_cli_paths", fake_candidate_cli_paths)
     return calls
 
 
@@ -195,6 +205,19 @@ def test_install_avault_unsupported_platform_is_clear_failure(monkeypatch):
     assert "no avault build for FreeBSD-riscv64" in out["message"]
 
 
+def test_install_avault_force_keeps_existing_binary_on_unsupported_platform(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "/opt/avault/bin/avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/opt/avault/bin/avault" if b == "/opt/avault/bin/avault" else None)
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+    monkeypatch.setattr("platform.machine", lambda: "arm64")
+    monkeypatch.setattr(api.urllib.request, "urlopen", lambda *a, **k: pytest.fail("should not download"))
+
+    out = api.install_avault(force=True)
+
+    assert out["ok"] is True
+    assert out["path"] == "/opt/avault/bin/avault"
+
+
 def test_avault_target_detects_macos_arm64(monkeypatch):
     monkeypatch.setattr("platform.system", lambda: "Darwin")
     monkeypatch.setattr("platform.machine", lambda: "arm64")
@@ -285,6 +308,27 @@ def test_install_avault_force_redownloads_when_present(monkeypatch):
     assert out["ok"] is True
     assert len(calls) == 2
     assert installed.read_text(encoding="utf-8").startswith("#!/bin/sh")
+
+
+def test_ensure_avault_force_uses_managed_binary_after_install(monkeypatch):
+    configured = api.Path.home() / "custom" / "avault"
+    configured.parent.mkdir(parents=True, exist_ok=True)
+    configured.write_text("#!/bin/sh\necho old\n", encoding="utf-8")
+    configured.chmod(0o755)
+    cfg = api.save_config({})
+    cfg.agents.avault.cli_path = str(configured)
+    cfg.save()
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    monkeypatch.setattr("platform.machine", lambda: "arm64")
+    _installable_avault_release(monkeypatch, target="macos-arm64")
+
+    out = api.ensure_avault_installed(force=True)
+
+    installed = api.Path.home() / ".local" / "bin" / "avault"
+    assert out["ok"] is True
+    assert out["path"] == str(installed)
+    assert api.V2Config.load().agents.avault.cli_path == str(installed)
+    assert api._resolve_avault_cli_path() == str(installed)
 
 
 def test_avault_resolves_path_fallback_when_configured_path_missing(monkeypatch):

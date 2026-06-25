@@ -3418,6 +3418,28 @@ def _avault_managed_bin_path() -> Path:
     return Path.home() / ".local" / "bin" / "avault"
 
 
+def _persist_avault_cli_path(path: str) -> None:
+    try:
+        try:
+            load_config()
+        except FileNotFoundError:
+            save_config({})
+        with CONFIG_LOCK:
+            cfg = load_config()
+            previous = getattr(cfg.agents.avault, "cli_path", "") or ""
+            if previous != path:
+                cfg.agents.avault.cli_path = path
+                cfg.save()
+                logger.info(
+                    "install_avault: updated V2Config cli_path: %s -> %s",
+                    previous or "<unset>",
+                    path,
+                )
+    except Exception as exc:
+        logger.warning("install_avault: failed to persist cli_path: %s", exc)
+        raise
+
+
 def _download_avault_release_file(url: str) -> bytes:
     request = urllib.request.Request(
         url,
@@ -3479,6 +3501,14 @@ def install_avault(force: bool = False) -> dict:
 
     target, platform_label = _avault_target()
     if target is None:
+        if path:
+            return {
+                "ok": True,
+                "message": backend_t("dependencies.avault.ready"),
+                "output": None,
+                "path": path,
+                "changed": False,
+            }
         return {
             "ok": False,
             "message": backend_t("dependencies.avault.noBuild", platform=platform_label),
@@ -3517,12 +3547,14 @@ def install_avault(force: bool = False) -> dict:
             os.replace(tmp_path, install_path)
         install_path.chmod(0o755)
         _clear_macos_quarantine(install_path)
+        _persist_avault_cli_path(str(install_path))
 
         return {
             "ok": True,
             "message": backend_t("dependencies.avault.installed", version=AVAULT_VERSION),
             "output": f"Installed avault {AVAULT_VERSION} for {target}",
             "path": str(install_path),
+            "changed": True,
         }
     except Exception as exc:  # noqa: BLE001
         logger.warning("avault install failed: %s", exc, exc_info=True)
@@ -3551,7 +3583,8 @@ def ensure_avault_installed(force: bool = False) -> dict:
         resolved = _resolve_avault_cli_path()
         installed = bool(resolved)
         result["installed"] = installed
-        result["changed"] = installed and bool(result.get("ok")) and (not existing or force)
+        if "changed" not in result:
+            result["changed"] = installed and bool(result.get("ok")) and (not existing or force)
         result["path"] = resolved
         if result.get("ok") and not installed:
             result["ok"] = False
