@@ -488,7 +488,7 @@ End state: **Python performs no cryptography and never reads `machine.key`.** av
 - **(A) All-in (recommended):** land avault P1.1 (§18.3), then migrate every path (§18.4). Clean final form, AAD everywhere, Python crypto fully gone, no mixed-reader fragility, no data migration. Cost: avault P1.1 first (notably an HTTP client in `avault-cli` for `fetch`).
 - **(B) No-AAD wire-compat (incremental):** make avault P1 `seal` write **P0-identical no-AAD** blobs (a `--p0-compat` mode) so avault and Python interoperate on the same blobs; migrate command-by-command; add AAD + retire Python in P2. Cheaper to start, but defers AAD (anti-transplant) and runs a two-reader window.
 
-Recommend **(A)** — it is the "最终形态" asked for and avoids a fragile coexistence window; the avault P1.1 verbs are small and well-scoped.
+**Decided: (A) all-in — 2026-06-25.** Land avault P1.1 (§18.3) first, then migrate every path (§18.4); Python crypto is removed entirely. This pulls `deliver fetch`/`inject` forward from P2 (§15) into the P1.1 prerequisite. Sequence: PR#1 (core) merge → PR#2 (CI) merge → avault P1.1 (complete deliver surface) → avibe #631 rework.
 
 ---
 
