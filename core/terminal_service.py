@@ -130,6 +130,13 @@ class TerminalService:
             await self.close(connection)
 
     async def open(self, session_id: str) -> TerminalConnection:
+        # If this session id is already attached, replace it — close the old
+        # connection first so its PTY/process isn't orphaned (an orphan would
+        # also slip past the max_sessions cap).
+        async with self._lock:
+            existing = self._connections.get(session_id)
+        if existing is not None:
+            await self.close(existing)
         async with self._lock:
             self._forget_finished_locked()
             if len(self._connections) + len(self._detached_tmux_sessions) >= self.max_sessions:

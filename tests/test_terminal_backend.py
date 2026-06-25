@@ -63,6 +63,28 @@ async def _terminal_ephemeral_pty_round_trip(monkeypatch, tmp_path):
     assert json.loads(websocket.sent_text[-1]) == {"type": "exit", "code": 7}
 
 
+def test_terminal_reconnect_replaces_session(monkeypatch, tmp_path):
+    asyncio.run(_terminal_reconnect_replaces_session(monkeypatch, tmp_path))
+
+
+async def _terminal_reconnect_replaces_session(monkeypatch, tmp_path):
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: None)
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+    try:
+        first = await service.open("dup")
+        second = await service.open("dup")
+        # Reconnecting the same id reuses one slot; the old connection is
+        # replaced (and its shell terminated), not orphaned past max_sessions.
+        assert len(service._connections) == 1
+        assert service._connections["dup"] is second
+        assert first.process.returncode is not None
+    finally:
+        await service.shutdown()
+
+
 def test_terminal_resize_applies_winsize(monkeypatch, tmp_path):
     asyncio.run(_terminal_resize_applies_winsize(monkeypatch, tmp_path))
 

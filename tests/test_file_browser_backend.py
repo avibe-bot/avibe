@@ -59,6 +59,21 @@ def test_list_rejects_traversal_to_non_directory(tmp_path):
     assert exc.value.code == "not_dir"
 
 
+def test_write_refuses_to_follow_symlink(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    real = root / "real.txt"
+    real.write_text("original", encoding="utf-8")
+    link = root / "link.txt"
+    os.symlink(real, link)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.write_file(str(link), "hacked")
+    assert exc.value.code == "is_symlink"
+    # The symlink's target must be left untouched (no write-through).
+    assert real.read_text(encoding="utf-8") == "original"
+
+
 def test_content_inline_headers_attachment_and_size_cap(tmp_path):
     text_path = tmp_path / "note.txt"
     text_path.write_text("hello", encoding="utf-8")

@@ -13,6 +13,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 MAX_FILE_BYTES = 25 * 1024 * 1024
+MAX_LIST_ENTRIES = 5000
 
 INLINE_SAFE_CONTENT_TYPES = {
     "image/png",
@@ -214,11 +215,15 @@ def _entry_payload(entry: os.DirEntry[str]) -> dict[str, Any] | None:
 def list_directory(raw_path: str, *, show_hidden: bool = False) -> dict[str, Any]:
     target = _require_directory(raw_path)
     entries: list[dict[str, Any]] = []
+    truncated = False
     try:
         with os.scandir(target) as iterator:
             for entry in iterator:
                 if not show_hidden and entry.name.startswith("."):
                     continue
+                if len(entries) >= MAX_LIST_ENTRIES:
+                    truncated = True
+                    break
                 payload = _entry_payload(entry)
                 if payload is not None:
                     entries.append(payload)
@@ -229,7 +234,7 @@ def list_directory(raw_path: str, *, show_hidden: bool = False) -> dict[str, Any
 
     entries.sort(key=lambda item: (0 if item["kind"] == "dir" else 1, str(item["name"]).lower(), str(item["name"])))
     parent = None if target.parent == target else str(target.parent)
-    return {"ok": True, "path": str(target), "parent": parent, "entries": entries}
+    return {"ok": True, "path": str(target), "parent": parent, "entries": entries, "truncated": truncated}
 
 
 def metadata(raw_path: str) -> dict[str, Any]:
@@ -295,6 +300,21 @@ def _run_mutation(op: str, path: Path, func, **audit_extra: Any):
     return func()
 
 
+def _fsync_dir(path: Path) -> None:
+    # Persist the directory entry change (e.g. an os.replace rename) so the new
+    # name survives a crash, not just the file's contents.
+    try:
+        dir_fd = os.open(path, os.O_DIRECTORY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
 def write_file(raw_path: str, content: str, *, expected_mtime: float | None = None) -> dict[str, Any]:
     if not isinstance(content, str):
         raise FileBrowserError("invalid_content", "Content must be UTF-8 text", 400)
@@ -302,20 +322,19 @@ def write_file(raw_path: str, content: str, *, expected_mtime: float | None = No
     if len(data) > MAX_FILE_BYTES:
         raise FileBrowserError("too_large", "Content is too large", 413)
 
-    target = resolve_safe_path(raw_path)
-    try:
-        parent = target.parent.resolve(strict=True)
-    except FileNotFoundError as exc:
-        raise NotFoundError("Parent directory not found") from exc
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise FileBrowserError("invalid_path", str(exc), 400) from exc
+    # Operate on the entry itself (parent resolved, final component NOT
+    # symlink-followed) so writing matches the no-follow semantics of
+    # list/meta/delete and never silently clobbers a symlink's target.
+    target = _resolve_entry_path(raw_path)
+    parent = target.parent
     if not parent.is_dir():
         raise FileBrowserError("not_dir", "Parent is not a directory", 400)
+    if target.is_symlink():
+        raise FileBrowserError("is_symlink", "Refusing to write through a symlink", 400)
     if target.exists() and not target.is_file():
         raise FileBrowserError("not_file", "Path is not a regular file", 400)
     if expected_mtime is not None:
         try:
-            _require_stable_resolved_path(target)
             current_mtime = _mtime_seconds(target.stat())
         except FileNotFoundError as exc:
             raise ConflictError("conflict", "File was removed before save") from exc
@@ -323,11 +342,12 @@ def write_file(raw_path: str, content: str, *, expected_mtime: float | None = No
             raise ConflictError("conflict", "File changed on disk")
 
     def _write() -> dict[str, Any]:
-        _require_stable_resolved_path(parent)
-        if target.exists():
-            _require_stable_resolved_path(target)
-            if not target.is_file():
-                raise FileBrowserError("not_file", "Path is not a regular file", 400)
+        # Re-check at write time to defeat a file→symlink swap between the
+        # checks above and the replace below.
+        if target.is_symlink():
+            raise FileBrowserError("is_symlink", "Refusing to write through a symlink", 400)
+        if target.exists() and not target.is_file():
+            raise FileBrowserError("not_file", "Path is not a regular file", 400)
         fd = -1
         temp_name = ""
         try:
@@ -338,6 +358,8 @@ def write_file(raw_path: str, content: str, *, expected_mtime: float | None = No
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temp_name, target)
+            temp_name = ""
+            _fsync_dir(parent)
             stat_result = target.stat()
             return {"ok": True, "mtime": _mtime_seconds(stat_result)}
         finally:
