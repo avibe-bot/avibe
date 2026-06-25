@@ -587,7 +587,7 @@
       "tagline": "在浏览器里跑真实 shell。",
       "persistent": "持久会话",
       "reconnect": "重新连接",
-      "disabled": "终端未开启。在服务端设置 VIBE_UI_ENABLE_TERMINAL 后,重新打开此页即可。",
+      "disabled": "终端不可用:可能在服务端被关掉(VIBE_UI_ENABLE_TERMINAL=0),或当前会话未获授权。",
       "status": {
         "connecting": "连接中…",
         "ready": "已连接",

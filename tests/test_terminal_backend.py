@@ -110,8 +110,9 @@ def test_sanitize_session_id_allows_only_contract_chars():
     assert sanitize_session_id("abc-DEF_123") == "abc-DEF_123"
 
 
-def test_terminal_websocket_disabled_by_default(monkeypatch, tmp_path):
-    monkeypatch.delenv("VIBE_UI_ENABLE_TERMINAL", raising=False)
+def test_terminal_websocket_disabled_when_flag_off(monkeypatch, tmp_path):
+    # The terminal is ON by default; an explicit VIBE_UI_ENABLE_TERMINAL=0 disables it.
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "0")
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
     with pytest.raises(WebSocketDisconnect) as exc:

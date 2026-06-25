@@ -587,7 +587,7 @@
       "tagline": "A real shell, in your browser.",
       "persistent": "Persistent",
       "reconnect": "Reconnect",
-      "disabled": "The Terminal is turned off. Enable it by setting VIBE_UI_ENABLE_TERMINAL on the server, then reopen this page.",
+      "disabled": "Terminal unavailable: it may be turned off on the server (VIBE_UI_ENABLE_TERMINAL=0) or this session isn't authorized.",
       "status": {
         "connecting": "Connecting…",
         "ready": "Connected",

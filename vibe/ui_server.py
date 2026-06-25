@@ -643,6 +643,16 @@ def _env_flag_enabled(name: str) -> bool:
     return os.environ.get(name, "").lower() in {"1", "true", "yes", "on"}
 
 
+def _terminal_enabled() -> bool:
+    # The Web Terminal is ON by default; set VIBE_UI_ENABLE_TERMINAL to a falsy
+    # value (0/false/no/off) to turn it off. The WebSocket auth gate still
+    # authorizes every connection regardless of this flag.
+    raw = os.environ.get(TERMINAL_ENABLED_ENV)
+    if raw is None or raw.strip() == "":
+        return True
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _has_loopback_only_docker_port_binding() -> bool:
     bind_host = os.environ.get("VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST")
     if not bind_host:
@@ -1917,7 +1927,7 @@ async def public_show_runtime_hmr_websocket(websocket: WebSocket, share_id: str)
 
 @app.websocket("/api/terminal/{session_id}")
 async def terminal_websocket(websocket: WebSocket, session_id: str):
-    if not _env_flag_enabled(TERMINAL_ENABLED_ENV):
+    if not _terminal_enabled():
         await websocket.close(code=1008)
         return
     if _websocket_has_forwarded_metadata(websocket):
@@ -7432,7 +7442,7 @@ def get_terminal_service() -> TerminalService:
 
 
 async def _start_terminal_service() -> None:
-    if _env_flag_enabled(TERMINAL_ENABLED_ENV):
+    if _terminal_enabled():
         get_terminal_service().start_reaper()
 
 
