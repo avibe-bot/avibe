@@ -16,6 +16,7 @@ from vibe import api
 from vibe import remote_access
 from vibe import ui_server
 from vibe.ui_server import app
+from starlette.websockets import WebSocketDisconnect
 
 
 _FakeSnicaddr = namedtuple("snicaddr", ["family", "address", "netmask", "broadcast", "ptp"])
@@ -1676,6 +1677,63 @@ def test_setup_host_request_from_self_is_treated_as_local(monkeypatch, tmp_path)
     )
 
     assert response.status_code == 200
+
+
+@pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
+def test_terminal_websocket_rejects_setup_host_origin_from_different_port(monkeypatch, tmp_path):
+    # A private setup-host request is treated as local (accepted without a session
+    # cookie), so the terminal Origin check must still pin it to the exact scheme+port —
+    # otherwise a same-host page served on another port could open a cross-origin
+    # terminal socket. Regression guard for the setup-host CSWSH gap: before passing the
+    # config into _websocket_is_local_request, this request fell through to the remote
+    # host-only relaxation and the mismatched port was accepted.
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config_with_setup_host(tmp_path, "192.168.2.3")
+    _mock_interface(monkeypatch, "192.168.2.3", 24)
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with app.test_client().websocket_connect(
+            "/api/terminal/test",
+            headers={
+                "host": "192.168.2.3:5123",
+                "origin": "http://192.168.2.3:3000",
+                "x-vibe-test-remote-addr": "192.168.2.5",
+            },
+        ):
+            pass
+
+    assert exc.value.code == 1008
+
+
+@pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
+def test_terminal_websocket_accepts_setup_host_origin_from_same_port(monkeypatch, tmp_path):
+    # The exact-origin counterpart: a setup-host terminal request whose Origin matches the
+    # request scheme+port must still be accepted (the fix must not over-reject LAN setup).
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config_with_setup_host(tmp_path, "192.168.2.3")
+    _mock_interface(monkeypatch, "192.168.2.3", 24)
+
+    accepted = False
+
+    async def fake_handle_websocket(websocket, session_id):
+        nonlocal accepted
+        accepted = True
+
+    monkeypatch.setattr(ui_server.get_terminal_service(), "handle_websocket", fake_handle_websocket)
+
+    with app.test_client().websocket_connect(
+        "/api/terminal/test",
+        headers={
+            "host": "192.168.2.3:5123",
+            "origin": "http://192.168.2.3:5123",
+            "x-vibe-test-remote-addr": "192.168.2.5",
+        },
+    ):
+        pass
+
+    assert accepted is True
 
 
 def test_setup_host_with_public_peer_is_not_local(monkeypatch, tmp_path):

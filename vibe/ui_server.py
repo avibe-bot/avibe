@@ -2137,7 +2137,15 @@ def _terminal_origin_allowed(websocket: WebSocket) -> bool:
     parsed_origin = urlparse(origin)
     if _normalized_host(parsed_origin.netloc) != _websocket_normalized_host(websocket):
         return False
-    if not _websocket_is_local_request(websocket):
+    # Mirror _show_runtime_websocket_authorized's local classification: loopback AND
+    # private setup-host requests are both accepted without a cookie, so both must clear
+    # the exact scheme+port check below. Without the config, _websocket_is_local_request
+    # cannot recognize a setup-host request as local and we would fall through to the
+    # remote host-only relaxation, letting a same-host page on a different scheme/port
+    # open a cross-origin terminal socket. Remote (public-host + cookie) requests only
+    # need the host match already verified above.
+    config = _load_remote_access_config()
+    if not _websocket_is_local_request(websocket, config):
         return True
     origin_port = _origin_port(parsed_origin.netloc, parsed_origin.scheme)
     request_port = _origin_port(websocket.headers.get("host"), websocket.url.scheme)

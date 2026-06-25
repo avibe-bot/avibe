@@ -150,12 +150,15 @@ jobs:
           name: tmux-runtime-manifest
           path: dist/tmux-runtime-manifest.json
 
-      - name: Upload release assets
+      # The build jobs above currently package scaffold placeholders (a README, not a real
+      # tmux binary), so the archives would install as a broken/missing binary. Refuse to
+      # publish them as release assets and fail loudly instead of silently shipping. Once
+      # the cross-build produces a real relocatable tmux, replace this guard with the
+      # softprops/action-gh-release@v2 upload of dist/tmux-*.tar.gz, *.sha256, and the
+      # manifest.
+      - name: Refuse to publish placeholder release assets
         if: inputs.release_tag != ''
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.release_tag }}
-          files: |
-            dist/tmux-*.tar.gz
-            dist/tmux-*.sha256
-            dist/tmux-runtime-manifest.json
+        shell: bash
+        run: |
+          echo "::error::build-tmux still packages scaffold placeholders; refusing to publish release assets for tag '${{ inputs.release_tag }}'. Implement the real tmux cross-build before enabling the release upload." >&2
+          exit 1

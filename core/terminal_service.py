@@ -86,7 +86,18 @@ class TerminalService:
         async with self._lock:
             connections = list(self._connections.values())
             self._connections.clear()
-        await asyncio.gather(*(self._cleanup_connection(connection) for connection in connections), return_exceptions=True)
+            detached = list(self._detached_tmux_sessions)
+            self._detached_tmux_sessions.clear()
+        # Kill (not just detach) every live persistent session so `vibe stop` leaves no
+        # orphaned tmux server, then reap sessions that had already detached earlier.
+        await asyncio.gather(
+            *(self._cleanup_connection(connection, detach=False) for connection in connections),
+            return_exceptions=True,
+        )
+        await asyncio.gather(
+            *(_kill_tmux_session(session_id) for session_id in detached),
+            return_exceptions=True,
+        )
 
     async def handle_websocket(self, websocket: WebSocket, raw_session_id: str) -> None:
         session_id = sanitize_session_id(raw_session_id)
@@ -210,14 +221,21 @@ class TerminalService:
                 self._connections.pop(connection.session_id, None)
         await self._cleanup_connection(connection)
 
-    async def _cleanup_connection(self, connection: TerminalConnection) -> None:
+    async def _cleanup_connection(self, connection: TerminalConnection, *, detach: bool = True) -> None:
         _close_fd(connection.master_fd)
         if connection.process.returncode is not None:
             return
-        if connection.persistent:
+        if connection.persistent and detach:
+            # Normal close/reaper path: detach the tmux client (SIGHUP) and leave the tmux
+            # server running so the session can be reattached; the reaper expires it later.
             await _terminate_process(connection.process, signal.SIGHUP)
             async with self._lock:
                 self._detached_tmux_sessions[connection.session_id] = time.monotonic()
+        elif connection.persistent:
+            # Service shutdown: tear the tmux session down for real so `vibe stop` does not
+            # leave an orphaned tmux server (and its shell processes) running.
+            await _kill_tmux_session(connection.session_id)
+            await _terminate_process(connection.process, signal.SIGHUP)
         else:
             await _terminate_process(connection.process, signal.SIGTERM)
 

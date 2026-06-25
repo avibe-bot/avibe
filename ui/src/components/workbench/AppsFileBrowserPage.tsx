@@ -300,7 +300,12 @@ const ContentPane: React.FC<{ selected: Selected | null }> = ({ selected }) => {
       </div>
     );
   }
-  const tooLargeToEdit = selected.size != null && selected.size > MAX_EDIT_BYTES;
+  // A symlink reports size:null (server lstat()s the link, not its target), but
+  // /api/files/content follows it — so a symlink pointing at a large file would slip past
+  // the size cap and load its whole target into CodeMirror. Treat symlinks and any
+  // unknown-size entry as non-editable; the download link below can still follow them.
+  const tooLargeToEdit =
+    selected.kind === 'symlink' || selected.size == null || selected.size > MAX_EDIT_BYTES;
   if (previewKind(selected.name, selected.mime || undefined) && !tooLargeToEdit) {
     return (
       <Suspense
