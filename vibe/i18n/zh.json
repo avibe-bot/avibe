@@ -31,6 +31,10 @@
     "avault": {
       "ready": "avault 已就绪。",
       "missing": "尚未安装 avault。请先在本地构建 avault 并放到 PATH 上，或设置 agents.avault.cli_path。",
+      "installed": "avault {version} 已安装。",
+      "noBuild": "没有适用于 {platform} 的 avault 构建。",
+      "checksumMismatch": "avault 下载校验失败。",
+      "installFailed": "avault 安装失败：{error}",
       "installedNotFound": "avault 已安装，但当前 PATH 找不到它；请重启服务或检查 PATH。",
       "alreadyRunning": "avault 安装或更新正在运行，请稍后重试。"
     }

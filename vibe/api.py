@@ -3290,6 +3290,8 @@ def _run_install_command(
 
 _ASKILL_INSTALL_LOCK = threading.Lock()
 _AVAULT_INSTALL_LOCK = threading.Lock()
+AVAULT_VERSION = "0.1.0"
+_AVAULT_RELEASE_BASE_URL = f"https://github.com/avibe-bot/avault/releases/download/v{AVAULT_VERSION}/"
 
 
 def _truncate_install_output(output: str, limit: int = 8192) -> str:
@@ -3396,30 +3398,140 @@ def _resolve_avault_cli_path() -> str | None:
     return None
 
 
-def install_avault() -> dict:
+def _avault_target() -> tuple[str | None, str]:
+    import platform
+
+    system = platform.system()
+    machine = platform.machine()
+    normalized_system = system.lower()
+    normalized_machine = machine.lower()
+    platform_label = f"{system or 'unknown'}-{machine or 'unknown'}"
+
+    if normalized_system == "darwin" and normalized_machine == "arm64":
+        return "macos-arm64", platform_label
+    if normalized_system == "linux" and normalized_machine in {"x86_64", "amd64"}:
+        return "linux-x64", platform_label
+    return None, platform_label
+
+
+def _avault_managed_bin_path() -> Path:
+    return Path.home() / ".local" / "bin" / "avault"
+
+
+def _download_avault_release_file(url: str) -> bytes:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/octet-stream",
+            "User-Agent": "avibe/avault-installer",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 - public GitHub release asset
+        return response.read()
+
+
+def _extract_avault_binary(archive_bytes: bytes, output_path: Path) -> None:
+    import io
+    import tarfile
+
+    output_real = output_path.parent.resolve()
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
+        member = next((item for item in archive.getmembers() if item.name == "avault"), None)
+        if member is None or not member.isfile():
+            raise ValueError("archive does not contain the avault executable")
+        target = (output_path.parent / member.name).resolve()
+        if target.parent != output_real or target.name != "avault":
+            raise ValueError("archive contains an unsafe avault path")
+        source = archive.extractfile(member)
+        if source is None:
+            raise ValueError("archive does not contain readable avault data")
+        with output_path.open("wb") as out:
+            shutil.copyfileobj(source, out)
+
+
+def _clear_macos_quarantine(path: Path) -> None:
+    if os.sys.platform != "darwin":
+        return
+    try:
+        os.removexattr(path, "com.apple.quarantine")
+    except (AttributeError, FileNotFoundError, OSError):
+        pass
+
+
+def install_avault(force: bool = False) -> dict:
     """Install (or refresh) avault, the required local custody-core dependency.
 
-    Stub-first integration: for now, accept a locally built binary already
-    reachable through ``agents.avault.cli_path`` or PATH. The real installer
-    should swap in here and use Avibe's manifest-pinned binary download path
-    with checksum verification once the avault release pipeline lands.
+    Downloads the Avibe-pinned public avault release manifest and tarball,
+    verifies the manifest sha256, safely extracts the single ``avault`` member,
+    and atomically installs it into Avibe's managed CLI location.
     """
     path = _resolve_avault_cli_path()
-    if path:
+    if path and not force:
         return {
             "ok": True,
             "message": backend_t("dependencies.avault.ready"),
             "output": None,
             "path": path,
         }
-    # TODO(vaults): download the Avibe-pinned avault release asset from the
-    # compatibility manifest, verify its checksum, install it into Avibe's
-    # managed bin dir, then return the resolved binary path.
-    return {
-        "ok": False,
-        "message": backend_t("dependencies.avault.missing"),
-        "output": None,
-    }
+
+    import hashlib
+    import tempfile
+
+    target, platform_label = _avault_target()
+    if target is None:
+        return {
+            "ok": False,
+            "message": backend_t("dependencies.avault.noBuild", platform=platform_label),
+            "output": None,
+            "path": None,
+        }
+
+    try:
+        manifest_url = urllib.parse.urljoin(_AVAULT_RELEASE_BASE_URL, "manifest.json")
+        manifest = json.loads(_download_avault_release_file(manifest_url).decode("utf-8"))
+        entry = manifest["versions"][AVAULT_VERSION][target]
+        asset = entry["asset"]
+        expected_sha256 = str(entry["sha256"]).strip().lower()
+        if not isinstance(asset, str) or not asset.endswith(".tar.gz") or "/" in asset:
+            raise ValueError("manifest contains an invalid avault asset name")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+            raise ValueError("manifest contains an invalid avault sha256")
+
+        archive_url = urllib.parse.urljoin(_AVAULT_RELEASE_BASE_URL, asset)
+        archive_bytes = _download_avault_release_file(archive_url)
+        actual_sha256 = hashlib.sha256(archive_bytes).hexdigest()
+        if actual_sha256 != expected_sha256:
+            return {
+                "ok": False,
+                "message": backend_t("dependencies.avault.checksumMismatch"),
+                "output": f"expected {expected_sha256}, got {actual_sha256}",
+                "path": None,
+            }
+
+        install_path = _avault_managed_bin_path()
+        install_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="avault-install-", dir=install_path.parent) as tmp_dir:
+            tmp_path = Path(tmp_dir) / "avault"
+            _extract_avault_binary(archive_bytes, tmp_path)
+            tmp_path.chmod(0o755)
+            os.replace(tmp_path, install_path)
+        install_path.chmod(0o755)
+        _clear_macos_quarantine(install_path)
+
+        return {
+            "ok": True,
+            "message": backend_t("dependencies.avault.installed", version=AVAULT_VERSION),
+            "output": f"Installed avault {AVAULT_VERSION} for {target}",
+            "path": str(install_path),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("avault install failed: %s", exc, exc_info=True)
+        return {
+            "ok": False,
+            "message": backend_t("dependencies.avault.installFailed", error=str(exc)),
+            "output": None,
+            "path": None,
+        }
 
 
 def ensure_avault_installed(force: bool = False) -> dict:
@@ -3435,11 +3547,11 @@ def ensure_avault_installed(force: bool = False) -> dict:
         existing = _resolve_avault_cli_path()
         if existing and not force:
             return {"ok": True, "installed": True, "changed": False, "path": existing}
-        result = install_avault()
+        result = install_avault(force=force)
         resolved = _resolve_avault_cli_path()
         installed = bool(resolved)
         result["installed"] = installed
-        result["changed"] = False
+        result["changed"] = installed and bool(result.get("ok")) and (not existing or force)
         result["path"] = resolved
         if result.get("ok") and not installed:
             result["ok"] = False

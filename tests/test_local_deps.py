@@ -8,9 +8,68 @@ shape.
 
 from __future__ import annotations
 
+import hashlib
+import io
+import json
+import tarfile
+
 import pytest
 
 from vibe import api
+
+
+class _FakeHTTPResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def _fake_avault_archive(content: bytes = b"#!/bin/sh\necho avault 0.1.0\n") -> bytes:
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w:gz") as archive:
+        info = tarfile.TarInfo("avault")
+        info.size = len(content)
+        info.mode = 0o755
+        archive.addfile(info, io.BytesIO(content))
+    return raw.getvalue()
+
+
+def _installable_avault_release(monkeypatch, *, target: str = "macos-arm64", sha256: str | None = None):
+    archive = _fake_avault_archive()
+    digest = sha256 or hashlib.sha256(archive).hexdigest()
+    manifest = {
+        "schema_version": 1,
+        "versions": {
+            api.AVAULT_VERSION: {
+                target: {
+                    "asset": f"avault-{api.AVAULT_VERSION}-{target}.tar.gz",
+                    "sha256": digest,
+                }
+            }
+        },
+    }
+    calls: list[str] = []
+
+    def fake_urlopen(request, timeout=30):
+        url = request.full_url
+        calls.append(url)
+        if url.endswith("/manifest.json"):
+            return _FakeHTTPResponse(json.dumps(manifest).encode("utf-8"))
+        if url.endswith(f"/avault-{api.AVAULT_VERSION}-{target}.tar.gz"):
+            return _FakeHTTPResponse(archive)
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(api.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(api.shutil, "which", lambda _binary: None)
+    return calls
 
 
 def test_install_askill_uses_official_curl_installer(monkeypatch):
@@ -123,14 +182,109 @@ def test_install_avault_uses_existing_configured_binary(monkeypatch):
     assert out["path"] == "/opt/avault/bin/avault"
 
 
-def test_install_avault_missing_is_clear_stub_failure(monkeypatch):
+def test_install_avault_unsupported_platform_is_clear_failure(monkeypatch):
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr(api, "resolve_cli_path", lambda _b: None)
+    monkeypatch.setattr("platform.system", lambda: "FreeBSD")
+    monkeypatch.setattr("platform.machine", lambda: "riscv64")
+    monkeypatch.setattr(api.urllib.request, "urlopen", lambda *a, **k: pytest.fail("should not download"))
 
     out = api.install_avault()
 
     assert out["ok"] is False
-    assert "agents.avault.cli_path" in out["message"]
+    assert "no avault build for FreeBSD-riscv64" in out["message"]
+
+
+def test_avault_target_detects_macos_arm64(monkeypatch):
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    monkeypatch.setattr("platform.machine", lambda: "arm64")
+
+    assert api._avault_target() == ("macos-arm64", "Darwin-arm64")
+
+
+def test_avault_target_detects_linux_x64(monkeypatch):
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+    monkeypatch.setattr("platform.machine", lambda: "amd64")
+
+    assert api._avault_target() == ("linux-x64", "Linux-amd64")
+
+
+def test_install_avault_downloads_manifest_verifies_and_installs(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    monkeypatch.setattr("platform.machine", lambda: "arm64")
+    calls = _installable_avault_release(monkeypatch, target="macos-arm64")
+
+    out = api.install_avault()
+
+    installed = api.Path.home() / ".local" / "bin" / "avault"
+    assert out["ok"] is True
+    assert out["path"] == str(installed)
+    assert installed.exists()
+    assert installed.stat().st_mode & 0o777 == 0o755
+    assert api.resolve_cli_path("avault") == str(installed)
+    assert calls == [
+        f"https://github.com/avibe-bot/avault/releases/download/v{api.AVAULT_VERSION}/manifest.json",
+        f"https://github.com/avibe-bot/avault/releases/download/v{api.AVAULT_VERSION}/avault-{api.AVAULT_VERSION}-macos-arm64.tar.gz",
+    ]
+
+
+def test_install_avault_downloads_linux_x64_asset(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+    monkeypatch.setattr("platform.machine", lambda: "x86_64")
+    calls = _installable_avault_release(monkeypatch, target="linux-x64")
+
+    out = api.install_avault()
+
+    assert out["ok"] is True
+    assert calls[-1].endswith(f"/avault-{api.AVAULT_VERSION}-linux-x64.tar.gz")
+
+
+def test_install_avault_checksum_mismatch_installs_nothing(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    monkeypatch.setattr("platform.machine", lambda: "arm64")
+    _installable_avault_release(monkeypatch, target="macos-arm64", sha256="0" * 64)
+
+    out = api.install_avault()
+
+    installed = api.Path.home() / ".local" / "bin" / "avault"
+    assert out["ok"] is False
+    assert "checksum" in out["message"]
+    assert not installed.exists()
+
+
+def test_install_avault_is_idempotent_when_present(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api.shutil, "which", lambda _binary: None)
+    installed = api.Path.home() / ".local" / "bin" / "avault"
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    installed.write_text("#!/bin/sh\n", encoding="utf-8")
+    installed.chmod(0o755)
+    monkeypatch.setattr(api.urllib.request, "urlopen", lambda *a, **k: pytest.fail("should not download"))
+
+    out = api.install_avault()
+
+    assert out["ok"] is True
+    assert out["path"] == str(installed)
+
+
+def test_install_avault_force_redownloads_when_present(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    monkeypatch.setattr("platform.machine", lambda: "arm64")
+    installed = api.Path.home() / ".local" / "bin" / "avault"
+    installed.parent.mkdir(parents=True, exist_ok=True)
+    installed.write_text("old\n", encoding="utf-8")
+    installed.chmod(0o755)
+    calls = _installable_avault_release(monkeypatch, target="macos-arm64")
+
+    out = api.install_avault(force=True)
+
+    assert out["ok"] is True
+    assert len(calls) == 2
+    assert installed.read_text(encoding="utf-8").startswith("#!/bin/sh")
 
 
 def test_avault_resolves_path_fallback_when_configured_path_missing(monkeypatch):
@@ -152,7 +306,7 @@ def test_ensure_avault_idempotent_when_present(monkeypatch):
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
     flag = {"installed": False}
-    monkeypatch.setattr(api, "install_avault", lambda: flag.__setitem__("installed", True) or {"ok": True})
+    monkeypatch.setattr(api, "install_avault", lambda force=False: flag.__setitem__("installed", True) or {"ok": True})
 
     out = api.ensure_avault_installed()
 
@@ -164,14 +318,14 @@ def test_ensure_avault_force_rechecks_existing_binary(monkeypatch):
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
     flag = {"installed": False}
-    monkeypatch.setattr(api, "install_avault", lambda: flag.__setitem__("installed", True) or {"ok": True})
+    monkeypatch.setattr(api, "install_avault", lambda force=False: flag.__setitem__("installed", True) or {"ok": True})
 
     out = api.ensure_avault_installed(force=True)
 
     assert flag["installed"] is True
     assert out["ok"] is True
     assert out["installed"] is True
-    assert out["changed"] is False
+    assert out["changed"] is True
 
 
 def test_avault_status_missing(monkeypatch):

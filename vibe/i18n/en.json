@@ -31,6 +31,10 @@
     "avault": {
       "ready": "avault ready.",
       "missing": "avault is not installed. Build avault locally and put it on PATH, or set agents.avault.cli_path.",
+      "installed": "avault {version} installed.",
+      "noBuild": "no avault build for {platform}",
+      "checksumMismatch": "avault download checksum verification failed.",
+      "installFailed": "avault install failed: {error}",
       "installedNotFound": "avault installed but was not found on PATH; restart the service or check PATH.",
       "alreadyRunning": "avault install or update is already running; try again shortly."
     }
