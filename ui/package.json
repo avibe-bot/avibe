@@ -25,6 +25,8 @@
     "@shikijs/themes": "^4.2.0",
     "@uiw/react-codemirror": "^4.25.10",
     "@uiw/react-json-view": "^2.0.0-alpha.43",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "agentation": "^3.0.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

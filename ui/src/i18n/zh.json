@@ -582,7 +582,18 @@
     "terminal": {
       "label": "终端",
       "desc": "在浏览器里跑真实 shell。",
-      "placeholder": "终端将在第二阶段上线:真实 shell,配 tmux 持久化会话。"
+      "placeholder": "终端将在第二阶段上线:真实 shell,配 tmux 持久化会话。",
+      "tagline": "在浏览器里跑真实 shell。",
+      "persistent": "持久会话",
+      "reconnect": "重新连接",
+      "disabled": "终端未开启。在服务端设置 VIBE_UI_ENABLE_TERMINAL 后,重新打开此页即可。",
+      "status": {
+        "connecting": "连接中…",
+        "ready": "已连接",
+        "closed": "会话已结束",
+        "disabled": "未开启",
+        "error": "已断开"
+      }
     }
   },
   "appShell": {

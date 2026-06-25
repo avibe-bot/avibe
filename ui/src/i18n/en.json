@@ -582,7 +582,18 @@
     "terminal": {
       "label": "Terminal",
       "desc": "A real shell in your browser.",
-      "placeholder": "The Terminal arrives in Phase 2: a real shell with tmux-backed persistent sessions."
+      "placeholder": "The Terminal arrives in Phase 2: a real shell with tmux-backed persistent sessions.",
+      "tagline": "A real shell, in your browser.",
+      "persistent": "Persistent",
+      "reconnect": "Reconnect",
+      "disabled": "The Terminal is turned off. Enable it by setting VIBE_UI_ENABLE_TERMINAL on the server, then reopen this page.",
+      "status": {
+        "connecting": "Connecting…",
+        "ready": "Connected",
+        "closed": "Session ended",
+        "disabled": "Disabled",
+        "error": "Disconnected"
+      }
     }
   },
   "appShell": {
