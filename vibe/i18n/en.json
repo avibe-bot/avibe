@@ -425,6 +425,8 @@
   "remote_access": {
     "oauth_error": {
       "sign_in_again": "Sign in again",
+      "diagnostics_summary": "Technical details",
+      "diagnostics_hint": "Copy these details when contacting support.",
       "cookie_hint": "Still stuck after trying again? Make sure your browser allows cookies for this site.",
       "default_title": "Let's sign you in again",
       "default_body": "Your sign-in didn't finish. Please try again.",

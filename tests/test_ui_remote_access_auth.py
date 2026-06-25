@@ -1061,6 +1061,9 @@ def test_remote_callback_explains_pairing_mismatch(monkeypatch, tmp_path):
     assert "remote_pairing_mismatch" in response.text
     assert "Reconnect this Avibe" in response.text
     assert "pair Remote Access again" in response.text
+    assert "Technical details" in response.text
+    assert "reason: invalid_instance_id" in response.text
+    assert "error: remote_pairing_mismatch" in response.text
 
 
 def test_remote_callback_explains_clock_mismatch(monkeypatch, tmp_path):
@@ -1084,6 +1087,7 @@ def test_remote_callback_explains_clock_mismatch(monkeypatch, tmp_path):
     assert response.status_code == 400
     assert "oauth_time_mismatch" in response.text
     assert "Check this machine&#x27;s clock" in response.text
+    assert "reason: expired_id_token" in response.text
 
 
 def test_remote_callback_rejects_when_remote_access_is_disabled(monkeypatch, tmp_path):
@@ -1176,6 +1180,25 @@ def test_remote_callback_renders_relogin_page_for_legacy_state(monkeypatch, tmp_
     assert "invalid_oauth_state" in response.text
     assert "Sign in again" in response.text
     assert 'href="/"' in response.text
+
+
+def test_remote_callback_diagnostics_do_not_expose_oauth_parameters(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    client = app.test_client()
+
+    response = client.get(
+        "/auth/callback?code=secret-code&state=secret-state",
+        base_url="https://alex.avibe.bot",
+    )
+
+    assert response.status_code == 400
+    assert "invalid_oauth_state" in response.text
+    assert "Technical details" in response.text
+    assert "error: invalid_oauth_state" in response.text
+    assert "host: alex.avibe.bot" in response.text
+    assert "secret-code" not in response.text
+    assert "secret-state" not in response.text
 
 
 def test_remote_callback_recovers_via_store_when_cookie_state_desyncs(monkeypatch, tmp_path):

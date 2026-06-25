@@ -425,6 +425,8 @@
   "remote_access": {
     "oauth_error": {
       "sign_in_again": "重新登录",
+      "diagnostics_summary": "技术细节",
+      "diagnostics_hint": "联系支持时请复制这段信息。",
       "cookie_hint": "重试后仍然卡住?请确认浏览器允许本站使用 Cookie。",
       "default_title": "重新登录一下",
       "default_body": "登录未完成,请重试。",
