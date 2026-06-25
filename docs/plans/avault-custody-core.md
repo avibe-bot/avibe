@@ -422,6 +422,76 @@ All settled; the authoritative record is **`avault/docs/DESIGN.md` §16**. Summa
 
 ---
 
+## 18. Concrete P1 rework of #631 (Avibe-side)
+
+*Added 2026-06-25 after mapping the P0 consumer surface against avault's P1 CLI. This is the build plan for routing Vaults value-crypto through `avault` and retiring the Python crypto path.*
+
+### 18.1 The consumer surface (what touches plaintext today)
+
+Every standard-tier crypto call lives in two modules — and **the long-lived daemon only ever _seals_ (on create); all _decryption_ happens in short-lived `vibe vault …` CLI processes.** That shape matters: the daemon is almost clean already.
+
+| Path | Code | Crypto today | Plaintext destination |
+|---|---|---|---|
+| Create (REST) | `vibe/api.py:create_vault_secret` → `vault_service.create_secret` → `seal_standard` | seal (daemon) | — (stores ciphertext) |
+| Create (CLI) | `cmd_vault_set` → `create_secret` → `seal_standard` | seal | — |
+| Rotate | `vault_service.rotate_secret` → `seal_standard` | seal | — (unused in P0) |
+| Run | `cmd_vault_run` → `resolve` → `subprocess.Popen(env=…)` | open ×N | child env (1 child, N vars) |
+| Export | `cmd_vault_export` → `resolve` → stdout | open ×N | shell (`eval $(…)`) |
+| Inject | `cmd_vault_inject` → `resolve` → `_write_private_file` | open ×N | 0600 config file (dotenv/json/yaml/toml) |
+| Fetch | `cmd_vault_fetch` → `open_secret_value` → `httpx` | open ×1 | outbound HTTP header/query |
+| Key export/import | `cmd_vault_key_*` → `export/import_machine_key` | machine-key wrap | passphrase-wrapped blob |
+
+`machine.key` is read **only** through `vault_crypto`; no other module reads it. REST has **no decrypt endpoint** (list/create/delete/audit only). `is_valid_secret_name` is pure — it stays in Python.
+
+### 18.2 Why this can't be a thin reroute on avault-as-built
+
+Two facts collide:
+
+1. **avault `seal` binds AAD = `name‖scheme‖version`; Python `open_standard` uses no AAD.** avault can read old no-AAD P0 blobs (its `open` has a no-AAD fallback), but **Python cannot read avault's new AAD blobs.** So the moment `create/set` routes to `avault seal`, every new secret is AAD-bound — and any *open* path still on Python breaks for those secrets.
+2. **avault's P1 CLI delivery surface is incomplete for Avibe's needs:** `deliver run` is **single-secret → single child env var** (verified: `parse_deliver_run_options` takes one `--name`/`--env`, one envelope); `deliver fetch` and `deliver inject` are explicit **P2 stubs** (`bail!("…P2 stub…")`); there is no `export`/stdout mode.
+
+Together: you **cannot partially migrate**. Routing `seal` to avault forces *all* opens to avault (AAD), but avault can't yet cover multi-secret `run`, `fetch`, `export`, or `inject`. **So the Avibe rework is gated on an avault `P1.1` that completes the delivery surface.**
+
+### 18.3 Prerequisite — avault P1.1 (complete the deliver surface)
+
+In the avault repo, before the Avibe rework:
+
+- **Multi-secret `deliver run`:** accept N `(name, env, envelope)` tuples (envelopes as a JSON array on stdin) → decrypt all → spawn **one** child with all env vars → exit code. (`run --env A --env B` needs one child with both.)
+- **`deliver fetch`:** perform the brokered HTTP request in Rust (egress with the secret in header/bearer/query), return only the response (status + body). Add a small blocking HTTP client (`ureq` + `rustls`) **to `avault-cli` only**; `avault-core` stays pure.
+- **`deliver export`:** write `export NAME=value` lines to **inherited stdout** (value reaches the user's shell, never Avibe — Avibe execs avault with stdout inherited, does not capture).
+- **`deliver inject`:** render a 0600 file — dotenv + json natively (serde_json already present); yaml/toml may defer to P2.
+
+All keep the invariant: plaintext flows only *into* avault; out comes an exit code / response / a written delivery target — never a value returned to Python.
+
+### 18.4 The Avibe rework (after P1.1)
+
+- **`vault_service.create_secret` / `rotate_secret`** → spawn `avault seal --name <N>`, value on **stdin** (the daemon's transient POST plaintext piped straight through; never logged/persisted), parse `{ciphertext,nonce,wrap_meta}`, store. **Removes the daemon's only crypto + its only `machine.key` read.**
+- **`cmd_vault_run`** → `avault deliver run` (multi-secret); envelopes from the DB on stdin. Drop `resolve()` + `Popen` here.
+- **`cmd_vault_export` / `cmd_vault_inject`** → `avault deliver export|inject`.
+- **`cmd_vault_fetch`** → `avault deliver fetch` (policy/host-allowlist check stays in Python *before* the call).
+- **`cmd_vault_key_export|import`** → `avault key export|import`.
+- **Delete** `seal_standard` / `open_standard` / `get_machine_key` / `export/import_machine_key` from `vault_crypto.py` (keep `is_valid_secret_name` and the `Sealed` shape for DB I/O). `resolve` / `open_secret_value` become DB-row readers that hand envelopes to avault, not decryptors.
+- **No data migration:** avault reads old P0 (no-AAD fallback) and new (AAD) blobs alike; existing secrets keep working untouched. Optional lazy re-seal-to-AAD on next rotate.
+- **Audit / usage / policy / DB / `$<NAME>` / approval** — unchanged, Python-owned. `record_deliveries` / `record_proxy_use` still fire after avault returns success.
+
+End state: **Python performs no cryptography and never reads `machine.key`.** avault owns the key and all value crypto.
+
+### 18.5 Mechanics
+
+- Resolve the binary via the already-plumbed `_resolve_avault_cli_path()` (commit e7d235f6) / `agents.avault.cli_path`.
+- Control args via argv; **values + envelopes via stdin**; results via **stdout JSON** / exit code. Keep blobs out of argv (no `ps` leak).
+- Map avault non-zero exits → the existing `VaultServiceError` family so REST/CLI error behavior is preserved.
+- Hermetic tests (isolated `VIBE_REMOTE_HOME`, never real `~/.avibe`): a real built `avault` on PATH drives end-to-end seal→deliver round-trips, incl. reading a pre-seeded P0 (no-AAD) blob; unit tests stub the subprocess.
+
+### 18.6 The one decision
+
+- **(A) All-in (recommended):** land avault P1.1 (§18.3), then migrate every path (§18.4). Clean final form, AAD everywhere, Python crypto fully gone, no mixed-reader fragility, no data migration. Cost: avault P1.1 first (notably an HTTP client in `avault-cli` for `fetch`).
+- **(B) No-AAD wire-compat (incremental):** make avault P1 `seal` write **P0-identical no-AAD** blobs (a `--p0-compat` mode) so avault and Python interoperate on the same blobs; migrate command-by-command; add AAD + retire Python in P2. Cheaper to start, but defers AAD (anti-transplant) and runs a two-reader window.
+
+Recommend **(A)** — it is the "最终形态" asked for and avoids a fragile coexistence window; the avault P1.1 verbs are small and well-scoped.
+
+---
+
 ## Appendix A — relationship to `vt`
 
 **Borrow (the ≈1.1k-LOC pure core ideas):** `AesGcmCrypto`, `derive_dek` (HKDF), the AEAD-with-AAD discipline, the v2 envelope + **DEK-release** protocol, `AuthCache`'s rigor (as our grant cache), and the zeroize discipline throughout.
