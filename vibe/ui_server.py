@@ -2083,11 +2083,10 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
         # POSIX-only — no PTY/tmux on native Windows.
         await websocket.close(code=1008)
         return
-    # CSWSH guard for the local-trust path (a loopback request has no cookie gate):
-    # require a same-HOST Origin. HOST only — scheme/port are unreliable behind a
-    # TLS-terminating proxy (Cloudflare), which is what broke legitimate remote
-    # terminals. Do NOT reject on forwarded metadata (remote/CF carries it).
-    if not _websocket_origin_matches_host(websocket):
+    # CSWSH guard. Remote terminals have a session cookie and may sit behind a
+    # TLS proxy, so host match is the stable check there. Local trusted terminal
+    # sockets have no cookie gate, so the Origin must match the exact socket too.
+    if not _terminal_origin_allowed(websocket):
         await websocket.close(code=1008)
         return
     if not _show_runtime_websocket_authorized(websocket):
@@ -2131,15 +2130,45 @@ def _show_runtime_websocket_authorized(websocket: WebSocket) -> bool:
     ) is not None
 
 
-def _websocket_origin_matches_host(websocket: WebSocket) -> bool:
-    # Compare HOST only: a TLS-terminating proxy (Cloudflare) means the client's
-    # scheme/port (https/443) won't match the local socket (ws/80), so comparing
-    # them rejected legitimate remote terminals. The host still blocks cross-site
-    # origins (e.g. evil.example) for the unauthenticated local-trust path.
+def _terminal_origin_allowed(websocket: WebSocket) -> bool:
     origin = _request_origin(websocket.headers.get("origin"))
     if not origin:
         return False
-    return _normalized_host(urlparse(origin).netloc) == _websocket_normalized_host(websocket)
+    parsed_origin = urlparse(origin)
+    if _normalized_host(parsed_origin.netloc) != _websocket_normalized_host(websocket):
+        return False
+    if not _websocket_is_local_request(websocket):
+        return True
+    origin_port = _origin_port(parsed_origin.netloc, parsed_origin.scheme)
+    request_port = _origin_port(websocket.headers.get("host"), websocket.url.scheme)
+    return origin_port == request_port and _terminal_origin_scheme_matches_socket(
+        parsed_origin.scheme,
+        websocket.url.scheme,
+    )
+
+
+def _origin_port(netloc: str | None, scheme: str | None) -> int | None:
+    if not netloc:
+        return None
+    parsed = urlparse(f"//{netloc}")
+    try:
+        explicit_port = parsed.port
+    except ValueError:
+        return None
+    if explicit_port is not None:
+        return explicit_port
+    normalized_scheme = (scheme or "").lower()
+    if normalized_scheme in {"https", "wss"}:
+        return 443
+    if normalized_scheme in {"http", "ws"}:
+        return 80
+    return None
+
+
+def _terminal_origin_scheme_matches_socket(origin_scheme: str | None, socket_scheme: str | None) -> bool:
+    origin_secure = (origin_scheme or "").lower() == "https"
+    socket_secure = (socket_scheme or "").lower() == "wss"
+    return origin_secure == socket_secure
 
 
 def _websocket_is_local_request(websocket: WebSocket, config: V2Config | None = None) -> bool:

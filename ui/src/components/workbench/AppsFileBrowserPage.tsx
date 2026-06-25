@@ -7,6 +7,7 @@ import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext
 import { previewKind } from '../../lib/filePreview';
 import {
   contentUrl,
+  fileBrowserErrorMessage,
   fileMeta,
   joinPath,
   listDir,
@@ -52,7 +53,7 @@ export const AppsFileBrowserPage: React.FC = () => {
           setCwd(r.path);
           setListing(r);
         })
-        .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to list'))
+        .catch((e: unknown) => setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.listFailed'))))
         .finally(() => setLoading(false));
     },
     [showHidden],
@@ -65,6 +66,7 @@ export const AppsFileBrowserPage: React.FC = () => {
   // Pick an initial directory once: first pinned project, else the home favorite.
   useEffect(() => {
     if (cwd) return;
+    if (projects === null) return;
     const initial = projects?.[0]?.folder_path || sysFavs.find((f) => f.key === 'home')?.path;
     if (initial) navigate(initial);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -84,7 +86,7 @@ export const AppsFileBrowserPage: React.FC = () => {
     } else {
       fileMeta(full)
         .then((m) => setSelected({ path: full, name: entry.name, kind: m.kind, mime: m.mime, mtime: m.mtime, size: m.size }))
-        .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to open'));
+        .catch((e: unknown) => setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.openFailed'))));
     }
   };
 
@@ -95,7 +97,7 @@ export const AppsFileBrowserPage: React.FC = () => {
       await makeDir(joinPath(cwd, name));
       navigate(cwd);
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : 'Failed to create folder');
+      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.createFolderFailed')));
     }
   };
 

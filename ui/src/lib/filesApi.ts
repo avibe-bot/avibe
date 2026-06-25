@@ -39,6 +39,14 @@ export class FilesApiError extends Error {
   }
 }
 
+export function fileBrowserErrorMessage(error: unknown, t: (key: string) => string, fallback: string): string {
+  if (error instanceof FilesApiError) {
+    const translated = t(`apps.fileBrowser.errors.${error.code}`);
+    return translated === `apps.fileBrowser.errors.${error.code}` ? error.message : translated;
+  }
+  return error instanceof Error ? error.message : fallback;
+}
+
 async function parse<T>(res: Response): Promise<T> {
   const data = await res.json().catch(() => ({}) as Record<string, unknown>);
   if (!res.ok || (data as { ok?: boolean }).ok === false) {

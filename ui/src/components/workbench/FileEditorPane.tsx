@@ -5,7 +5,7 @@ import { languages } from '@codemirror/language-data';
 import clsx from 'clsx';
 
 import { Button } from '../ui/button';
-import { FilesApiError, readText, writeFile } from '../../lib/filesApi';
+import { fileBrowserErrorMessage, readText, writeFile } from '../../lib/filesApi';
 
 // CodeMirror 6 is heavy; lazy-load it so it stays out of the main bundle (same
 // approach as the file-viewer modal). @uiw/react-codemirror's default export is
@@ -52,7 +52,7 @@ export const FileEditorPane: React.FC<{ path: string; filename: string; mtime: n
         setOriginal(body);
       })
       .catch((e: unknown) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load');
+        if (!cancelled) setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.loadFailed')));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -76,11 +76,7 @@ export const FileEditorPane: React.FC<{ path: string; filename: string; mtime: n
       setOriginal(text);
       setSavedMtime(result.mtime);
     } catch (e: unknown) {
-      if (e instanceof FilesApiError && e.code === 'conflict') {
-        setError(t('apps.fileBrowser.conflict'));
-      } else {
-        setError(e instanceof Error ? e.message : 'Save failed');
-      }
+      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.saveFailed')));
     } finally {
       setSaving(false);
     }

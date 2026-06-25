@@ -617,7 +617,25 @@
       "showHidden": "显示隐藏文件",
       "save": "保存",
       "unsaved": "有未保存的修改",
-      "conflict": "打开后该文件在磁盘上已被改动。请先重新加载再保存,以免覆盖。"
+      "conflict": "打开后该文件在磁盘上已被改动。请先重新加载再保存,以免覆盖。",
+      "errors": {
+        "conflict": "打开后该文件在磁盘上已被改动。请先重新加载再保存,以免覆盖。",
+        "not_found": "找不到这个路径。",
+        "permission_denied": "没有权限访问。",
+        "too_large": "这个文件太大。",
+        "not_dir": "这个路径不是文件夹。",
+        "not_file": "这个路径不是普通文件。",
+        "is_symlink": "这里不能编辑符号链接。",
+        "invalid_path": "请输入有效的绝对路径。",
+        "invalid_name": "请输入有效名称。",
+        "exists": "这个路径已存在。",
+        "fs_error": "文件系统操作失败。",
+        "listFailed": "无法列出这个文件夹。",
+        "openFailed": "无法打开这个项目。",
+        "createFolderFailed": "无法创建文件夹。",
+        "loadFailed": "无法加载这个文件。",
+        "saveFailed": "无法保存这个文件。"
+      }
     },
     "terminal": {
       "label": "终端",

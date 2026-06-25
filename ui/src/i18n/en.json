@@ -617,7 +617,25 @@
       "showHidden": "Show hidden files",
       "save": "Save",
       "unsaved": "Unsaved changes",
-      "conflict": "This file changed on disk since you opened it. Reload before saving to avoid overwriting it."
+      "conflict": "This file changed on disk since you opened it. Reload before saving to avoid overwriting it.",
+      "errors": {
+        "conflict": "This file changed on disk since you opened it. Reload before saving to avoid overwriting it.",
+        "not_found": "Path not found.",
+        "permission_denied": "Permission denied.",
+        "too_large": "This file is too large.",
+        "not_dir": "Path is not a folder.",
+        "not_file": "Path is not a regular file.",
+        "is_symlink": "Symbolic links cannot be edited here.",
+        "invalid_path": "Enter a valid absolute path.",
+        "invalid_name": "Enter a valid name.",
+        "exists": "Path already exists.",
+        "fs_error": "File system operation failed.",
+        "listFailed": "Couldn't list this folder.",
+        "openFailed": "Couldn't open this item.",
+        "createFolderFailed": "Couldn't create the folder.",
+        "loadFailed": "Couldn't load this file.",
+        "saveFailed": "Couldn't save this file."
+      }
     },
     "terminal": {
       "label": "Terminal",

@@ -237,6 +237,41 @@ def test_terminal_websocket_rejects_cross_origin(monkeypatch, tmp_path):
     assert exc.value.code == 1008
 
 
+def test_terminal_websocket_rejects_local_origin_from_different_port(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with app.test_client().websocket_connect(
+            "/api/terminal/test",
+            headers={"host": "127.0.0.1", "origin": "http://127.0.0.1:3000"},
+        ):
+            pass
+
+    assert exc.value.code == 1008
+
+
+def test_terminal_websocket_accepts_local_origin_from_same_port(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    accepted = False
+
+    async def fake_handle_websocket(websocket, session_id):
+        nonlocal accepted
+        accepted = True
+
+    monkeypatch.setattr(ui_server.get_terminal_service(), "handle_websocket", fake_handle_websocket)
+
+    with app.test_client().websocket_connect(
+        "/api/terminal/test",
+        headers={"host": "127.0.0.1:5123", "origin": "http://127.0.0.1:5123"},
+    ):
+        pass
+
+    assert accepted is True
+
+
 def test_terminal_service_ignores_invalid_limit_env(monkeypatch):
     monkeypatch.setattr(ui_server, "_terminal_service", None)
     monkeypatch.setenv(ui_server.TERMINAL_IDLE_TIMEOUT_ENV, "1h")
