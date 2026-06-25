@@ -1773,6 +1773,14 @@ class ConsolidatedMessageDispatcher:
                     logger.warning("Failed to send split result chunk %d: %s", index, err)
                     message_id = None
 
+            if index == 0 and message_id is None:
+                # The HEAD chunk failed: abandon the split and return None so the
+                # caller's fallback delivers the COMPLETE content (e.g. as a .md
+                # upload). Returning a later chunk's id here would mark a head-less
+                # partial — the user seeing only the tail — as a successful delivery.
+                logger.warning("Split result head chunk failed to send; abandoning partial split")
+                return None
+
             if first_message_id is None and message_id is not None:
                 first_message_id = message_id
 

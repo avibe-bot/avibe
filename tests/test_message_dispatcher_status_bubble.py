@@ -277,6 +277,32 @@ class StatusBubbleResultTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result_id, "msg-2")  # first chunk delivered
         self.assertEqual(controller.im_client.deletes, ["msg-1"])  # bubble still retired
 
+    async def test_split_head_chunk_failure_returns_none(self):
+        # If the HEAD chunk fails to send, the split is abandoned (returns None) so
+        # the caller's fallback delivers the COMPLETE content — never a head-less
+        # partial marked as delivered just because a later chunk happened to send.
+        class _FailFirstChunk(_EditClient):
+            def __init__(self):
+                super().__init__()
+                self._x_sends = 0
+
+            async def send_message(self, context, text, parse_mode=None, reply_to=None, subtext=None):
+                if text.startswith("x"):
+                    self._x_sends += 1
+                    if self._x_sends == 1:  # fail ONLY the head chunk
+                        raise RuntimeError("head chunk send failed")
+                return await super().send_message(context, text, parse_mode, reply_to, subtext)
+
+        controller = _StubController(platform="discord", im_client=_FailFirstChunk())
+        d = _dispatcher(controller)
+        ctx = _ctx("discord")
+        result = await d._send_split_result_messages(
+            controller.im_client, ctx, "x" * 2500, [], "markdown"
+        )
+        self.assertIsNone(result)  # abandoned → caller falls back to full delivery
+        # No chunk was kept as the anchor (head missing).
+        self.assertEqual([t for _, t, _ in controller.im_client.sent if t.startswith("x")][:1], [])
+
     async def test_slack_result_delivered_via_native_markdown_then_bubble_deleted(self):
         # A Slack result is delivered inline via the native markdown sender as a
         # FRESH message (carrying the done footer as subtext); the bubble is then
