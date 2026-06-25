@@ -880,25 +880,31 @@ async def end_running_agent(
             composite_key=composite_key,
             base_session_id=base_session_id,
         )
-        if not stop_result.get("ok"):
-            return stop_result
-        # The canonical stop SETTLES the turn (releases the runtime gate / pending
-        # requests / terminal result) but only INTERRUPTS it; it does not free the
-        # rest of the runtime. Without this, "End" on an active row would leave the
-        # row behind and force a second Disconnect:
-        #   - codex keeps its session mappings + shared app-server transport,
-        #   - opencode keeps its local polling task,
-        #   - claude's CLI subprocess can linger after the client disconnects.
-        # Claude's client is already removed by the stop path (so its row clears and
-        # calling _end_claude here would wrongly report ``session_not_live``); only
-        # the leftover subprocess needs reaping.
+        stop_ok = bool(stop_result.get("ok"))
+        # The canonical stop interrupts the turn (and releases its runtime gate via
+        # the turn's own context — verified in Incus) but does NOT free the rest of
+        # the runtime. Finish the teardown so the row clears instead of forcing a
+        # second Disconnect.
         if backend == "codex":
+            # Tear down even when the stop FAILED: a stale-active row whose turn can
+            # no longer be interrupted (app-server died) must still be clearable via
+            # End, otherwise it sticks in the tab forever.
             teardown = await _end_codex(controller, base_session_id)
-            if isinstance(teardown, dict) and teardown.get("process_killed"):
-                stop_result["process_killed"] = True
-        elif backend == "opencode":
+            if isinstance(teardown, dict) and teardown.get("ok"):
+                result = dict(stop_result) if stop_ok else {"ok": True, "action": "ended", "backend": "codex"}
+                if teardown.get("process_killed"):
+                    result["process_killed"] = True
+                return result
+            return stop_result if stop_ok else (teardown if isinstance(teardown, dict) else stop_result)
+
+        if not stop_ok:
+            return stop_result
+        if backend == "opencode":
             await _end_opencode(controller, base_session_id)
         elif backend == "claude" and isinstance(claude_pid, int):
+            # Claude's client is already removed by the stop path (so its row clears,
+            # and calling _end_claude here would wrongly report ``session_not_live``);
+            # only the leftover CLI subprocess needs reaping.
             try:
                 from modules.agents.claude_process_reaper import _reap_pid_set
 

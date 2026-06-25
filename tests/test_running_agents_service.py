@@ -666,7 +666,11 @@ def test_end_active_codex_frees_runtime_after_stop():
         clear_session=lambda b: cleared.__setitem__("treg", b),
     )
     codex = types.SimpleNamespace(
-        _session_mgr=mgr, _turn_registry=treg, _transports=transports, _transport_last_activity={"/w": 0.0}
+        _session_mgr=mgr,
+        _turn_registry=treg,
+        _transports=transports,
+        _transport_last_activity={"/w": 0.0},
+        _runtime_turn_key_for_base_session=lambda b: f"{b}:/w",
     )
     controller = _make_controller(codex=codex)
     controller.session_turns = types.SimpleNamespace(is_in_flight=lambda sid: False, cancel=_AsyncFlag())
@@ -682,6 +686,44 @@ def test_end_active_codex_frees_runtime_after_stop():
     assert cleared.get("clr") == "b1" and cleared.get("treg") == "b1"
     assert transport.stop.called and "/w" not in transports
     assert res["process_killed"] is True
+
+
+def test_end_active_codex_clears_stale_row_even_when_stop_fails():
+    # A stale-active codex row (turn still in the registry but the app-server died)
+    # makes the canonical stop fail; End must still tear it down + release the gate
+    # so the row clears instead of sticking forever.
+    async def _handle_stop(context):
+        return False
+
+    cleared = {}
+    mgr = types.SimpleNamespace(
+        get_cwd=lambda b: "/w",
+        get_thread_id=lambda b: None,
+        clear=lambda b: cleared.__setitem__("clr", b),
+        sessions_for_cwd=lambda cwd: [],
+    )
+    treg = types.SimpleNamespace(
+        get_active_turn=lambda b: "stale-turn",
+        clear_session=lambda b: cleared.__setitem__("treg", b),
+    )
+    codex = types.SimpleNamespace(
+        _session_mgr=mgr,
+        _turn_registry=treg,
+        _transports={},  # app-server already gone
+        _transport_last_activity={},
+        _runtime_turn_key_for_base_session=lambda b: f"{b}:/w",
+    )
+    controller = _make_controller(codex=codex)
+    controller.session_turns = types.SimpleNamespace(is_in_flight=lambda sid: False, cancel=_AsyncFlag())
+    controller.command_handler = types.SimpleNamespace(handle_stop=_handle_stop)
+
+    res = asyncio.run(
+        running_agents.end_running_agent(
+            controller, backend="codex", state="active", session_id="s", base_session_id="b1"
+        )
+    )
+    assert res["ok"] is True  # teardown cleared the stale row despite the failed stop
+    assert cleared.get("clr") == "b1" and cleared.get("treg") == "b1"
 
 
 def test_end_unknown_target():
