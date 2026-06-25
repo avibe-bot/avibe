@@ -1,138 +1,181 @@
-"""CLI tests for the help-only delivery modes ``vibe vault export`` / ``inject``."""
+"""CLI tests for ``vibe vault export`` / ``inject`` with avault-backed delivery."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import stat
 
 import pytest
 
+from storage import vault_service
+from storage.vault_crypto import Sealed
 from vibe import cli
 
 
 def _ns(**kw):
     base = dict(
-        name=None, stdin=False, from_file=None, group=None, tag=None, description=None,
-        allow_host=None, auth_header=None, auth_query=None,
-        env=None, keys=None, out=None, format="dotenv", json=False,
+        name=None,
+        stdin=False,
+        from_file=None,
+        group=None,
+        tag=None,
+        description=None,
+        allow_host=None,
+        auth_header=None,
+        auth_query=None,
+        env=None,
+        keys=None,
+        out=None,
+        format="dotenv",
+        json=False,
     )
     base.update(kw)
     return argparse.Namespace(**base)
 
 
-def _set(name, value, tmp_path):
+def _sealed(suffix: str = "1") -> Sealed:
+    return Sealed(ciphertext=f"ct-{suffix}", nonce=f"n-{suffix}", wrap_meta=f"wm-{suffix}")
+
+
+def _set(name, value, tmp_path, monkeypatch, capfd, *, sealed: Sealed | None = None):
+    from unittest.mock import Mock
+
+    from vibe import api
+
     vf = tmp_path / f"{name}.txt"
     vf.write_text(value)
+    monkeypatch.setattr(api, "avault_seal", Mock(return_value=sealed or _sealed(name.lower())))
     assert cli.cmd_vault_set(_ns(name=name, from_file=str(vf))) == 0
-
-
-def test_export_emits_eval_lines(tmp_path, capfd):
-    _set("OPENAI_API_KEY", "sk-with space&special", tmp_path)
     capfd.readouterr()
-    assert cli.cmd_vault_export(_ns(env=["OPENAI_API_KEY", "ALIAS=OPENAI_API_KEY"])) == 0
-    out = capfd.readouterr().out
-    # Both the same-name and the renamed export are emitted, shell-quoted so eval is safe.
-    assert "export OPENAI_API_KEY=" in out
-    assert "export ALIAS=" in out
-    # Round-trip: a shell parsing the quoted value recovers the original.
-    import shlex
-
-    line = next(line_ for line_ in out.splitlines() if line_.startswith("export OPENAI_API_KEY="))
-    rhs = line.split("=", 1)[1]
-    assert shlex.split(rhs)[0] == "sk-with space&special"
 
 
-@pytest.mark.parametrize("fmt", ["dotenv", "json", "yaml", "toml"])
-def test_inject_renders_each_format_to_0600_file(tmp_path, capfd, fmt):
-    _set("A_KEY", "alpha-1", tmp_path)
-    _set("B_KEY", "beta-2", tmp_path)
-    capfd.readouterr()
+def test_export_is_deprecated_and_does_not_touch_db(capfd):
+    code = cli.cmd_vault_export(_ns(env=["OPENAI_API_KEY"]))
+    captured = capfd.readouterr()
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "export_deprecated"
+    with cli._open_vault_engine().connect() as conn:
+        assert vault_service.list_secrets(conn) == []
+
+
+@pytest.mark.parametrize("fmt", ["dotenv", "json"])
+def test_inject_calls_avault_and_records_delivery(tmp_path, capfd, monkeypatch, fmt):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    _set("A_KEY", "alpha-1", tmp_path, monkeypatch, capfd, sealed=_sealed("a"))
+    _set("B_KEY", "beta-2", tmp_path, monkeypatch, capfd, sealed=_sealed("b"))
+    inject = Mock(return_value=None)
+    monkeypatch.setattr(api, "avault_deliver_inject", inject)
     out = tmp_path / f"secrets.{fmt}"
+
     assert cli.cmd_vault_inject(_ns(keys="A_KEY,B_KEY", out=str(out), format=fmt)) == 0
     payload = json.loads(capfd.readouterr().out)
-    assert payload["written"] is True and payload["format"] == fmt
-
-    # File is 0600.
-    assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
-
-    text = out.read_text()
-    assert "alpha-1" in text and "beta-2" in text
-    if fmt == "json":
-        assert json.loads(text) == {"A_KEY": "alpha-1", "B_KEY": "beta-2"}
-    elif fmt == "toml":
-        assert 'A_KEY = "alpha-1"' in text
-    elif fmt == "yaml":
-        import yaml
-
-        assert yaml.safe_load(text) == {"A_KEY": "alpha-1", "B_KEY": "beta-2"}
-    else:  # dotenv
-        assert "A_KEY=alpha-1" in text
+    assert payload["written"] is True
+    assert payload["format"] == fmt
+    inject.assert_called_once_with(
+        str(out),
+        fmt,
+        [
+            {"name": "A_KEY", "key": "A_KEY", "envelope": _sealed("a")},
+            {"name": "B_KEY", "key": "B_KEY", "envelope": _sealed("b")},
+        ],
+    )
+    cli.cmd_vault_list(_ns())
+    secrets = {s["name"]: s for s in json.loads(capfd.readouterr().out)["secrets"]}
+    assert secrets["A_KEY"]["use_count"] == 1
+    assert secrets["B_KEY"]["use_count"] == 1
 
 
-def test_inject_overwrites_preexisting_loose_file_as_0600(tmp_path, capfd):
-    # If the target already exists with permissive perms, the write must NOT inherit them —
-    # the atomic 0600 temp+replace ensures the secret is never momentarily world-readable.
-    _set("A_KEY", "alpha-1", tmp_path)
-    capfd.readouterr()
-    out = tmp_path / "preexisting.env"
-    out.write_text("OLD=stale\n")
-    os.chmod(out, 0o644)
-    assert cli.cmd_vault_inject(_ns(keys="A_KEY", out=str(out), format="dotenv")) == 0
-    assert stat.S_IMODE(os.stat(out).st_mode) == 0o600
-    assert out.read_text() == "A_KEY=alpha-1\n"  # fully replaced, not appended
+@pytest.mark.parametrize("fmt", ["yaml", "toml"])
+def test_inject_rejects_unavailable_formats_before_avault(tmp_path, capfd, monkeypatch, fmt):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    _set("A_KEY", "alpha-1", tmp_path, monkeypatch, capfd)
+    inject = Mock(return_value=None)
+    monkeypatch.setattr(api, "avault_deliver_inject", inject)
+
+    code = cli.cmd_vault_inject(_ns(keys="A_KEY", out=str(tmp_path / f"s.{fmt}"), format=fmt))
+    captured = capfd.readouterr()
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "format_unavailable"
+    inject.assert_not_called()
 
 
-def test_inject_dedupes_repeated_keys(tmp_path, capfd):
-    # --keys A,A renders one entry; usage/audit must reflect one delivery, not two.
-    _set("A_KEY", "alpha-1", tmp_path)
-    capfd.readouterr()
+def test_inject_unknown_format_rejected_before_avault(tmp_path, capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    _set("K", "v", tmp_path, monkeypatch, capfd)
+    inject = Mock(return_value=None)
+    monkeypatch.setattr(api, "avault_deliver_inject", inject)
+
+    code = cli.cmd_vault_inject(_ns(keys="K", out=str(tmp_path / "o"), format="xml"))
+    assert code == 1
+    assert json.loads(capfd.readouterr().err)["code"] == "invalid_format"
+    inject.assert_not_called()
+
+
+def test_inject_dedupes_repeated_keys(tmp_path, capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    _set("A_KEY", "alpha-1", tmp_path, monkeypatch, capfd, sealed=_sealed("a"))
+    inject = Mock(return_value=None)
+    monkeypatch.setattr(api, "avault_deliver_inject", inject)
+
     out = tmp_path / "dup.env"
     assert cli.cmd_vault_inject(_ns(keys="A_KEY,A_KEY", out=str(out), format="dotenv")) == 0
     assert json.loads(capfd.readouterr().out)["keys"] == ["A_KEY"]
+    inject.assert_called_once_with(str(out), "dotenv", [{"name": "A_KEY", "key": "A_KEY", "envelope": _sealed("a")}])
     cli.cmd_vault_list(_ns())
     assert json.loads(capfd.readouterr().out)["secrets"][0]["use_count"] == 1
 
 
-def test_inject_payload_does_not_leak_value(tmp_path, capfd):
-    _set("SECRET_KEY", "topsecret-INJECT", tmp_path)
-    capfd.readouterr()
-    out = tmp_path / "s.env"
-    cli.cmd_vault_inject(_ns(keys="SECRET_KEY", out=str(out), format="dotenv"))
+def test_inject_payload_does_not_leak_value(tmp_path, capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    _set("SECRET_KEY", "topsecret-INJECT", tmp_path, monkeypatch, capfd)
+    monkeypatch.setattr(api, "avault_deliver_inject", Mock(return_value=None))
+
+    cli.cmd_vault_inject(_ns(keys="SECRET_KEY", out=str(tmp_path / "s.env"), format="dotenv"))
     payload_out = capfd.readouterr().out
-    # The CLI's JSON payload reports path/keys, never the value (the value is only in the file).
     assert "topsecret-INJECT" not in payload_out
-    assert "topsecret-INJECT" in out.read_text()
 
 
-def test_export_missing_secret_clean_error(tmp_path, capfd):
-    code = cli.cmd_vault_export(_ns(env=["NOPE"]))
+def test_inject_does_not_record_delivery_when_avault_fails(tmp_path, capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    _set("A_KEY", "alpha-1", tmp_path, monkeypatch, capfd)
+    monkeypatch.setattr(api, "avault_deliver_inject", Mock(side_effect=api.AvaultError("boom")))
+
+    code = cli.cmd_vault_inject(_ns(keys="A_KEY", out=str(tmp_path / "fail.env"), format="dotenv"))
     captured = capfd.readouterr()
     assert code == 1
-    assert json.loads(captured.err)["code"] == "secret_not_found"
+    assert json.loads(captured.err)["code"] == "avault_failed"
+    cli.cmd_vault_list(_ns())
+    assert json.loads(capfd.readouterr().out)["secrets"][0]["use_count"] == 0
 
 
-def test_inject_unknown_format_rejected(tmp_path, capfd):
-    _set("K", "v", tmp_path)
-    capfd.readouterr()
-    code = cli.cmd_vault_inject(_ns(keys="K", out=str(tmp_path / "o"), format="xml"))
-    assert code == 1
-    assert json.loads(capfd.readouterr().err)["code"] == "invalid_format"
+def test_inject_succeeds_even_if_audit_fails(tmp_path, capfd, monkeypatch):
+    from unittest.mock import Mock
 
+    from vibe import api
 
-def test_inject_writes_file_even_if_audit_fails(tmp_path, capfd, monkeypatch):
-    # The secret file is already on disk once written; a bookkeeping failure must not report a
-    # failed command (callers would retry though the secret is already delivered).
-    from storage import vault_service
-
-    _set("A_KEY", "alpha-1", tmp_path)
-    capfd.readouterr()
+    _set("A_KEY", "alpha-1", tmp_path, monkeypatch, capfd)
+    monkeypatch.setattr(api, "avault_deliver_inject", Mock(return_value=None))
 
     def _boom(*a, **k):
         raise RuntimeError("db locked")
 
     monkeypatch.setattr(vault_service, "record_deliveries", _boom)
-    out = tmp_path / "ok.env"
-    assert cli.cmd_vault_inject(_ns(keys="A_KEY", out=str(out), format="dotenv")) == 0
-    assert out.read_text() == "A_KEY=alpha-1\n"  # delivered despite the audit failure
+    assert cli.cmd_vault_inject(_ns(keys="A_KEY", out=str(tmp_path / "ok.env"), format="dotenv")) == 0
