@@ -1257,7 +1257,7 @@ def cmd_build_base(args: argparse.Namespace) -> int:
                 """\
                 set -euo pipefail
                 apt-get update
-                apt-get install -y bash ca-certificates curl git build-essential python3 python3-pip python3-venv rsync sudo
+                apt-get install -y bash ca-certificates curl git build-essential python3 python3-pip python3-venv rsync sudo tmux
                 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
                 apt-get install -y nodejs
                 # Install the agent backends under the service user's home so the

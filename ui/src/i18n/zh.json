@@ -211,6 +211,7 @@
       "items": {
         "askill": { "label": "askill", "detail": "Agent Skills 运行时 —— 驱动 Skills 页面。" },
         "show-runtime": { "label": "Show Page 运行时", "detail": "在你本机渲染可视化 Show 页面。" },
+        "tmux": { "label": "tmux", "detail": "持久终端运行时，用于可重连的 Web Terminal 会话。" },
         "node": { "label": "Node.js", "detail": "上述运行时的共同前置依赖。" }
       }
     },

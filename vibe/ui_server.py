@@ -3475,7 +3475,7 @@ def backend_restart(name):
     return jsonify(api.restart_backend(name, metadata=metadata))
 
 
-_ALLOWED_DEPENDENCIES = {"askill", "show-runtime"}
+_ALLOWED_DEPENDENCIES = {"askill", "show-runtime", "tmux"}
 
 
 @app.route("/api/dependencies")
