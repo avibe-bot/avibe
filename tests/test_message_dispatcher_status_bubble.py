@@ -326,6 +326,26 @@ class StatusBubbleResultTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(late)  # bailed
         self.assertEqual(len(controller.im_client.edits), edits_after_finalize)  # no new edit
 
+    async def test_late_emit_after_result_does_not_reopen_bubble(self):
+        # P2: the runtime gate is released only AFTER the result path's teardown,
+        # so a late same-turn process emit in that window still passes the
+        # runtime-turn guard. The finalized marker must SURVIVE _drop_status_keys
+        # (not re-seeded here) so the late emit bails instead of opening a new
+        # running bubble after the answer was posted.
+        controller = _StubController(platform="slack")
+        d = _dispatcher(controller)
+        ctx = _ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await d.emit_agent_message(ctx, "toolcall", "🔧 `Bash` `{}`")  # bubble msg-1
+            await d.emit_agent_message(ctx, "result", "Final answer")  # delete bubble + fresh result
+        sends_before = len(controller.im_client.sent)
+        edits_before = len(controller.im_client.edits)
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            late = await d.emit_agent_message(ctx, "toolcall", "🔧 `Read` `{}`")
+        self.assertIsNone(late)  # bailed on the surviving finalized marker
+        self.assertEqual(len(controller.im_client.sent), sends_before)  # no new bubble posted
+        self.assertEqual(len(controller.im_client.edits), edits_before)
+
     async def test_error_result_collapse_fallback_uses_failed_marker(self):
         # C4: on an is_error turn where the bubble delete fails, the collapse
         # fallback reflects the failure outcome (⏹ failed), NOT a hardcoded ✅ done.
@@ -351,10 +371,13 @@ class StatusBubbleResultTests(unittest.IsolatedAsyncioTestCase):
             key = d._get_consolidated_message_key(ctx)
             self.assertIn(key, d._consolidated_message_locks)  # lock created
             await d.emit_agent_message(ctx, "result", "Final answer")
-        # All per-turn state — including the lock and the finalized marker — is gone.
+        # Per-turn state (lock + message id) is dropped so they can't grow
+        # unbounded. The finalized marker intentionally SURVIVES teardown — it must
+        # outlive the turn's gate-release window so a late same-turn emit can't
+        # re-open the bubble (P2); it is bounded separately in _finalize_status_key.
         self.assertNotIn(key, d._consolidated_message_locks)
-        self.assertNotIn(key, d._status_finalized)
         self.assertNotIn(key, d._consolidated_message_ids)
+        self.assertIn(key, d._status_finalized)
 
     async def test_result_stops_heartbeat_before_edit(self):
         # Heartbeat ENABLED here: emit a process message to start it, then the

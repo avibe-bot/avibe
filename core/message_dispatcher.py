@@ -282,7 +282,13 @@ class ConsolidatedMessageDispatcher:
             self._status_last_activity_at.pop(key, None)
             self._status_render_tick.pop(key, None)
             self._status_step_count.pop(key, None)
-            self._status_finalized.discard(key)
+            # NOTE: the finalized marker is intentionally NOT discarded here. The
+            # runtime gate is released only AFTER this teardown (in the agent
+            # service's finally), so a late same-token process emit during that
+            # window still passes _is_current_runtime_turn; keeping the key
+            # finalized makes _render_concise_status bail instead of re-opening a
+            # bubble after the answer was posted (P2). The set is bounded in
+            # _finalize_status_key.
         # Drop the lock itself LAST — only after the ``async with`` block above
         # has released it — so the per-key lock dict can't grow unbounded across
         # many turns (C6). Popping a still-held lock would orphan the held lock.
@@ -748,6 +754,13 @@ class ConsolidatedMessageDispatcher:
         sees the key finalized and bails — it can never land after the terminal
         edit and stomp the bubble back to "working" (C1)."""
         async with self._get_consolidated_message_lock(consolidated_key):
+            # Finalized markers persist past _drop_status_keys (see note there) so
+            # they must be bounded. A marker only needs to outlive its own turn's
+            # teardown→gate-release window (sub-second), so when the set grows large
+            # every entry in it is from a turn finished long ago and safe to drop;
+            # clear before re-adding THIS turn's key so the live one always remains.
+            if len(self._status_finalized) > 512:
+                self._status_finalized.clear()
             self._status_finalized.add(consolidated_key)
             return self._consolidated_message_ids.get(consolidated_key)
 
