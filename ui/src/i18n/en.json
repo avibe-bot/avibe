@@ -563,7 +563,21 @@
     "fileBrowser": {
       "label": "File Browser",
       "desc": "Browse, view, and edit files on this machine.",
-      "placeholder": "The File Browser is being built. You'll be able to browse the whole machine, open files, and edit and save them right here."
+      "placeholder": "The File Browser is being built. You'll be able to browse the whole machine, open files, and edit and save them right here.",
+      "tagline": "Whole machine · view and edit",
+      "selectHint": "Select a file to view or edit it.",
+      "empty": "This folder is empty.",
+      "noPreview": "No in-app preview for this file type.",
+      "download": "Download",
+      "refresh": "Refresh",
+      "newFolder": "New folder",
+      "newFolderPrompt": "New folder name",
+      "projects": "Projects",
+      "system": "System",
+      "showHidden": "Show hidden files",
+      "save": "Save",
+      "unsaved": "Unsaved changes",
+      "conflict": "This file changed on disk since you opened it. Reload before saving to avoid overwriting it."
     },
     "terminal": {
       "label": "Terminal",

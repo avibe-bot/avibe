@@ -563,7 +563,21 @@
     "fileBrowser": {
       "label": "文件浏览器",
       "desc": "浏览、查看、编辑这台机器上的文件。",
-      "placeholder": "文件浏览器正在搭建中。很快你就能在这里浏览整机文件、打开文件、直接编辑并保存。"
+      "placeholder": "文件浏览器正在搭建中。很快你就能在这里浏览整机文件、打开文件、直接编辑并保存。",
+      "tagline": "整机 · 查看与编辑",
+      "selectHint": "选择一个文件来查看或编辑。",
+      "empty": "这个文件夹是空的。",
+      "noPreview": "这种文件类型暂不支持应用内预览。",
+      "download": "下载",
+      "refresh": "刷新",
+      "newFolder": "新建文件夹",
+      "newFolderPrompt": "新文件夹名称",
+      "projects": "项目",
+      "system": "系统",
+      "showHidden": "显示隐藏文件",
+      "save": "保存",
+      "unsaved": "有未保存的修改",
+      "conflict": "打开后该文件在磁盘上已被改动。请先重新加载再保存,以免覆盖。"
     },
     "terminal": {
       "label": "终端",
