@@ -381,6 +381,11 @@ def test_auto_update_skips_unattended_source_checkout_install(monkeypatch, tmp_p
         "_fetch_pypi_version_sync",
         lambda: {"current": "3.0.4.dev10+g4d621ef0a", "latest": "3.0.4", "has_update": True, "error": None},
     )
+    monkeypatch.setattr(
+        update_checker,
+        "_fetch_update_notification_policy_sync",
+        lambda version: {"version": version, "policy": "default", "error": None},
+    )
     monkeypatch.setattr(checker, "_is_idle", lambda: True)
     monkeypatch.setattr(update_checker, "get_running_vibe_path", lambda: "/tmp/dev-vibe")
     monkeypatch.setattr("vibe.runtime.get_service_main_path", lambda: Path("/repo/main.py"))
@@ -416,6 +421,11 @@ def test_restartless_auto_update_blocks_same_version_retry_and_notifies(monkeypa
         update_checker,
         "_fetch_pypi_version_sync",
         lambda: {"current": "3.0.3", "latest": "3.0.4", "has_update": True, "error": None},
+    )
+    monkeypatch.setattr(
+        update_checker,
+        "_fetch_update_notification_policy_sync",
+        lambda version: {"version": version, "policy": "default", "error": None},
     )
     monkeypatch.setattr(checker, "_is_idle", lambda: True)
     monkeypatch.setattr("vibe.runtime.get_service_main_path", lambda: Path("/pkg/service_main.py"))
@@ -453,6 +463,11 @@ def test_install_failure_auto_update_remains_retryable(monkeypatch, tmp_path):
         update_checker,
         "_fetch_pypi_version_sync",
         lambda: {"current": "3.0.3", "latest": "3.0.4", "has_update": True, "error": None},
+    )
+    monkeypatch.setattr(
+        update_checker,
+        "_fetch_update_notification_policy_sync",
+        lambda version: {"version": version, "policy": "default", "error": None},
     )
     monkeypatch.setattr(checker, "_is_idle", lambda: True)
     monkeypatch.setattr("vibe.runtime.get_service_main_path", lambda: Path("/pkg/service_main.py"))
