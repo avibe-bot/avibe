@@ -398,13 +398,17 @@ This is an internal store selection inside `avault`, not an Avibe-level plugin l
 
 ---
 
-## 16. Open decisions
+## 16. Decisions — settled (2026-06-25)
 
-1. **Name:** `avault` / `avibe-custody` / other?
-2. **Envelope:** keep `wrap_meta` / `wrapped_dek` (cheap rotation, no DB break — recommended) vs `vt`'s pure-derive?
-3. **Distribution:** bundled-in-wheel + manifest, version-locked (recommended) vs `askill`-style `curl | sh`?
-4. **P1 = CLI-only first?** (recommended yes.)
-5. **Protected-tier pubkey trust:** pinning vs attestation mechanism for `avault`'s public key.
+All settled; the authoritative record is **`avault/docs/DESIGN.md` §16**. Summary:
+
+1. **Name** → `avault`.
+2. **Envelope** → `wrapped_dek` (random per-record DEK wrapped under master/VMK; cheap rotation, unified standard+protected envelope; protected adds N `wrapped_vmk` factor-copies — password/passkey/device/recovery, any one unlocks).
+3. **Distribution** → real manifest-pinned release pipeline (Show-Runtime model), stub-first, `macos-arm64` + `linux-x64`, macOS signing as a sub-task.
+4. **P1 scope** → standard-tier CLI core (this doc's Avibe-side wiring + the avault crypto/store/CLI). Agent / grants / signing / protected tier → P2.
+5. **Protected-tier pubkey trust** → deferred to P2; lean attest, interim pin.
+6. **Transport** → CLI is the conservative default (P1); resident agent (P2) is a hardened tradeoff for grant-cache + signing.
+7. **No-hardware store** → add `file + passphrase` (P2): passphrase-wrapped master, unlock once at startup; defends at-rest, not the running machine.
 
 ---
 
