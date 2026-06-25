@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { isTouchCapableDevice } from './softKeyboard';
+import { isSoftKeyboardOpen, isTouchCapableDevice } from './softKeyboard';
 
 // iOS Safari keeps the layout viewport (and 100dvh) at full height when the
 // virtual keyboard opens — only the VISUAL viewport shrinks — so a bottom-pinned
@@ -15,12 +15,14 @@ import { isTouchCapableDevice } from './softKeyboard';
 // desktop layout and so cannot use the mobile body-lock; sizing that chat to the
 // visual viewport keeps its composer above the soft keyboard.
 //
-// Gated to two cases so it tracks ONLY the soft keyboard: (1) touch devices —
-// non-touch desktops have no keyboard, so the var must stay at its 100dvh default;
-// (2) not pinch-zoomed — trackpad/gesture zoom ALSO shrinks visualViewport.height
+// Gated so it tracks ONLY the soft keyboard: (1) touch devices — non-touch desktops
+// have no keyboard, so the var must stay at its 100dvh default; (2) skip a
+// keyboard-less pinch-zoom — trackpad/gesture zoom ALSO shrinks visualViewport.height
 // (with scale > 1), and mirroring that would drag the bottom-pinned composer up off
-// the bottom (worse the more you zoom). The soft keyboard shrinks height with
-// scale === 1, so scale cleanly tells the two apart. Refs:
+// the bottom (worse the more you zoom). Zoom can coexist with the keyboard though
+// (iPad: zoom first, then focus the composer), and there the inset is still needed,
+// so we keep applying it whenever isSoftKeyboardOpen() and only bail on a zoom with
+// no keyboard. Refs:
 //   https://www.bram.us/2021/09/13/prevent-items-from-being-hidden-underneath-the-virtual-keyboard-by-means-of-the-virtualkeyboard-api/
 //   https://dev.to/franciscomoretti/fix-mobile-keyboard-overlap-with-visualviewport-3a4a
 export function useViewportHeightVar(): void {
@@ -36,11 +38,13 @@ export function useViewportHeightVar(): void {
     let raf = 0;
     const apply = () => {
       raf = 0;
-      // Touch devices can pinch-zoom too (iPad, touch laptops): a zoom shrinks
-      // vv.height with scale > 1, while the soft keyboard shrinks it with scale === 1.
-      // Only the keyboard should drive the inset — when zoomed, drop the override so
-      // the chat falls back to the full-height 100dvh default.
-      if (vv.scale > 1) {
+      // Touch devices can pinch-zoom too (iPad, touch laptops), which also shrinks
+      // vv.height with scale > 1. A keyboard-less zoom must NOT drive the inset (it
+      // would lift the composer off the bottom), so drop the override and fall back
+      // to 100dvh. But zoom and the keyboard can be up together (zoom, then focus the
+      // composer) — then we still need the inset, so only bail when the keyboard is
+      // closed; isSoftKeyboardOpen()'s resting baseline already nets out the zoom.
+      if (vv.scale > 1 && !isSoftKeyboardOpen()) {
         document.documentElement.style.removeProperty('--app-vvh');
         return;
       }
