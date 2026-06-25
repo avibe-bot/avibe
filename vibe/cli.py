@@ -5354,17 +5354,22 @@ def _run_remote_pair(args, *, guided: bool) -> int:
         getattr(args, "backend_url", "https://avibe.bot"),
         getattr(args, "device_name", "avibe"),
     )
+    start_result = result.get("start") if isinstance(result.get("start"), dict) else {}
+    command_ok = bool(result.get("ok") and start_result.get("ok"))
     if getattr(args, "json", False):
-        _print_json(result)
-        return 0 if result.get("ok") else 1
+        payload = {**result, "ok": command_ok}
+        if result.get("ok") and not command_ok:
+            payload.setdefault("pairing", {"ok": True})
+            payload.setdefault("error", str(start_result.get("error") or "remote_start_failed"))
+        _print_json(payload)
+        return 0 if command_ok else 1
 
     if not result.get("ok"):
         _print_remote_pair_failure(result)
         return 1
 
-    start_result = result.get("start") if isinstance(result.get("start"), dict) else {}
     _print_remote_pair_success(result, start_result)
-    return 0
+    return 0 if command_ok else 1
 
 
 def cmd_remote_pair(args):
