@@ -110,6 +110,7 @@ _SHOW_RUNTIME_COMPRESSIBLE_MIN_BYTES = 1024
 TERMINAL_ENABLED_ENV = "VIBE_UI_ENABLE_TERMINAL"
 TERMINAL_IDLE_TIMEOUT_ENV = "VIBE_UI_TERMINAL_IDLE_TIMEOUT_SECONDS"
 TERMINAL_MAX_SESSIONS_ENV = "VIBE_UI_TERMINAL_MAX_SESSIONS"
+_TRUE_BOOL_STRINGS = {"1", "true", "yes", "on"}
 
 STRUCTURED_LOG_PATTERN = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\s+-\s+([\w.]+)\s+-\s+(\w+)\s+-\s+(.*)$")
 LEVEL_HINT_PATTERN = re.compile(r"\b(DEBUG|INFO|WARNING|ERROR|CRITICAL)\b")
@@ -142,6 +143,22 @@ LOG_SOURCES = (
     ("ui_stdout", "ui_stdout.log", lambda: paths.get_runtime_dir() / "ui_stdout.log"),
     ("ui_stderr", "ui_stderr.log", lambda: paths.get_runtime_dir() / "ui_stderr.log"),
 )
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid integer env var %s", name)
+        return default
+
+
+def _parse_explicit_bool(value: Any) -> bool:
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in _TRUE_BOOL_STRINGS
+    return False
 
 
 def _recover_stale_session_status(session_id: str) -> bool:
@@ -5116,7 +5133,7 @@ async def files_move(starlette_request: FastAPIRequest):
                     file_browser_service.move_path,
                     payload.get("src") or "",
                     payload.get("dst") or "",
-                    overwrite=bool(payload.get("overwrite")),
+                    overwrite=_parse_explicit_bool(payload.get("overwrite")),
                 )
             )
         except Exception as exc:
@@ -5136,7 +5153,7 @@ async def files_delete(starlette_request: FastAPIRequest):
                 await asyncio.to_thread(
                     file_browser_service.delete_path,
                     payload.get("path") or "",
-                    recursive=bool(payload.get("recursive")),
+                    recursive=_parse_explicit_bool(payload.get("recursive")),
                 )
             )
         except Exception as exc:
@@ -7605,8 +7622,8 @@ def get_terminal_service() -> TerminalService:
     global _terminal_service
     if _terminal_service is None:
         _terminal_service = TerminalService(
-            idle_timeout_seconds=int(os.environ.get(TERMINAL_IDLE_TIMEOUT_ENV, "3600")),
-            max_sessions=int(os.environ.get(TERMINAL_MAX_SESSIONS_ENV, "8")),
+            idle_timeout_seconds=_env_int(TERMINAL_IDLE_TIMEOUT_ENV, 3600),
+            max_sessions=_env_int(TERMINAL_MAX_SESSIONS_ENV, 8),
         )
     return _terminal_service
 

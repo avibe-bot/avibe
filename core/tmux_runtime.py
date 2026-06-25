@@ -548,7 +548,10 @@ def _safe_extract_tar(tar: tarfile.TarFile, destination: Path) -> None:
             resolved_link = (target.parent / link_target).resolve() if not link_target.is_absolute() else link_target.resolve()
             if resolved_link != destination_resolved and destination_resolved not in resolved_link.parents:
                 raise ValueError(f"Unsafe tmux archive link target: {member.name}")
-    tar.extractall(destination, filter="fully_trusted")
+    if sys.version_info >= (3, 12):
+        tar.extractall(destination, filter="fully_trusted")
+    else:
+        tar.extractall(destination)
 
 
 def _file_sha256(path: Path) -> str:

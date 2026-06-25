@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -15,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
+
+from config import paths
 
 try:  # POSIX-only; the PTY + tmux terminal is not supported on native Windows.
     import fcntl
@@ -59,6 +62,7 @@ class TerminalService:
         self.max_sessions = max(1, int(max_sessions))
         self._connections: dict[str, TerminalConnection] = {}
         self._detached_tmux_sessions: dict[str, float] = {}
+        self._reserved_sessions: set[str] = set()
         self._lock = asyncio.Lock()
         self._reaper_task: asyncio.Task | None = None
         self._closed = False
@@ -151,44 +155,54 @@ class TerminalService:
             # Reclaim this id's detached slot BEFORE the cap check, so reconnecting
             # to an existing (detached) session is never rejected as "too many".
             self._detached_tmux_sessions.pop(session_id, None)
-            if len(self._connections) + len(self._detached_tmux_sessions) >= self.max_sessions:
+            if session_id in self._reserved_sessions:
+                raise TerminalServiceError("session_opening")
+            active_count = len(self._connections) + len(self._detached_tmux_sessions) + len(self._reserved_sessions)
+            if active_count >= self.max_sessions:
                 raise TerminalServiceError("too_many_sessions")
-        persistent = False
-        tmux_binary = resolve_tmux_binary()
-        if tmux_binary:
-            cmd = _tmux_launch_command(tmux_binary, session_id)
-            persistent = True
-        else:
-            cmd = [os.environ.get("SHELL") or "/bin/bash", "-l"]
-
-        master_fd, slave_fd = os.openpty()
+            self._reserved_sessions.add(session_id)
         try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=slave_fd,
-                stdout=slave_fd,
-                stderr=slave_fd,
-                cwd=str(Path.home()),
-                env=_spawn_env(persistent=persistent),
-                preexec_fn=os.setsid if hasattr(os, "setsid") else None,
-            )
-        except Exception:
-            _close_fd(master_fd)
-            raise
-        finally:
-            _close_fd(slave_fd)
+            persistent = False
+            tmux_binary = resolve_tmux_binary()
+            if tmux_binary:
+                cmd = _tmux_launch_command(tmux_binary, session_id)
+                persistent = True
+            else:
+                cmd = [os.environ.get("SHELL") or "/bin/bash", "-l"]
 
-        connection = TerminalConnection(
-            session_id=session_id,
-            process=process,
-            master_fd=master_fd,
-            persistent=persistent,
-            attached_at=time.monotonic(),
-            last_seen=time.monotonic(),
-        )
-        async with self._lock:
-            self._connections[session_id] = connection
-        return connection
+            master_fd, slave_fd = os.openpty()
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=slave_fd,
+                    stdout=slave_fd,
+                    stderr=slave_fd,
+                    cwd=str(Path.home()),
+                    env=_spawn_env(persistent=persistent),
+                    preexec_fn=os.setsid if hasattr(os, "setsid") else None,
+                )
+            except Exception:
+                _close_fd(master_fd)
+                raise
+            finally:
+                _close_fd(slave_fd)
+
+            connection = TerminalConnection(
+                session_id=session_id,
+                process=process,
+                master_fd=master_fd,
+                persistent=persistent,
+                attached_at=time.monotonic(),
+                last_seen=time.monotonic(),
+            )
+            async with self._lock:
+                self._reserved_sessions.discard(session_id)
+                self._connections[session_id] = connection
+            return connection
+        except Exception:
+            async with self._lock:
+                self._reserved_sessions.discard(session_id)
+            raise
 
     async def close(self, connection: TerminalConnection) -> None:
         async with self._lock:
@@ -320,7 +334,7 @@ def _tmux_launch_command(tmux_binary: str, session_id: str) -> list[str]:
     return [
         tmux_binary,
         "-L",
-        "avibe",
+        _tmux_socket_name(),
         "-f",
         "/dev/null",
         "new-session",
@@ -361,7 +375,7 @@ async def _send_exit_status(websocket: WebSocket, code: int | None) -> None:
 async def _terminate_process(process: asyncio.subprocess.Process, signum: signal.Signals) -> None:
     try:
         if hasattr(os, "killpg") and process.pid:
-            os.killpg(process.pid, signum)
+            os.killpg(os.getpgid(process.pid), signum)
         else:
             process.send_signal(signum)
     except ProcessLookupError:
@@ -374,7 +388,10 @@ async def _terminate_process(process: asyncio.subprocess.Process, signum: signal
     except asyncio.TimeoutError:
         pass
     try:
-        process.kill()
+        if hasattr(os, "killpg") and process.pid:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        else:
+            process.kill()
     except ProcessLookupError:
         return
     await process.wait()
@@ -387,7 +404,7 @@ async def _kill_tmux_session(session_id: str) -> None:
     process = await asyncio.create_subprocess_exec(
         tmux_binary,
         "-L",
-        "avibe",
+        _tmux_socket_name(),
         "-f",
         "/dev/null",
         "kill-session",
@@ -397,6 +414,12 @@ async def _kill_tmux_session(session_id: str) -> None:
         stderr=asyncio.subprocess.DEVNULL,
     )
     await process.wait()
+
+
+def _tmux_socket_name() -> str:
+    runtime_dir = str(paths.get_runtime_dir())
+    digest = hashlib.sha256(runtime_dir.encode("utf-8")).hexdigest()[:12]
+    return f"avibe-{digest}"
 
 
 def _close_fd(fd: int) -> None:

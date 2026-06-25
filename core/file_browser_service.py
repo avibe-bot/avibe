@@ -6,6 +6,7 @@ import os
 import shutil
 import stat
 import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -352,10 +353,13 @@ def write_file(raw_path: str, content: str, *, expected_mtime: float | None = No
             raise FileBrowserError("is_symlink", "Refusing to write through a symlink", 400)
         if target.exists() and not target.is_file():
             raise FileBrowserError("not_file", "Path is not a regular file", 400)
+        mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else None
         fd = -1
         temp_name = ""
         try:
             fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=parent)
+            if mode is not None:
+                os.fchmod(fd, mode)
             with os.fdopen(fd, "wb") as handle:
                 fd = -1
                 handle.write(data)
@@ -426,6 +430,8 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
 
     def _rename() -> dict[str, Any]:
         try:
+            if _exists_no_follow(target):
+                raise ConflictError("exists", "Destination already exists")
             source.rename(target)
             return {"ok": True, "path": str(target)}
         except FileExistsError as exc:
@@ -451,6 +457,7 @@ def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
         raise ConflictError("exists", "Cannot overwrite a directory with a file")
 
     def _move() -> dict[str, Any]:
+        backup: Path | None = None
         try:
             # Re-check at move time: shutil.move()/os.rename() replaces an existing
             # destination on POSIX, so without this a no-overwrite move would
@@ -458,16 +465,46 @@ def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
             if _exists_no_follow(target):
                 if not overwrite:
                     raise ConflictError("exists", "Destination already exists")
-                if _is_dir_no_follow(target):
-                    target.rmdir()
-                else:
-                    target.unlink()
-            shutil.move(str(source), str(target))
+                if _is_dir_no_follow(target) and source.is_file():
+                    raise ConflictError("exists", "Cannot overwrite a directory with a file")
+                backup = _reserve_backup_path(target)
+                target.rename(backup)
+            try:
+                shutil.move(str(source), str(target))
+            except Exception:
+                if backup is not None:
+                    _restore_move_backup(backup, target)
+                raise
+            if backup is not None:
+                _remove_backup_path(backup)
             return {"ok": True}
         except OSError as exc:
             raise FileBrowserError("fs_error", str(exc), 400) from exc
 
     return _run_mutation("move", source, _move, dst=str(target), overwrite=overwrite)
+
+
+def _reserve_backup_path(target: Path) -> Path:
+    for _ in range(100):
+        candidate = target.with_name(f".{target.name}.avibe-overwrite-{uuid.uuid4().hex}")
+        if not _exists_no_follow(candidate):
+            return candidate
+    raise FileBrowserError("fs_error", "Could not reserve overwrite backup path", 400)
+
+
+def _restore_move_backup(backup: Path, target: Path) -> None:
+    if not _exists_no_follow(backup):
+        return
+    if _exists_no_follow(target):
+        _remove_backup_path(target)
+    backup.rename(target)
+
+
+def _remove_backup_path(path: Path) -> None:
+    if _is_dir_no_follow(path):
+        shutil.rmtree(path)
+    else:
+        path.unlink()
 
 
 def delete_path(raw_path: str, *, recursive: bool = False) -> dict[str, Any]:

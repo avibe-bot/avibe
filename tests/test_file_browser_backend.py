@@ -132,6 +132,17 @@ def test_write_is_atomic_and_detects_mtime_conflict(tmp_path):
     assert not list(tmp_path.glob(".large.txt.*.tmp"))
 
 
+def test_write_preserves_existing_file_mode(tmp_path):
+    path = tmp_path / "script.sh"
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+
+    fs.write_file(str(path), "#!/bin/sh\necho ok\n")
+
+    assert path.read_text(encoding="utf-8") == "#!/bin/sh\necho ok\n"
+    assert path.stat().st_mode & 0o777 == 0o755
+
+
 def test_mutating_ops_mkdir_rename_move_delete(tmp_path, caplog):
     caplog.set_level(logging.INFO, logger="core.file_browser_service")
     folder = tmp_path / "folder"
@@ -172,6 +183,26 @@ def test_mutating_ops_mkdir_rename_move_delete(tmp_path, caplog):
     fs.delete_path(str(nested), recursive=True)
     assert not nested.exists()
     assert any("file_browser.delete" in record.message for record in caplog.records)
+
+
+def test_move_overwrite_restores_destination_when_move_fails(tmp_path, monkeypatch):
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination.txt"
+    source.write_text("source", encoding="utf-8")
+    destination.write_text("destination", encoding="utf-8")
+
+    def fail_move(_src: str, _dst: str) -> None:
+        raise OSError("simulated cross-device failure")
+
+    monkeypatch.setattr(fs.shutil, "move", fail_move)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.move_path(str(source), str(destination), overwrite=True)
+
+    assert exc.value.code == "fs_error"
+    assert source.read_text(encoding="utf-8") == "source"
+    assert destination.read_text(encoding="utf-8") == "destination"
+    assert not list(tmp_path.glob(".destination.txt.avibe-overwrite-*"))
 
 
 def test_symlink_mutations_operate_on_link_not_target(tmp_path):
@@ -233,3 +264,32 @@ def test_http_routes_map_structured_errors_and_enforce_csrf(tmp_path):
     assert ok.status_code == 200
     assert ok.get_json()["ok"] is True
     assert write_path.read_text(encoding="utf-8") == "x"
+
+
+def test_http_delete_and_move_string_false_flags_are_not_truthy(tmp_path):
+    client = app.test_client()
+    headers = csrf_headers(client)
+
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    (folder / "child.txt").write_text("child", encoding="utf-8")
+    delete_response = client.post(
+        "/api/files/delete",
+        json={"path": str(folder), "recursive": "false"},
+        headers=headers,
+    )
+    assert delete_response.status_code == 409
+    assert folder.exists()
+
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination.txt"
+    source.write_text("source", encoding="utf-8")
+    destination.write_text("destination", encoding="utf-8")
+    move_response = client.post(
+        "/api/files/move",
+        json={"src": str(source), "dst": str(destination), "overwrite": "false"},
+        headers=headers,
+    )
+    assert move_response.status_code == 409
+    assert source.read_text(encoding="utf-8") == "source"
+    assert destination.read_text(encoding="utf-8") == "destination"

@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import json
+import os
 import struct
-import termios
 
 import pytest
+
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="terminal PTY tests require POSIX")
+
+fcntl = pytest.importorskip("fcntl")
+termios = pytest.importorskip("termios")
+
 from starlette.websockets import WebSocketDisconnect
 
 from core import terminal_service
-from core.terminal_service import TerminalService, _tmux_launch_command, sanitize_session_id
+from core.terminal_service import TerminalService, _tmux_launch_command, _tmux_socket_name, sanitize_session_id
+from vibe import ui_server
 from vibe.ui_server import app
 
 
@@ -109,10 +115,8 @@ async def _terminal_resize_applies_winsize(monkeypatch, tmp_path):
 def test_terminal_tmux_launch_command_uses_safe_session():
     cmd = _tmux_launch_command("/tmp/tmux", sanitize_session_id("../bad session!"))
 
-    assert cmd == [
-        "/tmp/tmux",
-        "-L",
-        "avibe",
+    assert cmd[0:3] == ["/tmp/tmux", "-L", _tmux_socket_name()]
+    assert cmd[3:] == [
         "-f",
         "/dev/null",
         "new-session",
@@ -125,6 +129,42 @@ def test_terminal_tmux_launch_command_uses_safe_session():
         "status",
         "off",
     ]
+    assert _tmux_socket_name().startswith("avibe-")
+
+
+def test_terminal_open_reserves_session_slot_during_spawn(monkeypatch, tmp_path):
+    asyncio.run(_terminal_open_reserves_session_slot_during_spawn(monkeypatch, tmp_path))
+
+
+async def _terminal_open_reserves_session_slot_during_spawn(monkeypatch, tmp_path):
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(terminal_service.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: None)
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=1)
+    spawn_started = asyncio.Event()
+    release_spawn = asyncio.Event()
+    original_spawn = asyncio.create_subprocess_exec
+
+    async def delayed_spawn(*args, **kwargs):
+        spawn_started.set()
+        await release_spawn.wait()
+        return await original_spawn(*args, **kwargs)
+
+    monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", delayed_spawn)
+
+    first_task = asyncio.create_task(service.open("first"))
+    await spawn_started.wait()
+    with pytest.raises(terminal_service.TerminalServiceError):
+        await service.open("second")
+
+    release_spawn.set()
+    connection = await first_task
+    try:
+        assert service._connections["first"] is connection
+    finally:
+        await service.shutdown()
 
 
 def test_sanitize_session_id_allows_only_contract_chars():
@@ -195,3 +235,17 @@ def test_terminal_websocket_rejects_cross_origin(monkeypatch, tmp_path):
             pass
 
     assert exc.value.code == 1008
+
+
+def test_terminal_service_ignores_invalid_limit_env(monkeypatch):
+    monkeypatch.setattr(ui_server, "_terminal_service", None)
+    monkeypatch.setenv(ui_server.TERMINAL_IDLE_TIMEOUT_ENV, "1h")
+    monkeypatch.setenv(ui_server.TERMINAL_MAX_SESSIONS_ENV, "many")
+
+    service = ui_server.get_terminal_service()
+
+    try:
+        assert service.idle_timeout_seconds == 3600
+        assert service.max_sessions == 8
+    finally:
+        monkeypatch.setattr(ui_server, "_terminal_service", None)

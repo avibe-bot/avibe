@@ -146,3 +146,28 @@ def test_macos_codesign_path_is_used(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert result["signing"]["changed"] is True
     assert calls[0][:4] == ["/usr/bin/codesign", "-f", "-s", "-"]
     assert calls[0][4].endswith("/tmux")
+
+
+def test_safe_extract_tar_omits_filter_before_python_312(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    destination = tmp_path / "extract"
+    destination.mkdir()
+    calls: list[object] = []
+
+    class VersionInfo(tuple):
+        major = 3
+        minor = 11
+
+    with tarfile.open(archive, "r:gz") as tar:
+        original_extractall = tar.extractall
+
+        def capture_extractall(path, members=None, *, numeric_owner=False, filter=None):
+            calls.append(filter)
+            return original_extractall(path, members=members, numeric_owner=numeric_owner)
+
+        monkeypatch.setattr(tmux_runtime.sys, "version_info", VersionInfo((3, 11, 0)))
+        monkeypatch.setattr(tar, "extractall", capture_extractall)
+        tmux_runtime._safe_extract_tar(tar, destination)
+
+    assert calls == [None]
+    assert (destination / "tmux").is_file()
