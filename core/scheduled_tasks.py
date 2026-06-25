@@ -183,6 +183,7 @@ class AgentRunExecutionResult:
     error: Optional[str]
     complete_on_return: bool
     requeue_on_return: bool = False
+    coalesced_completion_ids: tuple[str, ...] = ()
 
 
 def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None) -> ResolvedSessionIdTarget:
@@ -406,6 +407,124 @@ class TaskExecutionRequest:
             callback_status=payload.get("callback_status"),
             metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
         )
+
+
+def _agent_run_message_for_request(request: TaskExecutionRequest) -> str:
+    coalesced = (request.metadata or {}).get("coalesced_queue")
+    if isinstance(coalesced, dict):
+        live_execution_ids = _live_coalesced_agent_run_ids(request)
+        live_set = set(live_execution_ids) if live_execution_ids is not None else None
+        prompt = str(coalesced.get("prompt") or "")
+        if prompt and live_set is None:
+            return prompt
+        messages = coalesced.get("messages")
+        if isinstance(messages, list):
+            parts: list[str] = []
+            for item in messages:
+                if not isinstance(item, dict):
+                    continue
+                execution_id = str(item.get("execution_id") or "").strip()
+                if live_set is not None and execution_id not in live_set:
+                    continue
+                message = str(item.get("message") or item.get("prompt") or "")
+                if message:
+                    parts.append(message)
+            if parts:
+                return "\n\n---\n\n".join(parts)
+    return str(request.message or "")
+
+
+def _live_coalesced_agent_run_ids(request: TaskExecutionRequest) -> list[str] | None:
+    coalesced = (request.metadata or {}).get("coalesced_queue")
+    if not isinstance(coalesced, dict):
+        return None
+    execution_ids = coalesced.get("execution_ids")
+    if not isinstance(execution_ids, list):
+        return None
+    run_ids: list[str] = []
+    seen: set[str] = set()
+    for value in execution_ids:
+        run_id = str(value or "").strip()
+        if run_id and run_id not in seen:
+            seen.add(run_id)
+            run_ids.append(run_id)
+    if not run_ids:
+        return []
+    store = SQLiteBackgroundTaskStore()
+    try:
+        queued_ids, _stale_ids = store.inspect_queued_runs_for_workbench(run_ids)
+    finally:
+        store.close()
+    live = [request.id]
+    for run_id in queued_ids:
+        if run_id not in live:
+            live.append(run_id)
+    return live
+
+
+def _retire_stale_agent_run_queue_rows(
+    *,
+    session_id: Optional[str],
+    execution_ids: list[str],
+) -> int:
+    """Retire old queued Workbench rows for recovered direct Agent Runs.
+
+    A crash can happen after the run rows are claimed but before flush_queue
+    deletes the queued harness rows. On restart the primary run is recovered and
+    submitted here; leaving the old queued rows in place makes their native ids
+    look like delivered duplicates even though they are only stale queue state.
+    Child rows still need their native ids preserved as dedupe markers because
+    only the primary prompt is re-mirrored as a visible harness row.
+    """
+    normalized_ids: list[str] = []
+    seen: set[str] = set()
+    for raw_execution_id in execution_ids:
+        execution_id = str(raw_execution_id or "").strip()
+        if not execution_id or execution_id in seen:
+            continue
+        seen.add(execution_id)
+        normalized_ids.append(execution_id)
+    if not session_id or not normalized_ids:
+        return 0
+
+    from storage import messages_service
+    from storage.models import messages
+
+    native_ids = [f"agent_run:{execution_id}" for execution_id in normalized_ids]
+    primary_native_id = native_ids[0]
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        rows = list(
+            conn.execute(
+                select(messages.c.id, messages.c.native_message_id)
+                .where(messages.c.session_id == session_id)
+                .where(messages.c.platform == "avibe")
+                .where(messages.c.type == messages_service.QUEUED_TYPE)
+                .where(messages.c.native_message_id.in_(native_ids))
+            )
+        )
+        primary_row_ids = [str(row.id) for row in rows if str(row.native_message_id or "") == primary_native_id]
+        marker_row_ids = [str(row.id) for row in rows if str(row.native_message_id or "") != primary_native_id]
+        if marker_row_ids:
+            conn.execute(
+                messages.update()
+                .where(messages.c.id.in_(marker_row_ids))
+                .values(
+                    author="harness",
+                    source="harness",
+                    type=messages_service.HARNESS_DEDUPE_TYPE,
+                    content_text="",
+                    content_json=json.dumps({"text": ""}),
+                    metadata_json=json.dumps({"coalesced_from": primary_native_id, "recovered_queue_row": True}),
+                    updated_at=_utc_now_iso(),
+                )
+            )
+        row_ids = primary_row_ids + marker_row_ids
+        if not row_ids:
+            return 0
+        if primary_row_ids:
+            messages_service.delete_queued(conn, primary_row_ids)
+        return len(row_ids)
 
 
 class ScheduledTaskStore:
@@ -1124,6 +1243,27 @@ class TaskExecutionStore:
         tmp_path.replace(completed_path)
         processing_path.unlink(missing_ok=True)
 
+    def complete_coalesced(
+        self,
+        request: TaskExecutionRequest,
+        run_ids: list[str],
+        *,
+        ok: bool,
+        error: Optional[str] = None,
+    ) -> None:
+        if self._sqlite is not None:
+            from storage.background import complete_coalesced_agent_runs_for_workbench_in_connection
+
+            with self._sqlite.engine.begin() as conn:
+                complete_coalesced_agent_runs_for_workbench_in_connection(
+                    conn,
+                    run_ids,
+                    ok=ok,
+                    error=error,
+                )
+            return
+        self.complete(request, ok=ok, error=error)
+
 
 class ScheduledTaskService:
     """Controller-owned runtime that executes persisted scheduled tasks."""
@@ -1487,6 +1627,7 @@ class ScheduledTaskService:
     async def _execute_claimed_request(self, request: TaskExecutionRequest) -> None:
         error: Optional[str] = None
         should_complete = True
+        coalesced_completion_ids: list[str] = _live_coalesced_agent_run_ids(request) or []
         task_id = request.task_id
         session_key = request.session_key
         session_id = request.session_id
@@ -1530,7 +1671,8 @@ class ScheduledTaskService:
                     agent_name=request.agent_name,
                 )
             elif request.request_type == "agent_run":
-                if not request.message:
+                message = _agent_run_message_for_request(request)
+                if not message:
                     raise ValueError("agent run requires message")
                 if not (request.session_id or request.session_key):
                     raise ValueError("agent run currently requires session_id or a resolvable session target")
@@ -1539,15 +1681,22 @@ class ScheduledTaskService:
                     session_id=request.session_id,
                     post_to=request.post_to,
                     deliver_key=request.deliver_key,
-                    message=request.message,
+                    message=message,
                     execution_id=request.id,
                     agent_name=request.agent_name,
-                    metadata=request.metadata,
+                    metadata={
+                        **(request.metadata or {}),
+                        "source_kind": request.source_kind,
+                        "source_actor": request.source_actor,
+                        "parent_run_id": request.parent_run_id,
+                        "callback_session_id": request.callback_session_id,
+                    },
                 )
                 error = result.error
                 should_complete = result.complete_on_return
                 if result.requeue_on_return:
                     self.request_store.requeue(request.id, metadata={"workbench_queue_holds_run": True})
+                coalesced_completion_ids = list(result.coalesced_completion_ids)
             else:
                 raise ValueError(f"unknown task request type: {request.request_type}")
         except asyncio.CancelledError:
@@ -1560,14 +1709,22 @@ class ScheduledTaskService:
             should_complete = True
         finally:
             if should_complete:
-                self.request_store.complete(
-                    request,
-                    ok=not error,
-                    error=error,
-                    task_id=task_id,
-                    session_key=session_key,
-                    session_id=session_id,
-                )
+                if coalesced_completion_ids:
+                    self.request_store.complete_coalesced(
+                        request,
+                        coalesced_completion_ids,
+                        ok=not error,
+                        error=error,
+                    )
+                else:
+                    self.request_store.complete(
+                        request,
+                        ok=not error,
+                        error=error,
+                        task_id=task_id,
+                        session_key=session_key,
+                        session_id=session_id,
+                    )
                 await self._drain_callbacks()
 
     async def _execute_task(
@@ -1650,9 +1807,40 @@ class ScheduledTaskService:
 
         gate = getattr(self.controller, "session_turn_gate", None)
         if target.platform == "avibe" and session_id and gate is not None:
+            stale_queue_rows = _retire_stale_agent_run_queue_rows(
+                session_id=session_id,
+                execution_ids=_live_coalesced_agent_run_ids(
+                    TaskExecutionRequest(
+                        id=execution_id,
+                        request_type="agent_run",
+                        metadata=metadata or {},
+                    )
+                )
+                or [execution_id],
+            )
+            if stale_queue_rows:
+                try:
+                    from core.inbox_events import bus
+
+                    bus.publish("queue.updated", {"session_id": session_id})
+                except Exception:
+                    logger.debug("agent_run recovery: queue.updated publish failed", exc_info=True)
             state = await gate.submit_scheduled(session_id, context, message)
             if state == "enqueued":
                 return AgentRunExecutionResult(error=None, complete_on_return=False, requeue_on_return=True)
+            if state == "duplicate":
+                live_ids = _live_coalesced_agent_run_ids(
+                    TaskExecutionRequest(
+                        id=execution_id,
+                        request_type="agent_run",
+                        metadata=metadata or {},
+                    )
+                )
+                return AgentRunExecutionResult(
+                    error=None,
+                    complete_on_return=True,
+                    coalesced_completion_ids=tuple(live_ids or [execution_id]),
+                )
             return AgentRunExecutionResult(error=None, complete_on_return=False)
 
         async def _noop_chunk(_envelope: dict) -> None:
@@ -1860,6 +2048,11 @@ class ScheduledTaskService:
                 # attribute the injected prompt to its precise definition.
                 "task_definition_id": task_id,
                 "vibe_agent_name": agent_name,
+                "source_kind": (metadata or {}).get("source_kind"),
+                "source_actor": (metadata or {}).get("source_actor"),
+                "parent_run_id": (metadata or {}).get("parent_run_id"),
+                "callback_session_id": (metadata or {}).get("callback_session_id"),
+                "coalesced_queue": (metadata or {}).get("coalesced_queue"),
                 "suppress_delivery": bool(target_info.suppress_delivery) if target_info else False,
                 "agent_session_target": (
                     {

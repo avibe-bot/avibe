@@ -608,3 +608,63 @@ def test_settings_store_custom_path_uses_sibling_config_primary_platform(tmp_pat
     finally:
         sessions.close()
         store.close()
+
+
+def test_sqlite_filters_deprecated_system_message_type(tmp_path: Path) -> None:
+    """The deprecated "system" message type must not survive the SQLite settings
+    round-trip, and a legacy raw row that still contains it is filtered on load.
+
+    Regression for the Codex review on PR #638: the SQLite store load/save path
+    bypassed message-type normalization, so stored "system" leaked through
+    store-level APIs (e.g. /api/users) until the row was edited.
+    """
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    service = SQLiteSettingsService(db_path)
+    try:
+        # save-normalize: "system" is stripped before it is persisted.
+        service.save_state(
+            SettingsState(
+                channels={
+                    "slack::C1": ChannelSettings(
+                        enabled=True, show_message_types=["system", "assistant"]
+                    )
+                },
+                users={
+                    "slack::U1": UserSettings(
+                        display_name="Alex", enabled=True, show_message_types=["system", "toolcall"]
+                    )
+                },
+            )
+        )
+        saved = service.load_state()
+        assert saved.channels["slack::C1"].show_message_types == ["assistant"]
+        assert saved.users["slack::U1"].show_message_types == ["toolcall"]
+
+        # Simulate legacy rows written before the deprecation by injecting raw
+        # "system" back into settings_json, bypassing save-normalize.
+        engine = create_sqlite_engine(db_path)
+        with engine.begin() as conn:
+            for row in conn.execute(
+                select(scope_settings.c.scope_id, scope_settings.c.settings_json)
+            ).all():
+                payload = json.loads(row.settings_json)
+                if "show_message_types" in payload:
+                    payload["show_message_types"] = ["system", *payload["show_message_types"]]
+                    conn.execute(
+                        scope_settings.update()
+                        .where(scope_settings.c.scope_id == row.scope_id)
+                        .values(settings_json=json.dumps(payload))
+                    )
+        engine.dispose()
+    finally:
+        service.close()
+
+    # load-normalize: a fresh reader drops the legacy "system" value.
+    reader = SQLiteSettingsService(db_path)
+    try:
+        legacy = reader.load_state()
+    finally:
+        reader.close()
+    assert legacy.channels["slack::C1"].show_message_types == ["assistant"]
+    assert legacy.users["slack::U1"].show_message_types == ["toolcall"]

@@ -14,7 +14,7 @@ from config.v2_config import (
     DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
 )
 from core.avibe_cloud import avibe_cloud_url_available
-from core.services.session_fork import pending_native_fork_source
+from core.services.session_fork import fork_source_state, pending_native_fork
 from core.system_prompt_injection import (
     build_forked_session_correction_prompt,
     build_system_prompt_injection,
@@ -740,11 +740,12 @@ class CodexAgent(BaseAgent):
         self,
         transport: CodexTransport,
         request: AgentRequest,
-        source_thread_id: str,
+        fork: dict[str, Any],
     ) -> str:
         """Fork an existing Codex thread and bind the new thread id."""
         self.ensure_agent_session_id(request)
         _, effective_model, _, _ = self._resolve_codex_agent_settings(request)
+        source_thread_id = str(fork.get("source_native_session_id") or "").strip()
         params: Dict[str, Any] = {
             "threadId": source_thread_id,
             "cwd": request.working_path,
@@ -759,6 +760,7 @@ class CodexAgent(BaseAgent):
 
         self._mark_fork_correction_pending(request.base_session_id)
         try:
+            should_trim = await self._should_rollback_forked_running_turn(fork)
             resp = await transport.send_request("thread/fork", params)
             thread_id = resp.get("id", "")
             if not thread_id:
@@ -768,6 +770,8 @@ class CodexAgent(BaseAgent):
             if not thread_id:
                 raise RuntimeError("Codex thread/fork returned no thread id")
 
+            if should_trim:
+                await self._rollback_forked_running_turn(transport, thread_id)
             await self._inject_forked_session_correction(transport, request, thread_id)
         finally:
             self._clear_fork_correction_pending(request.base_session_id)
@@ -776,6 +780,60 @@ class CodexAgent(BaseAgent):
         self._remember_thread_developer_instructions(request.base_session_id, thread_id, developer_instructions)
         logger.info("Forked Codex thread %s from %s for session %s", thread_id, source_thread_id, request.base_session_id)
         return thread_id
+
+    async def _should_rollback_forked_running_turn(self, fork: dict[str, Any]) -> bool:
+        """Rollback only when Codex's latest-turn rollback still targets the reserved turn."""
+
+        if not bool(fork.get("trim_latest_running_turn")):
+            return False
+        source_state = fork_source_state(fork)
+        if source_state.anchor_is_terminal_agent_output:
+            return False
+        anchor_is_running_user = (
+            getattr(source_state, "anchor_author", None) == "user"
+            and getattr(source_state, "anchor_type", None) == "user"
+        )
+        if getattr(source_state, "has_user_turn_after_anchor", False):
+            return False
+        if anchor_is_running_user:
+            if source_state.has_messages_after_anchor:
+                return True
+            if bool(fork.get("native_turn_started")):
+                return True
+            return await self._fork_source_turn_now_started(fork)
+        if source_state.has_messages_after_anchor:
+            return not source_state.has_terminal_agent_output_after_anchor
+        if bool(fork.get("native_turn_started")):
+            return True
+        return await self._fork_source_turn_now_started(fork)
+
+    async def _fork_source_turn_now_started(self, fork: dict[str, Any]) -> bool:
+        source_session_id = str(fork.get("source_session_id") or "").strip()
+        if not source_session_id:
+            return False
+        from vibe import internal_client
+
+        try:
+            turn_result = await internal_client.turn_state(source_session_id)
+        except (internal_client.InternalServerTimeout, internal_client.InternalServerUnavailable):
+            return False
+        body = turn_result.get("body") or {}
+        return bool(body.get("in_flight") and body.get("native_turn_started"))
+
+    async def _rollback_forked_running_turn(
+        self,
+        transport: CodexTransport,
+        thread_id: str,
+    ) -> None:
+        """Remove the source's still-running latest turn from a forked thread."""
+
+        await transport.send_request(
+            "thread/rollback",
+            {
+                "threadId": thread_id,
+                "numTurns": 1,
+            },
+        )
 
     def _resolve_codex_agent_settings(
         self,
@@ -896,9 +954,9 @@ class CodexAgent(BaseAgent):
             logger.info("Resumed Codex thread %s for session %s", thread_id, request.base_session_id)
             return thread_id
 
-        fork_source = pending_native_fork_source(request.context, self.name)
-        if fork_source:
-            return await self._fork_thread(transport, request, fork_source)
+        fork = pending_native_fork(request.context, self.name)
+        if fork:
+            return await self._fork_thread(transport, request, fork)
 
         # No associated thread yet (genuinely first turn) — start fresh.
         return await self._start_thread(transport, request)

@@ -182,6 +182,8 @@ def test_failed_update_notification_does_not_defer_idle_auto_update(monkeypatch,
         lambda version: {"version": version, "policy": "default", "error": None},
     )
     monkeypatch.setattr(checker, "_is_idle", lambda: True)
+    monkeypatch.setattr("vibe.runtime.get_service_main_path", lambda: Path("/pkg/service_main.py"))
+    monkeypatch.setattr(update_checker, "get_running_vibe_path", lambda: "/tmp/vibe")
     performed = []
 
     async def fake_perform_update(target_version, **kwargs):
@@ -220,6 +222,8 @@ def test_silent_release_metadata_skips_notifications_but_keeps_auto_update(monke
         lambda version: {"version": version, "policy": "none", "error": None},
     )
     monkeypatch.setattr(checker, "_is_idle", lambda: True)
+    monkeypatch.setattr("vibe.runtime.get_service_main_path", lambda: Path("/pkg/service_main.py"))
+    monkeypatch.setattr(update_checker, "get_running_vibe_path", lambda: "/tmp/vibe")
     notified = []
     performed = []
 
@@ -289,7 +293,7 @@ def test_update_check_reconciles_askill_even_when_product_checks_disabled(monkey
     assert reconciled == [True]
 
 
-def test_suppressed_post_update_notification_does_not_write_marker(monkeypatch, tmp_path):
+def test_suppressed_post_update_notification_writes_verification_marker(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()
     checker = UpdateChecker(_StubController(SettingsStore.get_instance()), UpdateConfig())
@@ -303,7 +307,9 @@ def test_suppressed_post_update_notification_does_not_write_marker(monkeypatch, 
 
     assert result["ok"] is True
     marker = tmp_path / "state" / "pending_update_notification.json"
-    assert not marker.exists()
+    data = json.loads(marker.read_text(encoding="utf-8"))
+    assert data["version"] == "1.0.1"
+    assert data["suppress_success_notification"] is True
 
 
 def test_update_marker_records_platform_for_non_slack_callbacks(monkeypatch, tmp_path):
@@ -329,6 +335,7 @@ def test_post_update_notification_uses_unicode_emoji_for_non_slack(monkeypatch, 
     controller.im_clients = {"telegram": telegram_client}
     checker = UpdateChecker(controller, UpdateConfig())
     checker._write_update_marker("1.0.1", channel_id="123456", message_id="42", platform="telegram")
+    monkeypatch.setattr("vibe.__version__", "1.0.1", raising=False)
 
     asyncio.run(checker.check_and_send_post_update_notification())
 
@@ -336,6 +343,214 @@ def test_post_update_notification_uses_unicode_emoji_for_non_slack(monkeypatch, 
     _, _, text, _ = telegram_client.edit_calls[0]
     assert text == "✅ Avibe has been updated to `1.0.1`"
     assert ":white_check_mark:" not in text
+
+
+def test_suppressed_post_update_marker_verifies_without_success_message(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    controller = _StubController(SettingsStore.get_instance())
+    telegram_client = _FakeIMClient()
+    controller.im_clients = {"telegram": telegram_client}
+    checker = UpdateChecker(controller, UpdateConfig())
+    checker._write_update_marker(
+        "1.0.1",
+        channel_id="123456",
+        message_id="42",
+        platform="telegram",
+        suppress_success_notification=True,
+    )
+    monkeypatch.setattr("vibe.__version__", "1.0.1", raising=False)
+
+    asyncio.run(checker.check_and_send_post_update_notification())
+
+    assert telegram_client.edit_calls == []
+    marker = tmp_path / "state" / "pending_update_notification.json"
+    assert not marker.exists()
+
+
+def test_auto_update_skips_unattended_source_checkout_install(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    checker = UpdateChecker(
+        _StubController(SettingsStore.get_instance()),
+        UpdateConfig(check_interval_minutes=1, notify_admins=False, auto_update=True),
+    )
+    checker.state.last_activity_at = time.time() - 3600
+    monkeypatch.setattr(
+        update_checker,
+        "_fetch_pypi_version_sync",
+        lambda: {"current": "3.0.4.dev10+g4d621ef0a", "latest": "3.0.4", "has_update": True, "error": None},
+    )
+    monkeypatch.setattr(
+        update_checker,
+        "_fetch_update_notification_policy_sync",
+        lambda version: {"version": version, "policy": "default", "error": None},
+    )
+    monkeypatch.setattr(checker, "_is_idle", lambda: True)
+    monkeypatch.setattr(update_checker, "get_running_vibe_path", lambda: "/tmp/dev-vibe")
+    monkeypatch.setattr("vibe.runtime.get_service_main_path", lambda: Path("/repo/main.py"))
+    performed = []
+
+    async def fake_perform_update(target_version, **kwargs):
+        performed.append((target_version, kwargs))
+        return {"ok": True, "restarting": True, "message": "ok"}
+
+    monkeypatch.setattr(checker, "_perform_update", fake_perform_update)
+
+    asyncio.run(checker._do_check())
+
+    assert performed == []
+    assert checker.state.blocked_auto_update_version is None
+
+
+def test_restartless_auto_update_blocks_same_version_retry_and_notifies(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    store = SettingsStore.get_instance()
+    store.set_users_for_platform("telegram", {"123456": UserSettings(display_name="Telegram", is_admin=True)})
+    store.save()
+    controller = _StubController(store)
+    telegram_client = _FakeIMClient()
+    controller.im_clients = {"telegram": telegram_client}
+    checker = UpdateChecker(
+        controller,
+        UpdateConfig(check_interval_minutes=1, notify_admins=False, auto_update=True),
+    )
+    checker.state.last_activity_at = time.time() - 3600
+    monkeypatch.setattr(
+        update_checker,
+        "_fetch_pypi_version_sync",
+        lambda: {"current": "3.0.3", "latest": "3.0.4", "has_update": True, "error": None},
+    )
+    monkeypatch.setattr(
+        update_checker,
+        "_fetch_update_notification_policy_sync",
+        lambda version: {"version": version, "policy": "default", "error": None},
+    )
+    monkeypatch.setattr(checker, "_is_idle", lambda: True)
+    monkeypatch.setattr("vibe.runtime.get_service_main_path", lambda: Path("/pkg/service_main.py"))
+    monkeypatch.setattr(update_checker, "get_running_vibe_path", lambda: "/tmp/vibe")
+    attempts = []
+
+    async def fake_perform_update(target_version, **kwargs):
+        attempts.append((target_version, kwargs))
+        return {"ok": True, "restarting": False, "message": "restart missing"}
+
+    monkeypatch.setattr(checker, "_perform_update", fake_perform_update)
+
+    asyncio.run(checker._do_check())
+    asyncio.run(checker._do_check())
+
+    assert attempts == [("3.0.4", {})]
+    assert telegram_client.dm_calls
+    _, text, _ = telegram_client.dm_calls[0]
+    assert "did not take effect" in text
+    assert "`3.0.4`" in text
+    assert "`3.0.3`" in text
+    assert checker.state.blocked_auto_update_version == "3.0.4"
+    assert checker.state.blocked_auto_update_reason == "restart_not_scheduled"
+
+
+def test_install_failure_auto_update_remains_retryable(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    checker = UpdateChecker(
+        _StubController(SettingsStore.get_instance()),
+        UpdateConfig(check_interval_minutes=1, notify_admins=False, auto_update=True),
+    )
+    checker.state.last_activity_at = time.time() - 3600
+    monkeypatch.setattr(
+        update_checker,
+        "_fetch_pypi_version_sync",
+        lambda: {"current": "3.0.3", "latest": "3.0.4", "has_update": True, "error": None},
+    )
+    monkeypatch.setattr(
+        update_checker,
+        "_fetch_update_notification_policy_sync",
+        lambda version: {"version": version, "policy": "default", "error": None},
+    )
+    monkeypatch.setattr(checker, "_is_idle", lambda: True)
+    monkeypatch.setattr("vibe.runtime.get_service_main_path", lambda: Path("/pkg/service_main.py"))
+    monkeypatch.setattr(update_checker, "get_running_vibe_path", lambda: "/tmp/vibe")
+    attempts = []
+
+    async def fake_perform_update(target_version, **kwargs):
+        attempts.append((target_version, kwargs))
+        return {"ok": False, "restarting": False, "message": "network down"}
+
+    monkeypatch.setattr(checker, "_perform_update", fake_perform_update)
+
+    asyncio.run(checker._do_check())
+    asyncio.run(checker._do_check())
+
+    assert attempts == [("3.0.4", {}), ("3.0.4", {})]
+    assert checker.state.blocked_auto_update_version is None
+    assert checker.state.blocked_auto_update_reason is None
+
+
+def test_update_check_error_preserves_blocked_auto_update(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    checker = UpdateChecker(
+        _StubController(SettingsStore.get_instance()),
+        UpdateConfig(check_interval_minutes=1, notify_admins=False, auto_update=True),
+    )
+    checker._block_auto_update("3.0.4", "post_update_version_mismatch", current_version="3.0.3")
+    monkeypatch.setattr(
+        update_checker,
+        "_fetch_pypi_version_sync",
+        lambda: {"current": "3.0.3", "latest": None, "has_update": False, "error": "network down"},
+    )
+
+    asyncio.run(checker._do_check())
+
+    assert checker.state.blocked_auto_update_version == "3.0.4"
+    assert checker.state.blocked_auto_update_reason == "post_update_version_mismatch"
+    assert checker.state.blocked_auto_update_current_version == "3.0.3"
+
+
+def test_post_update_notification_accepts_newer_running_version(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    controller = _StubController(SettingsStore.get_instance())
+    telegram_client = _FakeIMClient()
+    controller.im_clients = {"telegram": telegram_client}
+    checker = UpdateChecker(controller, UpdateConfig())
+    checker._write_update_marker("3.0.4", channel_id="123456", message_id="42", platform="telegram")
+    monkeypatch.setattr("vibe.__version__", "3.0.5", raising=False)
+
+    asyncio.run(checker.check_and_send_post_update_notification())
+
+    assert telegram_client.edit_calls
+    _, _, text, _ = telegram_client.edit_calls[0]
+    assert text == "✅ Avibe has been updated to `3.0.4`"
+    assert checker.state.blocked_auto_update_version is None
+    marker = tmp_path / "state" / "pending_update_notification.json"
+    assert not marker.exists()
+
+
+def test_post_update_notification_skips_success_when_running_version_mismatches(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+    controller = _StubController(SettingsStore.get_instance())
+    telegram_client = _FakeIMClient()
+    controller.im_clients = {"telegram": telegram_client}
+    checker = UpdateChecker(controller, UpdateConfig())
+    checker._write_update_marker("3.0.4", channel_id="123456", message_id="42", platform="telegram")
+    monkeypatch.setattr("vibe.__version__", "3.0.3", raising=False)
+
+    asyncio.run(checker.check_and_send_post_update_notification())
+
+    assert telegram_client.edit_calls
+    _, _, text, _ = telegram_client.edit_calls[0]
+    assert "did not take effect" in text
+    assert "`3.0.4`" in text
+    assert "`3.0.3`" in text
+    assert checker.state.blocked_auto_update_version == "3.0.4"
+    assert checker.state.blocked_auto_update_reason == "post_update_version_mismatch"
+    assert checker.state.blocked_auto_update_current_version == "3.0.3"
+    marker = tmp_path / "state" / "pending_update_notification.json"
+    assert not marker.exists()
 
 
 def test_stop_returns_cancellable_task(monkeypatch, tmp_path):

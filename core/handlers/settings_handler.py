@@ -23,7 +23,6 @@ class SettingsHandler(BaseHandler):
 
     def _message_type_display_names(self) -> dict:
         return {
-            "system": self._t("messageType.system"),
             "assistant": self._t("messageType.assistant"),
             "toolcall": self._t("messageType.toolcall"),
         }
@@ -341,7 +340,6 @@ class SettingsHandler(BaseHandler):
                 title=self._t("info.messageTypesTitle"),
                 emoji="📋",
                 items=[
-                    (self._t("messageType.system"), self._t("messageType.systemDesc")),
                     (self._t("messageType.toolcall"), self._t("messageType.toolcallDesc")),
                     (self._t("messageType.assistant"), self._t("messageType.assistantDesc")),
                     (self._t("messageType.result"), self._t("messageType.resultDesc")),

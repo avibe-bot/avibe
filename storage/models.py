@@ -362,7 +362,7 @@ messages = Table(
         "session_id",
         text("created_at desc"),
         text("id desc"),
-        sqlite_where=text("session_id is not null and type not in ('queued', 'draft', 'pending')"),
+        sqlite_where=text("session_id is not null and type not in ('queued', 'draft', 'pending', 'harness_dedupe')"),
     ),
     Index(
         "ix_messages_inbox_agent_reply",
@@ -378,7 +378,9 @@ messages = Table(
         "session_id",
         text("created_at desc"),
         text("id desc"),
-        sqlite_where=text("session_id is not null and author = 'user' and type not in ('queued', 'draft', 'pending')"),
+        sqlite_where=text(
+            "session_id is not null and author = 'user' and type not in ('queued', 'draft', 'pending', 'harness_dedupe')"
+        ),
     ),
     Index("ix_messages_scope_created", "scope_id", "created_at"),
     Index("ix_messages_scope_unread", "scope_id", "read_at"),

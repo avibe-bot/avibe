@@ -3,6 +3,14 @@
     "title": "Fork {title}",
     "titleUntitled": "Fork"
   },
+  "harness": {
+    "queueCoalesced": {
+      "summary": "[Avibe Harness] The same watch/task callback fired {count} times within a rolling {window}-second window. The queued callbacks were coalesced into this single Agent turn.",
+      "messagesLabel": "Coalesced callback messages:",
+      "latestLabel": "Latest callback message after {additional} additional trigger(s):",
+      "burstHint": "This callback source is firing frequently. Inspect the related watch/task and pause, remove, or update it if it is looping."
+    }
+  },
   "common": {
     "save": "Save",
     "cancel": "Cancel",
@@ -109,6 +117,7 @@
     "restartRequired": "Upgrade complete. Please restart Avibe.",
     "restartRequiredShort": "Upgrade completed - restart required",
     "restartRequiredSlack": "✅ *Upgrade complete*\n\nPlease restart Avibe to apply the update.",
+    "postUpdateVersionMismatch": "❌ Avibe update did not take effect. Tried to update to `{target}`, but the service is still running `{current}`. Automatic retries for this version have been paused; please check the install path and restart logs.",
     "updated": "✅ Avibe has been updated to `{version}`",
     "updatedSlack": "✅ *Avibe Updated Successfully*\n\nNow running version `{version}`",
     "availablePlain": "Avibe update available: {current} → {latest} ({releaseUrl})",
@@ -340,7 +349,7 @@
   },
   "messageType": {
     "system": "System",
-    "assistant": "Assistant",
+    "assistant": "Muttering",
     "toolcall": "Toolcall",
     "result": "Result",
     "systemDesc": "System initialization and status messages",

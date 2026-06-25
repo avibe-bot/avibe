@@ -21,7 +21,8 @@ import clsx from 'clsx';
 import { useApi } from '../context/ApiContext';
 import { useToast } from '../context/ToastContext';
 import { copyTextToClipboard } from '../lib/utils';
-import { copyHref, displayLink } from '../lib/showPageLinks';
+import { copyHref, displayLink, type ShowPageLinkInfo } from '../lib/showPageLinks';
+import { ShowPageShareIdField } from './workbench/ShowPageShareIdField';
 import { SearchField } from './settings/SettingsPrimitives';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
@@ -69,9 +70,10 @@ interface RowProps {
   onSetVisibility: (visibility: Visibility) => void;
   onRotate: () => void;
   onCopy: () => void;
+  onShareIdSaved: (payload: ShowPageLinkInfo) => void;
 }
 
-function ShowPageRow({ page, expanded, busy, copied, onToggle, onSetVisibility, onRotate, onCopy }: RowProps) {
+function ShowPageRow({ page, expanded, busy, copied, onToggle, onSetVisibility, onRotate, onCopy, onShareIdSaved }: RowProps) {
   const { t, i18n } = useTranslation();
   const status = STATUS[page.visibility];
   const { Icon } = status;
@@ -217,7 +219,7 @@ function ShowPageRow({ page, expanded, busy, copied, onToggle, onSetVisibility, 
                     <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
                       <TriangleAlert size={13} className="text-gold" />
                       <span className="text-muted">{t('showPages.cloudOff')}</span>
-                      <a href="/admin/settings/service" className="font-semibold text-gold hover:underline">
+                      <a href="/admin/remote-access" className="font-semibold text-gold hover:underline">
                         {t('showPages.connectCloud')} →
                       </a>
                     </div>
@@ -226,14 +228,27 @@ function ShowPageRow({ page, expanded, busy, copied, onToggle, onSetVisibility, 
               )}
 
               {page.visibility === 'public' ? (
-                <div className="flex flex-col gap-2">
-                  <span className={LABEL}>{t('showPages.shareLink')}</span>
-                  <div className="flex flex-wrap items-center gap-3">
-                    <Button type="button" variant="secondary" size="sm" onClick={onRotate} disabled={busy}>
-                      <RotateCw size={14} />
-                      {t('showPages.rotate')}
-                    </Button>
-                    <span className="text-[11px] text-muted">{t('showPages.rotateHint')}</span>
+                <div className="flex flex-col gap-3">
+                  <div className="flex flex-col gap-2">
+                    <span className={LABEL}>{t('showPages.shareId.label')}</span>
+                    <div className="max-w-[360px]">
+                      <ShowPageShareIdField
+                        sessionId={page.session_id}
+                        shareId={page.share_id}
+                        disabled={busy}
+                        onSaved={onShareIdSaved}
+                      />
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <span className={LABEL}>{t('showPages.shareLink')}</span>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <Button type="button" variant="secondary" size="sm" onClick={onRotate} disabled={busy}>
+                        <RotateCw size={14} />
+                        {t('showPages.rotate')}
+                      </Button>
+                      <span className="text-[11px] text-muted">{t('showPages.rotateHint')}</span>
+                    </div>
                   </div>
                 </div>
               ) : null}
@@ -321,6 +336,13 @@ export function ShowPagesPage() {
     } finally {
       setBusyId(null);
     }
+  };
+
+  // The custom-link field owns its own request/validation; the page only merges
+  // the returned payload (new share_id, updated_at) and confirms.
+  const onShareIdSaved = (next: ShowPageLinkInfo) => {
+    mergePage(next as ShowPage);
+    showToast(t('showPages.shareId.toast.saved'));
   };
 
   const copy = async (page: ShowPage) => {
@@ -414,6 +436,7 @@ export function ShowPagesPage() {
                 onSetVisibility={(visibility) => setVisibility(page, visibility)}
                 onRotate={() => rotate(page)}
                 onCopy={() => copy(page)}
+                onShareIdSaved={onShareIdSaved}
               />
             ))}
           </div>

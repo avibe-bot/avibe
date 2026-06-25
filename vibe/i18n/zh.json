@@ -3,6 +3,14 @@
     "title": "复刻 {title}",
     "titleUntitled": "复刻"
   },
+  "harness": {
+    "queueCoalesced": {
+      "summary": "[Avibe Harness] 同一个 watch/task callback 在滚动 {window} 秒窗口内触发了 {count} 次。已将这些排队 callback 合并为一次 Agent turn。",
+      "messagesLabel": "已合并的 callback 消息：",
+      "latestLabel": "后续又触发 {additional} 次后的最新 callback 消息：",
+      "burstHint": "这个 callback 来源正在频繁触发。请检查相关 watch/task；如果它在循环触发，请 pause、remove 或 update。"
+    }
+  },
   "common": {
     "save": "保存",
     "cancel": "取消",
@@ -109,6 +117,7 @@
     "restartRequired": "升级完成，请重启 Avibe。",
     "restartRequiredShort": "升级完成 - 需要重启",
     "restartRequiredSlack": "✅ *升级完成*\n\n请重启 Avibe 以应用更新。",
+    "postUpdateVersionMismatch": "❌ Avibe 更新没有生效。尝试更新到 `{target}`，但服务仍在运行 `{current}`。已暂停这个版本的自动重试，请检查安装路径和重启日志。",
     "updated": "✅ Avibe 已更新到 `{version}`",
     "updatedSlack": "✅ *Avibe 更新成功*\n\n当前运行版本 `{version}`",
     "availablePlain": "Avibe 有可用更新：{current} → {latest} ({releaseUrl})",
@@ -340,7 +349,7 @@
   },
   "messageType": {
     "system": "系统",
-    "assistant": "助手",
+    "assistant": "喃喃自语",
     "toolcall": "工具调用",
     "result": "结果",
     "systemDesc": "系统初始化和状态消息",

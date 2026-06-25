@@ -402,6 +402,16 @@ export const Dashboard: React.FC = () => {
 
       {/* Mirrors design.pen statsRow + NbtYJ Card/Stat */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {/* Avibe (remote access) card leads the row. */}
+        <CloudStatCard
+          label={t('dashboard.metricCloud')}
+          value={cloudValue}
+          hint={cloudHint}
+          icon={<Cloud className="size-4" />}
+          cloudHomeUrl="https://avibe.bot"
+          settingsHref="/admin/remote-access"
+          publicUrl={cloudPublicHref}
+        />
         <StatCard
           label={t('dashboard.metricPlatforms')}
           value={`${activePlatformCount} / ${platformCatalog.length}`}
@@ -422,15 +432,6 @@ export const Dashboard: React.FC = () => {
           hint={t('dashboard.metricUsersHint')}
           icon={<MessageSquare className="size-4" />}
           to="/admin/users"
-        />
-        <CloudStatCard
-          label={t('dashboard.metricCloud')}
-          value={cloudValue}
-          hint={cloudHint}
-          icon={<Cloud className="size-4" />}
-          cloudHomeUrl="https://avibe.bot"
-          settingsHref="/admin/settings/service#remote-access"
-          publicUrl={cloudPublicHref}
         />
       </div>
 

@@ -1089,6 +1089,25 @@ def rotate_show_page_share(session_id: str) -> dict:
     return {"ok": True, "previous_share_id": previous_share_id, **_apply_session_meta([payload])[0]}
 
 
+def set_show_page_share_id(session_id: str, share_id: str) -> dict:
+    """Set a custom public link suffix (public pages only).
+
+    Like ``rotate_show_page_share`` but with a caller-chosen value; setting it
+    revokes the previous public URL. Raises ``ShowPageError`` for an invalid /
+    taken suffix or a non-public page, which the route layer maps to a 4xx/409.
+    """
+    from core.show_pages import ShowPageStore, show_page_payload
+
+    config = V2Config.load()
+    store = ShowPageStore()
+    try:
+        updated, previous_share_id = store.set_share_id(session_id, share_id)
+        payload = show_page_payload(updated, config=config)
+    finally:
+        store.close()
+    return {"ok": True, "previous_share_id": previous_share_id, **_apply_session_meta([payload])[0]}
+
+
 def _vibe_agent_payload(agent, *, brief: bool = False) -> dict:
     payload = agent.to_dict()
     if brief:

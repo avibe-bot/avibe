@@ -375,14 +375,17 @@ class SettingsManager:
         self.update_user_settings(user_id, settings)
 
     def get_available_message_types(self) -> List[str]:
-        """Get list of available message types that can be hidden"""
-        return ["system", "assistant", "toolcall"]
+        """Get list of available message types that can be hidden.
+
+        ``system`` is intentionally excluded: system/init messages are never
+        pushed to users, so there is nothing for the toggle to control.
+        """
+        return ["assistant", "toolcall"]
 
     def get_message_type_display_names(self) -> Dict[str, str]:
         """Get display names for message types"""
         return {
-            "system": "System",
-            "assistant": "Assistant",
+            "assistant": "Muttering",
             "toolcall": "Toolcall",
         }
 
@@ -391,8 +394,13 @@ class SettingsManager:
         return self.MESSAGE_TYPE_ALIASES.get(message_type, message_type)
 
     def _normalize_show_message_types(self, show_message_types: Optional[List[str]]) -> List[str]:
-        """Normalize and migrate show message types to current canonical schema."""
-        allowed = {"system", "assistant", "toolcall"}
+        """Normalize and migrate show message types to current canonical schema.
+
+        "system" is deprecated and dropped here: system/init messages are never
+        pushed to users, so a legacy stored "system" value is filtered out on
+        load/save instead of leaking into settings UIs.
+        """
+        allowed = {"assistant", "toolcall"}
         if show_message_types is None:
             return DEFAULT_SHOW_MESSAGE_TYPES.copy()
         normalized: List[str] = []

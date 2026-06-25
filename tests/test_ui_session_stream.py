@@ -10,6 +10,8 @@ controller process.
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -73,6 +75,26 @@ def _make_session(tmp_path: Path) -> tuple[str, str]:
             agent_name="worker",
         )
     return scope_id, session["id"]
+
+
+def _seed_opencode_messages(xdg_home: Path, native_session_id: str, roles: list[str]) -> None:
+    db_path = xdg_home / "opencode" / "opencode.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE message (id TEXT PRIMARY KEY, data TEXT)")
+        conn.execute(
+            "CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT, message_id TEXT, time_created INTEGER, data TEXT)"
+        )
+        for index, role in enumerate(roles, start=1):
+            message_id = f"oc-msg-{index}"
+            conn.execute(
+                "INSERT INTO message (id, data) VALUES (?, ?)",
+                (message_id, json.dumps({"role": role})),
+            )
+            conn.execute(
+                "INSERT INTO part (id, session_id, message_id, time_created, data) VALUES (?, ?, ?, ?, ?)",
+                (f"part-{index}", native_session_id, message_id, index, json.dumps({"type": "text"})),
+            )
 
 
 def test_route_fire_and_forgets_dispatch(isolated_state, tmp_path):
@@ -226,6 +248,146 @@ def test_fork_session_creates_new_workbench_session(isolated_state, tmp_path):
         "session.activity",
         {"session_id": payload["id"], "scope_id": scope_id, "event": "created"},
     )
+
+
+def test_fork_session_marks_running_source_for_trim(isolated_state, tmp_path, monkeypatch):
+    from sqlalchemy import update
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+    from vibe.ui_server import app
+
+    xdg_home = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
+    _seed_opencode_messages(xdg_home, "native-source-1", ["user", "assistant", "user"])
+    scope_id, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == session_id)
+            .values(
+                agent_backend="opencode",
+                agent_variant="opencode",
+                agent_name="opencode",
+                native_session_id="native-source-1",
+                title="Source session",
+            )
+        )
+        messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id=session_id,
+            platform="avibe",
+            author="user",
+            message_type="user",
+            text="do work",
+        )
+
+    in_flight = AsyncMock(
+        return_value={
+            "status_code": 200,
+            "body": {"ok": True, "in_flight": True, "native_turn_started": True},
+        }
+    )
+    with (
+        patch("vibe.sse_broker.broker.publish"),
+        patch("vibe.internal_client.turn_state", in_flight),
+    ):
+        client = app.test_client()
+        headers = csrf_headers(client)
+        response = client.post(f"/api/sessions/{session_id}/fork", json={}, headers=headers)
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["metadata"]["fork_trim_latest_running_turn"] is True
+    assert payload["metadata"]["fork_native_turn_started"] is True
+    assert payload["metadata"]["fork_opencode_message_id"] == "oc-msg-3"
+    in_flight.assert_awaited_once_with(session_id)
+
+
+def test_fork_session_does_not_mark_claude_running_source_for_trim(isolated_state, tmp_path):
+    from sqlalchemy import update
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+    from vibe.ui_server import app
+
+    _, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == session_id)
+            .values(native_session_id="claude-source-1", title="Source session")
+        )
+
+    in_flight = AsyncMock(
+        return_value={
+            "status_code": 200,
+            "body": {"ok": True, "in_flight": True, "native_turn_started": True},
+        }
+    )
+    with (
+        patch("vibe.sse_broker.broker.publish"),
+        patch("vibe.internal_client.turn_state", in_flight),
+    ):
+        client = app.test_client()
+        headers = csrf_headers(client)
+        response = client.post(f"/api/sessions/{session_id}/fork", json={}, headers=headers)
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["metadata"]["fork_source_backend"] == "claude"
+    assert payload["metadata"]["fork_trim_latest_running_turn"] is False
+    assert payload["metadata"]["fork_native_turn_started"] is False
+
+
+def test_fork_session_trims_post_accept_open_code_before_native_turn_starts(isolated_state, tmp_path, monkeypatch):
+    from sqlalchemy import update
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+    from vibe.ui_server import app
+
+    xdg_home = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_DATA_HOME", str(xdg_home))
+    _seed_opencode_messages(xdg_home, "native-source-1", ["user"])
+    _, session_id = _make_session(tmp_path)
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == session_id)
+            .values(
+                agent_backend="opencode",
+                agent_variant="opencode",
+                agent_name="opencode",
+                native_session_id="native-source-1",
+                title="Source session",
+            )
+        )
+
+    in_flight = AsyncMock(
+        return_value={
+            "status_code": 200,
+            "body": {"ok": True, "in_flight": True, "native_turn_started": False},
+        }
+    )
+    with (
+        patch("vibe.sse_broker.broker.publish"),
+        patch("vibe.internal_client.turn_state", in_flight),
+    ):
+        client = app.test_client()
+        headers = csrf_headers(client)
+        response = client.post(f"/api/sessions/{session_id}/fork", json={}, headers=headers)
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["metadata"]["fork_trim_latest_running_turn"] is True
+    assert payload["metadata"]["fork_native_turn_started"] is True
+    assert payload["metadata"]["fork_opencode_message_id"] == "oc-msg-1"
 
 
 def test_fork_session_rejects_unbound_source_session(isolated_state, tmp_path):

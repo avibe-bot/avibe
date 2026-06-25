@@ -26,7 +26,13 @@ from config.v2_config import UpdateConfig
 from config.v2_settings import _infer_channel_platform, _infer_user_platform, _split_scoped_key
 from modules.im import InlineButton, InlineKeyboard, MessageContext
 from vibe.i18n import t as i18n_t
-from vibe.upgrade import PACKAGE_NAME, get_update_metadata_url, has_newer_version, select_latest_update_version
+from vibe.upgrade import (
+    PACKAGE_NAME,
+    get_running_vibe_path,
+    get_update_metadata_url,
+    has_newer_version,
+    select_latest_update_version,
+)
 
 if TYPE_CHECKING:
     from core.controller import Controller
@@ -52,6 +58,7 @@ UPDATE_NOTIFICATION_POLICY_MARKER_RE = re.compile(
     r"<!--\s*(?:avibe|vibe-remote):update-notification\s*=\s*(?P<policy>none|default)\s*-->",
     re.IGNORECASE,
 )
+_STABLE_PACKAGE_VERSION_RE = re.compile(r"^\d+(?:\.\d+)*(?:[.-]?post\d+)?$")
 
 
 def _fetch_pypi_version_sync() -> Dict[str, Any]:
@@ -140,6 +147,10 @@ class UpdateState:
     notified_at: Optional[str] = None
     last_check_at: Optional[str] = None
     last_activity_at: Optional[float] = None
+    blocked_auto_update_version: Optional[str] = None
+    blocked_auto_update_reason: Optional[str] = None
+    blocked_auto_update_at: Optional[str] = None
+    blocked_auto_update_current_version: Optional[str] = None
 
     @classmethod
     def load(cls) -> "UpdateState":
@@ -153,6 +164,10 @@ class UpdateState:
                 notified_at=data.get("notified_at"),
                 last_check_at=data.get("last_check_at"),
                 last_activity_at=data.get("last_activity_at"),
+                blocked_auto_update_version=data.get("blocked_auto_update_version"),
+                blocked_auto_update_reason=data.get("blocked_auto_update_reason"),
+                blocked_auto_update_at=data.get("blocked_auto_update_at"),
+                blocked_auto_update_current_version=data.get("blocked_auto_update_current_version"),
             )
         except Exception as e:
             logger.warning(f"Failed to load update state: {e}")
@@ -168,6 +183,10 @@ class UpdateState:
                 "notified_at": self.notified_at,
                 "last_check_at": self.last_check_at,
                 "last_activity_at": self.last_activity_at,
+                "blocked_auto_update_version": self.blocked_auto_update_version,
+                "blocked_auto_update_reason": self.blocked_auto_update_reason,
+                "blocked_auto_update_at": self.blocked_auto_update_at,
+                "blocked_auto_update_current_version": self.blocked_auto_update_current_version,
             }
             # Atomic write: write to temp file, then rename
             with tempfile.NamedTemporaryFile(
@@ -261,6 +280,64 @@ class UpdateChecker:
         except Exception as e:
             logger.warning(f"Failed to reload update config: {e}")
 
+    def _clear_blocked_auto_update(self) -> None:
+        if (
+            self.state.blocked_auto_update_version is None
+            and self.state.blocked_auto_update_reason is None
+            and self.state.blocked_auto_update_at is None
+            and self.state.blocked_auto_update_current_version is None
+        ):
+            return
+        self.state.blocked_auto_update_version = None
+        self.state.blocked_auto_update_reason = None
+        self.state.blocked_auto_update_at = None
+        self.state.blocked_auto_update_current_version = None
+        self.state.save()
+
+    def _clear_blocked_auto_update_if_resolved(self, latest: Optional[str], *, has_update: bool) -> None:
+        blocked = self.state.blocked_auto_update_version
+        if not blocked:
+            return
+        if has_update and latest == blocked:
+            return
+        logger.info("Clearing blocked auto-update state for %s", blocked)
+        self._clear_blocked_auto_update()
+
+    def _block_auto_update(self, target_version: str, reason: str, *, current_version: Optional[str] = None) -> None:
+        self.state.blocked_auto_update_version = target_version
+        self.state.blocked_auto_update_reason = reason
+        self.state.blocked_auto_update_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self.state.blocked_auto_update_current_version = current_version
+        self.state.save()
+
+    def _blocked_auto_update_reason_for(self, target_version: str) -> Optional[str]:
+        if self.state.blocked_auto_update_version != target_version:
+            return None
+        return self.state.blocked_auto_update_reason or "unknown"
+
+    def _supports_unattended_self_update(self, current_version: str) -> tuple[bool, Optional[str]]:
+        from vibe import runtime
+
+        service_main_path = runtime.get_service_main_path()
+        if service_main_path.name == "main.py":
+            return False, f"service is running from source checkout at {service_main_path}"
+
+        normalized_version = str(current_version or "").strip()
+        if not _STABLE_PACKAGE_VERSION_RE.fullmatch(normalized_version):
+            return False, f"running version {normalized_version or 'unknown'} is not a packaged stable release"
+
+        if not get_running_vibe_path():
+            return False, "current vibe executable path is unavailable"
+
+        return True, None
+
+    def _running_version_satisfies_target(self, running_version: str, target_version: str) -> bool:
+        running = str(running_version or "").strip()
+        target = str(target_version or "").strip()
+        if not running or not target:
+            return False
+        return running == target or has_newer_version(running, target)
+
     async def _check_loop(self) -> None:
         """Main loop for periodic update checking."""
         # Initial delay to let the service fully start
@@ -309,6 +386,11 @@ class UpdateChecker:
                 logger.warning(f"Failed to check for updates: {version_info['error']}")
                 return
 
+            self._clear_blocked_auto_update_if_resolved(
+                version_info.get("latest") if version_info.get("has_update") else None,
+                has_update=bool(version_info.get("has_update")),
+            )
+
             if not version_info.get("has_update"):
                 logger.debug(f"No update available (current={version_info['current']})")
                 return
@@ -317,6 +399,7 @@ class UpdateChecker:
             current = version_info["current"]
             logger.info(f"Update available: {current} -> {latest}")
             release_notifications_enabled: Optional[bool] = None
+            unattended_supported, unattended_reason = self._supports_unattended_self_update(current)
 
             # Notification flow — failure must not block auto-update
             if self.config.notify_admins and self.state.notified_version != latest:
@@ -343,6 +426,17 @@ class UpdateChecker:
             # Auto-update flow — respect a grace period after successful notification
             # so the admin has time to read the notification before auto-update kicks in.
             if self.config.auto_update and self._is_idle():
+                blocked_reason = self._blocked_auto_update_reason_for(latest)
+                if blocked_reason:
+                    logger.warning(
+                        "Skipping auto-update to %s; previous attempt is blocked: %s",
+                        latest,
+                        blocked_reason,
+                    )
+                    return
+                if not unattended_supported:
+                    logger.warning("Skipping unattended self-update for %s: %s", latest, unattended_reason)
+                    return
                 release_notifications = await self._should_send_release_notifications(
                     latest,
                     cached=release_notifications_enabled,
@@ -354,7 +448,23 @@ class UpdateChecker:
                     update_kwargs = {}
                     if not release_notifications:
                         update_kwargs["suppress_post_update_notification"] = True
-                    await self._perform_update(latest, **update_kwargs)
+                    result = await self._perform_update(latest, **update_kwargs)
+                    if not result.get("ok"):
+                        logger.warning(
+                            "Auto-update to %s failed and will be retried on a later check: %s",
+                            latest,
+                            result.get("message") or "unknown",
+                        )
+                    elif not result.get("restarting"):
+                        await self._send_post_update_failure_notification(
+                            target_version=str(latest),
+                            running_version=str(current),
+                        )
+                        self._block_auto_update(
+                            latest,
+                            "restart_not_scheduled",
+                            current_version=current,
+                        )
         except Exception as e:
             logger.error(f"Update check failed: {e}", exc_info=True)
 
@@ -577,6 +687,54 @@ class UpdateChecker:
             else:
                 logger.warning("Update notification skipped: no admins and unsupported platform %s", platform)
                 return False
+
+    async def _send_post_update_failure_notification(
+        self,
+        *,
+        target_version: str,
+        running_version: str,
+        channel_id: Optional[str] = None,
+        message_id: Optional[str] = None,
+        platform: Optional[str] = None,
+    ) -> None:
+        """Notify admins that an installed update did not become the active runtime."""
+        resolved_platform = platform or getattr(self.controller.config, "platform", "slack")
+        if channel_id:
+            resolved_platform = platform or _infer_channel_platform(channel_id)
+
+        failure_text = self._t(
+            "update.postUpdateVersionMismatch",
+            target=target_version,
+            current=running_version or "unknown",
+        )
+
+        try:
+            im_client = self._get_im_client_for_platform(resolved_platform)
+            if channel_id and message_id and resolved_platform == "slack":
+                await im_client.web_client.chat_update(channel=channel_id, ts=message_id, text=failure_text)
+                logger.info("Updated original message with post-update failure notification")
+                return
+            if channel_id and message_id:
+                context = MessageContext(user_id="system", channel_id=channel_id, platform=resolved_platform)
+                await im_client.edit_message(context, message_id, text=failure_text)
+                logger.info("Updated %s message with post-update failure notification", resolved_platform)
+                return
+
+            admin_ids = self._get_admin_user_ids()
+            if admin_ids:
+                for uid in admin_ids:
+                    admin_client, raw_user_id, _ = self._get_im_client_for_user(uid)
+                    await admin_client.send_dm(raw_user_id, failure_text)
+                    logger.info("Sent post-update failure notification to admin %s", uid)
+            elif resolved_platform == "slack":
+                owner_id = await self._get_workspace_owner_id()
+                if owner_id:
+                    dm_channel = await self._open_dm_channel(owner_id)
+                    if dm_channel:
+                        await im_client.web_client.chat_postMessage(channel=dm_channel, text=failure_text)
+                        logger.info("Sent post-update failure notification to %s", owner_id)
+        except Exception as e:
+            logger.error("Failed to send post-update failure notification: %s", e)
 
     async def _send_notification_to_admins(self, admin_ids: list, current: str, latest: str, platform: str) -> bool:
         """Send update notification DM to each admin user."""
@@ -816,14 +974,13 @@ class UpdateChecker:
                     # Write marker only if restart is scheduled
                     if suppress_post_update_notification:
                         logger.info("Post-update notification suppressed for %s", target_version)
-                        self._remove_update_marker()
-                    else:
-                        self._write_update_marker(
-                            target_version,
-                            channel_id=channel_id,
-                            message_id=message_id,
-                            platform=platform,
-                        )
+                    self._write_update_marker(
+                        target_version,
+                        channel_id=channel_id,
+                        message_id=message_id,
+                        platform=platform,
+                        suppress_success_notification=suppress_post_update_notification,
+                    )
                 else:
                     logger.warning("Upgrade completed without restart; manual restart required")
                 return result
@@ -840,6 +997,7 @@ class UpdateChecker:
         channel_id: Optional[str] = None,
         message_id: Optional[str] = None,
         platform: Optional[str] = None,
+        suppress_success_notification: bool = False,
     ) -> None:
         """Write a marker file to trigger post-update notification."""
         try:
@@ -849,6 +1007,8 @@ class UpdateChecker:
                 "version": version,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
+            if suppress_success_notification:
+                data["suppress_success_notification"] = True
             # Store message coordinates for updating the original message after restart
             if channel_id and message_id:
                 data["channel_id"] = channel_id
@@ -881,15 +1041,42 @@ class UpdateChecker:
             return
 
         try:
+            from vibe import __version__
+
             data = json.loads(marker_path.read_text(encoding="utf-8"))
             channel_id = data.get("channel_id")
             message_id = data.get("message_id")
             # Use the target version from marker (more reliable than __version__ in edge cases)
             target_version = data.get("version", "unknown")
+            running_version = str(__version__ or "").strip()
+            if not self._running_version_satisfies_target(running_version, str(target_version)):
+                logger.warning(
+                    "Suppressing post-update success notification: expected %s but still running %s",
+                    target_version,
+                    running_version or "unknown",
+                )
+                self._block_auto_update(
+                    str(target_version),
+                    "post_update_version_mismatch",
+                    current_version=running_version or None,
+                )
+                await self._send_post_update_failure_notification(
+                    target_version=str(target_version),
+                    running_version=running_version or "unknown",
+                    channel_id=channel_id,
+                    message_id=message_id,
+                    platform=data.get("platform"),
+                )
+                return
 
             platform = data.get("platform") or getattr(self.controller.config, "platform", "slack")
             if channel_id:
                 platform = data.get("platform") or _infer_channel_platform(channel_id)
+            if self.state.blocked_auto_update_version == target_version:
+                self._clear_blocked_auto_update()
+            if data.get("suppress_success_notification"):
+                logger.info("Post-update success notification suppressed for %s", target_version)
+                return
             im_client = self._get_im_client_for_platform(platform)
             success_text = self._t("update.updated", version=target_version)
             success_blocks = [

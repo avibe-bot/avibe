@@ -83,6 +83,9 @@
     "users": "Direct Messages",
     "showPages": "Show Pages",
     "settings": "Settings",
+    "advancedSettings": "Advanced Settings",
+    "messagingPlatforms": "Messaging Platforms",
+    "backends": "Backends",
     "remoteAccess": "Remote Access",
     "doctor": "Doctor",
     "inbox": "Inbox",
@@ -155,6 +158,17 @@
     "shareLink": "Share link",
     "rotate": "Rotate link",
     "rotateHint": "Generates a new link and disables the current one.",
+    "shareId": {
+      "label": "Custom link",
+      "hint": "3–64 letters, numbers, dash, or underscore. Must be unique.",
+      "placeholder": "my-page",
+      "toast": { "saved": "Custom link updated" },
+      "errors": {
+        "taken": "That custom link is already taken. Pick another.",
+        "invalid": "Use 3–64 letters, numbers, dash, or underscore, starting and ending with a letter or number.",
+        "generic": "Couldn't update the custom link."
+      }
+    },
     "cloudOff": "Avibe Cloud is off — this link only opens on this device.",
     "connectCloud": "Connect Avibe Cloud",
     "details": "Details",
@@ -549,6 +563,11 @@
     "retry": "Retry"
   },
   "errors": {
+    "share_id_taken": "That custom link is already taken. Pick another.",
+    "invalid_share_id": "A custom link may use only 3–64 letters, numbers, dash, or underscore, starting and ending with a letter or number.",
+    "missing_share_id": "Enter a custom link first.",
+    "not_public": "Make the Show Page public first to change its link.",
+    "session_archived": "This session is archived, so its Show Page can't be changed.",
     "project_no_folder": "This project has no local folder configured.",
     "project_not_found": "Project not found.",
     "remote_access_host_mismatch": "This address can't open the Avibe control panel. Open it from your https://<your-slug>.avibe.bot link, or http://127.0.0.1:5123 on the machine running Avibe.",
@@ -573,7 +592,8 @@
     "title": "Avibe OS",
     "subtitle": "Agent OS · Workbench",
     "workspaceLabel": "Workspace",
-    "openControlPanel": "Control Panel",
+    "moreSettings": "More Settings",
+    "openControlPanel": "Settings",
     "backToWorkbench": "Back to Workbench",
     "newSession": "New",
     "navigationLabel": "Console",
@@ -1188,7 +1208,11 @@
     "useGlobalDefault": "Use global default",
     "backend": "Backend",
     "showMessageTypes": "Show Message Types",
-    "showMessageTypesHint": "Control which message types are displayed in Slack:\n\n• System: Agent startup/status messages\n• Assistant: Agent responses and explanations\n• Toolcall: Tool execution details (one-line summary)\n\nNote: The agent's final result is always shown regardless of these settings.",
+    "showMessageTypesHint": "Control which message types are shown in the conversation:\n\n• Muttering: Agent responses and explanations\n• Toolcall: Tool execution details (one-line summary)\n\nNote: The agent's final result is always shown regardless of these settings.",
+    "messageType": {
+      "assistant": "Muttering",
+      "toolcall": "Toolcall"
+    },
     "opencodeSettings": "OpenCode Settings",
     "claudeSettings": "Claude Settings",
     "codexSettings": "Codex Settings",
@@ -1208,7 +1232,7 @@
     "requireMention": "Require @Mention",
     "requireMentionOn": "Require @mention",
     "requireMentionOff": "Don't require @mention",
-    "requireBind": "Bound users only",
+    "requireBind": "Allowed Users",
     "requireBindOn": "Bound only",
     "requireBindOff": "Anyone",
     "mentionStatusOn": "Require @",
@@ -1832,9 +1856,13 @@
       "visibilityPrivate": "Private",
       "publicDesc": "Anyone with the link can view",
       "privateDesc": "Only you can view",
+      "customLink": "Custom link",
       "offlineNote": "This Show Page is offline and can't be shared right now.",
       "publicUnavailable": "Connect Avibe Cloud to get a public link others can open.",
-      "loadError": "Couldn't load this Show Page."
+      "loadError": "Couldn't load this Show Page.",
+      "addToHomeTitle": "Add to Home Screen",
+      "addToHomeBodySafari": "Tap here to open in a new tab, then Share → “Add to Home Screen”.",
+      "addToHomeBodyPwa": "Copy the link above and open it in Safari, then tap Share → “Add to Home Screen”."
     },
     "titlePlaceholder": "Session title",
     "pickAgent": "Pick an agent",
@@ -1868,6 +1896,8 @@
       "effort": "Effort",
       "newAgent": "New agent",
       "noModels": "No models found",
+      "searchModels": "Search models",
+      "noModelMatch": "No matching models",
       "effortOptions": {
         "minimal": "Minimal",
         "low": "Low",
@@ -1909,6 +1939,7 @@
     "queue": {
       "title": "Queued · {{count}}",
       "sendNow": "Send now",
+      "recall": "Recall to input",
       "remove": "Remove from queue"
     }
   },

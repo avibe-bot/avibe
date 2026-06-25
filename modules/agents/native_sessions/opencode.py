@@ -3,12 +3,20 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
 from .base import NativeSessionProvider, build_tail_preview, dt_from_ts, normalize_title_text, parse_json_blob
 from .types import BackendSessionTitle, NativeResumeSession
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class OpenCodeForkPoint:
+    available: bool
+    message_id: str | None = None
+    empty_history: bool = False
 
 
 class OpenCodeNativeSessionProvider(NativeSessionProvider):
@@ -94,6 +102,61 @@ class OpenCodeNativeSessionProvider(NativeSessionProvider):
         fallback = str(item.locator.get("title") or item.native_session_id)
         item.last_agent_tail = build_tail_preview(preview or fallback)
         return item
+
+    def running_fork_point_before_latest_user(
+        self,
+        native_session_id: str,
+        *,
+        include_completed_assistant_tail: bool = False,
+    ) -> OpenCodeForkPoint:
+        """Return the immutable fork point that excludes the latest user turn."""
+
+        if not self.db_path.exists():
+            return OpenCodeForkPoint(available=False)
+        try:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """
+                    SELECT m.id, m.data, MIN(p.time_created) AS first_seen
+                    FROM part p
+                    JOIN message m ON m.id = p.message_id
+                    WHERE p.session_id = ?
+                    GROUP BY m.id, m.data
+                    ORDER BY first_seen ASC, m.id ASC
+                    """,
+                    (native_session_id,),
+                )
+                messages = [
+                    (str(message_id or "").strip(), parse_json_blob(message_blob))
+                    for message_id, message_blob, _first_seen in cursor.fetchall()
+                ]
+        except Exception as exc:
+            logger.warning("Failed to read OpenCode fork point for %s: %s", native_session_id, exc)
+            return OpenCodeForkPoint(available=False)
+
+        if not messages:
+            return OpenCodeForkPoint(available=False)
+        last_message_id, last_message = messages[-1]
+        last_role = last_message.get("role")
+        if last_role == "user":
+            if last_message_id:
+                return OpenCodeForkPoint(available=True, message_id=last_message_id)
+            return OpenCodeForkPoint(available=False)
+        if last_role == "assistant":
+            time_info = last_message.get("time") or {}
+            finish_reason = last_message.get("finish")
+            if (
+                time_info.get("completed")
+                and finish_reason != "tool-calls"
+                and not include_completed_assistant_tail
+            ):
+                return OpenCodeForkPoint(available=False)
+            for message_id, message in reversed(messages[:-1]):
+                if message.get("role") == "user":
+                    if message_id:
+                        return OpenCodeForkPoint(available=True, message_id=message_id)
+                    return OpenCodeForkPoint(available=False)
+        return OpenCodeForkPoint(available=False)
 
     @classmethod
     def is_ignored_title(cls, title: str) -> bool:

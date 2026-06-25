@@ -139,6 +139,15 @@ class AgentService:
             return
         gate.runtime_started = True
 
+    def runtime_turn_started(self, context: Any) -> bool:
+        payload = getattr(context, "platform_specific", None) or {}
+        runtime_key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip()
+        runtime_token = str(payload.get(AGENT_RUNTIME_TURN_TOKEN) or "").strip()
+        if not runtime_key or not runtime_token:
+            return False
+        gate = self._turn_gates.get(runtime_key)
+        return bool(gate is not None and gate.token == runtime_token and gate.runtime_started)
+
     def release_runtime_turn(self, context: Any) -> None:
         payload = getattr(context, "platform_specific", None) or {}
         runtime_key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip()

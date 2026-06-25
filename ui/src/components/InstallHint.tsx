@@ -4,27 +4,18 @@ import { Plus, Share, Sparkles, X } from 'lucide-react';
 
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { Button } from './ui/button';
-import { isIosDevice, isStandalonePwa } from '@/lib/platform';
+import { isRealMobileSafari, isStandalonePwa } from '@/lib/platform';
 
 const STORAGE_KEY = 'vibe-remote-a2hs';
 
-// iOS in-app webviews (IM/social apps) and alt browsers can't "Add to Home
-// Screen" and don't expose Safari's share flow, so the nudge would give
-// impossible steps to exactly the IM-launched users this app targets. Only real
-// Safari qualifies — it carries both a "Version/<n>" and a "Safari" token, which
-// WKWebview-based in-app browsers and CriOS/FxiOS/etc. lack.
-const NON_SAFARI_UA = /CriOS|FxiOS|EdgiOS|OPiOS|mercury/i;
-const IN_APP_UA =
-  /MicroMessenger|FBAN|FBAV|FB_IAB|Instagram|Line\/|Twitter|WhatsApp|Snapchat|DingTalk|QQ\/|QQTheme|Slack|Discord|Feishu|Lark|; wv\)/i;
-
+// Only real iOS Safari can "Add to Home Screen": IM in-app webviews and alt
+// browsers (CriOS/FxiOS/etc.) don't expose Safari's share flow, so the nudge
+// would give impossible steps to exactly the IM-launched users this app targets.
+// isRealMobileSafari() (shared in lib/platform) encodes that filter.
 function shouldShowHint(): boolean {
   if (typeof window === 'undefined' || !window.matchMedia) return false;
   if (!window.matchMedia('(max-width: 767px)').matches) return false;
-  if (!isIosDevice()) return false;
-  const ua = navigator.userAgent || '';
-  const isRealSafari =
-    /Safari/.test(ua) && /Version\//.test(ua) && !NON_SAFARI_UA.test(ua) && !IN_APP_UA.test(ua);
-  if (!isRealSafari) return false;
+  if (!isRealMobileSafari()) return false;
   return !isStandalonePwa();
 }
 

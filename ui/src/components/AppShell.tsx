@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, FolderTree, Hash, Inbox, LayoutDashboard, LayoutGrid, Menu, MonitorPlay, Plus, Settings, SlidersHorizontal, Sparkles, Users } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Bot, ChevronDown, FolderTree, Globe, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, MonitorPlay, PlugZap, Plus, Settings, SlidersHorizontal, Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -21,23 +21,42 @@ import { getEnabledPlatforms, platformSupportsChannels } from '../lib/platforms'
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
 
 type ShellNavItem = {
-  to: string;
+  // Optional: a parent that only groups children (no page of its own) omits `to`
+  // and renders as a collapsible toggle instead of a link.
+  to?: string;
   label: string;
   icon: React.ComponentType<{ className?: string }>;
   match?: (pathname: string) => boolean;
   badge?: number;
+  children?: ShellNavItem[];
+  // `defaultOpen` makes a group start expanded (used in the mobile 更多 sheet so
+  // 通讯平台 shows its children without a second tap).
+  defaultOpen?: boolean;
+  // Mobile-tab extras: `onClick` makes the tab a button (e.g. 更多 opens the
+  // nav sheet) instead of a link; `variant: 'workbench'` renders the emphasized
+  // green circle for the back-to-workbench tab.
+  onClick?: () => void;
+  variant?: 'workbench';
 };
+
+const isItemActive = (item: ShellNavItem, pathname: string): boolean =>
+  item.match
+    ? item.match(pathname)
+    : item.to
+      ? pathname === item.to || pathname.startsWith(`${item.to}/`)
+      : false;
 
 // Mirrors design.pen kSWgv (VR/Sidebar): 240px width, fill --surface,
 // right border, padding [20,16]. Mint-soft active state with mint glow.
 const ShellNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
   const location = useLocation();
+  if (item.children && item.children.length > 0) return <ShellNavGroup item={item} />;
   const active = item.match ? item.match(location.pathname) : location.pathname === item.to;
   const Icon = item.icon;
 
   return (
     <NavLink
-      to={item.to}
+      to={item.to ?? '#'}
       className={clsx(
         'group flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-colors',
         active
@@ -51,21 +70,68 @@ const ShellNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
   );
 };
 
+// Collapsible parent for a nested submenu (e.g. 通讯平台 → 平台 / 群组 / 私聊).
+// Auto-expands when one of its children is the active route; the parent has no
+// page of its own, so it's a toggle button rather than a link.
+const ShellNavGroup: React.FC<{ item: ShellNavItem }> = ({ item }) => {
+  const location = useLocation();
+  const Icon = item.icon;
+  const childActive = (item.children ?? []).some((child) => isItemActive(child, location.pathname));
+  const [open, setOpen] = useState(childActive || !!item.defaultOpen);
+  useEffect(() => {
+    if (childActive) setOpen(true);
+  }, [childActive]);
+
+  return (
+    <div className="flex flex-col gap-0.5">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className={clsx(
+          'group flex w-full items-center gap-2.5 rounded-lg border border-transparent px-3 py-2.5 text-[13px] font-medium transition-colors hover:bg-foreground/[0.04]',
+          childActive ? 'text-foreground' : 'text-muted hover:text-foreground'
+        )}
+      >
+        <Icon className={clsx('size-4', childActive ? 'text-mint' : 'text-muted group-hover:text-foreground')} />
+        <span className="flex-1 text-left">{item.label}</span>
+        <ChevronDown className={clsx('size-3.5 shrink-0 text-muted transition-transform', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <div className="ml-3 flex flex-col gap-0.5 border-l border-border pl-2">
+          {item.children!.map((child) => <ShellNavLink key={child.to} item={child} />)}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
   const location = useLocation();
   const active = item.match ? item.match(location.pathname) : location.pathname === item.to;
   const Icon = item.icon;
+  const isWorkbench = item.variant === 'workbench';
 
-  return (
-    <NavLink
-      to={item.to}
-      className={clsx(
-        'flex min-w-0 flex-1 flex-col items-center justify-center gap-1 rounded-lg px-1 py-2 text-[10px] transition-colors',
-        active ? 'bg-mint/[0.08] text-mint' : 'text-muted'
-      )}
-    >
-      <span className="relative">
-        <Icon className="size-4" />
+  const className = clsx(
+    'flex min-w-0 flex-1 flex-col items-center justify-center gap-1 rounded-lg px-1 py-2 text-[10px] transition-colors',
+    isWorkbench ? 'text-mint' : active ? 'bg-mint/[0.08] text-mint' : 'text-muted'
+  );
+  const inner = (
+    <>
+      {/* Fixed-height icon slot so every tab's icon row is the same height and
+          centers on one line — the workbench circle no longer protrudes above
+          its siblings. */}
+      <span className="relative flex h-7 items-center justify-center">
+        {isWorkbench ? (
+          // Emphasized green circle — the back-to-workbench tab, mirroring the
+          // desktop sidebar's distinct mint mode-switch button. Sized to fill the
+          // slot so it sits on the same baseline as the plain icons.
+          <span className="grid size-7 place-items-center rounded-full border border-mint/45 bg-mint/[0.14] shadow-[0_0_12px_-3px_rgba(91,255,160,0.6)]">
+            <Icon className="size-4 text-mint" />
+          </span>
+        ) : (
+          <Icon className="size-4" />
+        )}
         {item.badge ? (
           <span className="absolute -right-2 -top-1.5 min-w-[14px] rounded-full bg-mint px-1 text-center font-mono text-[9px] font-bold leading-[14px] text-background">
             {item.badge > 99 ? '99+' : item.badge}
@@ -73,8 +139,13 @@ const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
         ) : null}
       </span>
       <span className="max-w-full truncate">{item.label}</span>
-    </NavLink>
+    </>
   );
+
+  if (item.onClick) {
+    return <button type="button" onClick={item.onClick} className={className}>{inner}</button>;
+  }
+  return <NavLink to={item.to ?? '#'} className={className}>{inner}</NavLink>;
 };
 
 type CenterButton = { label: string; icon: React.ComponentType<{ className?: string }>; to?: string; onClick?: () => void };
@@ -91,7 +162,7 @@ const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButton }> =
     return (
       <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-surface/96 px-2 pt-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] backdrop-blur md:hidden">
         <div className="flex items-end justify-between gap-1">
-          {items.map((item) => <MobileNavLink key={item.to} item={item} />)}
+          {items.map((item) => <MobileNavLink key={item.to ?? item.label} item={item} />)}
         </div>
       </nav>
     );
@@ -143,6 +214,9 @@ export const AppShell: React.FC = () => {
   const [config, setConfig] = useState<any>(null);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  // The mobile admin nav sheet (opened from the 更多 tab). Close it whenever the
+  // route changes so tapping any item in the sheet dismisses it.
+  const [adminMenuOpen, setAdminMenuOpen] = useState(false);
   // Mirror the iOS visual-viewport height into --app-vvh. The MOBILE shell is a
   // static locked column that does NOT read it (resizing the shell mid-focus
   // fought iOS's scroll-into-view and flung the input off-screen); only the md+
@@ -171,6 +245,12 @@ export const AppShell: React.FC = () => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
+  // Close the mobile admin nav sheet on any route change (tapping an item in it
+  // navigates, which should dismiss the sheet).
+  useEffect(() => {
+    setAdminMenuOpen(false);
+  }, [location.pathname]);
+
   const hasChannelPlatforms = enabledPlatforms.some((platform) => platformSupportsChannels(config, platform));
   const isRunning = status.state === 'running';
 
@@ -188,18 +268,72 @@ export const AppShell: React.FC = () => {
 
   const adminItems: ShellNavItem[] = [
     { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
-    ...(hasChannelPlatforms ? [{ to: '/admin/groups', label: t('nav.channels'), icon: Hash }] : []),
-    { to: '/admin/users', label: t('nav.users'), icon: Users },
+    { to: '/admin/remote-access', label: t('nav.remoteAccess'), icon: Globe },
+    {
+      // 通讯平台: groups everything about connecting messaging platforms — the
+      // platform credentials (was a Settings tab), plus the group + DM scopes.
+      label: t('nav.messagingPlatforms'),
+      icon: LinkIcon,
+      match: (p) =>
+        p.startsWith('/admin/settings/platforms') ||
+        p.startsWith('/admin/groups') ||
+        p.startsWith('/admin/users'),
+      children: [
+        { to: '/admin/settings/platforms', label: t('settings.tabs.platforms'), icon: PlugZap },
+        ...(hasChannelPlatforms ? [{ to: '/admin/groups', label: t('nav.channels'), icon: Hash }] : []),
+        { to: '/admin/users', label: t('nav.users'), icon: MessageCircle },
+      ],
+    },
+    {
+      to: '/admin/settings/backends',
+      label: t('nav.backends'),
+      icon: Bot,
+      match: (p) => p.startsWith('/admin/settings/backends'),
+    },
     { to: '/admin/show-pages', label: t('nav.showPages'), icon: MonitorPlay },
     {
-      to: '/admin/settings/service',
-      label: t('nav.settings'),
+      // 高级设置: the remaining Settings tabs (messaging leads). Platforms +
+      // backends moved out to their own sidebar destinations above, so exclude
+      // their routes from the active match.
+      to: '/admin/settings/messaging',
+      label: t('nav.advancedSettings'),
       icon: Settings,
-      match: (pathname) => pathname.startsWith('/admin/settings'),
+      match: (p) =>
+        p.startsWith('/admin/settings') &&
+        !p.startsWith('/admin/settings/platforms') &&
+        !p.startsWith('/admin/settings/backends'),
     },
   ];
 
   const items: ShellNavItem[] = shellMode === 'admin' ? adminItems : [];
+
+  // A bottom tab bar can't hold the nested admin nav (6 sections, one with a
+  // submenu), so mobile keeps a trimmed 4-tab bar — back-to-workbench (emphasized
+  // green circle), 控制台, 菜单 (opens the full nested nav sheet below), 高级设置 —
+  // and the 菜单 sheet renders the same nested adminItems so every page is
+  // reachable + groups expand. See ``adminMenuOpen``.
+  const adminMobileTabs: ShellNavItem[] = [
+    { to: '/', label: t('nav.workbench'), icon: Sparkles, variant: 'workbench' },
+    { to: '/admin/dashboard', label: t('nav.dashboard'), icon: LayoutDashboard },
+    { label: t('nav.more'), icon: Menu, onClick: () => setAdminMenuOpen(true), match: () => adminMenuOpen },
+    {
+      to: '/admin/settings/messaging',
+      label: t('nav.advancedSettings'),
+      icon: Settings,
+      match: (p) =>
+        p.startsWith('/admin/settings') &&
+        !p.startsWith('/admin/settings/platforms') &&
+        !p.startsWith('/admin/settings/backends'),
+    },
+  ];
+  // The 更多 sheet shows the OVERFLOW — admin sections not already on the bottom
+  // bar (控制台 + 高级设置) — so nothing is duplicated.
+  const adminBottomBarPaths = new Set(['/admin/dashboard', '/admin/settings/messaging']);
+  const adminSheetItems = adminItems
+    .filter((item) => !item.to || !adminBottomBarPaths.has(item.to))
+    // Groups start expanded in the sheet (the sheet is transient — show the
+    // children up front). The desktop sidebar keeps its collapse-by-default.
+    .map((item) => (item.children ? { ...item, defaultOpen: true } : item));
 
   // Workbench mobile tabs flatten the (desktop-only) WorkbenchSidebar into a
   // bottom tab bar: Inbox / Projects / Capabilities / More, around a center
@@ -373,15 +507,46 @@ export const AppShell: React.FC = () => {
 
       {showBottomNav && (
         shellMode === 'admin' ? (
-          <MobileTabBar
-            items={[{ to: '/', label: t('nav.workbench'), icon: Sparkles }, ...adminItems]}
-          />
+          <MobileTabBar items={adminMobileTabs} />
         ) : (
           <MobileTabBar
             items={workbenchTabs}
             center={{ onClick: () => setNewSessionOpen(true), label: t('appShell.newSession'), icon: Plus }}
           />
         )
+      )}
+
+      {/* Mobile admin nav sheet — the full nested adminItems (groups expand),
+          opened from the 更多 tab. Mounted only in the admin shell on mobile. */}
+      {shellMode === 'admin' && adminMenuOpen && (
+        <div className="fixed inset-0 z-50 md:hidden" role="dialog" aria-modal="true">
+          <button
+            type="button"
+            aria-label={t('common.close')}
+            onClick={() => setAdminMenuOpen(false)}
+            className="absolute inset-0 bg-background/70 backdrop-blur-sm"
+          />
+          {/* Floats as a card ABOVE the bottom tab bar (not flush to the screen
+              edge) so the list sits clear of the nav and the thumb-tap zone. */}
+          <div className="absolute inset-x-2 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] max-h-[68vh] overflow-y-auto rounded-2xl border border-border bg-surface px-3 pb-3 pt-1 shadow-2xl">
+            <div className="relative flex items-center justify-center py-2">
+              <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
+                {t('appShell.moreSettings')}
+              </span>
+              <button
+                type="button"
+                aria-label={t('common.close')}
+                onClick={() => setAdminMenuOpen(false)}
+                className="absolute right-1 top-1.5 grid size-8 place-items-center rounded-lg text-muted transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+            <nav className="flex flex-col gap-0.5 pb-2">
+              {adminSheetItems.map((item) => <ShellNavLink key={item.to ?? item.label} item={item} />)}
+            </nav>
+          </div>
+        </div>
       )}
 
       <NewSessionSheet

@@ -78,11 +78,14 @@
     "proxyUrlCollapsedHint": "（留空则尝试系统代理，否则直连）"
   },
   "nav": {
-    "dashboard": "仪表盘",
+    "dashboard": "控制台",
     "channels": "群组",
     "users": "私聊",
     "showPages": "展示页面",
     "settings": "设置",
+    "advancedSettings": "高级设置",
+    "messagingPlatforms": "通讯平台",
+    "backends": "后端",
     "remoteAccess": "远程访问",
     "doctor": "诊断",
     "inbox": "收件箱",
@@ -155,6 +158,17 @@
     "shareLink": "分享链接",
     "rotate": "更换链接",
     "rotateHint": "生成新链接并使当前链接立即失效。",
+    "shareId": {
+      "label": "自定义链接",
+      "hint": "3–64 位，可用字母、数字、短横线或下划线，需唯一。",
+      "placeholder": "my-page",
+      "toast": { "saved": "自定义链接已更新" },
+      "errors": {
+        "taken": "这个自定义链接已被占用，换一个。",
+        "invalid": "请使用 3–64 位字母、数字、短横线或下划线，且首尾为字母或数字。",
+        "generic": "更新自定义链接失败。"
+      }
+    },
     "cloudOff": "Avibe Cloud 未开启——此链接仅能在本机打开。",
     "connectCloud": "连接 Avibe Cloud",
     "details": "详情",
@@ -549,6 +563,11 @@
     "retry": "重试"
   },
   "errors": {
+    "share_id_taken": "这个自定义链接已被占用，换一个。",
+    "invalid_share_id": "自定义链接只能用 3–64 位字母、数字、短横线或下划线，且首尾为字母或数字。",
+    "missing_share_id": "请先输入自定义链接。",
+    "not_public": "请先把展示页面设为公开，再修改链接。",
+    "session_archived": "该会话已归档，无法修改它的展示页面。",
     "project_no_folder": "这个项目没有配置本地文件夹。",
     "project_not_found": "找不到这个项目。",
     "remote_access_host_mismatch": "这个地址无法打开 Avibe 控制台。请用你的 https://<你的子域>.avibe.bot 链接打开，或在运行 Avibe 的机器上访问 http://127.0.0.1:5123。",
@@ -573,7 +592,8 @@
     "title": "Avibe OS",
     "subtitle": "Agent操作系统 · 工作台",
     "workspaceLabel": "工作区",
-    "openControlPanel": "控制面板",
+    "moreSettings": "更多设置",
+    "openControlPanel": "设置",
     "backToWorkbench": "返回工作台",
     "newSession": "新建",
     "navigationLabel": "控制台",
@@ -1188,7 +1208,11 @@
     "useGlobalDefault": "使用全局默认值",
     "backend": "后端",
     "showMessageTypes": "显示的消息类型",
-    "showMessageTypesHint": "控制在 Slack 中显示哪些消息类型：\n\n• System：Agent 启动/状态消息\n• Assistant：Agent 的回复和解释\n• Toolcall：工具执行详情（单行摘要）\n\n注意：Agent 的最终结果消息会始终显示，不受此设置影响。",
+    "showMessageTypesHint": "控制在对话中显示哪些消息类型：\n\n• 喃喃自语：Agent 的回复和解释\n• 工具调用：工具执行详情（单行摘要）\n\n注意：Agent 的最终结果消息会始终显示，不受此设置影响。",
+    "messageType": {
+      "assistant": "喃喃自语",
+      "toolcall": "工具调用"
+    },
     "opencodeSettings": "OpenCode 设置",
     "claudeSettings": "Claude 设置",
     "codexSettings": "Codex 设置",
@@ -1208,7 +1232,7 @@
     "requireMention": "需要 @提及",
     "requireMentionOn": "需要@",
     "requireMentionOff": "不用@",
-    "requireBind": "仅限已绑定用户",
+    "requireBind": "允许对话的用户",
     "requireBindOn": "仅绑定用户",
     "requireBindOff": "所有人",
     "mentionStatusOn": "需要 @",
@@ -1831,9 +1855,13 @@
       "visibilityPrivate": "私有",
       "publicDesc": "任何人都可以通过链接查看",
       "privateDesc": "只有你能查看",
+      "customLink": "自定义链接",
       "offlineNote": "这个 Show Page 已离线，暂时无法分享。",
       "publicUnavailable": "连接 Avibe Cloud 后才能获得别人可打开的公开链接。",
-      "loadError": "无法加载这个 Show Page。"
+      "loadError": "无法加载这个 Show Page。",
+      "addToHomeTitle": "添加到主屏幕",
+      "addToHomeBodySafari": "点此处在新页面中打开，再点「分享」 →「添加到主屏幕」。",
+      "addToHomeBodyPwa": "复制上方链接，在 Safari 中打开，再点分享 →「添加到主屏幕」。"
     },
     "titlePlaceholder": "会话标题",
     "pickAgent": "选择 Agent",
@@ -1867,6 +1895,8 @@
       "effort": "思考强度",
       "newAgent": "新建 Agent",
       "noModels": "未找到模型",
+      "searchModels": "搜索模型",
+      "noModelMatch": "无匹配模型",
       "effortOptions": {
         "minimal": "极简",
         "low": "低",
@@ -1908,6 +1938,7 @@
     "queue": {
       "title": "排队中 · {{count}}",
       "sendNow": "立即发送",
+      "recall": "撤回到输入框",
       "remove": "移出队列"
     }
   },

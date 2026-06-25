@@ -5,9 +5,7 @@ import { useTranslation } from 'react-i18next';
 import {
   MessageSquare,
   Package,
-  PlugZap,
   Server,
-  Sparkles,
   Stethoscope,
 } from 'lucide-react';
 
@@ -19,11 +17,12 @@ const TABS: Array<{
   label: string;
   icon: React.ComponentType<{ className?: string }>;
 }> = [
-  { key: 'service', href: '/settings/service', label: 'settings.tabs.service', icon: Server },
-  { key: 'platforms', href: '/settings/platforms', label: 'settings.tabs.platforms', icon: PlugZap },
-  { key: 'backends', href: '/settings/backends', label: 'settings.tabs.backends', icon: Sparkles },
-  { key: 'dependencies', href: '/settings/dependencies', label: 'settings.tabs.dependencies', icon: Package },
+  // Platforms + Backends were promoted to their own sidebar destinations (平台
+  // under 通讯平台, and a top-level 后端), so they're no longer Advanced-Settings
+  // tabs. Messaging leads, per the requested order.
   { key: 'messaging', href: '/settings/messaging', label: 'settings.tabs.messaging', icon: MessageSquare },
+  { key: 'service', href: '/settings/service', label: 'settings.tabs.service', icon: Server },
+  { key: 'dependencies', href: '/settings/dependencies', label: 'settings.tabs.dependencies', icon: Package },
   { key: 'diagnostics', href: '/settings/diagnostics', label: 'settings.tabs.diagnostics', icon: Stethoscope },
 ];
 
@@ -49,6 +48,10 @@ export const SettingsPageShell: React.FC<SettingsPageShellProps> = ({
   children,
 }) => {
   const { t } = useTranslation();
+  // Platforms + Backends now live in the sidebar, not as Advanced-Settings tabs,
+  // so when one of those standalone pages renders this shell we hide the tab bar
+  // (its activeTab isn't one of the remaining tabs).
+  const showTabs = TABS.some((tab) => tab.key === activeTab);
 
   return (
     <div className="flex flex-col gap-6">
@@ -60,29 +63,31 @@ export const SettingsPageShell: React.FC<SettingsPageShellProps> = ({
         {actions && <div className="shrink-0">{actions}</div>}
       </div>
 
-      <div className="border-b border-border">
-        <nav className="-mb-px flex gap-1 overflow-x-auto pb-px" aria-label="Settings sections">
-          {TABS.map((tab) => {
-            const Icon = tab.icon;
-            const active = tab.key === activeTab;
-            return (
-              <Link
-                key={tab.key}
-                to={tab.href}
-                className={clsx(
-                  'inline-flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-4 py-2.5 text-[13px] transition-colors',
-                  active
-                    ? 'border-mint font-semibold text-foreground'
-                    : 'border-transparent font-medium text-muted hover:border-border-strong hover:text-foreground'
-                )}
-              >
-                <Icon className={clsx('size-3.5', active ? 'text-mint' : 'text-muted')} />
-                {t(tab.label)}
-              </Link>
-            );
-          })}
-        </nav>
-      </div>
+      {showTabs && (
+        <div className="border-b border-border">
+          <nav className="-mb-px flex gap-1 overflow-x-auto pb-px" aria-label="Settings sections">
+            {TABS.map((tab) => {
+              const Icon = tab.icon;
+              const active = tab.key === activeTab;
+              return (
+                <Link
+                  key={tab.key}
+                  to={tab.href}
+                  className={clsx(
+                    'inline-flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-4 py-2.5 text-[13px] transition-colors',
+                    active
+                      ? 'border-mint font-semibold text-foreground'
+                      : 'border-transparent font-medium text-muted hover:border-border-strong hover:text-foreground'
+                  )}
+                >
+                  <Icon className={clsx('size-3.5', active ? 'text-mint' : 'text-muted')} />
+                  {t(tab.label)}
+                </Link>
+              );
+            })}
+          </nav>
+        </div>
+      )}
 
       {/* Breadcrumb lives below the tabs so it reads as sub-navigation
           *within* the active tab (e.g. "← Back to backends" while on the

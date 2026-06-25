@@ -49,7 +49,14 @@ const isTouchDevice = typeof navigator !== 'undefined' && navigator.maxTouchPoin
 
 export function isSoftKeyboardOpen(): boolean {
   if (!isTouchDevice || typeof window === 'undefined' || !window.visualViewport) return false;
-  return restingHeight - window.visualViewport.height > KEYBOARD_MIN_DELTA;
+  const vv = window.visualViewport;
+  // vv.height (and so the resting-height delta) is in CSS px, which pinch-zoom
+  // shrinks by ~1/scale — but the OS keyboard occupies a fixed slice of the physical
+  // screen, so at scale > 1 the measured delta reads ~keyboardCssPx/scale and can dip
+  // under the fixed threshold while the keyboard is genuinely open (e.g. iPad: zoom,
+  // then focus a field). Multiply the delta back up by scale to compare in unzoomed
+  // CSS px; at scale 1 this is a no-op, so non-zoomed behavior is unchanged.
+  return (restingHeight - vv.height) * vv.scale > KEYBOARD_MIN_DELTA;
 }
 
 // True on devices with an on-screen keyboard (touch). Callers gate on this to

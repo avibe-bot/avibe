@@ -2,16 +2,19 @@ import React, { useEffect, useState } from 'react';
 import { Bot, FolderOpen, HelpCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
-import { Combobox } from '../ui/combobox';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
-import { BackendIcon } from '../visual';
-import { CompactSelect } from '../settings/SettingsPrimitives';
-import { modelOptionLabel } from '../../lib/backendModels';
+import { AgentRoutePicker } from '../workbench/AgentRoutePicker';
+import type { VibeAgentBrief } from '../../context/ApiContext';
 
 // Mirrors design.pen `asPXu` (VR/RoutingConfig). Shared between groups (channels)
 // and users — same form, same fields, same styles. The only difference is whether
 // the @mention requirement segmented toggle is shown.
+//
+// The agent/model/effort route is the SAME AgentRoutePicker used by the workbench
+// chat header + create surfaces (one source of truth), replacing the former three
+// separate selects. Its built-in "+ new agent → /agents" entry covers managing /
+// adding agents from wherever a route is chosen.
 
 export interface RoutingConfigValue {
   custom_cwd: string;
@@ -43,15 +46,12 @@ export interface RoutingConfigPanelProps {
   showRequireMention?: boolean;
   /** Platform key used to derive inherited @mention default (e.g., 'slack', 'discord'). */
   inheritsFromKey?: string;
-  /** Backend lookup data — pass already-loaded values from the parent. */
-  vibeAgents?: {
-    name: string;
-    description?: string | null;
-    backend: string;
-    model?: string | null;
-    reasoning_effort?: string | null;
-  }[];
+  /** Vibe Agent catalog — passed already-loaded from the parent. */
+  vibeAgents?: VibeAgentBrief[];
   defaultAgentName?: string | null;
+  // Legacy backend-model props: no longer read here (AgentRoutePicker self-loads
+  // models + effort options). Kept on the interface so existing callers still
+  // type-check; a follow-up can drop them and the parents' model preloading.
   opencodeOptions?: any;
   claudeAgents?: { id: string; name: string }[];
   claudeModels?: string[];
@@ -59,7 +59,7 @@ export interface RoutingConfigPanelProps {
   claudeReasoningOptions?: Record<string, { value: string; label: string }[]>;
   codexAgents?: { id: string; name: string }[];
   codexModels?: string[];
-  /** Optional footer slot — e.g., admin/remove actions on the users page. */
+  /** Custom footer slot — e.g., admin/remove actions on the users page. */
   footerActions?: React.ReactNode;
   /** Wrapper class — controls outer padding/border. Default: 'border-t border-border/60 px-5 py-4'. */
   containerClass?: string;
@@ -92,11 +92,6 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
   inheritsFromKey,
   vibeAgents = [],
   defaultAgentName,
-  opencodeOptions,
-  claudeModels = [],
-  claudeModelLabels = {},
-  claudeReasoningOptions = {},
-  codexModels = [],
   footerActions,
   containerClass = 'border-t border-border/60 px-5 py-4',
 }) => {
@@ -104,47 +99,9 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
 
   const selectedVibeAgent = vibeAgents.find((agent) => agent.name === value.routing.agent_name) || null;
   const defaultVibeAgent = vibeAgents.find((agent) => agent.name === defaultAgentName) || null;
-  const inheritedVibeAgent = selectedVibeAgent || defaultVibeAgent;
-  const effectiveBackend = selectedVibeAgent?.backend || defaultVibeAgent?.backend || 'opencode';
-  const effectiveModel = value.routing.model || inheritedVibeAgent?.model || '';
 
-  const getOpenCodeReasoningOptions = (modelKey: string) => {
-    const lookup = opencodeOptions?.reasoning_options || {};
-    if (lookup && typeof lookup === 'object') {
-      return (lookup as Record<string, { value: string; label: string }[]>)[modelKey] || [];
-    }
-    return [];
-  };
-
-  const getClaudeReasoning = (model: string) => {
-    const modelKey = model || '';
-    const cached = claudeReasoningOptions[modelKey];
-    if (cached?.length) return cached;
-    const fallback = claudeReasoningOptions[''] || [];
-    const normalized = modelKey.toLowerCase();
-    if (normalized.includes('claude-opus-4-7') || normalized.includes('claude-fable-5') || normalized === 'opus' || normalized === 'opus[1m]') {
-      const opts = [...fallback];
-      if (!opts.some((o) => o.value === 'xhigh')) opts.push({ value: 'xhigh', label: 'Extra High' });
-      if (!opts.some((o) => o.value === 'max')) opts.push({ value: 'max', label: 'Max' });
-      return opts;
-    }
-    if (normalized.includes('claude-opus-4-6') || normalized.includes('claude-sonnet-4-6')) {
-      return fallback.some((o) => o.value === 'max') ? fallback : [...fallback, { value: 'max', label: 'Max' }];
-    }
-    return fallback;
-  };
-
-  const getReasoningLabel = (val: string, fallback: string) => {
-    switch (val) {
-      case 'low': return t('channelList.reasoningLow');
-      case 'medium': return t('channelList.reasoningMedium');
-      case 'high': return t('channelList.reasoningHigh');
-      case 'xhigh': return t('channelList.reasoningXHigh');
-      case 'max': return t('channelList.reasoningMax');
-      default: return fallback;
-    }
-  };
-
+  // Picking an agent re-seeds model/effort, so always clear the deprecated
+  // per-backend overrides on any route change (kept for back-compat on read).
   const clearLegacyOverrides = (routing: RoutingConfigValue['routing']) => ({
     ...routing,
     opencode_model: null,
@@ -155,94 +112,16 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
     codex_reasoning_effort: null,
   });
 
-  const buildModelRoutingPatch = (model: string | null) => {
-    return clearLegacyOverrides({
-      ...value.routing,
-      model,
-      reasoning_effort: null,
-    });
-  };
-
-  const buildReasoningRoutingPatch = (reasoningEffort: string | null) => {
-    return clearLegacyOverrides({
-      ...value.routing,
-      reasoning_effort: reasoningEffort,
-    });
-  };
-
-  const modelOverrideControl = (() => {
-    if (effectiveBackend === 'opencode') {
-      return (
-        <CompactSelect
-          value={value.routing.model || ''}
-          onChange={(e) => onChange({
-            routing: buildModelRoutingPatch(e.target.value || null),
-          })}
-          className="w-full"
-        >
-          <option value="">{t('common.default')}</option>
-          {(opencodeOptions?.models?.providers || []).flatMap((provider: any) => {
-            const pid = provider.id || provider.provider_id || provider.name;
-            const pLabel = provider.name || pid;
-            const models = provider.models || {};
-            if (Array.isArray(models)) {
-              return models.map((m: any) => {
-                const mid = typeof m === 'string' ? m : m.id;
-                return <option key={`${pid}:${mid}`} value={`${pid}/${mid}`}>{pLabel}/{mid}</option>;
-              });
-            }
-            return Object.keys(models).map((mid) => (
-              <option key={`${pid}:${mid}`} value={`${pid}/${mid}`}>{pLabel}/{mid}</option>
-            ));
-          })}
-        </CompactSelect>
-      );
-    }
-    const models = effectiveBackend === 'claude' ? claudeModels : codexModels;
-    const placeholder = effectiveBackend === 'claude'
-      ? t('channelList.claudeModelPlaceholder')
-      : t('channelList.codexModelPlaceholder');
-    return (
-      <Combobox
-        options={[
-          { value: '', label: t('common.default') },
-          ...models.map(m => ({
-            value: m,
-            label: effectiveBackend === 'claude' ? modelOptionLabel(m, claudeModelLabels) : m,
-          })),
-        ]}
-        value={value.routing.model || ''}
-        onValueChange={(v) => onChange({
-          routing: buildModelRoutingPatch(v || null),
-        })}
-        placeholder={placeholder}
-        searchPlaceholder={t('channelList.searchModel')}
-        allowCustomValue={true}
-      />
-    );
-  })();
-
-  const reasoningOptions = (() => {
-    if (effectiveBackend === 'claude') {
-      return getClaudeReasoning(effectiveModel)
-        .filter((option) => option.value !== '__default__')
-        .map((option) => ({ value: option.value, label: getReasoningLabel(option.value, option.label) }));
-    }
-    if (effectiveBackend === 'opencode') {
-      const options = getOpenCodeReasoningOptions(effectiveModel);
-      if (options.length) return options;
-    }
-    return ['low', 'medium', 'high', 'xhigh'].map((value) => ({ value, label: getReasoningLabel(value, value) }));
-  })();
-
-  // Top row: working dir + Vibe Agent (+ optional require_mention / require_bind) — dynamic grid columns
-  const topGridCols = showRequireMention ? 'md:grid-cols-4' : 'md:grid-cols-2';
+  // Access row: working dir (+ optional require_mention / require_bind for
+  // channels). The Agent route picker lives in the row below.
+  const accessGridCols = showRequireMention ? 'md:grid-cols-3' : 'md:grid-cols-1';
 
   return (
     <div className={clsx('space-y-4', containerClass)}>
-      <div className={clsx('grid grid-cols-1 gap-3', topGridCols)}>
-        {/* Working directory */}
-        <div className="space-y-1">
+      <div className={clsx('grid grid-cols-1 gap-3', accessGridCols)}>
+        {/* Working directory. On the users page (no require-mention column) it
+            would otherwise stretch the full row, so cap it at ~40%. */}
+        <div className={clsx('space-y-1', !showRequireMention && 'md:max-w-[40%]')}>
           <label className="text-xs font-medium uppercase text-muted">{t('channelList.workingDirectory')}</label>
           <div className="flex gap-1.5">
             <BlurInput
@@ -261,58 +140,6 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
               <FolderOpen size={14} />
             </button>
           </div>
-        </div>
-
-        {/* Vibe Agent */}
-        <div className="space-y-1">
-          <label className="text-xs font-medium uppercase text-muted">{t('channelList.agent')}</label>
-          <div className="relative">
-            <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2">
-              <Bot size={14} className="text-muted" />
-            </span>
-            <CompactSelect
-              value={value.routing.agent_name || ''}
-              onChange={(e) => {
-                const nextName = e.target.value || null;
-                onChange({
-                  routing: {
-                    ...value.routing,
-                    agent_name: nextName,
-                    model: null,
-                    reasoning_effort: null,
-                    opencode_model: null,
-                    opencode_reasoning_effort: null,
-                    claude_model: null,
-                    claude_reasoning_effort: null,
-                    codex_model: null,
-                    codex_reasoning_effort: null,
-                  },
-                });
-              }}
-              className="w-full pl-9 pr-3"
-            >
-              <option value="">
-                {defaultVibeAgent ? `${t('common.default')} · ${defaultVibeAgent.name}` : t('common.default')}
-              </option>
-              {vibeAgents.map((agent) => (
-                <option key={agent.name} value={agent.name}>
-                  {agent.name}
-                  {agent.backend ? ` · ${agent.backend}` : ''}
-                  {agent.model ? ` / ${agent.model}` : ''}
-                </option>
-              ))}
-            </CompactSelect>
-          </div>
-          {inheritedVibeAgent && (
-            <div className="flex items-center gap-1.5 text-[11px] text-muted">
-              <BackendIcon backend={inheritedVibeAgent.backend} variant="glyph" size={12} />
-              <span className="truncate">
-                {inheritedVibeAgent.backend}
-                {inheritedVibeAgent.model ? ` / ${inheritedVibeAgent.model}` : ''}
-                {inheritedVibeAgent.reasoning_effort ? ` / ${inheritedVibeAgent.reasoning_effort}` : ''}
-              </span>
-            </div>
-          )}
         </div>
 
         {/* Require @mention (channels only) */}
@@ -355,7 +182,11 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
                       aria-checked={active}
                       onClick={() => setMention(seg.id)}
                       className={clsx(
-                        'flex-1 rounded-[4px] px-2.5 text-[12px] transition-colors',
+                        // The "inherit" label carries the inherited state in
+                        // parentheses, so it needs more room than on/off to
+                        // avoid wrapping.
+                        'whitespace-nowrap rounded-[4px] px-2 text-[12px] transition-colors',
+                        seg.id === 'inherit' ? 'flex-[1.6]' : 'flex-1',
                         active
                           ? 'border border-mint/30 bg-mint-soft font-bold text-mint'
                           : 'font-medium text-muted hover:text-foreground'
@@ -417,27 +248,65 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
         })()}
       </div>
 
-      {/* Scope-level overrides */}
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-        <div className="space-y-1">
-          <label className="text-xs font-medium uppercase text-muted">{t('channelList.model')}</label>
-          {modelOverrideControl}
-        </div>
-        <div className="space-y-1">
-          <label className="text-xs font-medium uppercase text-muted">{t('channelList.reasoningEffort')}</label>
-          <CompactSelect
-            value={value.routing.reasoning_effort || ''}
-            onChange={(e) => onChange({
-              routing: buildReasoningRoutingPatch(e.target.value || null),
-            })}
-            className="w-full"
-          >
-            <option value="">{t('common.default')}</option>
-            {reasoningOptions.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </CompactSelect>
-        </div>
+      {/* Routing: one unified Agent picker (agent → model → effort), shared with
+          the workbench chat/create surfaces. Empty = inherit the global default. */}
+      <div className="space-y-1">
+        <label className="flex items-center gap-1.5 text-xs font-medium uppercase text-muted">
+          <Bot size={12} className="text-muted" />
+          {t('channelList.agent')}
+        </label>
+        <AgentRoutePicker
+          value={{
+            // Resolve the DISPLAYED route. An explicit agent with an empty
+            // model/effort means "inherit that agent's", so fall back to the
+            // selected agent's own model/effort — otherwise the effort column
+            // resolves options against the backend defaults instead of the
+            // inherited model (e.g. a Claude agent's xhigh/max would vanish).
+            // agent_backend also falls back to the default agent so the columns
+            // resolve while inheriting the global default.
+            agent_backend: selectedVibeAgent?.backend ?? defaultVibeAgent?.backend ?? null,
+            agent_name: value.routing.agent_name ?? null,
+            model: value.routing.model ?? selectedVibeAgent?.model ?? null,
+            reasoning_effort: value.routing.reasoning_effort ?? selectedVibeAgent?.reasoning_effort ?? null,
+          }}
+          agents={vibeAgents}
+          onChange={(patch) => {
+            // Concrete routes, matching the workbench picker + the other call
+            // sites: merge only the keys PRESENT in the (partial) patch. A
+            // present field wins (incl. an explicit null that clears it); an
+            // absent field keeps its stored value. We deliberately do NOT
+            // special-case agent picks to null model/effort — that discarded the
+            // first model pick on an inherited-default route, where the pick
+            // arrives as the materialized agent_name + the chosen model together.
+            const next = { ...value.routing };
+            if ('agent_name' in patch) next.agent_name = patch.agent_name ?? null;
+            if ('model' in patch) next.model = patch.model ?? null;
+            if ('reasoning_effort' in patch) next.reasoning_effort = patch.reasoning_effort ?? null;
+            onChange({ routing: clearLegacyOverrides(next) });
+          }}
+          defaultLabel={
+            defaultVibeAgent ? `${t('common.default')} · ${defaultVibeAgent.name}` : t('common.default')
+          }
+          defaultRoute={
+            defaultVibeAgent
+              ? {
+                  agent_backend: defaultVibeAgent.backend,
+                  agent_name: defaultVibeAgent.name,
+                  model: defaultVibeAgent.model,
+                  reasoning_effort: defaultVibeAgent.reasoning_effort,
+                }
+              : undefined
+          }
+          // Only a FULLY-inheriting scope (no overrides at all) displays the
+          // default route. A scope that inherits the agent but overrides
+          // model/effort must show its own values, not the default agent's,
+          // otherwise the override is masked and silently overwritten.
+          isDefaultRoute={
+            !value.routing.agent_name && !value.routing.model && !value.routing.reasoning_effort
+          }
+          align="start"
+          triggerClassName="w-full"
+        />
       </div>
 
       {/* Show message types chips */}
@@ -452,9 +321,9 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
           </span>
         </div>
         <div className="flex flex-wrap gap-2 text-sm">
-          {['system', 'assistant', 'toolcall'].map((msgType) => {
+          {['assistant', 'toolcall'].map((msgType) => {
             const checked = (value.show_message_types || []).includes(msgType);
-            const label = msgType === 'toolcall' ? 'Toolcall' : msgType.charAt(0).toUpperCase() + msgType.slice(1);
+            const label = t(`channelList.messageType.${msgType}`);
             return (
               <button
                 key={msgType}
