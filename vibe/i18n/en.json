@@ -432,6 +432,10 @@
       "invalid_oauth_state_body": "The secure login link expired or couldn't be matched to this browser. This usually happens when a sign-in link sits unused for a few minutes, or is opened in a different tab or window. Start over and you'll be right back in.",
       "oauth_exchange_failed_title": "We couldn't finish signing you in",
       "oauth_exchange_failed_body": "Avibe Cloud didn't complete the sign-in just now. This is usually temporary — please try again.",
+      "remote_pairing_mismatch_title": "Reconnect this Avibe",
+      "remote_pairing_mismatch_body": "This Avibe's local pairing no longer matches the Avibe Cloud record for this address. Open Avibe on the machine that owns this domain, then pair Remote Access again.",
+      "oauth_time_mismatch_title": "Check this machine's clock",
+      "oauth_time_mismatch_body": "Avibe Cloud finished the sign-in, but this machine rejected the security token because the local clock appears out of sync. Correct the system time, then try again.",
       "invalid_oauth_nonce_title": "We couldn't verify this sign-in",
       "invalid_oauth_nonce_body": "This sign-in attempt couldn't be verified, so we stopped to keep your account secure. Start over to continue."
     }

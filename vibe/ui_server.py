@@ -1333,7 +1333,28 @@ def _restart_vibe_cloud_login_from_state(config: V2Config, state: str | None):
 # Error codes with dedicated copy in vibe/i18n (remote_access.oauth_error.*); any
 # other code falls back to the generic "default_*" strings so an unexpected failure
 # still renders a usable page.
-_OAUTH_ERROR_PAGE_CODES = {"invalid_oauth_state", "oauth_exchange_failed", "invalid_oauth_nonce"}
+_OAUTH_ERROR_PAGE_CODES = {
+    "invalid_oauth_state",
+    "oauth_exchange_failed",
+    "remote_pairing_mismatch",
+    "oauth_time_mismatch",
+    "invalid_oauth_nonce",
+}
+
+_OAUTH_EXCHANGE_ERROR_PAGE_BY_REASON = {
+    "invalid_instance_id": "remote_pairing_mismatch",
+    "invalid_issuer": "remote_pairing_mismatch",
+    "invalid_audience": "remote_pairing_mismatch",
+    "expired_id_token": "oauth_time_mismatch",
+}
+
+
+def _oauth_exchange_error_page_code(exc: BaseException) -> str:
+    from vibe import remote_access
+
+    if isinstance(exc, remote_access.OAuthCodeExchangeError):
+        return _OAUTH_EXCHANGE_ERROR_PAGE_BY_REASON.get(exc.reason, "oauth_exchange_failed")
+    return "oauth_exchange_failed"
 
 
 def _request_ui_language() -> str:
@@ -2851,7 +2872,7 @@ def remote_access_auth_callback():
     except Exception as exc:
         # Unauthenticated-reachable (valid handshake + bad code), so rate-limited.
         _log_oauth_diag("exchange_failed", "vibe cloud oauth code exchange failed: %s", exc)
-        return _oauth_callback_error_response("oauth_exchange_failed", next_target=next_target)
+        return _oauth_callback_error_response(_oauth_exchange_error_page_code(exc), next_target=next_target)
     if claims.get("nonce") != handshake_nonce:
         return _oauth_callback_error_response("invalid_oauth_nonce", next_target=next_target)
     response = Response(status=302)

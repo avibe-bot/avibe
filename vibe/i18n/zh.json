@@ -432,6 +432,10 @@
       "invalid_oauth_state_body": "安全登录链接已过期,或无法与当前浏览器匹配。这通常是因为登录链接闲置了几分钟,或在另一个标签页/窗口中打开。重新登录即可继续。",
       "oauth_exchange_failed_title": "登录未能完成",
       "oauth_exchange_failed_body": "Avibe Cloud 刚才没能完成登录,这通常是暂时的,请重试。",
+      "remote_pairing_mismatch_title": "需要重新配对这台 Avibe",
+      "remote_pairing_mismatch_body": "这台 Avibe 的本地配对信息已经和当前域名在 Avibe Cloud 的记录不一致。请在拥有这个域名的机器上打开 Avibe,重新配对远程访问。",
+      "oauth_time_mismatch_title": "请检查这台机器的时间",
+      "oauth_time_mismatch_body": "Avibe Cloud 已完成登录,但这台机器因为本地时间不同步而拒绝了安全令牌。请校准系统时间后重试。",
       "invalid_oauth_nonce_title": "无法验证此次登录",
       "invalid_oauth_nonce_body": "本次登录未能通过验证,为保护你的账户已中止。请重新登录以继续。"
     }
