@@ -180,3 +180,5 @@ sessions/
 # Worktrees
 .worktrees/
 .gstack/
+
+.agents/
