@@ -4,6 +4,8 @@ import json
 import threading
 import time
 
+import pytest
+
 from config import paths
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
 from vibe import remote_access
@@ -28,6 +30,10 @@ def _config() -> V2Config:
     cloud.client_id = "vr_client_123"
     cloud.public_url = "https://alex.avibe.bot"
     cloud.session_secret = "session-secret"
+    cloud.token_endpoint = "https://backend.test/oauth/token"
+    cloud.redirect_uri = "https://alex.avibe.bot/auth/callback"
+    cloud.jwks_uri = "https://backend.test/oauth/jwks.json"
+    cloud.issuer = "https://backend.test"
     return config
 
 
@@ -79,10 +85,101 @@ def test_make_session_cookie_requires_session_secret() -> None:
     config = _config()
     config.remote_access.vibe_cloud.session_secret = ""
 
-    import pytest
-
     with pytest.raises(ValueError, match="session secret"):
         remote_access.make_session_cookie(config, "alex@example.com", "user-1")
+
+
+def test_exchange_oauth_code_wraps_token_endpoint_rejection(monkeypatch) -> None:
+    config = _config()
+
+    class ResponseStub:
+        text = '{"error":"invalid_code"}'
+
+        def raise_for_status(self):
+            raise remote_access.requests.HTTPError("400 Client Error")
+
+        def json(self):
+            return {"error": "invalid_code"}
+
+    monkeypatch.setattr(remote_access.requests, "post", lambda *args, **kwargs: ResponseStub())
+
+    with pytest.raises(remote_access.OAuthCodeExchangeError) as exc_info:
+        remote_access.exchange_oauth_code(config, "code-1", "verifier-1")
+
+    assert exc_info.value.reason == "token_endpoint_rejected"
+    assert exc_info.value.detail == "invalid_code"
+
+
+def test_oauth_code_exchange_error_string_omits_rejection_detail() -> None:
+    error = remote_access.OAuthCodeExchangeError("token_endpoint_rejected", '{"code":"secret-code"}')
+
+    assert str(error) == "token_endpoint_rejected"
+    assert "secret-code" not in str(error)
+
+
+def test_exchange_oauth_code_reports_instance_mismatch(monkeypatch) -> None:
+    config = _config()
+
+    class ResponseStub:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"id_token": "id-token"}
+
+    class JwkClientStub:
+        def __init__(self, uri):
+            self.uri = uri
+
+        def get_signing_key_from_jwt(self, id_token):
+            return type("SigningKey", (), {"key": "secret"})()
+
+    monkeypatch.setattr(remote_access.requests, "post", lambda *args, **kwargs: ResponseStub())
+    monkeypatch.setattr(remote_access, "PyJWKClient", JwkClientStub)
+    monkeypatch.setattr(
+        remote_access.jwt,
+        "decode",
+        lambda *args, **kwargs: {
+            "sub": "user-1",
+            "vibe_instance_id": "inst_other",
+            "email_verified": True,
+        },
+    )
+
+    with pytest.raises(remote_access.OAuthCodeExchangeError) as exc_info:
+        remote_access.exchange_oauth_code(config, "code-1", "verifier-1")
+
+    assert exc_info.value.reason == "invalid_instance_id"
+
+
+def test_exchange_oauth_code_reports_immature_token_as_clock_mismatch(monkeypatch) -> None:
+    config = _config()
+
+    class ResponseStub:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"id_token": "id-token"}
+
+    class JwkClientStub:
+        def __init__(self, uri):
+            self.uri = uri
+
+        def get_signing_key_from_jwt(self, id_token):
+            return type("SigningKey", (), {"key": "secret"})()
+
+    def decode(*args, **kwargs):
+        raise remote_access.jwt.ImmatureSignatureError("The token is not yet valid")
+
+    monkeypatch.setattr(remote_access.requests, "post", lambda *args, **kwargs: ResponseStub())
+    monkeypatch.setattr(remote_access, "PyJWKClient", JwkClientStub)
+    monkeypatch.setattr(remote_access.jwt, "decode", decode)
+
+    with pytest.raises(remote_access.OAuthCodeExchangeError) as exc_info:
+        remote_access.exchange_oauth_code(config, "code-1", "verifier-1")
+
+    assert exc_info.value.reason == "immature_id_token"
 
 
 def test_pair_redeems_key_and_starts_connector(monkeypatch, tmp_path) -> None:

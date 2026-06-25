@@ -18,7 +18,7 @@ import threading
 import time
 from collections import OrderedDict
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlsplit, urlunsplit
@@ -1333,7 +1333,57 @@ def _restart_vibe_cloud_login_from_state(config: V2Config, state: str | None):
 # Error codes with dedicated copy in vibe/i18n (remote_access.oauth_error.*); any
 # other code falls back to the generic "default_*" strings so an unexpected failure
 # still renders a usable page.
-_OAUTH_ERROR_PAGE_CODES = {"invalid_oauth_state", "oauth_exchange_failed", "invalid_oauth_nonce"}
+_OAUTH_ERROR_PAGE_CODES = {
+    "invalid_oauth_state",
+    "oauth_exchange_failed",
+    "remote_pairing_mismatch",
+    "oauth_time_mismatch",
+    "invalid_oauth_nonce",
+}
+
+_OAUTH_EXCHANGE_ERROR_PAGE_BY_REASON = {
+    "invalid_instance_id": "remote_pairing_mismatch",
+    "invalid_issuer": "remote_pairing_mismatch",
+    "invalid_audience": "remote_pairing_mismatch",
+    "expired_id_token": "oauth_time_mismatch",
+    "immature_id_token": "oauth_time_mismatch",
+}
+
+_OAUTH_DIAGNOSTIC_DETAIL_MAX_CHARS = 240
+_OAUTH_DIAGNOSTIC_SECRET_PATTERN = re.compile(
+    r"(?i)(?P<key_quote>['\"]?)\b(?P<key>code_verifier|id_token|access_token|refresh_token|code|state|nonce)\b(?P=key_quote)"
+    r"(?P<sep>\s*[=:]\s*|%3d)(?P<value_quote>['\"]?)[^&\s,;}]+(?P=value_quote)"
+)
+
+
+def _oauth_exchange_error_page_code(exc: BaseException) -> str:
+    from vibe import remote_access
+
+    if isinstance(exc, remote_access.OAuthCodeExchangeError):
+        return _OAUTH_EXCHANGE_ERROR_PAGE_BY_REASON.get(exc.reason, "oauth_exchange_failed")
+    return "oauth_exchange_failed"
+
+
+def _sanitize_oauth_diagnostic_detail(value: str | None) -> str:
+    if not value:
+        return ""
+    compact = " ".join(str(value).split())
+    redacted = _OAUTH_DIAGNOSTIC_SECRET_PATTERN.sub(lambda match: f"{match.group('key')}=<redacted>", compact)
+    if len(redacted) <= _OAUTH_DIAGNOSTIC_DETAIL_MAX_CHARS:
+        return redacted
+    return redacted[: _OAUTH_DIAGNOSTIC_DETAIL_MAX_CHARS - 1].rstrip() + "..."
+
+
+def _oauth_exchange_error_diagnostics(exc: BaseException) -> tuple[str, dict[str, str]]:
+    from vibe import remote_access
+
+    error = _oauth_exchange_error_page_code(exc)
+    if isinstance(exc, remote_access.OAuthCodeExchangeError):
+        return error, {
+            "reason": exc.reason,
+            "detail": _sanitize_oauth_diagnostic_detail(exc.detail),
+        }
+    return error, {"reason": exc.__class__.__name__}
 
 
 def _request_ui_language() -> str:
@@ -1356,7 +1406,26 @@ def _request_ui_language() -> str:
     return "en"
 
 
-def _render_oauth_error_html(error: str, *, retry_href: str, lang: str = "en") -> str:
+def _oauth_error_diagnostics_text(diagnostics: dict[str, Any] | None) -> str:
+    if not diagnostics:
+        return ""
+    fields = ("error", "reason", "detail", "time_utc", "host", "retry_path", "handshake_cookie_present")
+    lines = []
+    for key in fields:
+        value = diagnostics.get(key)
+        if value is None or value == "":
+            continue
+        lines.append(f"{key}: {value}")
+    return "\n".join(lines)
+
+
+def _render_oauth_error_html(
+    error: str,
+    *,
+    retry_href: str,
+    lang: str = "en",
+    diagnostics: dict[str, Any] | None = None,
+) -> str:
     """Render a branded, self-contained re-login page for a failed OAuth callback.
 
     Replaces the old raw-JSON dead-end: the user sees a plain-language reason and a
@@ -1371,6 +1440,18 @@ def _render_oauth_error_html(error: str, *, retry_href: str, lang: str = "en") -
     safe_button = html.escape(t("remote_access.oauth_error.sign_in_again", lang))
     safe_href = html.escape(retry_href or "/", quote=True)
     safe_code = html.escape(error)
+    diagnostics_text = _oauth_error_diagnostics_text(diagnostics)
+    diagnostics_block = ""
+    if diagnostics_text:
+        safe_diagnostics_summary = html.escape(t("remote_access.oauth_error.diagnostics_summary", lang))
+        safe_diagnostics_hint = html.escape(t("remote_access.oauth_error.diagnostics_hint", lang))
+        safe_diagnostics = html.escape(diagnostics_text)
+        diagnostics_block = f"""
+        <details class="oauth-error-details">
+          <summary>{safe_diagnostics_summary}</summary>
+          <pre>{safe_diagnostics}</pre>
+          <p>{safe_diagnostics_hint}</p>
+        </details>"""
     hint = ""
     if error == "invalid_oauth_state":
         hint = f'<p class="oauth-error-hint">{html.escape(t("remote_access.oauth_error.cookie_hint", lang))}</p>'
@@ -1443,6 +1524,36 @@ def _render_oauth_error_html(error: str, *, retry_href: str, lang: str = "en") -
         font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
         color: #94a3b8;
       }}
+      .oauth-error-details {{
+        margin-top: 22px;
+        border: 1px solid rgba(23, 32, 51, 0.10);
+        border-radius: 12px;
+        background: #f8fafc;
+        text-align: left;
+      }}
+      .oauth-error-details summary {{
+        cursor: pointer;
+        padding: 12px 14px;
+        color: #334155;
+        font-size: 13px;
+        font-weight: 720;
+      }}
+      .oauth-error-details pre {{
+        margin: 0;
+        padding: 0 14px 12px;
+        color: #334155;
+        font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        user-select: all;
+      }}
+      .oauth-error-details p {{
+        margin: 0;
+        padding: 0 14px 14px;
+        color: #64748b;
+        font-size: 12px;
+        line-height: 1.5;
+      }}
     </style>
   </head>
   <body>
@@ -1456,6 +1567,7 @@ def _render_oauth_error_html(error: str, *, retry_href: str, lang: str = "en") -
           <a class="oauth-error-button" href="{safe_href}">{safe_button}</a>
         </div>
         <div class="oauth-error-code">{safe_code}</div>
+        {diagnostics_block}
       </section>
     </main>
   </body>
@@ -1488,7 +1600,13 @@ def _log_oauth_diag(key: str, message: str, *args: Any) -> None:
     logger.warning(message + extra, *args)
 
 
-def _oauth_callback_error_response(error: str, *, next_target: Any, status: int = 400):
+def _oauth_callback_error_response(
+    error: str,
+    *,
+    next_target: Any,
+    status: int = 400,
+    diagnostics: dict[str, Any] | None = None,
+):
     """Build the HTML re-login response for a failed OAuth callback.
 
     Clears any stale handshake cookie so "Sign in again" starts a clean flow, and
@@ -1508,8 +1626,22 @@ def _oauth_callback_error_response(error: str, *, next_target: Any, status: int 
         request.headers.get("Sec-Fetch-Site") or "",
     )
     retry_href = _strip_oauth_retry_param(next_target if isinstance(next_target, str) else "/")
+    diagnostic_payload: dict[str, Any] = {
+        "error": error,
+        "time_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "host": request.host,
+        "retry_path": retry_href,
+        "handshake_cookie_present": str(bool(request.cookies.get(REMOTE_OAUTH_COOKIE_NAME))).lower(),
+    }
+    if diagnostics:
+        diagnostic_payload.update(diagnostics)
     response = Response(
-        _render_oauth_error_html(error, retry_href=retry_href, lang=_request_ui_language()),
+        _render_oauth_error_html(
+            error,
+            retry_href=retry_href,
+            lang=_request_ui_language(),
+            diagnostics=diagnostic_payload,
+        ),
         status=status,
         mimetype="text/html; charset=utf-8",
     )
@@ -2897,8 +3029,10 @@ def remote_access_auth_callback():
         claims = result["claims"]
     except Exception as exc:
         # Unauthenticated-reachable (valid handshake + bad code), so rate-limited.
-        _log_oauth_diag("exchange_failed", "vibe cloud oauth code exchange failed: %s", exc)
-        return _oauth_callback_error_response("oauth_exchange_failed", next_target=next_target)
+        reason = exc.reason if isinstance(exc, remote_access.OAuthCodeExchangeError) else exc.__class__.__name__
+        _log_oauth_diag("exchange_failed", "vibe cloud oauth code exchange failed: reason=%s", reason)
+        error, diagnostics = _oauth_exchange_error_diagnostics(exc)
+        return _oauth_callback_error_response(error, next_target=next_target, diagnostics=diagnostics)
     if claims.get("nonce") != handshake_nonce:
         return _oauth_callback_error_response("invalid_oauth_nonce", next_target=next_target)
     response = Response(status=302)
