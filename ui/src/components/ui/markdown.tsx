@@ -6,6 +6,7 @@ import remarkBreaks from 'remark-breaks';
 import { Badge } from '@/components/ui/badge';
 import { ChatImage, LinkedImageProvider } from '@/components/ui/chat-image';
 import { FileCard } from '@/components/ui/file-card';
+import { SecretRequestCard } from '@/components/ui/secret-request-card';
 import { isProxyMediaUrl, readMediaDims } from '@/lib/mediaProxy';
 import {
   MENTION_LINK_SCHEME,
@@ -32,10 +33,45 @@ import { cn } from '@/lib/utils';
 // echoes with its line breaks intact while still formatting explicit markdown;
 // leave it off for authored markdown (agent replies) where wrapped lines must
 // not sprout stray hard breaks.
-// Keep react-markdown's URL sanitizer from stripping our custom mention scheme
-// (it allows only http/https/mailto/tel/relative by default).
+
+// Vault dynamic-ask: an agent reply may contain `$<OPENAI_API_KEY>`. When interactive,
+// we rewrite each marker (outside code) to an `avibe-secret:NAME` link that the `a` handler
+// renders as an inline SecretRequestCard. Fenced/inline code spans AND indented (≥4-space / tab)
+// code lines are left verbatim so a marker shown in any code example never becomes a real
+// input card.
+const SECRET_LINK_SCHEME = 'avibe-secret';
+const SECRET_REQUEST_RE = /\$<([A-Z][A-Z0-9_]*)>/g;
+const CODE_SPAN_RE = /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g;
+const INDENTED_CODE_LINE_RE = /^(?: {4}|\t)/;
+
+function linkifySecretRequests(text: string): string {
+  if (!text.includes('$<')) return text;
+  // Within a non-fenced/non-inline-code segment, still skip indented code lines.
+  const rewrite = (segment: string) =>
+    segment
+      .split('\n')
+      .map((line) =>
+        INDENTED_CODE_LINE_RE.test(line)
+          ? line
+          : line.replace(SECRET_REQUEST_RE, (_m, name) => `[${name}](${SECRET_LINK_SCHEME}:${name})`),
+      )
+      .join('\n');
+  // Partition on code spans; rewrite only the non-code segments (code stays verbatim).
+  let result = '';
+  let last = 0;
+  CODE_SPAN_RE.lastIndex = 0;
+  for (let m = CODE_SPAN_RE.exec(text); m; m = CODE_SPAN_RE.exec(text)) {
+    result += rewrite(text.slice(last, m.index)) + m[0];
+    last = m.index + m[0].length;
+  }
+  return result + rewrite(text.slice(last));
+}
+
+// Keep react-markdown's URL sanitizer from stripping our custom schemes (it allows
+// only http/https/mailto/tel/relative by default).
 function mentionUrlTransform(url: string): string {
-  return url.startsWith(`${MENTION_LINK_SCHEME}:`) ? url : defaultUrlTransform(url);
+  if (url.startsWith(`${MENTION_LINK_SCHEME}:`) || url.startsWith(`${SECRET_LINK_SCHEME}:`)) return url;
+  return defaultUrlTransform(url);
 }
 
 export const Markdown: React.FC<{
@@ -46,7 +82,12 @@ export const Markdown: React.FC<{
   /** Mention sidecar — when present, `@<name>` / `#<id>` markers in `content`
    *  render as inline chips (see lib/mentions). */
   references?: MentionReference[];
-}> = ({ content, className, interactive = true, softBreaks = false, references }) => {
+  /** Opt-in: render `$<NAME>` dynamic-ask markers as interactive SecretRequestCards. ONLY the
+   *  agent-reply surface sets this — user bubbles, previews, and docs must NOT, or user-authored
+   *  or quoted text could mint an "agent asked for this secret" card that creates a vault
+   *  secret on click. */
+  secretRequests?: boolean;
+}> = ({ content, className, interactive = true, softBreaks = false, references, secretRequests = false }) => {
   // Stable ``remarkPlugins`` + ``components`` identities across re-renders.
   // ReactMarkdown keys its rendered tree on the component functions it is handed;
   // the old inline object minted fresh functions every render, so ReactMarkdown
@@ -109,6 +150,13 @@ export const Markdown: React.FC<{
             </Badge>
           );
         }
+        // Vault `$<NAME>` dynamic-ask marker → inline secure-input card. Gated on
+        // ``secretRequests`` (agent-reply surface only), NOT just ``interactive`` — otherwise a
+        // user who literally typed `[x](avibe-secret:FOO)` in their own bubble could mint a card.
+        if (url.startsWith(`${SECRET_LINK_SCHEME}:`)) {
+          const name = url.slice(SECRET_LINK_SCHEME.length + 1);
+          return secretRequests ? <SecretRequestCard name={name} /> : <span>{children}</span>;
+        }
         if (interactive && url && isProxyMediaUrl(url)) {
           return <FileCard href={url}>{children}</FileCard>;
         }
@@ -132,14 +180,16 @@ export const Markdown: React.FC<{
             ),
           }),
     }),
-    [interactive],
+    [interactive, secretRequests],
   );
 
   // Mention markers are rewritten to `avibe-mention:` links BEFORE markdown sees
   // them, and only when a sidecar is present — agent replies (no references) skip
   // this so their code spans are never touched. The links render as chips via the
-  // `a` map.
-  const rendered = references && references.length ? linkifyMentions(content, references) : content;
+  // `a` map. Secret `$<NAME>` markers are rewritten too, but only on the agent-reply surface
+  // (secretRequests) — user bubbles / previews / docs keep them as plain text.
+  let rendered = references && references.length ? linkifyMentions(content, references) : content;
+  if (secretRequests) rendered = linkifySecretRequests(rendered);
   return (
     <div className={cn('vr-markdown', className)}>
       <ReactMarkdown

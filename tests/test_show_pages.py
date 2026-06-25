@@ -40,11 +40,15 @@ def test_runtime_prepare_cli_reports_warning_only_failure(monkeypatch, capsys):
             return {"ok": False, "reason": "runtime_node_missing"}
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda offline=False: {"ok": True, "installed": True})
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda offline=False: {"ok": True, "installed": True})
 
     assert cli.cmd_runtime(args) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert payload["reason"] == "runtime_node_missing"
+    assert payload["askill"] == {"ok": True, "installed": True}
+    assert payload["avault"] == {"ok": True, "installed": True}
 
 
 def test_runtime_prepare_cli_preserves_offline_environment(monkeypatch):
@@ -58,6 +62,8 @@ def test_runtime_prepare_cli_preserves_offline_environment(monkeypatch):
             return {"ok": True}
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda offline=False: {"ok": True, "installed": True})
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda offline=False: {"ok": True, "installed": True})
 
     assert cli.cmd_runtime(args) == 0
 
@@ -82,9 +88,39 @@ def test_runtime_prepare_cli_strict_fails_when_prepare_fails(monkeypatch, capsys
             return {"ok": False, "reason": "runtime_archive_download_failed"}
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda offline=False: {"ok": True, "installed": True})
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda offline=False: {"ok": True, "installed": True})
 
     assert cli.cmd_runtime(args) == 1
     assert "runtime_archive_download_failed" in capsys.readouterr().err
+
+
+def test_runtime_prepare_cli_skips_avault_offline(monkeypatch, capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(["runtime", "prepare", "--offline", "--json"])
+    seen = {"askill": None, "avault": None}
+
+    class FakeRuntimeManager:
+        def prepare(self, *, force=False, offline=None):
+            assert offline is True
+            return {"ok": True}
+
+    def fake_askill(offline=False):
+        seen["askill"] = offline
+        return {"ok": True, "skipped": True, "reason": "offline"}
+
+    def fake_avault(offline=False):
+        seen["avault"] = offline
+        return {"ok": True, "skipped": True, "reason": "offline"}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", fake_askill)
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", fake_avault)
+
+    assert cli.cmd_runtime(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert seen == {"askill": True, "avault": True}
+    assert payload["avault"] == {"ok": True, "skipped": True, "reason": "offline"}
 
 
 def _save_config() -> V2Config:

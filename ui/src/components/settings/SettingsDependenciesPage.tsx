@@ -1,7 +1,19 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ArrowUpRight, Download, Hexagon, LayoutDashboard, Loader2, RefreshCw, ShieldCheck, SquareTerminal, Terminal, WandSparkles } from 'lucide-react';
+import {
+  ArrowUpRight,
+  Download,
+  Hexagon,
+  KeyRound,
+  LayoutDashboard,
+  Loader2,
+  RefreshCw,
+  ShieldCheck,
+  SquareTerminal,
+  Terminal,
+  WandSparkles,
+} from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 import { Button } from '../ui/button';
@@ -23,6 +35,7 @@ type DepMeta = { icon: LucideIcon; tileCls: string; iconCls: string };
 
 const DEP_META: Record<string, DepMeta> = {
   askill: { icon: WandSparkles, tileCls: 'bg-mint-soft', iconCls: 'text-mint' },
+  avault: { icon: KeyRound, tileCls: 'bg-gold-soft', iconCls: 'text-gold' },
   'show-runtime': { icon: LayoutDashboard, tileCls: 'bg-cyan-soft', iconCls: 'text-cyan' },
   tmux: { icon: SquareTerminal, tileCls: 'bg-surface-3', iconCls: 'text-foreground' },
   node: { icon: Hexagon, tileCls: 'bg-violet-soft', iconCls: 'text-violet' },
@@ -97,7 +110,8 @@ export const SettingsDependenciesPage: React.FC = () => {
           {deps.map((d) => {
             const meta = DEP_META[d.id] ?? DEP_META.node;
             const installing = busy === d.id;
-            const showAction = d.id === 'askill' || d.id === 'show-runtime' || d.id === 'tmux';
+            const showAction =
+              d.id === 'askill' || d.id === 'avault' || d.id === 'show-runtime' || d.id === 'tmux';
             return (
               <SettingsResourceRow
                 key={d.id}

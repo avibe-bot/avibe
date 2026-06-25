@@ -275,11 +275,17 @@ class CodexConfig:
 
 
 @dataclass
+class AVaultConfig:
+    cli_path: str = "avault"
+
+
+@dataclass
 class AgentsConfig:
     default_backend: str = DEFAULT_AGENT_BACKEND
     opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     codex: CodexConfig = field(default_factory=CodexConfig)
+    avault: AVaultConfig = field(default_factory=AVaultConfig)
 
 
 @dataclass
@@ -513,14 +519,20 @@ class V2Config:
         if not isinstance(codex_payload, dict):
             raise ValueError("Config 'agents.codex' must be an object")
 
+        avault_payload = agents_payload.get("avault") or {}
+        if not isinstance(avault_payload, dict):
+            raise ValueError("Config 'agents.avault' must be an object")
+
         opencode = OpenCodeConfig(**_filter_dataclass_fields(OpenCodeConfig, opencode_payload))
         claude = ClaudeConfig(**_filter_dataclass_fields(ClaudeConfig, claude_payload))
         codex = CodexConfig(**_filter_dataclass_fields(CodexConfig, codex_payload))
+        avault = AVaultConfig(**_filter_dataclass_fields(AVaultConfig, avault_payload))
 
         agents = AgentsConfig(
             opencode=opencode,
             claude=claude,
             codex=codex,
+            avault=avault,
         )
 
         ui_payload = payload.get("ui") or {}
@@ -684,6 +696,7 @@ class V2Config:
                 "opencode": self.agents.opencode.__dict__,
                 "claude": self.agents.claude.__dict__,
                 "codex": self.agents.codex.__dict__,
+                "avault": self.agents.avault.__dict__,
             },
             "gateway": self.gateway.__dict__ if self.gateway else None,
             "ui": self.ui.__dict__,

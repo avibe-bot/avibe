@@ -56,6 +56,13 @@ class BackendRequestError(Exception):
         self.payload = payload
 
 
+class OAuthCodeExchangeError(Exception):
+    def __init__(self, reason: str, detail: str | None = None):
+        super().__init__(reason)
+        self.reason = reason
+        self.detail = detail or ""
+
+
 def _bin_dir() -> Path:
     return paths.get_vibe_remote_dir() / "bin"
 
@@ -847,18 +854,49 @@ def exchange_oauth_code(config: V2Config, code: str, code_verifier: str) -> dict
         headers={"Accept": "application/json", "User-Agent": "avibe/dev"},
         timeout=20,
     )
-    response.raise_for_status()
-    token_payload = response.json()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = ""
+        try:
+            payload = response.json()
+            detail = str(payload.get("error") or payload.get("detail") or "")
+        except Exception:
+            detail = response.text[:120]
+        raise OAuthCodeExchangeError("token_endpoint_rejected", detail or str(exc)) from exc
+    try:
+        token_payload = response.json()
+    except ValueError as exc:
+        raise OAuthCodeExchangeError("invalid_token_response", str(exc)) from exc
     id_token = token_payload.get("id_token")
     if not id_token:
-        raise ValueError("missing_id_token")
-    jwk_client = PyJWKClient(cloud.jwks_uri)
-    signing_key = jwk_client.get_signing_key_from_jwt(id_token)
-    claims = jwt.decode(id_token, signing_key.key, algorithms=["RS256"], audience=cloud.client_id, issuer=cloud.issuer)
+        raise OAuthCodeExchangeError("missing_id_token")
+    try:
+        jwk_client = PyJWKClient(cloud.jwks_uri)
+        signing_key = jwk_client.get_signing_key_from_jwt(id_token)
+        claims = jwt.decode(
+            id_token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=cloud.client_id,
+            issuer=cloud.issuer,
+        )
+    except jwt.InvalidIssuerError as exc:
+        raise OAuthCodeExchangeError("invalid_issuer", str(exc)) from exc
+    except jwt.InvalidAudienceError as exc:
+        raise OAuthCodeExchangeError("invalid_audience", str(exc)) from exc
+    except jwt.ExpiredSignatureError as exc:
+        raise OAuthCodeExchangeError("expired_id_token", str(exc)) from exc
+    except jwt.ImmatureSignatureError as exc:
+        raise OAuthCodeExchangeError("immature_id_token", str(exc)) from exc
+    except jwt.InvalidTokenError as exc:
+        raise OAuthCodeExchangeError("invalid_id_token", str(exc)) from exc
+    except Exception as exc:
+        raise OAuthCodeExchangeError("jwks_or_token_validation_failed", str(exc)) from exc
     if claims.get("vibe_instance_id") != cloud.instance_id:
-        raise ValueError("invalid_instance_id")
+        raise OAuthCodeExchangeError("invalid_instance_id")
     if not claims.get("email_verified"):
-        raise ValueError("email_not_verified")
+        raise OAuthCodeExchangeError("email_not_verified")
     return {"claims": claims, "token": token_payload}
 
 

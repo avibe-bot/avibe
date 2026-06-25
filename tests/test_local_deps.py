@@ -113,6 +113,91 @@ def test_askill_status_present_parses_version(monkeypatch):
     assert s["installed"] and s["version"] == "0.1.13" and s["status"] == "ready"
 
 
+def test_install_avault_uses_existing_configured_binary(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "/opt/avault/bin/avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/opt/avault/bin/avault" if b == "/opt/avault/bin/avault" else None)
+
+    out = api.install_avault()
+
+    assert out["ok"] is True
+    assert out["path"] == "/opt/avault/bin/avault"
+
+
+def test_install_avault_missing_is_clear_stub_failure(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _b: None)
+
+    out = api.install_avault()
+
+    assert out["ok"] is False
+    assert "agents.avault.cli_path" in out["message"]
+
+
+def test_avault_resolves_path_fallback_when_configured_path_missing(monkeypatch):
+    seen = []
+
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "/missing/avault")
+
+    def fake_resolve(binary):
+        seen.append(binary)
+        return "/usr/local/bin/avault" if binary == "avault" else None
+
+    monkeypatch.setattr(api, "resolve_cli_path", fake_resolve)
+
+    assert api._resolve_avault_cli_path() == "/usr/local/bin/avault"
+    assert seen == ["/missing/avault", "avault"]
+
+
+def test_ensure_avault_idempotent_when_present(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
+    flag = {"installed": False}
+    monkeypatch.setattr(api, "install_avault", lambda: flag.__setitem__("installed", True) or {"ok": True})
+
+    out = api.ensure_avault_installed()
+
+    assert out == {"ok": True, "installed": True, "changed": False, "path": "/usr/local/bin/avault"}
+    assert flag["installed"] is False
+
+
+def test_ensure_avault_force_rechecks_existing_binary(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
+    flag = {"installed": False}
+    monkeypatch.setattr(api, "install_avault", lambda: flag.__setitem__("installed", True) or {"ok": True})
+
+    out = api.ensure_avault_installed(force=True)
+
+    assert flag["installed"] is True
+    assert out["ok"] is True
+    assert out["installed"] is True
+    assert out["changed"] is False
+
+
+def test_avault_status_missing(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: None)
+    s = api.avault_status()
+    assert s["id"] == "avault"
+    assert s["installed"] is False and s["status"] == "missing" and s["version"] is None
+
+
+def test_avault_status_present_parses_version(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/x/avault")
+    monkeypatch.setattr(api, "_command_env_for", lambda p: {})
+    monkeypatch.setattr(api, "isolated_subprocess_kwargs", lambda: {})
+
+    class _R:
+        returncode = 0
+        stdout = "avault 0.0.1\n"
+        stderr = ""
+
+    monkeypatch.setattr(api.subprocess, "run", lambda *a, **k: _R())
+    s = api.avault_status()
+    assert s["installed"] and s["version"] == "0.0.1" and s["status"] == "ready"
+
+
 def test_askill_update_status_compares_latest(monkeypatch):
     monkeypatch.setattr(
         api,
@@ -230,6 +315,11 @@ def test_dependencies_status_shape(monkeypatch):
             "path": "/x",
         },
     )
+    monkeypatch.setattr(
+        api,
+        "avault_status",
+        lambda: {"id": "avault", "installed": True, "version": "0.0.1", "status": "ready", "path": "/x/avault"},
+    )
     import core.show_runtime as srt_mod
 
     class _Mgr:
@@ -240,9 +330,11 @@ def test_dependencies_status_shape(monkeypatch):
     out = api.dependencies_status()
     assert out["ok"]
     by = {d["id"]: d for d in out["deps"]}
-    assert list(by) == ["askill", "show-runtime", "node"]
+    assert list(by) == ["askill", "avault", "show-runtime", "node"]
     assert by["askill"]["status"] == "ready" and by["askill"]["version"] == "0.1.13" and by["askill"]["required"]
     assert by["askill"]["latest_version"] is None and by["askill"]["has_update"] is False
+    assert by["avault"]["status"] == "ready" and by["avault"]["version"] == "0.0.1" and by["avault"]["required"]
+    assert by["avault"]["latest_version"] is None and by["avault"]["has_update"] is False
     assert by["show-runtime"]["installed"] and by["show-runtime"]["version"] == "1.4.0"
     assert by["node"]["installed"] and by["node"]["version"] == "20.11"
 
@@ -253,6 +345,11 @@ def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
         api,
         "askill_update_status",
         lambda **_: {"id": "askill", "installed": True, "version": "0.1.13", "status": "ready", "path": "/x"},
+    )
+    monkeypatch.setattr(
+        api,
+        "avault_status",
+        lambda: {"id": "avault", "installed": True, "version": "0.0.1", "status": "ready", "path": "/x/avault"},
     )
     import core.show_runtime as srt_mod
 
@@ -267,12 +364,19 @@ def test_dependencies_status_node_unsupported_not_ready(monkeypatch):
 
 def test_reconcile_startup_dependencies_installs_askill_and_defers_runtime_prepare(monkeypatch):
     askill_calls = []
+    avault_calls = []
 
     def fake_ensure(force=False):
         askill_calls.append(force)
         return {"ok": True, "installed": True, "changed": True, "path": "/x/askill"}
 
     monkeypatch.setattr(api, "ensure_askill_installed", fake_ensure)
+
+    def fake_ensure_avault(force=False):
+        avault_calls.append(force)
+        return {"ok": True, "installed": True, "changed": False, "path": "/x/avault"}
+
+    monkeypatch.setattr(api, "ensure_avault_installed", fake_ensure_avault)
 
     import core.show_runtime as srt_mod
 
@@ -300,6 +404,7 @@ def test_reconcile_startup_dependencies_installs_askill_and_defers_runtime_prepa
 
     assert out["ok"] is True
     assert askill_calls == [False]
+    assert avault_calls == [False]
     assert manager.prepared == []
     assert out["node"]["status"] == "ready"
     assert out["show_runtime"] == {"ok": True, "status": "pending_prewarm", "reason": None}
@@ -307,6 +412,7 @@ def test_reconcile_startup_dependencies_installs_askill_and_defers_runtime_prepa
 
 def test_reconcile_startup_dependencies_does_not_prepare_runtime_without_node(monkeypatch):
     monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
+    monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
 
     import core.show_runtime as srt_mod
 
@@ -329,6 +435,7 @@ def test_reconcile_startup_dependencies_does_not_prepare_runtime_without_node(mo
 def test_reconcile_startup_dependencies_can_be_disabled(monkeypatch):
     monkeypatch.setenv("VIBE_STARTUP_DEPENDENCY_RECONCILE", "0")
     monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: pytest.fail("should not reconcile"))
+    monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: pytest.fail("should not reconcile"))
 
     out = api.reconcile_startup_dependencies()
 
@@ -388,6 +495,28 @@ def test_start_dependency_install_job_runs_askill(monkeypatch):
     cur = job
     for _ in range(100):
         cur = api.get_agent_install_job(job["job_id"], backend="askill")
+        if cur.get("status") != "running":
+            break
+        _t.sleep(0.02)
+    assert flag["called"] is True
+    assert cur["status"] == "succeeded" and cur["ok"] is True
+
+
+def test_start_dependency_install_job_runs_avault(monkeypatch):
+    import time as _t
+
+    flag = {"called": False}
+
+    def fake_ensure(force=False):
+        flag["called"] = True
+        return {"ok": True, "installed": True, "changed": False, "path": "/x/avault"}
+
+    monkeypatch.setattr(api, "ensure_avault_installed", fake_ensure)
+    job = api.start_dependency_install_job("avault")
+    assert job["ok"] and job["backend"] == "avault" and job.get("job_id")
+    cur = job
+    for _ in range(100):
+        cur = api.get_agent_install_job(job["job_id"], backend="avault")
         if cur.get("status") != "running":
             break
         _t.sleep(0.02)

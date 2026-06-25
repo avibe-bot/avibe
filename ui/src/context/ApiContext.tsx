@@ -16,6 +16,32 @@ export type GlobalPromptFile = {
   read_error: boolean;
 };
 
+export type VaultSecret = {
+  name: string;
+  group: string;
+  tags: string[];
+  kind: string;
+  protection: string;
+  signer_kind: string | null;
+  source: string;
+  description?: string | null;
+  preview: string;
+  policy: Record<string, unknown>;
+  last_used_at: string | null;
+  use_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type VaultAuditEvent = {
+  id: string;
+  ts: string;
+  event: string;
+  secret_name: string | null;
+  request_id: string | null;
+  grant_id: string | null;
+};
+
 export type ApiContextType = {
   getConfig: () => Promise<any>;
   getPlatformCatalog: () => Promise<any>;
@@ -219,6 +245,10 @@ export type ApiContextType = {
   updateVibeAgent: (name: string, payload: VibeAgentUpdatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   setDefaultVibeAgent: (name: string) => Promise<{ ok: boolean; default_agent_name: string; agent: VibeAgentBrief }>;
   removeVibeAgent: (name: string) => Promise<{ ok: boolean; code?: string; message?: string; references?: Record<string, number>; removed_agent?: string }>;
+  listVaultSecrets: (params?: { group?: string }) => Promise<{ ok: boolean; secrets: VaultSecret[] }>;
+  createVaultSecret: (payload: { name: string; value: string; group?: string; description?: string; tags?: string[]; policy?: Record<string, unknown> }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
+  deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
+  getVaultAudit: (params?: { secret?: string; limit?: number }) => Promise<{ ok: boolean; events: VaultAuditEvent[] }>;
   importVibeAgents: (payload: { from?: 'claude' | 'codex' | 'opencode'; name?: string; all?: boolean; file?: string; backend?: string }) => Promise<{ ok: boolean; imported?: any[]; skipped?: any[]; error?: string; code?: string; message?: string }>;
   // Agent Skills — thin shells over the askill CLI (see /api/skills*).
   listSkills: (params?: { scope?: SkillScope | 'all'; projectId?: string; backends?: string[] }) => Promise<SkillsListResult>;
@@ -1215,16 +1245,16 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     
     try {
       const data = await res.json();
-      if (data.error) {
-        // ``error`` may be a plain string (an errors.<key> code) or a
-        // structured ``{ code, message }`` object (project-scoped routes).
-        // Localize by code, falling back to the server-provided message so we
-        // never render a key like ``errors.[object Object]``.
-        const code = typeof data.error === 'string' ? data.error : data.error?.code;
+      // Accept the legacy ``error`` shape (string code or ``{ code, message }``) AND the
+      // top-level ``{ code, message }`` shape newer routes use (e.g. /api/vault/*), so callers
+      // always get a real ``ApiError.code`` to branch on instead of a generic status string.
+      const rawErr = data.error ?? (data.code ? { code: data.code, message: data.message } : undefined);
+      if (rawErr) {
+        // Localize by code, falling back to the server-provided message so we never render a
+        // key like ``errors.[object Object]``.
+        const code = typeof rawErr === 'string' ? rawErr : rawErr?.code;
         const fallback =
-          typeof data.error === 'string'
-            ? data.error
-            : data.error?.message ?? data.error?.code ?? errorMessage;
+          typeof rawErr === 'string' ? rawErr : rawErr?.message ?? rawErr?.code ?? errorMessage;
         errorCode = typeof code === 'string' ? code : null;
         errorMessage = errorCode ? t(`errors.${errorCode}`, { defaultValue: fallback }) : fallback;
       }
@@ -1441,12 +1471,17 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { res, payloadJson };
   };
 
-  const postJson = async (path: string, payload: any) => {
-    const { payloadJson } = await requestJson(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
+  const postJson = async (path: string, payload: any, opts?: { handleError?: boolean }) => {
+    const { payloadJson } = await requestJson(
+      path,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+      path,
+      opts,
+    );
     return payloadJson;
   };
 
@@ -1850,6 +1885,21 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     setDefaultVibeAgent: (name) => postJson('/api/agents/default', { name }),
     removeVibeAgent: (name) => deleteJson(`/api/agents/${encodeURIComponent(name)}`),
+    listVaultSecrets: (params) => {
+      const search = new URLSearchParams();
+      if (params?.group) search.set('group', params.group);
+      const qs = search.toString();
+      return getCachedJson(qs ? `/api/vault/secrets?${qs}` : '/api/vault/secrets', 1500);
+    },
+    createVaultSecret: (payload, opts) => postJson('/api/vault/secrets', payload, opts),
+    deleteVaultSecret: (name) => deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}`),
+    getVaultAudit: (params) => {
+      const search = new URLSearchParams();
+      if (params?.secret) search.set('secret', params.secret);
+      if (params?.limit) search.set('limit', String(params.limit));
+      const qs = search.toString();
+      return getCachedJson(qs ? `/api/vault/audit?${qs}` : '/api/vault/audit', 1500);
+    },
     importVibeAgents: (payload) => postJson('/api/agents/import', payload),
     listSkills: (params) => {
       const search = new URLSearchParams();

@@ -3307,6 +3307,750 @@ def cmd_session_update(args):
     return 0
 
 
+# ----- vault: secret management (design: docs/plans/vaults.md) -----
+# P0 standard-tier ops run direct-DB + direct-crypto here, matching sibling CLI
+# commands (session/task/data): the machine key is a local file, so the CLI reading
+# it is the same trust boundary as the daemon, and there is no approval to
+# orchestrate. Protected-tier resolve/sign (P1) will route through the daemon UDS,
+# because that is where the unlock factor, approval, and in-memory grants live.
+
+
+def _open_vault_engine():
+    _ensure_cli_sqlite_state()
+    return create_sqlite_engine(paths.get_sqlite_state_path())
+
+
+def _is_env_name(name: str) -> bool:
+    """ASCII shell/env identifier: a letter or underscore, then letters/digits/underscores."""
+    if not name or not name[0].isascii() or not (name[0].isalpha() or name[0] == "_"):
+        return False
+    return all(c.isascii() and (c.isalnum() or c == "_") for c in name)
+
+
+def _parse_env_specs(specs) -> dict:
+    """Map ENV var name -> vault secret name from ``--env`` specs.
+
+    Accepts ``NAME`` (inject as the same name), ``LOCAL=NAME`` (rename), and
+    comma-separated ``A,B`` within one flag.
+    """
+    mapping: dict[str, str] = {}
+    for spec in specs or []:
+        for part in str(spec).split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "=" in part:
+                local, _, vault_name = part.partition("=")
+                local, vault_name = local.strip(), vault_name.strip()
+            else:
+                local = vault_name = part
+            if not local or not vault_name:
+                raise TaskCliError(f"invalid --env spec: {part!r}", code="invalid_env_spec", help_command="vibe vault run --help")
+            # The local (LHS) becomes an env var name / is interpolated into `export`
+            # lines for eval — reject anything that isn't a plain identifier so it can't
+            # break the shell or smuggle in extra commands.
+            if not _is_env_name(local):
+                raise TaskCliError(f"invalid env var name: {local!r} (use [A-Za-z_][A-Za-z0-9_]*)", code="invalid_env_name", help_command="vibe vault run --help")
+            mapping[local] = vault_name
+    return mapping
+
+
+def _read_secret_value(args, *, help_command: str) -> str:
+    """Read a secret value from --stdin or --from-file. Argv values are rejected by
+    design (shell history / agent-context leakage)."""
+    from_file = getattr(args, "from_file", None)
+    use_stdin = bool(getattr(args, "stdin", False))
+    if bool(from_file) == use_stdin:  # neither, or both
+        raise TaskCliError(
+            "provide the value via exactly one of --stdin or --from-file",
+            code="missing_value_source",
+            help_command=help_command,
+        )
+    if from_file:
+        try:
+            # Stored byte-exact: read bytes and decode (NOT read_text, which does universal
+            # newline translation). A trailing newline and CRLF/CR endings are significant for
+            # Windows-created PEM/SSH keys and many tokens, so --from-file is preserved verbatim.
+            value = Path(from_file).read_bytes().decode("utf-8")
+        except OSError as exc:
+            raise TaskCliError(f"cannot read --from-file: {exc}", code="value_file_unreadable", help_command=help_command) from exc
+    else:
+        # Interactive/piped stdin: drop a single trailing newline (the Enter keypress / heredoc
+        # terminator) the user didn't intend as part of the secret.
+        value = sys.stdin.read()
+        if value.endswith("\n"):
+            value = value[:-1]
+    if not value:
+        raise TaskCliError("secret value is empty", code="empty_value", help_command=help_command)
+    return value
+
+
+def cmd_vault_set(args):
+    from storage import vault_crypto, vault_service
+    from vibe import api
+
+    help_command = "vibe vault set --help"
+    try:
+        value = _read_secret_value(args, help_command=help_command)
+        # Validate the name before sealing so an invalid name doesn't spend an avault call.
+        if not vault_crypto.is_valid_secret_name(args.name):
+            raise vault_service.InvalidSecretNameError(args.name)
+        tags = list(getattr(args, "tag", None) or []) or None
+        policy = _build_secret_policy(args)
+        # Seal via avault BEFORE opening a DB transaction (never hold a txn across a subprocess).
+        # The plaintext goes only to avault's stdin; we keep just the ciphertext envelope + a
+        # non-secret last-4 preview.
+        sealed = api.avault_seal(args.name, value.encode("utf-8"))
+        preview = vault_service.value_preview(value)
+        engine = _open_vault_engine()
+        with engine.begin() as conn:
+            meta = vault_service.create_secret(
+                conn,
+                name=args.name,
+                sealed=sealed,
+                preview=preview,
+                group=getattr(args, "group", None) or vault_service.DEFAULT_GROUP,
+                tags=tags,
+                description=getattr(args, "description", None),
+                policy=policy,
+            )
+        _print_cli_payload("vault_secret", saved=True, secret=meta)
+        return 0
+    except vault_service.InvalidSecretNameError:
+        _print_task_error(TaskCliError(f"invalid secret name: {args.name!r} (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name", help_command=help_command))
+        return 1
+    except vault_service.SecretExistsError:
+        _print_task_error(TaskCliError(f"secret '{args.name}' already exists (remove it first to replace)", code="secret_exists", help_command=help_command))
+        return 1
+    except api.AvaultError as exc:
+        _print_task_error(TaskCliError(f"avault seal failed: {exc}", code="avault_failed", help_command=help_command))
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
+def cmd_vault_list(args):
+    from storage import vault_service
+
+    try:
+        engine = _open_vault_engine()
+        with engine.connect() as conn:
+            secrets = vault_service.list_secrets(conn, group=getattr(args, "group", None))
+        _print_cli_payload("vault_secrets", secrets=secrets)
+        return 0
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe vault list --help")
+        return 1
+
+
+def cmd_vault_rm(args):
+    from storage import vault_service
+
+    help_command = "vibe vault rm --help"
+    try:
+        engine = _open_vault_engine()
+        with engine.begin() as conn:
+            vault_service.delete_secret(conn, args.name)
+        _print_cli_payload("vault_secret", removed=True, name=args.name)
+        return 0
+    except vault_service.SecretNotFoundError:
+        _print_task_error(TaskCliError(f"secret '{args.name}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
+def cmd_vault_run(args):
+    from storage import vault_service
+
+    help_command = "vibe vault run --help"
+    try:
+        mapping = _parse_env_specs(getattr(args, "env", None))
+        if not mapping:
+            raise TaskCliError("at least one --env NAME is required", code="missing_env", help_command=help_command)
+        command_argv = list(getattr(args, "command_argv", None) or [])
+        if command_argv and command_argv[0] == "--":
+            command_argv = command_argv[1:]
+        if not command_argv:
+            raise TaskCliError(
+                "a command is required after --",
+                code="missing_command",
+                help_command=help_command,
+                example="vibe vault run --env OPENAI_API_KEY -- python sync.py",
+            )
+        # Preflight the command BEFORE resolving — a missing binary shouldn't decrypt the
+        # secret, bump use_count, or write a 'delivered' audit for a delivery that never
+        # reached a child.
+        if shutil.which(command_argv[0]) is None:
+            raise TaskCliError(
+                f"command not found: {command_argv[0]!r}",
+                code="command_not_found",
+                help_command=help_command,
+                example="vibe vault run --env OPENAI_API_KEY -- python sync.py",
+            )
+        engine = _open_vault_engine()
+        with engine.connect() as conn:
+            envelopes = vault_service.get_envelopes(conn, sorted(set(mapping.values())))
+    except vault_service.SecretNotFoundError as exc:
+        _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.UnsupportedProtectionError as exc:
+        _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
+        return 1
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+    # Hand the envelopes + command to avault: it decrypts, spawns the child with the secret
+    # env, waits, and zeroizes. The plaintext never returns here; the child inherits our stdio
+    # so its output passes through. Envelopes (no plaintext) go on avault's stdin.
+    from vibe import api
+
+    secrets = [
+        {"name": vault_name, "env": env_name, "envelope": envelopes[vault_name]}
+        for env_name, vault_name in mapping.items()
+    ]
+    try:
+        exit_code = api.avault_deliver_run(secrets, command_argv)
+    except api.AvaultError as exc:
+        _print_task_error(TaskCliError(f"avault deliver failed: {exc}", code="avault_failed", help_command=help_command))
+        return 1
+    # avault exits 70 only on an internal failure BEFORE spawning the child (bad envelope /
+    # decrypt / store) — no delivery happened, so skip the audit. Any other code means the child
+    # ran with the secret in its env → record the delivery now. A bookkeeping failure must not
+    # crash or change the child's real exit code.
+    if exit_code != 70:
+        try:
+            with engine.begin() as conn:
+                vault_service.record_deliveries(
+                    conn, sorted(set(mapping.values())), requester={"source": "cli", "pid": os.getpid()}, mode="run"
+                )
+        except Exception:
+            pass
+    return exit_code
+
+
+def _wait_for_provision(request_id: str, *, timeout: float, poll_interval: float = 2.0) -> bool:
+    from storage.models import vault_requests
+
+    deadline = time.monotonic() + timeout
+    engine = _open_vault_engine()
+    while time.monotonic() < deadline:
+        with engine.connect() as conn:
+            row = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == request_id)).first()
+        if row and row[0] == "fulfilled":
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval, remaining))
+    return False
+
+
+def cmd_vault_request(args):
+    from storage import vault_crypto, vault_service
+
+    help_command = "vibe vault request --help"
+    try:
+        name = args.name
+        if not vault_crypto.is_valid_secret_name(name):
+            raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name", help_command=help_command)
+        engine = _open_vault_engine()
+        with engine.begin() as conn:
+            req = vault_service.create_provision_request(
+                conn,
+                name,
+                reason=getattr(args, "reason", None),
+                skill=getattr(args, "skill", None),
+                requester={"source": "cli", "pid": os.getpid()},
+            )
+        if req.get("status") == "fulfilled":
+            # Secret already existed — no point waiting.
+            _print_cli_payload(
+                "vault_request",
+                request_id=req["id"],
+                secret_name=name,
+                status="fulfilled",
+                message=f"'{name}' is already in the vault — use it via: vibe vault run --env {name} -- <command>",
+            )
+            return 0
+        wait_seconds = getattr(args, "wait", None)
+        if wait_seconds:
+            if _wait_for_provision(req["id"], timeout=float(wait_seconds)):
+                _print_cli_payload(
+                    "vault_request",
+                    request_id=req["id"],
+                    secret_name=name,
+                    status="fulfilled",
+                    message=f"'{name}' is now available — use it via: vibe vault run --env {name} -- <command>",
+                )
+                return 0
+            _print_task_error(
+                TaskCliError(
+                    f"request for '{name}' was not fulfilled within {wait_seconds}s",
+                    code="request_timeout",
+                    help_command=help_command,
+                    details={"request_id": req["id"]},
+                )
+            )
+            return 1
+        _print_cli_payload(
+            "vault_request",
+            request_id=req["id"],
+            secret_name=name,
+            status="pending",
+            message=(
+                f"Recorded a request for '{name}'. The user fulfills it by adding a secret named "
+                f"{name} on the Vaults page (Add secret) — saving it marks this request fulfilled. "
+                f"Then use: vibe vault run --env {name} -- <command>"
+            ),
+        )
+        return 0
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
+def _build_secret_policy(args) -> dict | None:
+    """Assemble the non-secret policy (allowed hosts + auth scheme) for the brokered
+    ``fetch`` mode from ``set`` flags. Returns None when nothing is configured."""
+    policy: dict = {}
+    hosts = [h.strip() for h in (getattr(args, "allow_host", None) or []) if h.strip()]
+    if hosts:
+        policy["allowed_hosts"] = hosts
+    auth_header = getattr(args, "auth_header", None)
+    auth_query = getattr(args, "auth_query", None)
+    if auth_header and auth_query:
+        raise TaskCliError("use at most one of --auth-header / --auth-query", code="invalid_auth", help_command="vibe vault set --help")
+    if auth_header:
+        # A stored auth-header policy is applied at fetch egress, so it must obey the same
+        # authority-override guard as --header (otherwise --auth-header Host bypasses it).
+        _reject_forbidden_header(auth_header, help_command="vibe vault set --help")
+        policy["auth"] = {"type": "header", "name": auth_header}
+    elif auth_query:
+        policy["auth"] = {"type": "query", "name": auth_query}
+    # No auth key => fetch defaults to Authorization: Bearer <value>.
+    return policy or None
+
+
+def _host_allowed(host, allowed) -> bool:
+    """Exact host match, or a leading-dot entry (``.github.com``) matching subdomains.
+
+    Hostnames are case-insensitive, so both sides are lowercased — otherwise a stored
+    ``API.GITHUB.COM`` would never match the lowercase ``urlsplit().hostname`` and a valid
+    host-bound secret becomes unusable.
+    """
+    if not host:
+        return False
+    host = host.lower()
+    for entry in allowed or []:
+        entry = str(entry).strip().lower()
+        if not entry:
+            continue
+        if entry.startswith("."):
+            if host == entry[1:] or host.endswith(entry):
+                return True
+        elif host == entry:
+            return True
+    return False
+
+
+# Headers that would override the request authority. The allowlist binds a secret to the URL
+# hostname, so letting any of these through (via --header OR a stored auth-header policy) could
+# route the credential-bearing request to a different vhost on the same endpoint.
+_FORBIDDEN_FETCH_HEADER_NAMES = frozenset({"host"})
+
+
+def _reject_forbidden_header(name, *, help_command: str) -> None:
+    if str(name).strip().lower() in _FORBIDDEN_FETCH_HEADER_NAMES:
+        raise TaskCliError(
+            f"the {str(name).strip()!r} header cannot be set in vault fetch (it overrides the request authority)",
+            code="forbidden_header",
+            help_command=help_command,
+        )
+
+
+def _parse_headers(specs) -> dict:
+    headers: dict[str, str] = {}
+    for spec in specs or []:
+        if ":" not in spec:
+            raise TaskCliError(f"invalid --header (expected 'Name: value'): {spec!r}", code="invalid_header", help_command="vibe vault fetch --help")
+        name, _, value = spec.partition(":")
+        name = name.strip()
+        _reject_forbidden_header(name, help_command="vibe vault fetch --help")
+        headers[name] = value.strip()
+    return headers
+
+
+def _read_request_body(args):
+    data = getattr(args, "data", None)
+    data_file = getattr(args, "data_file", None)
+    if data is not None and data_file:
+        raise TaskCliError("use at most one of --data / --data-file", code="invalid_data", help_command="vibe vault fetch --help")
+    if data is not None:
+        return data.encode("utf-8")
+    if data_file:
+        try:
+            return Path(data_file).read_bytes()
+        except OSError as exc:
+            raise TaskCliError(f"cannot read --data-file: {exc}", code="data_file_unreadable", help_command="vibe vault fetch --help") from exc
+    return None
+
+
+def cmd_vault_fetch(args):
+    from urllib.parse import urlsplit
+
+    from storage import vault_service
+    from vibe import api
+
+    help_command = "vibe vault fetch --help"
+    try:
+        name = args.auth
+        url = args.url
+        method = (getattr(args, "method", None) or "GET").upper()
+        headers = _parse_headers(getattr(args, "header", None))
+        body = _read_request_body(args)
+        if method in {"TRACE", "TRACK", "CONNECT"}:
+            # These echo the request (incl. the attached Authorization / custom-auth header) back
+            # in the response body, which fetch writes to stdout — leaking the secret value into
+            # stdout/transcripts. Reject before decrypting or sending.
+            raise TaskCliError(
+                f"method {method} is not allowed for vault fetch (it can echo the credential into the response)",
+                code="method_not_allowed",
+                help_command=help_command,
+            )
+        # Preflight --output BEFORE sending: a side-effecting request (POST/PATCH) must not run
+        # and then fail on a local write, or the agent will retry and duplicate the action. Check
+        # the target itself (an existing dir, or an existing file we can't write), not just the
+        # parent.
+        output = getattr(args, "output", None)
+        if output:
+            out_path = Path(output)
+            if out_path.exists():
+                # Require an existing regular file: a dir can't be written as a file, and a
+                # FIFO / device (e.g. /dev/full) passes os.access but write_bytes can block or
+                # fail AFTER the credential-bearing request already ran.
+                writable = out_path.is_file() and os.access(out_path, os.W_OK)
+            else:
+                writable = out_path.parent.is_dir() and os.access(out_path.parent, os.W_OK)
+            if not writable:
+                raise TaskCliError(
+                    f"output path is not writable: {output}",
+                    code="output_unwritable",
+                    help_command=help_command,
+                )
+        host = urlsplit(url).hostname
+        if not host:
+            raise TaskCliError(f"invalid --url: {url!r}", code="invalid_url", help_command=help_command)
+        # Never attach a credential over plaintext: a real host must be HTTPS so domain
+        # binding can't be used to downgrade transport. Loopback is exempt for local dev.
+        is_loopback = host in {"localhost", "127.0.0.1", "::1"}
+        scheme = (urlsplit(url).scheme or "").lower()
+        if scheme != "https" and not is_loopback:
+            raise TaskCliError(
+                f"refusing to attach a credential over plaintext {scheme or 'http'}:// to {host!r}; use https (loopback exempt)",
+                code="insecure_transport",
+                help_command=help_command,
+            )
+
+        engine = _open_vault_engine()
+        # Read policy + envelope in a read connection. The host check runs BEFORE handing the
+        # envelope to avault, so a disallowed target never even unwraps the secret.
+        with engine.connect() as conn:
+            policy = vault_service.get_secret_policy(conn, name)
+            allowed = policy.get("allowed_hosts") or []
+            if not allowed:
+                raise TaskCliError(
+                    f"secret '{name}' has no allowed_hosts; it cannot be used via fetch "
+                    f"(set them with: vibe vault set {name} --allow-host <host>)",
+                    code="proxy_unbound",
+                    help_command=help_command,
+                )
+            if not _host_allowed(host, allowed):
+                raise TaskCliError(
+                    f"host {host!r} is not allowed for secret '{name}'",
+                    code="host_not_allowed",
+                    help_command=help_command,
+                    details={"host": host, "allowed_hosts": allowed},
+                )
+            auth = policy.get("auth") or {"type": "bearer"}
+            if auth.get("type") == "header":
+                # Defensive: set-time validation blocks new Host auth-headers; this also guards
+                # legacy / hand-edited policies. Reject BEFORE handing off so a bad policy never
+                # even unwraps the secret.
+                _reject_forbidden_header(auth.get("name", ""), help_command=help_command)
+            sealed = vault_service.get_envelope(conn, name)
+
+        # Hand the envelope + request to avault: it injects the credential at egress, performs
+        # the request, and returns ONLY the response (status/headers/body) — the value never
+        # returns here. avault re-enforces the allowed_hosts allowlist before decrypting.
+        auth_type = auth.get("type") or "bearer"
+        if auth_type == "header":
+            inject = {"type": "header", "name": auth.get("name", "")}
+        elif auth_type == "query":
+            inject = {"type": "query", "name": auth.get("name", "")}
+        else:
+            inject = {"type": "bearer"}
+        request = {
+            "method": method,
+            "url": url,
+            "allowed_hosts": allowed,
+            "headers": headers,
+            "body": body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else body,
+            "inject": inject,
+        }
+        result = api.avault_deliver_fetch(name, sealed, request)
+        status = int(result.get("status") or 0)
+        resp_body = result.get("body") or ""
+
+        try:
+            with engine.begin() as conn:
+                vault_service.record_proxy_use(
+                    conn,
+                    name,
+                    requester={"source": "cli", "pid": os.getpid()},
+                    delivery={"host": host, "method": method, "status": status},
+                )
+        except Exception:
+            # The upstream request already happened (possibly a side-effecting POST/PATCH). A
+            # bookkeeping failure must not make the agent see a failure and retry — duplicating
+            # the upstream action. Contain it and still return the real response below.
+            pass
+    except vault_service.SecretNotFoundError:
+        _print_task_error(TaskCliError(f"secret '{args.auth}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.UnsupportedProtectionError as exc:
+        _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
+        return 1
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except api.AvaultError as exc:
+        _print_task_error(TaskCliError(f"request failed: {exc}", code="request_failed", help_command=help_command))
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+    # The response body is the upstream API's response (not a secret) — pass it through. avault
+    # returns it as UTF-8 text (binary responses are rejected upstream by avault).
+    output = getattr(args, "output", None)
+    body_bytes = resp_body.encode("utf-8")
+    if output:
+        try:
+            Path(output).write_bytes(body_bytes)
+        except OSError as exc:
+            # The secret-bearing request already completed; a bad --output path should still
+            # yield a structured error (missing parent / permission denied), not a traceback.
+            _print_task_error(TaskCliError(f"cannot write output file: {exc}", code="output_unwritable", help_command=help_command))
+            return 1
+    else:
+        sys.stdout.buffer.write(body_bytes)
+        sys.stdout.flush()
+    return 0 if 200 <= status <= 299 else 1
+
+
+def _write_private_file(path: Path, content: str) -> None:
+    """Atomically write ``content`` to ``path`` as a 0600 file.
+
+    ``tempfile.mkstemp`` creates the temp file 0600 from the start, so the secret is never
+    momentarily world-readable even when ``path`` pre-existed with looser perms (``O_TRUNC``
+    would have kept the old mode until a late ``chmod``). ``os.replace`` swaps it in
+    atomically — a crash mid-write leaves either the old file or the complete new one, never
+    a truncated/partial secret.
+    """
+    import tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def cmd_vault_export(args):
+    # Deprecated. avault (the custody core) deliberately has no plaintext-to-stdout sink —
+    # emitting `export NAME=...` for `eval` would hand the decrypted value back to the shell
+    # (and anything capturing stdout). Use `vibe vault run`, which injects secrets straight
+    # into a child process's environment — never your shell, never disk.
+    help_command = "vibe vault run --help"
+    _print_task_error(
+        TaskCliError(
+            "vibe vault export is no longer supported. Use "
+            "'vibe vault run --env NAME -- <command>' to inject secrets directly into a "
+            "process (off your shell and off disk).",
+            code="export_deprecated",
+            help_command=help_command,
+        )
+    )
+    return 1
+
+
+def cmd_vault_inject(args):
+    # Advanced / not recommended (prefer 'run'): render secrets into a 0600 file for
+    # tools that read config files. The value lands on disk. avault renders + writes the
+    # file (it holds the plaintext); nothing lands in this process. Help-only.
+    from storage import vault_service
+    from vibe import api
+
+    help_command = "vibe vault inject --help"
+    try:
+        keys = [k.strip() for k in (getattr(args, "keys", None) or "").split(",") if k.strip()]
+        keys = list(dict.fromkeys(keys))  # dedupe, preserve order: A,A is one entry + one audit
+        if not keys:
+            raise TaskCliError("--keys A,B is required", code="missing_keys", help_command=help_command)
+        out = getattr(args, "out", None)
+        if not out:
+            raise TaskCliError("--out FILE is required", code="missing_out", help_command=help_command)
+        fmt = (getattr(args, "format", None) or "dotenv").lower()
+        if fmt in ("yaml", "toml"):
+            # avault renders the file (it holds the plaintext); only dotenv/json are wired in P1.1.
+            raise TaskCliError(
+                f"--format {fmt} is not yet supported via avault (use dotenv or json)",
+                code="format_unavailable",
+                help_command=help_command,
+            )
+        if fmt not in ("dotenv", "json"):
+            raise TaskCliError(f"unknown --format: {fmt!r} (dotenv|json)", code="invalid_format", help_command=help_command)
+        engine = _open_vault_engine()
+        with engine.connect() as conn:
+            envelopes = vault_service.get_envelopes(conn, keys)
+        secrets = [{"name": k, "key": k, "envelope": envelopes[k]} for k in keys]
+        # avault writes the 0600 file atomically; if the path is unwritable it raises and no
+        # delivery is recorded.
+        api.avault_deliver_inject(out, fmt, secrets)
+        # The file is on disk → delivered. A bookkeeping failure must not report a failed command
+        # (callers would retry though the secrets are already written), so record best-effort.
+        try:
+            with engine.begin() as conn:
+                vault_service.record_deliveries(conn, keys, requester={"source": "cli", "pid": os.getpid()}, mode=f"inject:{fmt}")
+        except Exception:
+            pass
+        _print_cli_payload("vault_inject", written=True, path=str(out), format=fmt, keys=keys)
+        return 0
+    except vault_service.SecretNotFoundError as exc:
+        _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.UnsupportedProtectionError as exc:
+        _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
+        return 1
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except api.AvaultError as exc:
+        _print_task_error(TaskCliError(f"avault inject failed: {exc}", code="avault_failed", help_command=help_command))
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
+def _read_passphrase_stdin(help_command: str) -> str:
+    data = sys.stdin.read()
+    phrase = data.split("\n", 1)[0].strip() if data else ""
+    if not phrase:
+        raise TaskCliError("a passphrase is required on stdin", code="missing_passphrase", help_command=help_command)
+    return phrase
+
+
+def cmd_vault_key_export(args):
+    from storage import vault_service
+    from vibe import api
+
+    help_command = "vibe vault key export --help"
+    try:
+        passphrase = _read_passphrase_stdin(help_command)
+        blob = api.avault_key_export(passphrase)
+        out = getattr(args, "out", None)
+        if out:
+            # Create 0600 from the start (the blob holds the passphrase-wrapped key) —
+            # no window where it's world-readable under a permissive umask.
+            _write_private_file(Path(out), json.dumps(blob, indent=2) + "\n")
+            _print_cli_payload("vault_key_export", written=True, path=str(out))
+        else:
+            print(json.dumps(blob, indent=2))
+            try:
+                # print() may only buffer; flush so a piped consumer actually received the blob
+                # before we audit it as exported.
+                sys.stdout.flush()
+            except BrokenPipeError:
+                return 1  # pipe closed early → blob not delivered → don't audit
+        # Exporting the machine key is the most sensitive vault op (it can decrypt every
+        # standard-tier secret once the passphrase is known), so record a value-free audit row
+        # for the activity panel. Best-effort: an audit-write hiccup must not fail a delivered
+        # export.
+        try:
+            engine = _open_vault_engine()
+            with engine.begin() as conn:
+                vault_service.audit(
+                    conn,
+                    "key_exported",
+                    requester={"source": "cli", "pid": os.getpid()},
+                    delivery={"out": str(out) if out else "stdout"},
+                )
+        except Exception:
+            pass
+        return 0
+    except api.AvaultError as exc:
+        _print_task_error(TaskCliError(f"avault key export failed: {exc}", code="vault_key_export_failed", help_command=help_command))
+        return 1
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
+def cmd_vault_key_import(args):
+    from storage import vault_service
+    from vibe import api
+
+    help_command = "vibe vault key import --help"
+    try:
+        passphrase = _read_passphrase_stdin(help_command)
+        try:
+            blob = json.loads(Path(args.file).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise TaskCliError(f"cannot read export file: {exc}", code="export_file_unreadable", help_command=help_command) from exc
+        api.avault_key_import(blob, passphrase, force=bool(getattr(args, "force", False)))
+        # Replacing the machine key changes vault decryptability for every standard-tier secret;
+        # record it for the activity panel, symmetric with key export. Best-effort.
+        try:
+            engine = _open_vault_engine()
+            with engine.begin() as conn:
+                vault_service.audit(
+                    conn, "key_imported", requester={"source": "cli", "pid": os.getpid()}, delivery={"file": str(args.file)}
+                )
+        except Exception:
+            pass
+        _print_cli_payload("vault_key_import", imported=True)
+        return 0
+    except api.AvaultError as exc:
+        _print_task_error(TaskCliError(f"avault key import failed: {exc}", code="vault_key_import_failed", help_command=help_command))
+        return 1
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
 def cmd_watch_add(args):
     try:
         session_policy = _validate_definition_session_policy(
@@ -5547,7 +6291,9 @@ def cmd_runtime(args) -> int:
         payload = manager.prepare(force=getattr(args, "force", False), offline=offline)
         askill = _ensure_askill_during_prepare(offline=bool(offline))
         tmux = _ensure_tmux_during_prepare(offline=bool(offline), force=getattr(args, "force", False))
+        avault = _ensure_avault_during_prepare(offline=bool(offline))
         payload["askill"] = askill
+        payload["avault"] = avault
         payload["tmux"] = tmux
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
@@ -5566,6 +6312,12 @@ def cmd_runtime(args) -> int:
                 print("askill installed." if askill.get("changed") else "askill ready.")
             else:
                 print(f"askill not ready: {askill.get('message') or 'install failed'}", file=sys.stderr)
+            if avault.get("skipped"):
+                print(f"avault: skipped ({avault.get('reason') or 'skipped'}).")
+            elif avault.get("ok"):
+                print("avault installed." if avault.get("changed") else "avault ready.")
+            else:
+                print(f"avault not ready: {avault.get('message') or 'install failed'}", file=sys.stderr)
             if tmux.get("skipped"):
                 print(f"tmux: skipped ({tmux.get('reason') or 'skipped'}).")
             elif tmux.get("ok"):
@@ -5651,6 +6403,18 @@ def _ensure_tmux_during_prepare(offline: bool = False, force: bool = False) -> d
         from core.tmux_runtime import ensure_tmux_installed
 
         return ensure_tmux_installed(force=force)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)}
+
+
+def _ensure_avault_during_prepare(offline: bool = False) -> dict:
+    """Ensure avault (the Vault custody core) alongside other local deps."""
+    if offline:
+        return {"ok": True, "skipped": True, "reason": "offline"}
+    if os.environ.get("VIBE_INSTALL_SKIP_AVAULT", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_AVAULT"}
+    try:
+        return api.ensure_avault_installed(force=True)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
 
@@ -6065,6 +6829,184 @@ def build_parser():
         "--title", required=True, help="New title. Pass an empty string to clear it (reverts to id-based display)."
     )
     _add_json_noop(session_update_parser)
+
+    vault_parser = subparsers.add_parser(
+        "vault",
+        help="Store and deliver secrets to agents without exposing values",
+        description=(
+            "Manage Vault secrets. Values are encrypted at rest and never printed to stdout: "
+            "agents obtain them via 'vibe vault run', which injects them into a child process's "
+            "environment so the value never enters the agent's text channel."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault --help",
+        error_hint="Run one of the vault subcommands below. Start with: vibe vault list",
+    )
+    vault_subparsers = vault_parser.add_subparsers(dest="vault_command", metavar="{set,list,rm,run,fetch,request,export,inject,key}")
+    vault_subparsers.required = True
+
+    vault_set_parser = vault_subparsers.add_parser(
+        "set",
+        help="Store a secret (value from --stdin or --from-file, never argv)",
+        description="Create a secret. The value is read from --stdin or --from-file so it never lands in shell history or an agent's argv.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault set --help",
+    )
+    vault_set_parser.add_argument("name", help="Secret name, ENV-style (^[A-Z][A-Z0-9_]*$)")
+    vault_set_parser.add_argument("--stdin", action="store_true", help="Read the value from standard input")
+    vault_set_parser.add_argument("--from-file", help="Read the value from this file")
+    vault_set_parser.add_argument("--group", help="Group (organizational label). Defaults to 'default'.")
+    vault_set_parser.add_argument("--tag", action="append", help="Tag for filtering (repeatable)")
+    vault_set_parser.add_argument("--description", help="Human description shown in the Vaults page")
+    vault_set_parser.add_argument(
+        "--allow-host",
+        action="append",
+        metavar="HOST",
+        help="Allow this host for 'vibe vault fetch' (repeatable; '.example.com' matches subdomains). Required to use the secret via fetch.",
+    )
+    vault_set_parser.add_argument("--auth-header", metavar="NAME", help="For fetch: attach the value as this header (default: Authorization: Bearer <value>)")
+    vault_set_parser.add_argument("--auth-query", metavar="NAME", help="For fetch: attach the value as this query parameter")
+    _add_json_noop(vault_set_parser)
+
+    vault_list_parser = vault_subparsers.add_parser(
+        "list",
+        help="List secrets (names + masked metadata; never values)",
+        description="List secret names with masked metadata. Values are never shown.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault list --help",
+    )
+    vault_list_parser.add_argument("--group", help="Only list secrets in this group")
+    _add_json_noop(vault_list_parser)
+
+    vault_rm_parser = vault_subparsers.add_parser(
+        "rm",
+        help="Delete a secret",
+        description="Delete a secret by name.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault rm --help",
+    )
+    vault_rm_parser.add_argument("name", help="Secret name to delete")
+    _add_json_noop(vault_rm_parser)
+
+    vault_run_parser = vault_subparsers.add_parser(
+        "run",
+        help="Run a command with secrets injected into its environment",
+        description=(
+            "Resolve secrets and exec a command with them in its environment only. Nothing is "
+            "printed to stdout; the command's own output passes through. Safest mode: the value "
+            "lives only in the child process and never enters the agent's text channel."
+        ),
+        epilog="Example: vibe vault run --env OPENAI_API_KEY --env DB=PROD_DB_URL -- python sync.py",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault run --help",
+    )
+    vault_run_parser.add_argument(
+        "--env",
+        action="append",
+        metavar="NAME[,N2]|LOCAL=NAME",
+        help="Inject secret NAME as env var NAME (LOCAL=NAME to rename; comma-separates several). Repeatable.",
+    )
+    vault_run_parser.add_argument("command_argv", nargs=argparse.REMAINDER, help="-- followed by the command to run")
+    _add_json_noop(vault_run_parser)
+
+    vault_fetch_parser = vault_subparsers.add_parser(
+        "fetch",
+        help="Make an authenticated HTTP request without exposing the credential",
+        description=(
+            "Forward an HTTP request with a vault secret attached at egress (Authorization: Bearer "
+            "by default). The agent never sees the credential — only the response body, which is "
+            "written to stdout (or --output). The secret must declare --allow-host (domain binding): "
+            "a request to any other host is refused before the secret is even decrypted."
+        ),
+        epilog="Example: vibe vault fetch --auth GITHUB_PAT --method POST --url https://api.github.com/repos/o/r/issues --data-file body.json",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault fetch --help",
+    )
+    vault_fetch_parser.add_argument("--auth", required=True, metavar="NAME", help="Secret to attach as the request credential")
+    vault_fetch_parser.add_argument("--url", required=True, help="Target URL (host must be in the secret's allowed_hosts)")
+    vault_fetch_parser.add_argument("--method", default="GET", help="HTTP method (default GET)")
+    vault_fetch_parser.add_argument("--header", action="append", metavar="'Name: value'", help="Extra request header (repeatable)")
+    vault_fetch_parser.add_argument("--data", help="Request body (string)")
+    vault_fetch_parser.add_argument("--data-file", help="Request body read from this file")
+    vault_fetch_parser.add_argument("--output", help="Write the response body to this file instead of stdout")
+    _add_json_noop(vault_fetch_parser)
+
+    vault_export_parser = vault_subparsers.add_parser(
+        "export",
+        help="(advanced) Emit 'export NAME=...' lines for eval — prefer 'run'",
+        description=(
+            "Advanced/not recommended: print 'export NAME=value' lines for "
+            "eval \"$(vibe vault export --env A --env B)\". The value transits the caller's shell, "
+            "so this is weaker than 'run'; use only when several commands in one shell need the env."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault export --help",
+    )
+    vault_export_parser.add_argument("--env", action="append", metavar="NAME[,N2]|LOCAL=NAME", help="Secret(s) to export. Repeatable.")
+    _add_json_noop(vault_export_parser)
+
+    vault_inject_parser = vault_subparsers.add_parser(
+        "inject",
+        help="(advanced) Render secrets into a 0600 file — prefer 'run'",
+        description=(
+            "Advanced/not recommended: render secrets into a file for tools that read config files. "
+            "The value lands on disk; prefer 'run' (env-only) where possible."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault inject --help",
+    )
+    vault_inject_parser.add_argument("--keys", required=True, metavar="A,B", help="Comma-separated secret names")
+    vault_inject_parser.add_argument("--out", required=True, metavar="FILE", help="Output file (written 0600)")
+    vault_inject_parser.add_argument("--format", default="dotenv", choices=["dotenv", "json", "yaml", "toml"], help="Output format (default dotenv)")
+    _add_json_noop(vault_inject_parser)
+
+    vault_key_parser = vault_subparsers.add_parser(
+        "key",
+        help="Back up / restore the vault machine key (for migration)",
+        description=(
+            "Export the machine key as a passphrase-wrapped blob, or import it on another "
+            "machine. The machine key encrypts standard-tier secrets at rest; back it up if "
+            "you move the vault somewhere the state dir doesn't travel with it."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault key --help",
+        error_hint="Run: vibe vault key export  |  vibe vault key import <file>",
+    )
+    vault_key_sub = vault_key_parser.add_subparsers(dest="vault_key_command", metavar="{export,import}")
+    vault_key_sub.required = True
+    vault_key_export_parser = vault_key_sub.add_parser(
+        "export",
+        help="Export the machine key (passphrase read from stdin)",
+        description="Export the machine key wrapped under a passphrase read from stdin. Writes JSON to --out or stdout.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault key export --help",
+    )
+    vault_key_export_parser.add_argument("--out", help="Write the export blob here (defaults to stdout); created 0600")
+    _add_json_noop(vault_key_export_parser)
+    vault_key_import_parser = vault_key_sub.add_parser(
+        "import",
+        help="Restore the machine key from an export (passphrase from stdin)",
+        description="Restore the machine key from an export blob. Refuses to overwrite an existing key without --force.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault key import --help",
+    )
+    vault_key_import_parser.add_argument("file", help="Export blob file produced by 'vibe vault key export'")
+    vault_key_import_parser.add_argument("--force", action="store_true", help="Overwrite an existing machine key")
+    _add_json_noop(vault_key_import_parser)
+
+    vault_request_parser = vault_subparsers.add_parser(
+        "request",
+        help="Ask the user to provide a missing secret",
+        description="Record a request for a secret the user hasn't stored yet. With --wait, block until they provide it.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault request --help",
+    )
+    vault_request_parser.add_argument("name", help="Secret name being requested")
+    vault_request_parser.add_argument("--reason", help="Why the secret is needed (shown to the user)")
+    vault_request_parser.add_argument("--skill", help="Skill that needs it (shown to the user)")
+    vault_request_parser.add_argument("--wait", type=float, metavar="SECONDS", help="Block until fulfilled, up to SECONDS")
+    vault_request_parser.add_argument("--no-wait", action="store_true", help="Return immediately (default)")
+    _add_json_noop(vault_request_parser)
 
     show_parser = subparsers.add_parser(
         "show",
@@ -6790,6 +7732,30 @@ def main():
         if args.session_command == "update":
             sys.exit(cmd_session_update(args))
         parser.error("session command is required")
+    if args.command == "vault":
+        if args.vault_command == "set":
+            sys.exit(cmd_vault_set(args))
+        if args.vault_command == "list":
+            sys.exit(cmd_vault_list(args))
+        if args.vault_command == "rm":
+            sys.exit(cmd_vault_rm(args))
+        if args.vault_command == "run":
+            sys.exit(cmd_vault_run(args))
+        if args.vault_command == "fetch":
+            sys.exit(cmd_vault_fetch(args))
+        if args.vault_command == "request":
+            sys.exit(cmd_vault_request(args))
+        if args.vault_command == "export":
+            sys.exit(cmd_vault_export(args))
+        if args.vault_command == "inject":
+            sys.exit(cmd_vault_inject(args))
+        if args.vault_command == "key":
+            if args.vault_key_command == "export":
+                sys.exit(cmd_vault_key_export(args))
+            if args.vault_key_command == "import":
+                sys.exit(cmd_vault_key_import(args))
+            parser.error("vault key command is required")
+        parser.error("vault command is required")
     if args.command == "data":
         if args.data_command == "query":
             sys.exit(cmd_data_query(args))

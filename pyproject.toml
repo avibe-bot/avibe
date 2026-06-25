@@ -69,6 +69,7 @@ dependencies = [
     "uvicorn[standard]>=0.27",
     "imagesize>=1.4.1",
     "pywebpush>=2.0.3",
+    "cryptography>=42.0",
 ]
 
 [project.urls]
