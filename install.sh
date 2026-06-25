@@ -574,6 +574,28 @@ prepare_show_runtime() {
     fi
 }
 
+pair_remote_access() {
+    local pairing_key="${AVIBE_PAIRING_KEY:-}"
+    local backend_url="${AVIBE_PAIRING_BACKEND_URL:-https://avibe.bot}"
+    local vibe_cmd="${VIBE_BIN_PATH:-}"
+
+    if [ -z "$pairing_key" ]; then
+        return 0
+    fi
+
+    if [ -z "$vibe_cmd" ] || [ ! -x "$vibe_cmd" ]; then
+        error "Cannot pair remote access because the vibe command is not available."
+    fi
+
+    info "Pairing this Avibe with avibe.bot..."
+    "$vibe_cmd" remote pair "$pairing_key" --backend-url "$backend_url"
+    success "Remote access paired"
+
+    info "Starting Avibe service..."
+    "$vibe_cmd" start
+    success "Avibe service started"
+}
+
 # Print next steps
 print_next_steps() {
     local vibe_dir
@@ -583,6 +605,33 @@ print_next_steps() {
     echo -e "${GREEN}Installation complete!${NC}"
     echo ""
     echo -e "${BLUE}Next steps:${NC}"
+    if [ -n "${AVIBE_PAIRING_KEY:-}" ]; then
+        echo "  1. Open your avibe.bot URL"
+        echo "  2. Sign in with the same avibe.bot account to continue"
+        echo "  3. Optional: run 'vibe status' to check the local service"
+        echo ""
+        echo -e "${BLUE}Quick commands:${NC}"
+        echo "  vibe          - Start Avibe (service + web UI)"
+        echo "  vibe status   - Check service status"
+        echo "  vibe remote   - Manage remote Web UI access"
+        echo "  vibe stop     - Stop all services"
+        echo "  vibe doctor   - Run diagnostics"
+        echo ""
+        echo -e "${BLUE}Uninstall:${NC}"
+        echo "  uv tool uninstall avibe-os       # current uv install"
+        echo "  uv tool uninstall vibe-remote    # legacy uv install"
+        echo "  pip uninstall avibe-os vibe-remote"
+        echo "  rm -rf ~/.avibe ~/.vibe_remote   # remove config and data"
+        echo ""
+        echo -e "${BLUE}If 'vibe' is not found in a new shell:${NC}"
+        echo "  ${VIBE_BIN_PATH:-$HOME/.local/bin/vibe}"
+        echo ""
+        echo -e "${BLUE}Documentation:${NC}"
+        echo "  https://github.com/${REPO}#readme"
+        echo ""
+        return
+    fi
+
     if is_vibe_immediately_available; then
         echo "  1. Run 'vibe' to open the setup wizard"
         echo "  2. Choose your chat platform and agent backend"
@@ -648,6 +697,11 @@ main() {
     # Pre-download the current platform Show Runtime when possible. This is
     # intentionally warning-only so Node/network issues never break avibe.
     prepare_show_runtime
+
+    # Optional avibe.bot one-step install + pair flow. This runs through the
+    # verified absolute vibe path, not PATH, so it works even when the installer
+    # put the command into a fallback tool bin directory.
+    pair_remote_access
     
     # Done
     print_next_steps

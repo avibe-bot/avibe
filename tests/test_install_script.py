@@ -55,6 +55,12 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
                 exit 9
             fi
             echo "Show Runtime ready."
+        elif [ "${{1:-}}" = "remote" ] && [ "${{2:-}}" = "pair" ]; then
+            printf 'remote pair %s %s %s\\n' "${{3:-}}" "${{4:-}}" "${{5:-}}" >> "${{VIBE_TEST_CALL_LOG:-/dev/null}}"
+            echo "Remote access is ready"
+        elif [ "${{1:-}}" = "start" ]; then
+            printf 'start\\n' >> "${{VIBE_TEST_CALL_LOG:-/dev/null}}"
+            echo "Web UI:"
         else
             echo "started"
         fi
@@ -174,6 +180,35 @@ def test_install_script_keeps_vibe_available_on_current_path(tmp_path):
     assert version_result.returncode == 0, version_result.stdout + version_result.stderr
     assert "avibe-os 9.9.9" in version_result.stdout
     assert uv_log.read_text(encoding="utf-8")
+
+
+def test_install_script_pairs_and_starts_with_verified_vibe_path(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    tool_bin = tmp_path / "tool-bin"
+    call_log = tmp_path / "vibe-calls.log"
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+
+    _write_fake_uv(path_dir / "uv", uv_log)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
+    env["UV_TOOL_BIN_DIR"] = str(tool_bin)
+    env["VIBE_TEST_CALL_LOG"] = str(call_log)
+    env["AVIBE_PAIRING_KEY"] = "vrp_test"
+
+    install_result = _install(env)
+
+    assert install_result.returncode == 0, install_result.stdout + install_result.stderr
+    assert "Pairing this Avibe with avibe.bot" in install_result.stdout
+    assert "Avibe service started" in install_result.stdout
+    assert call_log.read_text(encoding="utf-8").splitlines() == [
+        "remote pair vrp_test --backend-url https://avibe.bot",
+        "start",
+    ]
 
 
 def test_install_script_installs_node_when_missing(tmp_path):
