@@ -1,0 +1,148 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import stat
+import tarfile
+from pathlib import Path
+
+import pytest
+
+from core import tmux_runtime
+from core.tmux_runtime import TmuxRuntimeManager
+
+
+def _write_tmux_archive(tmp_path: Path, *, text: str = "#!/bin/sh\necho tmux 3.6b\n") -> Path:
+    root = tmp_path / "archive-root"
+    root.mkdir()
+    binary = root / "tmux"
+    binary.write_text(text, encoding="utf-8")
+    binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+    archive = tmp_path / "tmux-test.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(binary, arcname="tmux")
+    return archive
+
+
+def _write_manifest(tmp_path: Path, archive: Path, *, sha256: str | None = None, size: int | None = None) -> Path:
+    digest = sha256 or hashlib.sha256(archive.read_bytes()).hexdigest()
+    manifest = {
+        "schema_version": 1,
+        "tmux_version": "3.6b",
+        "source": "test",
+        "source_url": "file://test",
+        "requires_utf8proc": True,
+        "terminfo": "bundled-or-system",
+        "archives": {
+            tmux_runtime._runtime_platform_tag(): {
+                "name": archive.name,
+                "url": archive.as_uri(),
+                "sha256": digest,
+                "size": archive.stat().st_size if size is None else size,
+                "bin_path": "tmux",
+            }
+        },
+    }
+    manifest_path = tmp_path / "tmux_runtime_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return manifest_path
+
+
+def test_platform_tag_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
+    cases = [
+        ("macosx-14.0-arm64", "ignored", "darwin-arm64"),
+        ("macosx-13.0-x86_64", "ignored", "darwin-x64"),
+        ("macosx-14.0-universal2", "arm64", "darwin-arm64"),
+        ("linux-x86_64", "ignored", "linux-x64"),
+        ("linux-aarch64", "ignored", "linux-arm64"),
+    ]
+    for raw_platform, machine, expected in cases:
+        monkeypatch.setattr(tmux_runtime, "get_platform", lambda value=raw_platform: value)
+        monkeypatch.setattr(tmux_runtime.platform, "machine", lambda value=machine: value)
+        assert tmux_runtime._runtime_platform_tag() == expected
+
+
+def test_download_verify_install_and_idempotent_reinstall(tmp_path: Path) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive)
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+
+    first = manager.ensure()
+    assert first["ok"] is True
+    assert first["changed"] is True
+    installed_path = Path(first["path"])
+    assert installed_path.name == "tmux"
+    assert installed_path.is_file()
+    assert manager.resolve_binary() == installed_path
+
+    second = manager.ensure()
+    assert second["ok"] is True
+    assert second["changed"] is False
+    assert Path(second["path"]) == installed_path
+
+
+def test_bad_checksum_is_rejected(tmp_path: Path) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive, sha256="0" * 64)
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+
+    result = manager.ensure()
+
+    assert result["ok"] is False
+    assert result["reason"] == "tmux_archive_checksum_mismatch"
+    assert manager.resolve_binary() is None
+
+
+def test_resolve_tmux_binary_returns_none_when_absent(tmp_path: Path) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive)
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+
+    assert manager.resolve_binary() is None
+
+
+def test_tmux_status_shape(tmp_path: Path) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive)
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+
+    status = manager.status()
+
+    assert status["id"] == "tmux"
+    assert status["installed"] is False
+    assert status["version"] == "3.6b"
+    assert status["status"] == "missing"
+    assert status["manifest"]["requires_utf8proc"] is True
+    assert status["archive"]["bin_path"] == "tmux"
+
+
+def test_macos_codesign_path_is_used(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    manifest = _write_manifest(tmp_path, archive)
+    manager = TmuxRuntimeManager(runtime_dir=tmp_path / "runtime", manifest_path=manifest)
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(tmux_runtime, "sys_platform", lambda: "darwin")
+    sign_checks = iter([False, True])
+    monkeypatch.setattr(tmux_runtime, "_codesign_valid", lambda _path: next(sign_checks))
+    monkeypatch.setattr(tmux_runtime, "_strip_quarantine", lambda _path: {"ok": True, "changed": False})
+    monkeypatch.setattr(tmux_runtime.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "codesign" else None)
+
+    def fake_run(argv: list[str], **_kwargs: object):
+        calls.append(argv)
+
+        class Proc:
+            returncode = 0
+            stdout = "tmux 3.6b\n" if argv[-1] == "-V" else ""
+            stderr = ""
+
+        return Proc()
+
+    monkeypatch.setattr(tmux_runtime.subprocess, "run", fake_run)
+
+    result = manager.ensure()
+
+    assert result["ok"] is True
+    assert result["signing"]["changed"] is True
+    assert calls[0][:4] == ["/usr/bin/codesign", "-f", "-s", "-"]
+    assert calls[0][4].endswith("/tmux")

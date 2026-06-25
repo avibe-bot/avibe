@@ -211,6 +211,7 @@
       "items": {
         "askill": { "label": "askill", "detail": "Agent Skills runtime — powers the Skills page." },
         "show-runtime": { "label": "Show Page runtime", "detail": "Renders visual Show Pages on your machine." },
+        "tmux": { "label": "tmux", "detail": "Persistent terminal runtime for reconnectable Web Terminal sessions." },
         "node": { "label": "Node.js", "detail": "Shared prerequisite for the runtimes above." }
       }
     },
