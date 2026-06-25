@@ -20,6 +20,8 @@ NODE_MINIMUM_REQUIREMENT="20.19+ or 22.12+"
 VIBE_BIN_PATH=""
 VIBE_TOOL_BIN_DIR=""
 ORIGINAL_PATH="$PATH"
+REMOTE_ACCESS_PAIRING_KEY=""
+REMOTE_ACCESS_PAIRED=""
 
 print_banner() {
     echo -e "${BLUE}"
@@ -575,7 +577,7 @@ prepare_show_runtime() {
 }
 
 pair_remote_access() {
-    local pairing_key="${AVIBE_PAIRING_KEY:-}"
+    local pairing_key="${REMOTE_ACCESS_PAIRING_KEY:-}"
     local backend_url="${AVIBE_PAIRING_BACKEND_URL:-https://avibe.bot}"
     local vibe_cmd="${VIBE_BIN_PATH:-}"
 
@@ -589,6 +591,7 @@ pair_remote_access() {
 
     info "Pairing this Avibe with avibe.bot..."
     "$vibe_cmd" remote pair "$pairing_key" --backend-url "$backend_url"
+    REMOTE_ACCESS_PAIRED="1"
     success "Remote access paired"
 
     info "Starting Avibe service..."
@@ -605,10 +608,17 @@ print_next_steps() {
     echo -e "${GREEN}Installation complete!${NC}"
     echo ""
     echo -e "${BLUE}Next steps:${NC}"
-    if [ -n "${AVIBE_PAIRING_KEY:-}" ]; then
-        echo "  1. Open your avibe.bot URL"
-        echo "  2. Sign in with the same avibe.bot account to continue"
-        echo "  3. Optional: run 'vibe status' to check the local service"
+    if [ "${REMOTE_ACCESS_PAIRED:-}" = "1" ]; then
+        if is_vibe_immediately_available; then
+            echo "  1. Open your avibe.bot URL"
+            echo "  2. Sign in with the same avibe.bot account to continue"
+            echo "  3. Optional: run 'vibe status' to check the local service"
+        else
+            echo "  1. Run 'export PATH=\"${vibe_dir}:\$PATH\"' in your shell"
+            echo "  2. Open your avibe.bot URL"
+            echo "  3. Sign in with the same avibe.bot account to continue"
+            echo "  4. Optional: run 'vibe status' to check the local service"
+        fi
         echo ""
         echo -e "${BLUE}Quick commands:${NC}"
         echo "  vibe          - Start Avibe (service + web UI)"
@@ -622,9 +632,11 @@ print_next_steps() {
         echo "  uv tool uninstall vibe-remote    # legacy uv install"
         echo "  pip uninstall avibe-os vibe-remote"
         echo "  rm -rf ~/.avibe ~/.vibe_remote   # remove config and data"
-        echo ""
-        echo -e "${BLUE}If 'vibe' is not found in a new shell:${NC}"
-        echo "  ${VIBE_BIN_PATH:-$HOME/.local/bin/vibe}"
+        if ! is_vibe_immediately_available; then
+            echo ""
+            echo -e "${BLUE}If 'vibe' is not found in a new shell:${NC}"
+            echo "  ${VIBE_BIN_PATH:-$HOME/.local/bin/vibe}"
+        fi
         echo ""
         echo -e "${BLUE}Documentation:${NC}"
         echo "  https://github.com/${REPO}#readme"
@@ -669,6 +681,8 @@ print_next_steps() {
 # Main installation flow
 main() {
     print_banner
+    REMOTE_ACCESS_PAIRING_KEY="${AVIBE_PAIRING_KEY:-}"
+    unset AVIBE_PAIRING_KEY
     
     local os
     os=$(detect_os)
