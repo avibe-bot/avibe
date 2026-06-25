@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -63,8 +62,12 @@ def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
-def _preview(value: str) -> str:
-    """Non-secret masked hint for list/detail views (last few chars, like #555)."""
+def value_preview(value: str) -> str:
+    """Non-secret masked hint for list/detail views (last few chars, like #555).
+
+    Computed by the caller from the plaintext *before* sealing (avault returns only
+    ciphertext), then stored as non-secret metadata via :func:`create_secret`.
+    """
     if not value:
         return ""
     if len(value) <= _PREVIEW_TAIL:
@@ -180,17 +183,19 @@ def create_secret(
     conn: Connection,
     *,
     name: str,
-    value: str,
+    sealed: Sealed,
+    preview: str = "",
     group: str = DEFAULT_GROUP,
     tags: list[str] | None = None,
     protection: str = "standard",
     description: str | None = None,
     source: str = "manual",
     policy: dict[str, Any] | None = None,
-    machine_key: bytes | None = None,
-    key_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Create a standard-tier secret and return its masked metadata.
+    """Create a standard-tier secret from an avault-sealed envelope; return masked metadata.
+
+    The value is sealed by the caller via the avault client (this layer never sees
+    plaintext or keys). ``preview`` is the caller-computed non-secret last-4 hint.
 
     ``policy`` is a non-secret JSON dict (e.g. ``allowed_hosts`` + ``auth`` scheme for
     the brokered ``fetch`` mode); it never contains the value.
@@ -203,9 +208,8 @@ def create_secret(
         raise SecretExistsError(name)
 
     _ensure_group(conn, group)
-    sealed = vault_crypto.seal_standard(value.encode("utf-8"), machine_key=machine_key, key_path=key_path)
     now = _now()
-    public_meta = {"preview": _preview(value)}
+    public_meta = {"preview": preview}
     if description:
         public_meta["description"] = description
     try:
@@ -264,17 +268,15 @@ def list_secrets(conn: Connection, *, group: str | None = None) -> list[dict[str
 def rotate_secret(
     conn: Connection,
     name: str,
-    new_value: str,
+    sealed: Sealed,
     *,
-    machine_key: bytes | None = None,
-    key_path: Path | None = None,
+    preview: str = "",
 ) -> dict[str, Any]:
     row = _require_row(conn, name)
     if row.get("protection") != "standard":
         raise UnsupportedProtectionError("only the standard tier is available in P0")
-    sealed = vault_crypto.seal_standard(new_value.encode("utf-8"), machine_key=machine_key, key_path=key_path)
     public_meta = _loads(row.get("public_meta")) or {}
-    public_meta["preview"] = _preview(new_value)
+    public_meta["preview"] = preview
     conn.execute(
         vault_secrets.update()
         .where(vault_secrets.c.name == name)
@@ -302,24 +304,18 @@ def get_secret_policy(conn: Connection, name: str) -> dict[str, Any]:
     return _loads(_require_row(conn, name).get("policy")) or {}
 
 
-def open_secret_value(
-    conn: Connection,
-    name: str,
-    *,
-    machine_key: bytes | None = None,
-    key_path: Path | None = None,
-) -> str:
-    """Decrypt one standard-tier secret WITHOUT auditing or bumping usage.
+def get_envelope(conn: Connection, name: str) -> Sealed:
+    """Return one standard-tier secret's stored envelope (no decrypt, no audit).
 
-    For callers (e.g. the brokered ``fetch`` proxy) that act on the value and then
-    record their own event via :func:`record_proxy_use`. Validate any policy (e.g.
-    host allowlist) *before* calling this so a denied request never decrypts.
+    For the brokered ``fetch`` proxy: the caller hands the envelope to the avault
+    client (which decrypts + delivers), then records its own ``record_proxy_use``.
+    Validate any policy (e.g. host allowlist) *before* delivering. Protected-tier
+    raises rather than being handed off — this layer never decrypts.
     """
     row = _require_row(conn, name)
     if row.get("protection") != "standard":
         raise UnsupportedProtectionError(f"{name} is protected-tier (approval is P1)")
-    sealed = Sealed(ciphertext=row["ciphertext"], nonce=row["nonce"], wrap_meta=row["wrap_meta"])
-    return vault_crypto.open_standard(sealed, machine_key=machine_key, key_path=key_path).decode("utf-8")
+    return Sealed(ciphertext=row["ciphertext"], nonce=row["nonce"], wrap_meta=row["wrap_meta"])
 
 
 def record_proxy_use(conn: Connection, name: str, *, requester: Any = None, delivery: Any = None) -> None:
@@ -333,31 +329,21 @@ def record_proxy_use(conn: Connection, name: str, *, requester: Any = None, deli
     audit(conn, "proxied", secret_name=name, requester=requester, delivery=delivery)
 
 
-def resolve(
-    conn: Connection,
-    names: list[str],
-    *,
-    machine_key: bytes | None = None,
-    key_path: Path | None = None,
-) -> dict[str, str]:
-    """Decrypt and return the requested secret values (standard tier).
+def get_envelopes(conn: Connection, names: list[str]) -> dict[str, Sealed]:
+    """Return the stored envelopes for the requested secrets (standard tier; no decrypt).
 
-    Validates the WHOLE batch (all names exist + standard tier) BEFORE decrypting any, so a
-    missing/protected name later in the list doesn't leave earlier secrets needlessly
-    unwrapped. Does NOT audit or bump usage — the caller records delivery via
-    :func:`record_deliveries` only after the actual delivery (child spawn / file write /
-    stream) succeeds, so a failed delivery never shows as delivered.
+    Validates the WHOLE batch (all names exist + standard tier) BEFORE returning any, so a
+    missing/protected name fails the request as a unit. The caller hands these envelopes to
+    the avault client to deliver (child env / file), and records delivery via
+    :func:`record_deliveries` only after the delivery side effect succeeds, so a failed
+    delivery never shows as delivered. This layer never decrypts.
     """
-    rows: dict[str, dict[str, Any]] = {}
+    out: dict[str, Sealed] = {}
     for name in names:
         row = _require_row(conn, name)
         if row.get("protection") != "standard":
             raise UnsupportedProtectionError(f"{name} is protected-tier (approval is P1)")
-        rows[name] = row
-    out: dict[str, str] = {}
-    for name, row in rows.items():
-        sealed = Sealed(ciphertext=row["ciphertext"], nonce=row["nonce"], wrap_meta=row["wrap_meta"])
-        out[name] = vault_crypto.open_standard(sealed, machine_key=machine_key, key_path=key_path).decode("utf-8")
+        out[name] = Sealed(ciphertext=row["ciphertext"], nonce=row["nonce"], wrap_meta=row["wrap_meta"])
     return out
 
 
@@ -415,25 +401,23 @@ def create_provision_request(
 def fulfill_provision(
     conn: Connection,
     request_id: str,
-    value: str,
+    sealed: Sealed,
     *,
+    preview: str = "",
     group: str = DEFAULT_GROUP,
     description: str | None = None,
-    machine_key: bytes | None = None,
-    key_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Store the value the user supplied for a pending provision request."""
+    """Store the caller-sealed value for a pending provision request."""
     row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().first()
     if row is None:
         raise RequestNotFoundError(request_id)
     meta = create_secret(
         conn,
         name=row["secret_name"],
-        value=value,
+        sealed=sealed,
+        preview=preview,
         group=group,
         description=description,
-        machine_key=machine_key,
-        key_path=key_path,
     )
     conn.execute(
         vault_requests.update()

@@ -1311,7 +1311,7 @@ def get_vault_secrets(*, group: Optional[str] = None) -> dict:
 
 
 def create_vault_secret(payload: dict) -> dict:
-    from storage import vault_service
+    from storage import vault_crypto, vault_service
 
     if not isinstance(payload, dict):
         raise VaultApiError("payload must be an object", code="invalid_payload")
@@ -1319,15 +1319,26 @@ def create_vault_secret(payload: dict) -> dict:
     value = payload.get("value")
     if value is None or value == "":
         raise VaultApiError("value is required", code="empty_value")
+    if not vault_crypto.is_valid_secret_name(name):
+        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
     tags = payload.get("tags") if isinstance(payload.get("tags"), list) else None
     policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else None
+    value = str(value)
+    # Seal via avault before the DB transaction. The transient plaintext POST lives only here
+    # (one request, not reused) and is piped to avault's stdin; we keep only the ciphertext.
+    try:
+        sealed = avault_seal(name, value.encode("utf-8"))
+    except AvaultError as exc:
+        raise VaultApiError(f"avault seal failed: {exc}", code="avault_failed") from exc
+    preview = vault_service.value_preview(value)
     engine = _vault_engine()
     try:
         with engine.begin() as conn:
             meta = vault_service.create_secret(
                 conn,
                 name=name,
-                value=str(value),
+                sealed=sealed,
+                preview=preview,
                 group=str(payload.get("group") or vault_service.DEFAULT_GROUP),
                 tags=tags,
                 description=payload.get("description"),

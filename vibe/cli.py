@@ -3386,19 +3386,29 @@ def _read_secret_value(args, *, help_command: str) -> str:
 
 
 def cmd_vault_set(args):
-    from storage import vault_service
+    from storage import vault_crypto, vault_service
+    from vibe import api
 
     help_command = "vibe vault set --help"
     try:
         value = _read_secret_value(args, help_command=help_command)
+        # Validate the name before sealing so an invalid name doesn't spend an avault call.
+        if not vault_crypto.is_valid_secret_name(args.name):
+            raise vault_service.InvalidSecretNameError(args.name)
         tags = list(getattr(args, "tag", None) or []) or None
         policy = _build_secret_policy(args)
+        # Seal via avault BEFORE opening a DB transaction (never hold a txn across a subprocess).
+        # The plaintext goes only to avault's stdin; we keep just the ciphertext envelope + a
+        # non-secret last-4 preview.
+        sealed = api.avault_seal(args.name, value.encode("utf-8"))
+        preview = vault_service.value_preview(value)
         engine = _open_vault_engine()
         with engine.begin() as conn:
             meta = vault_service.create_secret(
                 conn,
                 name=args.name,
-                value=value,
+                sealed=sealed,
+                preview=preview,
                 group=getattr(args, "group", None) or vault_service.DEFAULT_GROUP,
                 tags=tags,
                 description=getattr(args, "description", None),
@@ -3411,6 +3421,9 @@ def cmd_vault_set(args):
         return 1
     except vault_service.SecretExistsError:
         _print_task_error(TaskCliError(f"secret '{args.name}' already exists (remove it first to replace)", code="secret_exists", help_command=help_command))
+        return 1
+    except api.AvaultError as exc:
+        _print_task_error(TaskCliError(f"avault seal failed: {exc}", code="avault_failed", help_command=help_command))
         return 1
     except Exception as exc:
         _print_task_error(exc, help_command=help_command)
@@ -3479,7 +3492,7 @@ def cmd_vault_run(args):
             )
         engine = _open_vault_engine()
         with engine.connect() as conn:
-            values = vault_service.resolve(conn, sorted(set(mapping.values())))
+            envelopes = vault_service.get_envelopes(conn, sorted(set(mapping.values())))
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
         return 1
@@ -3492,36 +3505,33 @@ def cmd_vault_run(args):
     except Exception as exc:
         _print_task_error(exc, help_command=help_command)
         return 1
-    # Build the child env and exec. Values live ONLY in the child's environment; the
-    # CLI prints nothing. The child inherits our stdio so its output passes through.
-    child_env = dict(os.environ)
-    for env_name, vault_name in mapping.items():
-        child_env[env_name] = values[vault_name]
+    # Hand the envelopes + command to avault: it decrypts, spawns the child with the secret
+    # env, waits, and zeroizes. The plaintext never returns here; the child inherits our stdio
+    # so its output passes through. Envelopes (no plaintext) go on avault's stdin.
+    from vibe import api
+
+    secrets = [
+        {"name": vault_name, "env": env_name, "envelope": envelopes[vault_name]}
+        for env_name, vault_name in mapping.items()
+    ]
     try:
-        proc = subprocess.Popen(command_argv, env=child_env)
-    except FileNotFoundError:
-        # execve found nothing despite the which() preflight (e.g. a TOCTOU removal) — the
-        # child never received the env, so do NOT record a delivery.
-        _print_task_error(TaskCliError(f"command not found: {command_argv[0]!r}", code="command_not_found", help_command=help_command))
-        return 127
-    except OSError as exc:
-        # which() passed but execve still failed (no shebang, wrong arch, not executable). The
-        # child never started → no delivery; return a structured error, not a traceback.
-        _print_task_error(TaskCliError(f"cannot execute {command_argv[0]!r}: {exc}", code="command_not_executable", help_command=help_command))
-        return 126
-    # The secret reached the child's env at spawn time → record delivery NOW, before waiting.
-    # subprocess.run blocks until exit, so a long-running child that is interrupted (or a
-    # parent that dies) would have delivered the secret but never been audited. A bookkeeping
-    # failure here must not orphan the running child or crash with a traceback — contain it and
-    # still return the child's real exit code.
-    try:
-        with engine.begin() as conn:
-            vault_service.record_deliveries(
-                conn, sorted(set(mapping.values())), requester={"source": "cli", "pid": os.getpid()}, mode="run"
-            )
-    except Exception:
-        pass
-    return proc.wait()
+        exit_code = api.avault_deliver_run(secrets, command_argv)
+    except api.AvaultError as exc:
+        _print_task_error(TaskCliError(f"avault deliver failed: {exc}", code="avault_failed", help_command=help_command))
+        return 1
+    # avault exits 70 only on an internal failure BEFORE spawning the child (bad envelope /
+    # decrypt / store) — no delivery happened, so skip the audit. Any other code means the child
+    # ran with the secret in its env → record the delivery now. A bookkeeping failure must not
+    # crash or change the child's real exit code.
+    if exit_code != 70:
+        try:
+            with engine.begin() as conn:
+                vault_service.record_deliveries(
+                    conn, sorted(set(mapping.values())), requester={"source": "cli", "pid": os.getpid()}, mode="run"
+                )
+        except Exception:
+            pass
+    return exit_code
 
 
 def _wait_for_provision(request_id: str, *, timeout: float, poll_interval: float = 2.0) -> bool:
@@ -3695,10 +3705,10 @@ def _read_request_body(args):
 
 
 def cmd_vault_fetch(args):
-    import httpx
-    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    from urllib.parse import urlsplit
 
     from storage import vault_service
+    from vibe import api
 
     help_command = "vibe vault fetch --help"
     try:
@@ -3751,8 +3761,8 @@ def cmd_vault_fetch(args):
             )
 
         engine = _open_vault_engine()
-        # Read policy + decrypt in a read connection. The host check runs BEFORE the
-        # decrypt, so a disallowed target never even unwraps the secret.
+        # Read policy + envelope in a read connection. The host check runs BEFORE handing the
+        # envelope to avault, so a disallowed target never even unwraps the secret.
         with engine.connect() as conn:
             policy = vault_service.get_secret_policy(conn, name)
             allowed = policy.get("allowed_hosts") or []
@@ -3773,27 +3783,32 @@ def cmd_vault_fetch(args):
             auth = policy.get("auth") or {"type": "bearer"}
             if auth.get("type") == "header":
                 # Defensive: set-time validation blocks new Host auth-headers; this also guards
-                # legacy / hand-edited policies. Reject BEFORE decrypting so a bad policy never
+                # legacy / hand-edited policies. Reject BEFORE handing off so a bad policy never
                 # even unwraps the secret.
                 _reject_forbidden_header(auth.get("name", ""), help_command=help_command)
-            value = vault_service.open_secret_value(conn, name)
+            sealed = vault_service.get_envelope(conn, name)
 
-        # Attach the credential at egress and forward (outside any DB transaction).
-        target_url = url
-        if auth.get("type") == "header":
-            headers[auth["name"]] = value
-        elif auth.get("type") == "query":
-            parts = urlsplit(url)
-            query = parse_qsl(parts.query, keep_blank_values=True)
-            query.append((auth["name"], value))
-            target_url = urlunsplit(parts._replace(query=urlencode(query)))
-        else:  # bearer (default)
-            headers["Authorization"] = f"Bearer {value}"
-
-        # For the loopback plaintext exemption, ignore HTTP(S)_PROXY/ALL_PROXY from the env so a
-        # credential-bearing local request can't be redirected to an external proxy.
-        with httpx.Client(timeout=30.0, follow_redirects=False, trust_env=not is_loopback) as client:
-            resp = client.request(method, target_url, headers=headers, content=body)
+        # Hand the envelope + request to avault: it injects the credential at egress, performs
+        # the request, and returns ONLY the response (status/headers/body) — the value never
+        # returns here. avault re-enforces the allowed_hosts allowlist before decrypting.
+        auth_type = auth.get("type") or "bearer"
+        if auth_type == "header":
+            inject = {"type": "header", "name": auth.get("name", "")}
+        elif auth_type == "query":
+            inject = {"type": "query", "name": auth.get("name", "")}
+        else:
+            inject = {"type": "bearer"}
+        request = {
+            "method": method,
+            "url": url,
+            "allowed_hosts": allowed,
+            "headers": headers,
+            "body": body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else body,
+            "inject": inject,
+        }
+        result = api.avault_deliver_fetch(name, sealed, request)
+        status = int(result.get("status") or 0)
+        resp_body = result.get("body") or ""
 
         try:
             with engine.begin() as conn:
@@ -3801,7 +3816,7 @@ def cmd_vault_fetch(args):
                     conn,
                     name,
                     requester={"source": "cli", "pid": os.getpid()},
-                    delivery={"host": host, "method": method, "status": resp.status_code},
+                    delivery={"host": host, "method": method, "status": status},
                 )
         except Exception:
             # The upstream request already happened (possibly a side-effecting POST/PATCH). A
@@ -3817,43 +3832,29 @@ def cmd_vault_fetch(args):
     except TaskCliError as exc:
         _print_task_error(exc)
         return 1
-    except httpx.HTTPError as exc:
+    except api.AvaultError as exc:
         _print_task_error(TaskCliError(f"request failed: {exc}", code="request_failed", help_command=help_command))
         return 1
     except Exception as exc:
         _print_task_error(exc, help_command=help_command)
         return 1
 
-    # The response body is the upstream API's response (not a secret) — pass it through.
+    # The response body is the upstream API's response (not a secret) — pass it through. avault
+    # returns it as UTF-8 text (binary responses are rejected upstream by avault).
     output = getattr(args, "output", None)
+    body_bytes = resp_body.encode("utf-8")
     if output:
         try:
-            Path(output).write_bytes(resp.content)
+            Path(output).write_bytes(body_bytes)
         except OSError as exc:
             # The secret-bearing request already completed; a bad --output path should still
             # yield a structured error (missing parent / permission denied), not a traceback.
             _print_task_error(TaskCliError(f"cannot write output file: {exc}", code="output_unwritable", help_command=help_command))
             return 1
     else:
-        sys.stdout.buffer.write(resp.content)
+        sys.stdout.buffer.write(body_bytes)
         sys.stdout.flush()
-    return 0 if resp.is_success else 1
-
-
-def _render_secrets(values: dict, keys: list, fmt: str) -> str:
-    """Render resolved secrets in the requested file format, preserving key order."""
-    ordered = {k: values[k] for k in keys}
-    if fmt == "json":
-        return json.dumps(ordered, indent=2) + "\n"
-    if fmt == "yaml":
-        import yaml
-
-        return yaml.safe_dump(ordered, default_flow_style=False, sort_keys=False)
-    if fmt == "toml":
-        # Flat string key-values; JSON string escaping is a valid TOML basic string.
-        return "".join(f"{k} = {json.dumps(v)}\n" for k, v in ordered.items())
-    # dotenv (default): shell-quoted so a sourced/eval'd file is safe.
-    return "".join(f"{k}={shlex.quote(v)}\n" for k, v in ordered.items())
+    return 0 if 200 <= status <= 299 else 1
 
 
 def _write_private_file(path: Path, content: str) -> None:
@@ -3882,57 +3883,29 @@ def _write_private_file(path: Path, content: str) -> None:
 
 
 def cmd_vault_export(args):
-    # Advanced / not recommended (prefer 'run'): emits `export NAME=...` lines for
-    # `eval "$(vibe vault export ...)"`. The value transits the caller's shell, so this
-    # is weaker than 'run'. Help-only — not surfaced in agent-facing guidance.
-    from storage import vault_service
-
-    help_command = "vibe vault export --help"
-    try:
-        mapping = _parse_env_specs(getattr(args, "env", None))
-        if not mapping:
-            raise TaskCliError("at least one --env NAME is required", code="missing_env", help_command=help_command)
-        engine = _open_vault_engine()
-        with engine.connect() as conn:
-            values = vault_service.resolve(conn, sorted(set(mapping.values())))
-        lines = [f"export {local}={shlex.quote(values[vault_name])}" for local, vault_name in mapping.items()]
-        sys.stdout.write("\n".join(lines) + "\n")
-        try:
-            # write() may only buffer; flush so the downstream eval pipe has actually
-            # received the values before we record a delivery.
-            sys.stdout.flush()
-        except BrokenPipeError:
-            # The consumer's pipe closed before receiving the values — nothing was delivered,
-            # so don't record a delivery.
-            return 1
-        # The secret has already been delivered to the caller's shell; a bookkeeping failure must
-        # not make the script see a failed command (and re-run it, re-exposing the secret).
-        try:
-            with engine.begin() as conn:
-                vault_service.record_deliveries(
-                    conn, sorted(set(mapping.values())), requester={"source": "cli", "pid": os.getpid()}, mode="export"
-                )
-        except Exception:
-            pass
-        return 0
-    except vault_service.SecretNotFoundError as exc:
-        _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
-        return 1
-    except vault_service.UnsupportedProtectionError as exc:
-        _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
-        return 1
-    except TaskCliError as exc:
-        _print_task_error(exc)
-        return 1
-    except Exception as exc:
-        _print_task_error(exc, help_command=help_command)
-        return 1
+    # Deprecated. avault (the custody core) deliberately has no plaintext-to-stdout sink —
+    # emitting `export NAME=...` for `eval` would hand the decrypted value back to the shell
+    # (and anything capturing stdout). Use `vibe vault run`, which injects secrets straight
+    # into a child process's environment — never your shell, never disk.
+    help_command = "vibe vault run --help"
+    _print_task_error(
+        TaskCliError(
+            "vibe vault export is no longer supported. Use "
+            "'vibe vault run --env NAME -- <command>' to inject secrets directly into a "
+            "process (off your shell and off disk).",
+            code="export_deprecated",
+            help_command=help_command,
+        )
+    )
+    return 1
 
 
 def cmd_vault_inject(args):
     # Advanced / not recommended (prefer 'run'): render secrets into a 0600 file for
-    # tools that read config files. The value lands on disk. Help-only.
+    # tools that read config files. The value lands on disk. avault renders + writes the
+    # file (it holds the plaintext); nothing lands in this process. Help-only.
     from storage import vault_service
+    from vibe import api
 
     help_command = "vibe vault inject --help"
     try:
@@ -3944,13 +3917,22 @@ def cmd_vault_inject(args):
         if not out:
             raise TaskCliError("--out FILE is required", code="missing_out", help_command=help_command)
         fmt = (getattr(args, "format", None) or "dotenv").lower()
-        if fmt not in ("dotenv", "json", "yaml", "toml"):
-            raise TaskCliError(f"unknown --format: {fmt!r} (dotenv|json|yaml|toml)", code="invalid_format", help_command=help_command)
+        if fmt in ("yaml", "toml"):
+            # avault renders the file (it holds the plaintext); only dotenv/json are wired in P1.1.
+            raise TaskCliError(
+                f"--format {fmt} is not yet supported via avault (use dotenv or json)",
+                code="format_unavailable",
+                help_command=help_command,
+            )
+        if fmt not in ("dotenv", "json"):
+            raise TaskCliError(f"unknown --format: {fmt!r} (dotenv|json)", code="invalid_format", help_command=help_command)
         engine = _open_vault_engine()
         with engine.connect() as conn:
-            values = vault_service.resolve(conn, keys)
-        # Write first; if the path is unwritable this raises and no delivery is recorded.
-        _write_private_file(Path(out), _render_secrets(values, keys, fmt))
+            envelopes = vault_service.get_envelopes(conn, keys)
+        secrets = [{"name": k, "key": k, "envelope": envelopes[k]} for k in keys]
+        # avault writes the 0600 file atomically; if the path is unwritable it raises and no
+        # delivery is recorded.
+        api.avault_deliver_inject(out, fmt, secrets)
         # The file is on disk → delivered. A bookkeeping failure must not report a failed command
         # (callers would retry though the secrets are already written), so record best-effort.
         try:
@@ -3969,6 +3951,9 @@ def cmd_vault_inject(args):
     except TaskCliError as exc:
         _print_task_error(exc)
         return 1
+    except api.AvaultError as exc:
+        _print_task_error(TaskCliError(f"avault inject failed: {exc}", code="avault_failed", help_command=help_command))
+        return 1
     except Exception as exc:
         _print_task_error(exc, help_command=help_command)
         return 1
@@ -3983,12 +3968,13 @@ def _read_passphrase_stdin(help_command: str) -> str:
 
 
 def cmd_vault_key_export(args):
-    from storage import vault_crypto, vault_service
+    from storage import vault_service
+    from vibe import api
 
     help_command = "vibe vault key export --help"
     try:
         passphrase = _read_passphrase_stdin(help_command)
-        blob = vault_crypto.export_machine_key(passphrase)
+        blob = api.avault_key_export(passphrase)
         out = getattr(args, "out", None)
         if out:
             # Create 0600 from the start (the blob holds the passphrase-wrapped key) —
@@ -4019,8 +4005,8 @@ def cmd_vault_key_export(args):
         except Exception:
             pass
         return 0
-    except vault_crypto.VaultCryptoError as exc:
-        _print_task_error(TaskCliError(str(exc), code="vault_key_export_failed", help_command=help_command))
+    except api.AvaultError as exc:
+        _print_task_error(TaskCliError(f"avault key export failed: {exc}", code="vault_key_export_failed", help_command=help_command))
         return 1
     except TaskCliError as exc:
         _print_task_error(exc)
@@ -4031,7 +4017,8 @@ def cmd_vault_key_export(args):
 
 
 def cmd_vault_key_import(args):
-    from storage import vault_crypto, vault_service
+    from storage import vault_service
+    from vibe import api
 
     help_command = "vibe vault key import --help"
     try:
@@ -4040,7 +4027,7 @@ def cmd_vault_key_import(args):
             blob = json.loads(Path(args.file).read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise TaskCliError(f"cannot read export file: {exc}", code="export_file_unreadable", help_command=help_command) from exc
-        vault_crypto.import_machine_key(blob, passphrase, force=bool(getattr(args, "force", False)))
+        api.avault_key_import(blob, passphrase, force=bool(getattr(args, "force", False)))
         # Replacing the machine key changes vault decryptability for every standard-tier secret;
         # record it for the activity panel, symmetric with key export. Best-effort.
         try:
@@ -4053,8 +4040,8 @@ def cmd_vault_key_import(args):
             pass
         _print_cli_payload("vault_key_import", imported=True)
         return 0
-    except vault_crypto.VaultCryptoError as exc:
-        _print_task_error(TaskCliError(str(exc), code="vault_key_import_failed", help_command=help_command))
+    except api.AvaultError as exc:
+        _print_task_error(TaskCliError(f"avault key import failed: {exc}", code="vault_key_import_failed", help_command=help_command))
         return 1
     except TaskCliError as exc:
         _print_task_error(exc)
