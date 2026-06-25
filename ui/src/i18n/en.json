@@ -557,6 +557,20 @@
     "cloudflared_stop_failed": "The connector could not be stopped. Try again later, or manually stop the cloudflared process.",
     "cloudflared_process_unknown": "Avibe found a connector-like process but could not verify ownership. To avoid killing the wrong process, it did not change it. Check the cloudflared process manually and retry."
   },
+  "apps": {
+    "title": "Apps",
+    "soon": "Soon",
+    "fileBrowser": {
+      "label": "File Browser",
+      "desc": "Browse, view, and edit files on this machine.",
+      "placeholder": "The File Browser is being built. You'll be able to browse the whole machine, open files, and edit and save them right here."
+    },
+    "terminal": {
+      "label": "Terminal",
+      "desc": "A real shell in your browser.",
+      "placeholder": "The Terminal arrives in Phase 2: a real shell with tmux-backed persistent sessions."
+    }
+  },
   "appShell": {
     "title": "Avibe OS",
     "subtitle": "Agent OS · Workbench",

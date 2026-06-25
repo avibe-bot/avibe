@@ -11,6 +11,8 @@ import { VaultsPage } from './components/workbench/VaultsPage';
 import { ChatPage } from './components/workbench/ChatPage';
 import { ProjectsPage } from './components/workbench/ProjectsPage';
 import { MorePage } from './components/workbench/MorePage';
+import { AppsFileBrowserPage } from './components/workbench/AppsFileBrowserPage';
+import { AppsTerminalPage } from './components/workbench/AppsTerminalPage';
 import { Dashboard } from './components/Dashboard';
 import { ChannelList } from './components/steps/ChannelList';
 import { UserList } from './components/steps/UserList';
@@ -284,6 +286,11 @@ function AppRoutes() {
         <Route path="/vaults" element={<VaultsPage />} />
         <Route path="/projects" element={<ProjectsPage />} />
         <Route path="/more" element={<MorePage />} />
+        {/* Apps layer — File Browser (Phase 1) + Terminal (Phase 2). The
+            sidebar Apps launcher opens these; /apps lands on the file browser. */}
+        <Route path="/apps" element={<Navigate to="/apps/files" replace />} />
+        <Route path="/apps/files" element={<AppsFileBrowserPage />} />
+        <Route path="/apps/terminal" element={<AppsTerminalPage />} />
         <Route path="/chat/:sessionId" element={<ChatPage />} />
 
         {/* Control Panel mode — existing pages moved under /admin/* */}

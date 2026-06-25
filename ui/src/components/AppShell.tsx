@@ -12,6 +12,7 @@ import { LanguageSwitcher } from './LanguageSwitcher';
 import { ThemeToggle } from './ThemeToggle';
 import { VersionBadge } from './VersionBadge';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
+import { AppsLauncher } from './AppsLauncher';
 import { NewSessionSheet } from './workbench/NewSessionSheet';
 import { SearchPalette } from './workbench/search/SearchPalette';
 import { Button } from './ui/button';
@@ -404,26 +405,20 @@ export const AppShell: React.FC = () => {
 
           {/* Bottom: Status (with embedded version badge) + toggles + hostname */}
           <div className="flex flex-col gap-3">
-            <div
-              className={clsx(
-                'flex items-center gap-2.5 rounded-lg border px-3 py-2.5',
-                isRunning
-                  ? 'border-mint/30 bg-mint/[0.08]'
-                  : 'border-border bg-foreground/[0.02]'
-              )}
-            >
+            {/* Apps launcher + a compact run-state dot (hover shows the status
+                text) + version. The old status pill's two text lines collapsed
+                into the dot — the green/grey dot already conveys running vs
+                stopped, freeing this corner for the Apps entry. */}
+            <div className="flex items-center gap-2">
+              <AppsLauncher />
               <span
+                title={isRunning ? t('common.running') : t('common.stopped')}
+                aria-label={isRunning ? t('common.running') : t('common.stopped')}
                 className={clsx(
-                  'size-2 shrink-0 rounded-full',
+                  'size-2.5 shrink-0 rounded-full',
                   isRunning ? 'bg-mint shadow-[0_0_8px_rgba(91,255,160,0.9)]' : 'bg-muted'
                 )}
               />
-              <div className="min-w-0 flex-1">
-                <div className="text-[12px] font-medium text-foreground">
-                  {isRunning ? t('common.running') : t('common.stopped')}
-                </div>
-                <div className="text-[10px] text-muted">{t('appShell.statusLabel')}</div>
-              </div>
               <VersionBadge openUpward />
             </div>
 

@@ -557,6 +557,20 @@
     "cloudflared_stop_failed": "连接器暂时无法停止。请稍后重试，或在系统进程里手动结束 cloudflared。",
     "cloudflared_process_unknown": "检测到一个无法确认归属的连接器进程。为避免误杀其它进程，Avibe 没有自动处理。请手动检查 cloudflared 进程后再启动。"
   },
+  "apps": {
+    "title": "应用",
+    "soon": "即将上线",
+    "fileBrowser": {
+      "label": "文件浏览器",
+      "desc": "浏览、查看、编辑这台机器上的文件。",
+      "placeholder": "文件浏览器正在搭建中。很快你就能在这里浏览整机文件、打开文件、直接编辑并保存。"
+    },
+    "terminal": {
+      "label": "终端",
+      "desc": "在浏览器里跑真实 shell。",
+      "placeholder": "终端将在第二阶段上线:真实 shell,配 tmux 持久化会话。"
+    }
+  },
   "appShell": {
     "title": "Avibe OS",
     "subtitle": "Agent操作系统 · 工作台",
