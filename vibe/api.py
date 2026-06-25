@@ -3463,6 +3463,191 @@ def avault_status() -> dict:
     return {"id": "avault", "installed": True, "version": version, "status": "ready", "path": path}
 
 
+# ---------------------------------------------------------------------------
+# avault client — Avibe's only path to value cryptography.
+#
+# Every Vaults value operation (seal on create, deliver on use, key backup) is a
+# one-shot ``avault`` subprocess. Plaintext/keys flow only INTO avault via stdin;
+# avault returns ciphertext, a delivery exit code, an HTTP response, or a written
+# file — never plaintext. The daemon never holds the master key and never decrypts.
+# (Design: avibe docs/plans/avault-custody-core.md §18; verbs: avault/docs/DESIGN.md.)
+# ---------------------------------------------------------------------------
+
+# avibe's wait must outlast avault's own fetch timeout (10s connect + 30s total).
+_AVAULT_TIMEOUT_SECONDS = 20.0
+_AVAULT_FETCH_TIMEOUT_SECONDS = 60.0
+# avault exits 70 for an internal failure (bad envelope, decrypt error, store error)
+# before any delivery side effect — distinct from a delivered child's own exit code.
+_AVAULT_INTERNAL_ERROR_CODE = 70
+
+
+class AvaultError(Exception):
+    """An ``avault`` invocation failed. Messages never carry secret material —
+    avault is designed to keep secrets out of its stdout/stderr and errors."""
+
+
+def _avault_detail(proc: "subprocess.CompletedProcess") -> str:
+    """Best-effort, secret-free detail from a failed avault run (its stderr)."""
+    raw = proc.stderr
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    return (raw or "").strip()
+
+
+def _require_avault_path() -> str:
+    path = _resolve_avault_cli_path()
+    if not path:
+        raise AvaultError(backend_t("dependencies.avault.missing"))
+    return path
+
+
+def _run_avault(
+    args: list[str],
+    *,
+    stdin: bytes | None = None,
+    timeout: float = _AVAULT_TIMEOUT_SECONDS,
+) -> "subprocess.CompletedProcess":
+    """Run a capturing one-shot avault command. Bulk blobs go via ``stdin``."""
+    path = _require_avault_path()
+    try:
+        return subprocess.run(
+            [path, *args],
+            input=stdin,
+            capture_output=True,
+            timeout=timeout,
+            env=_command_env_for(path),
+            **isolated_subprocess_kwargs(),
+        )
+    except FileNotFoundError as exc:
+        raise AvaultError("avault binary not found") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise AvaultError("avault timed out") from exc
+
+
+def _envelope_payload(sealed) -> dict:
+    """Serialize a stored envelope for an avault stdin request (no plaintext)."""
+    return {"ciphertext": sealed.ciphertext, "nonce": sealed.nonce, "wrap_meta": sealed.wrap_meta}
+
+
+def avault_seal(name: str, value: bytes):
+    """Seal a value under the machine key via avault; return a :class:`Sealed`.
+
+    ``value`` is piped straight to avault's stdin and never persisted or logged here.
+    """
+    from storage.vault_crypto import Sealed
+
+    proc = _run_avault(["seal", "--name", name], stdin=value)
+    if proc.returncode != 0:
+        raise AvaultError(_avault_detail(proc) or "avault seal failed")
+    try:
+        payload = json.loads(proc.stdout)
+        return Sealed(
+            ciphertext=payload["ciphertext"],
+            nonce=payload["nonce"],
+            wrap_meta=payload["wrap_meta"],
+        )
+    except (ValueError, KeyError, TypeError) as exc:
+        raise AvaultError("avault seal returned malformed output") from exc
+
+
+def avault_deliver_run(secrets: list[dict], command: list[str]) -> int:
+    """Run ``command`` with the secrets injected as env vars, inside avault.
+
+    ``secrets`` is ``[{"name": <secret name>, "env": <env var>, "envelope": <Sealed>}]``.
+    avault decrypts, spawns the child with that env, waits, and zeroizes — the
+    plaintext never returns here. The child inherits this process's stdio so its
+    output passes through; the run-secrets JSON (envelopes only, no plaintext)
+    goes on avault's stdin to stay out of ``ps``. Returns the child's exit code
+    (``128 + signal`` if signalled), or raises :class:`AvaultError` if avault could
+    not start the child.
+    """
+    path = _require_avault_path()
+    payload = json.dumps(
+        [
+            {"name": s["name"], "env": s["env"], "envelope": _envelope_payload(s["envelope"])}
+            for s in secrets
+        ]
+    ).encode("utf-8")
+    try:
+        proc = subprocess.Popen(
+            [path, "deliver", "run", "--", *command],
+            stdin=subprocess.PIPE,
+            env=_command_env_for(path),
+            **isolated_subprocess_kwargs(),
+        )
+    except FileNotFoundError as exc:
+        raise AvaultError("avault binary not found") from exc
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(payload)
+        proc.stdin.close()
+    except (BrokenPipeError, OSError):
+        # avault exited before reading stdin (e.g. bad request); fall through to wait()
+        # which surfaces its exit code.
+        pass
+    return proc.wait()
+
+
+def avault_deliver_fetch(name: str, sealed, request: dict) -> dict:
+    """Broker an HTTP request inside avault with the secret injected at egress.
+
+    ``request`` must include ``allowed_hosts`` (avault rejects the target otherwise).
+    Returns ``{"status", "headers", "body"}`` — the response only, never the secret.
+    """
+    body = json.dumps(
+        {"name": name, "envelope": _envelope_payload(sealed), "request": request}
+    ).encode("utf-8")
+    proc = _run_avault(["deliver", "fetch"], stdin=body, timeout=_AVAULT_FETCH_TIMEOUT_SECONDS)
+    # avault exits 0 for 2xx and 1 for a non-2xx HTTP status; both still emit the
+    # response JSON. Any higher code is an avault-level failure (no response).
+    if proc.returncode not in (0, 1):
+        raise AvaultError(_avault_detail(proc) or "avault fetch failed")
+    try:
+        return json.loads(proc.stdout)
+    except (ValueError, TypeError) as exc:
+        raise AvaultError("avault fetch returned malformed output") from exc
+
+
+def avault_deliver_inject(path: str, fmt: str, secrets: list[dict]) -> None:
+    """Render the secrets to a 0600 file at ``path`` (dotenv/json) inside avault.
+
+    ``secrets`` is ``[{"name": <secret name>, "key": <file key>, "envelope": <Sealed>}]``.
+    """
+    body = json.dumps(
+        {
+            "path": str(path),
+            "format": fmt,
+            "secrets": [
+                {"name": s["name"], "key": s["key"], "envelope": _envelope_payload(s["envelope"])}
+                for s in secrets
+            ],
+        }
+    ).encode("utf-8")
+    proc = _run_avault(["deliver", "inject"], stdin=body)
+    if proc.returncode != 0:
+        raise AvaultError(_avault_detail(proc) or "avault inject failed")
+
+
+def avault_key_export(passphrase: str) -> dict:
+    """Export the machine key as a passphrase-wrapped backup blob via avault."""
+    proc = _run_avault(["key", "export"], stdin=passphrase.encode("utf-8"))
+    if proc.returncode != 0:
+        raise AvaultError(_avault_detail(proc) or "avault key export failed")
+    try:
+        return json.loads(proc.stdout)
+    except (ValueError, TypeError) as exc:
+        raise AvaultError("avault key export returned malformed output") from exc
+
+
+def avault_key_import(blob: dict, passphrase: str, *, force: bool = False) -> None:
+    """Restore the machine key from an :func:`avault_key_export` blob via avault."""
+    body = json.dumps({"passphrase": passphrase, "blob": blob}).encode("utf-8")
+    args = ["key", "import"] + (["--force"] if force else [])
+    proc = _run_avault(args, stdin=body)
+    if proc.returncode != 0:
+        raise AvaultError(_avault_detail(proc) or "avault key import failed")
+
+
 def _askill_auto_update_disabled() -> bool:
     """Return whether the managed askill reconcile loop is explicitly disabled."""
     skip_value = os.environ.get(_ASKILL_SKIP_ENV, "").strip().lower()
