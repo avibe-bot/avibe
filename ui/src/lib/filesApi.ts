@@ -41,13 +41,12 @@ export class FilesApiError extends Error {
   }
 }
 
-const FILE_BROWSER_ERROR_KEYS: Record<string, string> = {
-  file_not_utf8: 'apps.fileBrowser.errors.file_not_utf8',
-};
-
 export function fileBrowserErrorMessage(error: unknown, t: (key: string) => string, fallback: string): string {
   if (error instanceof FilesApiError) {
-    const key = FILE_BROWSER_ERROR_KEYS[error.code] ?? `apps.fileBrowser.errors.${error.code}`;
+    // Every error code (backend not_found/permission_denied/... and the client-side
+    // file_not_utf8) maps 1:1 to apps.fileBrowser.errors.<code>; fall back to the raw
+    // message when no localized string exists.
+    const key = `apps.fileBrowser.errors.${error.code}`;
     const translated = t(key);
     return translated === key ? error.message : translated;
   }
