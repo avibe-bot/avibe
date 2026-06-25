@@ -14,7 +14,7 @@ type AppItem = { to: string; labelKey: string; descKey: string; icon: LucideIcon
 
 const APPS: AppItem[] = [
   { to: '/apps/files', labelKey: 'apps.fileBrowser.label', descKey: 'apps.fileBrowser.desc', icon: FolderTree },
-  { to: '/apps/terminal', labelKey: 'apps.terminal.label', descKey: 'apps.terminal.desc', icon: TerminalSquare, soon: true },
+  { to: '/apps/terminal', labelKey: 'apps.terminal.label', descKey: 'apps.terminal.desc', icon: TerminalSquare },
 ];
 
 export const AppsLauncher: React.FC = () => {

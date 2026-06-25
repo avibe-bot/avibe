@@ -152,6 +152,7 @@ export const AppsFileBrowserPage: React.FC = () => {
               variant="ghost"
               className="size-7 shrink-0 text-muted"
               aria-label={t('apps.fileBrowser.newFolder')}
+              disabled={!cwd}
               onClick={() => void newFolder()}
             >
               <FolderPlus className="size-3.5" />

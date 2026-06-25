@@ -48,11 +48,28 @@ async function parse<T>(res: Response): Promise<T> {
   return data as T;
 }
 
+function isWindowsPath(p: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(p) || p.includes('\\');
+}
+
 export function joinPath(base: string, name: string): string {
-  return base.endsWith('/') ? `${base}${name}` : `${base}/${name}`;
+  const sep = isWindowsPath(base) ? '\\' : '/';
+  return base.endsWith('/') || base.endsWith('\\') ? `${base}${name}` : `${base}${sep}${name}`;
 }
 
 export function pathCrumbs(path: string): { label: string; path: string }[] {
+  // Windows: split on either separator and keep the drive (e.g. C:\) as the root.
+  if (isWindowsPath(path)) {
+    const parts = path.replace(/\//g, '\\').split('\\').filter(Boolean);
+    const drive = parts.shift() ?? '';
+    const out: { label: string; path: string }[] = [{ label: `${drive}\\`, path: `${drive}\\` }];
+    let cur = `${drive}\\`;
+    for (const part of parts) {
+      cur = cur.endsWith('\\') ? `${cur}${part}` : `${cur}\\${part}`;
+      out.push({ label: part, path: cur });
+    }
+    return out;
+  }
   const parts = path.split('/').filter(Boolean);
   const out: { label: string; path: string }[] = [{ label: '/', path: '/' }];
   let cur = '';

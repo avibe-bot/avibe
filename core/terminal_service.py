@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import errno
-import fcntl
 import json
 import logging
 import os
@@ -10,13 +9,19 @@ import re
 import signal
 import struct
 import sys
-import termios
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
+
+try:  # POSIX-only; the PTY + tmux terminal is not supported on native Windows.
+    import fcntl
+    import termios
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+    termios = None  # type: ignore[assignment]
 
 try:
     from core.tmux_runtime import resolve_tmux_binary
@@ -27,6 +32,10 @@ except Exception:  # pragma: no cover - integration branch may not be present.
 
 
 logger = logging.getLogger(__name__)
+
+# The terminal needs a PTY (os.openpty) + ioctl winsize; all POSIX-only. On native
+# Windows the websocket endpoint refuses instead of crashing at import/spawn time.
+TERMINAL_SUPPORTED = hasattr(os, "openpty") and fcntl is not None and termios is not None
 
 _SAFE_SESSION_ID_RE = re.compile(r"[^A-Za-z0-9_-]+")
 

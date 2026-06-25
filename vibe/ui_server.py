@@ -40,7 +40,7 @@ from core.show_pages import (
     show_event_write_token,
 )
 from core.show_session_events import show_event_payload_session_mismatch
-from core.terminal_service import TerminalService, TerminalServiceError, sanitize_session_id
+from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
 from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
 from vibe.i18n import get_supported_languages, t
 from vibe.runtime import get_ui_dist_path, get_working_dir
@@ -2062,10 +2062,14 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
     if not _terminal_enabled():
         await websocket.close(code=1008)
         return
-    # NOTE: do not reject forwarded metadata here — when the workbench is reached
-    # through Avibe Cloud / Cloudflare the request legitimately carries X-Forwarded
-    # headers. `_show_runtime_websocket_authorized` already distinguishes local
-    # (no-forwarded loopback) from remote (valid session cookie), so let it decide.
+    if not TERMINAL_SUPPORTED:
+        # POSIX-only — no PTY/tmux on native Windows.
+        await websocket.close(code=1008)
+        return
+    # CSWSH guard for the local-trust path (a loopback request has no cookie gate):
+    # require a same-HOST Origin. HOST only — scheme/port are unreliable behind a
+    # TLS-terminating proxy (Cloudflare), which is what broke legitimate remote
+    # terminals. Do NOT reject on forwarded metadata (remote/CF carries it).
     if not _websocket_origin_matches_host(websocket):
         await websocket.close(code=1008)
         return
@@ -2111,30 +2115,14 @@ def _show_runtime_websocket_authorized(websocket: WebSocket) -> bool:
 
 
 def _websocket_origin_matches_host(websocket: WebSocket) -> bool:
+    # Compare HOST only: a TLS-terminating proxy (Cloudflare) means the client's
+    # scheme/port (https/443) won't match the local socket (ws/80), so comparing
+    # them rejected legitimate remote terminals. The host still blocks cross-site
+    # origins (e.g. evil.example) for the unauthenticated local-trust path.
     origin = _request_origin(websocket.headers.get("origin"))
     if not origin:
         return False
-    parsed = urlparse(origin)
-    origin_host = _normalized_host(parsed.netloc)
-    request_host = _websocket_normalized_host(websocket)
-    if origin_host != request_host:
-        return False
-    return _origin_port(parsed.netloc, parsed.scheme) == _origin_port(websocket.headers.get("host"), websocket.url.scheme)
-
-
-def _origin_port(netloc: str | None, scheme: str) -> int | None:
-    parsed = urlparse(f"//{netloc or ''}")
-    try:
-        if parsed.port is not None:
-            return parsed.port
-    except ValueError:
-        return None
-    scheme = {"ws": "http", "wss": "https"}.get(scheme, scheme)
-    if scheme == "https":
-        return 443
-    if scheme == "http":
-        return 80
-    return None
+    return _normalized_host(urlparse(origin).netloc) == _websocket_normalized_host(websocket)
 
 
 def _websocket_is_local_request(websocket: WebSocket, config: V2Config | None = None) -> bool:

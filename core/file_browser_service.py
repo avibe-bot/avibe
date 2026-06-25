@@ -386,16 +386,14 @@ def write_file(raw_path: str, content: str, *, expected_mtime: float | None = No
 
 
 def make_directory(raw_path: str) -> dict[str, Any]:
-    target = resolve_safe_path(raw_path)
-    try:
-        parent = target.parent.resolve(strict=True)
-    except FileNotFoundError as exc:
-        raise NotFoundError("Parent directory not found") from exc
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise FileBrowserError("invalid_path", str(exc), 400) from exc
+    # Resolve the entry without following a final symlink, so mkdir on a name that
+    # is a (possibly dangling) symlink reports "exists" instead of creating the
+    # symlink's target — matching the no-follow semantics of the other mutations.
+    target = _resolve_entry_path(raw_path)
+    parent = target.parent
     if not parent.is_dir():
         raise FileBrowserError("not_dir", "Parent is not a directory", 400)
-    if target.exists():
+    if _exists_no_follow(target):
         raise ConflictError("exists", "Path already exists")
 
     def _mkdir() -> dict[str, Any]:
@@ -441,6 +439,9 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
 def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[str, Any]:
     source = _resolve_existing_entry_path(raw_src)
     target = _resolve_entry_path(raw_dst)
+    if source == target:
+        # Moving onto itself is a no-op; never unlink-then-move (it would delete it).
+        return {"ok": True}
     parent = target.parent
     if not parent.is_dir():
         raise FileBrowserError("not_dir", "Destination parent is not a directory", 400)

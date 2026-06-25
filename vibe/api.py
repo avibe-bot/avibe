@@ -3999,13 +3999,17 @@ def reconcile_startup_dependencies() -> dict:
             logger.warning("Startup dependency reconcile failed to prepare Show Runtime: %s", exc, exc_info=True)
             result["show_runtime"] = {"ok": False, "status": "failed", "reason": str(exc)}
 
-        try:
-            from core.tmux_runtime import ensure_tmux_installed
+        if os.environ.get("VIBE_UI_ENABLE_TERMINAL", "").strip().lower() in {"0", "false", "no", "off"}:
+            # Terminal explicitly disabled — don't download the optional tmux runtime.
+            result["tmux"] = {"ok": True, "status": "skipped", "reason": "terminal_disabled"}
+        else:
+            try:
+                from core.tmux_runtime import ensure_tmux_installed
 
-            result["tmux"] = ensure_tmux_installed(force=False)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Startup dependency reconcile failed to ensure tmux runtime: %s", exc, exc_info=True)
-            result["tmux"] = {"ok": False, "status": "failed", "reason": str(exc)}
+                result["tmux"] = ensure_tmux_installed(force=False)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Startup dependency reconcile failed to ensure tmux runtime: %s", exc, exc_info=True)
+                result["tmux"] = {"ok": False, "status": "failed", "reason": str(exc)}
 
         result["duration_ms"] = int((time.monotonic() - started_at) * 1000)
         result["ok"] = (
