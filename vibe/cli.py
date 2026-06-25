@@ -6303,7 +6303,9 @@ def cmd_runtime(args) -> int:
         offline = True if getattr(args, "offline", False) else None
         payload = manager.prepare(force=getattr(args, "force", False), offline=offline)
         askill = _ensure_askill_during_prepare(offline=bool(offline))
+        avault = _ensure_avault_during_prepare(offline=bool(offline))
         payload["askill"] = askill
+        payload["avault"] = avault
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
@@ -6321,6 +6323,12 @@ def cmd_runtime(args) -> int:
                 print("askill installed." if askill.get("changed") else "askill ready.")
             else:
                 print(f"askill not ready: {askill.get('message') or 'install failed'}", file=sys.stderr)
+            if avault.get("skipped"):
+                print(f"avault: skipped ({avault.get('reason') or 'skipped'}).")
+            elif avault.get("ok"):
+                print("avault installed." if avault.get("changed") else "avault ready.")
+            else:
+                print(f"avault not ready: {avault.get('message') or 'install failed'}", file=sys.stderr)
         return 1 if getattr(args, "strict", False) and not payload.get("ok") else 0
     if command == "clean":
         payload = manager.clean(keep_previous=getattr(args, "keep_previous", 1))
@@ -6382,6 +6390,18 @@ def _ensure_askill_during_prepare(offline: bool = False) -> dict:
         return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_ASKILL"}
     try:
         return api.ensure_askill_installed(force=True)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)}
+
+
+def _ensure_avault_during_prepare(offline: bool = False) -> dict:
+    """Ensure avault (the Vault custody core) alongside other local deps."""
+    if offline:
+        return {"ok": True, "skipped": True, "reason": "offline"}
+    if os.environ.get("VIBE_INSTALL_SKIP_AVAULT", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_AVAULT"}
+    try:
+        return api.ensure_avault_installed(force=True)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
 

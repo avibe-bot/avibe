@@ -235,6 +235,10 @@
           "label": "askill",
           "detail": "Agent Skills 运行时 —— 驱动 Skills 页面。"
         },
+        "avault": {
+          "label": "avault",
+          "detail": "Vault 托管核心 —— 本地 Vault 操作的必需依赖。"
+        },
         "show-runtime": {
           "label": "Show Page 运行时",
           "detail": "在你本机渲染可视化 Show 页面。"

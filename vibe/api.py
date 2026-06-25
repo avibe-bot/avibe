@@ -46,6 +46,7 @@ from vibe.upgrade import (
 )
 from vibe.restart_supervisor import schedule_restart
 from vibe.claude_model_catalog import DEFAULT_CLAUDE_MODEL_ALIASES, load_catalog_models
+from vibe.i18n import t as backend_t
 from modules.agents.catalog import (
     agent_backend_catalog_payload,
     agent_backend_descriptors,
@@ -3272,11 +3273,12 @@ def _run_install_command(
 
 
 # =============================================================================
-# Local dependencies (askill) — required tools avibe installs for the user
+# Local dependencies (askill / avault) — required tools avibe installs for the user
 # =============================================================================
 
 
 _ASKILL_INSTALL_LOCK = threading.Lock()
+_AVAULT_INSTALL_LOCK = threading.Lock()
 
 
 def _truncate_install_output(output: str, limit: int = 8192) -> str:
@@ -3364,6 +3366,101 @@ def askill_status() -> dict:
     except Exception:  # noqa: BLE001
         version = None
     return {"id": "askill", "installed": True, "version": version, "status": "ready", "path": path}
+
+
+def _configured_avault_cli_path() -> str:
+    try:
+        return str(V2Config.load().agents.avault.cli_path or "avault")
+    except Exception:  # noqa: BLE001
+        return "avault"
+
+
+def _resolve_avault_cli_path() -> str | None:
+    configured = _configured_avault_cli_path()
+    resolved = resolve_cli_path(configured)
+    if resolved:
+        return resolved
+    if configured != "avault":
+        return resolve_cli_path("avault")
+    return None
+
+
+def install_avault() -> dict:
+    """Install (or refresh) avault, the required local custody-core dependency.
+
+    Stub-first integration: for now, accept a locally built binary already
+    reachable through ``agents.avault.cli_path`` or PATH. The real installer
+    should swap in here and use Avibe's manifest-pinned binary download path
+    with checksum verification once the avault release pipeline lands.
+    """
+    path = _resolve_avault_cli_path()
+    if path:
+        return {
+            "ok": True,
+            "message": backend_t("dependencies.avault.ready"),
+            "output": None,
+            "path": path,
+        }
+    # TODO(vaults): download the Avibe-pinned avault release asset from the
+    # compatibility manifest, verify its checksum, install it into Avibe's
+    # managed bin dir, then return the resolved binary path.
+    return {
+        "ok": False,
+        "message": backend_t("dependencies.avault.missing"),
+        "output": None,
+    }
+
+
+def ensure_avault_installed(force: bool = False) -> dict:
+    """Ensure avault is present. Idempotent until the manifest installer lands."""
+    if not _AVAULT_INSTALL_LOCK.acquire(blocking=False):
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": "avault_install_already_running",
+            "message": backend_t("dependencies.avault.alreadyRunning"),
+        }
+    try:
+        existing = _resolve_avault_cli_path()
+        if existing and not force:
+            return {"ok": True, "installed": True, "changed": False, "path": existing}
+        result = install_avault()
+        resolved = _resolve_avault_cli_path()
+        installed = bool(resolved)
+        result["installed"] = installed
+        result["changed"] = False
+        result["path"] = resolved
+        if result.get("ok") and not installed:
+            result["ok"] = False
+            result["message"] = (
+                result.get("message") or backend_t("dependencies.avault.installedNotFound")
+            )
+        return result
+    finally:
+        _AVAULT_INSTALL_LOCK.release()
+
+
+def avault_status() -> dict:
+    """Report whether avault is installed and its version (best-effort)."""
+    path = _resolve_avault_cli_path()
+    if not path:
+        return {"id": "avault", "installed": False, "version": None, "status": "missing", "path": None}
+    version: str | None = None
+    try:
+        proc = subprocess.run(
+            [path, "version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=_command_env_for(path),
+            **isolated_subprocess_kwargs(),
+        )
+        text = (proc.stdout or proc.stderr or "").strip()
+        if proc.returncode == 0 and text:
+            version = text.split()[-1]
+    except Exception:  # noqa: BLE001
+        version = None
+    return {"id": "avault", "installed": True, "version": version, "status": "ready", "path": path}
 
 
 def _askill_auto_update_disabled() -> bool:
@@ -3458,7 +3555,7 @@ def reconcile_askill_auto_update() -> dict:
 # Dependencies aggregate + manual install jobs (askill / show runtime)
 # =============================================================================
 
-_ALLOWED_DEP_INSTALLS = {"askill", "show-runtime"}
+_ALLOWED_DEP_INSTALLS = {"askill", "avault", "show-runtime"}
 _STARTUP_DEPENDENCY_RECONCILE_LOCK = threading.Lock()
 _DEFAULT_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 3
 _MAX_STARTUP_SHOW_PAGE_PREWARM_LIMIT = 10
@@ -3485,6 +3582,20 @@ def dependencies_status() -> dict:
             "latest_version": a.get("latest_version"),
             "has_update": a.get("has_update", False),
             "status": a["status"],
+        }
+    )
+
+    av = avault_status()
+    deps.append(
+        {
+            "id": "avault",
+            "kind": "tool",
+            "required": True,
+            "installed": av["installed"],
+            "version": av.get("version"),
+            "latest_version": None,
+            "has_update": False,
+            "status": av["status"],
         }
     )
 
@@ -3607,6 +3718,7 @@ def reconcile_startup_dependencies() -> dict:
         "ok": True,
         "node": {"ok": False, "status": "unknown"},
         "askill": {"ok": False, "status": "unknown"},
+        "avault": {"ok": False, "status": "unknown"},
         "show_runtime": {"ok": False, "status": "unknown"},
     }
     try:
@@ -3616,6 +3728,13 @@ def reconcile_startup_dependencies() -> dict:
             logger.warning("Startup dependency reconcile failed to ensure askill: %s", exc, exc_info=True)
             askill = {"ok": False, "message": str(exc)}
         result["askill"] = askill
+
+        try:
+            avault = ensure_avault_installed(force=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Startup dependency reconcile failed to ensure avault: %s", exc, exc_info=True)
+            avault = {"ok": False, "message": str(exc)}
+        result["avault"] = avault
 
         try:
             from core.show_runtime import get_show_runtime_manager
@@ -3651,7 +3770,11 @@ def reconcile_startup_dependencies() -> dict:
             result["show_runtime"] = {"ok": False, "status": "failed", "reason": str(exc)}
 
         result["duration_ms"] = int((time.monotonic() - started_at) * 1000)
-        result["ok"] = bool(result["askill"].get("ok")) and bool(result["show_runtime"].get("ok"))
+        result["ok"] = (
+            bool(result["askill"].get("ok"))
+            and bool(result["avault"].get("ok"))
+            and bool(result["show_runtime"].get("ok"))
+        )
         return result
     finally:
         _STARTUP_DEPENDENCY_RECONCILE_LOCK.release()
@@ -3692,7 +3815,12 @@ def start_dependency_install_job(dep: str) -> dict:
 
     def _worker() -> None:
         try:
-            result = ensure_askill_installed(force=True) if dep == "askill" else _prepare_show_runtime_job()
+            if dep == "askill":
+                result = ensure_askill_installed(force=True)
+            elif dep == "avault":
+                result = ensure_avault_installed(force=True)
+            else:
+                result = _prepare_show_runtime_job()
             ok = bool(result.get("ok"))
             with _AGENT_INSTALL_JOB_LOCK:
                 current = _AGENT_INSTALL_JOBS.get(job_id)

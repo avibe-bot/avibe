@@ -27,6 +27,14 @@
     "processing": "正在处理 `/{command}`...",
     "submitted": "已提交"
   },
+  "dependencies": {
+    "avault": {
+      "ready": "avault 已就绪。",
+      "missing": "尚未安装 avault。请先在本地构建 avault 并放到 PATH 上，或设置 agents.avault.cli_path。",
+      "installedNotFound": "avault 已安装，但当前 PATH 找不到它；请重启服务或检查 PATH。",
+      "alreadyRunning": "avault 安装或更新正在运行，请稍后重试。"
+    }
+  },
   "error": {
     "channelNotEnabled": "此频道未启用。请前往控制面板启用它。",
     "unknownCommand": "未知命令：`/{command}`\n\n请使用 `@avibe /start` 访问所有机器人功能。",

@@ -27,6 +27,14 @@
     "processing": "Processing `/{command}`...",
     "submitted": "Submitted"
   },
+  "dependencies": {
+    "avault": {
+      "ready": "avault ready.",
+      "missing": "avault is not installed. Build avault locally and put it on PATH, or set agents.avault.cli_path.",
+      "installedNotFound": "avault installed but was not found on PATH; restart the service or check PATH.",
+      "alreadyRunning": "avault install or update is already running; try again shortly."
+    }
+  },
   "error": {
     "channelNotEnabled": "This channel is not enabled. Please go to the control panel to enable it.",
     "unknownCommand": "Unknown command: `/{command}`\n\nPlease use `@avibe /start` to access all bot features.",

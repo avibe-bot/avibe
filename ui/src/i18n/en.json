@@ -235,6 +235,10 @@
           "label": "askill",
           "detail": "Agent Skills runtime — powers the Skills page."
         },
+        "avault": {
+          "label": "avault",
+          "detail": "Vault custody core — required for local Vault operations."
+        },
         "show-runtime": {
           "label": "Show Page runtime",
           "detail": "Renders visual Show Pages on your machine."
