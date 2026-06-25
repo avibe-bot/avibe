@@ -134,7 +134,7 @@ def _make_row(
 
 
 def _collect_claude(
-    controller: "Controller", now: float, seen_native: set[str], seen_pids: set[int]
+    controller: "Controller", now: float, seen_native: dict[str, Optional[int]], seen_pids: set[int]
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     try:
@@ -170,7 +170,15 @@ def _collect_claude(
             )
         )
         if native:
-            seen_native.add(str(native))
+            # Map native id → the live client's pid (None when unresolved) so the
+            # orphan scan can tell this live process apart from an older one that
+            # leaked on reconnect (same native id, different pid). A known pid wins
+            # over a None so an unresolved duplicate can't mask it.
+            key = str(native)
+            if isinstance(pid, int):
+                seen_native[key] = pid
+            else:
+                seen_native.setdefault(key, None)
         if isinstance(pid, int):
             seen_pids.add(pid)
     return rows
@@ -198,6 +206,12 @@ def _collect_codex(controller: "Controller") -> list[dict[str, Any]]:
         cwd = session_mgr.get_cwd(base)
         active_turn = turn_registry.get_active_turn(base) if turn_registry is not None else None
         transport = transports.get(cwd) if cwd else None
+        # A transport object can outlive its app-server when the process exits out
+        # of band (crash / reader-task failure): it lingers in ``_transports`` with
+        # ``is_alive`` False until a later cleanup removes it. Treat a dead transport
+        # as no live transport so it can't surface as a phantom idle row.
+        if transport is not None and not getattr(transport, "is_alive", True):
+            transport = None
         # Idle eviction drops the app-server transport but preserves cwd/session
         # mappings for resume bookkeeping. Such bases are not live and must not
         # appear as phantom idle rows; keep only a transport-backed base or a still
@@ -253,7 +267,7 @@ def _collect_opencode(controller: "Controller") -> list[dict[str, Any]]:
     return rows
 
 
-def _collect_orphans(seen_native: set[str], seen_pids: set[int]) -> list[dict[str, Any]]:
+def _collect_orphans(seen_native: dict[str, Optional[int]], seen_pids: set[int]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     try:
         from modules.agents.claude_process_reaper import (
@@ -280,9 +294,16 @@ def _collect_orphans(seen_native: set[str], seen_pids: set[int]) -> list[dict[st
         if getattr(record, "owner", None) != AVIBE_CLAUDE_SESSION_OWNER:
             continue
         native = getattr(record, "native_session_id", None)
-        if native and str(native) in seen_native:
-            continue  # still owned by a live session — not an orphan
         record_pid = getattr(record, "pid", None)
+        if native and str(native) in seen_native:
+            owner_pid = seen_native[str(native)]
+            # Skip only when this record IS the live client's own process, or its
+            # pid is unresolved so we can't tell them apart. A live client with the
+            # same native id but a DIFFERENT pid means an older process leaked on
+            # reconnect — let it fall through to the pid/start-time verification so
+            # it can still surface (and be killed) as an orphan.
+            if owner_pid is None or owner_pid == record_pid:
+                continue
         if not isinstance(record_pid, int) or record_pid in seen_pids:
             continue
         recorded = getattr(record, "started_at", None)
@@ -491,6 +512,28 @@ def _find_claude_composite_for_base(session_handler: Any, base_session_id: Optio
         if client_base == base_session_id:
             return composite_key
     return None
+
+
+def _claude_pid_for(
+    controller: "Controller", composite_key: Optional[str], base_session_id: Optional[str]
+) -> Optional[int]:
+    """Resolve the OS pid of a live Claude session (by composite key, else base), or
+    ``None``. Used to reap the lingering CLI subprocess after the canonical stop
+    disconnects the client — the pid is unresolvable once the client is gone."""
+    session_handler = getattr(controller, "session_handler", None)
+    if session_handler is None:
+        return None
+    ck = composite_key or _find_claude_composite_for_base(session_handler, base_session_id)
+    sessions = getattr(session_handler, "claude_sessions", {}) or {}
+    client = sessions.get(ck) if ck else None
+    if client is None:
+        return None
+    try:
+        from modules.agents.claude_process_reaper import get_claude_client_pid
+
+        return get_claude_client_pid(client)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def _end_claude(controller: "Controller", composite_key: Optional[str], base_session_id: Optional[str]) -> dict[str, Any]:
@@ -808,9 +851,12 @@ async def end_running_agent(
       app-server when this was its last session).
     - opencode → abort the remote run + cancel the local polling task.
 
-    For an ACTIVE turn owned by the Workbench turn FSM, the turn is first settled
-    through ``SessionTurnManager.cancel`` (so the Chat page un-sticks and the
-    dispatch task is cancelled) before the backend teardown.
+    For an ACTIVE turn, the stop goes through the canonical per-backend stop path
+    (Workbench turns via ``SessionTurnManager.cancel``; IM / agent-run turns via
+    ``command_handler.handle_stop``) so the runtime gate / pending requests /
+    terminal result are released, then the leftover runtime is freed (codex session
+    + transport, opencode task, claude subprocess) so the row clears instead of
+    forcing a second Disconnect.
 
     Runs on the controller event loop (mutates loop-owned registries / awaits
     backend coroutines). There is deliberately NO self-protection: ending the
@@ -822,13 +868,45 @@ async def end_running_agent(
         return await _end_orphan_pid(pid)
 
     if state == "active":
-        return await _stop_active_agent(
+        # Capture the Claude OS pid BEFORE the stop disconnects the client — once
+        # the SDK client is gone the pid is no longer resolvable.
+        claude_pid = (
+            _claude_pid_for(controller, composite_key, base_session_id) if backend == "claude" else None
+        )
+        stop_result = await _stop_active_agent(
             controller,
             backend=backend,
             session_id=session_id,
             composite_key=composite_key,
             base_session_id=base_session_id,
         )
+        if not stop_result.get("ok"):
+            return stop_result
+        # The canonical stop SETTLES the turn (releases the runtime gate / pending
+        # requests / terminal result) but only INTERRUPTS it; it does not free the
+        # rest of the runtime. Without this, "End" on an active row would leave the
+        # row behind and force a second Disconnect:
+        #   - codex keeps its session mappings + shared app-server transport,
+        #   - opencode keeps its local polling task,
+        #   - claude's CLI subprocess can linger after the client disconnects.
+        # Claude's client is already removed by the stop path (so its row clears and
+        # calling _end_claude here would wrongly report ``session_not_live``); only
+        # the leftover subprocess needs reaping.
+        if backend == "codex":
+            teardown = await _end_codex(controller, base_session_id)
+            if isinstance(teardown, dict) and teardown.get("process_killed"):
+                stop_result["process_killed"] = True
+        elif backend == "opencode":
+            await _end_opencode(controller, base_session_id)
+        elif backend == "claude" and isinstance(claude_pid, int):
+            try:
+                from modules.agents.claude_process_reaper import _reap_pid_set
+
+                if (await _reap_pid_set({claude_pid}, terminate_timeout=2.0, logger=logger)) > 0:
+                    stop_result["process_killed"] = True
+            except Exception:  # noqa: BLE001
+                logger.debug("end: claude reap after stop failed for %s", claude_pid, exc_info=True)
+        return stop_result
 
     if backend == "claude":
         result = await _end_claude(controller, composite_key, base_session_id)
@@ -868,7 +946,7 @@ def snapshot_running_agents(controller: "Controller") -> dict[str, Any]:
     # separate wall-clock baseline (``time.time()`` vs ``ps`` start time) — do
     # NOT feed this ``now`` into orphan elapsed math.
     now = time.monotonic()
-    seen_native: set[str] = set()
+    seen_native: dict[str, Optional[int]] = {}
     seen_pids: set[int] = set()
     rows: list[dict[str, Any]] = []
     rows.extend(_collect_claude(controller, now, seen_native, seen_pids))

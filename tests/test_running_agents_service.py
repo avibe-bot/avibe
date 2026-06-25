@@ -57,8 +57,9 @@ class _FakeTurnRegistry:
 
 
 class _FakeTransport:
-    def __init__(self, pid):
+    def __init__(self, pid, is_alive=True):
         self.pid = pid
+        self.is_alive = is_alive
 
 
 class _FakeTask:
@@ -233,6 +234,25 @@ def test_codex_skips_evicted_idle_base_without_transport():
     assert by_base["active"]["pid"] is None
 
 
+def test_codex_skips_dead_transport_object():
+    # A transport whose app-server already exited (is_alive False) can linger in
+    # _transports; such a base must not surface as a phantom idle row, nor count
+    # toward pid_shared for a sibling on the same cwd.
+    mgr = _FakeSessionMgr({"dead": "/work/x", "alive": "/work/y"})
+    turns = _FakeTurnRegistry({})
+    codex = types.SimpleNamespace(
+        _session_mgr=mgr,
+        _turn_registry=turns,
+        _transports={"/work/x": _FakeTransport(8001, is_alive=False), "/work/y": _FakeTransport(8002)},
+    )
+    controller = _make_controller(codex=codex)
+    snap = running_agents.snapshot_running_agents(controller)
+    by_base = {r["base_session_id"]: r for r in snap["agents"]}
+
+    assert set(by_base) == {"alive"}  # the dead-transport base is dropped
+    assert by_base["alive"]["pid"] == 8002
+
+
 def test_opencode_active_requests_have_no_pid():
     oc = types.SimpleNamespace(_active_requests={"base-oc": _FakeTask(done=False)})
     controller = _make_controller(opencode=oc)
@@ -346,6 +366,31 @@ def test_session_meta_prefers_matching_backend_before_recent_fallback():
 
     assert running_agents._choose_session_meta(claude_row, candidates)["id"] == "ses-claude"
     assert running_agents._choose_session_meta(unknown_row, candidates)["id"] == "ses-codex"
+
+
+def test_orphan_surfaces_duplicate_native_with_different_pid(monkeypatch):
+    from modules.agents.claude_process_reaper import AVIBE_CLAUDE_SESSION_OWNER
+
+    # A live client reconnected as pid 100 (native nat-dup); an OLDER process with
+    # the SAME native id but pid 200 leaked. The native match must NOT hide it.
+    live = _FakeClaudeClient("slack_dup", "nat-dup", None)
+    live._fake_pid = 100
+    leaked_old = types.SimpleNamespace(
+        pid=200, native_session_id="nat-dup", owner=AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0
+    )
+    monkeypatch.setattr(
+        "modules.agents.claude_process_reaper._load_owned_process_registry",
+        lambda *a, **k: [leaked_old],
+    )
+    controller = _make_controller(
+        claude={"sessions": {"slack_dup:/w": live}, "active": set(), "last_activity": {}}
+    )
+    snap = running_agents.snapshot_running_agents(controller)
+    orphans = [r for r in snap["agents"] if r["state"] == "orphan"]
+
+    # The leaked old process surfaces as a killable orphan; the live client's own
+    # pid 100 is still excluded (by seen_pids).
+    assert {o["pid"] for o in orphans} == {200}
 
 
 def test_orphan_skips_dead_and_reused_pids(monkeypatch):
@@ -598,6 +643,45 @@ def test_end_active_im_turn_uses_canonical_stop_path(monkeypatch):
     assert payload["backend_composite_session_id"] == "slack_y:/w"
     assert payload["agent_session_target"]["agent_backend"] == "claude"
     assert payload["suppress_stop_no_active_notice"] is True
+
+
+def test_end_active_codex_frees_runtime_after_stop():
+    # Active Codex End must FREE the runtime after the canonical stop (which only
+    # interrupts the turn): clear the session mappings + stop the now-unused shared
+    # transport so the row disappears instead of forcing a second Disconnect.
+    async def _handle_stop(context):
+        return True
+
+    cleared = {}
+    transport = types.SimpleNamespace(send_request=_AsyncFlag(), stop=_AsyncFlag())
+    transports = {"/w": transport}
+    mgr = types.SimpleNamespace(
+        get_cwd=lambda b: "/w",
+        get_thread_id=lambda b: "th1",
+        clear=lambda b: cleared.__setitem__("clr", b),
+        sessions_for_cwd=lambda cwd: [],  # this was the last session on the cwd
+    )
+    treg = types.SimpleNamespace(
+        get_active_turn=lambda b: None,
+        clear_session=lambda b: cleared.__setitem__("treg", b),
+    )
+    codex = types.SimpleNamespace(
+        _session_mgr=mgr, _turn_registry=treg, _transports=transports, _transport_last_activity={"/w": 0.0}
+    )
+    controller = _make_controller(codex=codex)
+    controller.session_turns = types.SimpleNamespace(is_in_flight=lambda sid: False, cancel=_AsyncFlag())
+    controller.command_handler = types.SimpleNamespace(handle_stop=_handle_stop)
+
+    res = asyncio.run(
+        running_agents.end_running_agent(
+            controller, backend="codex", state="active", session_id="ses-im", base_session_id="b1"
+        )
+    )
+    assert res["ok"] is True
+    # Canonical stop ran, THEN teardown cleared mappings + stopped the shared transport.
+    assert cleared.get("clr") == "b1" and cleared.get("treg") == "b1"
+    assert transport.stop.called and "/w" not in transports
+    assert res["process_killed"] is True
 
 
 def test_end_unknown_target():
