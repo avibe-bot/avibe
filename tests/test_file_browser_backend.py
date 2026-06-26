@@ -114,6 +114,37 @@ def test_content_refuses_toctou_symlink_swap(tmp_path):
     assert exc.value.code == "not_found"
 
 
+def test_rename_no_replace_moves_when_target_absent(tmp_path):
+    src = tmp_path / "a.txt"
+    src.write_text("A", encoding="utf-8")
+    dst = tmp_path / "b.txt"
+
+    fs._rename_no_replace(src, dst)
+
+    assert dst.read_text(encoding="utf-8") == "A"
+    assert not src.exists()
+
+
+def test_rename_refuses_to_clobber_target_appearing_after_precheck(tmp_path, monkeypatch):
+    # TOCTOU guard: even if the existence pre-check is blind to the destination (it was
+    # created in the race window), the atomic no-replace rename must refuse rather than
+    # silently clobber the file that appeared.
+    src = tmp_path / "src.txt"
+    src.write_text("SRC", encoding="utf-8")
+    dst = tmp_path / "dst.txt"
+    dst.write_text("DST", encoding="utf-8")
+
+    real_exists = fs._exists_no_follow
+    monkeypatch.setattr(fs, "_exists_no_follow", lambda p: False if Path(p) == dst else real_exists(p))
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.rename_path(str(src), "dst.txt")
+
+    assert exc.value.code == "exists"
+    assert dst.read_text(encoding="utf-8") == "DST"  # not clobbered
+    assert src.read_text(encoding="utf-8") == "SRC"  # source intact
+
+
 def test_write_is_atomic_and_detects_mtime_conflict(tmp_path):
     path = tmp_path / "doc.txt"
     first = fs.write_file(str(path), "first")

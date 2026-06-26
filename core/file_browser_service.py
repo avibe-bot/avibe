@@ -133,6 +133,29 @@ def _is_dir_no_follow(path: Path) -> bool:
         return False
 
 
+def _rename_no_replace(source: Path, target: Path) -> None:
+    """Rename ``source`` -> ``target`` without ever replacing an existing target.
+
+    ``os.rename()`` REPLACES an existing destination on POSIX, so a separate existence
+    check before it is a TOCTOU race — a target created in between is silently clobbered.
+    ``os.link()`` is atomic and fails with ``FileExistsError`` if the target exists, so use
+    link()+unlink() for the common same-directory, regular-file case. Symlinks and
+    directories cannot be hard-linked; for those fall back to a last-moment existence check
+    + rename, where rename onto a different-type or non-empty target fails rather than
+    clobbering (only replacing an empty directory remains a residual race).
+    """
+    try:
+        os.link(source, target, follow_symlinks=False)
+    except FileExistsError as exc:
+        raise ConflictError("exists", "Destination already exists") from exc
+    except OSError:
+        if _exists_no_follow(target):
+            raise ConflictError("exists", "Destination already exists")
+        source.rename(target)
+        return
+    os.unlink(source)
+
+
 def _stat_existing(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
     try:
         return path.stat() if follow_symlinks else path.lstat()
@@ -430,9 +453,9 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
 
     def _rename() -> dict[str, Any]:
         try:
-            if _exists_no_follow(target):
-                raise ConflictError("exists", "Destination already exists")
-            source.rename(target)
+            # Atomic no-replace rename: never clobber a destination that appears between the
+            # precheck above and the rename itself.
+            _rename_no_replace(source, target)
             return {"ok": True, "path": str(target)}
         except FileExistsError as exc:
             raise ConflictError("exists", "Destination already exists") from exc
