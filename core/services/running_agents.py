@@ -892,6 +892,55 @@ async def _stop_active_agent(
     return {"ok": False, "error": str(payload.get("stop_failure_reason") or "stop_failed")}
 
 
+def _inflight_turn_matches_row(
+    controller: "Controller",
+    *,
+    session_id: str,
+    backend: Optional[str],
+    base_session_id: Optional[str],
+) -> bool:
+    """True when the Workbench turn in flight for ``session_id`` is THIS row's
+    runtime (same backend / session anchor), so promoting the row to active and
+    canceling that turn is correct.
+
+    The in-flight turn's identity comes from the ``MessageContext`` it started
+    under (``platform_specific.agent_session_target`` → ``agent_backend`` /
+    ``session_anchor``; same source ``turn_state`` uses). We require a positive
+    match on backend and/or anchor and NO conflict on either: a mismatch means a
+    different turn is running under the same chat, and "no evidence" is treated as
+    not-this-row (the backend-specific checks then decide), so we never cancel an
+    unrelated turn.
+    """
+    manager = getattr(controller, "session_turns", None)
+    in_flight = getattr(manager, "in_flight", None)
+    if not isinstance(in_flight, dict):
+        return False
+    entry = in_flight.get(session_id)
+    if entry is None:
+        return False
+    task = getattr(entry, "task", None)
+    try:
+        if task is not None and hasattr(task, "done") and task.done():
+            return False
+    except Exception:  # noqa: BLE001
+        pass
+    payload = getattr(getattr(entry, "context", None), "platform_specific", None) or {}
+    target = payload.get("agent_session_target") if isinstance(payload, dict) else None
+    target = target if isinstance(target, dict) else {}
+    turn_backend = str(target.get("agent_backend") or "").strip()
+    turn_anchor = str(target.get("session_anchor") or "").strip()
+    row_backend = str(backend or "").strip()
+    row_base = str(base_session_id or "").strip()
+
+    backend_conflict = bool(turn_backend and row_backend and turn_backend != row_backend)
+    anchor_conflict = bool(turn_anchor and row_base and turn_anchor != row_base)
+    if backend_conflict or anchor_conflict:
+        return False
+    backend_match = bool(turn_backend and turn_backend == row_backend)
+    anchor_match = bool(turn_anchor and turn_anchor == row_base)
+    return backend_match or anchor_match
+
+
 def _resolve_live_state(
     controller: "Controller",
     *,
@@ -912,15 +961,18 @@ def _resolve_live_state(
     Returns ``"active"``/``"idle"``, or ``None`` when the live state can't be
     determined (caller then falls back to the client-supplied ``state``).
     """
-    # A Workbench/chat turn in flight is authoritative for any backend.
-    manager = getattr(controller, "session_turns", None)
-    is_in_flight = getattr(manager, "is_in_flight", None)
-    if session_id and callable(is_in_flight):
-        try:
-            if is_in_flight(session_id):
-                return "active"
-        except Exception:  # noqa: BLE001
-            logger.debug("end: is_in_flight check failed for %s", session_id, exc_info=True)
+    # A Workbench/chat turn in flight promotes the row to active — but ONLY when
+    # that in-flight turn actually belongs to the clicked row. A chat session can
+    # hold an idle row for one backend/base while a *different* turn (e.g. a new
+    # Claude message after an idle Codex row) runs under the same ``session_id``;
+    # promoting on ``session_id`` alone would make the active End cancel that
+    # unrelated turn. So compare the in-flight turn's backend / session anchor to
+    # the target before trusting it; on conflict or no positive identity match,
+    # fall through to the backend-specific live checks below.
+    if session_id and _inflight_turn_matches_row(
+        controller, session_id=session_id, backend=backend, base_session_id=base_session_id
+    ):
+        return "active"
 
     if backend == "claude":
         active = getattr(controller, "claude_active_sessions", set()) or set()
