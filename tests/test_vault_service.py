@@ -277,6 +277,58 @@ def test_create_grant_freezes_scope_members_and_cache_is_memory_only(vault):
     assert json.loads(row["member_snapshot"]) == ["A_KEY", "B_KEY"]
 
 
+def test_grant_uses_approval_member_snapshot_not_later_group_members(vault):
+    _create(vault, name="A_KEY", protection="protected", group="crypto")
+    cache = vs.VaultGrantDekCache()
+    with vault.begin() as conn:
+        req = _access_request(conn, "A_KEY", session_id="ses_1")
+        vs.create_secret(conn, name="B_KEY", protection="protected", group="crypto", sealed=_sealed("b"))
+        grant = vs.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_1",
+            created_by_request_id=req["id"],
+            deks_by_secret={"A_KEY": "dek-a"},
+            cache=cache,
+        )
+
+    assert grant["member_snapshot"] == ["A_KEY"]
+    assert grant["cached_member_count"] == 1
+    assert cache.has(grant["id"], "A_KEY")
+    assert not cache.has(grant["id"], "B_KEY")
+
+
+def test_reusing_approval_request_does_not_create_second_grant(vault):
+    _create(vault, name="A_KEY", protection="protected")
+    cache = vs.VaultGrantDekCache()
+    with vault.begin() as conn:
+        req = _access_request(conn, "A_KEY", session_id="ses_1")
+        first = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="A_KEY",
+            session_id="ses_1",
+            created_by_request_id=req["id"],
+            deks_by_secret={"A_KEY": "dek-a"},
+            cache=cache,
+        )
+        with pytest.raises(vs.InvalidRequestError):
+            vs.create_grant(
+                conn,
+                scope_type="secret",
+                scope_ref="A_KEY",
+                session_id="ses_1",
+                created_by_request_id=req["id"],
+                deks_by_secret={"A_KEY": "dek-a-2"},
+                cache=cache,
+            )
+        grants = list(conn.execute(select(vault_grants)).mappings())
+
+    assert [row["id"] for row in grants] == [first["id"]]
+    assert cache.get(first["id"], "A_KEY") == "dek-a"
+
+
 def test_find_active_grant_requires_cached_dek_and_expires_stale_row(vault):
     _create(vault, name="A_KEY", protection="protected")
     cache = vs.VaultGrantDekCache()
@@ -296,6 +348,55 @@ def test_find_active_grant_requires_cached_dek_and_expires_stale_row(vault):
     with vault.connect() as conn:
         status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
     assert status == "expired"
+
+
+def test_rotate_protected_secret_expires_active_grants(vault):
+    _create(vault, name="A_KEY", protection="protected")
+    cache = vs.VaultGrantDekCache()
+    with vault.begin() as conn:
+        req = _access_request(conn, "A_KEY", session_id="ses_1")
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="A_KEY",
+            session_id="ses_1",
+            created_by_request_id=req["id"],
+            deks_by_secret={"A_KEY": "dek-a"},
+            cache=cache,
+        )
+        vs.rotate_secret(conn, "A_KEY", _sealed("rotated"), cache=cache)
+        resolved = vs.resolve_secret_access(conn, "A_KEY", session_id="ses_1", create_request=False, cache=cache)
+
+    assert resolved["status"] == "approval_required"
+    with vault.connect() as conn:
+        status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
+    assert status == "expired"
+    assert not cache.has(grant["id"], "A_KEY")
+
+
+def test_delete_protected_secret_expires_active_grants_before_recreate(vault):
+    _create(vault, name="A_KEY", protection="protected")
+    cache = vs.VaultGrantDekCache()
+    with vault.begin() as conn:
+        req = _access_request(conn, "A_KEY", session_id="ses_1")
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="A_KEY",
+            session_id="ses_1",
+            created_by_request_id=req["id"],
+            deks_by_secret={"A_KEY": "dek-a"},
+            cache=cache,
+        )
+        vs.delete_secret(conn, "A_KEY", cache=cache)
+        vs.create_secret(conn, name="A_KEY", protection="protected", sealed=_sealed("recreated"))
+        resolved = vs.resolve_secret_access(conn, "A_KEY", session_id="ses_1", create_request=False, cache=cache)
+
+    assert resolved["status"] == "approval_required"
+    with vault.connect() as conn:
+        status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
+    assert status == "expired"
+    assert not cache.has(grant["id"], "A_KEY")
 
 
 def test_active_grant_list_expires_rows_without_process_cache(vault):
@@ -336,6 +437,23 @@ def test_resolve_protected_without_grant_returns_approval_card(vault):
     assert card["command"] == "python sync.py"
     assert any(option["scope_type"] == "secret" for option in card["scope_options"])
     assert all("value" not in json.dumps(option) for option in card["scope_options"])
+
+
+def test_resolve_access_card_uses_delivery_session_fallback(vault):
+    _create(vault, name="PROTECTED_KEY", protection="protected", group="crypto")
+    with vault.begin() as conn:
+        result = vs.resolve_secret_access(conn, "PROTECTED_KEY", session_id="ses_delivery", requester={}, delivery={})
+        card = result["request"]["card"]
+        assert card["session_id"] == "ses_delivery"
+        req_id = result["request"]["id"]
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="PROTECTED_KEY",
+            created_by_request_id=req_id,
+            deks_by_secret={"PROTECTED_KEY": "dek"},
+        )
+    assert grant["session_id"] == "ses_delivery"
 
 
 def test_keypair_and_always_ask_are_not_grantable(vault):

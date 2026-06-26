@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import threading
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -32,6 +33,12 @@ DEFAULT_GROUP = "default"
 GRANT_SCOPE_TYPES = {"secret", "skill", "group"}
 DEFAULT_GRANT_TTL_SECONDS = {"secret": 300, "skill": 900, "group": 900}
 GRANT_TTL_OPTIONS_SECONDS = (300, 900, 3600)
+
+
+@dataclass(frozen=True)
+class GrantApproval:
+    members: list[str]
+    session_id: str | None
 
 
 class VaultServiceError(Exception):
@@ -435,10 +442,14 @@ def rotate_secret(
     conn: Connection,
     name: str,
     sealed: Sealed,
+    *,
+    cache: VaultGrantDekCache = GRANT_DEK_CACHE,
 ) -> dict[str, Any]:
     row = _require_row(conn, name)
     public_meta = _public_meta(row.get("public_meta"))
     public_meta.pop("preview", None)
+    if row.get("protection") == "protected":
+        _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
     conn.execute(
         vault_secrets.update()
         .where(vault_secrets.c.name == name)
@@ -454,9 +465,12 @@ def rotate_secret(
     return _meta_payload(_require_row(conn, name))
 
 
-def delete_secret(conn: Connection, name: str) -> None:
-    if conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name)).first() is None:
+def delete_secret(conn: Connection, name: str, *, cache: VaultGrantDekCache = GRANT_DEK_CACHE) -> None:
+    row = conn.execute(select(vault_secrets).where(vault_secrets.c.name == name)).mappings().first()
+    if row is None:
         raise SecretNotFoundError(name)
+    if row.get("protection") == "protected":
+        _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
     conn.execute(vault_secrets.delete().where(vault_secrets.c.name == name))
     audit(conn, "deleted", secret_name=name)
 
@@ -780,7 +794,7 @@ def create_access_request(
         command=delivery_payload.get("command"),
         egress=delivery_payload.get("egress"),
         skill=delivery_payload.get("skill") or requester_payload.get("skill"),
-        session_id=requester_payload.get("session_id"),
+        session_id=requester_payload.get("session_id") or delivery_payload.get("session_id"),
     )
     delivery_payload["card"] = card
     conn.execute(
@@ -822,7 +836,7 @@ def create_sign_request(
         command=delivery_payload.get("command") or f"sign:{scheme}",
         egress=delivery_payload.get("egress") or "signature",
         skill=delivery_payload.get("skill") or requester_payload.get("skill"),
-        session_id=requester_payload.get("session_id"),
+        session_id=requester_payload.get("session_id") or delivery_payload.get("session_id"),
         grantable=False,
     )
     delivery_payload.update({"digest": digest, "scheme": scheme, "card": card})
@@ -923,6 +937,21 @@ def _expire_grant_rows(
     return expired
 
 
+def _expire_active_grants_for_secret(
+    conn: Connection,
+    secret_name: str,
+    *,
+    cache: VaultGrantDekCache = GRANT_DEK_CACHE,
+    reason: str = "grant-expired",
+) -> int:
+    rows = [
+        dict(row)
+        for row in conn.execute(select(vault_grants).where(vault_grants.c.status == "active")).mappings()
+        if secret_name in (_loads(row.get("member_snapshot")) or [])
+    ]
+    return _expire_grant_rows(conn, rows, cache=cache, reason=reason)
+
+
 def expire_grants(conn: Connection, *, cache: VaultGrantDekCache = GRANT_DEK_CACHE) -> int:
     now = _now()
     rows = [
@@ -955,8 +984,8 @@ def _validate_access_request_for_grant(
     scope_type: str,
     scope_ref: str,
     session_id: str | None,
-    members: list[str],
-) -> None:
+    live_members: list[str],
+) -> GrantApproval:
     row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().first()
     if row is None:
         raise RequestNotFoundError(request_id)
@@ -966,22 +995,31 @@ def _validate_access_request_for_grant(
     if row_dict.get("status") != "pending":
         raise InvalidRequestError("grant approval request is not pending")
     requested_secret = row_dict.get("secret_name")
-    if requested_secret not in members:
+    if requested_secret not in live_members:
         raise InvalidRequestError("grant scope does not cover the requested secret")
     requested_session_id = _request_session_id(row_dict)
-    if requested_session_id and requested_session_id != session_id:
+    effective_session_id = session_id or requested_session_id
+    if requested_session_id and requested_session_id != effective_session_id:
         raise InvalidRequestError("grant session does not match the approval request")
     card = _request_card(row_dict)
     allowed_scopes = card.get("scope_options") if isinstance(card, dict) else None
     if isinstance(allowed_scopes, list) and allowed_scopes:
-        if not any(
-            isinstance(option, dict)
-            and option.get("scope_type") == scope_type
-            and option.get("scope_ref") == scope_ref
-            and requested_secret in (option.get("member_snapshot") or [])
-            for option in allowed_scopes
-        ):
-            raise InvalidRequestError("grant scope was not offered by the approval request")
+        for option in allowed_scopes:
+            if not (
+                isinstance(option, dict)
+                and option.get("scope_type") == scope_type
+                and option.get("scope_ref") == scope_ref
+            ):
+                continue
+            snapshot = option.get("member_snapshot") or []
+            if not isinstance(snapshot, list):
+                raise InvalidRequestError("grant scope has an invalid approval snapshot")
+            members = [str(name) for name in snapshot if isinstance(name, str) and name]
+            if requested_secret not in members:
+                break
+            return GrantApproval(members=members, session_id=effective_session_id)
+        raise InvalidRequestError("grant scope was not offered by the approval request")
+    return GrantApproval(members=live_members, session_id=effective_session_id)
 
 
 def create_grant(
@@ -999,51 +1037,63 @@ def create_grant(
         raise InvalidGrantError(f"invalid grant scope_type: {scope_type!r}")
     if not created_by_request_id:
         raise InvalidRequestError("grant creation requires an approval request")
-    members = [row["name"] for row in _grantable_member_rows(conn, scope_type, scope_ref)]
-    if not members:
+    live_members = [row["name"] for row in _grantable_member_rows(conn, scope_type, scope_ref)]
+    if not live_members:
         raise NotGrantableError(f"{scope_type}:{scope_ref} has no grantable static secrets")
+    approval = _validate_access_request_for_grant(
+        conn,
+        created_by_request_id,
+        scope_type=scope_type,
+        scope_ref=scope_ref,
+        session_id=session_id,
+        live_members=live_members,
+    )
+    session_id = approval.session_id
+    members = approval.members
+    members = [name for name in members if name in live_members]
+    if not members:
+        raise InvalidRequestError("grant approval snapshot has no currently grantable members")
     if not deks_by_secret:
         raise InvalidGrantError("grant creation requires a released DEK set")
     missing_deks = [name for name in members if not deks_by_secret.get(name)]
     if missing_deks:
         raise InvalidGrantError(f"grant DEK set is missing: {', '.join(missing_deks)}")
-    if created_by_request_id:
-        _validate_access_request_for_grant(
-            conn,
-            created_by_request_id,
-            scope_type=scope_type,
-            scope_ref=scope_ref,
-            session_id=session_id,
-            members=members,
+    claim = conn.execute(
+        vault_requests.update()
+        .where(
+            vault_requests.c.id == created_by_request_id,
+            vault_requests.c.request_type == "access",
+            vault_requests.c.status == "pending",
         )
+        .values(status="approved", decided_at=_now())
+    )
+    if claim.rowcount != 1:
+        raise InvalidRequestError("grant approval request is not pending")
     ttl = int(ttl_seconds or DEFAULT_GRANT_TTL_SECONDS[scope_type])
     ttl = max(1, min(ttl, _ttl_cap_for_members(conn, members)))
     now_dt = datetime.now(timezone.utc)
     grant_id = _id("vgr")
-    conn.execute(
-        vault_grants.insert().values(
-            id=grant_id,
-            scope_type=scope_type,
-            scope_ref=scope_ref,
-            member_snapshot=json.dumps(members),
-            session_id=session_id,
-            status="active",
-            created_by_request_id=created_by_request_id,
-            created_at=now_dt.isoformat(),
-            expires_at=(now_dt + timedelta(seconds=ttl)).isoformat(),
+    try:
+        conn.execute(
+            vault_grants.insert().values(
+                id=grant_id,
+                scope_type=scope_type,
+                scope_ref=scope_ref,
+                member_snapshot=json.dumps(members),
+                session_id=session_id,
+                status="active",
+                created_by_request_id=created_by_request_id,
+                created_at=now_dt.isoformat(),
+                expires_at=(now_dt + timedelta(seconds=ttl)).isoformat(),
+            )
         )
-    )
-    cache.put(grant_id, {name: deks_by_secret[name] for name in members})
-    if created_by_request_id:
+    except Exception:
         conn.execute(
             vault_requests.update()
-            .where(
-                vault_requests.c.id == created_by_request_id,
-                vault_requests.c.request_type == "access",
-                vault_requests.c.status == "pending",
-            )
-            .values(status="approved", decided_at=_now())
+            .where(vault_requests.c.id == created_by_request_id)
+            .values(status="pending", decided_at=None)
         )
+        raise
     audit(
         conn,
         "granted",
@@ -1053,6 +1103,7 @@ def create_grant(
         grant_id=grant_id,
     )
     row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().one()
+    cache.put(grant_id, {name: deks_by_secret[name] for name in members})
     return _grant_row_payload(dict(row), cache=cache)
 
 
