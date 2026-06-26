@@ -4,9 +4,14 @@ import { useTranslation } from 'react-i18next';
 // Lazy so xterm.js stays out of the main bundle until the Terminal is opened.
 const TerminalView = lazy(() => import('./TerminalView').then((m) => ({ default: m.TerminalView })));
 
-// A stable per-browser session id so the tmux-backed session reconnects to the
-// same shell after a refresh / network drop (persistence). Falls back to a fixed
-// id if localStorage is unavailable.
+// A process-unique in-memory fallback id, generated once per page load. Used only when
+// localStorage is unavailable, so privacy-restricted/embedded browsers don't all collapse
+// onto one shared tmux session (which would expose terminal state/commands across clients).
+const FALLBACK_SESSION_ID = `wb-${Math.random().toString(36).slice(2, 10)}`;
+
+// A stable per-browser session id so the tmux-backed session reconnects to the same shell
+// after a refresh / network drop (persistence). Falls back to the in-memory id above when
+// localStorage is unavailable.
 function getSessionId(): string {
   const KEY = 'avibe.terminal.sessionId';
   try {
@@ -17,7 +22,7 @@ function getSessionId(): string {
     }
     return id;
   } catch {
-    return 'workbench';
+    return FALLBACK_SESSION_ID;
   }
 }
 

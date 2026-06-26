@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronRight, Download, File as FileIcon, Folder, FolderPlus, Loader2, RefreshCw, Star } from 'lucide-react';
 import clsx from 'clsx';
@@ -44,17 +44,27 @@ export const AppsFileBrowserPage: React.FC = () => {
   const [sysFavs, setSysFavs] = useState<Favorite[]>([]);
   const [selected, setSelected] = useState<Selected | null>(null);
 
+  // Bump a token per navigation so a slow earlier listDir() that resolves last can't
+  // overwrite cwd/listing with a stale directory (which would make New Folder / selection
+  // act in the wrong place).
+  const navSeq = useRef(0);
   const navigate = useCallback(
     (path: string) => {
+      const seq = ++navSeq.current;
       setLoading(true);
       setError(null);
       listDir(path, showHidden)
         .then((r) => {
+          if (seq !== navSeq.current) return; // a newer navigation superseded this response
           setCwd(r.path);
           setListing(r);
         })
-        .catch((e: unknown) => setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.listFailed'))))
-        .finally(() => setLoading(false));
+        .catch((e: unknown) => {
+          if (seq === navSeq.current) setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.listFailed')));
+        })
+        .finally(() => {
+          if (seq === navSeq.current) setLoading(false);
+        });
     },
     [showHidden],
   );
@@ -316,7 +326,9 @@ const ContentPane: React.FC<{ selected: Selected | null }> = ({ selected }) => {
       <Suspense
         fallback={<div className="grid flex-1 place-items-center text-[12px] text-muted">{t('common.loading')}</div>}
       >
-        <FileEditorPane path={selected.path} filename={selected.name} mtime={selected.mtime} />
+        {/* key by path: remount per file so an in-flight save/load can never apply its
+            result to a different file (stale clean/dirty baseline or wrong expected_mtime). */}
+        <FileEditorPane key={selected.path} path={selected.path} filename={selected.name} mtime={selected.mtime} />
       </Suspense>
     );
   }
