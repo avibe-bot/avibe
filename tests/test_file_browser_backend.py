@@ -49,6 +49,20 @@ def test_list_directory_includes_dirs_files_hidden_and_unfollowed_symlink(tmp_pa
     assert fs.metadata(str(root / "link"))["kind"] == "symlink"
 
 
+def test_list_directory_truncates_scan_over_hidden_entries(tmp_path, monkeypatch):
+    monkeypatch.setattr(fs, "MAX_LIST_ENTRIES", 5)
+    root = tmp_path / "root"
+    root.mkdir()
+    for index in range(12):
+        (root / f".hidden-{index}").write_text("hidden", encoding="utf-8")
+    (root / "a.txt").write_text("a", encoding="utf-8")
+    (root / "b.txt").write_text("b", encoding="utf-8")
+
+    result = fs.list_directory(str(root), show_hidden=False)
+
+    assert result["truncated"] is True
+
+
 def test_entry_ops_handle_cyclic_symlink(tmp_path):
     link = tmp_path / "loop"
     link.symlink_to(link)

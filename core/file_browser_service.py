@@ -315,10 +315,15 @@ def _entry_payload(entry: os.DirEntry[str]) -> dict[str, Any] | None:
 def list_directory(raw_path: str, *, show_hidden: bool = False) -> dict[str, Any]:
     target = _require_directory(raw_path)
     entries: list[dict[str, Any]] = []
+    scanned_entries = 0
     truncated = False
     try:
         with os.scandir(target) as iterator:
             for entry in iterator:
+                scanned_entries += 1
+                if scanned_entries >= MAX_LIST_ENTRIES:
+                    truncated = True
+                    break
                 if not show_hidden and entry.name.startswith("."):
                     continue
                 if len(entries) >= MAX_LIST_ENTRIES:
