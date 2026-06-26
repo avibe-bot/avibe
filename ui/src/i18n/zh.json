@@ -2092,7 +2092,8 @@
       "errors": {
         "aadFieldTooLarge": "这次保险库封箱请求过大。",
         "invalidPublicKey": "avault 返回了无效公钥。请修复 avault 依赖后重试。",
-        "fingerprintMismatch": "avault 公钥指纹已变化。请先确认本机 avault 安装可信，再保存该密钥。"
+        "fingerprintMismatch": "avault 公钥指纹已变化。请先确认本机 avault 安装可信，再保存该密钥。",
+        "secretExists": "同名密钥已存在。"
       }
     },
     "request": {

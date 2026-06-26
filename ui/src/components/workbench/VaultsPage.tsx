@@ -10,7 +10,10 @@ import { useApi, type VaultAuditEvent, type VaultSecret } from '../../context/Ap
 import { useToast } from '../../context/ToastContext';
 import { VaultSecretForm } from '../ui/vault-secret-form';
 
-const AddSecretDialog: React.FC<{ onClose: () => void; onCreated: (name: string) => void }> = ({ onClose, onCreated }) => {
+const AddSecretDialog: React.FC<{
+  onClose: () => void;
+  onCreated: (name: string, reason?: 'created' | 'already_exists') => void;
+}> = ({ onClose, onCreated }) => {
   const { t } = useTranslation();
 
   return (
@@ -164,7 +167,8 @@ export const VaultsPage: React.FC = () => {
       {adding && (
         <AddSecretDialog
           onClose={() => setAdding(false)}
-          onCreated={(name) => {
+          onCreated={(name, reason) => {
+            if (reason === 'already_exists') return;
             setAdding(false);
             showToast(t('vaults.created', { name }), 'success');
             refresh();

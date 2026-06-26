@@ -2093,7 +2093,8 @@
       "errors": {
         "aadFieldTooLarge": "The sealed vault request is too large.",
         "invalidPublicKey": "avault returned an invalid public key. Repair the avault dependency and try again.",
-        "fingerprintMismatch": "The avault public key fingerprint changed. Verify the local avault install before saving this secret."
+        "fingerprintMismatch": "The avault public key fingerprint changed. Verify the local avault install before saving this secret.",
+        "secretExists": "A secret with this name already exists."
       }
     },
     "request": {

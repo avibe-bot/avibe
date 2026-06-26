@@ -303,6 +303,40 @@ def test_create_grant_freezes_scope_members_and_cache_is_memory_only(vault):
     assert json.loads(row["member_snapshot"]) == ["A_KEY", "B_KEY"]
 
 
+def test_group_grant_approves_sibling_requests_in_same_session(vault):
+    _create(vault, name="A_KEY", protection="protected", group="crypto")
+    _create(vault, name="B_KEY", protection="protected", group="crypto")
+    cache = vs.VaultGrantDekCache()
+    with vault.begin() as conn:
+        req_a = _access_request(conn, "A_KEY", session_id="ses_1")
+        req_b = _access_request(conn, "B_KEY", session_id="ses_1")
+        req_other = _access_request(conn, "B_KEY", session_id="ses_2")
+        grant = vs.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_1",
+            created_by_request_id=req_a["id"],
+            deks_by_secret={"A_KEY": "dek-a", "B_KEY": "dek-b"},
+            cache=cache,
+        )
+        statuses = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                select(vault_requests.c.id, vault_requests.c.status).where(
+                    vault_requests.c.id.in_([req_a["id"], req_b["id"], req_other["id"]])
+                )
+            ).mappings()
+        }
+
+    assert grant["member_snapshot"] == ["A_KEY", "B_KEY"]
+    assert statuses == {
+        req_a["id"]: "approved",
+        req_b["id"]: "approved",
+        req_other["id"]: "pending",
+    }
+
+
 def test_grant_uses_approval_member_snapshot_not_later_group_members(vault):
     _create(vault, name="A_KEY", protection="protected", group="crypto")
     cache = vs.VaultGrantDekCache()

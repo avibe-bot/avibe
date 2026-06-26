@@ -92,6 +92,7 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
             )
         )
         vs.create_secret(conn, name="ARCHIVE_KEY", protection="protected", sealed=Sealed("ct", "nonce", "wrap"))
+        vs.create_secret(conn, name="ARCHIVE_OTHER_KEY", protection="protected", sealed=Sealed("ct-other", "nonce-other", "wrap-other"))
         vs.create_secret(
             conn,
             name="ARCHIVE_SIGNING_KEY",
@@ -106,6 +107,12 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
             "ARCHIVE_KEY",
             requester={"session_id": sid},
             delivery={"session_id": sid, "command": "python sync.py"},
+        )
+        pending_uncovered_req = vs.create_access_request(
+            conn,
+            "ARCHIVE_OTHER_KEY",
+            requester={"session_id": sid},
+            delivery={"session_id": sid, "command": "python other.py"},
         )
         sign_req = vs.create_sign_request(
             conn,
@@ -170,12 +177,15 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
             row["id"]: row["status"]
             for row in conn.execute(
                 select(vault_requests.c.id, vault_requests.c.status).where(
-                    vault_requests.c.id.in_([req["id"], pending_req["id"], sign_req["id"], other_req["id"]])
+                    vault_requests.c.id.in_(
+                        [req["id"], pending_req["id"], pending_uncovered_req["id"], sign_req["id"], other_req["id"]]
+                    )
                 )
             ).mappings()
         }
         assert request_statuses[req["id"]] == "approved"
-        assert request_statuses[pending_req["id"]] == "expired"
+        assert request_statuses[pending_req["id"]] == "approved"
+        assert request_statuses[pending_uncovered_req["id"]] == "expired"
         assert request_statuses[sign_req["id"]] == "expired"
         assert request_statuses[other_req["id"]] == "pending"
 

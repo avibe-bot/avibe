@@ -44,7 +44,15 @@ export const VaultSecretForm: React.FC<{
   onCreated: (name: string, reason?: 'created' | 'already_exists') => void;
   className?: string;
   defaultProtection?: VaultProtection;
-}> = ({ fixedName, onCancel, onCreated, className, defaultProtection = 'protected' }) => {
+  treatExistingAsFulfilled?: boolean;
+}> = ({
+  fixedName,
+  onCancel,
+  onCreated,
+  className,
+  defaultProtection = 'standard',
+  treatExistingAsFulfilled = false,
+}) => {
   const { t } = useTranslation();
   const api = useApi();
   const [name, setName] = useState(fixedName ?? '');
@@ -86,6 +94,15 @@ export const VaultSecretForm: React.FC<{
   const canSubmit =
     p2Ready && Boolean(secretName && value) && !submitting && (protection === 'standard' || protectedCreateReady);
 
+  const handleExistingSecret = () => {
+    if (treatExistingAsFulfilled) {
+      setValue('');
+      onCreated(secretName, 'already_exists');
+      return;
+    }
+    setError(t('vaults.dialog.errors.secretExists'));
+  };
+
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
     if (!canSubmit) return;
@@ -115,8 +132,7 @@ export const VaultSecretForm: React.FC<{
       );
       if (!created.ok) {
         if (created.code === 'secret_exists') {
-          setValue('');
-          onCreated(secretName, 'already_exists');
+          handleExistingSecret();
           return;
         }
         throw new Error(created.message || created.code || t('vaults.request.saveFailed'));
@@ -127,8 +143,7 @@ export const VaultSecretForm: React.FC<{
       if (err instanceof VaultBlindBoxError) {
         setError(t(`vaults.dialog.errors.${err.code}`));
       } else if (err instanceof ApiError && err.code === 'secret_exists') {
-        setValue('');
-        onCreated(secretName, 'already_exists');
+        handleExistingSecret();
       } else {
         setError(err instanceof Error ? err.message : String(err));
       }

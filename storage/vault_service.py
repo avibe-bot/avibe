@@ -1355,6 +1355,54 @@ def _validate_access_request_for_grant(
     return GrantApproval(members=live_members, session_id=effective_session_id)
 
 
+def _approve_sibling_access_requests_for_grant(
+    conn: Connection,
+    *,
+    created_by_request_id: str,
+    members: list[str],
+    session_id: str | None,
+    decided_at: str,
+) -> int:
+    if not members:
+        return 0
+    target_session_id = session_id
+    if not target_session_id:
+        approval_row = conn.execute(select(vault_requests).where(vault_requests.c.id == created_by_request_id)).mappings().first()
+        target_session_id = _request_session_id(dict(approval_row)) if approval_row else None
+    if not target_session_id:
+        return 0
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            select(vault_requests).where(
+                vault_requests.c.id != created_by_request_id,
+                vault_requests.c.request_type == "access",
+                vault_requests.c.status == "pending",
+                vault_requests.c.secret_name.in_(members),
+            )
+        ).mappings()
+        if _request_session_id(dict(row)) == target_session_id
+    ]
+    approved = 0
+    for row in rows:
+        result = conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id == row["id"], vault_requests.c.status == "pending")
+            .values(status="approved", decided_at=decided_at)
+        )
+        if result.rowcount != 1:
+            continue
+        audit(
+            conn,
+            "request-approved-by-grant",
+            secret_name=row.get("secret_name"),
+            delivery={"request_type": "access", "session_id": target_session_id},
+            request_id=row["id"],
+        )
+        approved += 1
+    return approved
+
+
 def create_grant(
     conn: Connection,
     *,
@@ -1392,6 +1440,7 @@ def create_grant(
     missing_deks = [name for name in members if not deks_by_secret.get(name)]
     if missing_deks:
         raise InvalidGrantError(f"grant DEK set is missing: {', '.join(missing_deks)}")
+    decided_at = _now()
     claim = conn.execute(
         vault_requests.update()
         .where(
@@ -1399,7 +1448,7 @@ def create_grant(
             vault_requests.c.request_type == "access",
             vault_requests.c.status == "pending",
         )
-        .values(status="approved", decided_at=_now())
+        .values(status="approved", decided_at=decided_at)
     )
     if claim.rowcount != 1:
         raise InvalidRequestError("grant approval request is not pending")
@@ -1438,6 +1487,13 @@ def create_grant(
         grant_id=grant_id,
     )
     row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().one()
+    _approve_sibling_access_requests_for_grant(
+        conn,
+        created_by_request_id=created_by_request_id,
+        members=members,
+        session_id=session_id,
+        decided_at=decided_at,
+    )
     cache.put(grant_id, {name: deks_by_secret[name] for name in members}, expires_at=expires_at)
     return _grant_row_payload(dict(row), cache=cache)
 
@@ -1514,7 +1570,6 @@ def revoke_session_grants(
         )
         revoked += 1
     return revoked
-
 
 
 def find_active_grant_for_secret(

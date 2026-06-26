@@ -49,6 +49,7 @@ export const SecretRequestCard: React.FC<{ name: string }> = ({ name }) => {
                 setFulfilled(true);
                 setOpen(false);
               }}
+              treatExistingAsFulfilled
             />
           </div>
         </DialogContent>
