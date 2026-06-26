@@ -526,6 +526,126 @@ def test_end_orphan_kills_verified_owned_pid(monkeypatch):
     assert reap.called
 
 
+def test_end_orphan_reaps_root_plus_descendants(monkeypatch):
+    # Killing a leaked Claude orphan must also reap its descendants (node helpers),
+    # mirroring the background sweep — otherwise the row disappears while children
+    # leak with no registry root a later kill could target.
+    from modules.agents import claude_process_reaper as reaper
+
+    rec = types.SimpleNamespace(pid=100, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
+    monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [rec])
+    monkeypatch.setattr(reaper, "_process_start_time", lambda pid: 1000.0)
+    # Tree: 100(root) -> 200(child) -> 300(grandchild); 999 is unrelated.
+    ps_rows = [
+        reaper.ClaudeProcessRow(pid=100, ppid=1, command="claude"),
+        reaper.ClaudeProcessRow(pid=200, ppid=100, command="node helper"),
+        reaper.ClaudeProcessRow(pid=300, ppid=200, command="node helper2"),
+        reaper.ClaudeProcessRow(pid=999, ppid=1, command="unrelated"),
+    ]
+    monkeypatch.setattr(reaper, "_run_ps", lambda: "ignored")
+    monkeypatch.setattr(reaper, "_parse_ps_rows", lambda _out: ps_rows)
+    captured = {}
+
+    async def _reap(target_pids, *, terminate_timeout, logger):
+        captured["pids"] = set(target_pids)
+        return len(target_pids)
+
+    monkeypatch.setattr(reaper, "_reap_pid_set", _reap)
+
+    res = asyncio.run(running_agents.end_running_agent(_make_controller(), state="orphan", pid=100))
+    assert res["ok"] is True
+    assert captured["pids"] == {100, 200, 300}  # root + descendants, NOT the unrelated 999
+
+
+def test_end_orphan_falls_back_to_root_when_ps_unreadable(monkeypatch):
+    # If the ps read fails during descendant expansion, still reap the verified
+    # root pid (better than reaping nothing).
+    from modules.agents import claude_process_reaper as reaper
+
+    rec = types.SimpleNamespace(pid=55, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
+    monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [rec])
+    monkeypatch.setattr(reaper, "_process_start_time", lambda pid: 1000.0)
+
+    def _boom():
+        raise RuntimeError("ps unavailable")
+
+    monkeypatch.setattr(reaper, "_run_ps", _boom)
+    captured = {}
+
+    async def _reap(target_pids, *, terminate_timeout, logger):
+        captured["pids"] = set(target_pids)
+        return len(target_pids)
+
+    monkeypatch.setattr(reaper, "_reap_pid_set", _reap)
+
+    res = asyncio.run(running_agents.end_running_agent(_make_controller(), state="orphan", pid=55))
+    assert res["ok"] is True
+    assert captured["pids"] == {55}
+
+
+def test_end_orphan_excludes_other_registered_session_pids(monkeypatch):
+    # A descendant that belongs to a DIFFERENT registered session (or its own
+    # children) must NOT be reaped when ending one orphan — mirror the sweep's
+    # owned-pid subtraction so we don't kill another live session's process.
+    from modules.agents import claude_process_reaper as reaper
+
+    root = types.SimpleNamespace(pid=100, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
+    other = types.SimpleNamespace(pid=200, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
+    monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [root, other])
+    monkeypatch.setattr(reaper, "_process_start_time", lambda pid: 1000.0)
+    # 100(root) -> 200(other owned) -> 300(other's child)
+    ps_rows = [
+        reaper.ClaudeProcessRow(pid=100, ppid=1, command="claude"),
+        reaper.ClaudeProcessRow(pid=200, ppid=100, command="claude"),
+        reaper.ClaudeProcessRow(pid=300, ppid=200, command="node helper"),
+    ]
+    monkeypatch.setattr(reaper, "_run_ps", lambda: "ignored")
+    monkeypatch.setattr(reaper, "_parse_ps_rows", lambda _out: ps_rows)
+    captured = {}
+
+    async def _reap(target_pids, *, terminate_timeout, logger):
+        captured["pids"] = set(target_pids)
+        return len(target_pids)
+
+    monkeypatch.setattr(reaper, "_reap_pid_set", _reap)
+
+    res = asyncio.run(running_agents.end_running_agent(_make_controller(), state="orphan", pid=100))
+    assert res["ok"] is True
+    # 200 (other owned) and its child 300 are excluded; only the verified root remains.
+    assert captured["pids"] == {100}
+
+
+def test_end_orphan_never_reaps_the_service_tree(monkeypatch):
+    # If the avibe service pid (or its descendants) somehow appears under the
+    # orphan root, it must never be signalled.
+    from modules.agents import claude_process_reaper as reaper
+
+    root = types.SimpleNamespace(pid=100, owner=reaper.AVIBE_CLAUDE_SESSION_OWNER, started_at=1000.0)
+    monkeypatch.setattr(reaper, "_load_owned_process_registry", lambda *a, **k: [root])
+    monkeypatch.setattr(reaper, "_process_start_time", lambda pid: 1000.0)
+    # 100(root) -> 200(== service pid) -> 300(service child)
+    ps_rows = [
+        reaper.ClaudeProcessRow(pid=100, ppid=1, command="claude"),
+        reaper.ClaudeProcessRow(pid=200, ppid=100, command="python avibe"),
+        reaper.ClaudeProcessRow(pid=300, ppid=200, command="python worker"),
+    ]
+    monkeypatch.setattr(reaper, "_run_ps", lambda: "ignored")
+    monkeypatch.setattr(reaper, "_parse_ps_rows", lambda _out: ps_rows)
+    monkeypatch.setattr(running_agents.os, "getpid", lambda: 200)  # avibe service is pid 200
+    captured = {}
+
+    async def _reap(target_pids, *, terminate_timeout, logger):
+        captured["pids"] = set(target_pids)
+        return len(target_pids)
+
+    monkeypatch.setattr(reaper, "_reap_pid_set", _reap)
+
+    res = asyncio.run(running_agents.end_running_agent(_make_controller(), state="orphan", pid=100))
+    assert res["ok"] is True
+    assert 200 not in captured["pids"] and 300 not in captured["pids"]
+    assert captured["pids"] == {100}
+
+
 def test_end_orphan_refuses_unowned_pid(monkeypatch):
     from modules.agents import claude_process_reaper as reaper
 

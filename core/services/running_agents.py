@@ -27,7 +27,9 @@ process registry, or eviction state.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import time
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -493,14 +495,19 @@ async def _end_orphan_pid(pid: int) -> dict[str, Any]:
     try:
         from modules.agents.claude_process_reaper import (
             AVIBE_CLAUDE_SESSION_OWNER,
+            _build_children_map,
+            _descendant_pids,
             _load_owned_process_registry,
+            _parse_ps_rows,
             _process_start_time,
             _reap_pid_set,
+            _run_ps,
         )
     except Exception:  # noqa: BLE001
         return {"ok": False, "error": "reaper_unavailable"}
+    registry = list(_load_owned_process_registry())
     record = None
-    for r in _load_owned_process_registry():
+    for r in registry:
         if getattr(r, "pid", None) == pid and getattr(r, "owner", None) == AVIBE_CLAUDE_SESSION_OWNER:
             record = r
             break
@@ -521,8 +528,38 @@ async def _end_orphan_pid(pid: int) -> dict[str, Any]:
     # NOTE: a microscopic TOCTOU remains between this check and the signal (the pid
     # could exit + be reused in the gap); it's inherent to pid-based signaling and
     # negligible vs. the registration→kill window the start-time match already covers.
-    killed = await _reap_pid_set({pid}, terminate_timeout=2.0, logger=logger)
-    return {"ok": killed > 0, "action": "killed_process", "pid": pid}
+    #
+    # Reap the orphan root TOGETHER WITH its descendants (e.g. node helper
+    # processes), mirroring the background orphan sweep — otherwise killing only
+    # the registered root makes the Running tab row disappear while surviving
+    # children leak with no registry root a later kill could target. Apply the
+    # SAME safety subtractions as the sweep so we never signal the avibe service
+    # (or its tree) or a process owned by a DIFFERENT registered session. The
+    # blocking ``ps`` read is offloaded so we don't stall the controller loop. If
+    # it fails, fall back to the verified root pid alone (better than nothing).
+    target_pids = {pid}
+    try:
+        loop = asyncio.get_running_loop()
+        rows = _parse_ps_rows(await loop.run_in_executor(None, _run_ps))
+        children = _build_children_map(rows)
+        target_pids |= _descendant_pids(rows, pid, children)
+        # Never reap the avibe service itself or anything under it.
+        service_pid = os.getpid()
+        target_pids -= {service_pid} | _descendant_pids(rows, service_pid, children)
+        # Never reap a pid owned by a DIFFERENT registry entry (or its descendants):
+        # only this verified orphan root + its own helpers are in scope.
+        for other in registry:
+            other_pid = getattr(other, "pid", None)
+            if isinstance(other_pid, int) and other_pid > 0 and other_pid != pid:
+                target_pids.discard(other_pid)
+                target_pids -= _descendant_pids(rows, other_pid, children)
+        # The verified root is always in scope regardless of the subtractions above.
+        target_pids.add(pid)
+    except Exception:  # noqa: BLE001
+        logger.debug("end: orphan descendant expansion failed for %s", pid, exc_info=True)
+        target_pids = {pid}
+    killed = await _reap_pid_set(target_pids, terminate_timeout=2.0, logger=logger)
+    return {"ok": killed > 0, "action": "killed_process", "pid": pid, "reaped_pids": sorted(target_pids)}
 
 
 def _find_claude_composite_for_base(session_handler: Any, base_session_id: Optional[str]) -> Optional[str]:
