@@ -48,6 +48,12 @@ export type ProtectedSealed = {
   wrapped_dek: string;
 };
 
+export type ProtectedRecordContext = {
+  name: string;
+  scheme?: typeof WRAP_SCHEME;
+  version?: typeof WRAP_META_VERSION;
+};
+
 export type Argon2idParams = {
   iterations: number;
   memorySize: number;
@@ -317,20 +323,38 @@ function validateScryptParams(n: number, r: number, p: number): void {
   }
 }
 
-async function aesgcmEncrypt(key: BytesLike, nonce: BytesLike, data: BytesLike): Promise<Uint8Array> {
+async function aesgcmEncrypt(
+  key: BytesLike,
+  nonce: BytesLike,
+  data: BytesLike,
+  additionalData?: BytesLike,
+): Promise<Uint8Array> {
   const cryptoKey = await crypto.subtle.importKey('raw', toArrayBuffer(key), 'AES-GCM', false, ['encrypt']);
   const ct = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: toArrayBuffer(nonce) },
+    {
+      name: 'AES-GCM',
+      iv: toArrayBuffer(nonce),
+      ...(additionalData ? { additionalData: toArrayBuffer(additionalData) } : {}),
+    },
     cryptoKey,
     toArrayBuffer(data),
   );
   return new Uint8Array(ct);
 }
 
-async function aesgcmDecrypt(key: BytesLike, nonce: BytesLike, data: BytesLike): Promise<Uint8Array> {
+async function aesgcmDecrypt(
+  key: BytesLike,
+  nonce: BytesLike,
+  data: BytesLike,
+  additionalData?: BytesLike,
+): Promise<Uint8Array> {
   const cryptoKey = await crypto.subtle.importKey('raw', toArrayBuffer(key), 'AES-GCM', false, ['decrypt']);
   const pt = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: toArrayBuffer(nonce) },
+    {
+      name: 'AES-GCM',
+      iv: toArrayBuffer(nonce),
+      ...(additionalData ? { additionalData: toArrayBuffer(additionalData) } : {}),
+    },
     cryptoKey,
     toArrayBuffer(data),
   );
@@ -549,15 +573,39 @@ export function passkeyPrfSalts(wrapMeta: string | WrapMeta): Uint8Array[] {
     .map((copy) => base64ToBytes(copy.prf_salt));
 }
 
-export async function sealProtected(value: BytesLike, vmk: BytesLike): Promise<ProtectedSealed> {
+function protectedRecordAad(context: ProtectedRecordContext): Uint8Array {
+  const out: number[] = [];
+  pushLengthPrefixed(out, utf8(validateSecretName(context.name)));
+  pushLengthPrefixed(out, utf8(context.scheme ?? WRAP_SCHEME));
+  pushLengthPrefixed(out, new Uint8Array([context.version ?? WRAP_META_VERSION]));
+  return new Uint8Array(out);
+}
+
+export function protectedRecordAadHex(context: ProtectedRecordContext): string {
+  return bytesToHex(protectedRecordAad(context));
+}
+
+function requirePinnedPublicKey(publicKey: AvaultPublicKey): AvaultPublicKey {
+  if (!publicKey.fingerprint) {
+    throw new Error('protected DEK release requires a pinned avault public key fingerprint');
+  }
+  return publicKey;
+}
+
+export async function sealProtected(
+  value: BytesLike,
+  vmk: BytesLike,
+  context: ProtectedRecordContext,
+): Promise<ProtectedSealed> {
   const vmkBytes = toUint8Array(vmk, 'VMK');
   assertLength(vmkBytes, KEY_BYTES, 'VMK');
+  const aad = protectedRecordAad(context);
   const dek = randomBytes(KEY_BYTES);
   try {
     const valueNonce = randomBytes(NONCE_BYTES);
-    const ciphertext = await aesgcmEncrypt(dek, valueNonce, toUint8Array(value, 'value'));
+    const ciphertext = await aesgcmEncrypt(dek, valueNonce, toUint8Array(value, 'value'), aad);
     const dekNonce = randomBytes(NONCE_BYTES);
-    const wrappedDek = await aesgcmEncrypt(vmkBytes, dekNonce, dek);
+    const wrappedDek = await aesgcmEncrypt(vmkBytes, dekNonce, dek, aad);
     return {
       ciphertext: bytesToBase64(ciphertext),
       nonce: bytesToBase64(valueNonce),
@@ -569,16 +617,34 @@ export async function sealProtected(value: BytesLike, vmk: BytesLike): Promise<P
   }
 }
 
-export async function unwrapProtectedDek(sealed: ProtectedSealed, vmk: BytesLike): Promise<Uint8Array> {
+export async function unwrapProtectedDek(
+  sealed: ProtectedSealed,
+  vmk: BytesLike,
+  context: ProtectedRecordContext,
+): Promise<Uint8Array> {
   const vmkBytes = toUint8Array(vmk, 'VMK');
   assertLength(vmkBytes, KEY_BYTES, 'VMK');
-  return aesgcmDecrypt(vmkBytes, base64ToBytes(sealed.dek_nonce), base64ToBytes(sealed.wrapped_dek));
+  return aesgcmDecrypt(
+    vmkBytes,
+    base64ToBytes(sealed.dek_nonce),
+    base64ToBytes(sealed.wrapped_dek),
+    protectedRecordAad(context),
+  );
 }
 
-export async function openProtected(sealed: ProtectedSealed, vmk: BytesLike): Promise<Uint8Array> {
-  const dek = await unwrapProtectedDek(sealed, vmk);
+export async function openProtected(
+  sealed: ProtectedSealed,
+  vmk: BytesLike,
+  context: ProtectedRecordContext,
+): Promise<Uint8Array> {
+  const dek = await unwrapProtectedDek(sealed, vmk, context);
   try {
-    return await aesgcmDecrypt(dek, base64ToBytes(sealed.nonce), base64ToBytes(sealed.ciphertext));
+    return await aesgcmDecrypt(
+      dek,
+      base64ToBytes(sealed.nonce),
+      base64ToBytes(sealed.ciphertext),
+      protectedRecordAad(context),
+    );
   } finally {
     dek.fill(0);
   }
@@ -587,12 +653,13 @@ export async function openProtected(sealed: ProtectedSealed, vmk: BytesLike): Pr
 export async function releaseProtectedDek(
   sealed: ProtectedSealed,
   vmk: BytesLike,
-  publicKey: AvaultPublicKey | string,
+  publicKey: AvaultPublicKey,
+  recordContext: ProtectedRecordContext,
   context: ProtectedDekReleaseBlindBoxContext,
 ): Promise<BlindBox> {
-  const dek = await unwrapProtectedDek(sealed, vmk);
+  const dek = await unwrapProtectedDek(sealed, vmk, recordContext);
   try {
-    return await sealBlindBox(dek, publicKey, context);
+    return await sealBlindBox(dek, requirePinnedPublicKey(publicKey), context);
   } finally {
     dek.fill(0);
   }
@@ -632,16 +699,20 @@ export async function sealBlindBox(
 
   const recipientPublicKey = await suite.kem.deserializePublicKey(publicKeyRaw);
   const pt = typeof plaintext === 'string' ? utf8(plaintext) : toUint8Array(plaintext, 'plaintext');
-  const sealed = await suite.seal(
-    { recipientPublicKey, info: utf8(BLIND_BOX_HPKE_INFO) },
-    pt,
-    blindBoxAad(context),
-  );
-  return {
-    scheme: BLIND_BOX_SCHEME,
-    enc: bytesToBase64(new Uint8Array(sealed.enc)),
-    ct: bytesToBase64(new Uint8Array(sealed.ct)),
-  };
+  try {
+    const sealed = await suite.seal(
+      { recipientPublicKey, info: utf8(BLIND_BOX_HPKE_INFO) },
+      pt,
+      blindBoxAad(context),
+    );
+    return {
+      scheme: BLIND_BOX_SCHEME,
+      enc: bytesToBase64(new Uint8Array(sealed.enc)),
+      ct: bytesToBase64(new Uint8Array(sealed.ct)),
+    };
+  } finally {
+    pt.fill(0);
+  }
 }
 
 function normalizeDigest(digest: BytesLike | string): Uint8Array {
@@ -934,46 +1005,51 @@ export function signDigest(
   options: SignDigestOptions = {},
 ): SignatureResult {
   const key = normalizePrivateKey(privateKey);
-  const msg = normalizeDigest(digest);
-  if (scheme === SIGN_SCHEME_ECDSA_SECP256K1_RECOVERABLE) {
-    const recovered = secp256k1.sign(msg, key, { prehash: false, lowS: true, format: 'recovered' });
-    return {
-      scheme,
-      signature: bytesToHex(recovered.slice(1)),
-      recovery_id: recovered[0] ?? null,
-    };
-  }
-  if (scheme === SIGN_SCHEME_ECDSA_SECP256K1_DER) {
-    return {
-      scheme,
-      signature: bytesToHex(secp256k1.sign(msg, key, { prehash: false, lowS: true, format: 'der' })),
-      recovery_id: null,
-    };
-  }
-  if (scheme === SIGN_SCHEME_SCHNORR_SECP256K1_BIP340) {
-    const aux = options.schnorrAuxRand
-      ? normalizeHexOrBytes(options.schnorrAuxRand, 'schnorr aux randomness')
-      : undefined;
-    if (aux) {
-      assertLength(aux, KEY_BYTES, 'schnorr aux randomness');
+  try {
+    const msg = normalizeDigest(digest);
+    if (scheme === SIGN_SCHEME_ECDSA_SECP256K1_RECOVERABLE) {
+      const recovered = secp256k1.sign(msg, key, { prehash: false, lowS: true, format: 'recovered' });
+      return {
+        scheme,
+        signature: bytesToHex(recovered.slice(1)),
+        recovery_id: recovered[0] ?? null,
+      };
     }
-    return {
-      scheme,
-      signature: bytesToHex(schnorr.sign(msg, key, aux)),
-      recovery_id: null,
-    };
+    if (scheme === SIGN_SCHEME_ECDSA_SECP256K1_DER) {
+      return {
+        scheme,
+        signature: bytesToHex(secp256k1.sign(msg, key, { prehash: false, lowS: true, format: 'der' })),
+        recovery_id: null,
+      };
+    }
+    if (scheme === SIGN_SCHEME_SCHNORR_SECP256K1_BIP340) {
+      const aux = options.schnorrAuxRand
+        ? normalizeHexOrBytes(options.schnorrAuxRand, 'schnorr aux randomness')
+        : undefined;
+      if (aux) {
+        assertLength(aux, KEY_BYTES, 'schnorr aux randomness');
+      }
+      return {
+        scheme,
+        signature: bytesToHex(schnorr.sign(msg, key, aux)),
+        recovery_id: null,
+      };
+    }
+    throw new Error('unsupported signing scheme');
+  } finally {
+    key.fill(0);
   }
-  throw new Error('unsupported signing scheme');
 }
 
 export async function signProtectedDigest(
   sealedKey: ProtectedSealed,
   vmk: BytesLike,
+  context: ProtectedRecordContext,
   digest: BytesLike | string,
   scheme: SignatureScheme,
   options: SignDigestOptions = {},
 ): Promise<SignatureResult> {
-  const privateKey = await openProtected(sealedKey, vmk);
+  const privateKey = await openProtected(sealedKey, vmk, context);
   try {
     return signDigest(privateKey, digest, scheme, options);
   } finally {

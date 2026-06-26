@@ -21,6 +21,7 @@ import {
   newVmk,
   passkeyPrfSalts,
   protectedDekReleaseBlindBoxContext,
+  protectedRecordAadHex,
   releaseProtectedDek,
   sealBlindBox,
   sealProtected,
@@ -283,8 +284,9 @@ describe('vaultCrypto protected hierarchy', () => {
 
   it('wraps a protected value with a per-record DEK and releases only that DEK', async () => {
     const vmk = newVmk();
-    const sealed = await sealProtected(new TextEncoder().encode('protected value'), vmk);
-    const dek = await unwrapProtectedDek(sealed, vmk);
+    const recordContext = { name: 'ETH_SIGNING_KEY' };
+    const sealed = await sealProtected(new TextEncoder().encode('protected value'), vmk, recordContext);
+    const dek = await unwrapProtectedDek(sealed, vmk, recordContext);
     const sign = p2.blind_box_aad_examples.cases.find((vector) => vector.purpose === 'sign');
     if (!sign) {
       throw new Error('missing shared sign AAD example');
@@ -296,12 +298,21 @@ describe('vaultCrypto protected hierarchy', () => {
       approval: approvalFromVector(sign),
       operationHash: sign.operation_hash_hex,
     });
-    const released = await releaseProtectedDek(sealed, vmk, p2.blind_box.public_key, context);
+    const avaultPublicKey = {
+      public_key: p2.blind_box.public_key,
+      fingerprint: p2.blind_box.fingerprint,
+    };
+    const released = await releaseProtectedDek(sealed, vmk, avaultPublicKey, recordContext, context);
 
     expect(dek).toHaveLength(32);
+    expect(protectedRecordAadHex(recordContext)).not.toBe(protectedRecordAadHex({ name: 'OTHER_SIGNING_KEY' }));
     expect(released.scheme).toBe(BLIND_BOX_SCHEME);
     expect(base64ToBytes(released.enc)).toHaveLength(32);
     expect(base64ToBytes(released.ct).length).toBe(32 + 16);
+    await expect(unwrapProtectedDek(sealed, vmk, { name: 'OTHER_SIGNING_KEY' })).rejects.toThrow();
+    await expect(releaseProtectedDek(sealed, vmk, { public_key: p2.blind_box.public_key }, recordContext, context)).rejects.toThrow(
+      /fingerprint/,
+    );
     await expect(openBlindBox(released, blindBoxAad(context))).resolves.toEqual(dek);
     await expect(
       openBlindBox(
