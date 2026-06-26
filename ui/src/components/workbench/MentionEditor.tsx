@@ -342,28 +342,33 @@ function MentionCaretFixPlugin() {
 // browser splits the text into block elements, and PlainText's DOM→state
 // reconciliation then keeps only the FIRST block, silently dropping every later
 // paragraph (intermittently, depending on the IME's delete/re-insert race).
-// Capture any multi-line text insertion before Lexical/the browser handle it and
+// Capture the multi-line `insertText` before Lexical/the browser handle it and
 // insert it ourselves via insertRawText (proper LineBreakNodes), which is
-// lossless. Single-line input is left untouched. Registered on the document in
-// the capture phase so it runs ahead of Lexical's own root beforeinput listener;
-// stopPropagation prevents a double insert.
+// lossless. Registered on the document in the capture phase so it runs ahead of
+// Lexical's own root beforeinput listener; stopPropagation prevents a double
+// insert.
+//
+// Three guards keep us from ever swallowing input we wouldn't faithfully re-insert:
+//   • only `insertText` — NOT `insertReplacementText`, whose getTargetRanges() may
+//     differ from the selection (autocorrect/spellcheck), which would land the
+//     text at the wrong spot;
+//   • only when `event.cancelable` — a non-cancelable beforeinput ignores
+//     preventDefault, so taking over would double-insert alongside the native edit;
+//   • only when a RangeSelection can receive it — otherwise (e.g. a node-selected
+//     mention chip) defer to the normal path so the text is never dropped.
 function MultilineInsertFixPlugin() {
   const [editor] = useLexicalComposerContext();
   useEffect(() => {
     const onBeforeInput = (event: InputEvent) => {
-      if (event.inputType !== 'insertText' && event.inputType !== 'insertReplacementText') return;
+      if (event.inputType !== 'insertText' || !event.cancelable) return;
+      const text = event.data ?? '';
+      if (!text.includes('\n')) return;
       const root = editor.getRootElement();
       const target = event.target as Node | null;
       if (!root || !target || !(root === target || root.contains(target))) return;
-      let text = event.data ?? '';
-      if (!text && event.dataTransfer) {
-        try {
-          text = event.dataTransfer.getData('text/plain');
-        } catch {
-          text = '';
-        }
-      }
-      if (!text.includes('\n')) return;
+      // Confirm a range selection can take the insert BEFORE cancelling the default,
+      // so non-range selections fall through to the normal path instead of dropping.
+      if (!editor.getEditorState().read(() => $isRangeSelection($getSelection()))) return;
       event.preventDefault();
       event.stopPropagation();
       editor.update(() => {
