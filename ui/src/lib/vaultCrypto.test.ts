@@ -12,9 +12,7 @@ import {
   blindBoxAadHex,
   blindBoxAgentDeliverOperationHash,
   blindBoxAgentSignOperationHash,
-  blindBoxDeliverOperationHash,
   blindBoxOperationHash,
-  blindBoxSignOperationHash,
   buildWrapMeta,
   bytesToBase64,
   bytesFromHex,
@@ -115,22 +113,6 @@ async function blindBoxContextFromVector(vector: (typeof p2.blind_box_aad_exampl
   switch (vector.purpose) {
     case 'seal':
       return standardCreateBlindBoxContext(vector.name);
-    case 'deliver':
-      return await protectedDekReleaseBlindBoxContext(vector.name, {
-        kind: 'deliver',
-        deliverKind: vector.operation_hash_kind as 'deliver-run' | 'deliver-fetch' | 'deliver-inject',
-        operationFields: vector.operation_hash_fields_hex.slice(1).map(bytesFromHex),
-        approval: approvalFromVector(vector),
-        operationHash: vector.operation_hash_hex,
-      });
-    case 'sign':
-      return await protectedDekReleaseBlindBoxContext(vector.name, {
-        kind: 'sign',
-        signatureScheme: vector.sign_scheme as SignatureScheme,
-        digest: vector.digest_hex,
-        approval: approvalFromVector(vector),
-        operationHash: vector.operation_hash_hex,
-      });
     case 'agent-deliver':
       return await protectedDekReleaseBlindBoxContext(vector.name, {
         kind: 'agent-deliver',
@@ -208,10 +190,9 @@ describe('vaultCrypto blind boxes', () => {
   });
 
   it('derives shared operation hash examples from length-prefixed fields', async () => {
-    const sign = p2.blind_box_aad_examples.cases.find((vector) => vector.purpose === 'sign');
     const agentDeliver = p2.blind_box_aad_examples.cases.find((vector) => vector.purpose === 'agent-deliver');
     const agentSign = p2.blind_box_aad_examples.cases.find((vector) => vector.purpose === 'agent-sign');
-    if (!sign || !agentDeliver || !agentSign) {
+    if (!agentDeliver || !agentSign) {
       throw new Error('missing shared operation-hash examples');
     }
 
@@ -223,22 +204,6 @@ describe('vaultCrypto blind boxes', () => {
         blindBoxOperationHash(vector.operation_hash_fields_hex.map(bytesFromHex)).then(bytesToHexString),
       ).resolves.toBe(vector.operation_hash_hex);
     }
-    await expect(
-      blindBoxOperationHash(['sign', sign.sign_scheme, bytesFromHex(sign.digest_hex)]).then(bytesToHexString),
-    ).resolves.toBe(sign.operation_hash_hex);
-    await expect(
-      blindBoxSignOperationHash(sign.sign_scheme as SignatureScheme, sign.digest_hex).then(bytesToHexString),
-    ).resolves.toBe(sign.operation_hash_hex);
-    const deliver = p2.blind_box_aad_examples.cases.find((vector) => vector.operation_hash_kind === 'deliver-run');
-    if (!deliver) {
-      throw new Error('missing shared deliver-run operation-hash example');
-    }
-    await expect(
-      blindBoxDeliverOperationHash(
-        deliver.operation_hash_kind as 'deliver-run',
-        deliver.operation_hash_fields_hex.slice(1).map(bytesFromHex),
-      ).then(bytesToHexString),
-    ).resolves.toBe(deliver.operation_hash_hex);
     await expect(
       blindBoxAgentDeliverOperationHash(agentDeliver.name, agentDeliver.ttl_secs).then(bytesToHexString),
     ).resolves.toBe(agentDeliver.operation_hash_hex);
@@ -323,17 +288,18 @@ describe('vaultCrypto protected hierarchy', () => {
     const recordContext = { name: 'OPENAI_API_KEY' };
     const sealed = await sealProtected(new TextEncoder().encode('protected value'), vmk, recordContext);
     const dek = await unwrapProtectedDek(sealed, vmk, recordContext);
-    const deliver = p2.blind_box_aad_examples.cases.find((vector) => vector.operation_hash_kind === 'deliver-run');
-    const sign = p2.blind_box_aad_examples.cases.find((vector) => vector.purpose === 'sign');
-    if (!deliver || !sign) {
-      throw new Error('missing shared AAD examples');
+    const agentDeliver = p2.blind_box_aad_examples.cases.find((vector) => vector.purpose === 'agent-deliver');
+    const agentSign = p2.blind_box_aad_examples.cases.find((vector) => vector.purpose === 'agent-sign');
+    if (!agentDeliver || !agentSign) {
+      throw new Error('missing shared agent AAD examples');
     }
     const context = await protectedDekReleaseBlindBoxContext('OPENAI_API_KEY', {
-      kind: 'deliver',
-      deliverKind: deliver.operation_hash_kind as 'deliver-run',
-      operationFields: deliver.operation_hash_fields_hex.slice(1).map(bytesFromHex),
-      approval: approvalFromVector(deliver),
-      operationHash: deliver.operation_hash_hex,
+      kind: 'agent-deliver',
+      scopeType: agentDeliver.scope_type,
+      scopeRef: agentDeliver.scope_ref,
+      ttlSecs: agentDeliver.ttl_secs,
+      approval: approvalFromVector(agentDeliver),
+      operationHash: agentDeliver.operation_hash_hex,
     });
     const avaultPublicKey = {
       public_key: p2.blind_box.public_key,
@@ -365,19 +331,23 @@ describe('vaultCrypto protected hierarchy', () => {
     await expect(openBlindBox(released, blindBoxAad(context))).resolves.toEqual(dek);
     await expect(
       protectedDekReleaseBlindBoxContext('OPENAI_API_KEY', {
-        kind: 'deliver',
-        deliverKind: deliver.operation_hash_kind as 'deliver-run',
-        operationFields: [bytesFromHex('ff')],
-        approval: approvalFromVector(deliver),
-        operationHash: deliver.operation_hash_hex,
+        kind: 'agent-deliver',
+        scopeType: agentDeliver.scope_type,
+        scopeRef: agentDeliver.scope_ref,
+        ttlSecs: 999,
+        approval: approvalFromVector(agentDeliver),
+        operationHash: agentDeliver.operation_hash_hex,
       }),
     ).rejects.toThrow(/operation hash/);
     const signContext = await protectedDekReleaseBlindBoxContext('OPENAI_API_KEY', {
-      kind: 'sign',
-      digest: sign.digest_hex,
-      signatureScheme: sign.sign_scheme as SignatureScheme,
-      approval: approvalFromVector(sign),
-      operationHash: sign.operation_hash_hex,
+      kind: 'agent-sign',
+      scopeType: agentSign.scope_type,
+      scopeRef: agentSign.scope_ref,
+      digest: agentSign.digest_hex,
+      ttlSecs: agentSign.ttl_secs,
+      signatureScheme: agentSign.sign_scheme as SignatureScheme,
+      approval: approvalFromVector(agentSign),
+      operationHash: agentSign.operation_hash_hex,
     });
     await expect(releaseProtectedDek(sealed, vmk, avaultPublicKey, recordContext, signContext)).rejects.toThrow(
       /signed locally/,
@@ -387,13 +357,12 @@ describe('vaultCrypto protected hierarchy', () => {
         released,
         blindBoxAad(
           await protectedDekReleaseBlindBoxContext('OPENAI_API_KEY', {
-            kind: 'deliver',
-            deliverKind: deliver.operation_hash_kind as 'deliver-run',
-            operationFields: [bytesFromHex('ff')],
-            approval: approvalFromVector(deliver),
-            operationHash: await blindBoxDeliverOperationHash(deliver.operation_hash_kind as 'deliver-run', [
-              bytesFromHex('ff'),
-            ]),
+            kind: 'agent-deliver',
+            scopeType: agentDeliver.scope_type,
+            scopeRef: 'other-scope',
+            ttlSecs: agentDeliver.ttl_secs,
+            approval: approvalFromVector(agentDeliver),
+            operationHash: agentDeliver.operation_hash_hex,
           }),
         ),
       ),

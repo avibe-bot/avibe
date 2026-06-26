@@ -123,29 +123,10 @@ export type BlindBoxApproval = {
 };
 
 export type BlindBoxOperationHashField = string | BytesLike;
-export type ProtectedDeliverKind = 'deliver-run' | 'deliver-fetch' | 'deliver-inject';
 
 export type StandardCreateBlindBoxContext = {
   purpose: 'seal';
   name: string;
-};
-
-export type ProtectedDeliverBlindBoxContext = {
-  purpose: 'deliver';
-  name: string;
-  approvalNonce: BytesLike;
-  approvalExpiresAtUnix: number | bigint;
-  operationHash: HexOrBytes;
-};
-
-export type ProtectedSignBlindBoxContext = {
-  purpose: 'sign';
-  name: string;
-  signScheme: SignatureScheme;
-  digest: HexOrBytes;
-  approvalNonce: BytesLike;
-  approvalExpiresAtUnix: number | bigint;
-  operationHash: HexOrBytes;
 };
 
 export type AgentDeliverBlindBoxContext = {
@@ -170,30 +151,12 @@ export type AgentSignBlindBoxContext = {
   operationHash: HexOrBytes;
 };
 
-export type ProtectedDekReleaseBlindBoxContext =
-  | ProtectedDeliverBlindBoxContext
-  | ProtectedSignBlindBoxContext
-  | AgentDeliverBlindBoxContext
-  | AgentSignBlindBoxContext;
-export type ProtectedDekDeliveryBlindBoxContext = ProtectedDeliverBlindBoxContext | AgentDeliverBlindBoxContext;
+export type ProtectedDekReleaseBlindBoxContext = AgentDeliverBlindBoxContext | AgentSignBlindBoxContext;
+export type ProtectedDekDeliveryBlindBoxContext = AgentDeliverBlindBoxContext;
 
 export type BlindBoxContext = StandardCreateBlindBoxContext | ProtectedDekReleaseBlindBoxContext;
 
 export type ProtectedDekReleaseOperation =
-  | {
-      kind: 'deliver';
-      deliverKind: ProtectedDeliverKind;
-      operationFields: BlindBoxOperationHashField[];
-      approval: BlindBoxApproval;
-      operationHash: HexOrBytes;
-    }
-  | {
-      kind: 'sign';
-      signatureScheme: SignatureScheme;
-      digest: HexOrBytes;
-      approval: BlindBoxApproval;
-      operationHash: HexOrBytes;
-    }
   | {
       kind: 'agent-deliver';
       scopeType: string;
@@ -695,7 +658,7 @@ function assertReleaseMatchesRecord(recordContext: ProtectedRecordContext, conte
 function assertDeliveryReleaseContext(
   context: ProtectedDekReleaseBlindBoxContext,
 ): asserts context is ProtectedDekDeliveryBlindBoxContext {
-  if (context.purpose === 'sign' || context.purpose === 'agent-sign') {
+  if (context.purpose === 'agent-sign') {
     throw new Error('protected signing keys must be signed locally; DEK release only supports delivery contexts');
   }
 }
@@ -921,34 +884,6 @@ function normalizeBlindBoxContext(context: BlindBoxContext): BlindBoxContext {
   switch (context.purpose) {
     case 'seal':
       return standardCreateBlindBoxContext(context.name);
-    case 'deliver': {
-      const approval = normalizeApproval({
-        nonce: context.approvalNonce,
-        expiresAtUnix: context.approvalExpiresAtUnix,
-      });
-      return {
-        purpose: 'deliver',
-        name: validateSecretName(context.name),
-        approvalNonce: approval.approvalNonce,
-        approvalExpiresAtUnix: approval.approvalExpiresAtUnix,
-        operationHash: normalizeOperationHash(context.operationHash),
-      };
-    }
-    case 'sign': {
-      const approval = normalizeApproval({
-        nonce: context.approvalNonce,
-        expiresAtUnix: context.approvalExpiresAtUnix,
-      });
-      return {
-        purpose: 'sign',
-        name: validateSecretName(context.name),
-        signScheme: context.signScheme,
-        digest: normalizeDigest(context.digest),
-        approvalNonce: approval.approvalNonce,
-        approvalExpiresAtUnix: approval.approvalExpiresAtUnix,
-        operationHash: normalizeOperationHash(context.operationHash),
-      };
-    }
     case 'agent-deliver': {
       const approval = normalizeApproval({
         nonce: context.approvalNonce,
@@ -1013,30 +948,6 @@ export async function protectedDekReleaseBlindBoxContext(
   const approval = normalizeApproval(operation.approval);
 
   switch (operation.kind) {
-    case 'deliver':
-      return {
-        purpose: 'deliver',
-        name: normalizedName,
-        approvalNonce: approval.approvalNonce,
-        approvalExpiresAtUnix: approval.approvalExpiresAtUnix,
-        operationHash: await normalizeAndCheckOperationHash(
-          deliverOperationHashFields(operation.deliverKind, operation.operationFields),
-          operation.operationHash,
-        ),
-      };
-    case 'sign':
-      return {
-        purpose: 'sign',
-        name: normalizedName,
-        signScheme: operation.signatureScheme,
-        digest: normalizeDigest(operation.digest),
-        approvalNonce: approval.approvalNonce,
-        approvalExpiresAtUnix: approval.approvalExpiresAtUnix,
-        operationHash: await normalizeAndCheckOperationHash(
-          ['sign', operation.signatureScheme, normalizeDigest(operation.digest)],
-          operation.operationHash,
-        ),
-      };
     case 'agent-deliver':
       return {
         purpose: 'agent-deliver',
@@ -1081,27 +992,6 @@ export async function blindBoxOperationHash(fields: BlindBoxOperationHashField[]
     pushLengthPrefixed(encoded, typeof field === 'string' ? utf8(field) : toUint8Array(field));
   }
   return new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array(encoded)));
-}
-
-export async function blindBoxSignOperationHash(signScheme: SignatureScheme, digest: HexOrBytes): Promise<Uint8Array> {
-  return blindBoxOperationHash(['sign', signScheme, normalizeDigest(digest)]);
-}
-
-function deliverOperationHashFields(
-  deliverKind: ProtectedDeliverKind,
-  operationFields: BlindBoxOperationHashField[],
-): BlindBoxOperationHashField[] {
-  if (!Array.isArray(operationFields) || operationFields.length === 0) {
-    throw new Error('deliver operation fields are required');
-  }
-  return [deliverKind, ...operationFields];
-}
-
-export async function blindBoxDeliverOperationHash(
-  deliverKind: ProtectedDeliverKind,
-  operationFields: BlindBoxOperationHashField[],
-): Promise<Uint8Array> {
-  return blindBoxOperationHash(deliverOperationHashFields(deliverKind, operationFields));
 }
 
 export async function blindBoxAgentDeliverOperationHash(
@@ -1149,15 +1039,11 @@ export function blindBoxAad(context: BlindBoxContext): Uint8Array {
   );
   pushLengthPrefixed(
     out,
-    normalized.purpose === 'sign' || normalized.purpose === 'agent-sign'
-      ? utf8(normalized.signScheme)
-      : new Uint8Array(),
+    normalized.purpose === 'agent-sign' ? utf8(normalized.signScheme) : new Uint8Array(),
   );
   pushLengthPrefixed(
     out,
-    normalized.purpose === 'sign' || normalized.purpose === 'agent-sign'
-      ? normalizeDigest(normalized.digest)
-      : new Uint8Array(),
+    normalized.purpose === 'agent-sign' ? normalizeDigest(normalized.digest) : new Uint8Array(),
   );
   pushLengthPrefixed(
     out,
