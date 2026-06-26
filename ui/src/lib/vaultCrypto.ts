@@ -18,6 +18,11 @@ const NONCE_BYTES = 12;
 const ARGON2_VERSION = 19;
 const PASSKEY_PRF_SALT_BYTES = 32;
 const PASSKEY_HKDF_INFO = 'avault:protected-vmk:kek-passkey:v1';
+const DEFAULT_SCRYPT = {
+  n: 2 ** 15,
+  r: 8,
+  p: 1,
+} as const;
 
 const DEFAULT_ARGON2ID = {
   iterations: 3,
@@ -64,6 +69,7 @@ export type PasswordWrapFactor = {
   kind: 'password';
   password: string;
   argon2id?: Partial<Argon2idParams>;
+  kdf?: 'scrypt' | 'argon2id';
 };
 
 export type PasskeyWrapFactor = {
@@ -240,12 +246,17 @@ export type WebAuthnPrfExtensionInput = {
   };
 };
 
+export type PasskeyPrfSalt = {
+  prfSalt: Uint8Array;
+  credentialId?: string;
+};
+
 function toUint8Array(value: BytesLike, field = 'bytes'): Uint8Array {
   if (value instanceof Uint8Array) {
     return new Uint8Array(value);
   }
   if (value instanceof ArrayBuffer) {
-    return new Uint8Array(value);
+    return new Uint8Array(value.slice(0));
   }
   if (ArrayBuffer.isView(value)) {
     return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
@@ -436,7 +447,7 @@ function normalizeWrapFactors(factors: VmkWrapFactor[] | string[]): VmkWrapFacto
   return factors.map((factor) => (typeof factor === 'string' ? { kind: 'password', password: factor } : factor));
 }
 
-async function passwordCopy(vmk: BytesLike, factor: PasswordWrapFactor): Promise<PasswordArgon2idCopy> {
+async function passwordArgon2idCopy(vmk: BytesLike, factor: PasswordWrapFactor): Promise<PasswordArgon2idCopy> {
   const salt = randomBytes(16);
   const nonce = randomBytes(NONCE_BYTES);
   const params = normalizeArgon2idParams(factor.argon2id);
@@ -457,6 +468,33 @@ async function passwordCopy(vmk: BytesLike, factor: PasswordWrapFactor): Promise
   } finally {
     kek.fill(0);
   }
+}
+
+async function passwordScryptCopy(vmk: BytesLike, password: string): Promise<PasswordScryptCopy> {
+  const salt = randomBytes(16);
+  const nonce = randomBytes(NONCE_BYTES);
+  const kek = await kekPasswordScrypt(password, salt, DEFAULT_SCRYPT.n, DEFAULT_SCRYPT.r, DEFAULT_SCRYPT.p);
+  try {
+    const wrapped = await aesgcmEncrypt(kek, nonce, toUint8Array(vmk, 'VMK'));
+    return {
+      kind: 'password',
+      kdf: 'scrypt',
+      n: DEFAULT_SCRYPT.n,
+      r: DEFAULT_SCRYPT.r,
+      p: DEFAULT_SCRYPT.p,
+      salt: bytesToBase64(salt),
+      nonce: bytesToBase64(nonce),
+      wrapped: bytesToBase64(wrapped),
+    };
+  } finally {
+    kek.fill(0);
+  }
+}
+
+async function passwordCopy(vmk: BytesLike, factor: PasswordWrapFactor): Promise<PasswordArgon2idCopy | PasswordScryptCopy> {
+  return factor.kdf === 'argon2id'
+    ? passwordArgon2idCopy(vmk, factor)
+    : passwordScryptCopy(vmk, factor.password);
 }
 
 async function passkeyCopy(vmk: BytesLike, factor: PasskeyWrapFactor): Promise<PasskeyPrfCopy> {
@@ -568,9 +606,16 @@ export async function unwrapVmk(wrapMeta: string | WrapMeta, factor: VmkUnlockFa
 }
 
 export function passkeyPrfSalts(wrapMeta: string | WrapMeta): Uint8Array[] {
+  return passkeyPrfSaltEntries(wrapMeta).map((entry) => entry.prfSalt);
+}
+
+export function passkeyPrfSaltEntries(wrapMeta: string | WrapMeta): PasskeyPrfSalt[] {
   return parseWrapMeta(wrapMeta)
     .copies.filter((copy): copy is PasskeyPrfCopy => copy.kind === 'passkey')
-    .map((copy) => base64ToBytes(copy.prf_salt));
+    .map((copy) => ({
+      prfSalt: base64ToBytes(copy.prf_salt),
+      ...(copy.credential_id ? { credentialId: copy.credential_id } : {}),
+    }));
 }
 
 function protectedRecordAad(context: ProtectedRecordContext): Uint8Array {
@@ -590,6 +635,12 @@ function requirePinnedPublicKey(publicKey: AvaultPublicKey): AvaultPublicKey {
     throw new Error('protected DEK release requires a pinned avault public key fingerprint');
   }
   return publicKey;
+}
+
+function assertReleaseMatchesRecord(recordContext: ProtectedRecordContext, context: ProtectedDekReleaseBlindBoxContext): void {
+  if (validateSecretName(recordContext.name) !== validateSecretName(context.name)) {
+    throw new Error('protected DEK release context name does not match record name');
+  }
 }
 
 export async function sealProtected(
@@ -657,6 +708,7 @@ export async function releaseProtectedDek(
   recordContext: ProtectedRecordContext,
   context: ProtectedDekReleaseBlindBoxContext,
 ): Promise<BlindBox> {
+  assertReleaseMatchesRecord(recordContext, context);
   const dek = await unwrapProtectedDek(sealed, vmk, recordContext);
   try {
     return await sealBlindBox(dek, requirePinnedPublicKey(publicKey), context);
@@ -869,12 +921,23 @@ export function standardCreateBlindBoxContext(name: string): StandardCreateBlind
   };
 }
 
-export function protectedDekReleaseBlindBoxContext(
+async function normalizeAndCheckOperationHash(
+  expectedFields: BlindBoxOperationHashField[],
+  suppliedHash: HexOrBytes,
+): Promise<Uint8Array> {
+  const supplied = normalizeOperationHash(suppliedHash);
+  const computed = await blindBoxOperationHash(expectedFields);
+  if (bytesToHex(supplied) !== bytesToHex(computed)) {
+    throw new Error('operation hash does not match release operation fields');
+  }
+  return supplied;
+}
+
+export async function protectedDekReleaseBlindBoxContext(
   name: string,
   operation: ProtectedDekReleaseOperation,
-): ProtectedDekReleaseBlindBoxContext {
+): Promise<ProtectedDekReleaseBlindBoxContext> {
   const normalizedName = validateSecretName(name);
-  const operationHash = normalizeOperationHash(operation.operationHash);
   const approval = normalizeApproval(operation.approval);
 
   switch (operation.kind) {
@@ -884,7 +947,7 @@ export function protectedDekReleaseBlindBoxContext(
         name: normalizedName,
         approvalNonce: approval.approvalNonce,
         approvalExpiresAtUnix: approval.approvalExpiresAtUnix,
-        operationHash,
+        operationHash: normalizeOperationHash(operation.operationHash),
       };
     case 'sign':
       return {
@@ -894,7 +957,10 @@ export function protectedDekReleaseBlindBoxContext(
         digest: normalizeDigest(operation.digest),
         approvalNonce: approval.approvalNonce,
         approvalExpiresAtUnix: approval.approvalExpiresAtUnix,
-        operationHash,
+        operationHash: await normalizeAndCheckOperationHash(
+          ['sign', operation.signatureScheme, normalizeDigest(operation.digest)],
+          operation.operationHash,
+        ),
       };
     case 'agent-deliver':
       return {
@@ -904,7 +970,10 @@ export function protectedDekReleaseBlindBoxContext(
         scopeRef: validateNonEmpty(operation.scopeRef, 'scope ref'),
         approvalNonce: approval.approvalNonce,
         approvalExpiresAtUnix: approval.approvalExpiresAtUnix,
-        operationHash,
+        operationHash: await normalizeAndCheckOperationHash(
+          ['agent-deliver', normalizedName],
+          operation.operationHash,
+        ),
       };
     case 'agent-sign':
       return {
@@ -916,7 +985,10 @@ export function protectedDekReleaseBlindBoxContext(
         digest: normalizeDigest(operation.digest),
         approvalNonce: approval.approvalNonce,
         approvalExpiresAtUnix: approval.approvalExpiresAtUnix,
-        operationHash,
+        operationHash: await normalizeAndCheckOperationHash(
+          ['agent-sign', operation.signatureScheme, normalizeDigest(operation.digest)],
+          operation.operationHash,
+        ),
       };
     default:
       throw new Error('unsupported blind-box release operation');

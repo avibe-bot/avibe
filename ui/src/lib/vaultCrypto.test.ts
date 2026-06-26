@@ -19,6 +19,7 @@ import {
   bytesToHexString,
   derivePasskeyKek,
   newVmk,
+  passkeyPrfSaltEntries,
   passkeyPrfSalts,
   protectedDekReleaseBlindBoxContext,
   protectedRecordAadHex,
@@ -108,18 +109,18 @@ function approvalFromVector(vector: (typeof p2.blind_box_aad_examples.cases)[num
   };
 }
 
-function blindBoxContextFromVector(vector: (typeof p2.blind_box_aad_examples.cases)[number]): BlindBoxContext {
+async function blindBoxContextFromVector(vector: (typeof p2.blind_box_aad_examples.cases)[number]): Promise<BlindBoxContext> {
   switch (vector.purpose) {
     case 'seal':
       return standardCreateBlindBoxContext(vector.name);
     case 'deliver':
-      return protectedDekReleaseBlindBoxContext(vector.name, {
+      return await protectedDekReleaseBlindBoxContext(vector.name, {
         kind: 'deliver',
         approval: approvalFromVector(vector),
         operationHash: vector.operation_hash_hex,
       });
     case 'sign':
-      return protectedDekReleaseBlindBoxContext(vector.name, {
+      return await protectedDekReleaseBlindBoxContext(vector.name, {
         kind: 'sign',
         signatureScheme: vector.sign_scheme as SignatureScheme,
         digest: vector.digest_hex,
@@ -127,7 +128,7 @@ function blindBoxContextFromVector(vector: (typeof p2.blind_box_aad_examples.cas
         operationHash: vector.operation_hash_hex,
       });
     case 'agent-deliver':
-      return protectedDekReleaseBlindBoxContext(vector.name, {
+      return await protectedDekReleaseBlindBoxContext(vector.name, {
         kind: 'agent-deliver',
         scopeType: vector.scope_type,
         scopeRef: vector.scope_ref,
@@ -135,7 +136,7 @@ function blindBoxContextFromVector(vector: (typeof p2.blind_box_aad_examples.cas
         operationHash: vector.operation_hash_hex,
       });
     case 'agent-sign':
-      return protectedDekReleaseBlindBoxContext(vector.name, {
+      return await protectedDekReleaseBlindBoxContext(vector.name, {
         kind: 'agent-sign',
         scopeType: vector.scope_type,
         scopeRef: vector.scope_ref,
@@ -191,12 +192,12 @@ describe('vaultCrypto signing vectors', () => {
 });
 
 describe('vaultCrypto blind boxes', () => {
-  it('matches all shared avault blind-box AAD examples byte-for-byte', () => {
+  it('matches all shared avault blind-box AAD examples byte-for-byte', async () => {
     expect(p2.blind_box.aad_domain_utf8).toBe(BLIND_BOX_AAD_DOMAIN);
     expect(p2.blind_box_aad_examples.wrap_scheme).toBe(WRAP_SCHEME);
     expect(p2.blind_box_aad_examples.version).toBe(WRAP_META_VERSION);
     for (const vector of p2.blind_box_aad_examples.cases) {
-      expect(blindBoxAadHex(blindBoxContextFromVector(vector))).toBe(vector.aad_hex);
+      expect(blindBoxAadHex(await blindBoxContextFromVector(vector))).toBe(vector.aad_hex);
     }
   });
 
@@ -278,7 +279,9 @@ describe('vaultCrypto protected hierarchy', () => {
 
     await expect(unwrapVmk(wrapMeta, { kind: 'passkey', prfOutput })).resolves.toEqual(vmk);
     await expect(unwrapVmk(wrapMeta, 'less-secure-fallback')).resolves.toEqual(vmk);
+    expect(JSON.parse(wrapMeta).copies.find((copy: { kind: string }) => copy.kind === 'password')?.kdf).toBe('scrypt');
     expect(passkeyPrfSalts(wrapMeta)).toEqual([prfSalt]);
+    expect(passkeyPrfSaltEntries(wrapMeta)).toEqual([{ prfSalt, credentialId: 'cred-1' }]);
     expect(webAuthnPrfExtensionInput(prfSalt).prf.eval.first.byteLength).toBe(32);
   });
 
@@ -291,7 +294,7 @@ describe('vaultCrypto protected hierarchy', () => {
     if (!sign) {
       throw new Error('missing shared sign AAD example');
     }
-    const context = protectedDekReleaseBlindBoxContext('ETH_SIGNING_KEY', {
+    const context = await protectedDekReleaseBlindBoxContext('ETH_SIGNING_KEY', {
       kind: 'sign',
       digest: sign.digest_hex,
       signatureScheme: sign.sign_scheme as SignatureScheme,
@@ -313,21 +316,43 @@ describe('vaultCrypto protected hierarchy', () => {
     await expect(releaseProtectedDek(sealed, vmk, { public_key: p2.blind_box.public_key }, recordContext, context)).rejects.toThrow(
       /fingerprint/,
     );
+    await expect(releaseProtectedDek(sealed, vmk, avaultPublicKey, { name: 'OTHER_SIGNING_KEY' }, context)).rejects.toThrow(
+      /record name/,
+    );
     await expect(openBlindBox(released, blindBoxAad(context))).resolves.toEqual(dek);
+    await expect(
+      protectedDekReleaseBlindBoxContext('ETH_SIGNING_KEY', {
+        kind: 'sign',
+        digest: 'ff'.repeat(32),
+        signatureScheme: SIGN_SCHEME_ECDSA_SECP256K1_RECOVERABLE,
+        approval: approvalFromVector(sign),
+        operationHash: sign.operation_hash_hex,
+      }),
+    ).rejects.toThrow(/operation hash/);
     await expect(
       openBlindBox(
         released,
         blindBoxAad(
-          protectedDekReleaseBlindBoxContext('ETH_SIGNING_KEY', {
+          await protectedDekReleaseBlindBoxContext('ETH_SIGNING_KEY', {
             kind: 'sign',
             digest: 'ff'.repeat(32),
             signatureScheme: SIGN_SCHEME_ECDSA_SECP256K1_RECOVERABLE,
             approval: approvalFromVector(sign),
-            operationHash: sign.operation_hash_hex,
+            operationHash: await blindBoxSignOperationHash(
+              SIGN_SCHEME_ECDSA_SECP256K1_RECOVERABLE,
+              'ff'.repeat(32),
+            ),
           }),
         ),
       ),
     ).rejects.toThrow();
+  });
+
+  it('copies ArrayBuffer inputs before zeroizing local buffers', () => {
+    const key = bytesFromHex(p2.signing.private_key_hex);
+    const keyBuffer = key.buffer.slice(key.byteOffset, key.byteOffset + key.byteLength);
+    signDigest(keyBuffer, p2.signing.digest_hex, SIGN_SCHEME_ECDSA_SECP256K1_RECOVERABLE);
+    expect(bytesToHexString(new Uint8Array(keyBuffer))).toBe(p2.signing.private_key_hex);
   });
 
   it('derives a stable passkey KEK from WebAuthn PRF output and salt', async () => {
