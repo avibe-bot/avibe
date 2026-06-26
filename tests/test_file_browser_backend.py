@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import logging
 from pathlib import Path
@@ -272,6 +273,32 @@ def test_move_no_overwrite_refuses_target_appearing_after_precheck(tmp_path, mon
     assert exc.value.code == "exists"
     assert source.read_text(encoding="utf-8") == "source"
     assert destination.read_text(encoding="utf-8") == "destination"
+
+
+def test_move_cross_filesystem_copies_then_removes_source(tmp_path, monkeypatch):
+    # A cross-filesystem move raises EXDEV from the no-replace rename; the move must then
+    # copy the source to a destination-side temp, atomically place it (still no-replace),
+    # and only then remove the original source — never lose data.
+    source = tmp_path / "src.txt"
+    source.write_text("DATA", encoding="utf-8")
+    destination = tmp_path / "dst.txt"
+
+    real_rename = fs._os_rename_noreplace
+    calls = {"n": 0}
+
+    def fake_rename(src: Path, dst: Path) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(errno.EXDEV, "cross-device link")
+        real_rename(src, dst)  # temp -> destination succeeds within one filesystem
+
+    monkeypatch.setattr(fs, "_os_rename_noreplace", fake_rename)
+
+    assert fs.move_path(str(source), str(destination), overwrite=False) == {"ok": True}
+    assert destination.read_text(encoding="utf-8") == "DATA"
+    assert not source.exists()
+    # No overwrite-temp siblings left behind.
+    assert not list(tmp_path.glob(".dst.txt.avibe-overwrite-*"))
 
 
 def test_symlink_mutations_operate_on_link_not_target(tmp_path):
