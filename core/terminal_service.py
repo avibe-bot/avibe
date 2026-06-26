@@ -180,6 +180,16 @@ class TerminalService:
                         name=f"terminal-output-drain-{session_id}",
                     )
         finally:
+            # Structural backstop: guarantee no pump/wait task outlives the connection,
+            # however the loop exits. The per-branch logic above cancels siblings on the
+            # expected paths (clean disconnect, process exit); this covers the rest — e.g. a
+            # pump raising a non-WebSocketDisconnect error (EBADF when a fast reconnect or
+            # shutdown closes the PTY fd) would otherwise propagate out of the loop leaving
+            # input/wait still reading the old socket or awaiting the old process. Cancelling
+            # an already-finished task is a no-op, so this is safe over the happy paths too.
+            for task in (output_task, input_task, wait_task):
+                task.cancel()
+            await asyncio.gather(output_task, input_task, wait_task, return_exceptions=True)
             await self.close(connection)
 
     async def open(self, session_id: str) -> TerminalConnection:

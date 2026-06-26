@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import signal
@@ -86,6 +87,52 @@ async def _terminal_ephemeral_pty_round_trip(monkeypatch, tmp_path):
     output = b"".join(websocket.sent_bytes)
     assert b"READY" in output
     assert json.loads(websocket.sent_text[-1]) == {"type": "exit", "code": 7}
+
+
+def test_terminal_websocket_cancels_siblings_on_pump_failure(monkeypatch, tmp_path):
+    asyncio.run(_terminal_websocket_cancels_siblings_on_pump_failure(monkeypatch, tmp_path))
+
+
+async def _terminal_websocket_cancels_siblings_on_pump_failure(monkeypatch, tmp_path):
+    # If a pump dies with anything other than WebSocketDisconnect (e.g. EBADF when a fast
+    # reconnect/shutdown closes the PTY fd), handle_websocket must still cancel the sibling
+    # tasks instead of letting them outlive the torn-down connection.
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: None)
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+
+    input_cancelled = asyncio.Event()
+
+    async def exploding_output(_websocket, _connection):
+        raise OSError(errno.EBADF, "Bad file descriptor")
+
+    async def blocking_input(_websocket, _connection):
+        try:
+            await asyncio.Event().wait()  # only a cancel ends this
+        except asyncio.CancelledError:
+            input_cancelled.set()
+            raise
+
+    monkeypatch.setattr(service, "_pump_output", exploding_output)
+    monkeypatch.setattr(service, "_pump_input", blocking_input)
+
+    try:
+        with pytest.raises(OSError) as exc:
+            await service.handle_websocket(_FakeWebSocket([]), "term_leak")
+        assert exc.value.errno == errno.EBADF
+        # The sibling input pump was cancelled (not leaked), and no terminal-* task is left
+        # pending after the connection tore down.
+        assert input_cancelled.is_set()
+        leaked = [
+            task
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task() and "terminal-" in task.get_name() and not task.done()
+        ]
+        assert leaked == []
+    finally:
+        await service.shutdown()
 
 
 def test_terminal_reconnect_replaces_session(monkeypatch, tmp_path):
