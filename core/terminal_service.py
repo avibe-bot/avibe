@@ -240,7 +240,7 @@ class TerminalService:
                     stdout=slave_fd,
                     stderr=slave_fd,
                     cwd=str(Path.home()),
-                    env=_spawn_env(persistent=persistent),
+                    env=_spawn_env(),
                     preexec_fn=os.setsid if hasattr(os, "setsid") else None,
                 )
             except BaseException:
@@ -517,11 +517,16 @@ def _tmux_launch_command(tmux_binary: str, session_id: str) -> list[str]:
     ]
 
 
-def _spawn_env(*, persistent: bool) -> dict[str, str]:
+def _spawn_env() -> dict[str, str]:
     env = dict(os.environ)
     env["TERM"] = "xterm-256color"
-    if persistent:
-        env["TMUX"] = ""
+    # Drop any tmux context inherited from the Avibe daemon (which may itself have been
+    # started from inside tmux). Otherwise the spawned terminal — the vendored tmux client
+    # OR a plain fallback shell — points at the operator's tmux socket and nesting/targeting
+    # breaks (e.g. running tmux/byobu inside the fallback shell). tmux sets the correct
+    # TMUX/TMUX_PANE itself inside the persistent panes it creates.
+    env.pop("TMUX", None)
+    env.pop("TMUX_PANE", None)
     # macOS lacks a C.UTF-8 locale; fall back to one that exists there so inner
     # programs don't warn on startup. Only override a missing/C/POSIX locale — a
     # real UTF-8 locale inherited from the user is kept as-is.

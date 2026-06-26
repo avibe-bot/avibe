@@ -883,7 +883,7 @@ def test_spawn_env_drops_c_lc_all(monkeypatch):
     monkeypatch.delenv("LANG", raising=False)
     monkeypatch.delenv("LC_CTYPE", raising=False)
 
-    env = terminal_service._spawn_env(persistent=False)
+    env = terminal_service._spawn_env()
 
     assert "LC_ALL" not in env
     assert env["LANG"].endswith("UTF-8")
@@ -893,9 +893,24 @@ def test_spawn_env_drops_c_lc_all(monkeypatch):
 def test_spawn_env_keeps_real_lc_all(monkeypatch):
     monkeypatch.setenv("LC_ALL", "en_US.UTF-8")
 
-    env = terminal_service._spawn_env(persistent=False)
+    env = terminal_service._spawn_env()
 
     assert env["LC_ALL"] == "en_US.UTF-8"
+
+
+def test_spawn_env_drops_inherited_tmux_context(monkeypatch):
+    # The Avibe daemon may itself run inside tmux. Every spawned terminal (vendored tmux
+    # client or plain fallback shell) must NOT inherit that pane's TMUX/TMUX_PANE, or it
+    # targets the operator's tmux socket and nests/targets the wrong server.
+    monkeypatch.setenv("TMUX", "/tmp/tmux-501/default,1234,0")
+    monkeypatch.setenv("TMUX_PANE", "%3")
+
+    env = terminal_service._spawn_env()
+
+    # Use .get(...) is None rather than "x not in env": a failed membership assert would dump
+    # the entire spawned environment (API keys included) into the test log.
+    assert env.get("TMUX") is None
+    assert env.get("TMUX_PANE") is None
 
 
 def test_sanitize_session_id_allows_only_contract_chars():
