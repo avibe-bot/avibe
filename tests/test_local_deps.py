@@ -33,7 +33,7 @@ class _FakeHTTPResponse:
 
 
 def _fake_avault_archive(
-    content: bytes = b"#!/bin/sh\necho avault 0.1.1\n",
+    content: bytes = b"#!/bin/sh\necho avault 0.1.2\n",
     *,
     member_name: str = "avault",
 ) -> bytes:
