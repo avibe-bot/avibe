@@ -526,6 +526,60 @@ async def _reaper_retracks_dead_client_with_live_session(monkeypatch, tmp_path):
     assert service._sessions["d"].phase is _Phase.DETACHED
 
 
+def test_forget_finished_keeps_persistent_dead_session(monkeypatch, tmp_path):
+    asyncio.run(_forget_finished_keeps_persistent_dead_session(monkeypatch, tmp_path))
+
+
+async def _forget_finished_keeps_persistent_dead_session(monkeypatch, tmp_path):
+    # open()'s synchronous GC must not drop a persistent (tmux) session whose client process
+    # exited — its tmux session may still be alive (a prefix-key detach), so dropping it here
+    # would untrack a live session. Ephemeral dead clients have no session and are dropped.
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=4)
+    pconn = _make_persistent_connection("p", process=_ExitedProcess())
+    service._sessions["p"] = _Session("p", _Phase.ATTACHED, persistent=True, connection=pconn)
+    efd = os.open(os.devnull, os.O_RDWR)
+    econn = terminal_service.TerminalConnection("e", _ExitedProcess(), efd, False, 0.0, 0.0)
+    service._sessions["e"] = _Session("e", _Phase.ATTACHED, persistent=False, connection=econn)
+
+    service._forget_finished_locked()
+
+    assert "p" in service._sessions  # persistent dead kept (reaper finalize reconciles via has-session)
+    assert "e" not in service._sessions  # ephemeral dead dropped (no tmux session to preserve)
+    terminal_service._close_fd(pconn.master_fd)
+    terminal_service._close_fd(efd)
+
+
+def test_reaper_keeps_detached_registered_until_kill_completes(monkeypatch, tmp_path):
+    asyncio.run(_reaper_keeps_detached_registered_until_kill_completes(monkeypatch, tmp_path))
+
+
+async def _reaper_keeps_detached_registered_until_kill_completes(monkeypatch, tmp_path):
+    # An expired DETACHED session must stay registered (counted) while its async kill runs,
+    # and only be removed once the kill completes — so a reconnect in that gap isn't dropped
+    # from the cap or silently killed.
+    gate = asyncio.Event()
+    killed: list[str] = []
+
+    async def gated_kill(session_id: str) -> None:
+        killed.append(session_id)
+        await gate.wait()
+
+    monkeypatch.setattr(terminal_service, "_kill_tmux_session", gated_kill)
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+    service._sessions["d"] = _Session("d", _Phase.DETACHED, persistent=True, detached_at=0.0)
+
+    reap_task = asyncio.create_task(service.reap_idle())
+    await asyncio.sleep(0.02)  # reaper marks CLOSING and parks in the gated kill
+
+    assert killed == ["d"]
+    assert "d" in service._sessions  # still registered during the kill
+    assert service._sessions["d"].phase is _Phase.CLOSING
+
+    gate.set()
+    await reap_task
+    assert "d" not in service._sessions  # removed once the kill completed
+
+
 def test_closing_session_still_counts_against_cap(monkeypatch, tmp_path):
     asyncio.run(_closing_session_still_counts_against_cap(monkeypatch, tmp_path))
 

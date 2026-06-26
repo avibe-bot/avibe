@@ -398,13 +398,17 @@ class TerminalService:
             await asyncio.sleep(0.05)
 
     def _forget_finished_locked(self) -> None:
-        # Drop attached sessions whose client process has already exited; the next open/reap
-        # reconciles tmux state via has-session.
+        # Drop EPHEMERAL attached sessions whose client has exited — they have no tmux session
+        # to preserve. A persistent client can exit while its tmux session is still alive (the
+        # user detached with the prefix key), so we must NOT pop those here: that would untrack
+        # a live session. Leave them for the reaper's finalize, which checks has-session and
+        # reconciles to DETACHED or removes them.
         for session_id, session in list(self._sessions.items()):
             if (
                 session.phase is _Phase.ATTACHED
                 and session.connection is not None
                 and session.connection.process.returncode is not None
+                and not session.persistent
             ):
                 self._sessions.pop(session_id, None)
 
@@ -429,15 +433,25 @@ class TerminalService:
                         session.phase = _Phase.CLOSING
                         closing.append(conn)
                 elif session.phase is _Phase.DETACHED and (session.detached_at or 0.0) < cutoff:
-                    self._sessions.pop(session_id, None)
+                    # Keep the entry registered (CLOSING) across the async kill so it stays
+                    # counted and a reconnect in the gap can't be silently killed.
+                    session.phase = _Phase.CLOSING
                     expired_detached.append(session_id)
         for conn in closing:
             await self._finalize_connection(conn)
-        # Detached sessions that outlived the idle window are killed for real.
-        await asyncio.gather(
-            *(_kill_tmux_session(session_id) for session_id in expired_detached),
-            return_exceptions=True,
-        )
+        # Kill detached sessions that outlived the idle window — but only if a reconnect has
+        # not grabbed the id meanwhile (it would have flipped the phase away from CLOSING), so
+        # we never kill a freshly reattached terminal. Drop the entry once the kill completes.
+        for session_id in expired_detached:
+            async with self._lock:
+                slot = self._sessions.get(session_id)
+                if slot is None or slot.phase is not _Phase.CLOSING or slot.connection is not None:
+                    continue
+            await _kill_tmux_session(session_id)
+            async with self._lock:
+                slot = self._sessions.get(session_id)
+                if slot is not None and slot.phase is _Phase.CLOSING and slot.connection is None:
+                    self._sessions.pop(session_id, None)
 
 
 class TerminalServiceError(Exception):

@@ -88,15 +88,24 @@ export const AppsFileBrowserPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showHidden]);
 
+  // Per-selection token: a slow fileMeta() for file A must not switch the pane back to A
+  // after the user has since clicked file B (or navigated away). Bumped on every click.
+  const selSeq = useRef(0);
   const openEntry = (entry: FsEntry) => {
+    const seq = ++selSeq.current;
     const full = joinPath(cwd, entry.name);
     if (entry.kind === 'dir') {
       setSelected(null);
       navigate(full);
     } else {
       fileMeta(full)
-        .then((m) => setSelected({ path: full, name: entry.name, kind: m.kind, mime: m.mime, mtime: m.mtime, size: m.size }))
-        .catch((e: unknown) => setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.openFailed'))));
+        .then((m) => {
+          if (seq !== selSeq.current) return; // a newer click superseded this metadata fetch
+          setSelected({ path: full, name: entry.name, kind: m.kind, mime: m.mime, mtime: m.mtime, size: m.size });
+        })
+        .catch((e: unknown) => {
+          if (seq === selSeq.current) setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.openFailed')));
+        });
     }
   };
 
