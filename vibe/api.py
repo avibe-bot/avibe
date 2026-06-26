@@ -1563,6 +1563,13 @@ def vault_sign(payload: dict) -> dict:
             meta = vault_service.get_secret_meta(conn, name)
             if meta.get("kind") != "keypair":
                 raise VaultApiError(f"secret '{name}' is not a signing key", code="not_signing_key", status=409)
+            signer_kind = meta.get("signer_kind") or "local"
+            if signer_kind != "local":
+                raise VaultApiError(
+                    f"secret '{name}' uses signer_kind '{signer_kind}', which is not locally signable",
+                    code="unsupported_signer_kind",
+                    status=409,
+                )
             if meta.get("protection") == "protected":
                 signature = payload.get("signature")
                 if not isinstance(signature, dict):

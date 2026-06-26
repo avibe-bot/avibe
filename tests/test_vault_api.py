@@ -308,6 +308,26 @@ def test_vault_sign_rejects_non_keypair_secret(monkeypatch):
     sign.assert_not_called()
 
 
+def test_vault_sign_rejects_non_local_signer(monkeypatch):
+    sign = Mock()
+    monkeypatch.setattr(api, "avault_sign", sign)
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("key")))
+    api.create_vault_secret(
+        {
+            "name": "WALLET_KEY",
+            "kind": "keypair",
+            "signer_kind": "external",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        }
+    )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.vault_sign({"name": "WALLET_KEY", "digest": "00" * 32})
+
+    assert exc.value.code == "unsupported_signer_kind"
+    sign.assert_not_called()
+
+
 def test_create_and_revoke_grant_api(monkeypatch):
     from unittest.mock import Mock
 
