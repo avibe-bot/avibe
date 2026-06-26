@@ -18,6 +18,7 @@ const NONCE_BYTES = 12;
 const ARGON2_VERSION = 19;
 const PASSKEY_PRF_SALT_BYTES = 32;
 const PASSKEY_HKDF_INFO = 'avault:protected-vmk:kek-passkey:v1';
+const SECRET_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 const DEFAULT_SCRYPT = {
   n: 2 ** 15,
   r: 8,
@@ -134,6 +135,7 @@ export type AgentDeliverBlindBoxContext = {
   name: string;
   scopeType: string;
   scopeRef: string;
+  ttlSecs: number | bigint;
   approvalNonce: BytesLike;
   approvalExpiresAtUnix: number | bigint;
   operationHash: HexOrBytes;
@@ -146,6 +148,7 @@ export type AgentSignBlindBoxContext = {
   scopeRef: string;
   signScheme: SignatureScheme;
   digest: HexOrBytes;
+  ttlSecs: number | bigint;
   approvalNonce: BytesLike;
   approvalExpiresAtUnix: number | bigint;
   operationHash: HexOrBytes;
@@ -245,6 +248,7 @@ function toArrayBuffer(value: BytesLike): ArrayBuffer {
   const bytes = toUint8Array(value);
   const out = new ArrayBuffer(bytes.byteLength);
   new Uint8Array(out).set(bytes);
+  bytes.fill(0);
   return out;
 }
 
@@ -285,6 +289,12 @@ function assertLength(bytes: Uint8Array, length: number, field: string): void {
   }
 }
 
+function wipeArrayBuffer(buffer: ArrayBuffer | undefined): void {
+  if (buffer) {
+    new Uint8Array(buffer).fill(0);
+  }
+}
+
 function normalizeArgon2idParams(params?: Partial<Argon2idParams>): Argon2idParams {
   const normalized = { ...DEFAULT_ARGON2ID, ...params };
   if (!Number.isInteger(normalized.iterations) || normalized.iterations < 1 || normalized.iterations > 10) {
@@ -317,17 +327,32 @@ async function aesgcmEncrypt(
   data: BytesLike,
   additionalData?: BytesLike,
 ): Promise<Uint8Array> {
-  const cryptoKey = await crypto.subtle.importKey('raw', toArrayBuffer(key), 'AES-GCM', false, ['encrypt']);
-  const ct = await crypto.subtle.encrypt(
-    {
-      name: 'AES-GCM',
-      iv: toArrayBuffer(nonce),
-      ...(additionalData ? { additionalData: toArrayBuffer(additionalData) } : {}),
-    },
-    cryptoKey,
-    toArrayBuffer(data),
-  );
-  return new Uint8Array(ct);
+  let keyBuffer: ArrayBuffer | undefined;
+  let nonceBuffer: ArrayBuffer | undefined;
+  let dataBuffer: ArrayBuffer | undefined;
+  let additionalDataBuffer: ArrayBuffer | undefined;
+  try {
+    keyBuffer = toArrayBuffer(key);
+    nonceBuffer = toArrayBuffer(nonce);
+    dataBuffer = toArrayBuffer(data);
+    additionalDataBuffer = additionalData ? toArrayBuffer(additionalData) : undefined;
+    const cryptoKey = await crypto.subtle.importKey('raw', keyBuffer, 'AES-GCM', false, ['encrypt']);
+    const ct = await crypto.subtle.encrypt(
+      {
+        name: 'AES-GCM',
+        iv: nonceBuffer,
+        ...(additionalDataBuffer ? { additionalData: additionalDataBuffer } : {}),
+      },
+      cryptoKey,
+      dataBuffer,
+    );
+    return new Uint8Array(ct);
+  } finally {
+    wipeArrayBuffer(keyBuffer);
+    wipeArrayBuffer(nonceBuffer);
+    wipeArrayBuffer(dataBuffer);
+    wipeArrayBuffer(additionalDataBuffer);
+  }
 }
 
 async function aesgcmDecrypt(
@@ -336,32 +361,59 @@ async function aesgcmDecrypt(
   data: BytesLike,
   additionalData?: BytesLike,
 ): Promise<Uint8Array> {
-  const cryptoKey = await crypto.subtle.importKey('raw', toArrayBuffer(key), 'AES-GCM', false, ['decrypt']);
-  const pt = await crypto.subtle.decrypt(
-    {
-      name: 'AES-GCM',
-      iv: toArrayBuffer(nonce),
-      ...(additionalData ? { additionalData: toArrayBuffer(additionalData) } : {}),
-    },
-    cryptoKey,
-    toArrayBuffer(data),
-  );
-  return new Uint8Array(pt);
+  let keyBuffer: ArrayBuffer | undefined;
+  let nonceBuffer: ArrayBuffer | undefined;
+  let dataBuffer: ArrayBuffer | undefined;
+  let additionalDataBuffer: ArrayBuffer | undefined;
+  try {
+    keyBuffer = toArrayBuffer(key);
+    nonceBuffer = toArrayBuffer(nonce);
+    dataBuffer = toArrayBuffer(data);
+    additionalDataBuffer = additionalData ? toArrayBuffer(additionalData) : undefined;
+    const cryptoKey = await crypto.subtle.importKey('raw', keyBuffer, 'AES-GCM', false, ['decrypt']);
+    const pt = await crypto.subtle.decrypt(
+      {
+        name: 'AES-GCM',
+        iv: nonceBuffer,
+        ...(additionalDataBuffer ? { additionalData: additionalDataBuffer } : {}),
+      },
+      cryptoKey,
+      dataBuffer,
+    );
+    return new Uint8Array(pt);
+  } finally {
+    wipeArrayBuffer(keyBuffer);
+    wipeArrayBuffer(nonceBuffer);
+    wipeArrayBuffer(dataBuffer);
+    wipeArrayBuffer(additionalDataBuffer);
+  }
 }
 
 async function hkdfSha256(ikm: BytesLike, salt: BytesLike, info: BytesLike, length: number): Promise<Uint8Array> {
-  const key = await crypto.subtle.importKey('raw', toArrayBuffer(ikm), 'HKDF', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits(
-    {
-      name: 'HKDF',
-      hash: 'SHA-256',
-      salt: toArrayBuffer(salt),
-      info: toArrayBuffer(info),
-    },
-    key,
-    length * 8,
-  );
-  return new Uint8Array(bits);
+  let ikmBuffer: ArrayBuffer | undefined;
+  let saltBuffer: ArrayBuffer | undefined;
+  let infoBuffer: ArrayBuffer | undefined;
+  try {
+    ikmBuffer = toArrayBuffer(ikm);
+    saltBuffer = toArrayBuffer(salt);
+    infoBuffer = toArrayBuffer(info);
+    const key = await crypto.subtle.importKey('raw', ikmBuffer, 'HKDF', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits(
+      {
+        name: 'HKDF',
+        hash: 'SHA-256',
+        salt: saltBuffer,
+        info: infoBuffer,
+      },
+      key,
+      length * 8,
+    );
+    return new Uint8Array(bits);
+  } finally {
+    wipeArrayBuffer(ikmBuffer);
+    wipeArrayBuffer(saltBuffer);
+    wipeArrayBuffer(infoBuffer);
+  }
 }
 
 async function kekPasswordArgon2id(password: string, salt: BytesLike, params?: Partial<Argon2idParams>): Promise<Uint8Array> {
@@ -392,10 +444,14 @@ async function kekPasswordScrypt(password: string, salt: BytesLike, n: number, r
 
 export async function derivePasskeyKek(prfOutput: BytesLike, prfSalt: BytesLike): Promise<Uint8Array> {
   const output = toUint8Array(prfOutput, 'passkey PRF output');
-  const salt = toUint8Array(prfSalt, 'passkey PRF salt');
-  assertLength(output, KEY_BYTES, 'passkey PRF output');
-  assertLength(salt, PASSKEY_PRF_SALT_BYTES, 'passkey PRF salt');
-  return hkdfSha256(output, salt, utf8(PASSKEY_HKDF_INFO), KEY_BYTES);
+  try {
+    const salt = toUint8Array(prfSalt, 'passkey PRF salt');
+    assertLength(output, KEY_BYTES, 'passkey PRF output');
+    assertLength(salt, PASSKEY_PRF_SALT_BYTES, 'passkey PRF salt');
+    return await hkdfSha256(output, salt, utf8(PASSKEY_HKDF_INFO), KEY_BYTES);
+  } finally {
+    output.fill(0);
+  }
 }
 
 export function newVmk(): Uint8Array {
@@ -433,12 +489,15 @@ function normalizeWrapFactors(factors: VmkWrapFactor[] | string[]): VmkWrapFacto
 }
 
 async function passwordArgon2idCopy(vmk: BytesLike, factor: PasswordArgon2idFactor): Promise<PasswordArgon2idCopy> {
+  const vmkBytes = toUint8Array(vmk, 'VMK');
   const salt = randomBytes(16);
   const nonce = randomBytes(NONCE_BYTES);
-  const params = normalizeArgon2idParams(factor.argon2id);
-  const kek = await kekPasswordArgon2id(factor.password, salt, params);
+  let kek: Uint8Array | undefined;
   try {
-    const wrapped = await aesgcmEncrypt(kek, nonce, toUint8Array(vmk, 'VMK'));
+    assertLength(vmkBytes, KEY_BYTES, 'VMK');
+    const params = normalizeArgon2idParams(factor.argon2id);
+    kek = await kekPasswordArgon2id(factor.password, salt, params);
+    const wrapped = await aesgcmEncrypt(kek, nonce, vmkBytes);
     return {
       kind: 'password',
       kdf: 'argon2id',
@@ -451,16 +510,20 @@ async function passwordArgon2idCopy(vmk: BytesLike, factor: PasswordArgon2idFact
       wrapped: bytesToBase64(wrapped),
     };
   } finally {
-    kek.fill(0);
+    kek?.fill(0);
+    vmkBytes.fill(0);
   }
 }
 
 async function passwordScryptCopy(vmk: BytesLike, password: string): Promise<PasswordScryptCopy> {
+  const vmkBytes = toUint8Array(vmk, 'VMK');
   const salt = randomBytes(16);
   const nonce = randomBytes(NONCE_BYTES);
-  const kek = await kekPasswordScrypt(password, salt, DEFAULT_SCRYPT.n, DEFAULT_SCRYPT.r, DEFAULT_SCRYPT.p);
+  let kek: Uint8Array | undefined;
   try {
-    const wrapped = await aesgcmEncrypt(kek, nonce, toUint8Array(vmk, 'VMK'));
+    assertLength(vmkBytes, KEY_BYTES, 'VMK');
+    kek = await kekPasswordScrypt(password, salt, DEFAULT_SCRYPT.n, DEFAULT_SCRYPT.r, DEFAULT_SCRYPT.p);
+    const wrapped = await aesgcmEncrypt(kek, nonce, vmkBytes);
     return {
       kind: 'password',
       kdf: 'scrypt',
@@ -472,7 +535,8 @@ async function passwordScryptCopy(vmk: BytesLike, password: string): Promise<Pas
       wrapped: bytesToBase64(wrapped),
     };
   } finally {
-    kek.fill(0);
+    kek?.fill(0);
+    vmkBytes.fill(0);
   }
 }
 
@@ -484,12 +548,16 @@ async function passwordCopy(vmk: BytesLike, factor: PasswordWrapFactor): Promise
 }
 
 async function passkeyCopy(vmk: BytesLike, factor: PasskeyWrapFactor): Promise<PasskeyPrfCopy> {
-  const prfSalt = toUint8Array(factor.prfSalt, 'passkey PRF salt');
-  assertLength(prfSalt, PASSKEY_PRF_SALT_BYTES, 'passkey PRF salt');
+  const vmkBytes = toUint8Array(vmk, 'VMK');
   const nonce = randomBytes(NONCE_BYTES);
-  const kek = await derivePasskeyKek(factor.prfOutput, prfSalt);
+  let kek: Uint8Array | undefined;
+  let prfSalt: Uint8Array | undefined;
   try {
-    const wrapped = await aesgcmEncrypt(kek, nonce, toUint8Array(vmk, 'VMK'));
+    assertLength(vmkBytes, KEY_BYTES, 'VMK');
+    prfSalt = toUint8Array(factor.prfSalt, 'passkey PRF salt');
+    assertLength(prfSalt, PASSKEY_PRF_SALT_BYTES, 'passkey PRF salt');
+    kek = await derivePasskeyKek(factor.prfOutput, prfSalt);
+    const wrapped = await aesgcmEncrypt(kek, nonce, vmkBytes);
     return {
       kind: 'passkey',
       kdf: 'webauthn-prf-hkdf-sha256',
@@ -499,19 +567,20 @@ async function passkeyCopy(vmk: BytesLike, factor: PasskeyWrapFactor): Promise<P
       ...(factor.credentialId ? { credential_id: factor.credentialId } : {}),
     };
   } finally {
-    kek.fill(0);
+    kek?.fill(0);
+    prfSalt?.fill(0);
+    vmkBytes.fill(0);
   }
 }
 
 export async function buildWrapMeta(vmk: BytesLike, factors: VmkWrapFactor[] | string[]): Promise<string> {
   const vmkBytes = toUint8Array(vmk, 'VMK');
-  assertLength(vmkBytes, KEY_BYTES, 'VMK');
-  const normalized = normalizeWrapFactors(factors);
-  if (normalized.length === 0) {
-    throw new Error('at least one protected unlock factor is required');
-  }
-
   try {
+    assertLength(vmkBytes, KEY_BYTES, 'VMK');
+    const normalized = normalizeWrapFactors(factors);
+    if (normalized.length === 0) {
+      throw new Error('at least one protected unlock factor is required');
+    }
     const copies: WrapCopy[] = [];
     for (const factor of normalized) {
       copies.push(factor.kind === 'password' ? await passwordCopy(vmkBytes, factor) : await passkeyCopy(vmkBytes, factor));
@@ -589,10 +658,24 @@ export async function unwrapVmk(wrapMeta: string | WrapMeta, factor: VmkUnlockFa
   for (const copy of meta.copies) {
     try {
       if (normalized.kind === 'password' && copy.kind === 'password') {
-        return await unwrapPasswordCopy(copy, normalized.password);
+        const vmk = await unwrapPasswordCopy(copy, normalized.password);
+        try {
+          assertLength(vmk, KEY_BYTES, 'VMK');
+          return vmk;
+        } catch (error) {
+          vmk.fill(0);
+          throw error;
+        }
       }
       if (normalized.kind === 'passkey' && copy.kind === 'passkey') {
-        return await unwrapPasskeyCopy(copy, normalized);
+        const vmk = await unwrapPasskeyCopy(copy, normalized);
+        try {
+          assertLength(vmk, KEY_BYTES, 'VMK');
+          return vmk;
+        } catch (error) {
+          vmk.fill(0);
+          throw error;
+        }
       }
     } catch {
       // Wrong factor or corrupt copy; try the next independent VMK copy.
@@ -642,7 +725,9 @@ function requirePinnedPublicKey(publicKey: AvaultPublicKey): AvaultPublicKey & {
 
 async function requireValidPinnedPublicKey(publicKey: AvaultPublicKey): Promise<AvaultPublicKey & { fingerprint: string }> {
   const pinned = requirePinnedPublicKey(publicKey);
-  const actual = await avaultPublicKeyFingerprint(pinned);
+  const rawPublicKey = publicKeyBytes(pinned);
+  assertLength(rawPublicKey, KEY_BYTES, 'avault public key');
+  const actual = await publicKeyFingerprint(rawPublicKey);
   if (actual !== pinned.fingerprint.toLowerCase()) {
     throw new Error('avault public key fingerprint mismatch');
   }
@@ -669,12 +754,14 @@ export async function sealProtected(
   context: ProtectedRecordContext,
 ): Promise<ProtectedSealed> {
   const vmkBytes = toUint8Array(vmk, 'VMK');
-  assertLength(vmkBytes, KEY_BYTES, 'VMK');
-  const aad = protectedRecordAad(context);
   const dek = randomBytes(KEY_BYTES);
+  let valueBytes: Uint8Array | undefined;
   try {
+    assertLength(vmkBytes, KEY_BYTES, 'VMK');
+    valueBytes = toUint8Array(value, 'value');
+    const aad = protectedRecordAad(context);
     const valueNonce = randomBytes(NONCE_BYTES);
-    const ciphertext = await aesgcmEncrypt(dek, valueNonce, toUint8Array(value, 'value'), aad);
+    const ciphertext = await aesgcmEncrypt(dek, valueNonce, valueBytes, aad);
     const dekNonce = randomBytes(NONCE_BYTES);
     const wrappedDek = await aesgcmEncrypt(vmkBytes, dekNonce, dek, aad);
     return {
@@ -686,6 +773,7 @@ export async function sealProtected(
   } finally {
     dek.fill(0);
     vmkBytes.fill(0);
+    valueBytes?.fill(0);
   }
 }
 
@@ -695,14 +783,21 @@ export async function unwrapProtectedDek(
   context: ProtectedRecordContext,
 ): Promise<Uint8Array> {
   const vmkBytes = toUint8Array(vmk, 'VMK');
-  assertLength(vmkBytes, KEY_BYTES, 'VMK');
   try {
-    return await aesgcmDecrypt(
+    assertLength(vmkBytes, KEY_BYTES, 'VMK');
+    const dek = await aesgcmDecrypt(
       vmkBytes,
       base64ToBytes(sealed.dek_nonce),
       base64ToBytes(sealed.wrapped_dek),
       protectedRecordAad(context),
     );
+    try {
+      assertLength(dek, KEY_BYTES, 'DEK');
+      return dek;
+    } catch (error) {
+      dek.fill(0);
+      throw error;
+    }
   } finally {
     vmkBytes.fill(0);
   }
@@ -735,6 +830,7 @@ export async function releaseProtectedDek(
 ): Promise<BlindBox> {
   assertDeliveryReleaseContext(context);
   assertReleaseMatchesRecord(recordContext, context);
+  await assertAgentDeliverReleaseHash(context);
   const pinnedPublicKey = await requireValidPinnedPublicKey(publicKey);
   const dek = await unwrapProtectedDek(sealed, vmk, recordContext);
   try {
@@ -756,9 +852,13 @@ function publicKeyBytes(publicKey: AvaultPublicKey | string): Uint8Array {
   return base64ToBytes(typeof publicKey === 'string' ? publicKey : publicKey.public_key);
 }
 
-export async function avaultPublicKeyFingerprint(publicKey: AvaultPublicKey | string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', toArrayBuffer(publicKeyBytes(publicKey)));
+async function publicKeyFingerprint(publicKeyRaw: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', toArrayBuffer(publicKeyRaw));
   return bytesToHex(new Uint8Array(digest));
+}
+
+export async function avaultPublicKeyFingerprint(publicKey: AvaultPublicKey | string): Promise<string> {
+  return publicKeyFingerprint(publicKeyBytes(publicKey));
 }
 
 export async function sealBlindBox(
@@ -802,11 +902,16 @@ function normalizeDigest(digest: BytesLike | string): Uint8Array {
 
 function normalizePrivateKey(privateKey: BytesLike | string): Uint8Array {
   const bytes = typeof privateKey === 'string' ? hexToBytes(privateKey) : toUint8Array(privateKey, 'private key');
-  assertLength(bytes, KEY_BYTES, 'private key');
-  if (!secp256k1.utils.isValidSecretKey(bytes)) {
-    throw new Error('invalid secp256k1 private key');
+  try {
+    assertLength(bytes, KEY_BYTES, 'private key');
+    if (!secp256k1.utils.isValidSecretKey(bytes)) {
+      throw new Error('invalid secp256k1 private key');
+    }
+    return bytes;
+  } catch (error) {
+    bytes.fill(0);
+    throw error;
   }
-  return bytes;
 }
 
 function normalizeHexOrBytes(value: HexOrBytes, field: string): Uint8Array {
@@ -814,8 +919,8 @@ function normalizeHexOrBytes(value: HexOrBytes, field: string): Uint8Array {
 }
 
 function validateSecretName(name: string): string {
-  if (typeof name !== 'string' || name.trim() === '') {
-    throw new Error('blind-box context name is required');
+  if (typeof name !== 'string' || !SECRET_NAME_PATTERN.test(name)) {
+    throw new Error('vault secret name must match ^[A-Z][A-Z0-9_]*$');
   }
   return name;
 }
@@ -894,6 +999,7 @@ function normalizeBlindBoxContext(context: BlindBoxContext): BlindBoxContext {
         name: validateSecretName(context.name),
         scopeType: validateNonEmpty(context.scopeType, 'scope type'),
         scopeRef: validateNonEmpty(context.scopeRef, 'scope ref'),
+        ttlSecs: normalizeU64(context.ttlSecs, 'ttl seconds'),
         approvalNonce: approval.approvalNonce,
         approvalExpiresAtUnix: approval.approvalExpiresAtUnix,
         operationHash: normalizeOperationHash(context.operationHash),
@@ -911,6 +1017,7 @@ function normalizeBlindBoxContext(context: BlindBoxContext): BlindBoxContext {
         scopeRef: validateNonEmpty(context.scopeRef, 'scope ref'),
         signScheme: context.signScheme,
         digest: normalizeDigest(context.digest),
+        ttlSecs: normalizeU64(context.ttlSecs, 'ttl seconds'),
         approvalNonce: approval.approvalNonce,
         approvalExpiresAtUnix: approval.approvalExpiresAtUnix,
         operationHash: normalizeOperationHash(context.operationHash),
@@ -940,6 +1047,14 @@ async function normalizeAndCheckOperationHash(
   return supplied;
 }
 
+async function assertAgentDeliverReleaseHash(context: ProtectedDekDeliveryBlindBoxContext): Promise<void> {
+  const supplied = normalizeOperationHash(context.operationHash);
+  const computed = await blindBoxAgentDeliverOperationHash(context.name, context.ttlSecs);
+  if (bytesToHex(supplied) !== bytesToHex(computed)) {
+    throw new Error('operation hash does not match release operation fields');
+  }
+}
+
 export async function protectedDekReleaseBlindBoxContext(
   name: string,
   operation: ProtectedDekReleaseOperation,
@@ -948,39 +1063,46 @@ export async function protectedDekReleaseBlindBoxContext(
   const approval = normalizeApproval(operation.approval);
 
   switch (operation.kind) {
-    case 'agent-deliver':
+    case 'agent-deliver': {
+      const ttlSecs = normalizeU64(operation.ttlSecs, 'ttl seconds');
       return {
         purpose: 'agent-deliver',
         name: normalizedName,
         scopeType: validateNonEmpty(operation.scopeType, 'scope type'),
         scopeRef: validateNonEmpty(operation.scopeRef, 'scope ref'),
+        ttlSecs,
         approvalNonce: approval.approvalNonce,
         approvalExpiresAtUnix: approval.approvalExpiresAtUnix,
         operationHash: await normalizeAndCheckOperationHash(
-          ['agent-deliver', normalizedName, u64Be(operation.ttlSecs, 'ttl seconds')],
+          ['agent-deliver', normalizedName, u64Be(ttlSecs, 'ttl seconds')],
           operation.operationHash,
         ),
       };
-    case 'agent-sign':
+    }
+    case 'agent-sign': {
+      const digest = normalizeDigest(operation.digest);
+      const ttlSecs = normalizeU64(operation.ttlSecs, 'ttl seconds');
       return {
         purpose: 'agent-sign',
         name: normalizedName,
         scopeType: validateNonEmpty(operation.scopeType, 'scope type'),
         scopeRef: validateNonEmpty(operation.scopeRef, 'scope ref'),
         signScheme: operation.signatureScheme,
-        digest: normalizeDigest(operation.digest),
+        digest,
+        ttlSecs,
         approvalNonce: approval.approvalNonce,
         approvalExpiresAtUnix: approval.approvalExpiresAtUnix,
         operationHash: await normalizeAndCheckOperationHash(
           [
             'agent-sign',
             operation.signatureScheme,
-            normalizeDigest(operation.digest),
-            u64Be(operation.ttlSecs, 'ttl seconds'),
+            digest,
+            u64Be(ttlSecs, 'ttl seconds'),
           ],
           operation.operationHash,
         ),
       };
+    }
     default:
       throw new Error('unsupported blind-box release operation');
   }

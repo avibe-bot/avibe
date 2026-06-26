@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { Aes256Gcm, CipherSuite, HkdfSha256 } from '@hpke/core';
 import { DhkemX25519HkdfSha256 } from '@hpke/dhkem-x25519';
+import { scrypt } from 'hash-wasm';
 
 import vectors from './__fixtures__/p2_core_crypto.json';
 import {
   BLIND_BOX_AAD_DOMAIN,
   BLIND_BOX_SCHEME,
   addPasswordCopy,
+  avaultPublicKeyFingerprint,
   base64ToBytes,
   blindBoxAad,
   blindBoxAadHex,
@@ -66,6 +68,45 @@ async function hkdfSha256(ikm: Uint8Array, salt: string, info: string, length: n
       length * 8,
     ),
   );
+}
+
+async function aesgcmEncryptForTest(key: Uint8Array, nonce: Uint8Array, plaintext: Uint8Array): Promise<Uint8Array> {
+  const cryptoKey = await crypto.subtle.importKey('raw', arrayBuffer(key), 'AES-GCM', false, ['encrypt']);
+  return new Uint8Array(
+    await crypto.subtle.encrypt(
+      {
+        name: 'AES-GCM',
+        iv: arrayBuffer(nonce),
+      },
+      cryptoKey,
+      arrayBuffer(plaintext),
+    ),
+  );
+}
+
+async function malformedScryptVmkCopy(password: string, plaintext: Uint8Array) {
+  const salt = new Uint8Array(16).fill(0xa5);
+  const nonce = new Uint8Array(12).fill(0x5a);
+  const kek = (await scrypt({
+    password: encoder.encode(password),
+    salt,
+    costFactor: 2 ** 15,
+    blockSize: 8,
+    parallelism: 1,
+    hashLength: 32,
+    outputType: 'binary',
+  })) as Uint8Array;
+  const wrapped = await aesgcmEncryptForTest(kek, nonce, plaintext);
+  return {
+    kind: 'password',
+    kdf: 'scrypt',
+    n: 2 ** 15,
+    r: 8,
+    p: 1,
+    salt: bytesToBase64(salt),
+    nonce: bytesToBase64(nonce),
+    wrapped: bytesToBase64(wrapped),
+  };
 }
 
 async function avaultVectorReceiverKey(): Promise<CryptoKeyPair> {
@@ -248,6 +289,23 @@ describe('vaultCrypto blind boxes', () => {
       }, standardCreateBlindBoxContext(vectorBlindBoxName)),
     ).rejects.toThrow(/fingerprint/);
   });
+
+  it('enforces the daemon vault secret-name syntax before producing AAD', async () => {
+    expect(() => standardCreateBlindBoxContext('OPENAI_API_KEY')).not.toThrow();
+    expect(() => standardCreateBlindBoxContext(' OPENAI_API_KEY ')).toThrow(/secret name/);
+    expect(() => standardCreateBlindBoxContext('openai_key')).toThrow(/secret name/);
+    expect(() => standardCreateBlindBoxContext('1OPENAI_KEY')).toThrow(/secret name/);
+    await expect(
+      protectedDekReleaseBlindBoxContext('openai_key', {
+        kind: 'agent-deliver',
+        scopeType: 'session',
+        scopeRef: 'sess-1',
+        ttlSecs: 60,
+        approval: { nonce: new Uint8Array(16).fill(1), expiresAtUnix: 1 },
+        operationHash: '00'.repeat(32),
+      }),
+    ).rejects.toThrow(/secret name/);
+  });
 });
 
 describe('vaultCrypto protected hierarchy', () => {
@@ -273,6 +331,19 @@ describe('vaultCrypto protected hierarchy', () => {
     });
     const copies = JSON.parse(withArgon2id).copies as Array<{ kind: string; kdf?: string }>;
     expect(copies.at(-1)?.kdf).toBe('argon2id');
+  });
+
+  it('skips malformed authenticated VMK copies and tries the next valid copy', async () => {
+    const vmk = newVmk();
+    const password = 'less-secure-fallback';
+    const malformed = await malformedScryptVmkCopy(password, new Uint8Array(31).fill(0x44));
+    const valid = await buildWrapMeta(vmk, [password]);
+    const combined = JSON.stringify({
+      v: 1,
+      copies: [malformed, ...JSON.parse(valid).copies],
+    });
+
+    await expect(unwrapVmk(combined, password)).resolves.toEqual(vmk);
   });
 
   it('rejects blank password wrap factors before deriving VMK copies', async () => {
@@ -325,6 +396,18 @@ describe('vaultCrypto protected hierarchy', () => {
         context,
       ),
     ).rejects.toThrow(/fingerprint/);
+    const badPublicKey = {
+      public_key: bytesToBase64(new Uint8Array(31).fill(0x5a)),
+    };
+    await expect(
+      releaseProtectedDek(
+        { ...sealed, wrapped_dek: bytesToBase64(new Uint8Array(48).fill(0x7f)) },
+        vmk,
+        { ...badPublicKey, fingerprint: await avaultPublicKeyFingerprint(badPublicKey) },
+        recordContext,
+        context,
+      ),
+    ).rejects.toThrow(/public key/);
     await expect(releaseProtectedDek(sealed, vmk, avaultPublicKey, { name: 'OTHER_SIGNING_KEY' }, context)).rejects.toThrow(
       /record name/,
     );
@@ -338,6 +421,15 @@ describe('vaultCrypto protected hierarchy', () => {
         approval: approvalFromVector(agentDeliver),
         operationHash: agentDeliver.operation_hash_hex,
       }),
+    ).rejects.toThrow(/operation hash/);
+    await expect(
+      releaseProtectedDek(
+        { ...sealed, wrapped_dek: bytesToBase64(new Uint8Array(48).fill(0x7f)) },
+        vmk,
+        avaultPublicKey,
+        recordContext,
+        { ...context, operationHash: new Uint8Array(32).fill(0x42) },
+      ),
     ).rejects.toThrow(/operation hash/);
     const signContext = await protectedDekReleaseBlindBoxContext('OPENAI_API_KEY', {
       kind: 'agent-sign',
@@ -382,6 +474,15 @@ describe('vaultCrypto protected hierarchy', () => {
     const sealed = await sealProtected(new TextEncoder().encode('protected value'), vmkBuffer, { name: 'OPENAI_API_KEY' });
     await expect(unwrapProtectedDek(sealed, vmkBuffer, { name: 'OPENAI_API_KEY' })).resolves.toHaveLength(32);
     expect(bytesToHexString(new Uint8Array(vmkBuffer))).toBe(bytesToHexString(vmk));
+  });
+
+  it('does not wipe caller-owned protected plaintext ArrayBuffers after sealing', async () => {
+    const vmk = newVmk();
+    const plaintext = new TextEncoder().encode('protected value');
+    const plaintextBuffer = plaintext.buffer.slice(plaintext.byteOffset, plaintext.byteOffset + plaintext.byteLength);
+    await sealProtected(plaintextBuffer, vmk, { name: 'OPENAI_API_KEY' });
+
+    expect(new TextDecoder().decode(plaintextBuffer)).toBe('protected value');
   });
 
   it('derives a stable passkey KEK from WebAuthn PRF output and salt', async () => {
