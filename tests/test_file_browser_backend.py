@@ -699,6 +699,17 @@ def test_move_directory_to_sibling_still_succeeds(tmp_path):
     assert (destination / "keep.txt").read_text(encoding="utf-8") == "keep"
 
 
+def test_move_directory_onto_itself_is_noop(tmp_path):
+    # An exact self-move stays an idempotent no-op — the into-itself guard must only reject
+    # moves into a descendant, not a move onto the source's own path.
+    folder = tmp_path / "a"
+    folder.mkdir()
+    (folder / "keep.txt").write_text("keep", encoding="utf-8")
+
+    assert fs.move_path(str(folder), str(folder)) == {"ok": True}
+    assert (folder / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
 def test_move_no_overwrite_refuses_target_appearing_after_precheck(tmp_path, monkeypatch):
     source = tmp_path / "source.txt"
     destination = tmp_path / "destination.txt"

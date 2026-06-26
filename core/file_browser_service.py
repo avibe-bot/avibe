@@ -629,11 +629,13 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
 def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[str, Any]:
     source = _resolve_existing_entry_path(raw_src)
     target = _resolve_entry_path(raw_dst)
+    if source == target:
+        # Moving onto itself is a no-op; never unlink-then-move (it would delete it). Kept
+        # before the subtree guard below so an exact self-move stays idempotent rather than
+        # erroring as "into itself" — the guard is only meant to reject moves into a descendant.
+        return {"ok": True}
     if _is_dir_no_follow(source) and _entry_contains_no_follow(source, target):
         raise FileBrowserError("invalid_path", "Cannot move a folder into itself", 400)
-    if source == target:
-        # Moving onto itself is a no-op; never unlink-then-move (it would delete it).
-        return {"ok": True}
     if source.is_symlink():
         try:
             same_target = source.resolve() == target.resolve()
