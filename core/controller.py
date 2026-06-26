@@ -177,6 +177,12 @@ class Controller:
         self.receiver_tasks: Dict[str, asyncio.Task] = {}
         self.stored_session_mappings: Dict[str, str] = {}
         self.session_last_activity: Dict[str, float] = {}
+        # Monotonic baseline of when each session's CURRENT turn went active
+        # (idle→active transition). Unlike ``session_last_activity`` — which is
+        # bumped on every streamed event — this is NOT touched mid-turn, so the
+        # Running tab can report an accurate "busy for" duration instead of
+        # seconds-since-last-chunk.
+        self.session_turn_started: Dict[str, float] = {}
         self.claude_active_sessions: set[str] = set()
 
         # The live streaming turn-sink registry now lives on the turn owner

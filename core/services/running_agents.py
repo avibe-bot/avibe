@@ -106,9 +106,9 @@ def _make_row(
 
     ``state`` is one of ``active`` (turn in flight), ``idle`` (connected but no
     active turn), ``orphan`` (process in registry with no live session).
-    ``elapsed_seconds`` is seconds since the last recorded activity (for active
-    rows it reads as "busy for", for idle rows as "idle for"); ``None`` when the
-    baseline is unknown.
+    ``elapsed_seconds`` reads as "busy for" on active rows (seconds since the
+    current turn went active) and "idle for" on idle/orphan rows (seconds since
+    the last activity); ``None`` when the baseline is unknown.
     """
     return {
         "backend": backend,
@@ -145,6 +145,7 @@ def _collect_claude(
     sessions = getattr(controller, "claude_sessions", {}) or {}
     active = getattr(controller, "claude_active_sessions", set()) or set()
     last_activity = getattr(controller, "session_last_activity", {}) or {}
+    turn_started = getattr(controller, "session_turn_started", {}) or {}
 
     for composite_key, client in _safe_items(sessions):
         # composite_key is ``{base}:{abs_workdir}``; split once for both halves.
@@ -154,8 +155,18 @@ def _collect_claude(
         model = getattr(client, "_vibe_current_model", None)
         pid = get_claude_client_pid(client)
         is_active = composite_key in active
-        la = last_activity.get(composite_key)
-        elapsed = (now - la) if isinstance(la, (int, float)) else None
+        # Active rows report turn duration from the idle→active baseline (NOT
+        # ``session_last_activity``, which is bumped on every streamed event and
+        # would read as seconds-since-last-chunk); idle rows report idle time from
+        # last activity. Fall back to last-activity if the turn baseline is missing.
+        if is_active:
+            ts = turn_started.get(composite_key)
+            if not isinstance(ts, (int, float)):
+                ts = last_activity.get(composite_key)
+            elapsed = (now - ts) if isinstance(ts, (int, float)) else None
+        else:
+            la = last_activity.get(composite_key)
+            elapsed = (now - la) if isinstance(la, (int, float)) else None
         rows.append(
             _make_row(
                 backend="claude",
@@ -200,11 +211,22 @@ def _collect_codex(controller: "Controller") -> list[dict[str, Any]]:
     base_ids = list(_safe_call(session_mgr.all_base_sessions, []))
     # Resolve each base's cwd once, then count sessions per cwd (so the UI can
     # flag a pid shared across sessions) — avoids a second get_cwd pass.
-    entries: list[tuple[str, Optional[str], Any, Any]] = []
+    entries: list[tuple[str, Optional[str], bool, Any]] = []
     cwd_session_count: dict[str, int] = {}
     for base in base_ids:
         cwd = session_mgr.get_cwd(base)
         active_turn = turn_registry.get_active_turn(base) if turn_registry is not None else None
+        # A request already holds the Workbench/runtime turn while ``turn/start`` is
+        # in flight, but ``get_active_turn`` stays empty until the turn id finalizes.
+        # Treat that pending-start window as active too — otherwise the UI offers
+        # Disconnect and the idle ``_end_codex`` path bypasses the canonical stop /
+        # terminal-result release and can leave the runtime gate stuck.
+        has_pending = (
+            bool(turn_registry.has_pending_turn_start(base))
+            if turn_registry is not None and hasattr(turn_registry, "has_pending_turn_start")
+            else False
+        )
+        is_active = bool(active_turn) or has_pending
         transport = transports.get(cwd) if cwd else None
         # A transport object can outlive its app-server when the process exits out
         # of band (crash / reader-task failure): it lingers in ``_transports`` with
@@ -215,14 +237,14 @@ def _collect_codex(controller: "Controller") -> list[dict[str, Any]]:
         # Idle eviction drops the app-server transport but preserves cwd/session
         # mappings for resume bookkeeping. Such bases are not live and must not
         # appear as phantom idle rows; keep only a transport-backed base or a still
-        # active turn that needs to remain visible.
-        if transport is None and active_turn is None:
+        # active (or pending-start) turn that needs to remain visible.
+        if transport is None and not is_active:
             continue
-        entries.append((base, cwd, active_turn, transport))
+        entries.append((base, cwd, is_active, transport))
         if cwd and transport is not None:
             cwd_session_count[cwd] = cwd_session_count.get(cwd, 0) + 1
 
-    for base, cwd, active_turn, transport in entries:
+    for base, cwd, is_active, transport in entries:
         pid = getattr(transport, "pid", None) if transport is not None else None
         # No per-session elapsed for codex: ``_transport_last_activity`` is keyed
         # by cwd (shared across every session on that transport) and is touched on
@@ -232,7 +254,7 @@ def _collect_codex(controller: "Controller") -> list[dict[str, Any]]:
         rows.append(
             _make_row(
                 backend="codex",
-                state="active" if active_turn else "idle",
+                state="active" if is_active else "idle",
                 base_session_id=base,
                 workdir=cwd,
                 pid=pid,
@@ -833,6 +855,73 @@ async def _stop_active_agent(
     return {"ok": False, "error": str(payload.get("stop_failure_reason") or "stop_failed")}
 
 
+def _resolve_live_state(
+    controller: "Controller",
+    *,
+    backend: Optional[str],
+    session_id: Optional[str],
+    composite_key: Optional[str],
+    base_session_id: Optional[str],
+) -> Optional[str]:
+    """Recompute a target's CURRENT ``active``/``idle`` state from live registries.
+
+    The browser sends the ``state`` it last polled, but a row can flip
+    idle→active (or active→idle) before the user clicks End. Trusting the stale
+    value would route an active turn down the idle teardown — which interrupts
+    the turn without releasing the Workbench/AgentService runtime gate or
+    emitting the terminal result, leaving the chat stuck. Re-deriving the state
+    here lets ``end_running_agent`` always pick the correct path.
+
+    Returns ``"active"``/``"idle"``, or ``None`` when the live state can't be
+    determined (caller then falls back to the client-supplied ``state``).
+    """
+    # A Workbench/chat turn in flight is authoritative for any backend.
+    manager = getattr(controller, "session_turns", None)
+    is_in_flight = getattr(manager, "is_in_flight", None)
+    if session_id and callable(is_in_flight):
+        try:
+            if is_in_flight(session_id):
+                return "active"
+        except Exception:  # noqa: BLE001
+            logger.debug("end: is_in_flight check failed for %s", session_id, exc_info=True)
+
+    if backend == "claude":
+        active = getattr(controller, "claude_active_sessions", set()) or set()
+        session_handler = getattr(controller, "session_handler", None)
+        ck = composite_key or _find_claude_composite_for_base(session_handler, base_session_id)
+        if ck is None:
+            return None
+        return "active" if ck in active else "idle"
+
+    if backend == "codex":
+        agent = _get_agent(controller, "codex")
+        registry = getattr(agent, "_turn_registry", None)
+        if registry is None or not base_session_id:
+            return None
+        try:
+            if registry.get_active_turn(base_session_id):
+                return "active"
+            if hasattr(registry, "has_pending_turn_start") and registry.has_pending_turn_start(base_session_id):
+                return "active"
+        except Exception:  # noqa: BLE001
+            logger.debug("end: codex live-state check failed for %s", base_session_id, exc_info=True)
+            return None
+        return "idle"
+
+    if backend == "opencode":
+        agent = _get_agent(controller, "opencode")
+        active_requests = getattr(agent, "_active_requests", {}) or {}
+        task = active_requests.get(base_session_id) if base_session_id else None
+        if task is None:
+            return "idle"
+        try:
+            return "idle" if bool(task.done()) else "active"
+        except Exception:  # noqa: BLE001
+            return "active"
+
+    return None
+
+
 async def end_running_agent(
     controller: "Controller",
     *,
@@ -866,6 +955,21 @@ async def end_running_agent(
         if not isinstance(pid, int):
             return {"ok": False, "error": "pid_required_for_orphan"}
         return await _end_orphan_pid(pid)
+
+    # Re-derive the live active/idle state server-side: the client's ``state`` is
+    # from its last poll and may be stale (a row can flip idle→active before the
+    # user clicks End). The recomputed value decides the teardown path so an
+    # active turn never falls through to the idle path (which would skip the
+    # canonical stop / gate + terminal-result release).
+    live_state = _resolve_live_state(
+        controller,
+        backend=backend,
+        session_id=session_id,
+        composite_key=composite_key,
+        base_session_id=base_session_id,
+    )
+    if live_state is not None:
+        state = live_state
 
     if state == "active":
         # Capture the Claude OS pid BEFORE the stop disconnects the client — once

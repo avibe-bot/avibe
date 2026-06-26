@@ -49,11 +49,15 @@ class _FakeSessionMgr:
 
 
 class _FakeTurnRegistry:
-    def __init__(self, active_by_base):
+    def __init__(self, active_by_base, pending=None):
         self._active = active_by_base
+        self._pending = set(pending or ())
 
     def get_active_turn(self, base):
         return self._active.get(base)
+
+    def has_pending_turn_start(self, base):
+        return base in self._pending
 
 
 class _FakeTransport:
@@ -251,6 +255,83 @@ def test_codex_skips_dead_transport_object():
 
     assert set(by_base) == {"alive"}  # the dead-transport base is dropped
     assert by_base["alive"]["pid"] == 8002
+
+
+def test_claude_active_elapsed_uses_turn_start_baseline():
+    # Active "busy for" must be measured from the turn-start baseline, NOT
+    # session_last_activity (which is bumped on every streamed chunk and would
+    # read as seconds-since-last-chunk). Idle rows still use last activity.
+    now = 1_000.0
+    c_active = _FakeClaudeClient("slack_a", "nat-a", "opus")
+    c_idle = _FakeClaudeClient("slack_b", "nat-b", None)
+    controller = _make_controller(
+        claude={
+            "sessions": {"slack_a:/w1": c_active, "slack_b:/w2": c_idle},
+            "active": {"slack_a:/w1"},
+            "last_activity": {"slack_a:/w1": now - 2.0, "slack_b:/w2": now - 90.0},
+        }
+    )
+    # Turn started long before the last chunk: busy time must reflect the turn
+    # baseline (120s), not the 2s since the last streamed event.
+    controller.session_turn_started = {"slack_a:/w1": now - 120.0}
+
+    import time as _time
+
+    orig = _time.monotonic
+    _time.monotonic = lambda: now
+    try:
+        snap = running_agents.snapshot_running_agents(controller)
+    finally:
+        _time.monotonic = orig
+
+    rows = {r["base_session_id"]: r for r in snap["agents"]}
+    assert rows["slack_a"]["state"] == "active"
+    assert rows["slack_a"]["elapsed_seconds"] == 120.0  # turn baseline, not 2s
+    assert rows["slack_b"]["elapsed_seconds"] == 90.0  # idle uses last activity
+
+
+def test_claude_active_elapsed_falls_back_to_last_activity_without_baseline():
+    # When no turn baseline is recorded (e.g. activated before this build), the
+    # active row degrades gracefully to last-activity rather than dropping elapsed.
+    now = 500.0
+    client = _FakeClaudeClient("slack_c", "nat-c", None)
+    controller = _make_controller(
+        claude={
+            "sessions": {"slack_c:/w": client},
+            "active": {"slack_c:/w"},
+            "last_activity": {"slack_c:/w": now - 5.0},
+        }
+    )
+    controller.session_turn_started = {}  # no baseline
+
+    import time as _time
+
+    orig = _time.monotonic
+    _time.monotonic = lambda: now
+    try:
+        snap = running_agents.snapshot_running_agents(controller)
+    finally:
+        _time.monotonic = orig
+    row = snap["agents"][0]
+    assert row["state"] == "active"
+    assert row["elapsed_seconds"] == 5.0
+
+
+def test_codex_pending_turn_start_counts_as_active():
+    # While turn/start is in flight, get_active_turn is still empty but the request
+    # already holds the runtime turn. Such a base must report active (not idle), so
+    # the UI offers Stop and End takes the canonical active path.
+    mgr = _FakeSessionMgr({"starting": "/work/p"})
+    turns = _FakeTurnRegistry({}, pending={"starting"})  # no active turn yet, pending start
+    codex = types.SimpleNamespace(
+        _session_mgr=mgr,
+        _turn_registry=turns,
+        _transports={"/work/p": _FakeTransport(9100)},
+    )
+    controller = _make_controller(codex=codex)
+    snap = running_agents.snapshot_running_agents(controller)
+    by_base = {r["base_session_id"]: r for r in snap["agents"]}
+    assert by_base["starting"]["state"] == "active"
 
 
 def test_opencode_active_requests_have_no_pid():
@@ -566,8 +647,19 @@ def test_end_opencode_cancels_active_task():
         _active_requests={"b1": task},
         _session_manager=types.SimpleNamespace(get_request_session=lambda b: None),
     )
+    # OpenCode rows are inherently in-flight (an active request task), so the live
+    # recheck classifies this as active: End runs the canonical stop, then
+    # _end_opencode cancels the local polling task.
+    async def _handle_stop(_context):
+        return True
+
+    controller = _make_controller(opencode=oc)
+    controller.session_turns = types.SimpleNamespace(is_in_flight=lambda sid: False)
+    controller.command_handler = types.SimpleNamespace(handle_stop=_handle_stop)
     res = asyncio.run(
-        running_agents.end_running_agent(_make_controller(opencode=oc), backend="opencode", base_session_id="b1")
+        running_agents.end_running_agent(
+            controller, backend="opencode", state="active", session_id="oc-s", base_session_id="b1"
+        )
     )
     assert res["ok"] is True
     assert task.cancelled
@@ -623,6 +715,9 @@ def test_end_active_im_turn_uses_canonical_stop_path(monkeypatch):
     command_handler = types.SimpleNamespace(handle_stop=_handle_stop)
     cleanup = _AsyncFlag()
     controller = _make_controller()
+    # A genuinely-active IM turn is registered in claude_active_sessions; the
+    # server-side live-state recheck reads this to confirm the active path.
+    controller.claude_active_sessions = {"slack_y:/w"}
     controller.session_turns = manager
     controller.command_handler = command_handler
     controller.session_handler = types.SimpleNamespace(claude_sessions={"slack_y:/w": object()}, cleanup_session=cleanup)
@@ -662,7 +757,7 @@ def test_end_active_codex_frees_runtime_after_stop():
         sessions_for_cwd=lambda cwd: [],  # this was the last session on the cwd
     )
     treg = types.SimpleNamespace(
-        get_active_turn=lambda b: None,
+        get_active_turn=lambda b: "turn1",  # genuinely active per the live registry
         clear_session=lambda b: cleared.__setitem__("treg", b),
     )
     codex = types.SimpleNamespace(
@@ -730,3 +825,68 @@ def test_end_unknown_target():
     res = asyncio.run(running_agents.end_running_agent(_make_controller(), backend="mystery"))
     assert res["ok"] is False
     assert res["error"] == "unknown_target"
+
+
+def test_end_rechecks_live_state_idle_to_active(monkeypatch):
+    # The browser polled this Claude row as idle, but it went active before the
+    # user clicked Disconnect. End must re-derive the live state server-side and
+    # route through the canonical stop path (NOT the idle _end_claude teardown,
+    # which would skip the runtime-gate / terminal-result release).
+    seen = {}
+
+    async def _handle_stop(context):
+        seen["stopped"] = True
+        return True
+
+    cleanup = _AsyncFlag()
+    controller = _make_controller()
+    controller.claude_active_sessions = {"slack_z:/w"}  # live registry says ACTIVE now
+    controller.session_turns = types.SimpleNamespace(is_in_flight=lambda sid: False, cancel=_AsyncFlag())
+    controller.command_handler = types.SimpleNamespace(handle_stop=_handle_stop)
+    controller.session_handler = types.SimpleNamespace(
+        claude_sessions={"slack_z:/w": object()}, cleanup_session=cleanup
+    )
+    monkeypatch.setattr("modules.agents.claude_process_reaper._reap_pid_set", _AsyncFlag(ret=0))
+
+    res = asyncio.run(
+        running_agents.end_running_agent(
+            controller,
+            backend="claude",
+            state="idle",  # stale client state
+            session_id="slack-im",
+            composite_key="slack_z:/w",
+        )
+    )
+    assert res["ok"] is True
+    assert seen.get("stopped") is True  # canonical active stop path was taken
+    assert res["action"] == "stopped"
+    assert cleanup.called is False  # idle _end_claude teardown was NOT used
+
+
+def test_end_rechecks_live_state_active_to_idle():
+    # The browser polled this Codex row as active, but the turn finished before
+    # End. With no live active/pending turn, End re-derives idle and runs the idle
+    # teardown directly (no canonical stop needed).
+    cleared = {}
+    transport = types.SimpleNamespace(send_request=_AsyncFlag(), stop=_AsyncFlag())
+    mgr = types.SimpleNamespace(
+        get_cwd=lambda b: "/w",
+        get_thread_id=lambda b: None,
+        clear=lambda b: cleared.__setitem__("clr", b),
+        sessions_for_cwd=lambda cwd: [],
+    )
+    treg = _FakeTurnRegistry({}, pending=set())  # no active turn, no pending start
+    treg.clear_session = lambda b: cleared.__setitem__("treg", b)
+    codex = types.SimpleNamespace(
+        _session_mgr=mgr, _turn_registry=treg, _transports={"/w": transport}, _transport_last_activity={"/w": 0.0}
+    )
+    controller = _make_controller(codex=codex)
+    controller.session_turns = types.SimpleNamespace(is_in_flight=lambda sid: False)
+
+    res = asyncio.run(
+        running_agents.end_running_agent(
+            controller, backend="codex", state="active", session_id="s", base_session_id="b1"
+        )
+    )
+    assert res["ok"] is True
+    assert cleared.get("clr") == "b1" and cleared.get("treg") == "b1"

@@ -339,10 +339,17 @@ const RunningAgentRow: React.FC<RunningAgentRowProps> = ({ agent, onEnd }) => {
         {/* State indicator */}
         <StateDot state={agent.state} t={t} />
 
-        {/* Elapsed */}
-        {agent.elapsed_seconds != null && agent.state !== 'active' && (
+        {/* Elapsed — "busy {{elapsed}}" while a turn is in flight (the backend
+            anchors this to the turn-start baseline, not last-chunk time), else
+            "idle {{elapsed}}". */}
+        {agent.elapsed_seconds != null && (
           <span className="font-mono text-[11px] text-muted">
-            {t('agents.running.idleElapsed', { elapsed: formatElapsed(agent.elapsed_seconds) })}
+            {t(
+              agent.state === 'active'
+                ? 'agents.running.busy'
+                : 'agents.running.idleElapsed',
+              { elapsed: formatElapsed(agent.elapsed_seconds) },
+            )}
           </span>
         )}
 
