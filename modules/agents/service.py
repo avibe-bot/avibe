@@ -89,6 +89,13 @@ class AgentService:
         gate.runtime_started = False
         self._stamp_runtime_turn(request, runtime_key, gate.token)
         try:
+            # Register the indicator handle for terminal/cancel cleanup BEFORE the
+            # reaction awaits below. If the turn is cancelled (shutdown / supersede)
+            # while promote is awaiting the reaction API, the scheduled terminal tidy
+            # resolves the handle by turn token from this registry — tracking it first
+            # ensures a queued 👌 or fallback typing/message indicator is still
+            # finished instead of leaking on the message (Codex P2).
+            self._track_processing_indicator_turn(request)
             # Settle the concurrently-added queued 👌 and promote it to the running
             # 👀 INSIDE this cancellation-managed try. A cancel (shutdown / supersede)
             # during these awaits must reach the CancelledError handler below so the
@@ -122,7 +129,6 @@ class AgentService:
             # are optional and guarded so a missing hook or a bubble failure can
             # never break the turn.
             await self._begin_turn_status(request.context)
-            self._track_processing_indicator_turn(request)
             await agent.handle_message(request)
         except asyncio.CancelledError:
             # Shutdown / SIGTERM / supersede cancels the turn mid-flight. Without a

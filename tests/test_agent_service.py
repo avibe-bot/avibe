@@ -422,6 +422,42 @@ def test_real_indicator_shows_queued_reaction_on_second_message_while_first_hold
     asyncio.run(_run())
 
 
+def test_processing_indicator_tracked_before_promote() -> None:
+    """Regression (Codex P2): the indicator handle must be tracked (registered for
+    terminal/cancel cleanup) BEFORE the promote await, so a cancel during promote
+    can still find and finish it instead of leaking the queued/fallback indicator."""
+
+    async def _run():
+        log: list[str] = []
+
+        class _Indicator:
+            def track_turn(self, _context, _request):
+                log.append("track")
+
+            async def show_queued_reaction(self, _request):
+                return False
+
+            async def promote_reaction_to_running(self, _request, *, agent_name=None):
+                log.append("promote")
+
+            async def finish(self, _request_or_handle):
+                log.append("finish")
+
+        controller = _Controller()
+        controller.processing_indicator = _Indicator()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        service.register(_RuntimeAgent())
+
+        request = _request("first")
+        request.processing_indicator = object()  # truthy so _track_processing_indicator_turn runs
+        await service.handle_message("claude", request)
+
+        assert log[:2] == ["track", "promote"], log
+
+    asyncio.run(_run())
+
+
 def test_gate_released_when_cancelled_during_promote() -> None:
     """Regression (Codex P1): a cancel after acquire() but during the
     settle/promote awaits must still release the runtime gate, or the token + lock
