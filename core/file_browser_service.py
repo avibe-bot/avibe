@@ -108,7 +108,6 @@ def _resolve_existing_path(raw: str) -> Path:
 
 
 def _resolve_entry_path(raw: str) -> Path:
-    resolve_safe_path(raw)
     expanded = _expanded_absolute_path(raw)
     try:
         parent = expanded.parent.resolve(strict=True)

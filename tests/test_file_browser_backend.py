@@ -49,6 +49,17 @@ def test_list_directory_includes_dirs_files_hidden_and_unfollowed_symlink(tmp_pa
     assert fs.metadata(str(root / "link"))["kind"] == "symlink"
 
 
+def test_entry_ops_handle_cyclic_symlink(tmp_path):
+    link = tmp_path / "loop"
+    link.symlink_to(link)
+
+    assert fs.metadata(str(link))["kind"] == "symlink"
+
+    fs.delete_path(str(link))
+
+    assert not link.is_symlink()
+
+
 def test_list_rejects_traversal_to_non_directory(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
