@@ -135,6 +135,35 @@ async def _terminal_websocket_cancels_siblings_on_pump_failure(monkeypatch, tmp_
         await service.shutdown()
 
 
+def test_shutdown_kills_whole_tmux_server_including_untracked(monkeypatch):
+    asyncio.run(_shutdown_kills_whole_tmux_server_including_untracked(monkeypatch))
+
+
+async def _shutdown_kills_whole_tmux_server_including_untracked(monkeypatch):
+    # A persistent session orphaned by a prior crashed/restarted process is on our tmux socket
+    # but absent from this process's registry. Shutdown must kill the whole server on our
+    # private socket — not just tracked entries — so `vibe stop` leaves no detached shell.
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: "/usr/bin/tmux")
+    commands: list[tuple] = []
+
+    class _FakeProcess:
+        async def wait(self) -> int:
+            return 0
+
+    async def fake_spawn(*args, **_kwargs):
+        commands.append(tuple(args))
+        return _FakeProcess()
+
+    monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", fake_spawn)
+
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+    # Empty registry: this process tracks nothing, so only a whole-server kill can reap orphans.
+    await service.shutdown()
+
+    socket = terminal_service._tmux_socket_name()
+    assert any("kill-server" in cmd and "-L" in cmd and socket in cmd for cmd in commands), commands
+
+
 def test_terminal_reconnect_replaces_session(monkeypatch, tmp_path):
     asyncio.run(_terminal_reconnect_replaces_session(monkeypatch, tmp_path))
 
@@ -719,6 +748,12 @@ async def _reconnect_window_session_killed_on_shutdown(monkeypatch, tmp_path):
     assert service._sessions["s"].phase is _Phase.OPENING
     assert service._sessions["s"].persistent is True  # placeholder stays visible to shutdown
 
+    # shutdown() now also kills the whole tmux server; stub that out so it doesn't block on the
+    # gated open-spawn above. This test asserts the tracked per-session kill (_kill_tmux_session).
+    async def fake_kill_server() -> None:
+        pass
+
+    monkeypatch.setattr(terminal_service, "_kill_tmux_server", fake_kill_server)
     await service.shutdown()
     assert "s" in killed  # shutdown killed the replaced tmux session rather than leaking it
 

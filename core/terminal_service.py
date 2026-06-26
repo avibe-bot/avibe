@@ -115,6 +115,10 @@ class TerminalService:
         # any live client process. An in-flight open() finds its slot gone and tears its own
         # child down.
         await asyncio.gather(*(self._shutdown_session(s) for s in sessions), return_exceptions=True)
+        # Tracked teardown above only covers this process's registry. Also kill the whole tmux
+        # server on our private socket so sessions orphaned by a prior crashed/restarted process
+        # (absent from _sessions, so untouched above) don't survive `vibe stop`.
+        await _kill_tmux_server()
 
     async def _shutdown_session(self, session: _Session) -> None:
         if session.connection is not None:
@@ -591,6 +595,31 @@ async def _kill_tmux_session(session_id: str) -> None:
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
+    await process.wait()
+
+
+async def _kill_tmux_server() -> None:
+    # Kill the entire tmux server on our dedicated socket. Unlike kill-session (one tracked id),
+    # this also removes sessions orphaned by a prior process that crashed/restarted — those are
+    # still on the socket but absent from this process's registry, so they would otherwise
+    # outlive `vibe stop` with no reaper to ever collect them. The socket is private to Avibe
+    # terminals, so killing the server only affects our own sessions.
+    tmux_binary = resolve_tmux_binary()
+    if not tmux_binary:
+        return
+    try:
+        process = await asyncio.create_subprocess_exec(
+            tmux_binary,
+            "-L",
+            _tmux_socket_name(),
+            "-f",
+            "/dev/null",
+            "kill-server",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError:
+        return
     await process.wait()
 
 
