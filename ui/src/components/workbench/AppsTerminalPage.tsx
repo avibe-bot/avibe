@@ -42,7 +42,9 @@ export const AppsTerminalPage: React.FC = () => {
       if (!cancelled) setSessionId(getSessionId(identity));
     };
     getAuthSession()
-      .then((session) => resolve(session.remote && session.authenticated ? session.email : null))
+      // Prefer the stable OIDC subject; email can be absent or shared across subjects, which
+      // would collide or fall back to the shared key. (Backend surfaces sub on /api/session.)
+      .then((session) => resolve(session.remote && session.authenticated ? session.sub || session.email : null))
       .catch(() => resolve(null));
     return () => {
       cancelled = true;

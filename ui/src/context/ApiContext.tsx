@@ -887,7 +887,9 @@ export type RunningAgentsResult =
 export type SessionInfo =
   | { remote: false }
   | { remote: true; authenticated: false }
-  | { remote: true; authenticated: true; email: string };
+  // sub is the stable OIDC subject; prefer it over email for per-account scoping (email can
+  // be absent or shared across subjects).
+  | { remote: true; authenticated: true; email: string; sub?: string };
 
 export type LogEntry = {
   timestamp: string;

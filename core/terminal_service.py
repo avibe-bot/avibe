@@ -245,7 +245,11 @@ class TerminalService:
                     stderr=slave_fd,
                     cwd=str(Path.home()),
                     env=_spawn_env(),
-                    preexec_fn=os.setsid if hasattr(os, "setsid") else None,
+                    # start_new_session runs setsid() in the child via C (post-fork, pre-exec)
+                    # instead of a Python preexec_fn — a Python preexec_fn can deadlock the
+                    # forked child if another thread (FastAPI threadpool, dependency jobs) holds
+                    # a lock at fork time, which would hang open() with the slot reserved.
+                    start_new_session=True,
                 )
             except BaseException:
                 # Close the PTY master on cancellation too (CancelledError is a BaseException,

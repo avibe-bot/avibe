@@ -63,7 +63,10 @@ async function parse<T>(res: Response): Promise<T> {
 }
 
 function isWindowsPath(p: string): boolean {
-  return /^[A-Za-z]:[\\/]/.test(p) || p.includes('\\');
+  // Windows iff a drive root (C:\ or C:/) or a UNC path (\\server). A lone backslash is a
+  // legal POSIX filename character (e.g. /tmp/a\b), so its mere presence must NOT flip us to
+  // Windows mode — that would make joinPath build /tmp/a\b\child and break descendant access.
+  return /^[A-Za-z]:[\\/]/.test(p) || /^\\\\/.test(p);
 }
 
 export function joinPath(base: string, name: string): string {

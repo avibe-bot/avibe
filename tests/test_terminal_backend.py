@@ -164,6 +164,53 @@ async def _shutdown_kills_whole_tmux_server_including_untracked(monkeypatch):
     assert any("kill-server" in cmd and "-L" in cmd and socket in cmd for cmd in commands), commands
 
 
+def test_open_spawns_with_start_new_session_not_preexec(monkeypatch, tmp_path):
+    asyncio.run(_open_spawns_with_start_new_session_not_preexec(monkeypatch, tmp_path))
+
+
+async def _open_spawns_with_start_new_session_not_preexec(monkeypatch, tmp_path):
+    # A Python preexec_fn can deadlock the forked child if another thread holds a lock at fork
+    # time; the process group must be created via start_new_session (C-level setsid) instead.
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(terminal_service.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: None)
+
+    captured: dict = {}
+
+    class _FakeProcess:
+        returncode = None
+        pid = 4321
+
+        async def wait(self) -> int:
+            return 0
+
+    async def fake_spawn(*_args, **kwargs):
+        captured.update(kwargs)
+        return _FakeProcess()
+
+    opened_fds: list[int] = []
+
+    def fake_openpty():
+        master = os.open(os.devnull, os.O_RDWR)
+        slave = os.open(os.devnull, os.O_RDWR)
+        opened_fds.extend([master, slave])
+        return master, slave
+
+    monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", fake_spawn)
+    monkeypatch.setattr(terminal_service.os, "openpty", fake_openpty)
+
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=1)
+    try:
+        await service.open("spawn")
+        assert captured.get("start_new_session") is True
+        assert "preexec_fn" not in captured
+    finally:
+        await service.shutdown()
+        for fd in opened_fds:
+            terminal_service._close_fd(fd)
+
+
 def test_terminal_reconnect_replaces_session(monkeypatch, tmp_path):
     asyncio.run(_terminal_reconnect_replaces_session(monkeypatch, tmp_path))
 
