@@ -238,40 +238,8 @@ def test_sign_wrapper_sends_name_and_envelope_to_avault(monkeypatch):
     body = json.loads(run.call_args.kwargs["stdin"])
     assert body["name"] == "ETH_KEY"
     assert body["key_envelope"] == {"ciphertext": "ct-key", "nonce": "n-key", "wrap_meta": "wm-key"}
-    assert body["approval"] is None
-
-
-def test_protected_sign_wrapper_requires_and_sends_approval(monkeypatch):
-    from types import SimpleNamespace
-
-    run = Mock(return_value=SimpleNamespace(returncode=0, stdout=b'{"signature":"abcd","recovery_id":null}', stderr=b""))
-    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": api.AVAULT_P2_MIN_VERSION})
-    monkeypatch.setattr(api, "_run_avault", run)
-    dek_blindbox = {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"}
-    approval = {"nonce": "AQIDBAUGBwgJCgsMDQ4PEA==", "expires_at_unix": 4102444800}
-
-    with pytest.raises(api.AvaultError, match="approval is required"):
-        api.avault_sign(
-            _sealed("key"),
-            "00" * 32,
-            "ecdsa-secp256k1-der",
-            dek_blindbox=dek_blindbox,
-            name="ETH_KEY",
-        )
-
-    result = api.avault_sign(
-        _sealed("key"),
-        "00" * 32,
-        "ecdsa-secp256k1-der",
-        dek_blindbox=dek_blindbox,
-        name="ETH_KEY",
-        approval=approval,
-    )
-
-    assert result == {"signature": "abcd", "recovery_id": None}
-    body = json.loads(run.call_args.kwargs["stdin"])
-    assert body["dek_blindbox"] == dek_blindbox
-    assert body["approval"] == approval
+    assert "dek_blindbox" not in body
+    assert "approval" not in body
 
 
 def test_standard_keypair_signs_via_avault(monkeypatch):
