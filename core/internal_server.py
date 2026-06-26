@@ -187,6 +187,50 @@ def create_app(controller: "Controller") -> FastAPI:
         (FSM, Phase 1b). A reconnected Chat page asks this to restore working/Stop."""
         return manager.turn_state(session_id)
 
+    @app.get("/internal/running-agents")
+    async def _running_agents() -> Any:
+        """Read-only snapshot of currently-running agent instances across all
+        backends. Lives here because every liveness source is controller
+        in-memory state the UI process cannot see; the web ``/api/running-agents``
+        route proxies this. Never mutates sessions/transports/eviction state.
+
+        Offloaded to a worker thread: the snapshot does a synchronous SQLite read
+        (and, when live orphan candidates survive, ``ps`` probes), which must not
+        block the controller's event loop that also serves IM/dispatch/SSE. The
+        aggregator tolerates concurrent registry mutation (``_safe_items``)."""
+        from core.services.running_agents import snapshot_running_agents
+
+        return await asyncio.to_thread(snapshot_running_agents, controller)
+
+    @app.post("/internal/running-agents/end")
+    async def _running_agents_end(request: Request) -> Any:
+        """Terminate one running agent's live runtime (Stop turn / disconnect /
+        kill orphan process), dispatched by backend+state. Runs ON the loop (it
+        awaits backend interrupts and mutates loop-owned registries — must NOT be
+        offloaded). Deliberately has no self-kill guard."""
+        from core.services.running_agents import end_running_agent
+
+        payload = await _safe_json(request)
+        if not isinstance(payload, dict):
+            return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_payload"})
+        raw_pid = payload.get("pid")
+        try:
+            pid = int(raw_pid) if raw_pid is not None else None
+        except (TypeError, ValueError):
+            pid = None
+        result = await end_running_agent(
+            controller,
+            backend=(str(payload.get("backend")).strip() or None) if payload.get("backend") else None,
+            state=(str(payload.get("state")).strip() or None) if payload.get("state") else None,
+            session_id=payload.get("session_id") or None,
+            composite_key=payload.get("composite_key") or None,
+            base_session_id=payload.get("base_session_id") or None,
+            pid=pid,
+        )
+        if not result.get("ok"):
+            return JSONResponse(status_code=409, content=result)
+        return result
+
     @app.post("/internal/dispatch")
     async def _dispatch(request: Request) -> Any:
         """Streaming turn dispatch: runs a turn and proxies its notify/result

@@ -167,6 +167,18 @@ class CodexTransport:
     def is_initialized(self) -> bool:
         return self._initialized and self.is_alive
 
+    @property
+    def pid(self) -> Optional[int]:
+        """OS pid of the codex app-server subprocess, or ``None`` if not running.
+
+        Read-only accessor for observability (the running-agents snapshot). One
+        transport (hence one pid) serves every session sharing its working dir.
+        """
+        proc = self._process
+        if proc is None or proc.returncode is not None:
+            return None
+        return proc.pid
+
     # ------------------------------------------------------------------
     # Callbacks
     # ------------------------------------------------------------------

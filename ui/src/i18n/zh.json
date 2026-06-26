@@ -1537,6 +1537,30 @@
   "agents": {
     "title": "Agents",
     "subtitle": "已登记 {{count}} 个 Agent。",
+    "tabs": {
+      "definitions": "定义",
+      "running": "运行中"
+    },
+    "running": {
+      "empty": "当前没有正在运行的 Agent。",
+      "unreachableTitle": "运行时不可达",
+      "unreachableBody": "Avibe 控制器无响应，请启动服务后重试。",
+      "stateActive": "运行中",
+      "stateIdle": "空闲",
+      "stateOrphan": "孤儿进程",
+      "orphan": "孤儿进程",
+      "busy": "忙碌 {{elapsed}}",
+      "idleElapsed": "空闲 {{elapsed}}",
+      "openChat": "打开会话",
+      "agentInitiated": "agent 发起",
+      "endActive": "停止",
+      "endIdle": "断开",
+      "endOrphan": "杀进程",
+      "confirmEnd": "确认",
+      "endedToast": "已结束",
+      "endFailedToast": "无法结束（{{error}}）",
+      "pidShared": "（共享）"
+    },
     "showDisabled": "显示已禁用",
     "statusEnabled": "已启用",
     "statusDisabled": "已停用",

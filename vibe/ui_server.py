@@ -2337,6 +2337,42 @@ def vibe_agents_get():
         return _vibe_agent_error_response(exc)
 
 
+@app.route("/api/running-agents", methods=["GET"])
+async def running_agents_get():
+    """Proxy the controller's read-only running-agents snapshot to the workbench.
+
+    Every liveness source lives in the controller process, so this awaits the
+    internal Unix-socket snapshot and degrades to an explicit ``unreachable``
+    payload (never a misleading empty/0 list) when the controller is down, so the
+    Running tab can render a distinct "runtime unreachable" state (I1)."""
+    from vibe import internal_client
+
+    try:
+        result = await internal_client.list_running_agents()
+    except internal_client.InternalServerUnavailable:
+        return jsonify({"ok": False, "unreachable": True, "agents": [], "counts": {}}), 503
+    except internal_client.InternalServerTimeout:
+        return jsonify({"ok": False, "unreachable": True, "timeout": True, "agents": [], "counts": {}}), 504
+    return jsonify(result.get("body") or {})
+
+
+@app.route("/api/running-agents/end", methods=["POST"])
+async def running_agents_end():
+    """Terminate one running agent's live runtime (Stop turn / disconnect / kill
+    orphan), dispatched controller-side by backend+state. Proxies the internal
+    socket; degrades to 503 when the controller is down."""
+    from vibe import internal_client
+
+    payload = request.json or {}
+    try:
+        result = await internal_client.end_running_agent(payload)
+    except internal_client.InternalServerUnavailable:
+        return jsonify({"ok": False, "unreachable": True}), 503
+    body = result.get("body") or {}
+    # Surface the controller's status (409 when the target couldn't be ended).
+    return jsonify(body), (result.get("status_code") or 200)
+
+
 @app.route("/api/agents/<name>", methods=["GET"])
 def vibe_agent_get(name):
     from vibe import api

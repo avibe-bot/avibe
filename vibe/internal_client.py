@@ -268,6 +268,31 @@ async def cancel_dispatch(session_id: str, *, socket_path: Optional[Path] = None
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
+async def end_running_agent(payload: dict[str, Any], *, socket_path: Optional[Path] = None) -> dict[str, Any]:
+    """Ask the controller to terminate one running agent's live runtime.
+
+    ``payload`` identifies the target (backend/state/composite_key/base_session_id
+    /pid). Returns ``{status_code, body}``; raises ``InternalServerUnavailable``
+    on socket failure. A Claude interrupt / OpenCode abort can take a few seconds,
+    so the timeout matches ``cancel_dispatch``.
+    """
+
+    target = (socket_path or default_socket_path()).expanduser().resolve()
+    if not target.exists():
+        raise InternalServerUnavailable(f"dispatch socket missing at {target}")
+    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(30.0, connect=1.0),
+        ) as client:
+            resp = await client.post("/internal/running-agents/end", json=payload)
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+
+
 async def send_now(session_id: str, *, socket_path: Optional[Path] = None) -> dict[str, Any]:
     """Ask the controller to run a session's send-while-busy queue immediately
     ("立即发送"): interrupt any running turn + flush the queue. Returns
@@ -311,6 +336,34 @@ async def turn_state(session_id: str, *, socket_path: Optional[Path] = None) -> 
             timeout=httpx.Timeout(1.0, connect=0.2),
         ) as client:
             resp = await client.get(f"/internal/turn-state/{session_id}")
+    except httpx.ReadTimeout as exc:
+        raise InternalServerTimeout(str(exc)) from exc
+    except _SOCKET_CONNECT_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+
+
+async def list_running_agents(*, socket_path: Optional[Path] = None) -> dict[str, Any]:
+    """Fetch the controller's read-only running-agents snapshot.
+
+    Returns ``{status_code, body}``; raises ``InternalServerUnavailable`` on
+    socket failure so the web route can render an explicit "runtime unreachable"
+    state instead of a misleading "0 running". The snapshot reads in-memory
+    registries plus a small DB enrichment, so the read timeout is a touch longer
+    than ``turn_state``.
+    """
+
+    target = (socket_path or default_socket_path()).expanduser().resolve()
+    if not target.exists():
+        raise InternalServerUnavailable(f"dispatch socket missing at {target}")
+    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(3.0, connect=0.5),
+        ) as client:
+            resp = await client.get("/internal/running-agents")
     except httpx.ReadTimeout as exc:
         raise InternalServerTimeout(str(exc)) from exc
     except _SOCKET_CONNECT_ERRORS as exc:

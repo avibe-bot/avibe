@@ -16,11 +16,14 @@ import {
   Star,
   Trash2,
   Upload,
+  Activity,
+  Layers,
 } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
 import type { VibeAgentBrief, VibeAgentFull } from '../../context/ApiContext';
+import { RunningAgentsTab } from './RunningAgentsTab';
 import { useToast } from '../../context/ToastContext';
 import { NewAgentDialog } from './NewAgentDialog';
 import { RunAgentDialog } from './RunAgentDialog';
@@ -51,6 +54,9 @@ import {
 // (a combobox can't submit an empty value, so this is the explicit clear path).
 const MODEL_DEFAULT_OPTION = '__default__';
 
+type AgentsTabKey = 'definitions' | 'running';
+const AGENTS_TAB_ORDER: AgentsTabKey[] = ['definitions', 'running'];
+
 function isSystemAgent(agent: { source: string }): boolean {
   return agent.source === 'builtin' || agent.source === 'system';
 }
@@ -59,6 +65,8 @@ export const AgentsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
+  const [agentsTab, setAgentsTab] = useState<AgentsTabKey>('definitions');
+  const [runningActiveCount, setRunningActiveCount] = useState<number | null>(null);
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [defaultName, setDefaultName] = useState<string | null>(null);
   const [selected, setSelected] = useState<VibeAgentFull | null>(null);
@@ -114,6 +122,37 @@ export const AgentsPage: React.FC = () => {
     if (!selected) setDetailOpen(false);
   }, [selected]);
 
+  // Fetch the active-count for the Running tab badge. Runs once on mount
+  // and polls every 8s so the pill reflects live state without hammering the server.
+  useEffect(() => {
+    let cancelled = false;
+    const fetchCount = async () => {
+      try {
+        const result = await api.getRunningAgents();
+        if (!cancelled) {
+          if (result.ok && result.counts) {
+            setRunningActiveCount((result.counts as any).active ?? 0);
+          } else {
+            setRunningActiveCount(null); // unreachable → show "—"
+          }
+        }
+      } catch {
+        // Any fetch failure (unreachable/401/500): show "—" rather than a stale
+        // count, matching the tab body's explicit unreachable handling.
+        if (!cancelled) setRunningActiveCount(null);
+      }
+    };
+    fetchCount();
+    // While the Running tab is open it already polls the same endpoint (4s), so
+    // skip the redundant badge poll then; one fetch on tab-switch keeps the pill
+    // fresh enough (it re-runs on the next switch back to Definitions).
+    const id = agentsTab === 'running' ? null : window.setInterval(fetchCount, 8000);
+    return () => {
+      cancelled = true;
+      if (id != null) window.clearInterval(id);
+    };
+  }, [api, agentsTab]);
+
   const selectAgent = useCallback(
     async (name: string, openDetail = false) => {
       try {
@@ -158,6 +197,10 @@ export const AgentsPage: React.FC = () => {
   const onCreated = (agent: VibeAgentFull) => {
     refresh().then(() => setSelected(agent));
   };
+
+  const handleRunningActiveCountChange = useCallback((count: number | null) => {
+    setRunningActiveCount(count);
+  }, []);
 
   const updateField = async (patch: Partial<VibeAgentFull>) => {
     if (!selected) return;
@@ -257,8 +300,50 @@ export const AgentsPage: React.FC = () => {
         }
       />
 
+      {/* Sub-tab row: Definitions | Running */}
+      <div className="flex items-center gap-0 overflow-x-auto border-b border-border">
+        {AGENTS_TAB_ORDER.map((key) => {
+          const active = agentsTab === key;
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => setAgentsTab(key)}
+              className={clsx(
+                'flex shrink-0 items-center gap-2 whitespace-nowrap px-4 py-3 text-[13px] transition',
+                active
+                  ? 'border-b-2 border-violet font-bold text-violet'
+                  : 'font-medium text-muted hover:text-foreground',
+              )}
+            >
+              {key === 'definitions' ? (
+                <Layers className={clsx('size-3.5', active ? 'text-violet' : 'text-muted')} />
+              ) : (
+                <Activity className={clsx('size-3.5', active ? 'text-violet' : 'text-muted')} />
+              )}
+              {t(`agents.tabs.${key}`)}
+              {key === 'running' && (
+                <span
+                  className={clsx(
+                    'rounded-full border px-1.5 py-0 font-mono text-[9px] font-bold',
+                    active
+                      ? 'border-violet/30 bg-violet/[0.10] text-violet'
+                      : 'border-border-strong bg-foreground/[0.04] text-muted',
+                  )}
+                >
+                  {runningActiveCount === null ? '—' : runningActiveCount}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Running tab body */}
+      {agentsTab === 'running' && <RunningAgentsTab onActiveCountChange={handleRunningActiveCountChange} />}
+
       {/* Toolbar — design.pen Imduv: search + backend filter + spacer + Import + 新建 Agent */}
-      <div className={clsx('flex flex-wrap items-center gap-2.5', detailOpen && 'max-lg:hidden')}>
+      <div className={clsx('flex flex-wrap items-center gap-2.5', agentsTab === 'running' ? 'hidden' : detailOpen && 'max-lg:hidden')}>
         <div className="flex h-9 w-full items-center gap-2 rounded-md border border-input bg-background px-3 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring sm:w-[320px]">
           <Search className="size-3.5 shrink-0 text-muted" />
           <input
@@ -281,7 +366,7 @@ export const AgentsPage: React.FC = () => {
         </Button>
       </div>
 
-      {error && (
+      {agentsTab === 'definitions' && error && (
         <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive">
           {error}
         </div>
@@ -291,10 +376,12 @@ export const AgentsPage: React.FC = () => {
           is selected; the empty "select an agent" placeholder used to
           dominate the right side of a fresh page. With auto-select on
           mount it's rarely needed; when it is empty we just collapse
-          back to a single column. */}
+          back to a single column.
+          Hidden when Running tab is active; all hooks stay mounted. */}
       <div
         className={clsx(
           'grid gap-5',
+          agentsTab === 'running' && 'hidden',
           // `minmax(0,1fr)` + `min-w-0` keep the list column shrinkable; bare
           // `1fr` would let a long agent row push the fixed detail card off-screen.
           selected ? 'grid-cols-1 lg:grid-cols-[minmax(0,1fr)_420px]' : 'grid-cols-1',

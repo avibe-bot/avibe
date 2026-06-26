@@ -66,10 +66,12 @@ class SessionHandler(BaseHandler):
         self.receiver_tasks = controller.receiver_tasks
         self.stored_session_mappings = controller.stored_session_mappings
         self.session_last_activity = getattr(controller, "session_last_activity", {})
+        self.session_turn_started = getattr(controller, "session_turn_started", {})
         self.active_sessions = getattr(controller, "claude_active_sessions", set())
         self.claude_system_prompts = getattr(controller, "claude_system_prompts", {})
         self.claude_session_creates = getattr(controller, "claude_session_creates", {})
         controller.session_last_activity = self.session_last_activity
+        controller.session_turn_started = self.session_turn_started
         controller.claude_active_sessions = self.active_sessions
         controller.claude_system_prompts = self.claude_system_prompts
         controller.claude_session_creates = self.claude_session_creates
@@ -81,6 +83,11 @@ class SessionHandler(BaseHandler):
     def mark_session_active(self, composite_key: str) -> None:
         if not composite_key:
             return
+        # Stamp the turn-start baseline only on the idle→active transition, so a
+        # second queued request on an already-active session does not reset the
+        # "busy for" clock (it stays anchored to the first in-flight request).
+        if composite_key not in self.active_sessions:
+            self.session_turn_started[composite_key] = time.monotonic()
         self.active_sessions.add(composite_key)
         self.touch_session_activity(composite_key)
 
@@ -88,6 +95,7 @@ class SessionHandler(BaseHandler):
         if not composite_key:
             return
         self.active_sessions.discard(composite_key)
+        self.session_turn_started.pop(composite_key, None)
         if composite_key in self.claude_sessions:
             self.touch_session_activity(composite_key)
 
@@ -96,6 +104,7 @@ class SessionHandler(BaseHandler):
             return
         self.active_sessions.discard(composite_key)
         self.session_last_activity.pop(composite_key, None)
+        self.session_turn_started.pop(composite_key, None)
         self.claude_system_prompts.pop(composite_key, None)
 
     def bind_claude_runtime_session(
@@ -1288,6 +1297,7 @@ class SessionHandler(BaseHandler):
         for composite_key, last_activity in list(self.session_last_activity.items()):
             if composite_key not in self.claude_sessions:
                 self.session_last_activity.pop(composite_key, None)
+                self.session_turn_started.pop(composite_key, None)
                 self.active_sessions.discard(composite_key)
                 continue
             idle_for = now - last_activity
@@ -1304,6 +1314,7 @@ class SessionHandler(BaseHandler):
             current_last_activity = self.session_last_activity.get(composite_key)
             if composite_key not in self.claude_sessions:
                 self.session_last_activity.pop(composite_key, None)
+                self.session_turn_started.pop(composite_key, None)
                 self.active_sessions.discard(composite_key)
                 continue
             if current_last_activity is None:

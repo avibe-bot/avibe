@@ -1537,6 +1537,30 @@
   "agents": {
     "title": "Agents",
     "subtitle": "{{count}} agents registered across all backends.",
+    "tabs": {
+      "definitions": "Definitions",
+      "running": "Running"
+    },
+    "running": {
+      "empty": "No agents are currently running.",
+      "unreachableTitle": "Runtime unreachable",
+      "unreachableBody": "The Avibe controller is not responding. Start the service and try again.",
+      "stateActive": "active",
+      "stateIdle": "idle",
+      "stateOrphan": "orphan",
+      "orphan": "orphan process",
+      "busy": "busy {{elapsed}}",
+      "idleElapsed": "idle {{elapsed}}",
+      "openChat": "Open chat",
+      "agentInitiated": "agent",
+      "endActive": "Stop",
+      "endIdle": "Disconnect",
+      "endOrphan": "Kill process",
+      "confirmEnd": "Confirm",
+      "endedToast": "Ended",
+      "endFailedToast": "Couldn't end ({{error}})",
+      "pidShared": "(shared)"
+    },
     "showDisabled": "Show disabled",
     "statusEnabled": "enabled",
     "statusDisabled": "disabled",
