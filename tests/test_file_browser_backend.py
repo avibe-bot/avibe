@@ -193,6 +193,20 @@ def test_rename_refuses_to_clobber_target_appearing_after_precheck(tmp_path, mon
     assert src.read_text(encoding="utf-8") == "SRC"  # source intact
 
 
+def test_delete_refuses_filesystem_root(monkeypatch):
+    # A recursive delete of "/" (or a drive root) must be refused before it can rmtree the
+    # machine. Resolver + rmtree are stubbed so the test is safe even if the guard regresses.
+    monkeypatch.setattr(fs, "_resolve_existing_entry_path", lambda raw: Path("/"))
+    rmtree_calls: list = []
+    monkeypatch.setattr(fs.shutil, "rmtree", lambda *args, **kwargs: rmtree_calls.append(args))
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.delete_path("/", recursive=True)
+
+    assert exc.value.code == "invalid_path"
+    assert rmtree_calls == []  # the guard fired before any rmtree
+
+
 def test_move_symlink_over_directory_is_refused(tmp_path):
     # overwrite=True must not let a non-directory replace a directory. is_file() follows
     # symlinks, so a symlink-to-dir (or broken link) slipped past the old guard and the move

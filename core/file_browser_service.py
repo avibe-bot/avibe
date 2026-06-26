@@ -666,6 +666,10 @@ def _remove_path_if_exists(path: Path) -> None:
 
 def delete_path(raw_path: str, *, recursive: bool = False) -> dict[str, Any]:
     target = _resolve_existing_entry_path(raw_path)
+    if target == target.parent:
+        # A filesystem root (/, or a drive root on Windows). Never deletable — a recursive
+        # delete here would try to wipe everything the process can reach.
+        raise FileBrowserError("invalid_path", "Refusing to delete a filesystem root", 400)
     target_stat = _stat_existing(target, follow_symlinks=False)
 
     def _delete() -> dict[str, Any]:
