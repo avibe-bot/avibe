@@ -415,6 +415,35 @@ def test_write_normal_path_still_succeeds(tmp_path):
     assert path.read_text(encoding="utf-8") == "ok"
 
 
+def test_write_long_legal_basename_uses_bounded_temp_name(tmp_path, monkeypatch):
+    name = "a" * 250
+    path = tmp_path / name
+    try:
+        path.touch()
+    except OSError as exc:
+        if exc.errno != errno.ENAMETOOLONG:
+            raise
+        name = "a" * 120
+        path = tmp_path / name
+        path.touch()
+    path.write_text("old", encoding="utf-8")
+    temp_prefixes: list[str] = []
+    real_mkstemp = fs.tempfile.mkstemp
+
+    def capture_mkstemp(*args, **kwargs):
+        temp_prefixes.append(kwargs["prefix"])
+        assert len(kwargs["prefix"].encode()) + 8 + len(kwargs["suffix"].encode()) <= 255
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(fs.tempfile, "mkstemp", capture_mkstemp)
+
+    result = fs.write_file(str(path), "new")
+
+    assert result["ok"] is True
+    assert path.read_text(encoding="utf-8") == "new"
+    assert temp_prefixes == [fs._WRITE_TEMP_PREFIX]
+
+
 def test_write_preserves_existing_file_mode(tmp_path):
     path = tmp_path / "script.sh"
     path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -633,6 +662,41 @@ def test_move_symlink_onto_its_target_is_refused(tmp_path):
     assert destination.is_symlink()
     assert destination.resolve() == other_real
     assert other_real.read_text(encoding="utf-8") == "other"
+
+
+def test_move_directory_into_own_descendant_is_refused_before_copy(tmp_path, monkeypatch):
+    source = tmp_path / "a"
+    destination_parent = source / "b"
+    destination = destination_parent / "c"
+    destination_parent.mkdir(parents=True)
+    (source / "keep.txt").write_text("keep", encoding="utf-8")
+    copytree_calls: list[tuple[Path, Path]] = []
+
+    def fail_copytree(src: Path, dst: Path, **_kwargs):
+        copytree_calls.append((Path(src), Path(dst)))
+        raise AssertionError("copytree should not run for an invalid self-descendant move")
+
+    monkeypatch.setattr(fs.shutil, "copytree", fail_copytree)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.move_path(str(source), str(destination))
+
+    assert exc.value.code == "invalid_path"
+    assert exc.value.status_code == 400
+    assert source.is_dir()
+    assert (source / "keep.txt").read_text(encoding="utf-8") == "keep"
+    assert copytree_calls == []
+
+
+def test_move_directory_to_sibling_still_succeeds(tmp_path):
+    source = tmp_path / "a"
+    source.mkdir()
+    (source / "keep.txt").write_text("keep", encoding="utf-8")
+    destination = tmp_path / "d"
+
+    assert fs.move_path(str(source), str(destination)) == {"ok": True}
+    assert not source.exists()
+    assert (destination / "keep.txt").read_text(encoding="utf-8") == "keep"
 
 
 def test_move_no_overwrite_refuses_target_appearing_after_precheck(tmp_path, monkeypatch):

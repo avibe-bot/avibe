@@ -193,3 +193,60 @@ def test_safe_extract_tar_omits_filter_before_python_312(tmp_path: Path, monkeyp
 
     assert calls == [None]
     assert (destination / "tmux").is_file()
+
+
+def test_safe_extract_tar_rejects_root_escaping_hard_link(tmp_path: Path) -> None:
+    archive = tmp_path / "tmux-hardlink-escape.tar.gz"
+    victim = tmp_path / "victim"
+    victim.write_text("victim", encoding="utf-8")
+    original_victim_stat = victim.stat()
+    destination = tmp_path / "extract"
+    destination.mkdir()
+
+    with tarfile.open(archive, "w:gz") as tar:
+        directory = tarfile.TarInfo("sub")
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o755
+        tar.addfile(directory)
+        hard_link = tarfile.TarInfo("sub/tmux")
+        hard_link.type = tarfile.LNKTYPE
+        hard_link.linkname = "../victim"
+        hard_link.mode = 0o755
+        tar.addfile(hard_link)
+
+    with tarfile.open(archive, "r:gz") as tar:
+        with pytest.raises(ValueError, match="Unsafe tmux archive link target"):
+            tmux_runtime._safe_extract_tar(tar, destination)
+
+    assert not (destination / "sub" / "tmux").exists()
+    assert victim.stat().st_nlink == original_victim_stat.st_nlink
+
+
+def test_safe_extract_tar_allows_root_relative_in_tree_hard_link(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    binary = source / "tmux-real"
+    binary.write_text("#!/bin/sh\necho tmux 3.6b\n", encoding="utf-8")
+    binary.chmod(0o755)
+    archive = tmp_path / "tmux-hardlink-safe.tar.gz"
+    destination = tmp_path / "extract"
+    destination.mkdir()
+
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(binary, arcname="tmux-real")
+        directory = tarfile.TarInfo("sub")
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o755
+        tar.addfile(directory)
+        hard_link = tarfile.TarInfo("sub/tmux")
+        hard_link.type = tarfile.LNKTYPE
+        hard_link.linkname = "tmux-real"
+        hard_link.mode = 0o755
+        tar.addfile(hard_link)
+
+    with tarfile.open(archive, "r:gz") as tar:
+        tmux_runtime._safe_extract_tar(tar, destination)
+
+    installed = destination / "sub" / "tmux"
+    assert installed.read_text(encoding="utf-8") == "#!/bin/sh\necho tmux 3.6b\n"
+    assert (destination / "tmux-real").stat().st_ino == installed.stat().st_ino

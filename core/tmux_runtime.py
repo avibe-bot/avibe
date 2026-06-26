@@ -545,9 +545,14 @@ def _safe_extract_tar(tar: tarfile.TarFile, destination: Path) -> None:
         target = (destination / member.name).resolve()
         if target != destination_resolved and destination_resolved not in target.parents:
             raise ValueError(f"Unsafe tmux archive member path: {member.name}")
-        if member.issym() or member.islnk():
+        if member.issym():
             link_target = Path(member.linkname)
             resolved_link = (target.parent / link_target).resolve() if not link_target.is_absolute() else link_target.resolve()
+            if resolved_link != destination_resolved and destination_resolved not in resolved_link.parents:
+                raise ValueError(f"Unsafe tmux archive link target: {member.name}")
+        if member.islnk():
+            link_target = Path(member.linkname)
+            resolved_link = (destination / link_target).resolve()
             if resolved_link != destination_resolved and destination_resolved not in resolved_link.parents:
                 raise ValueError(f"Unsafe tmux archive link target: {member.name}")
     if sys.version_info >= (3, 12):

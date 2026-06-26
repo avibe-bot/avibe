@@ -54,6 +54,7 @@ _RENAME_NOREPLACE = 1
 _RENAME_NOREPLACE_FALLBACK_WARNED = False
 _WRITE_LOCKS_MUTEX = threading.Lock()
 _WRITE_LOCKS: dict[str, threading.Lock] = {}
+_WRITE_TEMP_PREFIX = ".avibe-write-"
 
 
 class FileBrowserError(Exception):
@@ -162,6 +163,12 @@ def _is_dir_no_follow(path: Path) -> bool:
         return stat.S_ISDIR(path.lstat().st_mode)
     except FileNotFoundError:
         return False
+
+
+def _entry_contains_no_follow(parent: Path, child: Path) -> bool:
+    parent_resolved = parent.resolve(strict=True)
+    child_resolved = child.parent.resolve(strict=True) / child.name
+    return child_resolved == parent_resolved or parent_resolved in child_resolved.parents
 
 
 def _rename_no_replace(source: Path, target: Path) -> None:
@@ -524,7 +531,7 @@ def write_file(raw_path: str, content: str, *, expected_mtime: float | None = No
             temp_name = ""
             try:
                 mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else None
-                fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=parent)
+                fd, temp_name = tempfile.mkstemp(prefix=_WRITE_TEMP_PREFIX, suffix=".tmp", dir=parent)
                 if mode is not None:
                     os.fchmod(fd, mode)
                 with os.fdopen(fd, "wb") as handle:
@@ -622,6 +629,8 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
 def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[str, Any]:
     source = _resolve_existing_entry_path(raw_src)
     target = _resolve_entry_path(raw_dst)
+    if _is_dir_no_follow(source) and _entry_contains_no_follow(source, target):
+        raise FileBrowserError("invalid_path", "Cannot move a folder into itself", 400)
     if source == target:
         # Moving onto itself is a no-op; never unlink-then-move (it would delete it).
         return {"ok": True}
