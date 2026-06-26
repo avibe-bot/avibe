@@ -1,5 +1,7 @@
-import { Suspense, lazy, useMemo } from 'react';
+import { Suspense, lazy, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+
+import { useApi } from '../../context/ApiContext';
 
 // Lazy so xterm.js stays out of the main bundle until the Terminal is opened.
 const TerminalView = lazy(() => import('./TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -11,9 +13,11 @@ const FALLBACK_SESSION_ID = `wb-${Math.random().toString(36).slice(2, 10)}`;
 
 // A stable per-browser session id so the tmux-backed session reconnects to the same shell
 // after a refresh / network drop (persistence). Falls back to the in-memory id above when
-// localStorage is unavailable.
-function getSessionId(): string {
-  const KEY = 'avibe.terminal.sessionId';
+// localStorage is unavailable. The key is scoped to the signed-in account so a different
+// remote (OIDC) user in the same browser can't inherit — and reconnect to — the previous
+// user's live shell; local/unauthenticated sessions (identity == null) share one key.
+function getSessionId(identity: string | null): string {
+  const KEY = identity ? `avibe.terminal.sessionId.${encodeURIComponent(identity)}` : 'avibe.terminal.sessionId';
   try {
     let id = window.localStorage.getItem(KEY);
     if (!id) {
@@ -28,7 +32,22 @@ function getSessionId(): string {
 
 export const AppsTerminalPage: React.FC = () => {
   const { t } = useTranslation();
-  const sessionId = useMemo(() => getSessionId(), []);
+  const { getAuthSession } = useApi();
+  // Resolve the signed-in identity first, then derive the (account-scoped) session id, so we
+  // never briefly mount the terminal under the wrong key. email is null for local/unauth.
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const resolve = (identity: string | null) => {
+      if (!cancelled) setSessionId(getSessionId(identity));
+    };
+    getAuthSession()
+      .then((session) => resolve(session.remote && session.authenticated ? session.email : null))
+      .catch(() => resolve(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [getAuthSession]);
   return (
     <div className="flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]">
       <div>
@@ -36,11 +55,15 @@ export const AppsTerminalPage: React.FC = () => {
         <p className="text-[12px] text-muted">{t('apps.terminal.tagline')}</p>
       </div>
       <div className="flex min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-surface">
-        <Suspense
-          fallback={<div className="grid flex-1 place-items-center text-[12px] text-muted">{t('common.loading')}</div>}
-        >
-          <TerminalView sessionId={sessionId} />
-        </Suspense>
+        {sessionId == null ? (
+          <div className="grid flex-1 place-items-center text-[12px] text-muted">{t('common.loading')}</div>
+        ) : (
+          <Suspense
+            fallback={<div className="grid flex-1 place-items-center text-[12px] text-muted">{t('common.loading')}</div>}
+          >
+            <TerminalView sessionId={sessionId} />
+          </Suspense>
+        )}
       </div>
     </div>
   );
