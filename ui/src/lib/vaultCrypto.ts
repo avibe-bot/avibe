@@ -65,12 +65,20 @@ export type Argon2idParams = {
   parallelism: number;
 };
 
-export type PasswordWrapFactor = {
+type PasswordScryptFactor = {
   kind: 'password';
   password: string;
-  argon2id?: Partial<Argon2idParams>;
-  kdf?: 'scrypt' | 'argon2id';
+  kdf?: 'scrypt';
 };
+
+type PasswordArgon2idFactor = {
+  kind: 'password';
+  password: string;
+  kdf: 'argon2id';
+  argon2id?: Partial<Argon2idParams>;
+};
+
+export type PasswordWrapFactor = PasswordScryptFactor | PasswordArgon2idFactor;
 
 export type PasskeyWrapFactor = {
   kind: 'passkey';
@@ -186,6 +194,7 @@ export type ProtectedDekReleaseOperation =
       kind: 'agent-deliver';
       scopeType: string;
       scopeRef: string;
+      ttlSecs: number | bigint;
       approval: BlindBoxApproval;
       operationHash: HexOrBytes;
     }
@@ -195,6 +204,7 @@ export type ProtectedDekReleaseOperation =
       scopeRef: string;
       signatureScheme: SignatureScheme;
       digest: HexOrBytes;
+      ttlSecs: number | bigint;
       approval: BlindBoxApproval;
       operationHash: HexOrBytes;
     };
@@ -447,7 +457,7 @@ function normalizeWrapFactors(factors: VmkWrapFactor[] | string[]): VmkWrapFacto
   return factors.map((factor) => (typeof factor === 'string' ? { kind: 'password', password: factor } : factor));
 }
 
-async function passwordArgon2idCopy(vmk: BytesLike, factor: PasswordWrapFactor): Promise<PasswordArgon2idCopy> {
+async function passwordArgon2idCopy(vmk: BytesLike, factor: PasswordArgon2idFactor): Promise<PasswordArgon2idCopy> {
   const salt = randomBytes(16);
   const nonce = randomBytes(NONCE_BYTES);
   const params = normalizeArgon2idParams(factor.argon2id);
@@ -539,7 +549,13 @@ export async function addPasswordCopy(
   argon2idParams?: Partial<Argon2idParams>,
 ): Promise<string> {
   const meta = parseWrapMeta(wrapMeta);
-  meta.copies.push(await passwordCopy(vmk, { kind: 'password', password, argon2id: argon2idParams }));
+  meta.copies.push(
+    await passwordCopy(vmk, {
+      kind: 'password',
+      password,
+      ...(argon2idParams ? { kdf: 'argon2id', argon2id: argon2idParams } : {}),
+    }),
+  );
   return JSON.stringify(meta);
 }
 
@@ -818,22 +834,30 @@ function normalizeApproval(approval: BlindBoxApproval): {
   return { approvalNonce, approvalExpiresAtUnix };
 }
 
-function normalizeUnixU64(value: number | bigint): bigint {
+function normalizeU64(value: number | bigint, field: string): bigint {
   if (typeof value === 'number' && (!Number.isSafeInteger(value) || value < 0)) {
-    throw new Error('approval expiry out of bounds');
+    throw new Error(`${field} out of bounds`);
   }
-  const approvalExpiresAtUnix = typeof value === 'bigint' ? value : BigInt(value);
-  if (approvalExpiresAtUnix < 0n || approvalExpiresAtUnix > 0xffff_ffff_ffff_ffffn) {
-    throw new Error('approval expiry out of bounds');
+  const normalized = typeof value === 'bigint' ? value : BigInt(value);
+  if (normalized < 0n || normalized > 0xffff_ffff_ffff_ffffn) {
+    throw new Error(`${field} out of bounds`);
   }
-  return approvalExpiresAtUnix;
+  return normalized;
+}
+
+function normalizeUnixU64(value: number | bigint): bigint {
+  return normalizeU64(value, 'approval expiry');
+}
+
+function u64Be(value: number | bigint, field: string): Uint8Array {
+  const normalized = normalizeU64(value, field);
+  const out = new Uint8Array(8);
+  new DataView(out.buffer).setBigUint64(0, normalized, false);
+  return out;
 }
 
 function approvalExpiryBytes(value: number | bigint): Uint8Array {
-  const expiresAtUnix = normalizeUnixU64(value);
-  const out = new Uint8Array(8);
-  new DataView(out.buffer).setBigUint64(0, expiresAtUnix, false);
-  return out;
+  return u64Be(value, 'approval expiry');
 }
 
 function pushLengthPrefixed(out: number[], value: BytesLike): void {
@@ -971,7 +995,7 @@ export async function protectedDekReleaseBlindBoxContext(
         approvalNonce: approval.approvalNonce,
         approvalExpiresAtUnix: approval.approvalExpiresAtUnix,
         operationHash: await normalizeAndCheckOperationHash(
-          ['agent-deliver', normalizedName],
+          ['agent-deliver', normalizedName, u64Be(operation.ttlSecs, 'ttl seconds')],
           operation.operationHash,
         ),
       };
@@ -986,7 +1010,12 @@ export async function protectedDekReleaseBlindBoxContext(
         approvalNonce: approval.approvalNonce,
         approvalExpiresAtUnix: approval.approvalExpiresAtUnix,
         operationHash: await normalizeAndCheckOperationHash(
-          ['agent-sign', operation.signatureScheme, normalizeDigest(operation.digest)],
+          [
+            'agent-sign',
+            operation.signatureScheme,
+            normalizeDigest(operation.digest),
+            u64Be(operation.ttlSecs, 'ttl seconds'),
+          ],
           operation.operationHash,
         ),
       };
@@ -1007,15 +1036,28 @@ export async function blindBoxSignOperationHash(signScheme: SignatureScheme, dig
   return blindBoxOperationHash(['sign', signScheme, normalizeDigest(digest)]);
 }
 
-export async function blindBoxAgentDeliverOperationHash(name: string): Promise<Uint8Array> {
-  return blindBoxOperationHash(['agent-deliver', validateSecretName(name)]);
+export async function blindBoxAgentDeliverOperationHash(
+  name: string,
+  ttlSecs: number | bigint,
+): Promise<Uint8Array> {
+  return blindBoxOperationHash([
+    'agent-deliver',
+    validateSecretName(name),
+    u64Be(ttlSecs, 'ttl seconds'),
+  ]);
 }
 
 export async function blindBoxAgentSignOperationHash(
   signScheme: SignatureScheme,
   digest: HexOrBytes,
+  ttlSecs: number | bigint,
 ): Promise<Uint8Array> {
-  return blindBoxOperationHash(['agent-sign', signScheme, normalizeDigest(digest)]);
+  return blindBoxOperationHash([
+    'agent-sign',
+    signScheme,
+    normalizeDigest(digest),
+    u64Be(ttlSecs, 'ttl seconds'),
+  ]);
 }
 
 export function blindBoxAad(context: BlindBoxContext): Uint8Array {

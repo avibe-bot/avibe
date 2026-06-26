@@ -6,6 +6,7 @@ import vectors from './__fixtures__/p2_core_crypto.json';
 import {
   BLIND_BOX_AAD_DOMAIN,
   BLIND_BOX_SCHEME,
+  addPasswordCopy,
   base64ToBytes,
   blindBoxAad,
   blindBoxAadHex,
@@ -132,6 +133,7 @@ async function blindBoxContextFromVector(vector: (typeof p2.blind_box_aad_exampl
         kind: 'agent-deliver',
         scopeType: vector.scope_type,
         scopeRef: vector.scope_ref,
+        ttlSecs: vector.ttl_secs,
         approval: approvalFromVector(vector),
         operationHash: vector.operation_hash_hex,
       });
@@ -142,6 +144,7 @@ async function blindBoxContextFromVector(vector: (typeof p2.blind_box_aad_exampl
         scopeRef: vector.scope_ref,
         signatureScheme: vector.sign_scheme as SignatureScheme,
         digest: vector.digest_hex,
+        ttlSecs: vector.ttl_secs,
         approval: approvalFromVector(vector),
         operationHash: vector.operation_hash_hex,
       });
@@ -209,27 +212,29 @@ describe('vaultCrypto blind boxes', () => {
       throw new Error('missing shared operation-hash examples');
     }
 
+    for (const vector of p2.blind_box_aad_examples.cases) {
+      if (!vector.operation_hash_hex || !vector.operation_hash_fields_hex) {
+        continue;
+      }
+      await expect(
+        blindBoxOperationHash(vector.operation_hash_fields_hex.map(bytesFromHex)).then(bytesToHexString),
+      ).resolves.toBe(vector.operation_hash_hex);
+    }
     await expect(
       blindBoxOperationHash(['sign', sign.sign_scheme, bytesFromHex(sign.digest_hex)]).then(bytesToHexString),
     ).resolves.toBe(sign.operation_hash_hex);
     await expect(
       blindBoxSignOperationHash(sign.sign_scheme as SignatureScheme, sign.digest_hex).then(bytesToHexString),
     ).resolves.toBe(sign.operation_hash_hex);
-    await expect(blindBoxOperationHash(['agent-deliver', agentDeliver.name]).then(bytesToHexString)).resolves.toBe(
-      agentDeliver.operation_hash_hex,
-    );
-    await expect(blindBoxAgentDeliverOperationHash(agentDeliver.name).then(bytesToHexString)).resolves.toBe(
-      agentDeliver.operation_hash_hex,
-    );
     await expect(
-      blindBoxOperationHash(['agent-sign', agentSign.sign_scheme, bytesFromHex(agentSign.digest_hex)]).then(
-        bytesToHexString,
-      ),
-    ).resolves.toBe(agentSign.operation_hash_hex);
+      blindBoxAgentDeliverOperationHash(agentDeliver.name, agentDeliver.ttl_secs).then(bytesToHexString),
+    ).resolves.toBe(agentDeliver.operation_hash_hex);
     await expect(
-      blindBoxAgentSignOperationHash(agentSign.sign_scheme as SignatureScheme, agentSign.digest_hex).then(
-        bytesToHexString,
-      ),
+      blindBoxAgentSignOperationHash(
+        agentSign.sign_scheme as SignatureScheme,
+        agentSign.digest_hex,
+        agentSign.ttl_secs,
+      ).then(bytesToHexString),
     ).resolves.toBe(agentSign.operation_hash_hex);
   });
 
@@ -274,7 +279,7 @@ describe('vaultCrypto protected hierarchy', () => {
     const prfOutput = new Uint8Array(32).fill(0x22);
     const wrapMeta = await buildWrapMeta(vmk, [
       { kind: 'passkey', prfOutput, prfSalt, credentialId: 'cred-1' },
-      { kind: 'password', password: 'less-secure-fallback', argon2id: { memorySize: 512, iterations: 2 } },
+      { kind: 'password', password: 'less-secure-fallback' },
     ]);
 
     await expect(unwrapVmk(wrapMeta, { kind: 'passkey', prfOutput })).resolves.toEqual(vmk);
@@ -283,6 +288,13 @@ describe('vaultCrypto protected hierarchy', () => {
     expect(passkeyPrfSalts(wrapMeta)).toEqual([prfSalt]);
     expect(passkeyPrfSaltEntries(wrapMeta)).toEqual([{ prfSalt, credentialId: 'cred-1' }]);
     expect(webAuthnPrfExtensionInput(prfSalt).prf.eval.first.byteLength).toBe(32);
+
+    const withArgon2id = await addPasswordCopy(wrapMeta, vmk, 'argon2id-fallback', {
+      memorySize: 512,
+      iterations: 2,
+    });
+    const copies = JSON.parse(withArgon2id).copies as Array<{ kind: string; kdf?: string }>;
+    expect(copies.at(-1)?.kdf).toBe('argon2id');
   });
 
   it('wraps a protected value with a per-record DEK and releases only that DEK', async () => {
