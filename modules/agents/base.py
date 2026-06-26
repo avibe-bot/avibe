@@ -113,6 +113,16 @@ class BaseAgent(ABC):
         """Return runtime identities scoped to a persisted Avibe settings key."""
         return set()
 
+    def backend_alive(self, context: Any) -> Optional[bool]:
+        """Best-effort liveness of this backend for the given turn context.
+
+        Returns ``True`` (alive), ``False`` (definitively gone), or ``None``
+        (unknown — the default). Callers MUST treat ``None`` as alive so an
+        unknown state never triggers a false "backend not responding" warning.
+        The concise status bubble uses this to flip its footer to ⚠️.
+        """
+        return None
+
     def mark_runtime_turn_started(self, context: Any) -> None:
         """Mark the current gated turn as accepted by the backend runtime.
 

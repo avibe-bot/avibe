@@ -471,20 +471,48 @@ class DiscordBot(BaseIMClient):
 
         return await self._run_on_client_loop(_impl())
 
+    @staticmethod
+    def _compose_status_content(text: Optional[str], subtext: Optional[str]) -> Optional[str]:
+        """Append a concise status footer as Discord ``-#`` subtext.
+
+        ``subtext`` is only passed by the status-bubble dispatcher; when it is
+        falsy the content is the body unchanged (byte-identical to today). The
+        footer is short and prioritized over the body if the 2000-char limit is
+        hit (the status body is ~60 chars, so this is not normally reached).
+
+        When the body is empty (footer-only bubble at turn start / pure thinking),
+        the content is just ``-# {subtext}`` with NO leading newlines.
+        """
+        if not subtext:
+            return text
+        footer = f"-# {subtext}"
+        body = text or ""
+        if not body.strip():
+            return footer
+        suffix = f"\n\n{footer}"
+        limit = 2000
+        if len(body) + len(suffix) > limit:
+            keep = max(0, limit - len(suffix))
+            body = body[:keep]
+        return f"{body}{suffix}"
+
     async def send_message(
         self,
         context: MessageContext,
         text: str,
         parse_mode: Optional[str] = None,
         reply_to: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> str:
+        content = self._compose_status_content(text, subtext)
+
         async def _impl() -> str:
-            if not text:
+            if not content:
                 raise ValueError("Discord send_message requires non-empty text")
             target = await self._resolve_target(context)
             if target is None:
                 raise RuntimeError("Discord channel not found")
-            message = await target.send(content=text)
+            message = await target.send(content=content)
             if self.settings_manager and context.thread_id:
                 try:
                     if self.sessions:
@@ -501,7 +529,10 @@ class DiscordBot(BaseIMClient):
         text: str,
         keyboard: InlineKeyboard,
         parse_mode: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> str:
+        content = self._compose_status_content(text, subtext) if subtext else text
+
         async def _impl() -> str:
             target = await self._resolve_target(context)
             if target is None:
@@ -512,7 +543,7 @@ class DiscordBot(BaseIMClient):
                 if _PersistentStartView.is_all_static(keyboard)
                 else _DiscordButtonView(self, context, keyboard)
             )
-            message = await target.send(content=text, view=view)
+            message = await target.send(content=content, view=view)
             if self.settings_manager and context.thread_id:
                 try:
                     if self.sessions:
@@ -530,7 +561,10 @@ class DiscordBot(BaseIMClient):
         text: Optional[str] = None,
         keyboard: Optional[InlineKeyboard] = None,
         parse_mode: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> bool:
+        content = self._compose_status_content(text, subtext) if text is not None else text
+
         async def _impl() -> bool:
             target = await self._resolve_target(context)
             if target is None:
@@ -544,10 +578,29 @@ class DiscordBot(BaseIMClient):
                         if _PersistentStartView.is_all_static(keyboard)
                         else _DiscordButtonView(self, context, keyboard)
                     )
-                await msg.edit(content=text, view=view)
+                await msg.edit(content=content, view=view)
                 return True
             except Exception as err:
                 logger.debug("Failed to edit Discord message: %s", err)
+                return False
+
+        return await self._run_on_client_loop(_impl())
+
+    async def delete_message(self, context: MessageContext, message_id: str) -> bool:
+        """Delete a Discord message."""
+        if not message_id:
+            return False
+
+        async def _impl() -> bool:
+            target = await self._resolve_target(context)
+            if target is None:
+                return False
+            try:
+                msg = await target.fetch_message(int(message_id))
+                await msg.delete()
+                return True
+            except Exception as err:
+                logger.debug("Failed to delete Discord message: %s", err)
                 return False
 
         return await self._run_on_client_loop(_impl())

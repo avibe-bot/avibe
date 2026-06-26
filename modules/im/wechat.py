@@ -525,8 +525,13 @@ class WeChatBot(BaseIMClient):
         text: str,
         parse_mode: Optional[str] = None,
         reply_to: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> str:
-        """Send a plain text message to a WeChat user."""
+        """Send a plain text message to a WeChat user.
+
+        ``subtext`` (concise status-bubble footer) is part of the BaseIMClient
+        contract; WeChat has no native footer styling, so it is accepted and
+        ignored (no behavior change)."""
         if not text:
             raise ValueError("WeChat send_message requires non-empty text")
 
@@ -590,8 +595,11 @@ class WeChatBot(BaseIMClient):
         text: Optional[str] = None,
         keyboard: Optional[InlineKeyboard] = None,
         parse_mode: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> bool:
-        """WeChat does not support editing sent messages."""
+        """WeChat does not support editing sent messages.
+
+        ``subtext`` is accepted for the BaseIMClient contract and ignored."""
         return False
 
     async def answer_callback(

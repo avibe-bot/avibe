@@ -89,6 +89,27 @@ class CodexAgent(BaseAgent):
     # BaseAgent interface
     # ------------------------------------------------------------------
 
+    def backend_alive(self, context) -> Optional[bool]:
+        """Liveness via the CodexTransport for this turn's working directory.
+
+        Resolves base_session_id → cwd → transport and returns transport.is_alive.
+        Returns None (unknown) when anything can't be resolved, so the status
+        bubble never false-alarms ⚠️."""
+        payload = getattr(context, "platform_specific", None) or {}
+        base_session_id = str(payload.get("turn_base_session_id") or "").strip()
+        if not base_session_id:
+            return None
+        cwd = self._session_mgr.get_cwd(base_session_id)
+        if not cwd:
+            return None
+        transport = self._transports.get(cwd)
+        if transport is None:
+            return None
+        try:
+            return bool(transport.is_alive)
+        except Exception:
+            return None
+
     async def handle_message(self, request: AgentRequest) -> None:
         """Process a user message by routing it through app-server.
 

@@ -1130,8 +1130,16 @@ class TelegramBot(BaseIMClient):
         return message_id
 
     async def send_message(
-        self, context: MessageContext, text: str, parse_mode: Optional[str] = None, reply_to: Optional[str] = None
+        self,
+        context: MessageContext,
+        text: str,
+        parse_mode: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> str:
+        # ``subtext`` (concise status-bubble footer) is part of the BaseIMClient
+        # contract; Telegram has no native footer styling, so it is accepted and
+        # ignored (no behavior change).
         payload = self._build_payload(
             context,
             self.format_markdown(text),
@@ -1179,7 +1187,10 @@ class TelegramBot(BaseIMClient):
         text: Optional[str] = None,
         keyboard: Optional[InlineKeyboard] = None,
         parse_mode: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> bool:
+        # ``subtext`` is accepted for the BaseIMClient contract and ignored:
+        # Telegram has no native de-emphasized footer styling (no behavior change).
         payload = {
             "chat_id": context.channel_id,
             "message_id": int(message_id),

@@ -269,6 +269,15 @@ export type ApiContextType = {
   deleteHarnessWatch: (watchId: string) => Promise<{ ok: boolean; id?: string }>;
   listHarnessRuns: (params?: HarnessRunsParams) => Promise<HarnessRunsResult>;
   getHarnessRun: (runId: string) => Promise<{ ok: boolean; run: HarnessRun }>;
+  getRunningAgents: () => Promise<RunningAgentsResult>;
+  endRunningAgent: (payload: {
+    backend?: string | null;
+    state?: string | null;
+    session_id?: string | null;
+    composite_key?: string | null;
+    base_session_id?: string | null;
+    pid?: number | null;
+  }) => Promise<{ ok: boolean; unreachable?: boolean; error?: string; action?: string }>;
   remoteAccessStatus: () => Promise<any>;
   pairVibeCloudRemoteAccess: (payload: { backend_url: string; pairing_key: string; device_name?: string }) => Promise<any>;
   startRemoteAccess: () => Promise<any>;
@@ -835,6 +844,45 @@ export type HarnessBootstrapResult = {
   tab: 'tasks' | 'watches' | 'runs';
   page: HarnessTasksResult | HarnessWatchesResult | HarnessRunsResult;
 };
+
+// =============================================================================
+// Running agents (live process view)
+// =============================================================================
+
+export type RunningAgentState = 'active' | 'idle' | 'orphan';
+
+export type RunningAgent = {
+  backend: string;
+  state: RunningAgentState;
+  base_session_id: string | null;
+  composite_key: string | null;
+  workdir: string | null;
+  pid: number | null;
+  pid_shared: boolean;
+  native_session_id: string | null;
+  model: string | null;
+  elapsed_seconds: number | null;
+  session_id: string | null;
+  title: string | null;
+  platform: string | null;
+  scope_type: string | null;
+  scope_display_name: string | null;
+  trigger_source: 'human' | 'agent' | 'scheduled' | 'watch' | 'webhook' | 'callback' | null;
+  agent_name: string | null;
+  openable_in_chat: boolean;
+};
+
+export type RunningAgentCounts = {
+  total: number;
+  active: number;
+  idle: number;
+  orphan: number;
+  by_backend: Record<string, number>;
+};
+
+export type RunningAgentsResult =
+  | { ok: true; agents: RunningAgent[]; counts: RunningAgentCounts; unreachable?: false }
+  | { ok: false; unreachable: true; agents: RunningAgent[]; counts: Partial<RunningAgentCounts> };
 
 export type SessionInfo =
   | { remote: false }
@@ -2019,6 +2067,29 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           closeWorkbenchEventSource();
         }
       };
+    },
+    getRunningAgents: async () => {
+      const res = await apiFetch('/api/running-agents');
+      // 503/504 means controller is down; surface as unreachable instead of throwing.
+      if (res.status === 503 || res.status === 504) {
+        return { ok: false as const, unreachable: true as const, agents: [], counts: {} };
+      }
+      if (!res.ok) {
+        await handleApiError(res, '/api/running-agents');
+      }
+      return res.json();
+    },
+    endRunningAgent: async (payload) => {
+      const res = await apiFetch('/api/running-agents/end', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (res.status === 503) {
+        return { ok: false, unreachable: true };
+      }
+      // 409 (couldn't end) returns a body with ok:false + error; surface it.
+      return res.json().catch(() => ({ ok: res.ok }));
     },
     remoteAccessStatus: () => getJson('/api/remote-access/status'),
     pairVibeCloudRemoteAccess: (payload) => postJson('/api/remote-access/vibe-cloud/pair', payload),

@@ -14,6 +14,10 @@ class PlatformCapabilities:
     supports_buttons: bool
     supports_quick_replies: bool
     supports_message_editing: bool
+    # Platform can delete a previously-sent message. Used so the status bubble can
+    # be removed (rather than edited-in-place) when the final result is posted as a
+    # NEW message, which is what makes IM fire a push notification for the result.
+    supports_message_deletion: bool = False
     markdown_upload_returns_message_id: bool = False
     quick_reply_single_column: bool = False
     supports_typing_indicator: bool = False
@@ -24,6 +28,10 @@ class PlatformCapabilities:
     supports_message_indicator_delete: bool = False
     preferred_processing_indicator: str = "typing"
     force_preferred_processing_indicator: bool = False
+    # Platform can host the concise single status bubble (edit-in-place + subtext
+    # footer) that becomes the result. One capability shared by the dispatcher and
+    # the processing indicator instead of a hardcoded {"slack","discord"} literal.
+    supports_status_bubble: bool = False
 
 
 @dataclass(frozen=True)
@@ -138,9 +146,11 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
             supports_buttons=True,
             supports_quick_replies=True,
             supports_message_editing=True,
+            supports_message_deletion=True,
             supports_typing_indicator=True,
             typing_indicator_best_effort=True,
             supports_reaction_indicator=True,
+            supports_status_bubble=True,
         ),
     ),
     "discord": PlatformDescriptor(
@@ -160,9 +170,11 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
             supports_buttons=True,
             supports_quick_replies=True,
             supports_message_editing=True,
+            supports_message_deletion=True,
             markdown_upload_returns_message_id=True,
             supports_typing_indicator=True,
             supports_reaction_indicator=True,
+            supports_status_bubble=True,
         ),
     ),
     "telegram": PlatformDescriptor(
@@ -182,6 +194,7 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
             supports_buttons=True,
             supports_quick_replies=True,
             supports_message_editing=True,
+            supports_message_deletion=True,
             markdown_upload_returns_message_id=True,
             quick_reply_single_column=True,
             supports_typing_indicator=True,

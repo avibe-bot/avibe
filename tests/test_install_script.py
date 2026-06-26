@@ -36,6 +36,11 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
 
         printf '%s' "${{UV_TOOL_BIN_DIR:-}}" > "{uv_log}"
 
+        if [ -n "${{AVIBE_PAIRING_KEY:-}}" ]; then
+            printf 'uv leaked key\\n' >> "${{VIBE_TEST_CALL_LOG:-/dev/null}}"
+            exit 8
+        fi
+
         if [ "$1" != "tool" ] || [ "$2" != "install" ]; then
             exit 1
         fi
@@ -50,11 +55,33 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
         elif [ "${{1:-}}" = "version" ]; then
             echo "avibe-os 9.9.9"
         elif [ "${{1:-}}" = "runtime" ] && [ "${{2:-}}" = "prepare" ]; then
+            if [ -n "${{AVIBE_PAIRING_KEY:-}}" ]; then
+                printf 'runtime prepare leaked key\\n' >> "${{VIBE_TEST_CALL_LOG:-/dev/null}}"
+                exit 8
+            fi
             if [ "${{VIBE_TEST_RUNTIME_PREPARE_FAIL:-}}" = "1" ]; then
                 echo "node missing" >&2
                 exit 9
             fi
             echo "Show Runtime ready."
+        elif [ "${{1:-}}" = "remote" ] && [ "${{2:-}}" = "pair" ]; then
+            if [ -n "${{AVIBE_PAIRING_KEY:-}}" ]; then
+                printf 'remote pair leaked key\\n' >> "${{VIBE_TEST_CALL_LOG:-/dev/null}}"
+                exit 8
+            fi
+            printf 'remote pair %s %s %s\\n' "${{3:-}}" "${{4:-}}" "${{5:-}}" >> "${{VIBE_TEST_CALL_LOG:-/dev/null}}"
+            if [ "${{VIBE_TEST_REMOTE_PAIR_FAIL:-}}" = "1" ]; then
+                echo "Remote access is paired, but the tunnel did not start." >&2
+                exit 7
+            fi
+            echo "Remote access is ready"
+        elif [ "${{1:-}}" = "start" ]; then
+            if [ -n "${{AVIBE_PAIRING_KEY:-}}" ]; then
+                printf 'start leaked key\\n' >> "${{VIBE_TEST_CALL_LOG:-/dev/null}}"
+                exit 8
+            fi
+            printf 'start\\n' >> "${{VIBE_TEST_CALL_LOG:-/dev/null}}"
+            echo "Web UI:"
         else
             echo "started"
         fi
@@ -174,6 +201,65 @@ def test_install_script_keeps_vibe_available_on_current_path(tmp_path):
     assert version_result.returncode == 0, version_result.stdout + version_result.stderr
     assert "avibe-os 9.9.9" in version_result.stdout
     assert uv_log.read_text(encoding="utf-8")
+
+
+def test_install_script_pairs_and_starts_with_verified_vibe_path(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    uv_bin = tmp_path / "uv-bin"
+    uv_bin.mkdir()
+    tool_bin = tmp_path / "tool-bin"
+    call_log = tmp_path / "vibe-calls.log"
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+
+    _write_fake_uv(uv_bin / "uv", uv_log)
+    uv_bin.chmod(0o555)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["PATH"] = os.pathsep.join([str(uv_bin), "/usr/bin", "/bin"])
+    env["UV_TOOL_BIN_DIR"] = str(tool_bin)
+    env["VIBE_TEST_CALL_LOG"] = str(call_log)
+    env["AVIBE_PAIRING_KEY"] = "vrp_test"
+
+    install_result = _install(env)
+
+    assert install_result.returncode == 0, install_result.stdout + install_result.stderr
+    assert "Pairing this Avibe with avibe.bot" in install_result.stdout
+    assert "Avibe service started" in install_result.stdout
+    assert "Open your avibe.bot URL" in install_result.stdout
+    assert 'export PATH="' in install_result.stdout
+    assert call_log.read_text(encoding="utf-8").splitlines() == [
+        "remote pair vrp_test --backend-url https://avibe.bot",
+        "start",
+    ]
+
+
+def test_install_script_stops_when_remote_pair_cannot_start_tunnel(tmp_path):
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    call_log = tmp_path / "vibe-calls.log"
+    uv_log = tmp_path / "uv-tool-bin-dir.txt"
+
+    _write_fake_uv(path_dir / "uv", uv_log)
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["PATH"] = os.pathsep.join([str(path_dir), "/usr/bin", "/bin"])
+    env["VIBE_TEST_CALL_LOG"] = str(call_log)
+    env["AVIBE_PAIRING_KEY"] = "vrp_test"
+    env["VIBE_TEST_REMOTE_PAIR_FAIL"] = "1"
+
+    install_result = _install(env)
+
+    assert install_result.returncode == 7, install_result.stdout + install_result.stderr
+    assert "Pairing this Avibe with avibe.bot" in install_result.stdout
+    assert "Remote access paired" not in install_result.stdout
+    assert call_log.read_text(encoding="utf-8").splitlines() == [
+        "remote pair vrp_test --backend-url https://avibe.bot",
+    ]
 
 
 def test_install_script_installs_node_when_missing(tmp_path):

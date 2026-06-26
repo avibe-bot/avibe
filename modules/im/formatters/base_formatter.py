@@ -2,8 +2,43 @@ from abc import ABC, abstractmethod
 from typing import Optional, List, Tuple, Any, Dict
 import json
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+
+def _truncate_status(text: str, max_len: int) -> str:
+    """Truncate ``text`` to ``max_len`` chars with a trailing ellipsis.
+
+    The single safe-truncation primitive shared by ``to_status_label`` and
+    ``format_toolcall_label`` so the two never drift on how they shorten a
+    status line. Trims trailing whitespace before appending ``…``.
+    """
+    if len(text) > max_len:
+        return text[:max_len].rstrip() + "…"
+    return text
+
+
+def to_status_label(text: str, max_len: int = 60) -> str:
+    """Reduce an already-formatted process message to a single clean status line.
+
+    Used by the concise status-bubble flow (Slack/Discord): the agent backends
+    emit toolcall/assistant text that may be multi-line and wrapped in inline
+    code (e.g. ``🔧 `Bash` `{"command":"pytest tests/"}` ``). Naively truncating
+    that at N chars can cut inside a backtick block and leave dangling markup
+    that the renderer mangles. This takes the FIRST line, strips inline-code
+    backticks (the main truncation hazard), collapses whitespace, and truncates
+    with an ellipsis — so the label is always safe to drop into a message.
+
+    Underscores / asterisks are intentionally preserved so file names like
+    ``message_dispatcher.py`` survive intact.
+    """
+    if not text:
+        return ""
+    stripped = text.strip()
+    first_line = stripped.split("\n", 1)[0] if stripped else ""
+    cleaned = re.sub(r"\s+", " ", first_line.replace("`", "")).strip()
+    return _truncate_status(cleaned, max_len)
 
 
 class BaseMarkdownFormatter(ABC):
@@ -411,6 +446,92 @@ class BaseMarkdownFormatter(ABC):
         if params == "{}":
             return f"🔧 {self.format_code_inline(tool_name)}"
         return f"🔧 {self.format_code_inline(tool_name)} {self.format_code_inline(params)}"
+
+    # Salient-arg priority: the first key present wins as the label's detail.
+    _TOOLCALL_LABEL_ARG_PRIORITY = (
+        "command",
+        "cmd",
+        "file_path",
+        "filePath",
+        "path",
+        "pattern",
+        "query",
+        "url",
+        "directory",
+        "notebook_path",
+        "prompt",
+    )
+    # Path-like keys get ``get_relative_path`` applied so the workspace prefix
+    # is stripped (e.g. ``…/repo/message_dispatcher.py`` → ``message_dispatcher.py``).
+    _TOOLCALL_LABEL_PATH_KEYS = frozenset(
+        {"file_path", "filePath", "path", "directory", "notebook_path", "cwd", "workdir"}
+    )
+
+    def format_toolcall_label(
+        self,
+        tool_name: str,
+        tool_input: Optional[Dict[str, Any]] = None,
+        get_relative_path: Optional[callable] = None,
+        max_len: int = 60,
+    ) -> str:
+        """Build a clean claude-pipe-style status label for a tool call.
+
+        Produces ``🔧 <ToolName>: <primary-arg>`` (or ``🔧 <ToolName>`` when no
+        usable arg is found), e.g. ``🔧 Bash: pytest tests/test_x.py`` or
+        ``🔧 Read: message_dispatcher.py``. The most salient argument is picked
+        from ``tool_input`` in a fixed priority order; path-like keys are run
+        through ``get_relative_path`` (when provided) so the workspace prefix is
+        dropped. The chosen value is reduced to a single clean line (first line,
+        collapsed whitespace, surrounding quotes/backticks stripped) and the
+        whole label is truncated with the SAME safe primitive as
+        ``to_status_label``. Underscores are preserved so file names survive.
+
+        Pure/standalone — carries no platform state, so any formatter can use it.
+        """
+        # Defensive: a backend could hand a non-dict input; never raise from the
+        # live status-label path (just render the bare tool name).
+        if not isinstance(tool_input, dict):
+            tool_input = {}
+
+        chosen_key: Optional[str] = None
+        chosen_value: Any = None
+        for key in self._TOOLCALL_LABEL_ARG_PRIORITY:
+            value = tool_input.get(key)
+            if isinstance(value, str) and value.strip():
+                chosen_key = key
+                chosen_value = value
+                break
+        if chosen_key is None:
+            # Fall back to the first non-empty string value in insertion order.
+            for key, value in tool_input.items():
+                if isinstance(value, str) and value.strip():
+                    chosen_key = key
+                    chosen_value = value
+                    break
+
+        detail = ""
+        if chosen_key is not None:
+            raw = chosen_value
+            if chosen_key in self._TOOLCALL_LABEL_PATH_KEYS and get_relative_path:
+                try:
+                    raw = get_relative_path(raw)
+                except Exception:
+                    raw = chosen_value
+            detail = self._clean_label_value(str(raw))
+
+        if detail:
+            label = f"🔧 {tool_name}: {detail}"
+        else:
+            label = f"🔧 {tool_name}"
+        return _truncate_status(label, max_len)
+
+    @staticmethod
+    def _clean_label_value(value: str) -> str:
+        """Reduce a raw arg value to one clean line: first line only, collapsed
+        whitespace, surrounding quotes/backticks stripped."""
+        first_line = value.split("\n", 1)[0]
+        cleaned = re.sub(r"\s+", " ", first_line).strip()
+        return cleaned.strip("\"'`")
 
     def format_todo_item(self, status: str, priority: str, content: str, completed: bool = False) -> str:
         """Format a todo item with status and priority"""

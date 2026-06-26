@@ -368,8 +368,13 @@ class FeishuBot(BaseIMClient):
         text: str,
         parse_mode: Optional[str] = None,
         reply_to: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> str:
-        """Send a text message to Feishu."""
+        """Send a text message to Feishu.
+
+        ``subtext`` (concise status-bubble footer) is part of the BaseIMClient
+        contract; Feishu has no native footer styling, so it is accepted and
+        ignored (no behavior change)."""
         self._ensure_client()
         if not text:
             raise ValueError("Feishu send_message requires non-empty text")
@@ -631,8 +636,12 @@ class FeishuBot(BaseIMClient):
         text: Optional[str] = None,
         keyboard: Optional[InlineKeyboard] = None,
         parse_mode: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> bool:
-        """Edit an existing Feishu message."""
+        """Edit an existing Feishu message.
+
+        ``subtext`` is accepted for the BaseIMClient contract and ignored:
+        Feishu has no native de-emphasized footer styling (no behavior change)."""
         self._ensure_client()
         try:
             from lark_oapi.api.im.v1 import (

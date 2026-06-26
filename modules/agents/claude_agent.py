@@ -189,6 +189,22 @@ class ClaudeAgent(BaseAgent):
         if callable(release):
             release(context)
 
+    def backend_alive(self, context) -> Optional[bool]:
+        """Liveness via the receiver task for this turn's runtime session.
+
+        ``receiver_tasks`` is keyed by the Claude runtime session key. When that
+        key matches the turn's ``AGENT_RUNTIME_TURN_KEY`` we know the answer; if
+        it doesn't (e.g. a client-overridden runtime key) we return ``None`` so
+        the caller never false-alarms."""
+        payload = getattr(context, "platform_specific", None) or {}
+        key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip()
+        if not key:
+            return None
+        task = self.receiver_tasks.get(key)
+        if task is None:
+            return None
+        return not task.done()
+
     async def _handle_question_callback(self, request: AgentRequest) -> None:
         """Handle question-related callbacks (button clicks, modal submissions).
 
@@ -558,16 +574,31 @@ class ClaudeAgent(BaseAgent):
                                 #         continue
 
                                 toolcalls.append(
-                                    formatter.format_toolcall(
-                                        block.name,
-                                        block.input,
-                                        get_relative_path=lambda path: self.get_relative_path(path, context),
+                                    (
+                                        formatter.format_toolcall(
+                                            block.name,
+                                            block.input,
+                                            get_relative_path=lambda path: self.get_relative_path(path, context),
+                                        ),
+                                        formatter.format_toolcall_label(
+                                            block.name,
+                                            block.input,
+                                            get_relative_path=lambda path: self.get_relative_path(path, context),
+                                        ),
                                     )
                                 )
                             elif isinstance(block, TextBlock):
                                 text = block.text.strip() if block.text else ""
                                 if text:
                                     text_parts.append(text)
+
+                        # Update the status footer's session token figure to this
+                        # request's context-window occupancy. SET (not add): the
+                        # latest assistant message reflects current context size,
+                        # so the figure tracks it live and drops after a /compact.
+                        context_tokens = self._extract_context_tokens(message)
+                        if context_tokens:
+                            self.controller.note_session_tokens(context, total=context_tokens)
 
                         auth_failure_assistant = self._is_auth_failure_assistant_message(message)
                         assistant_text = self._extract_text_blocks(message, context)
@@ -608,12 +639,16 @@ class ClaudeAgent(BaseAgent):
                                 parse_mode="markdown",
                             )
 
-                        for toolcall in toolcalls:
+                        for toolcall_text, toolcall_label in toolcalls:
+                            # Persisted/verbose text stays the original
+                            # ``format_toolcall`` output; ``status_label`` carries
+                            # the clean claude-pipe label for the concise bubble only.
                             await self.controller.emit_agent_message(
                                 context,
                                 "toolcall",
-                                toolcall,
+                                toolcall_text,
                                 parse_mode="markdown",
+                                status_label=toolcall_label,
                             )
 
                         if text_parts:
@@ -1260,6 +1295,42 @@ class ClaudeAgent(BaseAgent):
         has_parse = "parse" in normalized or "parsing" in normalized or "malformed" in normalized
         has_retry = "retry" in normalized or "retried" in normalized
         return has_tool and has_parse and has_retry
+
+    @staticmethod
+    def _extract_context_tokens(message) -> int:
+        """Current context-window occupancy from an AssistantMessage's ``usage``.
+
+        Each AssistantMessage carries the RAW per-request Anthropic usage block
+        (``data["message"]["usage"]``), so its ``input_tokens +
+        cache_read_input_tokens + cache_creation_input_tokens`` is the full prompt
+        sent for that request — i.e. the whole context at that moment — and
+        ``output_tokens`` is the response that joins the context for the next
+        request. The LATEST assistant message therefore reflects the current
+        occupancy, which the dispatcher SETs (not accumulates) so the figure
+        tracks the live context size and drops after a /compact.
+
+        NB: ``ResultMessage.usage`` is the CLI's CUMULATIVE turn usage (summed
+        across requests), so it overstates occupancy and must NOT be used here.
+
+        Defensive: ``usage`` may be a dict or object, or absent — returns 0 rather
+        than raising so a missing field never breaks the turn."""
+        usage = getattr(message, "usage", None)
+        if usage is None:
+            return 0
+
+        def _field(name: str) -> int:
+            value = usage.get(name) if isinstance(usage, dict) else getattr(usage, name, None)
+            try:
+                return int(value) if value and int(value) > 0 else 0
+            except (TypeError, ValueError):
+                return 0
+
+        return (
+            _field("input_tokens")
+            + _field("cache_read_input_tokens")
+            + _field("cache_creation_input_tokens")
+            + _field("output_tokens")
+        )
 
     def _detect_message_type(self, message) -> Optional[str]:
         """Infer message type name from Claude SDK class."""

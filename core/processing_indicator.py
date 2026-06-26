@@ -140,6 +140,16 @@ class ProcessingIndicatorService:
             if mode in _PROCESSING_INDICATOR_MODES and mode not in candidates[:index]
         ]
 
+    def _concise_status_bubble_active(self, context: MessageContext) -> bool:
+        check = getattr(self.controller, "uses_concise_status_bubble", None)
+        if not callable(check):
+            return False
+        try:
+            return bool(check(context))
+        except Exception:
+            logger.debug("uses_concise_status_bubble check failed; not suppressing", exc_info=True)
+            return False
+
     def _processing_modes(self, context: MessageContext) -> list[str]:
         capabilities = self._capabilities(context)
         return [
@@ -184,6 +194,19 @@ class ProcessingIndicatorService:
     async def start(self, context: MessageContext, agent_name: str, *, enabled: bool = True) -> ProcessingIndicatorHandle:
         handle = ProcessingIndicatorHandle(context=context)
         if not enabled:
+            return handle
+
+        if self._concise_status_bubble_active(context):
+            # The concise status bubble is the primary progress indicator, but we
+            # still want the lightweight 👀 received-ack reaction AND typing
+            # keepalive (both best-effort, both cleaned up on finish). We only drop
+            # the ack MESSAGE mode — a separate text bubble would duplicate the
+            # status bubble and can't be deleted on Slack. (B2)
+            capabilities = self._capabilities(context)
+            if self._mode_supported(capabilities, "reaction", context):
+                await self._start_reaction_indicator(handle)
+            if self._mode_supported(capabilities, "typing", context):
+                await self._start_typing_indicator(handle)
             return handle
 
         for mode in self._processing_modes(context):

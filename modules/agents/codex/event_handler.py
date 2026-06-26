@@ -492,6 +492,53 @@ class CodexEventHandler:
     async def _on_context_compacted(self, params: dict[str, Any], request: AgentRequest) -> None:
         return
 
+    @staticmethod
+    def _extract_context_tokens(params: dict[str, Any]) -> int:
+        """Current context-window occupancy from a ``thread/tokenUsage/updated``
+        notification.
+
+        The app-server v2 payload nests it as ``tokenUsage.last.totalTokens`` —
+        the "latest active context size" the Codex CLI's own context bar uses (it
+        grows with the conversation and DROPS after a /compact). This is the SNAPSHOT
+        ``last`` breakdown, NOT ``total`` (which is the monotonic cumulative billing
+        figure). The legacy v1 event stream nests the same value as
+        ``info.last_token_usage.total_tokens`` (snake_case); both are tried.
+
+        Defensive: missing/malformed → 0 so a protocol change never breaks the turn."""
+        if not isinstance(params, dict):
+            return 0
+        # v2 app-server (camelCase) → v1 event stream (snake_case under "info").
+        last = None
+        usage = params.get("tokenUsage")
+        if isinstance(usage, dict) and isinstance(usage.get("last"), dict):
+            last = usage["last"]
+        else:
+            info = params.get("info")
+            if isinstance(info, dict) and isinstance(info.get("last_token_usage"), dict):
+                last = info["last_token_usage"]
+        if not isinstance(last, dict):
+            return 0
+        for name in ("totalTokens", "total_tokens"):
+            value = last.get(name)
+            try:
+                if value and int(value) > 0:
+                    return int(value)
+            except (TypeError, ValueError):
+                continue
+        return 0
+
+    async def _on_token_usage_updated(self, params: dict[str, Any], request: AgentRequest) -> None:
+        """``thread/tokenUsage/updated`` → set the status footer's session token
+        figure to the current context-window occupancy. SET (not add): the value is
+        a live snapshot of context size, not a cumulative total."""
+        tokens = self._extract_context_tokens(params)
+        if not tokens:
+            return
+        turn_id = params.get("turnId") or params.get("turn_id") or ""
+        turn_state = self._agent._turn_registry.get_turn(turn_id) if turn_id else None
+        ctx = (turn_state.request if turn_state else request).context
+        self._agent.controller.note_session_tokens(ctx, total=tokens)
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
@@ -509,6 +556,7 @@ class CodexEventHandler:
         "thread/started": _on_thread_started,
         "turn/started": _on_turn_started,
         "turn/completed": _on_turn_completed,
+        "thread/tokenUsage/updated": _on_token_usage_updated,
         "item/completed": _on_item_completed,
         "error": _on_error,
         "item/agentMessage/delta": _on_agent_message_delta,

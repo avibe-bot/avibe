@@ -79,6 +79,89 @@ class _Controller:
         self.session_turns = None
 
 
+class _OrderRecordingTurnManager:
+    def __init__(self, log: list[str]):
+        self._log = log
+
+    def on_running(self, _context):
+        self._log.append("on_running")
+
+
+class _OrderRecordingDispatcher:
+    def __init__(self, log: list[str]):
+        self._log = log
+
+    async def begin_status_bubble(self, _context):
+        self._log.append("begin_status_bubble")
+
+
+class _TurnStartController:
+    """Records the relative order of the turn-start hooks vs the agent run."""
+
+    def __init__(self, log: list[str]):
+        self.session_turns = _OrderRecordingTurnManager(log)
+        self.message_dispatcher = _OrderRecordingDispatcher(log)
+        self._log = log
+
+    def update_thread_message_id(self, _context):
+        self._log.append("update_thread_message_id")
+
+
+class _OrderRecordingAgent(_RuntimeAgent):
+    def __init__(self, log: list[str]):
+        super().__init__()
+        self._log = log
+
+    async def handle_message(self, request):
+        self._log.append("handle_message")
+        await super().handle_message(request)
+
+
+def test_agent_service_runs_turn_start_hooks_after_gate_before_agent() -> None:
+    async def _run():
+        log: list[str] = []
+        controller = _TurnStartController(log)
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        agent = _OrderRecordingAgent(log)
+        service.register(agent)
+
+        await service.handle_message("claude", _request("hi"))
+
+        # on_running (gate confirmed) must precede the bubble hooks, which in turn
+        # precede the agent run. This is what keeps a queued turn from claiming
+        # the trigger id / posting a premature bubble before it actually starts.
+        assert log == [
+            "on_running",
+            "update_thread_message_id",
+            "begin_status_bubble",
+            "handle_message",
+        ]
+
+    asyncio.run(_run())
+
+
+def test_agent_service_turn_start_hooks_optional_and_guarded() -> None:
+    async def _run():
+        # A controller WITHOUT the turn-start hooks (and a dispatcher whose
+        # bubble raises) must not break the turn.
+        class _NoHookController:
+            session_turns = None
+            message_dispatcher = SimpleNamespace(
+                begin_status_bubble=AsyncMock(side_effect=RuntimeError("bubble boom"))
+            )
+
+        service = AgentService(controller=_NoHookController())
+        agent = _RuntimeAgent()
+        service.register(agent)
+
+        await service.handle_message("claude", _request("hi"))
+
+        assert agent.started == ["hi"]
+
+    asyncio.run(_run())
+
+
 class _FailingTurnManager:
     def on_running(self, _context):
         raise RuntimeError("status failed")
@@ -410,6 +493,69 @@ def test_agent_service_releases_gate_when_on_running_fails() -> None:
         assert gate.token == ""
         assert gate.runtime_started is False
         assert agent.started == []
+
+    asyncio.run(_run())
+
+
+def test_agent_service_schedules_terminal_tidy_on_cancellation() -> None:
+    # C3: a turn cancelled mid-flight (shutdown / SIGTERM) must SCHEDULE a silent
+    # terminal result so the outbound chokepoint collapses the stuck status bubble
+    # + settles the dot, then re-raise CancelledError.
+    async def _run():
+        controller = _Controller()
+        emit_calls: list[tuple[tuple, dict]] = []
+        token_at_emit: list[str] = []
+        emitted = asyncio.Event()
+
+        async def _emit(*args, **kwargs):
+            # Capture the runtime-turn token AT EMIT TIME. The fix requires the
+            # tidy emit to run while the turn is STILL current (token not yet
+            # cleared) — otherwise the real result branch drops it as stale and
+            # the bubble never collapses. An early release would make this "".
+            gate = service._turn_gates.get("session:/repo")
+            token_at_emit.append(gate.token if gate else "")
+            emit_calls.append((args, kwargs))
+            emitted.set()
+
+        controller.emit_agent_message = _emit
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+
+        hanging = asyncio.Event()
+
+        class _HangingAgent(_RuntimeAgent):
+            async def handle_message(self, _request):
+                await hanging.wait()  # block until cancelled
+
+        agent = _HangingAgent()
+        service.register(agent)
+        request = _request("cancel-me")
+
+        task = asyncio.create_task(service.handle_message("claude", request))
+        await asyncio.sleep(0.05)  # let it reach the hanging agent
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("CancelledError should propagate")
+
+        # The terminal tidy emit was scheduled (create_task) → let it run.
+        await asyncio.wait_for(emitted.wait(), timeout=2.0)
+        assert len(emit_calls) == 1
+        args, kwargs = emit_calls[0]
+        # emit(context, "result", "", is_error=True, level="silent")
+        assert args[0] is request.context
+        assert args[1] == "result"
+        assert kwargs.get("is_error") is True
+        assert kwargs.get("level") == "silent"
+        # The turn was STILL current at emit time (token not cleared first) so the
+        # tidy isn't dropped as stale — this is the ordering the C3 fix guarantees.
+        assert token_at_emit and token_at_emit[0]
+        # Gate released AFTER the tidy emit so a later prompt can't hang behind the
+        # cancelled turn.
+        assert not service._turn_gates["session:/repo"].token
 
     asyncio.run(_run())
 

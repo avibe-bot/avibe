@@ -219,6 +219,30 @@ def test_save_config_preserves_show_pages_prompt_toggle(monkeypatch, tmp_path):
     assert payload["show_pages_prompt"] is False
 
 
+def test_save_config_preserves_status_bubble_settings_on_partial_save(monkeypatch, tmp_path):
+    """An unrelated partial save must NOT reset agent_progress_style / intervals.
+
+    Regression for the config_to_payload omission that wiped these on any UI save.
+    """
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    full = _full_config_payload()
+    full["agent_progress_style"] = "verbose"
+    full["agent_status_heartbeat_ms"] = 12000
+    created = api.save_config(full)
+    assert created.agent_progress_style == "verbose"
+    assert created.agent_status_heartbeat_ms == 12000
+
+    # Toggle an unrelated field — the status-bubble settings must survive.
+    updated = api.save_config({"show_duration": False})
+    payload = api.config_to_payload(updated)
+
+    assert updated.agent_progress_style == "verbose"
+    assert updated.agent_status_heartbeat_ms == 12000
+    assert payload["agent_progress_style"] == "verbose"
+    assert payload["agent_status_heartbeat_ms"] == 12000
+
+
 def test_config_load_defaults_missing_show_pages_prompt_to_enabled():
     payload = _full_config_payload()
     payload.pop("show_pages_prompt")

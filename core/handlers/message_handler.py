@@ -184,10 +184,13 @@ class MessageHandler(BaseHandler):
             settings_key = self._get_settings_key(context)
             session_key = self._get_session_key(context)
 
-            # Update thread's current message_id so log messages follow this user message
-            # This is critical for proper log message grouping when agent receivers
-            # hold references to older contexts
-            self.controller.update_thread_message_id(context)
+            # NOTE: claiming the thread's current message_id (the dispatcher's
+            # per-turn bubble trigger) and posting the "starting" status bubble
+            # now happen in AgentService.handle_message, AFTER the runtime gate
+            # is acquired — i.e. when this turn actually STARTS rather than while
+            # it is queued behind an in-flight turn. This keeps a queued turn
+            # from hijacking the running turn's bubble key or posting a premature
+            # bubble.
 
             platform_payload = context.platform_specific or {}
             resolved_target = platform_payload.get("agent_run_target")
@@ -380,6 +383,10 @@ class MessageHandler(BaseHandler):
                 context.platform_specific = spec
 
             if is_human:
+                # The concise status bubble (footer-only at turn start) is now
+                # posted by AgentService.handle_message after the runtime gate is acquired,
+                # so it only appears once this turn truly starts (not while it is
+                # queued). See _begin_turn_status there.
                 processing_indicator = await self.controller.processing_indicator.start(context, agent_name)
 
             if is_human and subagent_name and context.message_id:

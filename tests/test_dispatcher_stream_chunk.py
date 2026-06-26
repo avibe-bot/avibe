@@ -32,7 +32,7 @@ class _ControllerDouble:
     def _get_session_key(self, ctx):
         return f"{ctx.platform}::{ctx.channel_id}"
 
-    def register_turn_sink(self, session_key, *, on_chunk, done_event, turn_token=None):
+    def register_turn_sink(self, session_key, *, on_chunk, done_event, turn_token=None, context=None):
         self.active_turn_sinks[session_key] = {
             "on_chunk": on_chunk,
             "done_event": done_event,

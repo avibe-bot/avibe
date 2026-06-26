@@ -699,6 +699,66 @@ def test_cmd_remote_pair_prompts_and_reports_success(monkeypatch, capsys):
     assert "vibe remote status" in output
 
 
+def test_cmd_remote_pair_fails_when_tunnel_does_not_start(monkeypatch, capsys):
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: "vrp_prompt")
+
+    def fake_pair(pairing_key: str, backend_url: str, device_name: str):
+        return {
+            "ok": True,
+            "public_url": "https://alex.avibe.bot",
+            "running": False,
+            "start": {"ok": False, "error": "cloudflared_spawn_failed", "detail": "spawn failed"},
+        }
+
+    monkeypatch.setattr(remote_access, "pair", fake_pair)
+
+    result = cli.cmd_remote_pair(
+        SimpleNamespace(
+            pairing_key=None,
+            backend_url="https://backend.test",
+            device_name="Mac Studio",
+            json=False,
+        )
+    )
+
+    assert result == 1
+    output = capsys.readouterr()
+    assert "Step 3: Pairing saved" in output.out
+    assert "Remote access is paired, but the tunnel did not start." in output.err
+    assert "vibe remote start" in output.err
+
+
+def test_cmd_remote_pair_json_marks_start_failure_as_not_ok(monkeypatch, capsys):
+    monkeypatch.setattr(cli.getpass, "getpass", lambda prompt: "vrp_prompt")
+
+    def fake_pair(pairing_key: str, backend_url: str, device_name: str):
+        return {
+            "ok": True,
+            "pairing": {"ok": True},
+            "public_url": "https://alex.avibe.bot",
+            "running": False,
+            "start": {"ok": False, "error": "cloudflared_spawn_failed"},
+        }
+
+    monkeypatch.setattr(remote_access, "pair", fake_pair)
+
+    result = cli.cmd_remote_pair(
+        SimpleNamespace(
+            pairing_key=None,
+            backend_url="https://backend.test",
+            device_name="Mac Studio",
+            json=True,
+        )
+    )
+
+    assert result == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["pairing"] == {"ok": True}
+    assert payload["start"]["ok"] is False
+    assert payload["error"] == "cloudflared_spawn_failed"
+
+
 def test_cmd_remote_setup_explains_before_prompting_for_key(monkeypatch, capsys):
     events = []
 

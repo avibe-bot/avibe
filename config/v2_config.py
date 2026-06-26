@@ -412,6 +412,12 @@ class V2Config:
     reply_enhancements: bool = True  # Enable quick-reply buttons
     show_pages_prompt: bool = True  # Inject Show Pages capability guidance into agent prompts
     language: str = "en"  # Global language setting (see vibe/i18n)
+    # Concise status-bubble UX for editing platforms (Slack/Discord):
+    #   "concise" (default) one self-updating bubble that becomes the result,
+    #   "verbose" legacy append/split process log, "off" no process bubble.
+    agent_progress_style: str = "concise"
+    agent_status_heartbeat_ms: int = 15000  # status-bubble elapsed-timer heartbeat
+    agent_status_no_output_ms: int = 180000  # "no output for N min" hint threshold
     # True once the user has finished the setup wizard. This is the explicit
     # gate for ``setup_state().needs_setup`` — it replaces the old heuristic
     # that inferred "setup done" from having a mode plus configured platform
@@ -618,6 +624,20 @@ class V2Config:
 
         language = normalize_language(payload.get("language"), default="en")
 
+        agent_progress_style = payload.get("agent_progress_style", "concise")
+        if agent_progress_style not in ("concise", "verbose", "off"):
+            agent_progress_style = "concise"
+
+        def _positive_int(value, default, maximum):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0 or value > maximum:
+                return default
+            return value
+
+        # Cap to sane upper bounds so a fat-fingered value can't silence the
+        # heartbeat (heartbeat ≤ 1h, no-output hint ≤ 24h); out-of-range → default.
+        agent_status_heartbeat_ms = _positive_int(payload.get("agent_status_heartbeat_ms"), 15000, 3_600_000)
+        agent_status_no_output_ms = _positive_int(payload.get("agent_status_no_output_ms"), 180000, 86_400_000)
+
         # ``setup_completed`` is the explicit setup gate. Read the stored value
         # when present; otherwise leave it ``None`` here and derive it below
         # from the legacy "setup done" heuristic so installs configured before
@@ -653,6 +673,9 @@ class V2Config:
             reply_enhancements=reply_enhancements,
             show_pages_prompt=show_pages_prompt,
             language=language,
+            agent_progress_style=agent_progress_style,
+            agent_status_heartbeat_ms=agent_status_heartbeat_ms,
+            agent_status_no_output_ms=agent_status_no_output_ms,
         )
 
         # Migration: when the payload predates ``setup_completed``, derive it
@@ -713,6 +736,9 @@ class V2Config:
             "reply_enhancements": self.reply_enhancements,
             "show_pages_prompt": self.show_pages_prompt,
             "language": self.language,
+            "agent_progress_style": self.agent_progress_style,
+            "agent_status_heartbeat_ms": self.agent_status_heartbeat_ms,
+            "agent_status_no_output_ms": self.agent_status_no_output_ms,
             "setup_completed": self.setup_completed,
         }
         content = json.dumps(payload, indent=2)

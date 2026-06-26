@@ -269,6 +269,20 @@ def _npm_binary_candidates_for_prefix(prefix_path: Path, binary: str) -> list[Pa
     return derived_candidates
 
 
+def _windows_executable_candidates(candidates: list[Path]) -> list[Path]:
+    result: list[Path] = []
+    for candidate in candidates:
+        result.append(candidate)
+        if candidate.suffix.lower() not in {".cmd", ".exe"}:
+            result.extend(
+                [
+                    candidate.with_name(f"{candidate.name}.exe"),
+                    candidate.with_name(f"{candidate.name}.cmd"),
+                ]
+            )
+    return result
+
+
 def _candidate_cli_paths(binary: str) -> list[Path]:
     if not binary:
         return []
@@ -296,6 +310,8 @@ def _candidate_cli_paths(binary: str) -> list[Path]:
         Path("/opt/homebrew/bin") / binary,
         Path("/usr/local/bin") / binary,
     ]
+    if os.name == "nt":
+        common_candidates = _windows_executable_candidates(common_candidates)
     for candidate in common_candidates + _nvm_binary_candidates(binary) + _npm_global_binary_candidates(binary):
         if candidate not in candidates:
             candidates.append(candidate)
@@ -955,6 +971,9 @@ def config_to_payload(config: V2Config, *, include_secrets: bool = False) -> dic
         "include_user_info": config.include_user_info,
         "reply_enhancements": config.reply_enhancements,
         "show_pages_prompt": config.show_pages_prompt,
+        "agent_progress_style": config.agent_progress_style,
+        "agent_status_heartbeat_ms": config.agent_status_heartbeat_ms,
+        "agent_status_no_output_ms": config.agent_status_no_output_ms,
         "setup_completed": config.setup_completed,
     }
     return payload
@@ -3234,31 +3253,34 @@ def _run_install_command(
             # pre-upgrade value.
             _invalidate_version_cache(name)
 
-            # Persist the freshly-discovered install path to V2Config so the
-            # next ``get_backend_runtime`` reads it directly instead of
-            # relying on the resolver's stale-path fallback. Self-update
-            # commands normally keep the binary at the same path so this is
-            # a no-op for upgrades, but fresh installs after a missing
-            # bootstrap (or an installer that moves the file) need it.
-            if installed_path:
+            # Persist real Agent backend CLI paths to V2Config so the next
+            # ``get_backend_runtime`` reads them directly instead of relying
+            # on the resolver's stale-path fallback. Local dependencies such
+            # as askill reuse this runner but do not have ``agents.<name>``
+            # config entries, so they must not touch V2Config bookkeeping.
+            if installed_path and is_agent_backend(name):
                 try:
                     with CONFIG_LOCK:
                         try:
                             cfg = load_config()
                         except FileNotFoundError:
-                            cfg = V2Config()
-                        target = getattr(getattr(cfg, "agents", None), name, None)
-                        if target is not None:
-                            previous = getattr(target, "cli_path", "") or ""
-                            if previous != installed_path:
-                                target.cli_path = installed_path
-                                cfg.save()
-                                logger.info(
-                                    "install_agent: updated V2Config cli_path for %s: %s -> %s",
-                                    name,
-                                    previous or "<unset>",
-                                    installed_path,
-                                )
+                            logger.debug(
+                                "install_agent: config is not initialized; skipping cli_path persistence for %s",
+                                name,
+                            )
+                        else:
+                            target = getattr(getattr(cfg, "agents", None), name, None)
+                            if target is not None:
+                                previous = getattr(target, "cli_path", "") or ""
+                                if previous != installed_path:
+                                    target.cli_path = installed_path
+                                    cfg.save()
+                                    logger.info(
+                                        "install_agent: updated V2Config cli_path for %s: %s -> %s",
+                                        name,
+                                        previous or "<unset>",
+                                        installed_path,
+                                    )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "install_agent: failed to persist cli_path for %s: %s",
@@ -3290,6 +3312,8 @@ def _run_install_command(
 
 _ASKILL_INSTALL_LOCK = threading.Lock()
 _AVAULT_INSTALL_LOCK = threading.Lock()
+AVAULT_VERSION = "0.1.2"
+_AVAULT_RELEASE_BASE_URL = f"https://github.com/avibe-bot/avault/releases/download/v{AVAULT_VERSION}/"
 
 
 def _truncate_install_output(output: str, limit: int = 8192) -> str:
@@ -3300,10 +3324,9 @@ def install_askill() -> dict:
     """Install (or refresh) the askill CLI — a required local dependency for Skills.
 
     Uses the official one-line installer (same shape as the OpenCode bootstrap
-    in ``install_agent``), with an npm fallback. Runs through
-    ``_run_install_command``, which already skips the ``agents.<name>.cli_path``
-    write when there is no ``agents.askill`` attribute, so it is safe for a
-    standalone (non-agent) tool.
+    in ``install_agent``). Runs through ``_run_install_command``, whose
+    V2Config cli_path bookkeeping is limited to real Agent backends, so it is
+    safe for a standalone local dependency.
     """
     import platform
 
@@ -3396,30 +3419,190 @@ def _resolve_avault_cli_path() -> str | None:
     return None
 
 
-def install_avault() -> dict:
+def _avault_target() -> tuple[str | None, str]:
+    import platform
+
+    system = platform.system()
+    machine = platform.machine()
+    normalized_system = system.lower()
+    normalized_machine = machine.lower()
+    platform_label = f"{system or 'unknown'}-{machine or 'unknown'}"
+
+    if normalized_system == "darwin" and normalized_machine == "arm64":
+        return "macos-arm64", platform_label
+    if normalized_system == "darwin" and normalized_machine in {"x86_64", "amd64"}:
+        return "macos-x64", platform_label
+    if normalized_system == "linux" and normalized_machine in {"x86_64", "amd64"}:
+        return "linux-x64", platform_label
+    if normalized_system == "linux" and normalized_machine in {"aarch64", "arm64"}:
+        return "linux-arm64", platform_label
+    if normalized_system == "windows" and normalized_machine in {"amd64", "x86_64"}:
+        return "windows-x64", platform_label
+    if normalized_system == "windows" and normalized_machine == "arm64":
+        return "windows-arm64", platform_label
+    return None, platform_label
+
+
+def _avault_binary_name_for_target(target: str) -> str:
+    return "avault.exe" if target.startswith("windows-") else "avault"
+
+
+def _avault_managed_bin_path(target: str | None = None) -> Path:
+    target = target or (_avault_target()[0] or "")
+    # Windows uses the same Avibe-managed bin directory, with the .exe name
+    # that _candidate_cli_paths("avault") checks on Windows.
+    return Path.home() / ".local" / "bin" / _avault_binary_name_for_target(target)
+
+
+def _persist_avault_cli_path(path: str) -> None:
+    try:
+        try:
+            load_config()
+        except FileNotFoundError:
+            save_config({})
+        with CONFIG_LOCK:
+            cfg = load_config()
+            previous = getattr(cfg.agents.avault, "cli_path", "") or ""
+            if previous != path:
+                cfg.agents.avault.cli_path = path
+                cfg.save()
+                logger.info(
+                    "install_avault: updated V2Config cli_path: %s -> %s",
+                    previous or "<unset>",
+                    path,
+                )
+    except Exception as exc:
+        logger.warning("install_avault: failed to persist cli_path: %s", exc)
+        raise
+
+
+def _download_avault_release_file(url: str) -> bytes:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/octet-stream",
+            "User-Agent": "avibe/avault-installer",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 - public GitHub release asset
+        return response.read()
+
+
+def _extract_avault_binary(archive_bytes: bytes, output_path: Path, member_name: str = "avault") -> None:
+    import io
+    import tarfile
+
+    output_real = output_path.parent.resolve()
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
+        member = next((item for item in archive.getmembers() if item.name == member_name), None)
+        if member is None or not member.isfile():
+            raise ValueError("archive does not contain the avault executable")
+        target = (output_path.parent / member.name).resolve()
+        if target.parent != output_real or target.name != member_name:
+            raise ValueError("archive contains an unsafe avault path")
+        source = archive.extractfile(member)
+        if source is None:
+            raise ValueError("archive does not contain readable avault data")
+        with output_path.open("wb") as out:
+            shutil.copyfileobj(source, out)
+
+
+def _clear_macos_quarantine(path: Path) -> None:
+    if os.sys.platform != "darwin":
+        return
+    try:
+        os.removexattr(path, "com.apple.quarantine")
+    except (AttributeError, FileNotFoundError, OSError):
+        pass
+
+
+def install_avault(force: bool = False) -> dict:
     """Install (or refresh) avault, the required local custody-core dependency.
 
-    Stub-first integration: for now, accept a locally built binary already
-    reachable through ``agents.avault.cli_path`` or PATH. The real installer
-    should swap in here and use Avibe's manifest-pinned binary download path
-    with checksum verification once the avault release pipeline lands.
+    Downloads the Avibe-pinned public avault release manifest and tarball,
+    verifies the manifest sha256, safely extracts the single ``avault`` member,
+    and atomically installs it into Avibe's managed CLI location.
     """
     path = _resolve_avault_cli_path()
-    if path:
+    if path and not force:
         return {
             "ok": True,
             "message": backend_t("dependencies.avault.ready"),
             "output": None,
             "path": path,
         }
-    # TODO(vaults): download the Avibe-pinned avault release asset from the
-    # compatibility manifest, verify its checksum, install it into Avibe's
-    # managed bin dir, then return the resolved binary path.
-    return {
-        "ok": False,
-        "message": backend_t("dependencies.avault.missing"),
-        "output": None,
-    }
+
+    import hashlib
+    import tempfile
+
+    target, platform_label = _avault_target()
+    if target is None:
+        if path:
+            return {
+                "ok": True,
+                "message": backend_t("dependencies.avault.ready"),
+                "output": None,
+                "path": path,
+                "changed": False,
+            }
+        return {
+            "ok": False,
+            "message": backend_t("dependencies.avault.noBuild", platform=platform_label),
+            "output": None,
+            "path": None,
+        }
+
+    try:
+        manifest_url = urllib.parse.urljoin(_AVAULT_RELEASE_BASE_URL, "manifest.json")
+        manifest = json.loads(_download_avault_release_file(manifest_url).decode("utf-8"))
+        entry = manifest["versions"][AVAULT_VERSION][target]
+        asset = entry["asset"]
+        expected_sha256 = str(entry["sha256"]).strip().lower()
+        if not isinstance(asset, str) or not asset.endswith(".tar.gz") or "/" in asset:
+            raise ValueError("manifest contains an invalid avault asset name")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+            raise ValueError("manifest contains an invalid avault sha256")
+
+        archive_url = urllib.parse.urljoin(_AVAULT_RELEASE_BASE_URL, asset)
+        archive_bytes = _download_avault_release_file(archive_url)
+        actual_sha256 = hashlib.sha256(archive_bytes).hexdigest()
+        if actual_sha256 != expected_sha256:
+            return {
+                "ok": False,
+                "message": backend_t("dependencies.avault.checksumMismatch"),
+                "output": f"expected {expected_sha256}, got {actual_sha256}",
+                "path": None,
+            }
+
+        member_name = _avault_binary_name_for_target(target)
+        install_path = _avault_managed_bin_path(target)
+        install_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="avault-install-", dir=install_path.parent) as tmp_dir:
+            tmp_path = Path(tmp_dir) / member_name
+            _extract_avault_binary(archive_bytes, tmp_path, member_name)
+            if not target.startswith("windows-"):
+                tmp_path.chmod(0o755)
+            os.replace(tmp_path, install_path)
+        if not target.startswith("windows-"):
+            install_path.chmod(0o755)
+            _clear_macos_quarantine(install_path)
+        _persist_avault_cli_path(str(install_path))
+
+        return {
+            "ok": True,
+            "message": backend_t("dependencies.avault.installed", version=AVAULT_VERSION),
+            "output": f"Installed avault {AVAULT_VERSION} for {target}",
+            "path": str(install_path),
+            "changed": True,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("avault install failed: %s", exc, exc_info=True)
+        return {
+            "ok": False,
+            "message": backend_t("dependencies.avault.installFailed", error=str(exc)),
+            "output": None,
+            "path": None,
+        }
 
 
 def ensure_avault_installed(force: bool = False) -> dict:
@@ -3435,11 +3618,12 @@ def ensure_avault_installed(force: bool = False) -> dict:
         existing = _resolve_avault_cli_path()
         if existing and not force:
             return {"ok": True, "installed": True, "changed": False, "path": existing}
-        result = install_avault()
+        result = install_avault(force=force)
         resolved = _resolve_avault_cli_path()
         installed = bool(resolved)
         result["installed"] = installed
-        result["changed"] = False
+        if "changed" not in result:
+            result["changed"] = installed and bool(result.get("ok")) and (not existing or force)
         result["path"] = resolved
         if result.get("ok") and not installed:
             result["ok"] = False

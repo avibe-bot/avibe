@@ -32,6 +32,7 @@ const SAVE_KEYS = [
   'include_user_info',
   'reply_enhancements',
   'show_pages_prompt',
+  'agent_progress_style',
   'audio_asr',
   'slack',
   'discord',
@@ -118,6 +119,11 @@ export const SettingsMessagingPage: React.FC = () => {
     { value: 'typing', label: t('dashboard.ackTyping'), disabled: !typingSupported },
     { value: 'reaction', label: t('dashboard.ackReaction'), disabled: !reactionSupported },
     { value: 'message', label: t('dashboard.ackMessage'), disabled: false },
+  ];
+  const progressStyleOptions = [
+    { value: 'concise', label: t('dashboard.agentProgressStyleConcise') },
+    { value: 'verbose', label: t('dashboard.agentProgressStyleVerbose') },
+    { value: 'off', label: t('dashboard.agentProgressStyleOff') },
   ];
   const includeTimeInfoEnabled = config.include_time_info !== false;
   const audioAsr = config.audio_asr || {};
@@ -319,6 +325,29 @@ export const SettingsMessagingPage: React.FC = () => {
             >
               {ackOptions.map((option) => (
                 <option key={option.value} value={option.value} disabled={option.disabled}>
+                  {option.label}
+                </option>
+              ))}
+            </CompactSelect>
+          }
+        />
+
+        <SettingsRow
+          title={t('dashboard.agentProgressStyle')}
+          description={t('dashboard.agentProgressStyleHint')}
+          control={
+            <CompactSelect
+              value={config.agent_progress_style || 'concise'}
+              onChange={(event) =>
+                void persist({
+                  ...config,
+                  agent_progress_style: event.target.value || 'concise',
+                })
+              }
+              className="w-40"
+            >
+              {progressStyleOptions.map((option) => (
+                <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
               ))}

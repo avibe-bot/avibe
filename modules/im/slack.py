@@ -5,7 +5,7 @@ import logging
 import re
 import time
 import aiohttp
-from typing import Dict, Any, Optional, Callable, List
+from typing import Dict, Any, Optional, Callable, List, Tuple
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.socket_mode.request import SocketModeRequest
@@ -536,6 +536,12 @@ class SlackBot(BaseIMClient):
             "text": text,
         }
 
+    def _build_context_footer_block(self, subtext: str, parse_mode: Optional[str] = None) -> Dict[str, Any]:
+        """A native ``context`` block rendering ``subtext`` as small gray footer
+        text (the concise status footer / result done-footer)."""
+        footer_text = self._convert_markdown_to_slack_mrkdwn(subtext) if parse_mode == "markdown" else subtext
+        return {"type": "context", "elements": [{"type": "mrkdwn", "text": footer_text}]}
+
     @staticmethod
     def _build_actions_blocks(keyboard: InlineKeyboard) -> List[Dict[str, Any]]:
         blocks: List[Dict[str, Any]] = []
@@ -573,6 +579,45 @@ class SlackBot(BaseIMClient):
 
         blocks.extend(self._build_actions_blocks(keyboard))
         return blocks
+
+    def _build_status_blocks(
+        self,
+        body: str,
+        subtext: str,
+        keyboard: Optional[InlineKeyboard] = None,
+        parse_mode: Optional[str] = None,
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        """Render a status bubble as ``[markdown(body), context(subtext)]`` blocks.
+
+        The BODY uses a native Slack ``markdown`` block so it renders standard
+        markdown fully (no ``Show more`` auto-collapse, unlike a ``section``
+        mrkdwn block). The footer (``subtext``) stays a native ``context`` block
+        so it shows as small gray text under the body. Returns ``(blocks,
+        fallback_text)`` where the fallback mirrors ``send_markdown_message`` and
+        is the visible body text shown in notifications / no-block clients.
+
+        When ``body`` is empty/whitespace (no action label yet — turn start /
+        pure thinking), the markdown block is dropped so the bubble renders as the
+        footer ``context`` block alone, and the fallback text falls back to the
+        stripped footer so notifications still carry something visible.
+
+        Callers MUST length-guard the body against ``_SLACK_MARKDOWN_TEXT_LIMIT``
+        before calling this (the ``markdown`` block has that cap); when the body
+        is too long they should signal fallback so the dispatcher uses its normal
+        result delivery (split/upload) instead of cramming it here.
+        """
+        # The body is standard markdown — markdown blocks take it as-is, so we
+        # do NOT run _convert_markdown_to_slack_mrkdwn on it. The footer is short
+        # control text rendered in a context element, so converting it for
+        # parse_mode="markdown" keeps the prior behavior.
+        blocks: List[Dict[str, Any]] = []
+        if body and body.strip():
+            blocks.append(self._build_markdown_block(body))
+        blocks.append(self._build_context_footer_block(subtext, parse_mode=parse_mode))
+        if keyboard:
+            blocks.extend(self._build_actions_blocks(keyboard))
+        fallback_text = self._get_visible_text(body) if (body and body.strip()) else (subtext or "").strip()
+        return blocks, fallback_text
 
     @staticmethod
     def _is_markdown_block_rejection(error: SlackApiError) -> bool:
@@ -710,9 +755,15 @@ class SlackBot(BaseIMClient):
         text: str,
         parse_mode: Optional[str] = None,
         reply_to: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> str:
         """Send a message to Slack"""
         self._ensure_clients()
+        # Concise status bubble: render the footer as a native context block
+        # (small gray text) instead of an inline italic line. Only the status
+        # dispatcher passes ``subtext``; every other caller keeps the legacy path.
+        if subtext:
+            return await self._send_status_message(context, text, subtext, parse_mode=parse_mode, reply_to=reply_to)
         try:
             if not text:
                 raise ValueError("Slack send_message requires non-empty text")
@@ -740,12 +791,60 @@ class SlackBot(BaseIMClient):
             logger.error(f"Error sending Slack message: {e}")
             raise
 
+    async def _send_status_message(
+        self,
+        context: MessageContext,
+        body: str,
+        subtext: str,
+        parse_mode: Optional[str] = None,
+        reply_to: Optional[str] = None,
+    ) -> str:
+        """Post a status bubble (body + native context-block footer).
+
+        The body MAY be empty (footer-only bubble at turn start / pure thinking);
+        the footer (``subtext``) carries the liveness line, so the bubble renders
+        as the ``context`` block alone. An empty body therefore must NOT raise.
+        """
+        if not body and not (subtext and subtext.strip()):
+            raise ValueError("Slack status bubble requires a body or footer")
+        # The status bubble renders the body as a native markdown block, which is
+        # capped at _SLACK_MARKDOWN_TEXT_LIMIT. A body over the cap must NOT be
+        # crammed here; raise so the dispatcher falls back to its normal result
+        # delivery (split / upload) instead of rendering a broken bubble.
+        if len(body) > _SLACK_MARKDOWN_TEXT_LIMIT:
+            raise ValueError("Slack status bubble body exceeds markdown block limit")
+        blocks, fallback_text = self._build_status_blocks(body, subtext, keyboard=None, parse_mode=parse_mode)
+        kwargs: Dict[str, Any] = {
+            "channel": context.channel_id,
+            "blocks": blocks,
+            "text": fallback_text,
+        }
+        if context.thread_id:
+            kwargs["thread_ts"] = context.thread_id
+        elif reply_to:
+            kwargs["thread_ts"] = reply_to
+        try:
+            response = await self._post_message_with_dm_recovery(
+                context,
+                kwargs,
+                log_label="status-bubble send",
+            )
+        except SlackApiError as e:
+            logger.error(f"Error sending Slack status bubble: {e}")
+            raise
+        if self.settings_manager and (context.thread_id or reply_to):
+            thread_ts = context.thread_id or reply_to
+            if self.sessions:
+                self.sessions.mark_thread_active(context.user_id, context.channel_id, thread_ts)
+        return response["ts"]
+
     async def send_markdown_message(
         self,
         context: MessageContext,
         text: str,
         keyboard: Optional[InlineKeyboard] = None,
         reply_to: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> str:
         """Send standard Markdown using Slack's native markdown block.
 
@@ -758,6 +857,11 @@ class SlackBot(BaseIMClient):
             raise ValueError("Slack send_markdown_message requires non-empty text")
 
         if len(text) > _SLACK_MARKDOWN_TEXT_LIMIT:
+            # Over the markdown-block cap: keep the LEGACY mrkdwn/section path and
+            # do NOT attach the done-footer subtext. Passing subtext routes the
+            # send through the status-bubble path, which rejects bodies > the cap
+            # (so a 12k–30k inline result would otherwise fail to post). The footer
+            # is a non-essential trailer; reliable delivery of the body wins.
             if keyboard:
                 return await self.send_message_with_buttons(
                     context,
@@ -771,6 +875,8 @@ class SlackBot(BaseIMClient):
         blocks = [self._build_markdown_block(text)]
         if keyboard:
             blocks.extend(self._build_actions_blocks(keyboard))
+        if subtext:
+            blocks.append(self._build_context_footer_block(subtext, parse_mode="markdown"))
 
         kwargs = {
             "channel": context.channel_id,
@@ -796,6 +902,11 @@ class SlackBot(BaseIMClient):
                 logger.error(f"Error sending Slack native markdown message: {e}")
                 raise
             logger.warning("Slack rejected native markdown block; falling back to legacy mrkdwn rendering")
+            # Do NOT forward subtext here: it re-routes through _send_status_message,
+            # which rebuilds the SAME native markdown block Slack just rejected, so
+            # the fallback would hit the identical invalid_blocks error and degrade
+            # to attachment/failure. Use the legacy mrkdwn/section path; the done
+            # footer is dropped on this rare recovery path so the body still posts.
             if keyboard:
                 return await self.send_message_with_buttons(
                     context,
@@ -1407,6 +1518,7 @@ class SlackBot(BaseIMClient):
         keyboard: InlineKeyboard,
         parse_mode: Optional[str] = None,
         reply_to: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> str:
         """Send a message with interactive buttons"""
         self._ensure_clients()
@@ -1433,6 +1545,8 @@ class SlackBot(BaseIMClient):
             blocks = self._build_button_blocks(visible_text, keyboard, parse_mode=parse_mode)
             if blocks and blocks[0].get("type") == "section":
                 blocks[0]["text"]["verbatim"] = True
+            if subtext:
+                blocks.append(self._build_context_footer_block(subtext, parse_mode=parse_mode))
 
             # Prepare message kwargs
             kwargs = {
@@ -1473,9 +1587,32 @@ class SlackBot(BaseIMClient):
         text: Optional[str] = None,
         keyboard: Optional[InlineKeyboard] = None,
         parse_mode: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> bool:
         """Edit an existing Slack message"""
         self._ensure_clients()
+        # Concise status bubble: re-render body + native context-block footer.
+        if subtext:
+            # The body renders as a native markdown block (capped at
+            # _SLACK_MARKDOWN_TEXT_LIMIT). A body over the cap must NOT be crammed
+            # here; return False so the dispatcher treats it as a failed edit and
+            # falls back to its normal result delivery (split / upload).
+            if len(text or "") > _SLACK_MARKDOWN_TEXT_LIMIT:
+                return False
+            try:
+                blocks, fallback_text = self._build_status_blocks(
+                    text or "", subtext, keyboard=keyboard, parse_mode=parse_mode
+                )
+                await self.web_client.chat_update(
+                    channel=context.channel_id,
+                    ts=message_id,
+                    text=fallback_text,
+                    blocks=blocks,
+                )
+                return True
+            except SlackApiError as e:
+                logger.error(f"Error editing Slack status bubble: {e}")
+                return False
         try:
             if text and parse_mode == "markdown":
                 text = self._convert_markdown_to_slack_mrkdwn(text)
@@ -1494,6 +1631,18 @@ class SlackBot(BaseIMClient):
 
         except SlackApiError as e:
             logger.error(f"Error editing Slack message: {e}")
+            return False
+
+    async def delete_message(self, context: MessageContext, message_id: str) -> bool:
+        """Delete a Slack message via ``chat.delete``."""
+        if not message_id:
+            return False
+        self._ensure_clients()
+        try:
+            await self.web_client.chat_delete(channel=context.channel_id, ts=message_id)
+            return True
+        except SlackApiError as e:
+            logger.error(f"Error deleting Slack message: {e}")
             return False
 
     async def remove_inline_keyboard(

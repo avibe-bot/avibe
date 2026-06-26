@@ -311,10 +311,15 @@ class MultiIMClient(BaseIMClient):
         text: str,
         parse_mode: Optional[str] = None,
         reply_to: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> str:
-        return await self.get_client_for_context(context).send_message(
-            context, text, parse_mode=parse_mode, reply_to=reply_to
-        )
+        # Forward ``subtext`` only when set: it is a concise-status-bubble extra
+        # that only Slack/Discord implement; passing it (even as None) to adapters
+        # that don't declare the kwarg would raise TypeError.
+        kwargs = {"parse_mode": parse_mode, "reply_to": reply_to}
+        if subtext is not None:
+            kwargs["subtext"] = subtext
+        return await self.get_client_for_context(context).send_message(context, text, **kwargs)
 
     async def send_message_with_buttons(
         self,
@@ -322,9 +327,15 @@ class MultiIMClient(BaseIMClient):
         text: str,
         keyboard: InlineKeyboard,
         parse_mode: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> str:
+        # Forward subtext only when set, so adapters that don't declare the kwarg
+        # aren't handed it (mirrors send_message / edit_message forwarding).
+        kwargs = {"parse_mode": parse_mode}
+        if subtext is not None:
+            kwargs["subtext"] = subtext
         return await self.get_client_for_context(context).send_message_with_buttons(
-            context, text, keyboard, parse_mode=parse_mode
+            context, text, keyboard, **kwargs
         )
 
     def supports_message_editing(self, context: Optional[MessageContext] = None) -> bool:
@@ -375,14 +386,12 @@ class MultiIMClient(BaseIMClient):
         text: Optional[str] = None,
         keyboard: Optional[InlineKeyboard] = None,
         parse_mode: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> bool:
-        return await self.get_client_for_context(context).edit_message(
-            context,
-            message_id,
-            text=text,
-            keyboard=keyboard,
-            parse_mode=parse_mode,
-        )
+        kwargs = {"text": text, "keyboard": keyboard, "parse_mode": parse_mode}
+        if subtext is not None:
+            kwargs["subtext"] = subtext
+        return await self.get_client_for_context(context).edit_message(context, message_id, **kwargs)
 
     async def remove_inline_keyboard(
         self,

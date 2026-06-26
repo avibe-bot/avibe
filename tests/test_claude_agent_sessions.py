@@ -689,6 +689,10 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                 return "Bash(pwd)"
 
             @staticmethod
+            def format_toolcall_label(*_args, **_kwargs):
+                return "🔧 Bash: pwd"
+
+            @staticmethod
             def format_assistant_message(parts):
                 return "\n\n".join(parts)
 
@@ -705,7 +709,10 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         first_emit = controller.emit_agent_message.await_args_list[0]
         self.assertEqual(first_emit.args, (context, "toolcall", "Bash(pwd)"))
-        self.assertEqual(first_emit.kwargs, {"parse_mode": "markdown"})
+        self.assertEqual(
+            first_emit.kwargs,
+            {"parse_mode": "markdown", "status_label": "🔧 Bash: pwd"},
+        )
         self.assertEqual(context.platform_specific["turn_token"], "T2")
         self.assertEqual(context.platform_specific["agent_runtime_turn_key"], composite_key)
         self.assertEqual(context.platform_specific["agent_runtime_turn_token"], "R2")

@@ -323,9 +323,19 @@ class BaseIMClient(ABC):
 
     @abstractmethod
     async def send_message(
-        self, context: MessageContext, text: str, parse_mode: Optional[str] = None, reply_to: Optional[str] = None
+        self,
+        context: MessageContext,
+        text: str,
+        parse_mode: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> Optional[str]:
         """Send a text message
+
+        ``subtext`` is an optional de-emphasized footer (concise status bubble):
+        platforms that support it (Slack context block, Discord ``-#``) render it
+        as small secondary text; others may ignore it. Only ever passed on the
+        Slack/Discord concise status path.
 
         Args:
             context: Message context (channel, thread, etc)
@@ -340,7 +350,12 @@ class BaseIMClient(ABC):
 
     @abstractmethod
     async def send_message_with_buttons(
-        self, context: MessageContext, text: str, keyboard: InlineKeyboard, parse_mode: Optional[str] = None
+        self,
+        context: MessageContext,
+        text: str,
+        keyboard: InlineKeyboard,
+        parse_mode: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> Optional[str]:
         """Send a message with inline buttons
 
@@ -349,6 +364,8 @@ class BaseIMClient(ABC):
             text: Message text
             keyboard: Inline keyboard configuration
             parse_mode: Optional formatting mode
+            subtext: Optional de-emphasized footer (see send_message); only passed
+                by status-bubble platforms, so non-bubble adapters need not accept it.
 
         Returns:
             Message ID of sent message, or None when not delivered
@@ -453,6 +470,7 @@ class BaseIMClient(ABC):
         text: Optional[str] = None,
         keyboard: Optional[InlineKeyboard] = None,
         parse_mode: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> bool:
         """Edit an existing message
 
@@ -462,11 +480,23 @@ class BaseIMClient(ABC):
             text: New text (if provided)
             keyboard: New keyboard (if provided)
             parse_mode: Optional formatting mode (markdown, html, etc)
+            subtext: Optional de-emphasized footer (see send_message); platforms
+                that don't support it may ignore it.
 
         Returns:
             Success status
         """
         pass
+
+    async def delete_message(self, context: MessageContext, message_id: str) -> bool:
+        """Delete a previously-sent message.
+
+        Default is a no-op returning ``False`` for platforms that cannot delete
+        (callers must treat ``False`` as "not deleted" and fall back). Platforms
+        that support deletion override this; ``PlatformCapabilities.
+        supports_message_deletion`` advertises support without a probe call.
+        """
+        return False
 
     async def remove_inline_keyboard(
         self,
