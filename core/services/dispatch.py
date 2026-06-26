@@ -104,7 +104,13 @@ async def dispatch_turn(
         context.platform_specific = {}
     context.platform_specific["turn_token"] = turn_token
     done = asyncio.Event()
-    controller.register_turn_sink(session_key, on_chunk=on_chunk, done_event=done, turn_token=turn_token)
+    controller.register_turn_sink(
+        session_key,
+        on_chunk=on_chunk,
+        done_event=done,
+        turn_token=turn_token,
+        context=context,
+    )
     try:
         result = await _run()
         # Wait for the agent's REAL terminal result, however long it takes — a
