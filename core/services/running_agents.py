@@ -806,6 +806,97 @@ def _live_workdir_for_backend(
     return None
 
 
+def _effective_base_session_id(base_session_id: Optional[str], composite_key: Optional[str]) -> Optional[str]:
+    return base_session_id or (_base_from_composite(composite_key) if composite_key else None)
+
+
+def _resolve_session_key_context(
+    controller: "Controller",
+    target: Any,
+) -> dict[str, Any]:
+    platform = target.session_key.platform
+    channel_id = target.session_key.scope_id
+    user_id = "scheduled"
+    if target.session_key.is_dm:
+        user_id = target.session_key.scope_id
+        try:
+            settings_managers = getattr(controller, "platform_settings_managers", {}) or {}
+            settings_manager = settings_managers.get(platform)
+            store = settings_manager.get_store() if settings_manager is not None else None
+            bound_user = store.get_user(target.session_key.scope_id, platform=platform) if store is not None else None
+        except Exception:  # noqa: BLE001
+            bound_user = None
+        dm_chat_id = str(getattr(bound_user, "dm_chat_id", "") or "").strip()
+        if dm_chat_id:
+            channel_id = dm_chat_id
+    return {"user_id": user_id, "channel_id": channel_id}
+
+
+def _build_session_row_stop_context(
+    controller: "Controller",
+    *,
+    backend: Optional[str],
+    session_id: Optional[str],
+    composite_key: Optional[str],
+    base_session_id: Optional[str],
+) -> Any:
+    """Build a stop context from the agent_sessions row's real scope.
+
+    Running-tab End for a private ``vibe agent run`` targets an agent_sessions
+    row whose scope is a placeholder primary-platform channel, not a Workbench
+    ``avibe`` session. The Workbench context builder would produce
+    ``avibe::<session_id>``, which can stop the backend when backend ids are
+    patched in, but cannot find the dispatch sink registered under the original
+    scope key. Rebuild the same scope context that ``_execute_agent_run`` used so
+    ``controller._get_session_key`` resolves to the live sink.
+    """
+    if not session_id:
+        return None
+    try:
+        from core.scheduled_tasks import resolve_session_id_target
+        from modules.im import MessageContext
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        target = resolve_session_id_target(session_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("end: failed to resolve stop session target for %s", session_id, exc_info=True)
+        return None
+    scope_context = _resolve_session_key_context(controller, target)
+    platform = target.session_key.platform
+    payload = {
+        "platform": platform,
+        "is_dm": target.session_key.is_dm,
+        "turn_source": "scheduled",
+        "agent_session_id": session_id,
+        "session_key_external": target.session_key.to_key(),
+        "delivery_key_external": target.session_key.to_key(),
+        "delivery_scope_session_key": target.session_key.session_scope,
+        "suppress_delivery": bool(target.suppress_delivery),
+        "agent_session_target": {
+            "id": target.session_id,
+            "agent_id": target.agent_id,
+            "agent_name": target.agent_name,
+            "agent_backend": target.agent_backend or backend,
+            "agent_variant": target.agent_variant,
+            "model": target.model,
+            "reasoning_effort": target.reasoning_effort,
+            "native_session_id": target.native_session_id,
+            "workdir": target.workdir,
+            "session_anchor": target.session_anchor or base_session_id,
+            "metadata": target.metadata or {},
+            "suppress_delivery": bool(target.suppress_delivery),
+        },
+    }
+    return MessageContext(
+        user_id=scope_context["user_id"],
+        channel_id=scope_context["channel_id"],
+        platform=platform,
+        thread_id=target.session_key.thread_id,
+        platform_specific=payload,
+    )
+
+
 def _build_stop_context(
     controller: "Controller",
     *,
@@ -816,10 +907,20 @@ def _build_stop_context(
 ) -> Any:
     manager = getattr(controller, "session_turns", None)
     build_context = getattr(manager, "_build_context", None)
-    context = None
-    if session_id and callable(build_context):
+    context = _build_session_row_stop_context(
+        controller,
+        backend=backend,
+        session_id=session_id,
+        composite_key=composite_key,
+        base_session_id=base_session_id,
+    )
+    if context is None and session_id and callable(build_context):
         try:
-            context = build_context(session_id)
+            workbench_context = build_context(session_id)
+            if workbench_context is not None:
+                spec = getattr(workbench_context, "platform_specific", None) or {}
+                if spec.get("workbench_session_id") == session_id and getattr(workbench_context, "platform", None) == "avibe":
+                    context = workbench_context
         except Exception:  # noqa: BLE001
             logger.debug("end: failed to rebuild stop context for %s", session_id, exc_info=True)
     if context is None:
@@ -833,7 +934,7 @@ def _build_stop_context(
         context.platform_specific = {}
     payload = context.platform_specific
     payload["suppress_stop_no_active_notice"] = True
-    effective_base_session_id = base_session_id or (_base_from_composite(composite_key) if composite_key else None)
+    effective_base_session_id = _effective_base_session_id(base_session_id, composite_key)
     if effective_base_session_id:
         payload["backend_base_session_id"] = effective_base_session_id
     if composite_key:
@@ -881,13 +982,28 @@ async def _stop_active_agent(
     )
     if context is None:
         return {"ok": False, "error": "context_unavailable"}
+    sink_binding = None
+    bind_sink = getattr(controller, "bind_context_to_turn_sink", None)
+    if callable(bind_sink):
+        sink_binding = bind_sink(
+            context,
+            agent_session_id=session_id,
+            backend_base_session_id=_effective_base_session_id(base_session_id, composite_key),
+        )
     try:
         handled = bool(await handle_stop(context))
     except Exception:  # noqa: BLE001
         logger.debug("end: canonical stop failed for %s", base_session_id or session_id, exc_info=True)
         return {"ok": False, "error": "stop_failed"}
     if handled:
-        return {"ok": True, "action": "stopped", "backend": backend, "turn_settled": False}
+        settle_sink = getattr(controller, "settle_bound_turn_sink", None)
+        fallback_settled = bool(settle_sink(sink_binding)) if callable(settle_sink) else False
+        return {
+            "ok": True,
+            "action": "stopped",
+            "backend": backend,
+            "turn_settled": bool(sink_binding) or fallback_settled,
+        }
     payload = getattr(context, "platform_specific", None) or {}
     return {"ok": False, "error": str(payload.get("stop_failure_reason") or "stop_failed")}
 

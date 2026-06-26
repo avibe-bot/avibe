@@ -1246,7 +1246,23 @@ class SessionTurnManager:
 
     # --- the live streaming turn sink (owned here; Controller delegates) ----------
 
-    def register_turn_sink(self, session_key: str, *, on_chunk, done_event, turn_token=None) -> None:
+    @staticmethod
+    def _turn_sink_identity(context: Optional["MessageContext"]) -> dict[str, str]:
+        spec = getattr(context, "platform_specific", None) or {}
+        target = spec.get("agent_session_target") if isinstance(spec, dict) else None
+        target = target if isinstance(target, dict) else {}
+        agent_session_id = str(spec.get("agent_session_id") or target.get("id") or "").strip()
+        backend_base_session_id = str(
+            spec.get("backend_base_session_id")
+            or target.get("session_anchor")
+            or ""
+        ).strip()
+        return {
+            "agent_session_id": agent_session_id,
+            "backend_base_session_id": backend_base_session_id,
+        }
+
+    def register_turn_sink(self, session_key: str, *, on_chunk, done_event, turn_token=None, context=None) -> None:
         if session_key in self.active_turn_sinks:
             # dispatch_turn serializes streaming turns per session, so this should not
             # happen; if it does, keep the in-flight turn's sink rather than clobbering
@@ -1255,10 +1271,12 @@ class SessionTurnManager:
             return
         # turn_token correlates emits to this exact turn so a late straggler from a
         # superseded turn (same session key) is dropped in _stream_chunk.
+        identity = self._turn_sink_identity(context)
         self.active_turn_sinks[session_key] = {
             "on_chunk": on_chunk,
             "done_event": done_event,
             "turn_token": turn_token,
+            **identity,
         }
 
     def pop_turn_sink(self, session_key: str, done_event=None) -> None:
@@ -1275,6 +1293,91 @@ class SessionTurnManager:
 
     def get_turn_sink(self, session_key: str) -> Optional[dict]:
         return self.active_turn_sinks.get(session_key)
+
+    @staticmethod
+    def _sink_identity_matches(
+        sink: dict,
+        *,
+        agent_session_id: Optional[str],
+        backend_base_session_id: Optional[str],
+    ) -> bool:
+        expected_session = str(agent_session_id or "").strip()
+        expected_base = str(backend_base_session_id or "").strip()
+        if expected_session and sink.get("agent_session_id") != expected_session:
+            return False
+        if expected_base and sink.get("backend_base_session_id") != expected_base:
+            return False
+        return True
+
+    def bind_context_to_turn_sink(
+        self,
+        context: "MessageContext",
+        *,
+        agent_session_id: Optional[str] = None,
+        backend_base_session_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Stamp the live sink's token onto an external stop context.
+
+        Running-tab End may stop an agent-run turn from outside the original
+        dispatch context. Rebuild the context to the same session key, require the
+        registered sink's session/base identity to match the clicked row, then copy
+        that sink's token so the backend's silent terminal result satisfies the
+        normal active-turn guard. The returned binding can be used as an
+        identity-guarded fallback if the backend stops without emitting.
+        """
+        if self.controller is None:
+            return None
+        get_key = getattr(self.controller, "_get_session_key", None)
+        if not callable(get_key):
+            return None
+        try:
+            session_key = get_key(context)
+        except Exception:
+            logger.debug("turn sink bind: failed to derive session key", exc_info=True)
+            return None
+        sink = self.active_turn_sinks.get(session_key)
+        if sink is None:
+            return None
+        if not self._sink_identity_matches(
+            sink,
+            agent_session_id=agent_session_id,
+            backend_base_session_id=backend_base_session_id,
+        ):
+            return None
+        token = sink.get("turn_token")
+        if token:
+            if context.platform_specific is None:
+                context.platform_specific = {}
+            context.platform_specific["turn_token"] = token
+        return {
+            "session_key": session_key,
+            "sink": sink,
+            "done_event": sink.get("done_event"),
+            "turn_token": token,
+        }
+
+    def settle_bound_turn_sink(self, binding: Optional[dict]) -> bool:
+        """Settle the same sink returned by ``bind_context_to_turn_sink``.
+
+        This is a fallback for stop paths that successfully interrupt a backend
+        but do not emit a terminal result. The identity guard is intentionally
+        object-based so a late stop cannot complete a newer sink registered under
+        the same session key.
+        """
+        if not isinstance(binding, dict):
+            return False
+        session_key = binding.get("session_key")
+        sink = binding.get("sink")
+        if not session_key or self.active_turn_sinks.get(session_key) is not sink:
+            return False
+        done = sink.get("done_event") if isinstance(sink, dict) else None
+        if done is None or done is not binding.get("done_event"):
+            return False
+        token = binding.get("turn_token")
+        if token is not None and sink.get("turn_token") != token:
+            return False
+        done.set()
+        return True
 
     # --- boot / restore edge transitions -----------------------------------------
 

@@ -873,6 +873,189 @@ def test_end_active_im_turn_uses_canonical_stop_path(monkeypatch):
     assert payload["suppress_stop_no_active_notice"] is True
 
 
+def test_end_active_agent_run_binds_stop_context_to_matching_turn_sink(monkeypatch):
+    from core.scheduled_tasks import ParsedSessionKey, ResolvedSessionIdTarget
+    from core.session_turns import SessionTurnManager
+    from modules.im import MessageContext
+
+    session_id = "ses-run"
+    base_session_id = "slack_private-agent-abc"
+    sink_done = asyncio.Event()
+    seen = {}
+
+    target = ResolvedSessionIdTarget(
+        session_id=session_id,
+        session_key=ParsedSessionKey(
+            platform="slack",
+            scope_type="channel",
+            scope_id="private-agent-run-scope",
+            thread_id="private-agent-abc",
+        ),
+        agent_backend="codex",
+        agent_variant="codex",
+        native_session_id="",
+        agent_name="codex",
+        workdir="/w",
+        session_anchor=base_session_id,
+        metadata={"no_delivery": True},
+        suppress_delivery=True,
+    )
+    monkeypatch.setattr(
+        "core.scheduled_tasks.resolve_session_id_target",
+        lambda sid: target if sid == session_id else None,
+    )
+
+    async def _handle_stop(context):
+        seen["context"] = context
+        return True
+
+    class _Controller:
+        platform_settings_managers = {}
+
+        def __init__(self):
+            self.command_handler = types.SimpleNamespace(handle_stop=_handle_stop)
+            self.session_turns = SessionTurnManager(self)
+
+        def _get_session_key(self, context):
+            return f"{context.platform}::{context.channel_id}"
+
+        def bind_context_to_turn_sink(self, context, *, agent_session_id=None, backend_base_session_id=None):
+            return self.session_turns.bind_context_to_turn_sink(
+                context,
+                agent_session_id=agent_session_id,
+                backend_base_session_id=backend_base_session_id,
+            )
+
+        def settle_bound_turn_sink(self, binding):
+            return self.session_turns.settle_bound_turn_sink(binding)
+
+    controller = _Controller()
+    dispatch_context = MessageContext(
+        user_id="scheduled",
+        channel_id="private-agent-run-scope",
+        platform="slack",
+        thread_id="private-agent-abc",
+        platform_specific={
+            "agent_session_id": session_id,
+            "agent_session_target": {
+                "id": session_id,
+                "agent_backend": "codex",
+                "session_anchor": base_session_id,
+            },
+        },
+    )
+    controller.session_turns.register_turn_sink(
+        "slack::private-agent-run-scope",
+        on_chunk=lambda _envelope: None,
+        done_event=sink_done,
+        turn_token="sink-token",
+        context=dispatch_context,
+    )
+
+    res = asyncio.run(
+        running_agents._stop_active_agent(
+            controller,
+            backend="codex",
+            session_id=session_id,
+            composite_key=None,
+            base_session_id=base_session_id,
+        )
+    )
+
+    assert res["ok"] is True
+    assert res["turn_settled"] is True
+    assert sink_done.is_set()
+    stopped_context = seen["context"]
+    assert controller._get_session_key(stopped_context) == "slack::private-agent-run-scope"
+    assert stopped_context.platform_specific["turn_token"] == "sink-token"
+    assert stopped_context.platform_specific["agent_session_target"]["session_anchor"] == base_session_id
+
+
+def test_end_active_agent_run_does_not_settle_mismatched_turn_sink(monkeypatch):
+    from core.scheduled_tasks import ParsedSessionKey, ResolvedSessionIdTarget
+    from core.session_turns import SessionTurnManager
+    from modules.im import MessageContext
+
+    session_id = "ses-clicked"
+    sink_done = asyncio.Event()
+    target = ResolvedSessionIdTarget(
+        session_id=session_id,
+        session_key=ParsedSessionKey(
+            platform="slack",
+            scope_type="channel",
+            scope_id="private-agent-run-scope",
+            thread_id="private-agent-abc",
+        ),
+        agent_backend="codex",
+        agent_variant="codex",
+        native_session_id="",
+        session_anchor="slack_private-agent-clicked",
+    )
+    monkeypatch.setattr(
+        "core.scheduled_tasks.resolve_session_id_target",
+        lambda sid: target if sid == session_id else None,
+    )
+
+    async def _handle_stop(context):
+        return True
+
+    class _Controller:
+        platform_settings_managers = {}
+
+        def __init__(self):
+            self.command_handler = types.SimpleNamespace(handle_stop=_handle_stop)
+            self.session_turns = SessionTurnManager(self)
+
+        def _get_session_key(self, context):
+            return f"{context.platform}::{context.channel_id}"
+
+        def bind_context_to_turn_sink(self, context, *, agent_session_id=None, backend_base_session_id=None):
+            return self.session_turns.bind_context_to_turn_sink(
+                context,
+                agent_session_id=agent_session_id,
+                backend_base_session_id=backend_base_session_id,
+            )
+
+        def settle_bound_turn_sink(self, binding):
+            return self.session_turns.settle_bound_turn_sink(binding)
+
+    controller = _Controller()
+    newer_context = MessageContext(
+        user_id="scheduled",
+        channel_id="private-agent-run-scope",
+        platform="slack",
+        platform_specific={
+            "agent_session_id": "ses-newer",
+            "agent_session_target": {
+                "id": "ses-newer",
+                "agent_backend": "codex",
+                "session_anchor": "slack_private-agent-newer",
+            },
+        },
+    )
+    controller.session_turns.register_turn_sink(
+        "slack::private-agent-run-scope",
+        on_chunk=lambda _envelope: None,
+        done_event=sink_done,
+        turn_token="new-token",
+        context=newer_context,
+    )
+
+    res = asyncio.run(
+        running_agents._stop_active_agent(
+            controller,
+            backend="codex",
+            session_id=session_id,
+            composite_key=None,
+            base_session_id="slack_private-agent-clicked",
+        )
+    )
+
+    assert res["ok"] is True
+    assert res["turn_settled"] is False
+    assert not sink_done.is_set()
+
+
 def test_end_active_codex_frees_runtime_after_stop():
     # Active Codex End must FREE the runtime after the canonical stop (which only
     # interrupts the turn): clear the session mappings + stop the now-unused shared
