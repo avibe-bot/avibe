@@ -67,7 +67,7 @@ export type VaultGrant = {
   revoked_at: string | null;
   member_snapshot: string[];
   member_count: number;
-  cached_member_count: number;
+  runtime_member_count: number;
 };
 
 type VaultBlindBox = {

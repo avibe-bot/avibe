@@ -12,19 +12,19 @@ def _sealed(suffix: str = "1") -> Sealed:
     return Sealed(ciphertext=f"ct-{suffix}", nonce=f"n-{suffix}", wrap_meta=f"wm-{suffix}")
 
 
-def test_rest_create_rejects_plaintext_value(monkeypatch):
+def test_rest_create_rejects_protected_plaintext_value(monkeypatch):
     seal = Mock(return_value=_sealed())
     monkeypatch.setattr(api, "avault_seal_blind_box", seal)
     client = app.test_client()
 
     response = client.post(
         "/api/vault/secrets",
-        json={"name": "NO_PLAINTEXT", "value": "secret"},
+        json={"name": "NO_PLAINTEXT", "protection": "protected", "value": "secret"},
         headers=csrf_headers(client),
     )
 
     assert response.status_code == 400
-    assert response.get_json()["code"] == "blind_box_required"
+    assert response.get_json()["code"] == "invalid_envelope"
     seal.assert_not_called()
 
 
@@ -43,6 +43,22 @@ def test_rest_create_accepts_blind_box(monkeypatch):
     assert response.status_code == 200
     assert response.get_json()["secret"]["name"] == "REST_KEY"
     seal.assert_called_once_with("REST_KEY", blind_box)
+
+
+def test_rest_create_accepts_standard_value_fallback(monkeypatch):
+    seal = Mock(return_value=_sealed("rest-fallback"))
+    monkeypatch.setattr(api, "avault_seal", seal)
+    client = app.test_client()
+
+    response = client.post(
+        "/api/vault/secrets",
+        json={"name": "REST_FALLBACK", "value": "secret"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["secret"]["name"] == "REST_FALLBACK"
+    seal.assert_called_once_with("REST_FALLBACK", b"secret")
 
 
 def test_rest_requests_and_grants_routes(monkeypatch):
@@ -72,7 +88,6 @@ def test_rest_requests_and_grants_routes(monkeypatch):
             "scope_ref": "PROTECTED_REST",
             "session_id": "ses_1",
             "request_id": req["id"],
-            "deks_by_secret": {"PROTECTED_REST": "dek"},
         },
         headers=csrf_headers(client),
     )
@@ -119,7 +134,6 @@ def test_rest_grant_rejects_mismatched_request(monkeypatch):
             "scope_ref": "B_KEY",
             "session_id": "ses_1",
             "request_id": req["id"],
-            "deks_by_secret": {"B_KEY": "dek-b"},
         },
         headers=csrf_headers(client),
     )

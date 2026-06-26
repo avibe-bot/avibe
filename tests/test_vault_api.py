@@ -55,24 +55,19 @@ def test_create_list_delete_roundtrip(monkeypatch):
     assert api.get_vault_secrets()["secrets"] == []
 
 
-def test_standard_rest_create_rejects_when_pinned_avault_lacks_blind_box(monkeypatch):
+def test_standard_rest_create_uses_plaintext_fallback_when_pinned_avault_lacks_blind_box(monkeypatch):
     from unittest.mock import Mock
 
-    run = Mock()
-    monkeypatch.setattr(api, "_run_avault", run)
-    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": "0.1.2"})
+    seal = Mock(return_value=_sealed("fallback"))
+    blind_box = Mock(side_effect=api.AvaultError("blind-box seal requires avault >= 0.1.3"))
+    monkeypatch.setattr(api, "avault_seal", seal)
+    monkeypatch.setattr(api, "avault_seal_blind_box", blind_box)
 
-    with pytest.raises(api.VaultApiError) as exc:
-        api.create_vault_secret(
-            {
-                "name": "OPENAI_API_KEY",
-                "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
-            }
-        )
+    created = api.create_vault_secret({"name": "OPENAI_API_KEY", "value": "secret"})
 
-    assert exc.value.code == "avault_failed"
-    assert f"requires avault >= {api.AVAULT_P2_MIN_VERSION}" in str(exc.value)
-    run.assert_not_called()
+    assert created["secret"]["name"] == "OPENAI_API_KEY"
+    seal.assert_called_once_with("OPENAI_API_KEY", b"secret")
+    blind_box.assert_not_called()
 
 
 def test_create_with_policy_persists_allowed_hosts(monkeypatch):
@@ -118,8 +113,8 @@ def test_rest_plaintext_value_rejected_before_avault(monkeypatch):
     seal = Mock(return_value=_sealed())
     monkeypatch.setattr(api, "avault_seal_blind_box", seal)
     with pytest.raises(api.VaultApiError) as exc:
-        api.create_vault_secret({"name": "NO_PLAINTEXT", "value": "secret"})
-    assert exc.value.code == "blind_box_required"
+        api.create_vault_secret({"name": "NO_PLAINTEXT", "protection": "protected", "value": "secret"})
+    assert exc.value.code == "invalid_envelope"
     seal.assert_not_called()
 
 
@@ -335,10 +330,9 @@ def test_create_and_revoke_grant_api(monkeypatch):
             "session_id": "ses_1",
             "ttl_seconds": 300,
             "request_id": req["id"],
-            "deks_by_secret": {"GRANT_KEY": "dek"},
         }
     )
-    assert created["grant"]["cached_member_count"] == 1
+    assert created["grant"]["runtime_member_count"] == 1
     assert created["grant"]["delivery_ready"] is False
     assert created["grant"]["delivery_status"] == "resident_agent_pending"
     grants = api.get_vault_grants()["grants"]
@@ -347,7 +341,7 @@ def test_create_and_revoke_grant_api(monkeypatch):
     assert revoked["grant"]["status"] == "revoked"
 
 
-def test_create_grant_api_rejects_missing_deks_before_approval(monkeypatch):
+def test_create_grant_api_rejects_browser_deks_before_approval(monkeypatch):
     from unittest.mock import Mock
 
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
@@ -367,7 +361,7 @@ def test_create_grant_api_rejects_missing_deks_before_approval(monkeypatch):
                 "scope_ref": "GRANT_KEY",
                 "session_id": "ses_1",
                 "request_id": req["id"],
-                "deks_by_secret": {"GRANT_KEY": None},
+                "deks_by_secret": {"GRANT_KEY": "dek"},
             }
         )
 
@@ -396,7 +390,6 @@ def test_create_grant_api_preserves_unbound_session_choice(monkeypatch):
             "scope_ref": "GRANT_KEY",
             "request_id": req["id"],
             "this_session_only": False,
-            "deks_by_secret": {"GRANT_KEY": "dek"},
         }
     )
 

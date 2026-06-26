@@ -128,14 +128,13 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
             requester={"session_id": "ses_other"},
             delivery={"session_id": "ses_other"},
         )
-        cache = vs.GRANT_DEK_CACHE
+        cache = vs.GRANT_RUNTIME_CACHE
         grant = vs.create_grant(
             conn,
             scope_type="secret",
             scope_ref="ARCHIVE_KEY",
             session_id=sid,
             created_by_request_id=req["id"],
-            deks_by_secret={"ARCHIVE_KEY": "dek"},
             cache=cache,
         )
         assert cache.has(grant["id"], "ARCHIVE_KEY")

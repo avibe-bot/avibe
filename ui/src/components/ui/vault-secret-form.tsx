@@ -38,6 +38,10 @@ function avaultP2Ready(dep: DependencyItem | null): boolean {
   return dep?.status === 'ready' && versionAtLeast(dep.version, AVAULT_P2_MIN_VERSION);
 }
 
+function avaultInstalled(dep: DependencyItem | null): boolean {
+  return Boolean(dep?.installed);
+}
+
 export const VaultSecretForm: React.FC<{
   fixedName?: string;
   onCancel: () => void;
@@ -89,10 +93,13 @@ export const VaultSecretForm: React.FC<{
   }, [api]);
 
   const p2Ready = useMemo(() => avaultP2Ready(avaultDep), [avaultDep]);
+  const standardCreateReady = useMemo(() => avaultInstalled(avaultDep), [avaultDep]);
   const secretName = (fixedName ?? name).trim().toUpperCase();
   const protectedCreateReady = false;
   const canSubmit =
-    p2Ready && Boolean(secretName && value) && !submitting && (protection === 'standard' || protectedCreateReady);
+    Boolean(secretName && value) &&
+    !submitting &&
+    ((protection === 'standard' && standardCreateReady) || (protection === 'protected' && protectedCreateReady));
 
   const handleExistingSecret = () => {
     if (treatExistingAsFulfilled) {
@@ -117,13 +124,16 @@ export const VaultSecretForm: React.FC<{
         .split(',')
         .map((host) => host.trim())
         .filter(Boolean);
-      const pubkey = await api.getVaultPubkey();
-      const blindBox = await sealStandardCreateBlindBox(secretName, value, pubkey);
+      let blindBox: Awaited<ReturnType<typeof sealStandardCreateBlindBox>> | undefined;
+      if (p2Ready) {
+        const pubkey = await api.getVaultPubkey();
+        blindBox = await sealStandardCreateBlindBox(secretName, value, pubkey);
+      }
       const created = await api.createVaultSecret(
         {
           name: secretName,
           protection,
-          blind_box: blindBox,
+          ...(blindBox ? { blind_box: blindBox } : { value }),
           group: group.trim() || undefined,
           description: description.trim() || undefined,
           policy: hosts.length ? { allowed_hosts: hosts } : undefined,
@@ -230,7 +240,15 @@ export const VaultSecretForm: React.FC<{
       )}
       {!checkingAvault && !p2Ready && (
         <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
-          {t('vaults.dialog.p2Unavailable', { version: AVAULT_P2_MIN_VERSION, installed: avaultDep?.version ?? 'unknown' })}
+          {standardCreateReady
+            ? t('vaults.dialog.p2UnavailableStandardFallback', {
+                version: AVAULT_P2_MIN_VERSION,
+                installed: avaultDep?.version ?? 'unknown',
+              })
+            : t('vaults.dialog.p2Unavailable', {
+                version: AVAULT_P2_MIN_VERSION,
+                installed: avaultDep?.version ?? 'unknown',
+              })}
         </div>
       )}
       {error && (

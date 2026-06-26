@@ -1376,15 +1376,22 @@ def create_vault_secret(payload: dict) -> dict:
         signer_kind = str(signer_kind)
     if protection == "standard":
         blind_box = payload.get("blind_box")
-        if not isinstance(blind_box, dict):
+        value = payload.get("value")
+        if isinstance(blind_box, dict):
+            try:
+                sealed = avault_seal_blind_box(name, blind_box)
+            except AvaultError as exc:
+                raise VaultApiError(f"avault blind-box seal failed: {exc}", code="avault_failed") from exc
+        elif isinstance(value, str) and value:
+            try:
+                sealed = avault_seal(name, value.encode("utf-8"))
+            except AvaultError as exc:
+                raise VaultApiError(f"avault seal failed: {exc}", code="avault_failed") from exc
+        else:
             raise VaultApiError(
-                "standard REST create requires a browser blind_box; CLI stdin/file create remains available",
+                "standard create requires a browser blind_box or value fallback",
                 code="blind_box_required",
             )
-        try:
-            sealed = avault_seal_blind_box(name, blind_box)
-        except AvaultError as exc:
-            raise VaultApiError(f"avault blind-box seal failed: {exc}", code="avault_failed") from exc
     elif protection == "protected":
         # Protected-tier encryption is browser-side. Python stores the opaque envelope
         # and wrap_meta only; no avault open/decrypt happens in this process.
@@ -1470,18 +1477,8 @@ def create_vault_grant(payload: dict) -> dict:
         ttl_seconds = int(ttl) if ttl is not None else None
     except (TypeError, ValueError) as exc:
         raise VaultApiError("ttl_seconds must be an integer", code="invalid_grant") from exc
-    deks_by_secret = payload.get("deks_by_secret")
-    if deks_by_secret is not None and not isinstance(deks_by_secret, dict):
-        raise VaultApiError("deks_by_secret must be an object", code="invalid_grant")
-    normalized_deks: dict[str, str] | None = None
-    if isinstance(deks_by_secret, dict):
-        normalized_deks = {}
-        for key, value in deks_by_secret.items():
-            if not isinstance(key, str) or not key:
-                raise VaultApiError("deks_by_secret keys must be non-empty strings", code="invalid_grant")
-            if not isinstance(value, str) or not value:
-                raise VaultApiError("deks_by_secret values must be non-empty strings", code="invalid_grant")
-            normalized_deks[key] = value
+    if payload.get("deks_by_secret") is not None:
+        raise VaultApiError("protected grant DEKs must be handled by the resident avault agent", code="invalid_grant")
     request_id = payload.get("request_id") or payload.get("created_by_request_id")
     if not request_id:
         raise VaultApiError("request_id is required to create a grant", code="missing_request_id")
@@ -1499,7 +1496,6 @@ def create_vault_grant(payload: dict) -> dict:
                 session_id=str(session_id) if session_id else None,
                 ttl_seconds=ttl_seconds,
                 created_by_request_id=str(request_id),
-                deks_by_secret=normalized_deks,
                 inherit_request_session=inherit_request_session,
             )
     except vault_service.NotGrantableError as exc:
