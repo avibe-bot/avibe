@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { KeyRound } from 'lucide-react';
+import { CheckCircle2, KeyRound } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { badgeVariants } from './badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './dialog';
@@ -14,6 +14,16 @@ import { cn } from '@/lib/utils';
 export const SecretRequestCard: React.FC<{ name: string }> = ({ name }) => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const [fulfilled, setFulfilled] = useState(false);
+
+  if (fulfilled) {
+    return (
+      <span className={cn(badgeVariants({ variant: 'success' }), 'align-baseline font-medium')}>
+        <CheckCircle2 className="mr-1 inline size-3" />
+        {name} — {t('vaults.request.fulfilled')}
+      </span>
+    );
+  }
 
   return (
     <>
@@ -32,7 +42,14 @@ export const SecretRequestCard: React.FC<{ name: string }> = ({ name }) => {
           </DialogHeader>
           <div className="flex flex-col gap-3">
             <p className="text-sm text-muted">{t('vaults.request.help')}</p>
-            <VaultSecretForm fixedName={name} onCancel={() => setOpen(false)} onCreated={() => setOpen(false)} />
+            <VaultSecretForm
+              fixedName={name}
+              onCancel={() => setOpen(false)}
+              onCreated={() => {
+                setFulfilled(true);
+                setOpen(false);
+              }}
+            />
           </div>
         </DialogContent>
       </Dialog>

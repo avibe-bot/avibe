@@ -213,11 +213,28 @@ def test_askill_status_present_parses_version(monkeypatch):
 def test_install_avault_uses_existing_configured_binary(monkeypatch):
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "/opt/avault/bin/avault")
     monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/opt/avault/bin/avault" if b == "/opt/avault/bin/avault" else None)
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_P2_MIN_VERSION)
 
     out = api.install_avault()
 
     assert out["ok"] is True
     assert out["path"] == "/opt/avault/bin/avault"
+    assert out["version"] == api.AVAULT_P2_MIN_VERSION
+
+
+def test_install_avault_existing_binary_below_p2_is_not_reported_ready(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "/opt/avault/bin/avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/opt/avault/bin/avault" if b == "/opt/avault/bin/avault" else None)
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: "0.1.2")
+    monkeypatch.setattr(api.urllib.request, "urlopen", lambda *a, **k: pytest.fail("should not download old avault"))
+
+    out = api.install_avault()
+
+    assert out["ok"] is False
+    assert out["installed"] is True
+    assert out["path"] == "/opt/avault/bin/avault"
+    assert out["version"] == "0.1.2"
+    assert out["reason"] == "avault_p2_release_unavailable"
 
 
 def test_install_avault_unsupported_platform_is_clear_failure(monkeypatch):
@@ -236,6 +253,7 @@ def test_install_avault_unsupported_platform_is_clear_failure(monkeypatch):
 def test_install_avault_force_keeps_existing_binary_on_unsupported_platform(monkeypatch):
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "/opt/avault/bin/avault")
     monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/opt/avault/bin/avault" if b == "/opt/avault/bin/avault" else None)
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_P2_MIN_VERSION)
     monkeypatch.setattr("platform.system", lambda: "FreeBSD")
     monkeypatch.setattr("platform.machine", lambda: "riscv64")
     monkeypatch.setattr(api.urllib.request, "urlopen", lambda *a, **k: pytest.fail("should not download"))
@@ -244,6 +262,24 @@ def test_install_avault_force_keeps_existing_binary_on_unsupported_platform(monk
 
     assert out["ok"] is True
     assert out["path"] == "/opt/avault/bin/avault"
+    assert out["version"] == api.AVAULT_P2_MIN_VERSION
+
+
+def test_install_avault_force_rejects_old_existing_binary_on_unsupported_platform(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "/opt/avault/bin/avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/opt/avault/bin/avault" if b == "/opt/avault/bin/avault" else None)
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: "0.1.2")
+    monkeypatch.setattr("platform.system", lambda: "FreeBSD")
+    monkeypatch.setattr("platform.machine", lambda: "riscv64")
+    monkeypatch.setattr(api.urllib.request, "urlopen", lambda *a, **k: pytest.fail("should not download"))
+
+    out = api.install_avault(force=True)
+
+    assert out["ok"] is False
+    assert out["installed"] is True
+    assert out["path"] == "/opt/avault/bin/avault"
+    assert out["version"] == "0.1.2"
+    assert out["reason"] == "avault_p2_release_unavailable"
 
 
 @pytest.mark.parametrize(
@@ -286,6 +322,7 @@ def test_windows_candidate_paths_include_managed_exe(monkeypatch):
 )
 def test_install_avault_downloads_manifest_verifies_and_installs(monkeypatch, system, machine, target):
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: True)
     monkeypatch.setattr("platform.system", lambda: system)
     monkeypatch.setattr("platform.machine", lambda: machine)
     calls, member_name = _installable_avault_release(monkeypatch, target=target)
@@ -310,6 +347,7 @@ def test_install_avault_downloads_manifest_verifies_and_installs(monkeypatch, sy
 
 def test_install_avault_checksum_mismatch_installs_nothing(monkeypatch):
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: True)
     monkeypatch.setattr("platform.system", lambda: "Darwin")
     monkeypatch.setattr("platform.machine", lambda: "arm64")
     _installable_avault_release(monkeypatch, target="macos-arm64", sha256="0" * 64)
@@ -325,6 +363,7 @@ def test_install_avault_checksum_mismatch_installs_nothing(monkeypatch):
 def test_install_avault_is_idempotent_when_present(monkeypatch):
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr(api.shutil, "which", lambda _binary: None)
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_P2_MIN_VERSION)
     installed = api.Path.home() / ".local" / "bin" / "avault"
     installed.parent.mkdir(parents=True, exist_ok=True)
     installed.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -339,6 +378,7 @@ def test_install_avault_is_idempotent_when_present(monkeypatch):
 
 def test_install_avault_force_redownloads_when_present(monkeypatch):
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: True)
     monkeypatch.setattr("platform.system", lambda: "Darwin")
     monkeypatch.setattr("platform.machine", lambda: "arm64")
     installed = api.Path.home() / ".local" / "bin" / "avault"
@@ -355,6 +395,7 @@ def test_install_avault_force_redownloads_when_present(monkeypatch):
 
 
 def test_ensure_avault_force_uses_managed_binary_after_install(monkeypatch):
+    monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: True)
     configured = api.Path.home() / "custom" / "avault"
     configured.parent.mkdir(parents=True, exist_ok=True)
     configured.write_text("#!/bin/sh\necho old\n", encoding="utf-8")
@@ -410,6 +451,7 @@ def test_ensure_avault_idempotent_when_present(monkeypatch):
 
 
 def test_ensure_avault_force_rechecks_existing_binary(monkeypatch):
+    monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: True)
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
     monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_P2_MIN_VERSION)
@@ -424,7 +466,26 @@ def test_ensure_avault_force_rechecks_existing_binary(monkeypatch):
     assert out["changed"] is True
 
 
+def test_ensure_avault_force_does_not_downgrade_compatible_binary_when_pin_is_old(monkeypatch):
+    monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: False)
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_P2_MIN_VERSION)
+    monkeypatch.setattr(api, "install_avault", lambda force=False: pytest.fail("should not downgrade avault"))
+
+    out = api.ensure_avault_installed(force=True)
+
+    assert out == {
+        "ok": True,
+        "installed": True,
+        "changed": False,
+        "path": "/usr/local/bin/avault",
+        "version": api.AVAULT_P2_MIN_VERSION,
+    }
+
+
 def test_ensure_avault_upgrades_existing_binary_below_p2_minimum(monkeypatch):
+    monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: True)
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
     seen_force: list[bool] = []
@@ -443,6 +504,23 @@ def test_ensure_avault_upgrades_existing_binary_below_p2_minimum(monkeypatch):
     assert out["ok"] is True
     assert out["changed"] is True
     assert out["version"] == api.AVAULT_P2_MIN_VERSION
+
+
+def test_ensure_avault_does_not_install_release_below_p2_minimum(monkeypatch):
+    monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: False)
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: "0.1.2")
+    monkeypatch.setattr(api, "install_avault", lambda force=False: pytest.fail("should not install old avault"))
+
+    out = api.ensure_avault_installed()
+
+    assert out["ok"] is False
+    assert out["installed"] is True
+    assert out["changed"] is False
+    assert out["path"] == "/usr/local/bin/avault"
+    assert out["version"] == "0.1.2"
+    assert out["reason"] == "avault_p2_release_unavailable"
 
 
 def test_avault_status_missing(monkeypatch):

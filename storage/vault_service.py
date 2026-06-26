@@ -274,6 +274,8 @@ def _grant_row_payload(row: dict[str, Any], *, cache: VaultGrantDekCache = GRANT
         "member_snapshot": members,
         "member_count": len(members),
         "cached_member_count": len(cache.covered_names(grant_id)),
+        "delivery_ready": False,
+        "delivery_status": "resident_agent_pending",
     }
 
 
@@ -1558,15 +1560,21 @@ def resolve_secret_access(
     """Resolve an agent access attempt without exposing the value.
 
     Standard secrets can be delivered by existing one-shot avault paths. Protected
-    secrets require an active in-memory grant; otherwise this records an approval
-    request and returns its structured card data.
+    secrets can collect approval/grant metadata now, but resident-agent delivery
+    is a Phase-B follow-on; an active grant is therefore reported as pending
+    agent delivery instead of usable.
     """
     row = _require_row(conn, name)
     if row.get("protection") == "standard":
         return {"status": "standard", "secret": _meta_payload(row), "envelope": _row_sealed(row)}
     grant = find_active_grant_for_secret(conn, name, session_id=session_id, cache=cache)
     if grant is not None:
-        return {"status": "granted", "secret": _meta_payload(row), "grant": grant}
+        return {
+            "status": "agent_delivery_pending",
+            "secret": _meta_payload(row),
+            "grant": grant,
+            "request": None,
+        }
     request_payload = None
     if create_request:
         request_payload = create_access_request(

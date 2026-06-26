@@ -3570,6 +3570,26 @@ def _truncate_install_output(output: str, limit: int = 8192) -> str:
     return output if len(output) <= limit else "...(truncated)\n" + output[-limit:]
 
 
+def _managed_avault_release_satisfies_p2() -> bool:
+    return _version_at_least(AVAULT_VERSION, AVAULT_P2_MIN_VERSION)
+
+
+def _avault_p2_release_unavailable_result(*, existing: str | None = None, existing_version: str | None = None) -> dict:
+    return {
+        "ok": False,
+        "installed": bool(existing),
+        "changed": False,
+        "path": existing,
+        "version": existing_version,
+        "reason": "avault_p2_release_unavailable",
+        "message": backend_t(
+            "dependencies.avault.p2ReleaseUnavailable",
+            pinned=AVAULT_VERSION,
+            required=AVAULT_P2_MIN_VERSION,
+        ),
+    }
+
+
 def install_askill() -> dict:
     """Install (or refresh) the askill CLI — a required local dependency for Skills.
 
@@ -3775,11 +3795,17 @@ def install_avault(force: bool = False) -> dict:
     """
     path = _resolve_avault_cli_path()
     if path and not force:
+        existing_version = _probe_avault_version(path)
+        if not _version_at_least(existing_version, AVAULT_P2_MIN_VERSION):
+            result = _avault_p2_release_unavailable_result(existing=path, existing_version=existing_version)
+            result["output"] = None
+            return result
         return {
             "ok": True,
             "message": backend_t("dependencies.avault.ready"),
             "output": None,
             "path": path,
+            "version": existing_version,
         }
 
     import hashlib
@@ -3788,11 +3814,17 @@ def install_avault(force: bool = False) -> dict:
     target, platform_label = _avault_target()
     if target is None:
         if path:
+            existing_version = _probe_avault_version(path)
+            if not _version_at_least(existing_version, AVAULT_P2_MIN_VERSION):
+                result = _avault_p2_release_unavailable_result(existing=path, existing_version=existing_version)
+                result["output"] = None
+                return result
             return {
                 "ok": True,
                 "message": backend_t("dependencies.avault.ready"),
                 "output": None,
                 "path": path,
+                "version": existing_version,
                 "changed": False,
             }
         return {
@@ -3801,6 +3833,11 @@ def install_avault(force: bool = False) -> dict:
             "output": None,
             "path": None,
         }
+    if not _managed_avault_release_satisfies_p2():
+        existing_version = _probe_avault_version(path) if path else None
+        result = _avault_p2_release_unavailable_result(existing=path, existing_version=existing_version)
+        result["output"] = None
+        return result
 
     try:
         manifest_url = urllib.parse.urljoin(_AVAULT_RELEASE_BASE_URL, "manifest.json")
@@ -3867,14 +3904,19 @@ def ensure_avault_installed(force: bool = False) -> dict:
     try:
         existing = _resolve_avault_cli_path()
         existing_version = _probe_avault_version(existing) if existing else None
-        if existing and not force and _version_at_least(existing_version, AVAULT_P2_MIN_VERSION):
-            return {
-                "ok": True,
-                "installed": True,
-                "changed": False,
-                "path": existing,
-                "version": existing_version,
-            }
+        if existing and _version_at_least(existing_version, AVAULT_P2_MIN_VERSION):
+            if force and _managed_avault_release_satisfies_p2():
+                pass
+            else:
+                return {
+                    "ok": True,
+                    "installed": True,
+                    "changed": False,
+                    "path": existing,
+                    "version": existing_version,
+                }
+        if not _managed_avault_release_satisfies_p2():
+            return _avault_p2_release_unavailable_result(existing=existing, existing_version=existing_version)
         needs_upgrade = bool(existing and not _version_at_least(existing_version, AVAULT_P2_MIN_VERSION))
         result = install_avault(force=force or needs_upgrade)
         resolved = _resolve_avault_cli_path()
@@ -3892,9 +3934,10 @@ def ensure_avault_installed(force: bool = False) -> dict:
             )
         elif result.get("ok") and not _version_at_least(resolved_version, AVAULT_P2_MIN_VERSION):
             result["ok"] = False
-            result["message"] = (
-                f"avault {resolved_version or 'unknown'} is installed, "
-                f"but Vaults requires >= {AVAULT_P2_MIN_VERSION}."
+            result["message"] = backend_t(
+                "dependencies.avault.versionTooOld",
+                version=resolved_version or "unknown",
+                required=AVAULT_P2_MIN_VERSION,
             )
         return result
     finally:

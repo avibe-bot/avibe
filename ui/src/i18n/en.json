@@ -2082,11 +2082,23 @@
       "description": "Description",
       "allowHosts": "Allowed hosts (for vault fetch)",
       "allowHostsHelp": "Comma-separated. Required to use this secret via the brokered HTTP proxy; '.example.com' matches subdomains.",
+      "protection": "Protection",
+      "protectedProtection": "Protected",
+      "standardProtection": "Standard",
+      "protectedHelp": "Requires browser unlock and approval before agent use.",
+      "standardHelp": "Can be used headlessly through avault's standard delivery path.",
+      "protectedCreatePending": "Protected web create is not available in this build yet. Choose Standard only for secrets that may be used headlessly.",
       "save": "Save",
-      "cancel": "Cancel"
+      "cancel": "Cancel",
+      "errors": {
+        "aadFieldTooLarge": "The sealed vault request is too large.",
+        "invalidPublicKey": "avault returned an invalid public key. Repair the avault dependency and try again.",
+        "fingerprintMismatch": "The avault public key fingerprint changed. Verify the local avault install before saving this secret."
+      }
     },
     "request": {
       "provide": "provide",
+      "fulfilled": "provided",
       "title": "Provide {{name}}",
       "help": "The agent asked for this secret. It's saved straight to the vault and never re-enters the chat.",
       "saveFailed": "Couldn't save the secret. Please try again."

@@ -509,6 +509,29 @@ def test_resolve_protected_without_grant_returns_approval_card(vault):
     assert "ct-group" not in persisted
 
 
+def test_resolve_protected_with_grant_reports_agent_delivery_pending(vault):
+    _create(vault, name="PROTECTED_KEY", protection="protected")
+    cache = vs.VaultGrantDekCache()
+    with vault.begin() as conn:
+        req = _access_request(conn, "PROTECTED_KEY", session_id="ses_1")
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="PROTECTED_KEY",
+            session_id="ses_1",
+            created_by_request_id=req["id"],
+            deks_by_secret={"PROTECTED_KEY": "dek"},
+            cache=cache,
+        )
+        result = vs.resolve_secret_access(conn, "PROTECTED_KEY", session_id="ses_1", create_request=False, cache=cache)
+
+    assert result["status"] == "agent_delivery_pending"
+    assert result["request"] is None
+    assert result["grant"]["id"] == grant["id"]
+    assert result["grant"]["delivery_ready"] is False
+    assert result["grant"]["delivery_status"] == "resident_agent_pending"
+
+
 def test_request_inbox_hydrates_unlock_material_without_persisting_it(vault):
     _create(vault, name="PROTECTED_KEY", protection="protected", group="crypto")
     with vault.begin() as conn:

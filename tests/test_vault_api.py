@@ -339,6 +339,8 @@ def test_create_and_revoke_grant_api(monkeypatch):
         }
     )
     assert created["grant"]["cached_member_count"] == 1
+    assert created["grant"]["delivery_ready"] is False
+    assert created["grant"]["delivery_status"] == "resident_agent_pending"
     grants = api.get_vault_grants()["grants"]
     assert grants[0]["id"] == created["grant"]["id"]
     revoked = api.revoke_vault_grant(created["grant"]["id"])

@@ -2081,11 +2081,23 @@
       "description": "描述",
       "allowHosts": "允许的域名（用于 vault fetch）",
       "allowHostsHelp": "逗号分隔。通过认证代理使用该密钥时必填；'.example.com' 匹配子域。",
+      "protection": "保护级别",
+      "protectedProtection": "受保护",
+      "standardProtection": "标准",
+      "protectedHelp": "Agent 使用前需要浏览器解锁和批准。",
+      "standardHelp": "可通过 avault 标准交付路径无头使用。",
+      "protectedCreatePending": "当前构建尚不支持受保护的 Web 创建。只有可被无头使用的密钥才选择标准。",
       "save": "保存",
-      "cancel": "取消"
+      "cancel": "取消",
+      "errors": {
+        "aadFieldTooLarge": "这次保险库封箱请求过大。",
+        "invalidPublicKey": "avault 返回了无效公钥。请修复 avault 依赖后重试。",
+        "fingerprintMismatch": "avault 公钥指纹已变化。请先确认本机 avault 安装可信，再保存该密钥。"
+      }
     },
     "request": {
       "provide": "填写",
+      "fulfilled": "已提供",
       "title": "提供 {{name}}",
       "help": "Agent 请求了这个密钥。它会直接存入保险库，不会再进入聊天。",
       "saveFailed": "保存失败，请重试。"

@@ -19,6 +19,18 @@ export type VaultBlindBox = {
   ct: string;
 };
 
+export type VaultBlindBoxErrorCode = 'aadFieldTooLarge' | 'invalidPublicKey' | 'fingerprintMismatch';
+
+export class VaultBlindBoxError extends Error {
+  readonly code: VaultBlindBoxErrorCode;
+
+  constructor(code: VaultBlindBoxErrorCode) {
+    super(code);
+    this.name = 'VaultBlindBoxError';
+    this.code = code;
+  }
+}
+
 const textEncoder = new TextEncoder();
 
 function utf8(value: string): Uint8Array {
@@ -34,7 +46,11 @@ function bytesToBase64(value: Uint8Array): string {
 }
 
 function base64ToBytes(value: string): Uint8Array {
-  return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+  try {
+    return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
+  } catch {
+    throw new VaultBlindBoxError('invalidPublicKey');
+  }
 }
 
 function bytesToHex(value: Uint8Array): string {
@@ -49,7 +65,7 @@ function toArrayBuffer(value: Uint8Array): ArrayBuffer {
 
 function pushLengthPrefixed(out: number[], value: Uint8Array): void {
   if (value.length > 0xffff_ffff) {
-    throw new Error('blind-box AAD field is too large');
+    throw new VaultBlindBoxError('aadFieldTooLarge');
   }
   out.push((value.length >>> 24) & 0xff, (value.length >>> 16) & 0xff, (value.length >>> 8) & 0xff, value.length & 0xff);
   out.push(...value);
@@ -91,12 +107,12 @@ export async function sealStandardCreateBlindBox(
 ): Promise<VaultBlindBox> {
   const publicKeyRaw = base64ToBytes(publicKey.public_key);
   if (publicKeyRaw.length !== KEY_BYTES) {
-    throw new Error('avault public key must be 32 bytes');
+    throw new VaultBlindBoxError('invalidPublicKey');
   }
   if (publicKey.fingerprint) {
     const actual = await publicKeyFingerprint(publicKeyRaw);
     if (actual !== publicKey.fingerprint.toLowerCase()) {
-      throw new Error('avault public key fingerprint mismatch');
+      throw new VaultBlindBoxError('fingerprintMismatch');
     }
   }
 
