@@ -654,6 +654,17 @@
         "closed": "Session ended",
         "disabled": "Disabled",
         "error": "Disconnected"
+      },
+      "keys": {
+        "esc": "Esc",
+        "tab": "Tab",
+        "ctrl": "Ctrl",
+        "up": "↑",
+        "down": "↓",
+        "left": "←",
+        "right": "→",
+        "interrupt": "^C",
+        "pipe": "|"
       }
     }
   },

@@ -323,8 +323,15 @@ class TerminalService:
         """Release a connection's OS resources only — never touches the registry (the caller
         owns the _sessions transition). SIGHUP detaches a tmux client so its session survives
         for reattach; SIGTERM ends an ephemeral shell. kill_session=True also tears the tmux
-        session down (shutdown / idle expiry) so nothing is left running."""
-        _close_fd(connection.master_fd)
+        session down (shutdown / idle expiry) so nothing is left running.
+
+        Idempotent: a fast reconnect tears down the replaced connection, then os.openpty() for
+        the replacement can reuse that same fd number. If the superseded connection's stale
+        close() then ran a second teardown it would close the NEW terminal's fd — so we poison
+        master_fd to -1 on first teardown and a repeat call closes nothing."""
+        fd, connection.master_fd = connection.master_fd, -1
+        if fd >= 0:
+            _close_fd(fd)
         if kill_session and connection.persistent:
             await _kill_tmux_session(connection.session_id)
         if connection.process.returncode is None:
@@ -420,7 +427,15 @@ class TerminalService:
     async def _reaper_loop(self) -> None:
         while True:
             await asyncio.sleep(60)
-            await self.reap_idle()
+            try:
+                await self.reap_idle()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One bad session (e.g. a kill-session subprocess that fails because the
+                # vendored tmux binary went missing) must not kill the reaper for good, or
+                # idle/detached sessions would never be reclaimed until a restart.
+                logger.exception("terminal reaper cycle failed; continuing")
 
     async def reap_idle(self) -> None:
         cutoff = time.monotonic() - self.idle_timeout_seconds

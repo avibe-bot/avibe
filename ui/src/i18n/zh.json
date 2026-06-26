@@ -654,6 +654,17 @@
         "closed": "会话已结束",
         "disabled": "未开启",
         "error": "已断开"
+      },
+      "keys": {
+        "esc": "Esc",
+        "tab": "Tab",
+        "ctrl": "Ctrl",
+        "up": "↑",
+        "down": "↓",
+        "left": "←",
+        "right": "→",
+        "interrupt": "^C",
+        "pipe": "|"
       }
     }
   },

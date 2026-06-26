@@ -601,6 +601,32 @@ async def _reconnect_during_closing_is_rejected(monkeypatch, tmp_path):
         terminal_service._close_fd(conn.master_fd)
 
 
+def test_teardown_client_is_idempotent_on_fd(monkeypatch, tmp_path):
+    asyncio.run(_teardown_client_is_idempotent_on_fd(monkeypatch, tmp_path))
+
+
+async def _teardown_client_is_idempotent_on_fd(monkeypatch, tmp_path):
+    # A superseded connection can be torn down twice (open() replaces it, then the old
+    # websocket's close() runs). The second teardown must NOT close the fd again — the number
+    # may have been reused by the replacement terminal's PTY, and closing it would kill the
+    # new terminal. First teardown closes once + poisons master_fd to -1; repeat is a no-op.
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: None)
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+    closed: list[int] = []
+    real_close = terminal_service._close_fd
+    monkeypatch.setattr(terminal_service, "_close_fd", lambda fd: (closed.append(fd), real_close(fd)) and None)
+
+    fd = os.open(os.devnull, os.O_RDWR)
+    conn = terminal_service.TerminalConnection("x", _ExitedProcess(), fd, False, 0.0, 0.0)
+
+    await service._teardown_client(conn, kill_session=False)
+    assert conn.master_fd == -1  # poisoned
+    assert closed == [fd]  # real fd closed exactly once
+
+    await service._teardown_client(conn, kill_session=False)  # stale repeat teardown
+    assert closed == [fd]  # closed nothing the second time
+
+
 def test_closing_session_still_counts_against_cap(monkeypatch, tmp_path):
     asyncio.run(_closing_session_still_counts_against_cap(monkeypatch, tmp_path))
 

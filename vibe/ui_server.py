@@ -2102,7 +2102,11 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
         service.start_reaper()
         await service.handle_websocket(websocket, session_id)
     except TerminalServiceError as exc:
-        await websocket.close(code=1013 if str(exc) == "too_many_sessions" else 1011)
+        # Transient "try again shortly" conditions (not server faults): too_many_sessions (cap
+        # full) and session_opening (the id is mid-open or mid-teardown). Close with 1013 so
+        # the client can auto-retry instead of surfacing a hard error.
+        transient = str(exc) in {"too_many_sessions", "session_opening"}
+        await websocket.close(code=1013 if transient else 1011)
     except WebSocketDisconnect:
         return
     except Exception:

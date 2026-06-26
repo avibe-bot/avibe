@@ -16,19 +16,21 @@ import { Button } from '../ui/button';
 type Status = 'connecting' | 'ready' | 'closed' | 'disabled' | 'error';
 
 const ENC = new TextEncoder();
+const MAX_BUSY_RETRIES = 3; // auto-retry a transient "busy" (1013) close this many times
 
-// Accessory key bar for phones (their soft keyboards lack these). Each button
-// sends the raw byte sequence the PTY expects; Ctrl is a sticky modifier.
-const KEYS: { label: string; seq?: string; ctrl?: boolean }[] = [
-  { label: 'Esc', seq: '\x1b' },
-  { label: 'Tab', seq: '\t' },
-  { label: 'Ctrl', ctrl: true },
-  { label: '↑', seq: '\x1b[A' },
-  { label: '↓', seq: '\x1b[B' },
-  { label: '←', seq: '\x1b[D' },
-  { label: '→', seq: '\x1b[C' },
-  { label: '^C', seq: '\x03' },
-  { label: '|', seq: '|' },
+// Accessory key bar for phones (their soft keyboards lack these). Each button sends the raw
+// byte sequence the PTY expects; Ctrl is a sticky modifier. Labels go through i18n (the
+// control sequences stay here).
+const KEYS: { labelKey: string; seq?: string; ctrl?: boolean }[] = [
+  { labelKey: 'apps.terminal.keys.esc', seq: '\x1b' },
+  { labelKey: 'apps.terminal.keys.tab', seq: '\t' },
+  { labelKey: 'apps.terminal.keys.ctrl', ctrl: true },
+  { labelKey: 'apps.terminal.keys.up', seq: '\x1b[A' },
+  { labelKey: 'apps.terminal.keys.down', seq: '\x1b[B' },
+  { labelKey: 'apps.terminal.keys.left', seq: '\x1b[D' },
+  { labelKey: 'apps.terminal.keys.right', seq: '\x1b[C' },
+  { labelKey: 'apps.terminal.keys.interrupt', seq: '\x03' },
+  { labelKey: 'apps.terminal.keys.pipe', seq: '|' },
 ];
 
 function buildWsUrl(sessionId: string): string {
@@ -42,6 +44,8 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
   const termRef = useRef<Terminal | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const ctrlStickyRef = useRef(false);
+  const busyRetriesRef = useRef(0);
+  const retryTimerRef = useRef<number | null>(null);
   const [status, setStatus] = useState<Status>('connecting');
   const [persistent, setPersistent] = useState(false);
   const [exitCode, setExitCode] = useState<number | null>(null);
@@ -99,6 +103,7 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
         try {
           const msg = JSON.parse(ev.data) as { type?: string; persistent?: boolean; code?: number };
           if (msg.type === 'ready') {
+            busyRetriesRef.current = 0; // a successful attach resets the transient-retry budget
             setStatus('ready');
             setPersistent(!!msg.persistent);
           } else if (msg.type === 'exit') {
@@ -113,6 +118,18 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
       term.write(new Uint8Array(ev.data as ArrayBuffer));
     };
     ws.onclose = (ev: CloseEvent) => {
+      // 1013 = transient "try again shortly" (the session id is mid-open/teardown, or the cap
+      // is momentarily full). Auto-retry a few times with a short backoff before surfacing an
+      // error, so a reconnect that races a CLOSING teardown recovers on its own.
+      if (ev.code === 1013 && busyRetriesRef.current < MAX_BUSY_RETRIES) {
+        busyRetriesRef.current += 1;
+        setStatus('connecting');
+        retryTimerRef.current = window.setTimeout(
+          () => setReconnectKey((k) => k + 1),
+          250 * busyRetriesRef.current,
+        );
+        return;
+      }
       setStatus((prev) =>
         prev === 'closed' ? prev : ev.code === 1008 ? 'disabled' : prev === 'ready' ? 'closed' : 'error',
       );
@@ -128,6 +145,7 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
     if (containerRef.current) ro.observe(containerRef.current);
 
     return () => {
+      if (retryTimerRef.current != null) window.clearTimeout(retryTimerRef.current);
       ro.disconnect();
       onData.dispose();
       onResize.dispose();
@@ -174,7 +192,10 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
             size="sm"
             variant="ghost"
             className="ml-auto h-6 gap-1 px-2 text-[11px]"
-            onClick={() => setReconnectKey((k) => k + 1)}
+            onClick={() => {
+              busyRetriesRef.current = 0;
+              setReconnectKey((k) => k + 1);
+            }}
           >
             <RotateCw className="size-3" /> {t('apps.terminal.reconnect')}
           </Button>
@@ -193,12 +214,12 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
         <div className="flex gap-1 overflow-x-auto border-t border-border bg-surface px-2 py-1.5 md:hidden">
           {KEYS.map((k) => (
             <button
-              key={k.label}
+              key={k.labelKey}
               type="button"
               onClick={() => sendKey(k)}
               className="shrink-0 rounded-md border border-border-strong px-2.5 py-1.5 font-mono text-[12px] text-foreground active:bg-foreground/[0.08]"
             >
-              {k.label}
+              {t(k.labelKey)}
             </button>
           ))}
         </div>
