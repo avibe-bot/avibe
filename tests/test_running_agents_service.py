@@ -802,7 +802,20 @@ def test_end_active_workbench_turn_settles_via_manager(monkeypatch):
             return {"ok": True, "status": "cancel_requested", "backend": "claude"}
 
     cancel = _WorkbenchCancel()
-    manager = types.SimpleNamespace(is_in_flight=lambda sid: sid == "ses-wb", cancel=cancel)
+    # The live-state recheck verifies the in-flight turn belongs to THIS row before
+    # promoting to active, so expose an in_flight entry whose context identifies the
+    # same (claude) backend.
+    wb_entry = types.SimpleNamespace(
+        task=types.SimpleNamespace(done=lambda: False),
+        context=types.SimpleNamespace(
+            platform_specific={"agent_session_target": {"agent_backend": "claude"}}
+        ),
+    )
+    manager = types.SimpleNamespace(
+        is_in_flight=lambda sid: sid == "ses-wb",
+        cancel=cancel,
+        in_flight={"ses-wb": wb_entry},
+    )
     cleanup = _AsyncFlag()
     controller = _make_controller()
     controller.session_turns = manager
@@ -945,6 +958,107 @@ def test_end_unknown_target():
     res = asyncio.run(running_agents.end_running_agent(_make_controller(), backend="mystery"))
     assert res["ok"] is False
     assert res["error"] == "unknown_target"
+
+
+def _controller_with_inflight(session_id, *, agent_backend=None, session_anchor=None, task_done=False):
+    target = {}
+    if agent_backend is not None:
+        target["agent_backend"] = agent_backend
+    if session_anchor is not None:
+        target["session_anchor"] = session_anchor
+    ctx = types.SimpleNamespace(
+        platform_specific=({"agent_session_target": target} if target else {})
+    )
+    entry = types.SimpleNamespace(task=types.SimpleNamespace(done=lambda: task_done), context=ctx)
+    controller = _make_controller()
+    controller.session_turns = types.SimpleNamespace(in_flight={session_id: entry})
+    return controller
+
+
+def test_inflight_match_anchor_only():
+    # The dominant production path: backend empty on the live context, but the
+    # reliably-populated session_anchor matches the row → promote.
+    c = _controller_with_inflight("s1", session_anchor="base-1")
+    assert running_agents._inflight_turn_matches_row(
+        c, session_id="s1", backend="codex", base_session_id="base-1"
+    ) is True
+
+
+def test_inflight_match_backend_only():
+    # No anchor on the context, but backend matches → promote.
+    c = _controller_with_inflight("s1", agent_backend="claude")
+    assert running_agents._inflight_turn_matches_row(
+        c, session_id="s1", backend="claude", base_session_id="base-1"
+    ) is True
+
+
+def test_inflight_no_match_same_backend_different_anchor():
+    # Same backend but a different anchor → a different turn is running; do NOT
+    # promote (anchor conflict wins over backend match).
+    c = _controller_with_inflight("s1", agent_backend="claude", session_anchor="other-base")
+    assert running_agents._inflight_turn_matches_row(
+        c, session_id="s1", backend="claude", base_session_id="base-1"
+    ) is False
+
+
+def test_inflight_no_match_when_target_missing_or_task_done():
+    # No agent_session_target at all → no positive evidence → not this row.
+    c_empty = _controller_with_inflight("s1")
+    assert running_agents._inflight_turn_matches_row(
+        c_empty, session_id="s1", backend="claude", base_session_id="base-1"
+    ) is False
+    # A completed task is not in flight, even if identity would match.
+    c_done = _controller_with_inflight("s1", session_anchor="base-1", task_done=True)
+    assert running_agents._inflight_turn_matches_row(
+        c_done, session_id="s1", backend="claude", base_session_id="base-1"
+    ) is False
+
+
+def test_end_does_not_cancel_unrelated_inflight_turn_of_other_backend():
+    # Stale idle Codex row, but the SAME chat has since started a new Claude turn
+    # (in flight under the same session_id). Ending the codex row must NOT cancel
+    # the unrelated Claude turn — the live recheck sees a backend conflict, treats
+    # the codex row as idle, and runs the idle codex teardown instead.
+    cancel_called = {"v": False}
+
+    async def _cancel(_sid):
+        cancel_called["v"] = True
+        return {"ok": True, "status": "cancel_requested", "backend": "claude"}
+
+    inflight_ctx = types.SimpleNamespace(
+        platform_specific={"agent_session_target": {"agent_backend": "claude", "session_anchor": "claude-base"}}
+    )
+    inflight_entry = types.SimpleNamespace(task=types.SimpleNamespace(done=lambda: False), context=inflight_ctx)
+    manager = types.SimpleNamespace(
+        is_in_flight=lambda sid: True,
+        cancel=_cancel,
+        in_flight={"chat-1": inflight_entry},
+    )
+
+    cleared = {}
+    transport = types.SimpleNamespace(send_request=_AsyncFlag(), stop=_AsyncFlag())
+    mgr = types.SimpleNamespace(
+        get_cwd=lambda b: "/w",
+        get_thread_id=lambda b: None,
+        clear=lambda b: cleared.__setitem__("clr", b),
+        sessions_for_cwd=lambda cwd: [],
+    )
+    treg = _FakeTurnRegistry({}, pending=set())  # the codex base is genuinely idle
+    treg.clear_session = lambda b: cleared.__setitem__("treg", b)
+    codex = types.SimpleNamespace(
+        _session_mgr=mgr, _turn_registry=treg, _transports={"/w": transport}, _transport_last_activity={"/w": 0.0}
+    )
+    controller = _make_controller(codex=codex)
+    controller.session_turns = manager
+
+    res = asyncio.run(
+        running_agents.end_running_agent(
+            controller, backend="codex", state="active", session_id="chat-1", base_session_id="codex-base"
+        )
+    )
+    assert res["ok"] is True
+    assert cancel_called["v"] is False  # the unrelated in-flight Claude turn was NOT canceled
+    assert cleared.get("clr") == "codex-base" and cleared.get("treg") == "codex-base"  # idle codex teardown ran
 
 
 def test_end_rechecks_live_state_idle_to_active(monkeypatch):
