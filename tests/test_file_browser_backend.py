@@ -193,6 +193,27 @@ def test_rename_refuses_to_clobber_target_appearing_after_precheck(tmp_path, mon
     assert src.read_text(encoding="utf-8") == "SRC"  # source intact
 
 
+def test_move_symlink_over_directory_is_refused(tmp_path):
+    # overwrite=True must not let a non-directory replace a directory. is_file() follows
+    # symlinks, so a symlink-to-dir (or broken link) slipped past the old guard and the move
+    # then backed up + deleted the real directory's contents. No-follow guard refuses it.
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(other_dir)  # a symlink whose target is a directory
+    target_dir = tmp_path / "data"
+    target_dir.mkdir()
+    (target_dir / "keep.txt").write_text("keep", encoding="utf-8")
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.move_path(str(link), str(target_dir), overwrite=True)
+
+    assert exc.value.code == "exists"
+    assert target_dir.is_dir()
+    assert (target_dir / "keep.txt").read_text(encoding="utf-8") == "keep"  # contents not erased
+    assert link.is_symlink()
+
+
 def test_rename_same_name_is_noop(tmp_path):
     src = tmp_path / "same.txt"
     src.write_text("SRC", encoding="utf-8")

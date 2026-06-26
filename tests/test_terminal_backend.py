@@ -601,6 +601,76 @@ async def _reconnect_during_closing_is_rejected(monkeypatch, tmp_path):
         terminal_service._close_fd(conn.master_fd)
 
 
+def test_reconnect_window_session_killed_on_shutdown(monkeypatch, tmp_path):
+    asyncio.run(_reconnect_window_session_killed_on_shutdown(monkeypatch, tmp_path))
+
+
+async def _reconnect_window_session_killed_on_shutdown(monkeypatch, tmp_path):
+    # When a reconnect overwrites a persistent session's slot with an OPENING placeholder, the
+    # placeholder must carry persistent=True so a shutdown landing in that window still kills
+    # the replaced tmux session instead of leaking it after `vibe stop`.
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(terminal_service.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: "/usr/bin/tmux")
+
+    killed: list[str] = []
+
+    async def fake_kill(session_id: str) -> None:
+        killed.append(session_id)
+
+    monkeypatch.setattr(terminal_service, "_kill_tmux_session", fake_kill)
+
+    opened_fds: list[int] = []
+
+    def fake_openpty():
+        master = os.open(os.devnull, os.O_RDWR)
+        slave = os.open(os.devnull, os.O_RDWR)
+        opened_fds.extend([master, slave])
+        return master, slave
+
+    monkeypatch.setattr(terminal_service.os, "openpty", fake_openpty)
+
+    spawn_started = asyncio.Event()
+    gate = asyncio.Event()
+
+    class _FakeProcess:
+        returncode = None
+        pid = None
+
+        def send_signal(self, signum: int) -> None:
+            pass
+
+        async def wait(self) -> int:
+            return 0
+
+    async def gated_spawn(*_args, **_kwargs):
+        spawn_started.set()
+        await gate.wait()
+        return _FakeProcess()
+
+    monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", gated_spawn)
+
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+    old = _make_persistent_connection("s", process=_LiveProcess())
+    service._sessions["s"] = _Session("s", _Phase.ATTACHED, persistent=True, connection=old)
+
+    reopen = asyncio.create_task(service.open("s"))
+    await spawn_started.wait()  # reconnect overwrote the slot with OPENING and parked mid-spawn
+
+    assert service._sessions["s"].phase is _Phase.OPENING
+    assert service._sessions["s"].persistent is True  # placeholder stays visible to shutdown
+
+    await service.shutdown()
+    assert "s" in killed  # shutdown killed the replaced tmux session rather than leaking it
+
+    gate.set()
+    with pytest.raises(terminal_service.TerminalServiceError):
+        await reopen
+    for fd in opened_fds:
+        terminal_service._close_fd(fd)
+
+
 def test_teardown_client_is_idempotent_on_fd(monkeypatch, tmp_path):
     asyncio.run(_teardown_client_is_idempotent_on_fd(monkeypatch, tmp_path))
 

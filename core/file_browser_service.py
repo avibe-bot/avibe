@@ -582,8 +582,11 @@ def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
         raise FileBrowserError("not_dir", "Destination parent is not a directory", 400)
     if _exists_no_follow(target) and not overwrite:
         raise ConflictError("exists", "Destination already exists")
-    if _is_dir_no_follow(target) and source.is_file():
-        raise ConflictError("exists", "Cannot overwrite a directory with a file")
+    if _is_dir_no_follow(target) and not _is_dir_no_follow(source):
+        # No-follow: only a real directory may overwrite a directory. is_file() follows
+        # symlinks and is False for a symlink/broken link, which would let a symlink replace
+        # (and thus erase) a directory under overwrite=True.
+        raise ConflictError("exists", "Cannot overwrite a directory with a non-directory")
 
     def _move() -> dict[str, Any]:
         backup: Path | None = None
@@ -612,8 +615,8 @@ def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
             # Re-check at move time for the overwrite path so file-vs-directory
             # conflicts are caught before the destination is moved aside.
             if _exists_no_follow(target):
-                if _is_dir_no_follow(target) and source.is_file():
-                    raise ConflictError("exists", "Cannot overwrite a directory with a file")
+                if _is_dir_no_follow(target) and not _is_dir_no_follow(source):
+                    raise ConflictError("exists", "Cannot overwrite a directory with a non-directory")
                 backup = _reserve_backup_path(target)
                 target.rename(backup)
             try:

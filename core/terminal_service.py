@@ -202,7 +202,12 @@ class TerminalService:
             # A live client for this id will be replaced; its tmux session stays alive and
             # the new client reattaches to it.
             replaced = current.connection if (current is not None and current.phase is _Phase.ATTACHED) else None
-            self._sessions[session_id] = _Session(session_id, _Phase.OPENING)
+            # Carry the persistent flag onto the OPENING placeholder: if shutdown or a cancel
+            # lands in the reconnect window (after we overwrite the slot, before the new client
+            # registers), shutdown must still see this id as persistent and kill its existing
+            # tmux session — otherwise the replaced session leaks untracked after `vibe stop`.
+            was_persistent = current is not None and current.persistent
+            self._sessions[session_id] = _Session(session_id, _Phase.OPENING, persistent=was_persistent)
         registered = False
         spawned: TerminalConnection | None = None
         try:
