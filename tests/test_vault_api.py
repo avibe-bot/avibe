@@ -8,8 +8,10 @@ from __future__ import annotations
 import json
 
 import pytest
+from sqlalchemy import select
 
 from storage import vault_service
+from storage.models import vault_secrets
 from storage.vault_crypto import Sealed
 from vibe import api
 
@@ -27,15 +29,24 @@ def test_create_list_delete_roundtrip(monkeypatch):
     created = api.create_vault_secret({"name": "OPENAI_API_KEY", "value": "sk-ant-abcd1234", "description": "key"})
     assert created["ok"] is True
     assert created["secret"]["name"] == "OPENAI_API_KEY"
-    assert created["secret"]["preview"] == "…1234"
+    assert "preview" not in created["secret"]
     assert "sk-ant-abcd1234" not in json.dumps(created)
+    assert "1234" not in json.dumps(created)
     seal.assert_called_once_with("OPENAI_API_KEY", b"sk-ant-abcd1234")
     with api._vault_engine().connect() as conn:
         assert vault_service.get_envelope(conn, "OPENAI_API_KEY") == _sealed("api")
+        public_meta_raw = conn.execute(
+            select(vault_secrets.c.public_meta).where(vault_secrets.c.name == "OPENAI_API_KEY")
+        ).scalar_one()
+        public_meta = json.loads(public_meta_raw)
+        assert public_meta == {"description": "key"}
+        assert "preview" not in public_meta
+        assert "1234" not in json.dumps(vault_service.get_secret_meta(conn, "OPENAI_API_KEY"))
 
     listed = api.get_vault_secrets()
     assert [s["name"] for s in listed["secrets"]] == ["OPENAI_API_KEY"]
     assert "sk-ant-abcd1234" not in json.dumps(listed)
+    assert "1234" not in json.dumps(listed)
 
     removed = api.delete_vault_secret("OPENAI_API_KEY")
     assert removed == {"ok": True, "removed": True, "name": "OPENAI_API_KEY"}

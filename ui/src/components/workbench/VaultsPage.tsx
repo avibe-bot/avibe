@@ -195,9 +195,9 @@ export const VaultsPage: React.FC = () => {
                     <Badge variant="info">{t('vaults.proxyBound')}</Badge>
                   ) : null}
                 </div>
-                <span className="text-xs text-muted">
-                  {s.preview ? <span className="font-mono">{s.preview}</span> : null}
-                  {s.last_used_at ? ` · ${t('vaults.used', { count: s.use_count })}` : ` · ${t('vaults.neverUsed')}`}
+                <span className="truncate text-xs text-muted">
+                  {s.description ? `${s.description} · ` : ''}
+                  {s.last_used_at ? t('vaults.used', { count: s.use_count }) : t('vaults.neverUsed')}
                 </span>
               </div>
               <div className="ml-auto">

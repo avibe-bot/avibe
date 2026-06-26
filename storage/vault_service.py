@@ -27,7 +27,6 @@ from storage.models import vault_audit, vault_groups, vault_requests, vault_secr
 from storage.vault_crypto import Sealed
 
 DEFAULT_GROUP = "default"
-_PREVIEW_TAIL = 4
 
 
 class VaultServiceError(Exception):
@@ -62,19 +61,6 @@ def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
-def value_preview(value: str) -> str:
-    """Non-secret masked hint for list/detail views (last few chars, like #555).
-
-    Computed by the caller from the plaintext *before* sealing (avault returns only
-    ciphertext), then stored as non-secret metadata via :func:`create_secret`.
-    """
-    if not value:
-        return ""
-    if len(value) <= _PREVIEW_TAIL:
-        return "•" * len(value)
-    return "…" + value[-_PREVIEW_TAIL:]
-
-
 def _loads(raw: str | None) -> Any:
     if not raw:
         return None
@@ -84,9 +70,14 @@ def _loads(raw: str | None) -> Any:
         return None
 
 
+def _public_meta(raw: str | None) -> dict[str, Any]:
+    payload = _loads(raw)
+    return payload if isinstance(payload, dict) else {}
+
+
 def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
     """Masked, value-free metadata for a secret row."""
-    public_meta = _loads(row.get("public_meta")) or {}
+    public_meta = _public_meta(row.get("public_meta"))
     return {
         "name": row["name"],
         "group": row.get("group_name"),
@@ -96,7 +87,6 @@ def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
         "signer_kind": row.get("signer_kind"),
         "source": row.get("source"),
         "description": public_meta.get("description"),
-        "preview": public_meta.get("preview", ""),
         # Policy is non-secret (allowed hosts, auth scheme name) — safe to surface.
         "policy": _loads(row.get("policy")) or {},
         "last_used_at": row.get("last_used_at"),
@@ -184,7 +174,6 @@ def create_secret(
     *,
     name: str,
     sealed: Sealed,
-    preview: str = "",
     group: str = DEFAULT_GROUP,
     tags: list[str] | None = None,
     protection: str = "standard",
@@ -195,7 +184,7 @@ def create_secret(
     """Create a standard-tier secret from an avault-sealed envelope; return masked metadata.
 
     The value is sealed by the caller via the avault client (this layer never sees
-    plaintext or keys). ``preview`` is the caller-computed non-secret last-4 hint.
+    plaintext or keys). No value-derived metadata is stored or returned.
 
     ``policy`` is a non-secret JSON dict (e.g. ``allowed_hosts`` + ``auth`` scheme for
     the brokered ``fetch`` mode); it never contains the value.
@@ -209,7 +198,7 @@ def create_secret(
 
     _ensure_group(conn, group)
     now = _now()
-    public_meta = {"preview": preview}
+    public_meta = {}
     if description:
         public_meta["description"] = description
     try:
@@ -225,7 +214,7 @@ def create_secret(
                 ciphertext=sealed.ciphertext,
                 nonce=sealed.nonce,
                 wrap_meta=sealed.wrap_meta,
-                public_meta=json.dumps(public_meta),
+                public_meta=json.dumps(public_meta) if public_meta else None,
                 policy=json.dumps(policy) if policy else None,
                 use_count=0,
                 created_at=now,
@@ -269,14 +258,12 @@ def rotate_secret(
     conn: Connection,
     name: str,
     sealed: Sealed,
-    *,
-    preview: str = "",
 ) -> dict[str, Any]:
     row = _require_row(conn, name)
     if row.get("protection") != "standard":
         raise UnsupportedProtectionError("only the standard tier is available in P0")
-    public_meta = _loads(row.get("public_meta")) or {}
-    public_meta["preview"] = preview
+    public_meta = _public_meta(row.get("public_meta"))
+    public_meta.pop("preview", None)
     conn.execute(
         vault_secrets.update()
         .where(vault_secrets.c.name == name)
@@ -284,7 +271,7 @@ def rotate_secret(
             ciphertext=sealed.ciphertext,
             nonce=sealed.nonce,
             wrap_meta=sealed.wrap_meta,
-            public_meta=json.dumps(public_meta),
+            public_meta=json.dumps(public_meta) if public_meta else None,
             updated_at=_now(),
         )
     )
@@ -403,7 +390,6 @@ def fulfill_provision(
     request_id: str,
     sealed: Sealed,
     *,
-    preview: str = "",
     group: str = DEFAULT_GROUP,
     description: str | None = None,
 ) -> dict[str, Any]:
@@ -415,7 +401,6 @@ def fulfill_provision(
         conn,
         name=row["secret_name"],
         sealed=sealed,
-        preview=preview,
         group=group,
         description=description,
     )

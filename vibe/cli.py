@@ -3398,17 +3398,15 @@ def cmd_vault_set(args):
         tags = list(getattr(args, "tag", None) or []) or None
         policy = _build_secret_policy(args)
         # Seal via avault BEFORE opening a DB transaction (never hold a txn across a subprocess).
-        # The plaintext goes only to avault's stdin; we keep just the ciphertext envelope + a
-        # non-secret last-4 preview.
+        # The plaintext goes only to avault's stdin; Avibe keeps only the ciphertext envelope
+        # and non-value-derived metadata.
         sealed = api.avault_seal(args.name, value.encode("utf-8"))
-        preview = vault_service.value_preview(value)
         engine = _open_vault_engine()
         with engine.begin() as conn:
             meta = vault_service.create_secret(
                 conn,
                 name=args.name,
                 sealed=sealed,
-                preview=preview,
                 group=getattr(args, "group", None) or vault_service.DEFAULT_GROUP,
                 tags=tags,
                 description=getattr(args, "description", None),

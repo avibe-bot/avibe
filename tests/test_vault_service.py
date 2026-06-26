@@ -38,18 +38,10 @@ def _row(engine, name: str) -> dict:
         return dict(conn.execute(select(vault_secrets).where(vault_secrets.c.name == name)).mappings().one())
 
 
-def test_value_preview_masks_tail_hint():
-    assert vs.value_preview("") == ""
-    assert vs.value_preview("abc") == "•••"
-    assert vs.value_preview("abcd") == "••••"
-    assert vs.value_preview("abcde") == "…bcde"
-
-
-def test_create_stores_envelope_and_masked_meta(vault):
+def test_create_stores_envelope_and_value_free_meta(vault):
     meta = _create(
         vault,
         name="OPENAI_API_KEY",
-        preview="…1234",
         description="key",
         policy={"allowed_hosts": ["api.example.com"]},
     )
@@ -57,19 +49,38 @@ def test_create_stores_envelope_and_masked_meta(vault):
     assert meta["name"] == "OPENAI_API_KEY"
     assert meta["protection"] == "standard"
     assert meta["group"] == "default"
-    assert meta["preview"] == "…1234"
+    assert "preview" not in meta
     assert meta["policy"] == {"allowed_hosts": ["api.example.com"]}
     assert "plaintext" not in json.dumps(meta)
     row = _row(vault, "OPENAI_API_KEY")
     assert row["ciphertext"] == "ct-1"
     assert row["nonce"] == "n-1"
     assert row["wrap_meta"] == "wm-1"
+    assert json.loads(row["public_meta"]) == {"description": "key"}
+
+
+def test_create_persists_no_value_derived_public_meta(vault):
+    secret_value = "sk-ant-abcd1234"
+    value_tail = secret_value[-4:]
+    _create(vault, name="NO_PREVIEW_KEY")
+
+    row = _row(vault, "NO_PREVIEW_KEY")
+    assert row["public_meta"] is None
+
+    with vault.connect() as conn:
+        meta = vs.get_secret_meta(conn, "NO_PREVIEW_KEY")
+        listed = vs.list_secrets(conn)
+
+    assert "preview" not in meta
+    assert "preview" not in json.dumps(listed)
+    assert value_tail not in json.dumps(meta)
+    assert value_tail not in json.dumps(listed)
 
 
 def test_get_envelope_and_get_envelopes_return_stored_envelopes(vault):
-    _create(vault, name="A_KEY", preview="…1111")
+    _create(vault, name="A_KEY")
     with vault.begin() as conn:
-        vs.create_secret(conn, name="B_KEY", sealed=_sealed("2"), preview="…2222")
+        vs.create_secret(conn, name="B_KEY", sealed=_sealed("2"))
     with vault.connect() as conn:
         assert vs.get_envelope(conn, "A_KEY") == _sealed()
         assert vs.get_envelopes(conn, ["B_KEY", "A_KEY"]) == {
@@ -110,9 +121,9 @@ def test_record_proxy_use_bumps_usage_and_audits(vault):
 
 
 def test_list_secrets_masked_and_group_filtered(vault):
-    _create(vault, name="A_KEY", preview="…1111", group="default")
-    _create(vault, name="B_KEY", preview="…2222", group="crypto")
-    _create(vault, name="C_KEY", preview="…3333", group="crypto")
+    _create(vault, name="A_KEY", group="default")
+    _create(vault, name="B_KEY", group="crypto")
+    _create(vault, name="C_KEY", group="crypto")
     with vault.connect() as conn:
         all_names = [m["name"] for m in vs.list_secrets(conn)]
         crypto_names = [m["name"] for m in vs.list_secrets(conn, group="crypto")]
@@ -136,13 +147,22 @@ def test_protected_tier_not_available_in_p0(vault):
         _create(vault, name="SECRET", protection="protected")
 
 
-def test_rotate_changes_envelope_and_preview(vault):
-    _create(vault, name="ROT", preview="…9999")
+def test_rotate_changes_envelope_and_strips_legacy_preview(vault):
+    _create(vault, name="ROT", description="rotating")
     with vault.begin() as conn:
-        meta = vs.rotate_secret(conn, "ROT", _sealed("new"), preview="…0000")
-    assert meta["preview"] == "…0000"
+        conn.execute(
+            vault_secrets.update()
+            .where(vault_secrets.c.name == "ROT")
+            .values(public_meta=json.dumps({"description": "rotating", "preview": "…9999"}))
+        )
+    with vault.begin() as conn:
+        meta = vs.rotate_secret(conn, "ROT", _sealed("new"))
+    assert "preview" not in meta
+    assert meta["description"] == "rotating"
     with vault.connect() as conn:
         assert vs.get_envelope(conn, "ROT") == _sealed("new")
+    row = _row(vault, "ROT")
+    assert json.loads(row["public_meta"]) == {"description": "rotating"}
 
 
 def test_delete_removes_secret(vault):
@@ -154,7 +174,7 @@ def test_delete_removes_secret(vault):
 
 
 def test_audit_records_events_without_values(vault):
-    _create(vault, name="AUD", preview="…lue42")
+    _create(vault, name="AUD")
     with vault.begin() as conn:
         vs.record_deliveries(conn, ["AUD"], requester={"agent": "claude"}, mode="run")
         vs.delete_secret(conn, "AUD")
@@ -177,7 +197,7 @@ def test_create_auto_creates_missing_group(vault):
 def test_create_fulfills_pending_provision_request(vault):
     with vault.begin() as conn:
         req = vs.create_provision_request(conn, "ASKED_KEY", requester={"agent": "claude"})
-    _create(vault, name="ASKED_KEY", preview="…ided")
+    _create(vault, name="ASKED_KEY")
     with vault.connect() as conn:
         status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == req["id"])).scalar_one()
     assert status == "fulfilled"
@@ -195,8 +215,8 @@ def test_provision_request_and_fulfill(vault):
         req = vs.create_provision_request(conn, "NEW_KEY", reason="sync needs it", requester={"agent": "claude"})
     assert req["status"] == "pending"
     with vault.begin() as conn:
-        meta = vs.fulfill_provision(conn, req["id"], _sealed("filled"), preview="…7777", description="filled")
-    assert meta["preview"] == "…7777"
+        meta = vs.fulfill_provision(conn, req["id"], _sealed("filled"), description="filled")
+    assert "preview" not in meta
     assert meta["description"] == "filled"
     with vault.connect() as conn:
         assert vs.get_envelope(conn, "NEW_KEY") == _sealed("filled")

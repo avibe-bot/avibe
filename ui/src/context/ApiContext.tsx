@@ -25,7 +25,6 @@ export type VaultSecret = {
   signer_kind: string | null;
   source: string;
   description?: string | null;
-  preview: string;
   policy: Record<string, unknown>;
   last_used_at: string | null;
   use_count: number;

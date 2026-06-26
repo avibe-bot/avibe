@@ -206,7 +206,7 @@ Through-line legend: 🔓 plaintext · 📦 blind box (sealed to `avault`) · �
 2. Browser **seals the value to `avault`'s pubkey** → 📦; `POST /api/vault/secrets` carries the blind box.
 3. Daemon relays 📦 to `avault` (it cannot open it).
 4. `avault`: open 📦 → read master key from store → fresh DEK → AES-256-GCM encrypt (random nonce, **AAD = `name + scheme + version`**) → wrap DEK under master key → zeroize plaintext + DEK → return 🔒 `{ciphertext, nonce, wrap_meta}`.
-5. Daemon writes the row to `vault_secrets` (ciphertext, wrap_meta, preview `…last4`, `protection=standard`, audit `created`). 🔒 only; no plaintext, no key persists in Python.
+5. Daemon writes the row to `vault_secrets` (ciphertext, wrap_meta, `protection=standard`, audit `created`). 🔒 only; no plaintext, no key, and no value-derived data is stored or surfaced in metadata.
 
 **Protected tier:** step 2 is the **browser encrypting under the VMK** (it unlocks the VMK with the passkey/password first, or uses an existing VMK session) and the POST body is already 🔒. Python never sees plaintext at all.
 

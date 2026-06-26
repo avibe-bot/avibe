@@ -73,7 +73,7 @@ def test_parse_env_specs(specs, expected):
     assert cli._parse_env_specs(specs) == expected
 
 
-def test_set_seals_with_avault_and_stores_preview(tmp_path, capfd, monkeypatch):
+def test_set_seals_with_avault_without_value_derived_metadata(tmp_path, capfd, monkeypatch):
     from unittest.mock import Mock
 
     from vibe import api
@@ -87,8 +87,9 @@ def test_set_seals_with_avault_and_stores_preview(tmp_path, capfd, monkeypatch):
     payload = json.loads(capfd.readouterr().out)
     secret = payload["secret"]
     assert secret["name"] == "OPENAI_API_KEY"
-    assert secret["preview"] == "…1234"
+    assert "preview" not in secret
     assert "sk-ant-abcd1234" not in json.dumps(payload)
+    assert "1234" not in json.dumps(payload)
     seal.assert_called_once_with("OPENAI_API_KEY", b"sk-ant-abcd1234")
     with cli._open_vault_engine().connect() as conn:
         assert vault_service.get_envelope(conn, "OPENAI_API_KEY") == _sealed("saved")

@@ -16,7 +16,7 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260621_0023"
+HEAD_REVISION = "20260626_0024"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -231,6 +231,52 @@ def test_run_migrations_rebuilds_inbox_indexes_for_harness_dedupe(tmp_path: Path
         assert version == (HEAD_REVISION,)
         assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_activity")
         assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_user_send")
+
+
+def test_run_migrations_strips_vault_secret_preview_metadata(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+
+    run_migrations(db_path, revision="20260621_0023")
+    with sqlite3.connect(db_path) as conn:
+        version = conn.execute("select version_num from alembic_version").fetchone()
+        assert version == ("20260621_0023",)
+        conn.executemany(
+            """
+            insert into vault_secrets (
+                id, name, group_name, tags, kind, protection, source,
+                ciphertext, nonce, wrap_meta, public_meta, policy,
+                use_count, created_at, updated_at
+            ) values (?, ?, 'default', null, 'static', 'standard', 'manual',
+                'ct', 'nonce', 'wrap', ?, null, 0, 'now', 'now')
+            """,
+            [
+                ("vlt_keep", "KEEP_DESC", json.dumps({"description": "kept", "preview": "…1234", "pubkey": "pk"})),
+                ("vlt_empty", "ONLY_PREVIEW", json.dumps({"preview": "…9999"})),
+                ("vlt_null", "NULL_META", None),
+                ("vlt_blank", "BLANK_META", ""),
+                ("vlt_bad", "BAD_META", "not-json"),
+                ("vlt_other", "OTHER_META", json.dumps({"description": "other"})),
+            ],
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        version = conn.execute("select version_num from alembic_version").fetchone()
+        rows = dict(conn.execute("select name, public_meta from vault_secrets order by name").fetchall())
+
+    assert version == (HEAD_REVISION,)
+    assert json.loads(rows["KEEP_DESC"]) == {"description": "kept", "pubkey": "pk"}
+    assert rows["ONLY_PREVIEW"] is None
+    assert rows["NULL_META"] is None
+    assert rows["BLANK_META"] == ""
+    assert rows["BAD_META"] == "not-json"
+    assert json.loads(rows["OTHER_META"]) == {"description": "other"}
+    assert "preview" not in json.dumps(rows)
+    assert "1234" not in json.dumps(rows)
+    assert "9999" not in json.dumps(rows)
 
 
 def test_scope_agent_backfill_migrates_explicit_agent_routes(tmp_path: Path) -> None:

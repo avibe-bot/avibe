@@ -1344,12 +1344,12 @@ def create_vault_secret(payload: dict) -> dict:
     policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else None
     value = str(value)
     # Seal via avault before the DB transaction. The transient plaintext POST lives only here
-    # (one request, not reused) and is piped to avault's stdin; we keep only the ciphertext.
+    # (one request, not reused) and is piped to avault's stdin; Avibe keeps only the
+    # ciphertext and non-value-derived metadata.
     try:
         sealed = avault_seal(name, value.encode("utf-8"))
     except AvaultError as exc:
         raise VaultApiError(f"avault seal failed: {exc}", code="avault_failed") from exc
-    preview = vault_service.value_preview(value)
     engine = _vault_engine()
     try:
         with engine.begin() as conn:
@@ -1357,7 +1357,6 @@ def create_vault_secret(payload: dict) -> dict:
                 conn,
                 name=name,
                 sealed=sealed,
-                preview=preview,
                 group=str(payload.get("group") or vault_service.DEFAULT_GROUP),
                 tags=tags,
                 description=payload.get("description"),
