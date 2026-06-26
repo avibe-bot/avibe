@@ -103,6 +103,29 @@ def test_install_askill_uses_official_curl_installer(monkeypatch):
     assert "curl -fsSL https://askill.sh | sh" in captured["cmd"][2]
 
 
+def test_askill_install_command_does_not_persist_agent_cli_path(monkeypatch):
+    config_loads = []
+
+    class FakePopen:
+        returncode = 0
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def communicate(self, timeout=None):
+            return "installed", ""
+
+    monkeypatch.setattr(api.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/askill" if b == "askill" else None)
+    monkeypatch.setattr(api, "load_config", lambda: config_loads.append(True) or pytest.fail("askill should not load V2Config"))
+
+    out = api._run_install_command("askill", ["bash", "-c", "true"], lambda value: value, mode="install")
+
+    assert out["ok"] is True
+    assert out["path"] == "/usr/local/bin/askill"
+    assert config_loads == []
+
+
 def test_install_askill_unsupported_without_curl(monkeypatch):
     # No curl/bash (e.g. Windows): no broken npm fallback — a clear manual
     # message pointing at askill.sh, and _run_install_command is never invoked.
