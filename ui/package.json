@@ -11,10 +11,14 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
+    "test:crypto": "vitest run src/lib/vaultCrypto.test.ts",
     "validate:theme": "node scripts/validate-theme.mjs"
   },
   "dependencies": {
+    "@hpke/core": "^1.9.0",
+    "@hpke/dhkem-x25519": "^1.8.0",
     "@lexical/react": "^0.45.0",
+    "@noble/curves": "^2.2.0",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-label": "^2.1.8",
     "@radix-ui/react-popover": "^1.1.15",
@@ -28,6 +32,7 @@
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "framer-motion": "^12.26.2",
+    "hash-wasm": "^4.12.0",
     "i18next": "^25.7.4",
     "i18next-browser-languagedetector": "^8.2.0",
     "lexical": "^0.45.0",
@@ -63,6 +68,7 @@
     "tailwindcss": "^4.1.18",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.46.4",
-    "vite": "^8.0.16"
+    "vite": "^8.0.16",
+    "vitest": "^4.1.9"
   }
 }
