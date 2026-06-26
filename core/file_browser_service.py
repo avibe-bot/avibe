@@ -132,6 +132,15 @@ def _exists_no_follow(path: Path) -> bool:
         return False
 
 
+def _same_entry_no_follow(left: Path, right: Path) -> bool:
+    try:
+        left_stat = left.lstat()
+        right_stat = right.lstat()
+    except FileNotFoundError:
+        return False
+    return (left_stat.st_dev, left_stat.st_ino) == (right_stat.st_dev, right_stat.st_ino)
+
+
 def _is_dir_no_follow(path: Path) -> bool:
     try:
         return stat.S_ISDIR(path.lstat().st_mode)
@@ -339,7 +348,10 @@ def list_directory(raw_path: str, *, show_hidden: bool = False) -> dict[str, Any
 
     entries.sort(key=lambda item: (0 if item["kind"] == "dir" else 1, str(item["name"]).lower(), str(item["name"])))
     parent = None if target.parent == target else str(target.parent)
-    return {"ok": True, "path": str(target), "parent": parent, "entries": entries, "truncated": truncated}
+    payload = {"ok": True, "path": str(target), "parent": parent, "entries": entries, "truncated": truncated}
+    if truncated:
+        payload["limit"] = MAX_LIST_ENTRIES
+    return payload
 
 
 def metadata(raw_path: str) -> dict[str, Any]:
@@ -529,11 +541,17 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     source = _resolve_existing_entry_path(raw_path)
     name = _validate_new_name(new_name)
     target = source.with_name(name)
-    if _exists_no_follow(target):
+    same_entry = _same_entry_no_follow(source, target)
+    if same_entry and name == source.name:
+        return {"ok": True, "path": str(source)}
+    if _exists_no_follow(target) and not same_entry:
         raise ConflictError("exists", "Destination already exists")
 
     def _rename() -> dict[str, Any]:
         try:
+            if same_entry:
+                source.rename(target)
+                return {"ok": True, "path": str(target)}
             # Atomic no-replace rename: never clobber a destination that appears between the
             # precheck above and the rename itself.
             _rename_no_replace(source, target)

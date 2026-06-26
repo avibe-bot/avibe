@@ -4002,6 +4002,8 @@ def reconcile_startup_dependencies() -> dict:
         if os.environ.get("VIBE_UI_ENABLE_TERMINAL", "").strip().lower() in {"0", "false", "no", "off"}:
             # Terminal explicitly disabled — don't download the optional tmux runtime.
             result["tmux"] = {"ok": True, "status": "skipped", "reason": "terminal_disabled"}
+        elif os.environ.get("VIBE_INSTALL_SKIP_TMUX", "").strip().lower() in _TRUTHY_ENV_VALUES:
+            result["tmux"] = {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_TMUX"}
         else:
             try:
                 from core.tmux_runtime import ensure_tmux_installed

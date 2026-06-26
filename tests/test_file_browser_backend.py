@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import os
 import logging
+import sys
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,27 @@ def test_list_directory_truncates_scan_over_hidden_entries(tmp_path, monkeypatch
     result = fs.list_directory(str(root), show_hidden=False)
 
     assert result["truncated"] is True
+
+
+def test_list_truncated_includes_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(fs, "MAX_LIST_ENTRIES", 3)
+    root = tmp_path / "root"
+    root.mkdir()
+    for index in range(6):
+        (root / f".hidden-{index}").write_text("hidden", encoding="utf-8")
+
+    truncated = fs.list_directory(str(root), show_hidden=False)
+
+    assert truncated["truncated"] is True
+    assert truncated["entries"] == []
+    assert truncated["limit"] == 3
+
+    visible = tmp_path / "visible"
+    visible.mkdir()
+    (visible / "a.txt").write_text("a", encoding="utf-8")
+    not_truncated = fs.list_directory(str(visible), show_hidden=False)
+    assert not_truncated["truncated"] is False
+    assert "limit" not in not_truncated
 
 
 def test_entry_ops_handle_cyclic_symlink(tmp_path):
@@ -169,6 +191,39 @@ def test_rename_refuses_to_clobber_target_appearing_after_precheck(tmp_path, mon
     assert exc.value.code == "exists"
     assert dst.read_text(encoding="utf-8") == "DST"  # not clobbered
     assert src.read_text(encoding="utf-8") == "SRC"  # source intact
+
+
+def test_rename_same_name_is_noop(tmp_path):
+    src = tmp_path / "same.txt"
+    src.write_text("SRC", encoding="utf-8")
+
+    result = fs.rename_path(str(src), "same.txt")
+
+    assert result == {"ok": True, "path": str(src)}
+    assert src.read_text(encoding="utf-8") == "SRC"
+
+    dst = tmp_path / "other.txt"
+    dst.write_text("DST", encoding="utf-8")
+    with pytest.raises(FileBrowserError) as exc:
+        fs.rename_path(str(src), "other.txt")
+
+    assert exc.value.code == "exists"
+    assert src.read_text(encoding="utf-8") == "SRC"
+    assert dst.read_text(encoding="utf-8") == "DST"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="case-only rename behavior depends on case-insensitive filesystem")
+def test_rename_case_only_same_inode_is_allowed_on_case_insensitive_fs(tmp_path):
+    source = tmp_path / "case.txt"
+    source.write_text("case", encoding="utf-8")
+    target = tmp_path / "CASE.txt"
+    if not target.exists() or not fs._same_entry_no_follow(source, target):
+        pytest.skip("temporary filesystem is case-sensitive")
+
+    result = fs.rename_path(str(source), "CASE.txt")
+
+    assert result == {"ok": True, "path": str(target)}
+    assert target.read_text(encoding="utf-8") == "case"
 
 
 def test_rename_no_replace_refuses_existing_directory_target(tmp_path, monkeypatch):
@@ -442,3 +497,33 @@ def test_http_delete_and_move_string_false_flags_are_not_truthy(tmp_path):
     assert move_response.status_code == 409
     assert source.read_text(encoding="utf-8") == "source"
     assert destination.read_text(encoding="utf-8") == "destination"
+
+
+def test_startup_reconcile_skips_tmux_when_env_set(monkeypatch):
+    from vibe import api
+
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
+    monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: {"ok": True, "installed": True})
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+
+    import core.show_runtime as srt_mod
+    import core.tmux_runtime as tmux_mod
+
+    class _Mgr:
+        def status(self):
+            return {"installed": False, "node_available": False, "node_version": None}
+
+    monkeypatch.setattr(srt_mod, "get_show_runtime_manager", lambda: _Mgr())
+
+    calls = []
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_TMUX", raising=False)
+    monkeypatch.setattr(tmux_mod, "ensure_tmux_installed", lambda force=False: calls.append(force) or {"ok": True})
+    out_without_skip = api.reconcile_startup_dependencies()
+    assert out_without_skip["tmux"] == {"ok": True}
+    assert calls == [False]
+
+    monkeypatch.setenv("VIBE_INSTALL_SKIP_TMUX", "yes")
+    monkeypatch.setattr(tmux_mod, "ensure_tmux_installed", lambda force=False: pytest.fail("tmux install should be skipped"))
+    out_with_skip = api.reconcile_startup_dependencies()
+
+    assert out_with_skip["tmux"] == {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_TMUX"}
