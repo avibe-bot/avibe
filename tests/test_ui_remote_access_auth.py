@@ -609,6 +609,27 @@ def test_remote_host_allows_valid_remote_session(monkeypatch, tmp_path):
     assert response.status_code != 302
 
 
+def test_remote_session_info_includes_authenticated_subject(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        domain="alex.avibe.bot",
+    )
+
+    response = client.get("/api/session", base_url="https://alex.avibe.bot")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "remote": True,
+        "authenticated": True,
+        "email": "alex@example.com",
+        "sub": "user-1",
+    }
+
+
 def _forged_session_cookie(config: V2Config, exp: int, *, email: str = "alex@example.com", subject: str = "user-1") -> str:
     import json
     import urllib.parse

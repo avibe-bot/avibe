@@ -3255,6 +3255,7 @@ def api_session():
                     "remote": True,
                     "authenticated": True,
                     "email": str(payload.get("email", "")),
+                    "sub": str(payload.get("sub", "")),
                 }
             )
     # Identity payload must never be cached by intermediaries (Cloudflare etc.).

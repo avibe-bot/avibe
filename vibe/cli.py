@@ -6325,7 +6325,7 @@ def cmd_runtime(args) -> int:
                 print("avault installed." if avault.get("changed") else "avault ready.")
             else:
                 print(f"avault not ready: {avault.get('message') or 'install failed'}", file=sys.stderr)
-            if tmux.get("skipped"):
+            if tmux.get("skipped") or tmux.get("status") == "skipped":
                 print(f"tmux: skipped ({tmux.get('reason') or 'skipped'}).")
             elif tmux.get("ok"):
                 print("tmux installed." if tmux.get("changed") else "tmux ready.")

@@ -13,7 +13,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -681,6 +681,13 @@ def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
 
     def _move() -> dict[str, Any]:
         backup: Path | None = None
+        source_was_dir = _is_dir_no_follow(source)
+        target_was_placed = False
+
+        def mark_target_placed() -> None:
+            nonlocal target_was_placed
+            target_was_placed = True
+
         try:
             if not overwrite:
                 _move_to_absent_target(source, target)
@@ -693,13 +700,15 @@ def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
                 backup = _reserve_backup_path(target)
                 target.rename(backup)
             try:
-                if backup is None:
-                    _move_to_absent_target(source, target)
-                else:
-                    shutil.move(str(source), str(target))
+                _move_to_absent_target(source, target, on_target_placed=mark_target_placed)
             except Exception:
                 if backup is not None:
-                    _restore_move_backup(backup, target)
+                    _handle_failed_overwrite_move(
+                        target,
+                        backup,
+                        source_was_dir=source_was_dir,
+                        target_was_placed=target_was_placed,
+                    )
                 raise
             if backup is not None:
                 _remove_backup_path(backup)
@@ -710,16 +719,29 @@ def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
     return _run_mutation("move", source, _move, dst=str(target), overwrite=overwrite)
 
 
-def _move_to_absent_target(source: Path, target: Path) -> None:
+def _move_to_absent_target(
+    source: Path,
+    target: Path,
+    *,
+    on_target_placed: Callable[[], None] | None = None,
+) -> None:
     try:
         _os_rename_noreplace(source, target)
     except OSError as exc:
         if exc.errno != errno.EXDEV:
             raise
-        _copy_cross_fs_move_to_absent_target(source, target)
+        _copy_cross_fs_move_to_absent_target(source, target, on_target_placed=on_target_placed)
+    else:
+        if on_target_placed is not None:
+            on_target_placed()
 
 
-def _copy_cross_fs_move_to_absent_target(source: Path, target: Path) -> None:
+def _copy_cross_fs_move_to_absent_target(
+    source: Path,
+    target: Path,
+    *,
+    on_target_placed: Callable[[], None] | None = None,
+) -> None:
     temp_target: Path | None = _reserve_backup_path(target)
     try:
         if _is_dir_no_follow(source):
@@ -729,10 +751,13 @@ def _copy_cross_fs_move_to_absent_target(source: Path, target: Path) -> None:
         _os_rename_noreplace(temp_target, target)
         temp_target = None
         created_target_stat = target.lstat()
+        if on_target_placed is not None:
+            on_target_placed()
         try:
             _remove_backup_path(source)
         except OSError:
-            _remove_created_cross_fs_move_target(target, source, created_target_stat)
+            if _can_delete_placed_target_after_source_removal_failure(source):
+                _remove_created_cross_fs_move_target(target, source, created_target_stat)
             raise
     except Exception:
         if temp_target is not None:
@@ -754,6 +779,26 @@ def _restore_move_backup(backup: Path, target: Path) -> None:
     if _exists_no_follow(target):
         _remove_backup_path(target)
     backup.rename(target)
+
+
+def _handle_failed_overwrite_move(
+    target: Path,
+    backup: Path,
+    *,
+    source_was_dir: bool,
+    target_was_placed: bool,
+) -> None:
+    if source_was_dir and target_was_placed and _exists_no_follow(target):
+        _remove_path_if_exists_best_effort(backup)
+        return
+    _restore_move_backup(backup, target)
+
+
+def _can_delete_placed_target_after_source_removal_failure(source: Path) -> bool:
+    # Non-directory source cleanup uses unlink, which is atomic: if it failed and
+    # the source still exists, the source copy is intact. Directory cleanup uses
+    # rmtree, which can partially delete children before raising.
+    return _exists_no_follow(source) and not _is_dir_no_follow(source)
 
 
 def _remove_created_cross_fs_move_target(target: Path, source: Path, created_target_stat: os.stat_result) -> None:
@@ -781,6 +826,13 @@ def _remove_path_if_exists(path: Path) -> None:
         _remove_backup_path(path)
     except FileNotFoundError:
         pass
+
+
+def _remove_path_if_exists_best_effort(path: Path) -> None:
+    try:
+        _remove_path_if_exists(path)
+    except OSError:
+        logger.debug("Failed to remove move backup after preserving placed target", exc_info=True)
 
 
 def delete_path(raw_path: str, *, recursive: bool = False) -> dict[str, Any]:

@@ -153,6 +153,26 @@ def test_runtime_prepare_cli_skips_avault_offline(monkeypatch, capsys):
     assert payload["tmux"] == {"ok": True, "skipped": True, "reason": "offline"}
 
 
+def test_runtime_prepare_cli_prints_status_skipped_tmux_as_skipped(monkeypatch, capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(["runtime", "prepare"])
+
+    class FakeRuntimeManager:
+        def prepare(self, *, force=False, offline=None):
+            return {"ok": True}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    _stub_runtime_prepare_dependencies(
+        monkeypatch,
+        tmux_result={"ok": True, "status": "skipped", "reason": "terminal_disabled"},
+    )
+
+    assert cli.cmd_runtime(args) == 0
+    captured = capsys.readouterr()
+    assert "tmux: skipped (terminal_disabled)." in captured.out
+    assert "tmux ready." not in captured.out
+
+
 def test_runtime_prepare_tmux_respects_terminal_disabled(monkeypatch):
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "0")
     monkeypatch.delenv("VIBE_INSTALL_SKIP_TMUX", raising=False)
