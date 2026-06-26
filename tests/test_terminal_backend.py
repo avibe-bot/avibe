@@ -580,6 +580,27 @@ async def _reaper_keeps_detached_registered_until_kill_completes(monkeypatch, tm
     assert "d" not in service._sessions  # removed once the kill completed
 
 
+def test_reconnect_during_closing_is_rejected(monkeypatch, tmp_path):
+    asyncio.run(_reconnect_during_closing_is_rejected(monkeypatch, tmp_path))
+
+
+async def _reconnect_during_closing_is_rejected(monkeypatch, tmp_path):
+    # While a session is tearing down (CLOSING) — e.g. the reaper is awaiting its kill — a
+    # reconnect must be rejected with session_opening, not allowed to reattach to a session
+    # that is about to be killed. The client retries once teardown finishes.
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: None)
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+    conn = _make_persistent_connection("c", process=_ExitedProcess())
+    service._sessions["c"] = _Session("c", _Phase.CLOSING, persistent=True, connection=conn)
+
+    try:
+        with pytest.raises(terminal_service.TerminalServiceError, match="session_opening"):
+            await service.open("c")
+    finally:
+        service._sessions.clear()
+        terminal_service._close_fd(conn.master_fd)
+
+
 def test_closing_session_still_counts_against_cap(monkeypatch, tmp_path):
     asyncio.run(_closing_session_still_counts_against_cap(monkeypatch, tmp_path))
 

@@ -44,13 +44,16 @@ export const AppsFileBrowserPage: React.FC = () => {
   const [sysFavs, setSysFavs] = useState<Favorite[]>([]);
   const [selected, setSelected] = useState<Selected | null>(null);
 
-  // Bump a token per navigation so a slow earlier listDir() that resolves last can't
-  // overwrite cwd/listing with a stale directory (which would make New Folder / selection
-  // act in the wrong place).
+  // Tokens to drop stale async responses. navSeq guards directory listings; selSeq guards
+  // file-metadata selections. Every navigation bumps BOTH, so a slow earlier listDir() can't
+  // overwrite cwd/listing with a stale directory AND a pending fileMeta() can't repopulate the
+  // pane with a file after the user has moved to another directory (breadcrumb/favorite/toggle).
   const navSeq = useRef(0);
+  const selSeq = useRef(0);
   const navigate = useCallback(
     (path: string) => {
       const seq = ++navSeq.current;
+      selSeq.current += 1; // navigating away invalidates any in-flight file selection
       setLoading(true);
       setError(null);
       listDir(path, showHidden)
@@ -88,9 +91,6 @@ export const AppsFileBrowserPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showHidden]);
 
-  // Per-selection token: a slow fileMeta() for file A must not switch the pane back to A
-  // after the user has since clicked file B (or navigated away). Bumped on every click.
-  const selSeq = useRef(0);
   const openEntry = (entry: FsEntry) => {
     const seq = ++selSeq.current;
     const full = joinPath(cwd, entry.name);

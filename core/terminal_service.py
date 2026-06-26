@@ -190,7 +190,12 @@ class TerminalService:
         async with self._lock:
             self._forget_finished_locked()
             current = self._sessions.get(session_id)
-            if current is not None and current.phase is _Phase.OPENING:
+            if current is not None and current.phase in (_Phase.OPENING, _Phase.CLOSING):
+                # Either an open is in progress, or the session is mid-teardown (e.g. the
+                # reaper is awaiting a kill-session). Reject rather than reuse the id — a
+                # reconnect must not attach to a session that is being killed (which the
+                # delayed kill would then terminate). The client retries; once teardown
+                # finishes the slot is gone and the retry opens a fresh session.
                 raise TerminalServiceError("session_opening")
             if current is None and len(self._sessions) >= self.max_sessions:
                 raise TerminalServiceError("too_many_sessions")
