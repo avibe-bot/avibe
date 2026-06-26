@@ -173,6 +173,20 @@ def _row_sealed(row: dict[str, Any]) -> Sealed:
     return Sealed(ciphertext=row["ciphertext"], nonce=row["nonce"], wrap_meta=row["wrap_meta"])
 
 
+def _protected_unlock_material(row: dict[str, Any]) -> dict[str, Any] | None:
+    if row.get("protection") != "protected":
+        return None
+    return {
+        "name": row["name"],
+        "kind": row.get("kind"),
+        "envelope": {
+            "ciphertext": row["ciphertext"],
+            "nonce": row["nonce"],
+            "wrap_meta": row["wrap_meta"],
+        },
+    }
+
+
 def _grant_row_payload(row: dict[str, Any], *, cache: VaultGrantDekCache = GRANT_DEK_CACHE) -> dict[str, Any]:
     members = _loads(row.get("member_snapshot")) or []
     if not isinstance(members, list):
@@ -510,6 +524,24 @@ def record_proxy_use(conn: Connection, name: str, *, requester: Any = None, deli
     audit(conn, "proxied", secret_name=name, requester=requester, delivery=delivery)
 
 
+def record_signing_use(
+    conn: Connection,
+    name: str,
+    *,
+    requester: Any = None,
+    delivery: Any = None,
+    request_id: str | None = None,
+) -> None:
+    """Bump signing key usage + write a value-free ``signed`` audit row."""
+    _require_row(conn, name)
+    conn.execute(
+        vault_secrets.update()
+        .where(vault_secrets.c.name == name)
+        .values(last_used_at=_now(), use_count=vault_secrets.c.use_count + 1)
+    )
+    audit(conn, "signed", secret_name=name, requester=requester, delivery=delivery, request_id=request_id)
+
+
 def get_envelopes(conn: Connection, names: list[str]) -> dict[str, Sealed]:
     """Return the stored envelopes for the requested secrets (standard tier; no decrypt).
 
@@ -718,20 +750,21 @@ def _scope_option(
     *,
     default_ttl_seconds: int,
 ) -> dict[str, Any] | None:
-    members = [row["name"] for row in _grantable_member_rows(conn, scope_type, scope_ref)]
+    rows = _grantable_member_rows(conn, scope_type, scope_ref)
+    members = [row["name"] for row in rows]
     if not members:
         return None
-    capped_default = min(default_ttl_seconds, _ttl_cap_for_members(conn, members))
+    ttl_cap = _ttl_cap_for_members(conn, members)
+    capped_default = min(default_ttl_seconds, ttl_cap)
     return {
         "scope_type": scope_type,
         "scope_ref": scope_ref,
         "default_ttl_seconds": capped_default,
-        "ttl_options_seconds": [
-            seconds for seconds in GRANT_TTL_OPTIONS_SECONDS if seconds <= _ttl_cap_for_members(conn, members)
-        ],
+        "ttl_options_seconds": [seconds for seconds in GRANT_TTL_OPTIONS_SECONDS if seconds <= ttl_cap],
         "session_binding_default": True,
         "member_count": len(members),
         "member_snapshot": members,
+        "unlock_material": [material for row in rows if (material := _protected_unlock_material(row)) is not None],
     }
 
 
@@ -760,7 +793,7 @@ def approval_card(
             )
             if option is not None
         ]
-    return {
+    card = {
         "card_type": "approval",
         "request_id": request_id,
         "request_type": request_type,
@@ -774,6 +807,10 @@ def approval_card(
         "scope_options": scope_options,
         "value": None,
     }
+    secret_unlock_material = _protected_unlock_material(row)
+    if secret_unlock_material is not None:
+        card["secret_unlock_material"] = secret_unlock_material
+    return card
 
 
 def create_access_request(
@@ -859,6 +896,42 @@ def create_sign_request(
     return _request_row_payload(dict(row))
 
 
+def _signature_bytes(raw: str) -> bytes:
+    try:
+        return bytes.fromhex(raw)
+    except ValueError as exc:
+        raise InvalidRequestError("signature must be hex-encoded bytes") from exc
+
+
+def _validate_signature_payload(scheme: str, signature: dict[str, Any]) -> None:
+    if not isinstance(signature, dict):
+        raise InvalidRequestError("signature payload must be an object")
+    sig = signature.get("signature")
+    if not isinstance(sig, str) or not sig:
+        raise InvalidRequestError("signature payload requires a non-empty signature")
+    sig_bytes = _signature_bytes(sig)
+    recovery_id = signature.get("recovery_id")
+    if scheme == "ecdsa-secp256k1-recoverable":
+        if len(sig_bytes) != 64:
+            raise InvalidRequestError("recoverable secp256k1 signatures must be 64 bytes")
+        if type(recovery_id) is not int or recovery_id not in {0, 1, 2, 3}:
+            raise InvalidRequestError("recoverable secp256k1 signatures require recovery_id 0..3")
+        return
+    if scheme == "ecdsa-secp256k1-der":
+        if len(sig_bytes) < 8 or sig_bytes[0] != 0x30:
+            raise InvalidRequestError("DER secp256k1 signatures must be DER-encoded")
+        if recovery_id is not None:
+            raise InvalidRequestError("DER secp256k1 signatures must not include recovery_id")
+        return
+    if scheme == "schnorr-secp256k1-bip340":
+        if len(sig_bytes) != 64:
+            raise InvalidRequestError("BIP340 Schnorr signatures must be 64 bytes")
+        if recovery_id is not None:
+            raise InvalidRequestError("BIP340 Schnorr signatures must not include recovery_id")
+        return
+    raise InvalidRequestError(f"unsupported signature scheme: {scheme}")
+
+
 def complete_sign_request(
     conn: Connection,
     request_id: str,
@@ -883,9 +956,7 @@ def complete_sign_request(
     delivery_payload = delivery if isinstance(delivery, dict) else {}
     if delivery_payload.get("digest") != digest or delivery_payload.get("scheme") != scheme:
         raise InvalidRequestError("signature payload does not match the sign request")
-    sig = signature.get("signature")
-    if not isinstance(sig, str) or not sig:
-        raise InvalidRequestError("signature payload requires a non-empty signature")
+    _validate_signature_payload(scheme, signature)
     claim = conn.execute(
         vault_requests.update()
         .where(vault_requests.c.id == request_id, vault_requests.c.request_type == "sign", vault_requests.c.status == "pending")
@@ -893,10 +964,9 @@ def complete_sign_request(
     )
     if claim.rowcount != 1:
         raise InvalidRequestError("sign request is not pending")
-    audit(
+    record_signing_use(
         conn,
-        "signed",
-        secret_name=name,
+        name,
         requester=requester,
         delivery={"scheme": scheme, "digest": digest, "browser_signed": True},
         request_id=request_id,

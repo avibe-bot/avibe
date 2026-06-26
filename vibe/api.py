@@ -1602,10 +1602,9 @@ def vault_sign(payload: dict) -> dict:
     except AvaultError as exc:
         raise VaultApiError(f"avault sign failed: {exc}", code="avault_failed") from exc
     with engine.begin() as conn:
-        vault_service.audit(
+        vault_service.record_signing_use(
             conn,
-            "signed",
-            secret_name=name,
+            name,
             requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
             delivery={"scheme": scheme, "digest": digest},
         )
@@ -3551,6 +3550,7 @@ def _run_install_command(
 _ASKILL_INSTALL_LOCK = threading.Lock()
 _AVAULT_INSTALL_LOCK = threading.Lock()
 AVAULT_VERSION = "0.1.2"
+AVAULT_P2_MIN_VERSION = "0.1.3"
 _AVAULT_RELEASE_BASE_URL = f"https://github.com/avibe-bot/avault/releases/download/v{AVAULT_VERSION}/"
 
 
@@ -3896,6 +3896,43 @@ def avault_status() -> dict:
     return {"id": "avault", "installed": True, "version": version, "status": "ready", "path": path}
 
 
+def _version_at_least(current: str | None, minimum: str) -> bool:
+    if not current:
+        return False
+    try:
+        from packaging.version import InvalidVersion, Version
+
+        try:
+            return Version(current) >= Version(minimum)
+        except InvalidVersion:
+            pass
+    except Exception:  # pragma: no cover - packaging is a transitive dep
+        pass
+
+    def _parts(value: str) -> tuple[int, ...] | None:
+        core = value.split("+", 1)[0].split("-", 1)[0]
+        try:
+            return tuple(int(part) for part in core.split("."))
+        except ValueError:
+            return None
+
+    cur_parts = _parts(current)
+    min_parts = _parts(minimum)
+    if cur_parts is None or min_parts is None:
+        return False
+    width = max(len(cur_parts), len(min_parts))
+    return cur_parts + (0,) * (width - len(cur_parts)) >= min_parts + (0,) * (width - len(min_parts))
+
+
+def _require_avault_p2_surface(feature: str) -> None:
+    status = avault_status()
+    if not status.get("installed"):
+        raise AvaultError(f"avault is required for {feature}")
+    version = status.get("version")
+    if not _version_at_least(version, AVAULT_P2_MIN_VERSION):
+        raise AvaultError(f"{feature} requires avault >= {AVAULT_P2_MIN_VERSION}; installed {version or 'unknown'}")
+
+
 # ---------------------------------------------------------------------------
 # avault client — Avibe's only path to value cryptography.
 #
@@ -3985,6 +4022,7 @@ def avault_seal(name: str, value: bytes):
 
 def avault_pubkey() -> dict:
     """Return avault's blind-box public key + fingerprint."""
+    _require_avault_p2_surface("blind-box pubkey")
     proc = _run_avault(["pubkey"])
     if proc.returncode != 0:
         raise AvaultError(_avault_detail(proc) or "avault pubkey failed")
@@ -4020,6 +4058,7 @@ def avault_seal_blind_box(name_or_blind_box, blind_box: dict | None = None):
         name = str(name_or_blind_box or "")
     if not name:
         raise AvaultError("secret name is required for blind-box seal")
+    _require_avault_p2_surface("blind-box seal")
     body = json.dumps(blind_box).encode("utf-8")
     proc = _run_avault(["seal", "--name", name, "--blind-box"], stdin=body)
     if proc.returncode != 0:
@@ -4039,6 +4078,7 @@ def avault_sign(key_envelope, digest: str, scheme: str, dek_blindbox: dict | Non
     """Ask avault to sign a caller-computed 32-byte digest with a local key envelope."""
     if not name:
         raise AvaultError("secret name is required for avault sign")
+    _require_avault_p2_surface("vault signing")
     body = json.dumps(
         {
             "name": name,

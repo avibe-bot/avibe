@@ -423,6 +423,8 @@ def test_active_grant_list_expires_rows_without_process_cache(vault):
 def test_resolve_protected_without_grant_returns_approval_card(vault):
     _create(vault, name="PROTECTED_KEY", protection="protected", group="crypto")
     with vault.begin() as conn:
+        vs.create_secret(conn, name="GROUP_KEY", protection="protected", group="crypto", sealed=_sealed("group"))
+    with vault.begin() as conn:
         result = vs.resolve_secret_access(
             conn,
             "PROTECTED_KEY",
@@ -437,6 +439,25 @@ def test_resolve_protected_without_grant_returns_approval_card(vault):
     assert card["command"] == "python sync.py"
     assert any(option["scope_type"] == "secret" for option in card["scope_options"])
     assert all("value" not in json.dumps(option) for option in card["scope_options"])
+    assert card["secret_unlock_material"] == {
+        "name": "PROTECTED_KEY",
+        "kind": "static",
+        "envelope": {"ciphertext": "ct-1", "nonce": "n-1", "wrap_meta": "wm-1"},
+    }
+    group_option = next(option for option in card["scope_options"] if option["scope_type"] == "group")
+    assert group_option["member_snapshot"] == ["GROUP_KEY", "PROTECTED_KEY"]
+    assert group_option["unlock_material"] == [
+        {
+            "name": "GROUP_KEY",
+            "kind": "static",
+            "envelope": {"ciphertext": "ct-group", "nonce": "n-group", "wrap_meta": "wm-group"},
+        },
+        {
+            "name": "PROTECTED_KEY",
+            "kind": "static",
+            "envelope": {"ciphertext": "ct-1", "nonce": "n-1", "wrap_meta": "wm-1"},
+        },
+    ]
 
 
 def test_resolve_access_card_uses_delivery_session_fallback(vault):
@@ -599,7 +620,7 @@ def test_sign_request_completion_can_only_claim_pending_once(vault):
             name="ETH_KEY",
             digest=digest,
             scheme="ecdsa-secp256k1-recoverable",
-            signature={"signature": "sig-1"},
+            signature={"signature": "ab" * 64, "recovery_id": 1},
         )
         with pytest.raises(vs.InvalidRequestError):
             vs.complete_sign_request(
@@ -608,15 +629,48 @@ def test_sign_request_completion_can_only_claim_pending_once(vault):
                 name="ETH_KEY",
                 digest=digest,
                 scheme="ecdsa-secp256k1-recoverable",
-                signature={"signature": "sig-2"},
+                signature={"signature": "cd" * 64, "recovery_id": 1},
             )
         signed_events = [
             row["event"]
             for row in conn.execute(select(vault_audit.c.event).where(vault_audit.c.event == "signed")).mappings()
         ]
+        meta = vs.get_secret_meta(conn, "ETH_KEY")
 
     assert first["status"] == "approved"
     assert signed_events == ["signed"]
+    assert meta["use_count"] == 1
+    assert meta["last_used_at"] is not None
+
+
+def test_sign_request_completion_rejects_malformed_signatures(vault):
+    _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
+    digest = "00" * 32
+    with vault.begin() as conn:
+        req = vs.create_sign_request(conn, "ETH_KEY", digest=digest, scheme="ecdsa-secp256k1-recoverable")
+        with pytest.raises(vs.InvalidRequestError):
+            vs.complete_sign_request(
+                conn,
+                req["id"],
+                name="ETH_KEY",
+                digest=digest,
+                scheme="ecdsa-secp256k1-recoverable",
+                signature={"signature": "not-hex", "recovery_id": 1},
+            )
+        with pytest.raises(vs.InvalidRequestError):
+            vs.complete_sign_request(
+                conn,
+                req["id"],
+                name="ETH_KEY",
+                digest=digest,
+                scheme="ecdsa-secp256k1-recoverable",
+                signature={"signature": "ab" * 64},
+            )
+        status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == req["id"])).scalar_one()
+        meta = vs.get_secret_meta(conn, "ETH_KEY")
+
+    assert status == "pending"
+    assert meta["use_count"] == 0
 
 
 def test_skill_grant_uses_vault_links(vault):
