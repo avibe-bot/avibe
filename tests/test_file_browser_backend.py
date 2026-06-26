@@ -1015,6 +1015,49 @@ def test_move_overwrite_cross_filesystem_file_restores_backup_when_source_unlink
     assert not list(tmp_path.glob(".avibe-overwrite-*"))
 
 
+def test_move_overwrite_preserves_foreign_target_created_after_backup(tmp_path, monkeypatch):
+    source = tmp_path / "src.txt"
+    source.write_text("source", encoding="utf-8")
+    destination = tmp_path / "dst.txt"
+    destination.write_text("old destination", encoding="utf-8")
+
+    def foreign_target_conflict(src: Path, dst: Path, *, on_target_placed=None) -> None:
+        destination.write_text("foreign target", encoding="utf-8")
+        raise fs.ConflictError("exists", "Destination already exists")
+
+    monkeypatch.setattr(fs, "_move_to_absent_target", foreign_target_conflict)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.move_path(str(source), str(destination), overwrite=True)
+
+    assert exc.value.code == "exists"
+    assert destination.read_text(encoding="utf-8") == "foreign target"
+    backups = list(tmp_path.glob(".avibe-overwrite-*"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == "old destination"
+    assert source.read_text(encoding="utf-8") == "source"
+
+
+def test_move_overwrite_restores_backup_when_move_fails_before_target_placed(tmp_path, monkeypatch):
+    source = tmp_path / "src.txt"
+    source.write_text("source", encoding="utf-8")
+    destination = tmp_path / "dst.txt"
+    destination.write_text("old destination", encoding="utf-8")
+
+    def fail_before_target_placed(src: Path, dst: Path, *, on_target_placed=None) -> None:
+        raise PermissionError(errno.EACCES, "permission denied", str(dst))
+
+    monkeypatch.setattr(fs, "_move_to_absent_target", fail_before_target_placed)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.move_path(str(source), str(destination), overwrite=True)
+
+    assert exc.value.code == "fs_error"
+    assert destination.read_text(encoding="utf-8") == "old destination"
+    assert source.read_text(encoding="utf-8") == "source"
+    assert not list(tmp_path.glob(".avibe-overwrite-*"))
+
+
 def test_move_overwrite_cross_filesystem_directory_keeps_target_when_source_removal_partially_fails(
     tmp_path, monkeypatch
 ):

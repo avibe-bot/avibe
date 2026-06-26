@@ -1816,6 +1816,83 @@ def test_terminal_websocket_accepts_remote_exact_trusted_origin(monkeypatch, tmp
     assert accepted is True
 
 
+def test_terminal_effective_session_id_scopes_remote_subjects():
+    client_id = "shared-session"
+
+    user_one_first = ui_server._terminal_effective_session_id(client_id, "user-1")
+    user_one_second = ui_server._terminal_effective_session_id(client_id, "user-1")
+    user_two = ui_server._terminal_effective_session_id(client_id, "user-2")
+
+    assert user_one_first == user_one_second
+    assert user_one_first != user_two
+    assert user_one_first.endswith("-shared-session")
+    assert ui_server._terminal_effective_session_id(client_id, None) == client_id
+
+
+@pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
+def test_terminal_websocket_scopes_remote_session_id_by_authenticated_subject(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    handled_session_ids: list[str] = []
+
+    async def fake_handle_websocket(websocket, session_id):
+        handled_session_ids.append(session_id)
+
+    monkeypatch.setattr(ui_server.get_terminal_service(), "handle_websocket", fake_handle_websocket)
+
+    def connect_as(subject: str) -> None:
+        client = app.test_client()
+        client.set_cookie(
+            remote_access.SESSION_COOKIE_NAME,
+            remote_access.make_session_cookie(config, f"{subject}@example.com", subject),
+            domain="alex.avibe.bot",
+        )
+        with client.websocket_connect(
+            "wss://alex.avibe.bot/api/terminal/shared-session",
+            headers={
+                "host": "alex.avibe.bot",
+                "origin": "https://alex.avibe.bot",
+                "x-forwarded-for": "203.0.113.10",
+            },
+        ):
+            pass
+
+    connect_as("user-1")
+    connect_as("user-1")
+    connect_as("user-2")
+
+    assert handled_session_ids[0] == handled_session_ids[1]
+    assert handled_session_ids[0] != handled_session_ids[2]
+    assert all(session_id.endswith("-shared-session") for session_id in handled_session_ids)
+
+
+@pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
+def test_terminal_websocket_keeps_local_session_id_unscoped(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config_with_setup_host(tmp_path, "192.168.2.3")
+    _mock_interface(monkeypatch, "192.168.2.3", 24)
+    handled_session_ids: list[str] = []
+
+    async def fake_handle_websocket(websocket, session_id):
+        handled_session_ids.append(session_id)
+
+    monkeypatch.setattr(ui_server.get_terminal_service(), "handle_websocket", fake_handle_websocket)
+
+    with app.test_client().websocket_connect(
+        "/api/terminal/local-session",
+        headers={
+            "host": "192.168.2.3:5123",
+            "origin": "http://192.168.2.3:5123",
+            "x-vibe-test-remote-addr": "192.168.2.5",
+        },
+    ):
+        pass
+
+    assert handled_session_ids == ["local-session"]
+
+
 def test_setup_host_with_public_peer_is_not_local(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "192.168.2.3")

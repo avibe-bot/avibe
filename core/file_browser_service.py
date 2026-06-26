@@ -773,12 +773,18 @@ def _reserve_backup_path(target: Path) -> Path:
     raise FileBrowserError("fs_error", "Could not reserve overwrite backup path", 400)
 
 
-def _restore_move_backup(backup: Path, target: Path) -> None:
+def _restore_move_backup(backup: Path, target: Path, *, replace_target: bool) -> None:
     if not _exists_no_follow(backup):
         return
-    if _exists_no_follow(target):
+    if replace_target and _exists_no_follow(target):
         _remove_backup_path(target)
-    backup.rename(target)
+    try:
+        _os_rename_noreplace(backup, target)
+    except ConflictError:
+        if not replace_target:
+            logger.debug("Leaving overwrite backup in place because target is occupied during restore")
+            return
+        raise
 
 
 def _handle_failed_overwrite_move(
@@ -791,7 +797,7 @@ def _handle_failed_overwrite_move(
     if source_was_dir and target_was_placed and _exists_no_follow(target):
         _remove_path_if_exists_best_effort(backup)
         return
-    _restore_move_backup(backup, target)
+    _restore_move_backup(backup, target, replace_target=target_was_placed)
 
 
 def _can_delete_placed_target_after_source_removal_failure(source: Path) -> bool:

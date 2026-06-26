@@ -2121,12 +2121,14 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
 
     await websocket.accept()
     remote_addr = _websocket_client_host(websocket) or "unknown"
-    safe_session_id = sanitize_session_id(session_id)
-    logger.info("terminal.session_open session=%s remote_addr=%s", safe_session_id, remote_addr)
+    remote_subject = _remote_access_websocket_subject(websocket)
+    effective_session_id = _terminal_effective_session_id(session_id, remote_subject)
+    session_ref = _terminal_session_log_ref(effective_session_id)
+    logger.info("terminal.session_open session_ref=%s remote_addr=%s", session_ref, remote_addr)
     try:
         service = get_terminal_service()
         service.start_reaper()
-        await service.handle_websocket(websocket, session_id)
+        await service.handle_websocket(websocket, effective_session_id)
     except TerminalServiceError as exc:
         # Transient "try again shortly" conditions (not server faults): too_many_sessions (cap
         # full) and session_opening (the id is mid-open or mid-teardown). Close with 1013 so
@@ -2139,7 +2141,7 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
         logger.debug("Terminal websocket failed", exc_info=True)
         await websocket.close(code=1011)
     finally:
-        logger.info("terminal.session_close session=%s remote_addr=%s", safe_session_id, remote_addr)
+        logger.info("terminal.session_close session_ref=%s remote_addr=%s", session_ref, remote_addr)
 
 
 def _show_runtime_websocket_authorized(websocket: WebSocket) -> bool:
@@ -2150,14 +2152,43 @@ def _show_runtime_websocket_authorized(websocket: WebSocket) -> bool:
         return True
     if _websocket_normalized_host(websocket) != _remote_access_public_host(config):
         return False
+    return _remote_access_websocket_session_payload(websocket, config) is not None
+
+
+def _remote_access_websocket_session_payload(websocket: WebSocket, config: V2Config | None) -> dict[str, Any] | None:
+    if config is None or _websocket_is_local_request(websocket, config):
+        return None
+    if _websocket_normalized_host(websocket) != _remote_access_public_host(config):
+        return None
     from vibe import remote_access
 
     if not config.remote_access.vibe_cloud.enabled or not config.remote_access.vibe_cloud.session_secret:
-        return False
+        return None
     return remote_access.parse_session_cookie(
         config,
         websocket.cookies.get(remote_access.SESSION_COOKIE_NAME),
-    ) is not None
+    )
+
+
+def _remote_access_websocket_subject(websocket: WebSocket) -> str | None:
+    payload = _remote_access_websocket_session_payload(websocket, _load_remote_access_config())
+    if not payload:
+        return None
+    subject = str(payload.get("sub") or "").strip()
+    email = str(payload.get("email") or "").strip()
+    return subject or email or None
+
+
+def _terminal_effective_session_id(client_session_id: str, remote_subject: str | None) -> str:
+    safe_client_id = sanitize_session_id(client_session_id)
+    if not remote_subject:
+        return safe_client_id
+    subject_hash = hashlib.sha256(remote_subject.encode("utf-8")).hexdigest()[:16]
+    return f"{subject_hash}-{safe_client_id[:63]}"
+
+
+def _terminal_session_log_ref(effective_session_id: str) -> str:
+    return hashlib.sha256(effective_session_id.encode("utf-8")).hexdigest()[:16]
 
 
 def _terminal_origin_allowed(websocket: WebSocket) -> bool:
