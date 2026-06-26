@@ -3253,31 +3253,34 @@ def _run_install_command(
             # pre-upgrade value.
             _invalidate_version_cache(name)
 
-            # Persist the freshly-discovered install path to V2Config so the
-            # next ``get_backend_runtime`` reads it directly instead of
-            # relying on the resolver's stale-path fallback. Self-update
-            # commands normally keep the binary at the same path so this is
-            # a no-op for upgrades, but fresh installs after a missing
-            # bootstrap (or an installer that moves the file) need it.
-            if installed_path:
+            # Persist real Agent backend CLI paths to V2Config so the next
+            # ``get_backend_runtime`` reads them directly instead of relying
+            # on the resolver's stale-path fallback. Local dependencies such
+            # as askill reuse this runner but do not have ``agents.<name>``
+            # config entries, so they must not touch V2Config bookkeeping.
+            if installed_path and is_agent_backend(name):
                 try:
                     with CONFIG_LOCK:
                         try:
                             cfg = load_config()
                         except FileNotFoundError:
-                            cfg = V2Config()
-                        target = getattr(getattr(cfg, "agents", None), name, None)
-                        if target is not None:
-                            previous = getattr(target, "cli_path", "") or ""
-                            if previous != installed_path:
-                                target.cli_path = installed_path
-                                cfg.save()
-                                logger.info(
-                                    "install_agent: updated V2Config cli_path for %s: %s -> %s",
-                                    name,
-                                    previous or "<unset>",
-                                    installed_path,
-                                )
+                            logger.debug(
+                                "install_agent: config is not initialized; skipping cli_path persistence for %s",
+                                name,
+                            )
+                        else:
+                            target = getattr(getattr(cfg, "agents", None), name, None)
+                            if target is not None:
+                                previous = getattr(target, "cli_path", "") or ""
+                                if previous != installed_path:
+                                    target.cli_path = installed_path
+                                    cfg.save()
+                                    logger.info(
+                                        "install_agent: updated V2Config cli_path for %s: %s -> %s",
+                                        name,
+                                        previous or "<unset>",
+                                        installed_path,
+                                    )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "install_agent: failed to persist cli_path for %s: %s",
@@ -3321,10 +3324,9 @@ def install_askill() -> dict:
     """Install (or refresh) the askill CLI — a required local dependency for Skills.
 
     Uses the official one-line installer (same shape as the OpenCode bootstrap
-    in ``install_agent``), with an npm fallback. Runs through
-    ``_run_install_command``, which already skips the ``agents.<name>.cli_path``
-    write when there is no ``agents.askill`` attribute, so it is safe for a
-    standalone (non-agent) tool.
+    in ``install_agent``). Runs through ``_run_install_command``, whose
+    V2Config cli_path bookkeeping is limited to real Agent backends, so it is
+    safe for a standalone local dependency.
     """
     import platform
 
