@@ -1736,6 +1736,65 @@ def test_terminal_websocket_accepts_setup_host_origin_from_same_port(monkeypatch
     assert accepted is True
 
 
+@pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
+def test_terminal_websocket_rejects_remote_same_host_different_origin(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        domain="alex.avibe.bot",
+    )
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect(
+            "wss://alex.avibe.bot/api/terminal/test",
+            headers={
+                "host": "alex.avibe.bot",
+                "origin": "https://alex.avibe.bot:8443",
+                "x-forwarded-for": "203.0.113.10",
+            },
+        ):
+            pass
+
+    assert exc.value.code == 1008
+
+
+@pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
+@pytest.mark.parametrize("origin", ["https://alex.avibe.bot", "https://alex.avibe.bot:443"])
+def test_terminal_websocket_accepts_remote_exact_trusted_origin(monkeypatch, tmp_path, origin):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    accepted = False
+
+    async def fake_handle_websocket(websocket, session_id):
+        nonlocal accepted
+        accepted = True
+
+    monkeypatch.setattr(ui_server.get_terminal_service(), "handle_websocket", fake_handle_websocket)
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        domain="alex.avibe.bot",
+    )
+
+    with client.websocket_connect(
+        "wss://alex.avibe.bot/api/terminal/test",
+        headers={
+            "host": "alex.avibe.bot",
+            "origin": origin,
+            "x-forwarded-for": "203.0.113.10",
+        },
+    ):
+        pass
+
+    assert accepted is True
+
+
 def test_setup_host_with_public_peer_is_not_local(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     _save_config_with_setup_host(tmp_path, "192.168.2.3")

@@ -322,6 +322,21 @@ def test_rename_same_name_is_noop(tmp_path):
     assert dst.read_text(encoding="utf-8") == "DST"
 
 
+def test_rename_to_different_hard_link_of_same_inode_is_conflict(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("source", encoding="utf-8")
+    target = tmp_path / "target.txt"
+    os.link(source, target)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.rename_path(str(source), "target.txt")
+
+    assert exc.value.code == "exists"
+    assert source.read_text(encoding="utf-8") == "source"
+    assert target.read_text(encoding="utf-8") == "source"
+    assert fs._same_entry_no_follow(source, target)
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="case-only rename behavior depends on case-insensitive filesystem")
 def test_rename_case_only_same_inode_is_allowed_on_case_insensitive_fs(tmp_path):
     source = tmp_path / "case.txt"
@@ -634,6 +649,33 @@ def test_move_overwrite_restores_destination_when_move_fails(tmp_path, monkeypat
     assert source.read_text(encoding="utf-8") == "source"
     assert destination.read_text(encoding="utf-8") == "destination"
     assert not list(tmp_path.glob(".destination.txt.avibe-overwrite-*"))
+
+
+def test_move_overwrite_uses_bounded_backup_name_for_long_destination(tmp_path, monkeypatch):
+    source = tmp_path / "source.txt"
+    source.write_text("source", encoding="utf-8")
+    long_name = "d" * 255
+    destination = tmp_path / long_name
+    destination.write_text("destination", encoding="utf-8")
+    reserved: list[Path] = []
+    real_reserve_backup_path = fs._reserve_backup_path
+
+    def capture_reserve(target: Path) -> Path:
+        backup = real_reserve_backup_path(target)
+        reserved.append(backup)
+        return backup
+
+    monkeypatch.setattr(fs, "_reserve_backup_path", capture_reserve)
+
+    assert fs.move_path(str(source), str(destination), overwrite=True) == {"ok": True}
+
+    assert destination.read_text(encoding="utf-8") == "source"
+    assert len(reserved) == 1
+    assert reserved[0].parent == tmp_path
+    assert reserved[0].name.startswith(".avibe-overwrite-")
+    assert len(reserved[0].name) < 64
+    assert long_name not in reserved[0].name
+    assert not reserved[0].exists()
 
 
 def test_move_symlink_onto_its_target_is_refused(tmp_path):

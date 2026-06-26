@@ -1034,9 +1034,33 @@ def _remote_access_public_host(config: V2Config) -> str | None:
     return _normalized_host(parsed.hostname)
 
 
+def _remote_access_public_origin(config: V2Config) -> str | None:
+    public_url = (config.remote_access.vibe_cloud.public_url or "").strip()
+    if not public_url:
+        return ""
+    parsed = urlparse(public_url)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc.lower().rstrip('.')}"
+
+
+def _origin_identity(value: str) -> tuple[str, str, int | None] | None:
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.hostname or parsed.username or parsed.password:
+        return None
+    return (parsed.scheme.lower(), _normalized_host(parsed.hostname), _origin_port(parsed.netloc, parsed.scheme))
+
+
+def _remote_access_public_origin_matches(origin: str, config: V2Config) -> bool:
+    trusted_origin = _remote_access_public_origin(config)
+    if not trusted_origin:
+        return False
+    return _origin_identity(origin) == _origin_identity(trusted_origin)
+
+
 def _remote_access_public_url_invalid(config: V2Config) -> bool:
     cloud = config.remote_access.vibe_cloud
-    return bool(cloud.enabled and not _remote_access_public_host(config))
+    return bool(cloud.enabled and not _remote_access_public_origin(config))
 
 
 def _remote_access_snapshot(config: V2Config) -> dict[str, Any]:
@@ -2085,9 +2109,9 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
         await websocket.accept()
         await websocket.close(code=1008)
         return
-    # CSWSH guard. Remote terminals have a session cookie and may sit behind a
-    # TLS proxy, so host match is the stable check there. Local trusted terminal
-    # sockets have no cookie gate, so the Origin must match the exact socket too.
+    # CSWSH guard. Local trusted terminal sockets have no cookie gate, so the
+    # Origin must match the exact socket. Remote terminals are cookie-authenticated,
+    # so pin them to the configured public origin as well.
     if not _terminal_origin_allowed(websocket):
         await websocket.close(code=1008)
         return
@@ -2152,7 +2176,9 @@ def _terminal_origin_allowed(websocket: WebSocket) -> bool:
     # need the host match already verified above.
     config = _load_remote_access_config()
     if not _websocket_is_local_request(websocket, config):
-        return True
+        if config is None:
+            return False
+        return _remote_access_public_origin_matches(origin, config)
     origin_port = _origin_port(parsed_origin.netloc, parsed_origin.scheme)
     request_port = _origin_port(websocket.headers.get("host"), websocket.url.scheme)
     return origin_port == request_port and _terminal_origin_scheme_matches_socket(

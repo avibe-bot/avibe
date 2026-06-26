@@ -16,7 +16,7 @@ import threading
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from sysconfig import get_platform
 from typing import Any
 
@@ -542,6 +542,10 @@ def _safe_extract_tar(tar: tarfile.TarFile, destination: Path) -> None:
     for member in tar.getmembers():
         if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
             raise ValueError(f"Unsupported tmux archive member type: {member.name}")
+        if _tar_archive_path_is_unsafe(member.name):
+            raise ValueError(f"Unsafe tmux archive member path: {member.name}")
+        if (member.issym() or member.islnk()) and _tar_archive_path_is_unsafe(member.linkname):
+            raise ValueError(f"Unsafe tmux archive link target: {member.name}")
         target = (destination / member.name).resolve()
         if target != destination_resolved and destination_resolved not in target.parents:
             raise ValueError(f"Unsafe tmux archive member path: {member.name}")
@@ -556,9 +560,21 @@ def _safe_extract_tar(tar: tarfile.TarFile, destination: Path) -> None:
             if resolved_link != destination_resolved and destination_resolved not in resolved_link.parents:
                 raise ValueError(f"Unsafe tmux archive link target: {member.name}")
     if sys.version_info >= (3, 12):
-        tar.extractall(destination, filter="fully_trusted")
+        tar.extractall(destination, filter="data")
     else:
         tar.extractall(destination)
+
+
+def _tar_archive_path_is_unsafe(value: str) -> bool:
+    if not value:
+        return True
+    posix_path = PurePosixPath(value)
+    windows_path = PureWindowsPath(value)
+    if posix_path.is_absolute() or windows_path.is_absolute():
+        return True
+    if windows_path.drive or windows_path.root:
+        return True
+    return ".." in posix_path.parts or ".." in windows_path.parts
 
 
 def _file_sha256(path: Path) -> str:

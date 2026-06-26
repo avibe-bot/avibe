@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import stat
+import io
 import tarfile
 from pathlib import Path
 
@@ -193,6 +194,58 @@ def test_safe_extract_tar_omits_filter_before_python_312(tmp_path: Path, monkeyp
 
     assert calls == [None]
     assert (destination / "tmux").is_file()
+
+
+def test_safe_extract_tar_uses_data_filter_on_python_312_plus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    archive = _write_tmux_archive(tmp_path)
+    destination = tmp_path / "extract"
+    destination.mkdir()
+    calls: list[object] = []
+
+    class VersionInfo(tuple):
+        major = 3
+        minor = 12
+
+    with tarfile.open(archive, "r:gz") as tar:
+        original_extractall = tar.extractall
+
+        def capture_extractall(path, members=None, *, numeric_owner=False, filter=None):
+            calls.append(filter)
+            return original_extractall(path, members=members, numeric_owner=numeric_owner, filter=filter)
+
+        monkeypatch.setattr(tmux_runtime.sys, "version_info", VersionInfo((3, 12, 0)))
+        monkeypatch.setattr(tar, "extractall", capture_extractall)
+        tmux_runtime._safe_extract_tar(tar, destination)
+
+    assert calls == ["data"]
+    assert (destination / "tmux").is_file()
+
+
+def test_safe_extract_tar_rejects_symlink_assisted_dotdot_member(tmp_path: Path) -> None:
+    archive = tmp_path / "tmux-symlink-dotdot-escape.tar.gz"
+    destination = tmp_path / "extract"
+    destination.mkdir()
+    outside = tmp_path / "victim"
+
+    with tarfile.open(archive, "w:gz") as tar:
+        link = tarfile.TarInfo("link")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "."
+        tar.addfile(link)
+
+        payload = b"escaped"
+        member = tarfile.TarInfo("link/../victim")
+        member.size = len(payload)
+        member.mode = 0o644
+        tar.addfile(member, io.BytesIO(payload))
+
+    with tarfile.open(archive, "r:gz") as tar:
+        with pytest.raises(ValueError, match="Unsafe tmux archive member path"):
+            tmux_runtime._safe_extract_tar(tar, destination)
+
+    assert not outside.exists()
+    assert not (destination / "victim").exists()
+    assert not (destination / "link").exists()
 
 
 def test_safe_extract_tar_rejects_root_escaping_hard_link(tmp_path: Path) -> None:

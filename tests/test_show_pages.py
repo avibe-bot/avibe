@@ -1,6 +1,8 @@
 import json
 from dataclasses import dataclass
 
+import pytest
+
 from config import paths
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
 from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir, show_cli_event_token, show_page_payload
@@ -149,6 +151,24 @@ def test_runtime_prepare_cli_skips_avault_offline(monkeypatch, capsys):
     assert seen == {"askill": True, "avault": True, "tmux": {"offline": True, "force": False}}
     assert payload["avault"] == {"ok": True, "skipped": True, "reason": "offline"}
     assert payload["tmux"] == {"ok": True, "skipped": True, "reason": "offline"}
+
+
+def test_runtime_prepare_tmux_respects_terminal_disabled(monkeypatch):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "0")
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_TMUX", raising=False)
+    monkeypatch.setattr("core.tmux_runtime.ensure_tmux_installed", lambda force=False: pytest.fail("tmux install should be skipped"))
+
+    assert cli._ensure_tmux_during_prepare() == {"ok": True, "status": "skipped", "reason": "terminal_disabled"}
+
+
+def test_runtime_prepare_tmux_runs_when_terminal_enabled(monkeypatch):
+    calls = []
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_TMUX", raising=False)
+    monkeypatch.setattr("core.tmux_runtime.ensure_tmux_installed", lambda force=False: calls.append(force) or {"ok": True})
+
+    assert cli._ensure_tmux_during_prepare(force=True) == {"ok": True}
+    assert calls == [True]
 
 
 def _save_config() -> V2Config:

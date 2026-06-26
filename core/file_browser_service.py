@@ -158,6 +158,30 @@ def _same_entry_no_follow(left: Path, right: Path) -> bool:
     return (left_stat.st_dev, left_stat.st_ino) == (right_stat.st_dev, right_stat.st_ino)
 
 
+def _same_directory_entry(left: Path, right: Path) -> bool:
+    try:
+        left_parent = left.parent.resolve(strict=True)
+        right_parent = right.parent.resolve(strict=True)
+        left_stat = left.lstat()
+    except (OSError, RuntimeError):
+        return False
+    if left_parent != right_parent:
+        return False
+    if left.name == right.name:
+        return True
+    same_inode_entries = 0
+    for entry in left_parent.iterdir():
+        try:
+            entry_stat = entry.lstat()
+        except OSError:
+            continue
+        if (entry_stat.st_dev, entry_stat.st_ino) == (left_stat.st_dev, left_stat.st_ino):
+            same_inode_entries += 1
+            if same_inode_entries > 1:
+                return False
+    return same_inode_entries == 1
+
+
 def _is_dir_no_follow(path: Path) -> bool:
     try:
         return stat.S_ISDIR(path.lstat().st_mode)
@@ -604,14 +628,15 @@ def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
     name = _validate_new_name(new_name)
     target = source.with_name(name)
     same_entry = _same_entry_no_follow(source, target)
-    if same_entry and name == source.name:
+    same_directory_entry = same_entry and _same_directory_entry(source, target)
+    if same_directory_entry and name == source.name:
         return {"ok": True, "path": str(source)}
-    if _exists_no_follow(target) and not same_entry:
+    if _exists_no_follow(target) and not same_directory_entry:
         raise ConflictError("exists", "Destination already exists")
 
     def _rename() -> dict[str, Any]:
         try:
-            if same_entry:
+            if same_directory_entry:
                 source.rename(target)
                 return {"ok": True, "path": str(target)}
             # Atomic no-replace rename: never clobber a destination that appears between the
@@ -717,7 +742,7 @@ def _copy_cross_fs_move_to_absent_target(source: Path, target: Path) -> None:
 
 def _reserve_backup_path(target: Path) -> Path:
     for _ in range(100):
-        candidate = target.with_name(f".{target.name}.avibe-overwrite-{uuid.uuid4().hex}")
+        candidate = target.with_name(f".avibe-overwrite-{uuid.uuid4().hex}")
         if not _exists_no_follow(candidate):
             return candidate
     raise FileBrowserError("fs_error", "Could not reserve overwrite backup path", 400)

@@ -63,6 +63,8 @@ from storage.settings_service import make_scope_id
 
 logger = logging.getLogger(__name__)
 UV_TOOL_PACKAGE_NAMES = (PACKAGE_NAME, LEGACY_PACKAGE_NAME)
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+_FALSY_ENV_VALUES = {"0", "false", "no", "off"}
 
 WATCH_STARTUP_STABLE_RUNNING_SECONDS = 1.5
 WATCH_STARTUP_JITTER_BUFFER_SECONDS = 1.0
@@ -6386,7 +6388,7 @@ def _ensure_askill_during_prepare(offline: bool = False) -> dict:
     """
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
-    if os.environ.get("VIBE_INSTALL_SKIP_ASKILL", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if os.environ.get("VIBE_INSTALL_SKIP_ASKILL", "").strip().lower() in _TRUTHY_ENV_VALUES:
         return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_ASKILL"}
     try:
         return api.ensure_askill_installed(force=True)
@@ -6402,7 +6404,9 @@ def _ensure_tmux_during_prepare(offline: bool = False, force: bool = False) -> d
     """
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
-    if os.environ.get("VIBE_INSTALL_SKIP_TMUX", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if os.environ.get("VIBE_UI_ENABLE_TERMINAL", "").strip().lower() in _FALSY_ENV_VALUES:
+        return {"ok": True, "status": "skipped", "reason": "terminal_disabled"}
+    if os.environ.get("VIBE_INSTALL_SKIP_TMUX", "").strip().lower() in _TRUTHY_ENV_VALUES:
         return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_TMUX"}
     try:
         from core.tmux_runtime import ensure_tmux_installed
@@ -6416,7 +6420,7 @@ def _ensure_avault_during_prepare(offline: bool = False) -> dict:
     """Ensure avault (the Vault custody core) alongside other local deps."""
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
-    if os.environ.get("VIBE_INSTALL_SKIP_AVAULT", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if os.environ.get("VIBE_INSTALL_SKIP_AVAULT", "").strip().lower() in _TRUTHY_ENV_VALUES:
         return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_AVAULT"}
     try:
         return api.ensure_avault_installed(force=True)
