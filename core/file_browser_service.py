@@ -181,7 +181,7 @@ def _rename_no_replace(source: Path, target: Path) -> None:
     except OSError:
         _os_rename_noreplace(source, target)
         return
-    os.unlink(source)
+    _unlink_source_after_hard_link(source, target)
 
 
 def _os_rename_noreplace(source: Path, target: Path) -> None:
@@ -207,7 +207,7 @@ def _os_rename_noreplace(source: Path, target: Path) -> None:
         if exc.errno == errno.EXDEV:
             raise
     else:
-        os.unlink(source)
+        _unlink_source_after_hard_link(source, target)
         return
 
     _warn_rename_noreplace_fallback()
@@ -217,6 +217,24 @@ def _os_rename_noreplace(source: Path, target: Path) -> None:
     # that appears after this check, notably an empty directory during directory
     # rename. Linux deployments should take the atomic renameat2 path above.
     source.rename(target)
+
+
+def _unlink_source_after_hard_link(source: Path, target: Path) -> None:
+    try:
+        os.unlink(source)
+    except OSError:
+        _remove_created_hard_link(target, source)
+        raise
+
+
+def _remove_created_hard_link(target: Path, source: Path) -> None:
+    try:
+        source_stat = source.lstat()
+        target_stat = target.lstat()
+        if (source_stat.st_dev, source_stat.st_ino) == (target_stat.st_dev, target_stat.st_ino):
+            os.unlink(target)
+    except OSError:
+        logger.debug("Failed to remove rollback hard link after no-replace rename failure", exc_info=True)
 
 
 def _glibc_renameat2_noreplace(source: Path, target: Path) -> None:
@@ -502,10 +520,10 @@ def write_file(raw_path: str, content: str, *, expected_mtime: float | None = No
                 raise FileBrowserError("is_symlink", "Refusing to write through a symlink", 400)
             if target.exists() and not target.is_file():
                 raise FileBrowserError("not_file", "Path is not a regular file", 400)
-            mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else None
             fd = -1
             temp_name = ""
             try:
+                mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else None
                 fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=parent)
                 if mode is not None:
                     os.fchmod(fd, mode)
@@ -526,6 +544,10 @@ def write_file(raw_path: str, content: str, *, expected_mtime: float | None = No
                 _fsync_dir(parent)
                 stat_result = target.stat()
                 return {"ok": True, "mtime": _mtime_seconds(stat_result)}
+            except PermissionError as exc:
+                raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
+            except OSError as exc:
+                raise FileBrowserError("fs_error", str(exc), 400) from exc
             finally:
                 if fd >= 0:
                     os.close(fd)

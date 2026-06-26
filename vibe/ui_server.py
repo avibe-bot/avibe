@@ -2077,10 +2077,12 @@ async def public_show_runtime_hmr_websocket(websocket: WebSocket, share_id: str)
 @app.websocket("/api/terminal/{session_id}")
 async def terminal_websocket(websocket: WebSocket, session_id: str):
     if not _terminal_enabled():
+        await websocket.accept()
         await websocket.close(code=1008)
         return
     if not TERMINAL_SUPPORTED:
         # POSIX-only — no PTY/tmux on native Windows.
+        await websocket.accept()
         await websocket.close(code=1008)
         return
     # CSWSH guard. Remote terminals have a session cookie and may sit behind a

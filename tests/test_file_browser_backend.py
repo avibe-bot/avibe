@@ -375,6 +375,46 @@ def test_write_is_atomic_and_detects_mtime_conflict(tmp_path):
     assert not list(tmp_path.glob(".large.txt.*.tmp"))
 
 
+def test_write_maps_mkstemp_permission_error(tmp_path, monkeypatch):
+    path = tmp_path / "doc.txt"
+
+    def deny_tempfile(*_args, **_kwargs):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(fs.tempfile, "mkstemp", deny_tempfile)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.write_file(str(path), "blocked")
+
+    assert exc.value.code == "permission_denied"
+    assert exc.value.status_code == 403
+    assert not path.exists()
+
+
+def test_write_maps_mkstemp_os_error(tmp_path, monkeypatch):
+    path = tmp_path / "doc.txt"
+
+    def fail_tempfile(*_args, **_kwargs):
+        raise OSError("disk failure")
+
+    monkeypatch.setattr(fs.tempfile, "mkstemp", fail_tempfile)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.write_file(str(path), "blocked")
+
+    assert exc.value.code == "fs_error"
+    assert not path.exists()
+
+
+def test_write_normal_path_still_succeeds(tmp_path):
+    path = tmp_path / "doc.txt"
+
+    result = fs.write_file(str(path), "ok")
+
+    assert result["ok"] is True
+    assert path.read_text(encoding="utf-8") == "ok"
+
+
 def test_write_preserves_existing_file_mode(tmp_path):
     path = tmp_path / "script.sh"
     path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -541,6 +581,42 @@ def test_move_no_overwrite_refuses_target_appearing_after_precheck(tmp_path, mon
     assert exc.value.code == "exists"
     assert source.read_text(encoding="utf-8") == "source"
     assert destination.read_text(encoding="utf-8") == "destination"
+
+
+def test_move_no_overwrite_hard_link_fallback_rolls_back_when_unlink_fails(tmp_path, monkeypatch):
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination.txt"
+    source.write_text("source", encoding="utf-8")
+
+    monkeypatch.setattr(fs, "_glibc_renameat2_noreplace", lambda _src, _dst: (_ for _ in ()).throw(AttributeError()))
+    real_unlink = fs.os.unlink
+
+    def fail_source_unlink(path, *args, **kwargs):
+        if Path(path) == source:
+            raise OSError("cannot unlink source")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(fs.os, "unlink", fail_source_unlink)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.move_path(str(source), str(destination), overwrite=False)
+
+    assert exc.value.code == "fs_error"
+    assert source.exists()
+    assert source.read_text(encoding="utf-8") == "source"
+    assert not destination.exists()
+
+
+def test_move_no_overwrite_hard_link_fallback_still_moves(tmp_path, monkeypatch):
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination.txt"
+    source.write_text("source", encoding="utf-8")
+
+    monkeypatch.setattr(fs, "_glibc_renameat2_noreplace", lambda _src, _dst: (_ for _ in ()).throw(AttributeError()))
+
+    assert fs.move_path(str(source), str(destination), overwrite=False) == {"ok": True}
+    assert destination.read_text(encoding="utf-8") == "source"
+    assert not source.exists()
 
 
 def test_move_cross_filesystem_copies_then_removes_source(tmp_path, monkeypatch):

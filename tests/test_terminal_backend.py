@@ -50,6 +50,17 @@ class _FakeWebSocket:
         self.sent_text.append(payload)
 
 
+class _RecordingWebSocket:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int | None]] = []
+
+    async def accept(self) -> None:
+        self.calls.append(("accept", None))
+
+    async def close(self, code: int = 1000) -> None:
+        self.calls.append(("close", code))
+
+
 def test_terminal_ephemeral_pty_round_trip(monkeypatch, tmp_path):
     asyncio.run(_terminal_ephemeral_pty_round_trip(monkeypatch, tmp_path))
 
@@ -850,14 +861,33 @@ def test_terminal_websocket_disabled_when_flag_off(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "0")
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
 
-    with pytest.raises(WebSocketDisconnect) as exc:
-        with app.test_client().websocket_connect(
-            "/api/terminal/test",
-            headers={"host": "127.0.0.1", "origin": "http://127.0.0.1"},
-        ):
-            pass
+    with app.test_client().websocket_connect(
+        "/api/terminal/test",
+        headers={"host": "127.0.0.1", "origin": "http://127.0.0.1"},
+    ) as websocket:
+        with pytest.raises(WebSocketDisconnect) as exc:
+            websocket.receive_text()
 
     assert exc.value.code == 1008
+
+
+def test_terminal_websocket_disabled_accepts_before_policy_close(monkeypatch):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "0")
+    websocket = _RecordingWebSocket()
+
+    asyncio.run(ui_server.terminal_websocket(websocket, "test"))
+
+    assert websocket.calls == [("accept", None), ("close", 1008)]
+
+
+def test_terminal_websocket_unsupported_accepts_before_policy_close(monkeypatch):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setattr(ui_server, "TERMINAL_SUPPORTED", False)
+    websocket = _RecordingWebSocket()
+
+    asyncio.run(ui_server.terminal_websocket(websocket, "test"))
+
+    assert websocket.calls == [("accept", None), ("close", 1008)]
 
 
 def test_terminal_websocket_rejects_forwarded_request(monkeypatch, tmp_path):
