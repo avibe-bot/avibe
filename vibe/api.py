@@ -4097,10 +4097,20 @@ def avault_seal_blind_box(name_or_blind_box, blind_box: dict | None = None):
         raise AvaultError("avault blind-box seal returned malformed output") from exc
 
 
-def avault_sign(key_envelope, digest: str, scheme: str, dek_blindbox: dict | None = None, *, name: str | None = None) -> dict:
+def avault_sign(
+    key_envelope,
+    digest: str,
+    scheme: str,
+    dek_blindbox: dict | None = None,
+    *,
+    name: str | None = None,
+    approval: dict | None = None,
+) -> dict:
     """Ask avault to sign a caller-computed 32-byte digest with a local key envelope."""
     if not name:
         raise AvaultError("secret name is required for avault sign")
+    if dek_blindbox is not None and approval is None:
+        raise AvaultError("approval is required for protected avault sign")
     _require_avault_p2_surface("vault signing")
     body = json.dumps(
         {
@@ -4109,6 +4119,7 @@ def avault_sign(key_envelope, digest: str, scheme: str, dek_blindbox: dict | Non
             "digest": digest,
             "scheme": scheme,
             "dek_blindbox": dek_blindbox,
+            "approval": approval,
         }
     ).encode("utf-8")
     proc = _run_avault(["sign"], stdin=body)
