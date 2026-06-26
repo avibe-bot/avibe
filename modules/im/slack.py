@@ -1354,6 +1354,16 @@ class SlackBot(BaseIMClient):
         name = self._slack_reaction_name(emoji)
         if not name:
             return False
+        if not name.isascii():
+            # Slack reaction names are ASCII short names (e.g. ``ok_hand``). A
+            # non-ASCII value here is a raw unicode emoji with no mapping, which
+            # reactions.add rejects with ``invalid_name`` — surface it instead of
+            # failing silently. Add the mapping to ``_slack_reaction_name``.
+            logger.warning(
+                "Slack reaction %r has no short-name mapping; reactions.add will reject it. "
+                "Add it to SlackBot._slack_reaction_name.",
+                emoji,
+            )
 
         try:
             await self.web_client.reactions_add(

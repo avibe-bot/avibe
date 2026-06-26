@@ -166,6 +166,22 @@ class SlackDmMentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await slack.remove_reaction(context, "1710000000.000010", "👌"))
         self.assertEqual([c["name"] for c in calls], ["ok_hand", "ok_hand"])
 
+    async def test_add_reaction_warns_on_unmapped_unicode_emoji(self):
+        # Safeguard: an unmapped raw-unicode reaction emoji must log a WARNING so a
+        # future emoji that Slack would reject (invalid_name) is not lost silently.
+        slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
+
+        class _WebClient:
+            async def reactions_add(self, **kwargs):
+                return None
+
+        slack.web_client = _WebClient()
+        context = MessageContext(user_id="U123", channel_id="C123")
+
+        with self.assertLogs("modules.im.slack", level="WARNING") as captured:
+            await slack.add_reaction(context, "1710000000.000010", "🎉")
+        self.assertTrue(any("no short-name mapping" in m for m in captured.output))
+
     async def test_add_reaction_maps_eyes_to_slack_name(self):
         slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
         calls = []
