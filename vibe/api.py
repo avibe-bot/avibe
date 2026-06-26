@@ -3549,8 +3549,8 @@ def _run_install_command(
 
 _ASKILL_INSTALL_LOCK = threading.Lock()
 _AVAULT_INSTALL_LOCK = threading.Lock()
-AVAULT_VERSION = "0.1.2"
 AVAULT_P2_MIN_VERSION = "0.1.3"
+AVAULT_VERSION = AVAULT_P2_MIN_VERSION
 _AVAULT_RELEASE_BASE_URL = f"https://github.com/avibe-bot/avault/releases/download/v{AVAULT_VERSION}/"
 
 

@@ -458,6 +458,35 @@ def test_resolve_protected_without_grant_returns_approval_card(vault):
             "envelope": {"ciphertext": "ct-1", "nonce": "n-1", "wrap_meta": "wm-1"},
         },
     ]
+    assert all("member_versions" in option for option in card["scope_options"])
+    with vault.connect() as conn:
+        request_row = conn.execute(select(vault_requests).where(vault_requests.c.id == result["request"]["id"])).mappings().one()
+        delivery = json.loads(request_row["delivery"])
+        audit_delivery = conn.execute(
+            select(vault_audit.c.delivery).where(vault_audit.c.event == "access_requested")
+        ).scalar_one()
+    persisted = json.dumps({"delivery": delivery, "audit_delivery": audit_delivery})
+    assert "secret_unlock_material" not in persisted
+    assert "unlock_material" not in persisted
+    assert "ct-1" not in persisted
+    assert "ct-group" not in persisted
+
+
+def test_request_inbox_hydrates_unlock_material_without_persisting_it(vault):
+    _create(vault, name="PROTECTED_KEY", protection="protected", group="crypto")
+    with vault.begin() as conn:
+        req = vs.create_access_request(conn, "PROTECTED_KEY", delivery={"command": "python sync.py"})
+    with vault.connect() as conn:
+        listed = vs.list_requests(conn)
+        raw_delivery = conn.execute(select(vault_requests.c.delivery).where(vault_requests.c.id == req["id"])).scalar_one()
+
+    assert listed[0]["card"]["secret_unlock_material"]["envelope"] == {
+        "ciphertext": "ct-1",
+        "nonce": "n-1",
+        "wrap_meta": "wm-1",
+    }
+    assert "secret_unlock_material" not in raw_delivery
+    assert "ct-1" not in raw_delivery
 
 
 def test_resolve_access_card_uses_delivery_session_fallback(vault):
@@ -512,6 +541,23 @@ def test_keypair_and_always_ask_are_not_grantable(vault):
                 created_by_request_id=static_req["id"],
                 deks_by_secret={"STATIC_KEY": "dek"},
             )
+
+
+def test_approval_card_hides_scopes_that_do_not_cover_requested_secret(vault):
+    _create(vault, name="ASK_KEY", protection="protected", group="crypto", policy={"always_ask": True})
+    _create(vault, name="GROUP_KEY", protection="protected", group="crypto")
+    with vault.begin() as conn:
+        conn.execute(vault_links.insert().values(id="ln_ask", secret_name="ASK_KEY", skill_name="deploy", source="user", required=1, created_at="now"))
+        conn.execute(vault_links.insert().values(id="ln_group", secret_name="GROUP_KEY", skill_name="deploy", source="user", required=1, created_at="now"))
+        result = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1", "skill": "deploy"},
+            delivery={"skill": "deploy"},
+        )
+
+    assert result["request"]["card"]["scope_options"] == []
 
 
 def test_grant_creation_requires_released_dek_set(vault):
@@ -689,3 +735,25 @@ def test_skill_grant_uses_vault_links(vault):
             deks_by_secret={"A_KEY": "dek-a", "B_KEY": "dek-b"},
         )
     assert grant["member_snapshot"] == ["A_KEY", "B_KEY"]
+
+
+def test_scope_grant_rejects_stale_member_snapshot_after_rotation(vault):
+    _create(vault, name="A_KEY", protection="protected")
+    _create(vault, name="B_KEY", protection="protected")
+    with vault.begin() as conn:
+        conn.execute(vault_links.insert().values(id="ln_a", secret_name="A_KEY", skill_name="deploy", source="user", required=1, created_at="now"))
+        conn.execute(vault_links.insert().values(id="ln_b", secret_name="B_KEY", skill_name="deploy", source="user", required=1, created_at="now"))
+        req = _access_request(conn, "A_KEY", skill="deploy")
+        vs.rotate_secret(conn, "B_KEY", _sealed("rotated-b"))
+        with pytest.raises(vs.InvalidRequestError):
+            vs.create_grant(
+                conn,
+                scope_type="skill",
+                scope_ref="deploy",
+                session_id="ses_1",
+                created_by_request_id=req["id"],
+                deks_by_secret={"A_KEY": "dek-a", "B_KEY": "old-dek-b"},
+            )
+        status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == req["id"])).scalar_one()
+
+    assert status == "pending"

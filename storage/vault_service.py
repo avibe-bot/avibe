@@ -187,6 +187,23 @@ def _protected_unlock_material(row: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _member_version(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": row["name"],
+        "secret_id": row.get("id"),
+        "updated_at": row.get("updated_at"),
+        "created_at": row.get("created_at"),
+    }
+
+
+def _member_version_matches(row: dict[str, Any], version: dict[str, Any]) -> bool:
+    return (
+        row.get("name") == version.get("name")
+        and row.get("id") == version.get("secret_id")
+        and row.get("updated_at") == version.get("updated_at")
+    )
+
+
 def _grant_row_payload(row: dict[str, Any], *, cache: VaultGrantDekCache = GRANT_DEK_CACHE) -> dict[str, Any]:
     members = _loads(row.get("member_snapshot")) or []
     if not isinstance(members, list):
@@ -208,9 +225,59 @@ def _grant_row_payload(row: dict[str, Any], *, cache: VaultGrantDekCache = GRANT
     }
 
 
-def _request_row_payload(row: dict[str, Any]) -> dict[str, Any]:
+def _hydrate_card_unlock_material(conn: Connection, row: dict[str, Any], card: dict[str, Any]) -> dict[str, Any]:
+    card = dict(card)
+    secret_name = row.get("secret_name")
+    if secret_name:
+        secret_row = conn.execute(select(vault_secrets).where(vault_secrets.c.name == secret_name)).mappings().first()
+        if secret_row is not None and (material := _protected_unlock_material(dict(secret_row))) is not None:
+            card["secret_unlock_material"] = material
+    hydrated_options: list[dict[str, Any]] = []
+    for option in card.get("scope_options") or []:
+        if not isinstance(option, dict):
+            continue
+        option_payload = dict(option)
+        versions = option_payload.get("member_versions") or []
+        materials: list[dict[str, Any]] = []
+        if isinstance(versions, list):
+            names = [item.get("name") for item in versions if isinstance(item, dict) and isinstance(item.get("name"), str)]
+            current_rows = {
+                current["name"]: dict(current)
+                for current in conn.execute(select(vault_secrets).where(vault_secrets.c.name.in_(names))).mappings()
+            }
+            for version in versions:
+                if not isinstance(version, dict):
+                    continue
+                current = current_rows.get(version.get("name"))
+                if current is None or not _member_version_matches(current, version):
+                    continue
+                material = _protected_unlock_material(current)
+                if material is not None:
+                    materials.append(material)
+        if materials:
+            option_payload["unlock_material"] = materials
+        hydrated_options.append(option_payload)
+    if hydrated_options:
+        card["scope_options"] = hydrated_options
+    return card
+
+
+def _request_row_payload(
+    row: dict[str, Any],
+    *,
+    conn: Connection | None = None,
+    hydrate_unlock_material: bool = False,
+) -> dict[str, Any]:
     requester = _loads(row.get("requester"))
     delivery = _loads(row.get("delivery"))
+    card = delivery.get("card") if isinstance(delivery, dict) else None
+    if (
+        hydrate_unlock_material
+        and row.get("status") == "pending"
+        and conn is not None
+        and isinstance(card, dict)
+    ):
+        card = _hydrate_card_unlock_material(conn, row, card)
     return {
         "id": row["id"],
         "request_type": row["request_type"],
@@ -222,7 +289,7 @@ def _request_row_payload(row: dict[str, Any]) -> dict[str, Any]:
         "created_at": row.get("created_at"),
         "decided_at": row.get("decided_at"),
         "expires_at": row.get("expires_at"),
-        "card": delivery.get("card") if isinstance(delivery, dict) else None,
+        "card": card if isinstance(card, dict) else None,
     }
 
 
@@ -748,11 +815,12 @@ def _scope_option(
     scope_type: str,
     scope_ref: str,
     *,
+    requested_secret: str,
     default_ttl_seconds: int,
 ) -> dict[str, Any] | None:
     rows = _grantable_member_rows(conn, scope_type, scope_ref)
     members = [row["name"] for row in rows]
-    if not members:
+    if not members or requested_secret not in members:
         return None
     ttl_cap = _ttl_cap_for_members(conn, members)
     capped_default = min(default_ttl_seconds, ttl_cap)
@@ -764,7 +832,7 @@ def _scope_option(
         "session_binding_default": True,
         "member_count": len(members),
         "member_snapshot": members,
-        "unlock_material": [material for row in rows if (material := _protected_unlock_material(row)) is not None],
+        "member_versions": [_member_version(row) for row in rows],
     }
 
 
@@ -787,9 +855,31 @@ def approval_card(
         scope_options = [
             option
             for option in (
-                _scope_option(conn, "secret", secret_name, default_ttl_seconds=DEFAULT_GRANT_TTL_SECONDS["secret"]),
-                _scope_option(conn, "skill", skill, default_ttl_seconds=DEFAULT_GRANT_TTL_SECONDS["skill"]) if skill else None,
-                _scope_option(conn, "group", group, default_ttl_seconds=DEFAULT_GRANT_TTL_SECONDS["group"]),
+                _scope_option(
+                    conn,
+                    "secret",
+                    secret_name,
+                    requested_secret=secret_name,
+                    default_ttl_seconds=DEFAULT_GRANT_TTL_SECONDS["secret"],
+                ),
+                (
+                    _scope_option(
+                        conn,
+                        "skill",
+                        skill,
+                        requested_secret=secret_name,
+                        default_ttl_seconds=DEFAULT_GRANT_TTL_SECONDS["skill"],
+                    )
+                    if skill
+                    else None
+                ),
+                _scope_option(
+                    conn,
+                    "group",
+                    group,
+                    requested_secret=secret_name,
+                    default_ttl_seconds=DEFAULT_GRANT_TTL_SECONDS["group"],
+                ),
             )
             if option is not None
         ]
@@ -807,9 +897,6 @@ def approval_card(
         "scope_options": scope_options,
         "value": None,
     }
-    secret_unlock_material = _protected_unlock_material(row)
-    if secret_unlock_material is not None:
-        card["secret_unlock_material"] = secret_unlock_material
     return card
 
 
@@ -851,7 +938,7 @@ def create_access_request(
     )
     audit(conn, "access_requested", secret_name=name, requester=requester, delivery=delivery_payload, request_id=request_id)
     row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
-    return _request_row_payload(dict(row))
+    return _request_row_payload(dict(row), conn=conn, hydrate_unlock_material=True)
 
 
 def create_sign_request(
@@ -893,7 +980,7 @@ def create_sign_request(
     )
     audit(conn, "sign_requested", secret_name=name, requester=requester, delivery=delivery_payload, request_id=request_id)
     row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
-    return _request_row_payload(dict(row))
+    return _request_row_payload(dict(row), conn=conn, hydrate_unlock_material=True)
 
 
 def _signature_bytes(raw: str) -> bytes:
@@ -972,7 +1059,7 @@ def complete_sign_request(
         request_id=request_id,
     )
     updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
-    return _request_row_payload(dict(updated))
+    return _request_row_payload(dict(updated), conn=conn, hydrate_unlock_material=False)
 
 
 def list_requests(
@@ -987,7 +1074,10 @@ def list_requests(
         query = query.where(vault_requests.c.status == status)
     if request_type is not None:
         query = query.where(vault_requests.c.request_type == request_type)
-    return [_request_row_payload(dict(row)) for row in conn.execute(query).mappings()]
+    return [
+        _request_row_payload(dict(row), conn=conn, hydrate_unlock_material=True)
+        for row in conn.execute(query).mappings()
+    ]
 
 
 def _expire_grant_rows(
@@ -1131,6 +1221,26 @@ def _validate_access_request_for_grant(
             members = [str(name) for name in snapshot if isinstance(name, str) and name]
             if requested_secret not in members:
                 break
+            versions = option.get("member_versions")
+            if not isinstance(versions, list):
+                raise InvalidRequestError("grant scope approval snapshot is stale")
+            versions_by_name = {
+                item.get("name"): item
+                for item in versions
+                if isinstance(item, dict) and isinstance(item.get("name"), str)
+            }
+            if set(versions_by_name) != set(members):
+                raise InvalidRequestError("grant scope approval snapshot is stale")
+            current_rows = {
+                current["name"]: dict(current)
+                for current in conn.execute(select(vault_secrets).where(vault_secrets.c.name.in_(members))).mappings()
+            }
+            for member_name in members:
+                current = current_rows.get(member_name)
+                if current is None or member_name not in live_members:
+                    raise InvalidRequestError("grant approval snapshot has stale members")
+                if not _member_version_matches(current, versions_by_name[member_name]):
+                    raise InvalidRequestError("grant approval snapshot has stale members")
             return GrantApproval(members=members, session_id=effective_session_id)
         raise InvalidRequestError("grant scope was not offered by the approval request")
     return GrantApproval(members=live_members, session_id=effective_session_id)
@@ -1166,9 +1276,8 @@ def create_grant(
     )
     session_id = approval.session_id
     members = approval.members
-    members = [name for name in members if name in live_members]
-    if not members:
-        raise InvalidRequestError("grant approval snapshot has no currently grantable members")
+    if any(name not in live_members for name in members):
+        raise InvalidRequestError("grant approval snapshot has stale members")
     if not deks_by_secret:
         raise InvalidGrantError("grant creation requires a released DEK set")
     missing_deks = [name for name in members if not deks_by_secret.get(name)]
