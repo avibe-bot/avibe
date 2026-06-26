@@ -1608,13 +1608,16 @@ def vault_sign(payload: dict) -> dict:
         signature = avault_sign(key_envelope, digest, scheme, name=name)
     except AvaultError as exc:
         raise VaultApiError(f"avault sign failed: {exc}", code="avault_failed") from exc
-    with engine.begin() as conn:
-        vault_service.record_signing_use(
-            conn,
-            name,
-            requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
-            delivery={"scheme": scheme, "digest": digest},
-        )
+    try:
+        with engine.begin() as conn:
+            vault_service.record_signing_use(
+                conn,
+                name,
+                requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
+                delivery={"scheme": scheme, "digest": digest},
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("vault_sign: signature produced but usage audit failed for %s: %s", name, exc)
     return {"ok": True, "signature": signature}
 
 
@@ -3557,7 +3560,9 @@ def _run_install_command(
 _ASKILL_INSTALL_LOCK = threading.Lock()
 _AVAULT_INSTALL_LOCK = threading.Lock()
 AVAULT_P2_MIN_VERSION = "0.1.3"
-AVAULT_VERSION = AVAULT_P2_MIN_VERSION
+# Installer pin must reference a published manifest-pinned release. Runtime P2
+# entry points still gate on AVAULT_P2_MIN_VERSION below until the P2 artifact is published.
+AVAULT_VERSION = "0.1.2"
 _AVAULT_RELEASE_BASE_URL = f"https://github.com/avibe-bot/avault/releases/download/v{AVAULT_VERSION}/"
 
 

@@ -20,6 +20,7 @@ const AddSecretDialog: React.FC<{ onClose: () => void; onCreated: (name: string)
   const [value, setValue] = useState('');
   const [group, setGroup] = useState('');
   const [description, setDescription] = useState('');
+  const [allowHosts, setAllowHosts] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -30,6 +31,10 @@ const AddSecretDialog: React.FC<{ onClose: () => void; onCreated: (name: string)
     setSubmitting(true);
     setError(null);
     try {
+      const hosts = allowHosts
+        .split(',')
+        .map((host) => host.trim())
+        .filter(Boolean);
       const pubkey = await api.getVaultPubkey();
       const blindBox = await sealStandardCreateBlindBox(secretName, value, pubkey);
       await api.createVaultSecret({
@@ -38,6 +43,7 @@ const AddSecretDialog: React.FC<{ onClose: () => void; onCreated: (name: string)
         blind_box: blindBox,
         group: group.trim() || undefined,
         description: description.trim() || undefined,
+        policy: hosts.length ? { allowed_hosts: hosts } : undefined,
       });
       setValue('');
       onCreated(secretName);
@@ -80,6 +86,11 @@ const AddSecretDialog: React.FC<{ onClose: () => void; onCreated: (name: string)
           <label className="flex flex-col gap-1.5 text-sm font-medium">
             {t('vaults.dialog.description')}
             <Input value={description} onChange={(event) => setDescription(event.target.value)} />
+          </label>
+          <label className="flex flex-col gap-1.5 text-sm font-medium">
+            {t('vaults.dialog.allowHosts')}
+            <Input value={allowHosts} onChange={(event) => setAllowHosts(event.target.value)} />
+            <span className="text-xs text-muted-foreground">{t('vaults.dialog.allowHostsHelp')}</span>
           </label>
           {error && (
             <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">

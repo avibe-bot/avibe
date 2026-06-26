@@ -295,6 +295,26 @@ def test_standard_keypair_signs_via_avault(monkeypatch):
     assert meta["last_used_at"] is not None
 
 
+def test_standard_keypair_sign_returns_signature_when_usage_audit_fails(monkeypatch):
+    sign = Mock(return_value={"signature": "sig", "recovery_id": 1})
+    monkeypatch.setattr(api, "avault_sign", sign)
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("key")))
+    api.create_vault_secret(
+        {
+            "name": "ETH_KEY",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        }
+    )
+    monkeypatch.setattr(vault_service, "record_signing_use", Mock(side_effect=RuntimeError("audit write failed")))
+
+    result = api.vault_sign({"name": "ETH_KEY", "digest": "00" * 32, "scheme": "ecdsa-secp256k1-recoverable"})
+
+    assert result == {"ok": True, "signature": {"signature": "sig", "recovery_id": 1}}
+    sign.assert_called_once_with(_sealed("key"), "00" * 32, "ecdsa-secp256k1-recoverable", name="ETH_KEY")
+
+
 def test_vault_sign_rejects_non_keypair_secret(monkeypatch):
     from unittest.mock import Mock
 
