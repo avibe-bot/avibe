@@ -937,6 +937,9 @@ def test_end_active_agent_run_binds_stop_context_to_matching_turn_sink(monkeypat
         thread_id="private-agent-abc",
         platform_specific={
             "agent_session_id": session_id,
+            "task_trigger_kind": "agent_run",
+            "task_execution_id": "run-primary",
+            "coalesced_queue": {"execution_ids": ["run-coalesced"]},
             "agent_session_target": {
                 "id": session_id,
                 "agent_backend": "codex",
@@ -968,6 +971,9 @@ def test_end_active_agent_run_binds_stop_context_to_matching_turn_sink(monkeypat
     stopped_context = seen["context"]
     assert controller._get_session_key(stopped_context) == "slack::private-agent-run-scope"
     assert stopped_context.platform_specific["turn_token"] == "sink-token"
+    assert stopped_context.platform_specific["task_trigger_kind"] == "agent_run"
+    assert stopped_context.platform_specific["task_execution_id"] == "run-primary"
+    assert stopped_context.platform_specific["coalesced_queue"] == {"execution_ids": ["run-coalesced"]}
     assert stopped_context.platform_specific["agent_session_target"]["session_anchor"] == base_session_id
 
 
@@ -996,7 +1002,10 @@ def test_end_active_agent_run_does_not_settle_mismatched_turn_sink(monkeypatch):
         lambda sid: target if sid == session_id else None,
     )
 
+    seen = {}
+
     async def _handle_stop(context):
+        seen["context"] = context
         return True
 
     class _Controller:
@@ -1026,6 +1035,8 @@ def test_end_active_agent_run_does_not_settle_mismatched_turn_sink(monkeypatch):
         platform="slack",
         platform_specific={
             "agent_session_id": "ses-newer",
+            "task_trigger_kind": "agent_run",
+            "task_execution_id": "run-newer",
             "agent_session_target": {
                 "id": "ses-newer",
                 "agent_backend": "codex",
@@ -1054,6 +1065,10 @@ def test_end_active_agent_run_does_not_settle_mismatched_turn_sink(monkeypatch):
     assert res["ok"] is True
     assert res["turn_settled"] is False
     assert not sink_done.is_set()
+    stopped_context = seen["context"]
+    assert stopped_context.platform_specific.get("turn_token") is None
+    assert stopped_context.platform_specific.get("task_trigger_kind") is None
+    assert stopped_context.platform_specific.get("task_execution_id") is None
 
 
 def test_end_active_codex_frees_runtime_after_stop():

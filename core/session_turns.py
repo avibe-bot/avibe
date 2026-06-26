@@ -1247,9 +1247,10 @@ class SessionTurnManager:
     # --- the live streaming turn sink (owned here; Controller delegates) ----------
 
     @staticmethod
-    def _turn_sink_identity(context: Optional["MessageContext"]) -> dict[str, str]:
-        spec = getattr(context, "platform_specific", None) or {}
-        target = spec.get("agent_session_target") if isinstance(spec, dict) else None
+    def _turn_sink_identity(context: Optional["MessageContext"]) -> dict[str, Any]:
+        raw_spec = getattr(context, "platform_specific", None) or {}
+        spec = raw_spec if isinstance(raw_spec, dict) else {}
+        target = spec.get("agent_session_target")
         target = target if isinstance(target, dict) else {}
         agent_session_id = str(spec.get("agent_session_id") or target.get("id") or "").strip()
         backend_base_session_id = str(
@@ -1257,10 +1258,26 @@ class SessionTurnManager:
             or target.get("session_anchor")
             or ""
         ).strip()
-        return {
+        identity: dict[str, Any] = {
             "agent_session_id": agent_session_id,
             "backend_base_session_id": backend_base_session_id,
         }
+        task_trigger_kind = str(spec.get("task_trigger_kind") or "").strip()
+        if task_trigger_kind:
+            identity["task_trigger_kind"] = task_trigger_kind
+        task_execution_id = str(spec.get("task_execution_id") or "").strip()
+        if task_execution_id:
+            identity["task_execution_id"] = task_execution_id
+        coalesced_queue = spec.get("coalesced_queue")
+        if isinstance(coalesced_queue, dict):
+            copied_queue = dict(coalesced_queue)
+            execution_ids = copied_queue.get("execution_ids")
+            if isinstance(execution_ids, list):
+                copied_queue["execution_ids"] = list(execution_ids)
+            identity["coalesced_queue"] = copied_queue
+        elif coalesced_queue is not None:
+            identity["coalesced_queue"] = coalesced_queue
+        return identity
 
     def register_turn_sink(self, session_key: str, *, on_chunk, done_event, turn_token=None, context=None) -> None:
         if session_key in self.active_turn_sinks:
@@ -1345,10 +1362,23 @@ class SessionTurnManager:
         ):
             return None
         token = sink.get("turn_token")
-        if token:
+        attribution_keys = ("task_trigger_kind", "task_execution_id", "coalesced_queue")
+        if token or any(key in sink for key in attribution_keys):
             if context.platform_specific is None:
                 context.platform_specific = {}
+        if token:
             context.platform_specific["turn_token"] = token
+        for key in attribution_keys:
+            if key not in sink:
+                continue
+            value = sink[key]
+            if isinstance(value, dict):
+                copied_value = dict(value)
+                execution_ids = copied_value.get("execution_ids")
+                if isinstance(execution_ids, list):
+                    copied_value["execution_ids"] = list(execution_ids)
+                value = copied_value
+            context.platform_specific[key] = value
         return {
             "session_key": session_key,
             "sink": sink,
@@ -1360,9 +1390,13 @@ class SessionTurnManager:
         """Settle the same sink returned by ``bind_context_to_turn_sink``.
 
         This is a fallback for stop paths that successfully interrupt a backend
-        but do not emit a terminal result. The identity guard is intentionally
-        object-based so a late stop cannot complete a newer sink registered under
-        the same session key.
+        but do not emit a terminal result. It only releases the dispatch waiter;
+        run completion is still owned by the backend's terminal emit. Current
+        live backends emit that terminal before ``handle_stop`` returns, and the
+        bound stop context carries the original agent-run attribution so the emit
+        records the run terminal. The identity guard is intentionally object-based
+        so a late stop cannot complete a newer sink registered under the same
+        session key.
         """
         if not isinstance(binding, dict):
             return False
@@ -1375,6 +1409,9 @@ class SessionTurnManager:
             return False
         token = binding.get("turn_token")
         if token is not None and sink.get("turn_token") != token:
+            return False
+        is_set = getattr(done, "is_set", None)
+        if callable(is_set) and is_set():
             return False
         done.set()
         return True
