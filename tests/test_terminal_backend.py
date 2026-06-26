@@ -161,7 +161,15 @@ async def _shutdown_kills_whole_tmux_server_including_untracked(monkeypatch):
     await service.shutdown()
 
     socket = terminal_service._tmux_socket_name()
-    assert any("kill-server" in cmd and "-L" in cmd and socket in cmd for cmd in commands), commands
+    kill_cmds = [cmd for cmd in commands if "kill-server" in cmd]
+    assert kill_cmds, commands
+    cmd = kill_cmds[0]
+    assert "-L" in cmd and socket in cmd
+    # kill-server must be the COMMAND (trailing token after the global flags), and /dev/null
+    # must be the argument consumed by -f — not itself parsed as the command. This guards the
+    # arg ORDER, not just membership: `tmux -L <sock> -f /dev/null kill-server`.
+    assert cmd[-1] == "kill-server"
+    assert cmd[cmd.index("/dev/null") - 1] == "-f"
 
 
 def test_open_spawns_with_start_new_session_not_preexec(monkeypatch, tmp_path):

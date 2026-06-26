@@ -84,9 +84,25 @@ export function isPlainEntryName(name: string): boolean {
 }
 
 export function pathCrumbs(path: string): { label: string; path: string }[] {
-  // Windows: split on either separator and keep the drive (e.g. C:\) as the root.
+  // Windows: split on either separator and keep the root intact.
   if (isWindowsPath(path)) {
-    const parts = path.replace(/\//g, '\\').split('\\').filter(Boolean);
+    const normalized = path.replace(/\//g, '\\');
+    if (/^\\\\/.test(normalized)) {
+      // UNC: the root is the share (\\server\share) — you can't navigate above it, and the
+      // leading \\ must be preserved or breadcrumb targets become invalid (server\, server\share).
+      const parts = normalized.replace(/^\\+/, '').split('\\').filter(Boolean); // [server, share, dir, ...]
+      const server = parts.shift() ?? '';
+      const share = parts.shift();
+      const root = share ? `\\\\${server}\\${share}` : `\\\\${server}`;
+      const out: { label: string; path: string }[] = [{ label: root, path: root }];
+      let cur = root;
+      for (const part of parts) {
+        cur = `${cur}\\${part}`;
+        out.push({ label: part, path: cur });
+      }
+      return out;
+    }
+    const parts = normalized.split('\\').filter(Boolean);
     const drive = parts.shift() ?? '';
     const out: { label: string; path: string }[] = [{ label: `${drive}\\`, path: `${drive}\\` }];
     let cur = `${drive}\\`;
