@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { FormEvent } from 'react';
 import { History, KeyRound, Loader2, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -7,52 +6,12 @@ import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
-import { Input } from '../ui/input';
-import { Textarea } from '../ui/textarea';
 import { useApi, type VaultAuditEvent, type VaultSecret } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
-import { sealStandardCreateBlindBox } from '../../lib/vaultBlindBox';
+import { VaultSecretForm } from '../ui/vault-secret-form';
 
 const AddSecretDialog: React.FC<{ onClose: () => void; onCreated: (name: string) => void }> = ({ onClose, onCreated }) => {
   const { t } = useTranslation();
-  const api = useApi();
-  const [name, setName] = useState('');
-  const [value, setValue] = useState('');
-  const [group, setGroup] = useState('');
-  const [description, setDescription] = useState('');
-  const [allowHosts, setAllowHosts] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const onSubmit = async (event: FormEvent) => {
-    event.preventDefault();
-    const secretName = name.trim().toUpperCase();
-    if (!secretName || !value) return;
-    setSubmitting(true);
-    setError(null);
-    try {
-      const hosts = allowHosts
-        .split(',')
-        .map((host) => host.trim())
-        .filter(Boolean);
-      const pubkey = await api.getVaultPubkey();
-      const blindBox = await sealStandardCreateBlindBox(secretName, value, pubkey);
-      await api.createVaultSecret({
-        name: secretName,
-        protection: 'standard',
-        blind_box: blindBox,
-        group: group.trim() || undefined,
-        description: description.trim() || undefined,
-        policy: hosts.length ? { allowed_hosts: hosts } : undefined,
-      });
-      setValue('');
-      onCreated(secretName);
-    } catch (err: any) {
-      setError(err?.message ?? String(err));
-    } finally {
-      setSubmitting(false);
-    }
-  };
 
   return (
     <Dialog
@@ -65,48 +24,7 @@ const AddSecretDialog: React.FC<{ onClose: () => void; onCreated: (name: string)
         <DialogHeader>
           <DialogTitle>{t('vaults.dialog.title')}</DialogTitle>
         </DialogHeader>
-        <form className="flex flex-col gap-3" onSubmit={onSubmit}>
-          <label className="flex flex-col gap-1.5 text-sm font-medium">
-            {t('vaults.dialog.name')}
-            <Input value={name} onChange={(event) => setName(event.target.value)} autoFocus required />
-          </label>
-          <label className="flex flex-col gap-1.5 text-sm font-medium">
-            {t('vaults.dialog.value')}
-            <Textarea
-              value={value}
-              onChange={(event) => setValue(event.target.value)}
-              placeholder={t('vaults.dialog.valuePlaceholder')}
-              required
-            />
-          </label>
-          <label className="flex flex-col gap-1.5 text-sm font-medium">
-            {t('vaults.dialog.group')}
-            <Input value={group} onChange={(event) => setGroup(event.target.value)} />
-          </label>
-          <label className="flex flex-col gap-1.5 text-sm font-medium">
-            {t('vaults.dialog.description')}
-            <Input value={description} onChange={(event) => setDescription(event.target.value)} />
-          </label>
-          <label className="flex flex-col gap-1.5 text-sm font-medium">
-            {t('vaults.dialog.allowHosts')}
-            <Input value={allowHosts} onChange={(event) => setAllowHosts(event.target.value)} />
-            <span className="text-xs text-muted-foreground">{t('vaults.dialog.allowHostsHelp')}</span>
-          </label>
-          {error && (
-            <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-              {error}
-            </div>
-          )}
-          <div className="mt-2 flex justify-end gap-2">
-            <Button type="button" variant="ghost" onClick={onClose} disabled={submitting}>
-              {t('vaults.dialog.cancel')}
-            </Button>
-            <Button type="submit" disabled={submitting || !name.trim() || !value}>
-              {submitting && <Loader2 className="size-4 animate-spin" />}
-              {t('vaults.dialog.save')}
-            </Button>
-          </div>
-        </form>
+        <VaultSecretForm onCancel={onClose} onCreated={onCreated} />
       </DialogContent>
     </Dialog>
   );

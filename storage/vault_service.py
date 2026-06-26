@@ -961,6 +961,11 @@ def create_access_request(
     message_id: str | None = None,
     expires_at: str | None = None,
 ) -> dict[str, Any]:
+    row = _require_row(conn, name)
+    if row.get("protection") == "protected" and row.get("kind") == "keypair":
+        raise NotGrantableError(f"{name} is a signing key; protected keypairs require per-use signing approval")
+    if row.get("protection") == "protected" and _secret_policy(row).get("always_ask"):
+        raise NotGrantableError(f"{name} uses always_ask; one-shot protected approvals are not wired yet")
     request_id = _id("vrq")
     delivery_payload = dict(delivery or {})
     requester_payload = requester if isinstance(requester, dict) else {}
@@ -1201,6 +1206,40 @@ def _expire_pending_requests_for_secret(
             reason,
             secret_name=secret_name,
             delivery={"request_type": row["request_type"]},
+            request_id=row["id"],
+        )
+        expired += 1
+    return expired
+
+
+def expire_session_requests(conn: Connection, session_id: str, *, reason: str = "request-expired-session-archived") -> int:
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            select(vault_requests).where(
+                vault_requests.c.status == "pending",
+                vault_requests.c.request_type.in_(("access", "sign")),
+            )
+        ).mappings()
+        if _request_session_id(dict(row)) == session_id
+    ]
+    if not rows:
+        return 0
+    now = _now()
+    expired = 0
+    for row in rows:
+        result = conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id == row["id"], vault_requests.c.status == "pending")
+            .values(status="expired", decided_at=now)
+        )
+        if result.rowcount != 1:
+            continue
+        audit(
+            conn,
+            reason,
+            secret_name=row.get("secret_name"),
+            delivery={"request_type": row["request_type"], "session_id": session_id},
             request_id=row["id"],
         )
         expired += 1

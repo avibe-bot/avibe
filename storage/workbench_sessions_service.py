@@ -683,11 +683,12 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
     #     concurrent send reserved just before this committed (``promote_pending``
     #     then no-ops on that in-flight send), and the saved composer draft.
     from storage.messages_service import clear_draft, clear_pending, clear_queued
-    from storage.vault_service import revoke_session_grants
+    from storage.vault_service import expire_session_requests, revoke_session_grants
 
     clear_queued(conn, session_id)
     clear_pending(conn, session_id)
     clear_draft(conn, session_id)
+    expire_session_requests(conn, session_id)
     revoke_session_grants(conn, session_id)
 
     # 4) Take the Show Page offline so a shared link can't keep serving the

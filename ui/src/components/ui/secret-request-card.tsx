@@ -2,8 +2,8 @@ import { useState } from 'react';
 import { KeyRound } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { badgeVariants } from './badge';
-import { Button } from './button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './dialog';
+import { VaultSecretForm } from './vault-secret-form';
 import { cn } from '@/lib/utils';
 
 /**
@@ -32,12 +32,7 @@ export const SecretRequestCard: React.FC<{ name: string }> = ({ name }) => {
           </DialogHeader>
           <div className="flex flex-col gap-3">
             <p className="text-sm text-muted">{t('vaults.request.help')}</p>
-            <p className="text-xs text-muted">{t('vaults.dialog.browserSealingPending')}</p>
-            <div className="flex justify-end gap-2">
-              <Button variant="ghost" onClick={() => setOpen(false)}>
-                {t('vaults.dialog.cancel')}
-              </Button>
-            </div>
+            <VaultSecretForm fixedName={name} onCancel={() => setOpen(false)} onCreated={() => setOpen(false)} />
           </div>
         </DialogContent>
       </Dialog>

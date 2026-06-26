@@ -566,35 +566,36 @@ def test_keypair_and_always_ask_are_not_grantable(vault):
     _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
     _create(vault, name="STATIC_KEY", protection="protected", policy={"always_ask": True})
     with vault.begin() as conn:
-        eth_req = _access_request(conn, "ETH_KEY")
-        static_req = _access_request(conn, "STATIC_KEY")
         with pytest.raises(vs.NotGrantableError):
-            vs.create_grant(conn, scope_type="secret", scope_ref="ETH_KEY", created_by_request_id=eth_req["id"], deks_by_secret={"ETH_KEY": "dek"})
+            vs.create_access_request(conn, "ETH_KEY", requester={"session_id": "ses_1"})
         with pytest.raises(vs.NotGrantableError):
-            vs.create_grant(
-                conn,
-                scope_type="secret",
-                scope_ref="STATIC_KEY",
-                created_by_request_id=static_req["id"],
-                deks_by_secret={"STATIC_KEY": "dek"},
-            )
+            vs.create_access_request(conn, "STATIC_KEY", requester={"session_id": "ses_1"})
+        requests = conn.execute(
+            select(vault_requests).where(vault_requests.c.secret_name.in_(["ETH_KEY", "STATIC_KEY"]))
+        ).mappings().all()
+        sign_req = vs.create_sign_request(conn, "ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")
+
+    assert requests == []
+    assert sign_req["request_type"] == "sign"
 
 
-def test_approval_card_hides_scopes_that_do_not_cover_requested_secret(vault):
+def test_always_ask_access_request_is_rejected_until_one_shot_approval_exists(vault):
     _create(vault, name="ASK_KEY", protection="protected", group="crypto", policy={"always_ask": True})
     _create(vault, name="GROUP_KEY", protection="protected", group="crypto")
     with vault.begin() as conn:
         conn.execute(vault_links.insert().values(id="ln_ask", secret_name="ASK_KEY", skill_name="deploy", source="user", required=1, created_at="now"))
         conn.execute(vault_links.insert().values(id="ln_group", secret_name="GROUP_KEY", skill_name="deploy", source="user", required=1, created_at="now"))
-        result = vs.resolve_secret_access(
-            conn,
-            "ASK_KEY",
-            session_id="ses_1",
-            requester={"session_id": "ses_1", "skill": "deploy"},
-            delivery={"skill": "deploy"},
-        )
+        with pytest.raises(vs.NotGrantableError):
+            vs.resolve_secret_access(
+                conn,
+                "ASK_KEY",
+                session_id="ses_1",
+                requester={"session_id": "ses_1", "skill": "deploy"},
+                delivery={"skill": "deploy"},
+            )
+        requests = conn.execute(select(vault_requests).where(vault_requests.c.secret_name == "ASK_KEY")).mappings().all()
 
-    assert result["request"]["card"]["scope_options"] == []
+    assert requests == []
 
 
 def test_grant_creation_requires_released_dek_set(vault):
