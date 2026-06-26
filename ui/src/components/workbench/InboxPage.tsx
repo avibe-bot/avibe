@@ -57,10 +57,15 @@ export const InboxPage: React.FC = () => {
       if (document.visibilityState === 'hidden') {
         markLeft();
       } else if (document.visibilityState === 'visible') {
-        const { leftAt } = readInboxFilter();
-        if (leftAt > 0 && Date.now() - leftAt > INBOX_REVERT_AFTER_MS) {
+        const { tab, leftAt } = readInboxFilter();
+        if (leftAt === 0) return; // already marked present
+        if (Date.now() - leftAt > INBOX_REVERT_AFTER_MS) {
           setFilterState('unread');
           writeInboxFilter('unread', 0);
+        } else {
+          // Returned within the window → present again; clear the stale stamp so a
+          // later kill-without-pagehide can't measure against this old background time.
+          writeInboxFilter(tab, 0);
         }
       }
     };
