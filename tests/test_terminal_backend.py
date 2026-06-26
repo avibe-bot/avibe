@@ -16,7 +16,14 @@ termios = pytest.importorskip("termios")
 from starlette.websockets import WebSocketDisconnect
 
 from core import terminal_service
-from core.terminal_service import TerminalService, _tmux_launch_command, _tmux_socket_name, sanitize_session_id
+from core.terminal_service import (
+    TerminalService,
+    _Phase,
+    _Session,
+    _tmux_launch_command,
+    _tmux_socket_name,
+    sanitize_session_id,
+)
 from vibe import ui_server
 from vibe.ui_server import app
 
@@ -85,8 +92,8 @@ async def _terminal_reconnect_replaces_session(monkeypatch, tmp_path):
         second = await service.open("dup")
         # Reconnecting the same id reuses one slot; the old connection is
         # replaced (and its shell terminated), not orphaned past max_sessions.
-        assert len(service._connections) == 1
-        assert service._connections["dup"] is second
+        assert len(service._sessions) == 1
+        assert service._sessions["dup"].connection is second
         assert first.process.returncode is not None
     finally:
         await service.shutdown()
@@ -127,13 +134,16 @@ async def _reconnect_clears_detached_bookkeeping(monkeypatch, tmp_path):
 
     service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
     existing = _make_persistent_connection("id", process=_LiveProcess())
-    service._connections["id"] = existing
-    service._detached_tmux_sessions["id"] = 1.0
+    service._sessions["id"] = _Session("id", _Phase.ATTACHED, persistent=True, connection=existing)
 
     try:
         spawned = await service.open("id")
-        assert service._connections["id"] is spawned
-        assert "id" not in service._detached_tmux_sessions
+        # One entry per id: the reconnect transitions the slot in place — ATTACHED to the new
+        # client, never simultaneously DETACHED. The old three-collection desync (an id in
+        # both _connections and _detached_tmux_sessions) is structurally impossible now.
+        assert list(service._sessions) == ["id"]
+        assert service._sessions["id"].phase is _Phase.ATTACHED
+        assert service._sessions["id"].connection is spawned
     finally:
         await service.shutdown()
         for fd in opened_fds:
@@ -211,7 +221,7 @@ async def _terminal_open_reserves_session_slot_during_spawn(monkeypatch, tmp_pat
     release_spawn.set()
     connection = await first_task
     try:
-        assert service._connections["first"] is connection
+        assert service._sessions["first"].connection is connection
     finally:
         await service.shutdown()
 
@@ -260,7 +270,7 @@ async def _open_releases_reserved_slot_on_cancel(monkeypatch, tmp_path):
     with pytest.raises(asyncio.CancelledError):
         await open_task
 
-    assert service._reserved_sessions == set()
+    assert "cancelled" not in service._sessions  # the OPENING placeholder was reconciled away
     # The PTY master opened for the cancelled spawn must be closed, not leaked.
     assert opened_masters, "openpty was not called"
     assert opened_masters[0] in closed_fds
@@ -268,7 +278,7 @@ async def _open_releases_reserved_slot_on_cancel(monkeypatch, tmp_path):
     monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", original_spawn)
     connection = await service.open("next")
     try:
-        assert service._connections["next"] is connection
+        assert service._sessions["next"].connection is connection
     finally:
         await service.shutdown()
 
@@ -293,7 +303,7 @@ async def _ready_frame_failure_closes_connection(monkeypatch, tmp_path):
         await service.handle_websocket(_DisconnectingWebSocket([]), "drop")
 
     try:
-        assert service._connections == {}
+        assert service._sessions == {}
     finally:
         await service.shutdown()
 
@@ -347,14 +357,16 @@ def test_detached_session_tracked_when_client_exits(monkeypatch, tmp_path):
 
 async def _detached_session_tracked_when_client_exits(monkeypatch, tmp_path):
     # A persistent (tmux) connection whose client process has already exited — e.g. the
-    # user hit tmux's detach key — must still be recorded as detached WHEN THE SESSION IS
-    # STILL ALIVE, or it goes uncounted against max_sessions, unreaped, and unkilled.
+    # user hit tmux's detach key — must transition to DETACHED WHEN THE SESSION IS STILL
+    # ALIVE, or it goes uncounted against max_sessions, unreaped, and unkilled.
     await _set_tmux_has_session(monkeypatch, True)
     service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+    conn = _make_persistent_connection("detached", process=_ExitedProcess())
+    service._sessions["detached"] = _Session("detached", _Phase.ATTACHED, persistent=True, connection=conn)
 
-    await service._cleanup_connection(_make_persistent_connection("detached"), detach=True)
+    await service.close(conn)
 
-    assert "detached" in service._detached_tmux_sessions
+    assert service._sessions["detached"].phase is _Phase.DETACHED
 
 
 def test_dead_session_not_tracked_when_shell_exits(monkeypatch, tmp_path):
@@ -363,14 +375,16 @@ def test_dead_session_not_tracked_when_shell_exits(monkeypatch, tmp_path):
 
 async def _dead_session_not_tracked_when_shell_exits(monkeypatch, tmp_path):
     # When the shell inside tmux exits (rather than a detach), the client process exits AND
-    # the tmux session is gone — it must NOT be recorded as a live detached session, or a
-    # dead id counts against max_sessions until the idle timeout.
+    # the tmux session is gone — it must NOT be left tracked, or a dead id counts against
+    # max_sessions until the idle timeout.
     await _set_tmux_has_session(monkeypatch, False)
     service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+    conn = _make_persistent_connection("ended", process=_ExitedProcess())
+    service._sessions["ended"] = _Session("ended", _Phase.ATTACHED, persistent=True, connection=conn)
 
-    await service._cleanup_connection(_make_persistent_connection("ended"), detach=True)
+    await service.close(conn)
 
-    assert "ended" not in service._detached_tmux_sessions
+    assert "ended" not in service._sessions
 
 
 def test_detach_not_recorded_when_session_gone_despite_live_client(monkeypatch, tmp_path):
@@ -380,10 +394,61 @@ def test_detach_not_recorded_when_session_gone_despite_live_client(monkeypatch, 
 async def _detach_not_recorded_when_session_gone_despite_live_client(monkeypatch, tmp_path):
     await _set_tmux_has_session(monkeypatch, False)
     service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+    conn = _make_persistent_connection("raced", process=_LiveProcess())
+    service._sessions["raced"] = _Session("raced", _Phase.ATTACHED, persistent=True, connection=conn)
 
-    await service._cleanup_connection(_make_persistent_connection("raced", process=_LiveProcess()), detach=True)
+    await service.close(conn)
 
-    assert "raced" not in service._detached_tmux_sessions
+    assert "raced" not in service._sessions
+
+
+def test_superseded_close_leaves_live_session(monkeypatch, tmp_path):
+    asyncio.run(_superseded_close_leaves_live_session(monkeypatch, tmp_path))
+
+
+async def _superseded_close_leaves_live_session(monkeypatch, tmp_path):
+    # A fast reconnect already registered a new connection for this id; the OLD connection's
+    # close must not touch the registry — no double-count, and the reaper must not later kill
+    # the session out from under the live client.
+    await _set_tmux_has_session(monkeypatch, True)
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+    live = _make_persistent_connection("id", process=_LiveProcess())
+    service._sessions["id"] = _Session("id", _Phase.ATTACHED, persistent=True, connection=live)
+    superseded = _make_persistent_connection("id", process=_ExitedProcess())
+
+    await service.close(superseded)
+
+    assert service._sessions["id"].connection is live
+    assert service._sessions["id"].phase is _Phase.ATTACHED
+    await service.shutdown()
+
+
+def test_open_failure_preserves_detached_session(monkeypatch, tmp_path):
+    asyncio.run(_open_failure_preserves_detached_session(monkeypatch, tmp_path))
+
+
+async def _open_failure_preserves_detached_session(monkeypatch, tmp_path):
+    # Reconnecting to a DETACHED session whose spawn then fails must leave the (still-alive)
+    # tmux session tracked as DETACHED — never drop it into an untracked orphan.
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(terminal_service.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: "/usr/bin/tmux")
+    await _set_tmux_has_session(monkeypatch, True)
+
+    async def failing_spawn(*_args, **_kwargs):
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", failing_spawn)
+
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=1)
+    service._sessions["id"] = _Session("id", _Phase.DETACHED, persistent=True, detached_at=1.0)
+
+    with pytest.raises(OSError, match="spawn failed"):
+        await service.open("id")
+
+    assert service._sessions["id"].phase is _Phase.DETACHED
+    await service.shutdown()
 
 
 def test_open_cleans_up_process_when_registration_fails(monkeypatch, tmp_path):
@@ -391,10 +456,10 @@ def test_open_cleans_up_process_when_registration_fails(monkeypatch, tmp_path):
 
 
 async def _open_cleans_up_process_when_registration_fails(monkeypatch, tmp_path):
-    # If open() is interrupted after the child has spawned but before it is registered in
-    # _connections (a cancel while reacquiring the lock, modelled here by a failing
-    # registration), the spawned process + reservation must be torn down — otherwise it
-    # lives outside _connections where shutdown/reaping can never reach it.
+    # If the OPENING slot is taken away after the child has spawned but before it is
+    # registered (e.g. the service shuts down, or a forced supersession), the spawned
+    # process must still be torn down — otherwise it lives outside the registry where
+    # shutdown/reaping can never reach it.
     (tmp_path / "home").mkdir()
     monkeypatch.setenv("SHELL", "/bin/sh")
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -413,23 +478,19 @@ async def _open_cleans_up_process_when_registration_fails(monkeypatch, tmp_path)
         async def wait(self) -> int:
             return 0
 
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=1)
+
     async def fake_spawn(*_args, **_kwargs):
+        # Drop the OPENING placeholder mid-spawn so the child can never be registered.
+        service._sessions.clear()
         return _FakeProcess()
 
     monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", fake_spawn)
 
-    service = TerminalService(idle_timeout_seconds=60, max_sessions=1)
-
-    class _RaisingConnections(dict):
-        def __setitem__(self, key, value):
-            raise RuntimeError("registration boom")
-
-    service._connections = _RaisingConnections()
-
-    with pytest.raises(RuntimeError, match="registration boom"):
+    with pytest.raises(terminal_service.TerminalServiceError, match="session_opening"):
         await service.open("orphan")
 
-    assert service._reserved_sessions == set()
+    assert "orphan" not in service._sessions
     assert signal.SIGTERM in signals  # the spawned shell was terminated, not leaked
 
 
@@ -470,7 +531,7 @@ async def _concurrent_reconnect_is_rejected(monkeypatch, tmp_path):
         spawn_gate.set()
         replacement = await reopen
         try:
-            assert service._connections["dup"] is replacement
+            assert service._sessions["dup"].connection is replacement
             assert first.session_id == "dup"
         finally:
             await service.shutdown()

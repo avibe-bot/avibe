@@ -12,6 +12,7 @@ import struct
 import sys
 import time
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -56,13 +57,36 @@ class TerminalConnection:
         self.last_seen = time.monotonic()
 
 
+class _Phase(Enum):
+    OPENING = "opening"    # open() in progress; no usable connection yet
+    ATTACHED = "attached"  # a live websocket client is connected
+    DETACHED = "detached"  # tmux session alive but no client (reattachable)
+
+
+@dataclass
+class _Session:
+    """One terminal session id, always in exactly one phase.
+
+    The whole service tracks sessions in a single dict keyed by id, so an id can never be
+    double-counted or land in two collections out of sync — the root cause of an entire
+    class of bookkeeping races. Capacity is just len(self._sessions); a reconnect reuses an
+    existing entry, only a brand-new id is checked against the cap.
+    """
+
+    session_id: str
+    phase: _Phase
+    persistent: bool = False
+    connection: TerminalConnection | None = None  # set while ATTACHED
+    detached_at: float | None = None              # set while DETACHED
+
+
 class TerminalService:
     def __init__(self, *, idle_timeout_seconds: int = 3600, max_sessions: int = 8) -> None:
         self.idle_timeout_seconds = max(60, int(idle_timeout_seconds))
         self.max_sessions = max(1, int(max_sessions))
-        self._connections: dict[str, TerminalConnection] = {}
-        self._detached_tmux_sessions: dict[str, float] = {}
-        self._reserved_sessions: set[str] = set()
+        # One entry per session id, each in exactly one phase. Capacity is simply
+        # len(self._sessions) — no cross-collection arithmetic to keep in sync.
+        self._sessions: dict[str, _Session] = {}
         self._lock = asyncio.Lock()
         self._reaper_task: asyncio.Task | None = None
         self._closed = False
@@ -84,20 +108,18 @@ class TerminalService:
             except asyncio.CancelledError:
                 pass
         async with self._lock:
-            connections = list(self._connections.values())
-            self._connections.clear()
-            detached = list(self._detached_tmux_sessions)
-            self._detached_tmux_sessions.clear()
-        # Kill (not just detach) every live persistent session so `vibe stop` leaves no
-        # orphaned tmux server, then reap sessions that had already detached earlier.
-        await asyncio.gather(
-            *(self._cleanup_connection(connection, detach=False) for connection in connections),
-            return_exceptions=True,
-        )
-        await asyncio.gather(
-            *(_kill_tmux_session(session_id) for session_id in detached),
-            return_exceptions=True,
-        )
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+        # Kill every tmux session for real so `vibe stop` leaves no orphaned server, and reap
+        # any live client process. An in-flight open() finds its slot gone and tears its own
+        # child down.
+        await asyncio.gather(*(self._shutdown_session(s) for s in sessions), return_exceptions=True)
+
+    async def _shutdown_session(self, session: _Session) -> None:
+        if session.connection is not None:
+            await self._teardown_client(session.connection, kill_session=True)
+        elif session.persistent:
+            await _kill_tmux_session(session.session_id)
 
     async def handle_websocket(self, websocket: WebSocket, raw_session_id: str) -> None:
         session_id = sanitize_session_id(raw_session_id)
@@ -160,35 +182,26 @@ class TerminalService:
             await self.close(connection)
 
     async def open(self, session_id: str) -> TerminalConnection:
-        # Decide-and-reserve atomically under one lock so concurrent opens for the same id
-        # (two tabs, a fast reconnect) serialize: the loser sees the reservation and is
-        # rejected instead of both racing to close `existing` and overwrite each other's
-        # registration (which would orphan a PTY/process outside _connections).
+        # Claim the id as OPENING under the lock. A single registry entry per id means a
+        # concurrent open for the same id is rejected here (the slot is already OPENING), and
+        # reconnecting an existing attached/detached id reuses its slot rather than allocating
+        # a new one — so the cap is just len(self._sessions), no per-collection arithmetic.
         async with self._lock:
             self._forget_finished_locked()
-            if session_id in self._reserved_sessions:
+            current = self._sessions.get(session_id)
+            if current is not None and current.phase is _Phase.OPENING:
                 raise TerminalServiceError("session_opening")
-            # An already-attached connection for this id will be replaced, so it does not
-            # count toward the cap. Reclaim its detached slot too, so reconnecting to a
-            # detached session is never rejected as "too many".
-            existing = self._connections.get(session_id)
-            self._detached_tmux_sessions.pop(session_id, None)
-            active_count = (
-                len(self._connections)
-                - (1 if existing is not None else 0)
-                + len(self._detached_tmux_sessions)
-                + len(self._reserved_sessions)
-            )
-            if active_count >= self.max_sessions:
+            if current is None and len(self._sessions) >= self.max_sessions:
                 raise TerminalServiceError("too_many_sessions")
-            # Hold the reservation across the whole close+spawn window.
-            self._reserved_sessions.add(session_id)
+            # A live client for this id will be replaced; its tmux session stays alive and
+            # the new client reattaches to it.
+            replaced = current.connection if (current is not None and current.phase is _Phase.ATTACHED) else None
+            self._sessions[session_id] = _Session(session_id, _Phase.OPENING)
+        registered = False
         spawned: TerminalConnection | None = None
         try:
-            # Replace any existing connection; the reservation keeps a racing reconnect out
-            # until registration finishes.
-            if existing is not None:
-                await self.close(existing)
+            if replaced is not None:
+                await self._teardown_client(replaced, kill_session=False)
 
             persistent = False
             tmux_binary = resolve_tmux_binary()
@@ -210,9 +223,8 @@ class TerminalService:
                     preexec_fn=os.setsid if hasattr(os, "setsid") else None,
                 )
             except BaseException:
-                # Close the PTY master on cancellation too (CancelledError is a
-                # BaseException, not Exception) — otherwise a cancelled spawn leaks the fd
-                # even though the outer handler restores the reserved-slot accounting.
+                # Close the PTY master on cancellation too (CancelledError is a BaseException,
+                # not Exception) — otherwise a cancelled spawn leaks the fd.
                 _close_fd(master_fd)
                 raise
             finally:
@@ -227,52 +239,75 @@ class TerminalService:
                 last_seen=time.monotonic(),
             )
             async with self._lock:
-                self._reserved_sessions.discard(session_id)
-                self._detached_tmux_sessions.pop(session_id, None)
-                self._connections[session_id] = spawned
+                slot = self._sessions.get(session_id)
+                if slot is not None and slot.phase is _Phase.OPENING:
+                    slot.phase = _Phase.ATTACHED
+                    slot.connection = spawned
+                    slot.persistent = persistent
+                    registered = True
+            if not registered:
+                # The OPENING slot was taken over or the service shut down while we spawned;
+                # we lost the race — tear our own child down (below) and report busy.
+                raise TerminalServiceError("session_opening")
             return spawned
         except BaseException:
-            # On any failure/cancel after reserving, release the reservation. If the child
-            # was already spawned but not yet registered (e.g. cancelled while reacquiring
-            # the lock to register), tear it down too — it lives outside _connections, so
-            # shutdown and the reaper would otherwise never reach it.
-            async with self._lock:
-                self._reserved_sessions.discard(session_id)
-            if spawned is not None:
-                await self._cleanup_connection(spawned, detach=True)
+            if not registered:
+                await self._abandon_open(session_id, spawned)
             raise
+
+    async def _abandon_open(self, session_id: str, spawned: TerminalConnection | None) -> None:
+        # Tear down a child we spawned but never registered, then reconcile the OPENING slot
+        # with tmux reality: if a session for this id is still alive (e.g. we detached a
+        # previous client before the spawn failed), keep it tracked as DETACHED; otherwise
+        # drop the placeholder. This is why a failed reconnect never loses a live session.
+        if spawned is not None:
+            await self._teardown_client(spawned, kill_session=False)
+        async with self._lock:
+            slot = self._sessions.get(session_id)
+            ours = slot is not None and slot.phase is _Phase.OPENING
+            if ours:
+                self._sessions.pop(session_id, None)
+        if ours and await _tmux_has_session(session_id):
+            async with self._lock:
+                if session_id not in self._sessions:
+                    self._sessions[session_id] = _Session(
+                        session_id, _Phase.DETACHED, persistent=True, detached_at=time.monotonic()
+                    )
 
     async def close(self, connection: TerminalConnection) -> None:
         async with self._lock:
-            if self._connections.get(connection.session_id) is connection:
-                self._connections.pop(connection.session_id, None)
-        await self._cleanup_connection(connection)
-
-    async def _cleanup_connection(self, connection: TerminalConnection, *, detach: bool = True) -> None:
-        _close_fd(connection.master_fd)
-        client_exited = connection.process.returncode is not None
-        if connection.persistent:
-            if detach:
-                # Normal close/reaper path: detach the tmux client (SIGHUP) and leave the
-                # tmux server running so the session can be reattached; the reaper expires
-                # it later.
-                if not client_exited:
-                    await _terminate_process(connection.process, signal.SIGHUP)
-                # Only a real detach leaves the tmux session/server alive; if the shell
-                # exited before or during SIGHUP, don't count a dead id against max_sessions.
-                if await _tmux_has_session(connection.session_id):
-                    async with self._lock:
-                        self._detached_tmux_sessions[connection.session_id] = time.monotonic()
-            else:
-                # Service shutdown: tear the tmux session down for real so `vibe stop` does
-                # not leave an orphaned tmux server (and its shell processes) running.
-                await _kill_tmux_session(connection.session_id)
-                if not client_exited:
-                    await _terminate_process(connection.process, signal.SIGHUP)
+            slot = self._sessions.get(connection.session_id)
+            current = slot is not None and slot.connection is connection
+            if current:
+                # Remove now; re-added as DETACHED below only if the tmux session survives.
+                self._sessions.pop(connection.session_id, None)
+        # OS-level teardown only — the registry transition is owned here, not in the helper.
+        await self._teardown_client(connection, kill_session=False)
+        if not current:
+            # A newer connection already owns this id (fast reconnect): we only had to reap
+            # our own client process; leave the registry to the live owner.
             return
-        # Ephemeral shell: terminate it if it is still running.
-        if not client_exited:
-            await _terminate_process(connection.process, signal.SIGTERM)
+        if connection.persistent and await _tmux_has_session(connection.session_id):
+            async with self._lock:
+                if connection.session_id not in self._sessions:
+                    self._sessions[connection.session_id] = _Session(
+                        connection.session_id,
+                        _Phase.DETACHED,
+                        persistent=True,
+                        detached_at=time.monotonic(),
+                    )
+
+    async def _teardown_client(self, connection: TerminalConnection, *, kill_session: bool) -> None:
+        """Release a connection's OS resources only — never touches the registry (the caller
+        owns the _sessions transition). SIGHUP detaches a tmux client so its session survives
+        for reattach; SIGTERM ends an ephemeral shell. kill_session=True also tears the tmux
+        session down (shutdown / idle expiry) so nothing is left running."""
+        _close_fd(connection.master_fd)
+        if kill_session and connection.persistent:
+            await _kill_tmux_session(connection.session_id)
+        if connection.process.returncode is None:
+            signum = signal.SIGHUP if connection.persistent else signal.SIGTERM
+            await _terminate_process(connection.process, signum)
 
     async def resize(self, connection: TerminalConnection, cols: int, rows: int) -> None:
         rows = max(1, min(int(rows), 1000))
@@ -346,9 +381,15 @@ class TerminalService:
             await asyncio.sleep(0.05)
 
     def _forget_finished_locked(self) -> None:
-        for session_id, connection in list(self._connections.items()):
-            if connection.process.returncode is not None:
-                self._connections.pop(session_id, None)
+        # Drop attached sessions whose client process has already exited; the next open/reap
+        # reconciles tmux state via has-session.
+        for session_id, session in list(self._sessions.items()):
+            if (
+                session.phase is _Phase.ATTACHED
+                and session.connection is not None
+                and session.connection.process.returncode is not None
+            ):
+                self._sessions.pop(session_id, None)
 
     async def _reaper_loop(self) -> None:
         while True:
@@ -358,20 +399,39 @@ class TerminalService:
     async def reap_idle(self) -> None:
         cutoff = time.monotonic() - self.idle_timeout_seconds
         async with self._lock:
-            expired = [
-                connection
-                for connection in self._connections.values()
-                if connection.last_seen < cutoff or connection.process.returncode is not None
-            ]
-            for connection in expired:
-                self._connections.pop(connection.session_id, None)
-            expired_tmux_sessions = [
-                session_id for session_id, last_seen in self._detached_tmux_sessions.items() if last_seen < cutoff
-            ]
-            for session_id in expired_tmux_sessions:
-                self._detached_tmux_sessions.pop(session_id, None)
-        await asyncio.gather(*(self._cleanup_connection(connection) for connection in expired), return_exceptions=True)
-        await asyncio.gather(*(_kill_tmux_session(session_id) for session_id in expired_tmux_sessions), return_exceptions=True)
+            dead_clients: list[TerminalConnection] = []
+            idle_clients: list[TerminalConnection] = []
+            expired_detached: list[str] = []
+            for session_id, session in list(self._sessions.items()):
+                if session.phase is _Phase.ATTACHED and session.connection is not None:
+                    conn = session.connection
+                    if conn.process.returncode is not None:
+                        self._sessions.pop(session_id, None)
+                        dead_clients.append(conn)
+                    elif conn.last_seen < cutoff:
+                        self._sessions.pop(session_id, None)
+                        idle_clients.append(conn)
+                elif session.phase is _Phase.DETACHED and (session.detached_at or 0.0) < cutoff:
+                    self._sessions.pop(session_id, None)
+                    expired_detached.append(session_id)
+        # Dead clients: just reap the process + fd. Idle clients: detach (the tmux session may
+        # survive) and re-track as DETACHED if it does. Expired detached sessions: kill them.
+        await asyncio.gather(
+            *(self._teardown_client(conn, kill_session=False) for conn in dead_clients),
+            return_exceptions=True,
+        )
+        for conn in idle_clients:
+            await self._teardown_client(conn, kill_session=False)
+            if conn.persistent and await _tmux_has_session(conn.session_id):
+                async with self._lock:
+                    if conn.session_id not in self._sessions:
+                        self._sessions[conn.session_id] = _Session(
+                            conn.session_id, _Phase.DETACHED, persistent=True, detached_at=time.monotonic()
+                        )
+        await asyncio.gather(
+            *(_kill_tmux_session(session_id) for session_id in expired_detached),
+            return_exceptions=True,
+        )
 
 
 class TerminalServiceError(Exception):
