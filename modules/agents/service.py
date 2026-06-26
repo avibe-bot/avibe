@@ -43,20 +43,19 @@ class AgentService:
         agent = self.get(agent_name)
         runtime_key = self._runtime_turn_key(agent, request)
         gate = self._get_turn_gate(runtime_key)
-        # Surface the queued 👌 reaction BEFORE acquiring the gate, then promote it
-        # to the running 👀 once the gate is acquired (mirroring how the status
-        # bubble is posted only after the gate). We deliberately do NOT gate this on
-        # gate.lock.locked(): that single-instant check misses a turn that is in
-        # fact queued whenever this message reaches the gate a moment after the
-        # holder did, and was why a queued message could show no 👌 at all. So we
-        # always show 👌 first — if the gate is free, acquire() returns immediately
-        # and promote_reaction_to_running flips 👌→👀 right away (a brief flash); if
-        # it is contended, the 👌 stays for the whole wait. Reaction add/remove is
-        # owned by the processing indicator and is a no-op on platforms / modes
-        # without a reaction indicator (e.g. WeChat, typing-only, avibe Web).
+        # Only a message that is ACTUALLY queued behind a running turn shows the
+        # queued 👌. The gate is held for the whole turn (released only on the
+        # terminal result via the outbound dispatcher), so gate.lock.locked() here
+        # means another turn for this runtime key is in flight and this message will
+        # block on acquire() below — surface that wait with 👌, then promote it to
+        # the running 👀 once the gate is acquired. A non-contended message skips 👌
+        # entirely and goes straight to 👀 at promote_reaction_to_running, so it does
+        # NOT flash 👌→👀. Reaction add/remove is owned by the processing indicator
+        # and is a no-op on platforms / modes without a reaction indicator (e.g.
+        # WeChat, typing-only, avibe Web).
         indicator = getattr(self.controller, "processing_indicator", None)
         queued_reaction_shown = False
-        if indicator is not None:
+        if indicator is not None and gate.lock.locked():
             try:
                 queued_reaction_shown = bool(await indicator.show_queued_reaction(request))
             except Exception:

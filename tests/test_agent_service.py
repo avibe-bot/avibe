@@ -264,9 +264,9 @@ def test_agent_service_shows_queued_reaction_then_promotes_on_start() -> None:
 
         second = asyncio.create_task(service.handle_message("claude", _request("second")))
         await asyncio.sleep(0.05)
-        # Every turn shows the queued 👌 before acquiring the gate; only the first
-        # (which already holds the gate) has promoted to 👀 so far. The second is
-        # blocked on acquire() with its 👌 still showing.
+        # Only the SECOND message is queued (the first holds the gate): it shows the
+        # queued 👌 and is blocked on acquire(). The first ran uncontended, so it
+        # never showed 👌 and has already promoted to 👀.
         assert "show_queued" in log
         assert log.count("promote") == 1
 
@@ -275,7 +275,7 @@ def test_agent_service_shows_queued_reaction_then_promotes_on_start() -> None:
         await asyncio.wait_for(first, timeout=3)
         await asyncio.wait_for(second, timeout=3)
 
-        assert log.count("show_queued") == 2  # both turns surface the queued reaction
+        assert log.count("show_queued") == 1  # only the genuinely-queued turn shows 👌
         assert log.count("promote") == 2  # both turns promoted when they started
         assert "finish" not in log  # no cancellation occurred
 
@@ -393,8 +393,10 @@ def test_real_indicator_shows_queued_reaction_on_second_message_while_first_hold
             if ("add", "m1", ACK_REACTION_EMOJI) in im.events:
                 break
             await asyncio.sleep(0)
-        # First (uncontended) has started and shows the running 👀.
+        # First (uncontended) has started and shows the running 👀 directly — it must
+        # NOT have shown the queued 👌 (no 👌→👀 flash for a non-queued message).
         assert ("add", "m1", ACK_REACTION_EMOJI) in im.events, im.events
+        assert ("add", "m1", QUEUED_REACTION_EMOJI) not in im.events, im.events
 
         req2 = _reaction_request("second", "m2")
         second = asyncio.create_task(service.handle_message("claude", req2))

@@ -6,7 +6,16 @@ Scope: IM platforms (Slack / Discord / Telegram / Feishu). WeChat unaffected (no
 
 ## 0. Changelog
 
-- v3 (post-test fix): dropped the `gate.lock.locked()` precondition in
+- v4 (real root cause): the queued 👌 never appeared on Slack because
+  `SlackBot.add_reaction` only mapped 👀→`eyes` / 🤖→`robot_face`; the raw 👌
+  codepoint is rejected by Slack `reactions.add` with `invalid_name`. Fixed by
+  mapping 👌→`ok_hand` (Slack, via a shared `_slack_reaction_name` helper) and
+  👌→`OK` (Feishu emoji_type). With the platform mapping fixed, the v3 "always show
+  👌" workaround was REVERTED back to the `gate.lock.locked()` guard: a non-queued
+  message goes straight to 👀 (no 👌→👀 flash), only a genuinely-queued message
+  shows 👌. The gate is held for the whole turn (released only on the terminal
+  result), so `locked()` reliably detects real queuing.
+- v3 (superseded by v4): dropped the `gate.lock.locked()` precondition in
   `AgentService.handle_message`. That single-instant check missed genuinely-queued
   messages — a queued message could show no 👌 at all (observed in testing). The
   gate now ALWAYS calls `show_queued_reaction` before `acquire()`; a non-contended
