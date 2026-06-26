@@ -451,6 +451,116 @@ async def _open_failure_preserves_detached_session(monkeypatch, tmp_path):
     await service.shutdown()
 
 
+def test_abandoned_open_kills_orphan_tmux_session(monkeypatch, tmp_path):
+    asyncio.run(_abandoned_open_kills_orphan_tmux_session(monkeypatch, tmp_path))
+
+
+async def _abandoned_open_kills_orphan_tmux_session(monkeypatch, tmp_path):
+    # When the OPENING slot is gone (service shutting down) after a persistent child spawned,
+    # _abandon_open must KILL the tmux session, not merely detach it — otherwise a terminal
+    # opened during `vibe stop` leaves an orphaned tmux server.
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(terminal_service.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: "/usr/bin/tmux")
+
+    killed: list[str] = []
+
+    async def fake_kill(session_id: str) -> None:
+        killed.append(session_id)
+
+    monkeypatch.setattr(terminal_service, "_kill_tmux_session", fake_kill)
+
+    opened_fds: list[int] = []
+
+    def fake_openpty():
+        master = os.open(os.devnull, os.O_RDWR)
+        slave = os.open(os.devnull, os.O_RDWR)
+        opened_fds.extend([master, slave])
+        return master, slave
+
+    monkeypatch.setattr(terminal_service.os, "openpty", fake_openpty)
+
+    class _FakeProcess:
+        returncode = None
+        pid = None
+
+        def send_signal(self, signum: int) -> None:
+            pass
+
+        async def wait(self) -> int:
+            return 0
+
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=1)
+
+    async def fake_spawn(*_args, **_kwargs):
+        service._sessions.clear()  # simulate shutdown winning the race mid-spawn
+        return _FakeProcess()
+
+    monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", fake_spawn)
+
+    try:
+        with pytest.raises(terminal_service.TerminalServiceError, match="session_opening"):
+            await service.open("orphan")
+        assert "orphan" in killed  # the orphaned tmux session was killed, not just detached
+    finally:
+        for fd in opened_fds:
+            terminal_service._close_fd(fd)
+
+
+def test_reaper_retracks_dead_client_with_live_session(monkeypatch, tmp_path):
+    asyncio.run(_reaper_retracks_dead_client_with_live_session(monkeypatch, tmp_path))
+
+
+async def _reaper_retracks_dead_client_with_live_session(monkeypatch, tmp_path):
+    # A tmux client can exit (returncode set) while its session is still alive (the user
+    # detached). If the reaper sees it before close() runs, it must reconcile via has-session
+    # and re-track it as DETACHED — not silently drop a live, uncounted session.
+    await _set_tmux_has_session(monkeypatch, True)
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+    conn = _make_persistent_connection("d", process=_ExitedProcess())
+    service._sessions["d"] = _Session("d", _Phase.ATTACHED, persistent=True, connection=conn)
+
+    await service.reap_idle()
+
+    assert service._sessions["d"].phase is _Phase.DETACHED
+
+
+def test_closing_session_still_counts_against_cap(monkeypatch, tmp_path):
+    asyncio.run(_closing_session_still_counts_against_cap(monkeypatch, tmp_path))
+
+
+async def _closing_session_still_counts_against_cap(monkeypatch, tmp_path):
+    # During a real close(), the session must keep counting toward max_sessions across the
+    # async teardown window — a concurrent open for a different id must not slip past the cap
+    # while the closing session's tmux state is still being reconciled.
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: "/usr/bin/tmux")
+    gate = asyncio.Event()
+
+    async def gated_has_session(_session_id: str) -> bool:
+        await gate.wait()
+        return True
+
+    monkeypatch.setattr(terminal_service, "_tmux_has_session", gated_has_session)
+
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=1)
+    conn = _make_persistent_connection("a", process=_ExitedProcess())
+    service._sessions["a"] = _Session("a", _Phase.ATTACHED, persistent=True, connection=conn)
+
+    close_task = asyncio.create_task(service.close(conn))
+    await asyncio.sleep(0.02)  # let close() reach CLOSING and park in the gated has-session
+    try:
+        with pytest.raises(terminal_service.TerminalServiceError, match="too_many_sessions"):
+            await service.open("b")
+    finally:
+        gate.set()
+        await close_task
+
+    # The session was alive (has-session True), so it settled to DETACHED — still one slot.
+    assert service._sessions["a"].phase is _Phase.DETACHED
+    await service.shutdown()
+
+
 def test_open_cleans_up_process_when_registration_fails(monkeypatch, tmp_path):
     asyncio.run(_open_cleans_up_process_when_registration_fails(monkeypatch, tmp_path))
 
