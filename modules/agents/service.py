@@ -88,22 +88,23 @@ class AgentService:
         gate.backend = agent.name
         gate.runtime_started = False
         self._stamp_runtime_turn(request, runtime_key, gate.token)
-        # Settle the concurrently-added queued 👌 (it usually finished while we were
-        # blocked on acquire) before promoting, so promote sees the final state.
-        if queued_reaction_task is not None:
-            try:
-                await queued_reaction_task
-            except Exception:
-                logger.debug("Failed to settle queued reaction", exc_info=True)
-        # The turn truly starts now (gate acquired): flip the queued 👌 to the
-        # running 👀 (or add 👀 directly on the non-busy fast path). Guarded so a
-        # reaction failure can never break the turn.
-        if indicator is not None:
-            try:
-                await indicator.promote_reaction_to_running(request)
-            except Exception:
-                logger.debug("Failed to promote reaction to running", exc_info=True)
         try:
+            # Settle the concurrently-added queued 👌 and promote it to the running
+            # 👀 INSIDE this cancellation-managed try. A cancel (shutdown / supersede)
+            # during these awaits must reach the CancelledError handler below so the
+            # runtime turn is released; otherwise the gate token + lock would leak and
+            # later prompts for this runtime key would block forever (Codex P1). Each
+            # is individually guarded so a reaction failure can't break the turn.
+            if queued_reaction_task is not None:
+                try:
+                    await queued_reaction_task
+                except Exception:
+                    logger.debug("Failed to settle queued reaction", exc_info=True)
+            if indicator is not None:
+                try:
+                    await indicator.promote_reaction_to_running(request)
+                except Exception:
+                    logger.debug("Failed to promote reaction to running", exc_info=True)
             # INBOUND status chokepoint (one of exactly two — the other is the outbound
             # MessageDispatcher.emit_agent_message). Every turn, every source (chat /
             # scheduled / Show Page), every backend funnels through here, so this is the

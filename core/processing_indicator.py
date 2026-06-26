@@ -368,7 +368,16 @@ class ProcessingIndicatorService:
                 return
             handle.ack_reaction_message_id = None
             handle.ack_reaction_emoji = None
-        await self._start_reaction_indicator(handle, emoji=ACK_REACTION_EMOJI)
+        applied = await self._start_reaction_indicator(handle, emoji=ACK_REACTION_EMOJI)
+        if not applied and not handle.typing_indicator_active:
+            # The reaction add failed at runtime (e.g. Slack missing reactions scope,
+            # or a transient API error). Because start() deferred the reaction, the
+            # normal mode loop never got to try a lower candidate — fall back to a
+            # typing indicator here so the user still gets a processing ack instead of
+            # none at all (P2). Best-effort and capability-gated.
+            capabilities = self._capabilities(handle.context)
+            if self._mode_supported(capabilities, "typing", handle.context):
+                await self._start_typing_indicator(handle)
         self._sync_reaction_to_request(handle, request)
 
     @staticmethod

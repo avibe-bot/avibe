@@ -29,10 +29,13 @@ def _ctx(message_id="m1"):
 
 
 class _FakeIM:
-    def __init__(self, *, add_ok=True, remove_ok=True):
+    def __init__(self, *, add_ok=True, remove_ok=True, typing_ok=True):
         self.add_ok = add_ok
         self.remove_ok = remove_ok
+        self.typing_ok = typing_ok
         self.calls: list[tuple[str, str, str]] = []
+        self.typing_calls: list[str] = []
+        self.clear_calls: list[str] = []
 
     async def add_reaction(self, context, message_id, emoji):
         self.calls.append(("add", message_id, emoji))
@@ -41,6 +44,14 @@ class _FakeIM:
     async def remove_reaction(self, context, message_id, emoji):
         self.calls.append(("remove", message_id, emoji))
         return self.remove_ok
+
+    async def send_typing_indicator(self, context):
+        self.typing_calls.append(context.channel_id)
+        return self.typing_ok
+
+    async def clear_typing_indicator(self, context):
+        self.clear_calls.append(context.channel_id)
+        return True
 
 
 def _svc(im):
@@ -173,6 +184,22 @@ class QueuedReactionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         await svc.finish(handle)
         self.assertIsNone(handle.ack_reaction_emoji)
         self.assertIsNone(handle.ack_reaction_message_id)
+
+    async def test_promote_falls_back_to_typing_when_reaction_add_fails(self):
+        # P2: if the reaction add fails at runtime (e.g. missing Slack scope), the
+        # deferred reaction has no lower candidate to fall through to, so promote
+        # must fall back to a typing indicator rather than leave no ack at all.
+        im = _FakeIM(add_ok=False)
+        svc = _svc(im)
+        handle = ProcessingIndicatorHandle(context=_ctx(), reaction_indicator_selected=True)
+
+        await svc.promote_reaction_to_running(handle)
+        self.assertIsNone(handle.ack_reaction_emoji)  # reaction did not stick
+        self.assertTrue(handle.typing_indicator_active)  # fell back to typing
+        self.assertTrue(im.typing_calls)
+
+        await svc.finish(handle)  # cancels the typing keepalive task
+        self.assertFalse(handle.typing_indicator_active)
 
     async def test_request_parallel_fields_synced(self):
         im = _FakeIM()

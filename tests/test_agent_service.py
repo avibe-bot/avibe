@@ -422,6 +422,57 @@ def test_real_indicator_shows_queued_reaction_on_second_message_while_first_hold
     asyncio.run(_run())
 
 
+def test_gate_released_when_cancelled_during_promote() -> None:
+    """Regression (Codex P1): a cancel after acquire() but during the
+    settle/promote awaits must still release the runtime gate, or the token + lock
+    leak and later prompts for the same runtime key block forever."""
+
+    async def _run():
+        promote_started = asyncio.Event()
+        block = asyncio.Event()
+
+        class _BlockingIndicator:
+            async def show_queued_reaction(self, _request):
+                return False
+
+            async def promote_reaction_to_running(self, _request):
+                promote_started.set()
+                await block.wait()  # cancel hits here, inside the managed try
+
+            async def finish(self, _request_or_handle):
+                return None
+
+        controller = _Controller()
+        controller.processing_indicator = _BlockingIndicator()
+        controller.emit_agent_message = AsyncMock()  # used by the cancel tidy
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        service.register(_RuntimeAgent())
+
+        request = _request("first")
+        task = asyncio.create_task(service.handle_message("claude", request))
+        await asyncio.wait_for(promote_started.wait(), timeout=2)
+        gate = service._get_turn_gate("session:/repo")
+        assert gate.lock.locked()  # acquired, currently in promote
+
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=2)
+        except BaseException:
+            pass
+
+        # The CancelledError handler schedules a tidy task that releases the gate.
+        released = False
+        for _ in range(200):
+            await asyncio.sleep(0)
+            if not gate.lock.locked() and gate.token == "":
+                released = True
+                break
+        assert released  # gate token + lock released despite cancel during promote
+
+    asyncio.run(_run())
+
+
 def test_queued_reaction_does_not_delay_gate_acquire_fifo() -> None:
     """Regression (Codex P1): a contended turn must reserve its FIFO place on the
     runtime gate WITHOUT waiting for the (network) queued-reaction call. If the 👌
