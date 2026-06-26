@@ -14,6 +14,27 @@ class _FakeShowRuntimeResult:
     reason: str | None = None
 
 
+def _stub_runtime_prepare_dependencies(monkeypatch, *, askill_result=None, avault_result=None, tmux_result=None):
+    calls = {"askill": [], "avault": [], "tmux": []}
+
+    def fake_askill(offline=False):
+        calls["askill"].append({"offline": offline})
+        return askill_result or {"ok": True, "installed": True}
+
+    def fake_avault(offline=False):
+        calls["avault"].append({"offline": offline})
+        return avault_result or {"ok": True, "installed": True}
+
+    def fake_tmux(offline=False, force=False):
+        calls["tmux"].append({"offline": offline, "force": force})
+        return tmux_result or {"ok": True, "installed": True}
+
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", fake_askill)
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", fake_avault)
+    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", fake_tmux)
+    return calls
+
+
 def test_show_without_subcommand_prints_help(capsys):
     parser = cli.build_parser()
     args = parser.parse_args(["show"])
@@ -40,8 +61,7 @@ def test_runtime_prepare_cli_reports_warning_only_failure(monkeypatch, capsys):
             return {"ok": False, "reason": "runtime_node_missing"}
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
-    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda offline=False: {"ok": True, "installed": True})
-    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda offline=False: {"ok": True, "installed": True})
+    calls = _stub_runtime_prepare_dependencies(monkeypatch)
 
     assert cli.cmd_runtime(args) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -49,6 +69,8 @@ def test_runtime_prepare_cli_reports_warning_only_failure(monkeypatch, capsys):
     assert payload["reason"] == "runtime_node_missing"
     assert payload["askill"] == {"ok": True, "installed": True}
     assert payload["avault"] == {"ok": True, "installed": True}
+    assert payload["tmux"] == {"ok": True, "installed": True}
+    assert calls["tmux"] == [{"offline": False, "force": False}]
 
 
 def test_runtime_prepare_cli_preserves_offline_environment(monkeypatch):
@@ -62,10 +84,10 @@ def test_runtime_prepare_cli_preserves_offline_environment(monkeypatch):
             return {"ok": True}
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
-    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda offline=False: {"ok": True, "installed": True})
-    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda offline=False: {"ok": True, "installed": True})
+    calls = _stub_runtime_prepare_dependencies(monkeypatch)
 
     assert cli.cmd_runtime(args) == 0
+    assert calls["tmux"] == [{"offline": False, "force": False}]
 
 
 def test_runtime_manager_from_args_preserves_offline_environment(monkeypatch, tmp_path):
@@ -88,17 +110,17 @@ def test_runtime_prepare_cli_strict_fails_when_prepare_fails(monkeypatch, capsys
             return {"ok": False, "reason": "runtime_archive_download_failed"}
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
-    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda offline=False: {"ok": True, "installed": True})
-    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda offline=False: {"ok": True, "installed": True})
+    calls = _stub_runtime_prepare_dependencies(monkeypatch)
 
     assert cli.cmd_runtime(args) == 1
     assert "runtime_archive_download_failed" in capsys.readouterr().err
+    assert calls["tmux"] == [{"offline": False, "force": False}]
 
 
 def test_runtime_prepare_cli_skips_avault_offline(monkeypatch, capsys):
     parser = cli.build_parser()
     args = parser.parse_args(["runtime", "prepare", "--offline", "--json"])
-    seen = {"askill": None, "avault": None}
+    seen = {"askill": None, "avault": None, "tmux": None}
 
     class FakeRuntimeManager:
         def prepare(self, *, force=False, offline=None):
@@ -113,14 +135,20 @@ def test_runtime_prepare_cli_skips_avault_offline(monkeypatch, capsys):
         seen["avault"] = offline
         return {"ok": True, "skipped": True, "reason": "offline"}
 
+    def fake_tmux(offline=False, force=False):
+        seen["tmux"] = {"offline": offline, "force": force}
+        return {"ok": True, "skipped": True, "reason": "offline"}
+
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
     monkeypatch.setattr(cli, "_ensure_askill_during_prepare", fake_askill)
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", fake_avault)
+    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", fake_tmux)
 
     assert cli.cmd_runtime(args) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert seen == {"askill": True, "avault": True}
+    assert seen == {"askill": True, "avault": True, "tmux": {"offline": True, "force": False}}
     assert payload["avault"] == {"ok": True, "skipped": True, "reason": "offline"}
+    assert payload["tmux"] == {"ok": True, "skipped": True, "reason": "offline"}
 
 
 def _save_config() -> V2Config:
