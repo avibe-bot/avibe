@@ -3844,7 +3844,7 @@ def install_avault(force: bool = False) -> dict:
 
 
 def ensure_avault_installed(force: bool = False) -> dict:
-    """Ensure avault is present. Idempotent until the manifest installer lands."""
+    """Ensure avault is present and new enough for the Vaults P2 surface."""
     if not _AVAULT_INSTALL_LOCK.acquire(blocking=False):
         return {
             "ok": False,
@@ -3854,31 +3854,44 @@ def ensure_avault_installed(force: bool = False) -> dict:
         }
     try:
         existing = _resolve_avault_cli_path()
-        if existing and not force:
-            return {"ok": True, "installed": True, "changed": False, "path": existing}
-        result = install_avault(force=force)
+        existing_version = _probe_avault_version(existing) if existing else None
+        if existing and not force and _version_at_least(existing_version, AVAULT_P2_MIN_VERSION):
+            return {
+                "ok": True,
+                "installed": True,
+                "changed": False,
+                "path": existing,
+                "version": existing_version,
+            }
+        needs_upgrade = bool(existing and not _version_at_least(existing_version, AVAULT_P2_MIN_VERSION))
+        result = install_avault(force=force or needs_upgrade)
         resolved = _resolve_avault_cli_path()
         installed = bool(resolved)
+        resolved_version = _probe_avault_version(resolved) if resolved else None
         result["installed"] = installed
+        result["version"] = resolved_version
         if "changed" not in result:
-            result["changed"] = installed and bool(result.get("ok")) and (not existing or force)
+            result["changed"] = installed and bool(result.get("ok")) and (not existing or force or needs_upgrade)
         result["path"] = resolved
         if result.get("ok") and not installed:
             result["ok"] = False
             result["message"] = (
                 result.get("message") or backend_t("dependencies.avault.installedNotFound")
             )
+        elif result.get("ok") and not _version_at_least(resolved_version, AVAULT_P2_MIN_VERSION):
+            result["ok"] = False
+            result["message"] = (
+                f"avault {resolved_version or 'unknown'} is installed, "
+                f"but Vaults requires >= {AVAULT_P2_MIN_VERSION}."
+            )
         return result
     finally:
         _AVAULT_INSTALL_LOCK.release()
 
 
-def avault_status() -> dict:
-    """Report whether avault is installed and its version (best-effort)."""
-    path = _resolve_avault_cli_path()
+def _probe_avault_version(path: str | None) -> str | None:
     if not path:
-        return {"id": "avault", "installed": False, "version": None, "status": "missing", "path": None}
-    version: str | None = None
+        return None
     try:
         proc = subprocess.run(
             [path, "version"],
@@ -3890,10 +3903,20 @@ def avault_status() -> dict:
         )
         text = (proc.stdout or proc.stderr or "").strip()
         if proc.returncode == 0 and text:
-            version = text.split()[-1]
+            return text.split()[-1]
     except Exception:  # noqa: BLE001
-        version = None
-    return {"id": "avault", "installed": True, "version": version, "status": "ready", "path": path}
+        return None
+    return None
+
+
+def avault_status() -> dict:
+    """Report whether avault is installed and its version (best-effort)."""
+    path = _resolve_avault_cli_path()
+    if not path:
+        return {"id": "avault", "installed": False, "version": None, "status": "missing", "path": None}
+    version = _probe_avault_version(path)
+    status = "ready" if _version_at_least(version, AVAULT_P2_MIN_VERSION) else "upgrade_required"
+    return {"id": "avault", "installed": True, "version": version, "status": status, "path": path}
 
 
 def _version_at_least(current: str | None, minimum: str) -> bool:

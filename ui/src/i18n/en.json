@@ -221,6 +221,7 @@
       "statusReady": "Ready",
       "statusDetected": "Detected",
       "statusMissing": "Not installed",
+      "statusUpgradeRequired": "Upgrade required",
       "install": "Install",
       "reinstall": "Reinstall",
       "repair": "Repair",

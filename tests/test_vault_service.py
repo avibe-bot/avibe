@@ -7,6 +7,7 @@ sees plaintext, machine keys, or Python crypto.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
@@ -82,6 +83,31 @@ def test_create_persists_no_value_derived_public_meta(vault):
     assert "preview" not in json.dumps(listed)
     assert value_tail not in json.dumps(meta)
     assert value_tail not in json.dumps(listed)
+
+
+def test_pubkey_pin_metadata_round_trips_through_masked_meta(vault):
+    _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
+    pin = {
+        "public_key": "02" + "ab" * 32,
+        "fingerprint": "fp_123",
+        "attested_at": "2026-06-26T00:00:00Z",
+        "attestation": {"source": "avault"},
+        "ignored": "nope",
+    }
+
+    with vault.begin() as conn:
+        stored = vs.store_pubkey_pin(conn, "ETH_KEY", pin)
+        listed = vs.list_secrets(conn)
+
+    assert stored["avault_pubkey_pin"] == {
+        "public_key": pin["public_key"],
+        "fingerprint": "fp_123",
+        "attested_at": "2026-06-26T00:00:00Z",
+        "attestation": {"source": "avault"},
+    }
+    listed_meta = next(item for item in listed if item["name"] == "ETH_KEY")
+    assert listed_meta["avault_pubkey_pin"]["fingerprint"] == "fp_123"
+    assert "ignored" not in listed_meta["avault_pubkey_pin"]
 
 
 def test_get_envelope_and_get_envelopes_return_stored_envelopes(vault):
@@ -350,6 +376,17 @@ def test_find_active_grant_requires_cached_dek_and_expires_stale_row(vault):
     assert status == "expired"
 
 
+def test_grant_cache_drops_deks_at_expiry_without_vault_sweep():
+    cache = vs.VaultGrantDekCache()
+    expires_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+
+    cache.put("vgr_old", {"A_KEY": "dek-a"}, expires_at=expires_at)
+
+    assert not cache.has("vgr_old", "A_KEY")
+    assert cache.get("vgr_old", "A_KEY") is None
+    assert cache.covered_names("vgr_old") == []
+
+
 def test_rotate_protected_secret_expires_active_grants(vault):
     _create(vault, name="A_KEY", protection="protected")
     cache = vs.VaultGrantDekCache()
@@ -610,6 +647,28 @@ def test_grant_creation_must_match_pending_access_request(vault):
                 created_by_request_id=access_req["id"],
                 deks_by_secret={"A_KEY": "dek-a"},
             )
+
+
+def test_grant_creation_rejects_expired_access_request(vault):
+    _create(vault, name="A_KEY", protection="protected")
+    cache = vs.VaultGrantDekCache()
+    expired_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    with vault.begin() as conn:
+        req = vs.create_access_request(conn, "A_KEY", expires_at=expired_at)
+        with pytest.raises(vs.InvalidRequestError):
+            vs.create_grant(
+                conn,
+                scope_type="secret",
+                scope_ref="A_KEY",
+                created_by_request_id=req["id"],
+                deks_by_secret={"A_KEY": "dek-a"},
+                cache=cache,
+            )
+        status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == req["id"])).scalar_one()
+        grants = conn.execute(select(vault_grants)).mappings().all()
+
+    assert status == "expired"
+    assert grants == []
 
 
 def test_rotating_protected_secret_expires_pending_access_and_sign_requests(vault):

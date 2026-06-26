@@ -221,6 +221,7 @@
       "statusReady": "就绪",
       "statusDetected": "已检测",
       "statusMissing": "未安装",
+      "statusUpgradeRequired": "需要升级",
       "install": "安装",
       "reinstall": "重新安装",
       "repair": "修复",

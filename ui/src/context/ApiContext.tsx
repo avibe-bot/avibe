@@ -999,7 +999,7 @@ export type DependencyItem = {
   required: boolean;
   installed: boolean;
   version: string | null;
-  status: 'ready' | 'missing';
+  status: 'ready' | 'missing' | 'upgrade_required';
 };
 
 export type DependenciesResult = { ok: boolean; deps: DependencyItem[] };

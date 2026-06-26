@@ -16,10 +16,12 @@ from core.scheduled_tasks import resolve_session_id_target
 from core.show_pages import ShowPageError, ShowPageStore
 from core.show_session_events import ShowSessionEventError, ShowSessionEventStore
 from storage import messages_service
+from storage import vault_service as vs
 from storage import workbench_sessions_service as wss
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_runs, messages, run_definitions, show_pages
+from storage.models import agent_runs, messages, run_definitions, show_pages, vault_grants
+from storage.vault_crypto import Sealed
 from storage.sessions_service import SQLiteSessionsService
 
 NOW = "2026-06-08T00:00:00Z"
@@ -89,6 +91,19 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
                 session_id=sid, visibility="public", share_id="shareX", created_at=NOW, updated_at=NOW
             )
         )
+        vs.create_secret(conn, name="ARCHIVE_KEY", protection="protected", sealed=Sealed("ct", "nonce", "wrap"))
+        req = vs.create_access_request(conn, "ARCHIVE_KEY", requester={"session_id": sid}, delivery={"session_id": sid})
+        cache = vs.GRANT_DEK_CACHE
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ARCHIVE_KEY",
+            session_id=sid,
+            created_by_request_id=req["id"],
+            deks_by_secret={"ARCHIVE_KEY": "dek"},
+            cache=cache,
+        )
+        assert cache.has(grant["id"], "ARCHIVE_KEY")
 
     with engine.begin() as conn:
         result = wss.archive_session(conn, sid)
@@ -120,6 +135,9 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
         page = conn.execute(select(show_pages).where(show_pages.c.session_id == sid)).mappings().first()
         assert page["visibility"] == "offline"
         assert page["offline_at"] is not None
+        grant_row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant["id"])).mappings().one()
+        assert grant_row["status"] == "revoked"
+        assert not cache.has(grant["id"], "ARCHIVE_KEY")
 
 
 def test_archived_session_not_reused_for_anchor(monkeypatch, tmp_path: Path) -> None:

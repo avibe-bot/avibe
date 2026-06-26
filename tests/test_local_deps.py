@@ -33,7 +33,7 @@ class _FakeHTTPResponse:
 
 
 def _fake_avault_archive(
-    content: bytes = b"#!/bin/sh\necho avault 0.1.2\n",
+    content: bytes = b"#!/bin/sh\necho avault 0.1.3\n",
     *,
     member_name: str = "avault",
 ) -> bytes:
@@ -393,18 +393,26 @@ def test_avault_resolves_path_fallback_when_configured_path_missing(monkeypatch)
 def test_ensure_avault_idempotent_when_present(monkeypatch):
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_P2_MIN_VERSION)
     flag = {"installed": False}
     monkeypatch.setattr(api, "install_avault", lambda force=False: flag.__setitem__("installed", True) or {"ok": True})
 
     out = api.ensure_avault_installed()
 
-    assert out == {"ok": True, "installed": True, "changed": False, "path": "/usr/local/bin/avault"}
+    assert out == {
+        "ok": True,
+        "installed": True,
+        "changed": False,
+        "path": "/usr/local/bin/avault",
+        "version": api.AVAULT_P2_MIN_VERSION,
+    }
     assert flag["installed"] is False
 
 
 def test_ensure_avault_force_rechecks_existing_binary(monkeypatch):
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_P2_MIN_VERSION)
     flag = {"installed": False}
     monkeypatch.setattr(api, "install_avault", lambda force=False: flag.__setitem__("installed", True) or {"ok": True})
 
@@ -414,6 +422,27 @@ def test_ensure_avault_force_rechecks_existing_binary(monkeypatch):
     assert out["ok"] is True
     assert out["installed"] is True
     assert out["changed"] is True
+
+
+def test_ensure_avault_upgrades_existing_binary_below_p2_minimum(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
+    seen_force: list[bool] = []
+    versions = iter(["0.1.2", api.AVAULT_P2_MIN_VERSION])
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: next(versions))
+
+    def fake_install(force=False):
+        seen_force.append(force)
+        return {"ok": True, "path": "/usr/local/bin/avault"}
+
+    monkeypatch.setattr(api, "install_avault", fake_install)
+
+    out = api.ensure_avault_installed()
+
+    assert seen_force == [True]
+    assert out["ok"] is True
+    assert out["changed"] is True
+    assert out["version"] == api.AVAULT_P2_MIN_VERSION
 
 
 def test_avault_status_missing(monkeypatch):
@@ -432,12 +461,24 @@ def test_avault_status_present_parses_version(monkeypatch):
 
     class _R:
         returncode = 0
-        stdout = "avault 0.0.1\n"
+        stdout = f"avault {api.AVAULT_P2_MIN_VERSION}\n"
         stderr = ""
 
     monkeypatch.setattr(api.subprocess, "run", lambda *a, **k: _R())
     s = api.avault_status()
-    assert s["installed"] and s["version"] == "0.0.1" and s["status"] == "ready"
+    assert s["installed"] and s["version"] == api.AVAULT_P2_MIN_VERSION and s["status"] == "ready"
+
+
+def test_avault_status_marks_old_version_upgrade_required(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/x/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: "0.1.2")
+
+    s = api.avault_status()
+
+    assert s["installed"] is True
+    assert s["version"] == "0.1.2"
+    assert s["status"] == "upgrade_required"
 
 
 def test_askill_update_status_compares_latest(monkeypatch):

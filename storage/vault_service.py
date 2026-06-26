@@ -97,30 +97,62 @@ class VaultGrantDekCache:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._deks_by_grant: dict[str, dict[str, str]] = {}
+        self._expires_at_by_grant: dict[str, datetime] = {}
+        self._timers_by_grant: dict[str, threading.Timer] = {}
 
-    def put(self, grant_id: str, deks_by_secret: dict[str, str]) -> None:
+    def put(self, grant_id: str, deks_by_secret: dict[str, str], *, expires_at: str | None = None) -> None:
+        expires_at_dt = _parse_iso_datetime(expires_at)
         with self._lock:
+            self._drop_locked(grant_id)
+            if expires_at_dt is not None and expires_at_dt <= datetime.now(timezone.utc):
+                return
             self._deks_by_grant[grant_id] = dict(deks_by_secret)
+            if expires_at_dt is not None:
+                self._expires_at_by_grant[grant_id] = expires_at_dt
+                delay = max(0.0, (expires_at_dt - datetime.now(timezone.utc)).total_seconds())
+                timer = threading.Timer(delay, self.drop, args=(grant_id,))
+                timer.daemon = True
+                self._timers_by_grant[grant_id] = timer
+                timer.start()
 
     def has(self, grant_id: str, secret_name: str) -> bool:
         with self._lock:
+            self._drop_if_expired_locked(grant_id)
             return secret_name in self._deks_by_grant.get(grant_id, {})
 
     def get(self, grant_id: str, secret_name: str) -> str | None:
         with self._lock:
+            self._drop_if_expired_locked(grant_id)
             return self._deks_by_grant.get(grant_id, {}).get(secret_name)
 
     def covered_names(self, grant_id: str) -> list[str]:
         with self._lock:
+            self._drop_if_expired_locked(grant_id)
             return sorted(self._deks_by_grant.get(grant_id, {}))
 
     def drop(self, grant_id: str) -> None:
         with self._lock:
-            self._deks_by_grant.pop(grant_id, None)
+            self._drop_locked(grant_id)
 
     def clear(self) -> None:
         with self._lock:
+            for timer in self._timers_by_grant.values():
+                timer.cancel()
             self._deks_by_grant.clear()
+            self._expires_at_by_grant.clear()
+            self._timers_by_grant.clear()
+
+    def _drop_locked(self, grant_id: str) -> None:
+        self._deks_by_grant.pop(grant_id, None)
+        self._expires_at_by_grant.pop(grant_id, None)
+        timer = self._timers_by_grant.pop(grant_id, None)
+        if timer is not None:
+            timer.cancel()
+
+    def _drop_if_expired_locked(self, grant_id: str) -> None:
+        expires_at = self._expires_at_by_grant.get(grant_id)
+        if expires_at is not None and expires_at <= datetime.now(timezone.utc):
+            self._drop_locked(grant_id)
 
 
 GRANT_DEK_CACHE = VaultGrantDekCache()
@@ -128,6 +160,18 @@ GRANT_DEK_CACHE = VaultGrantDekCache()
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _id(prefix: str) -> str:
@@ -151,7 +195,7 @@ def _public_meta(raw: str | None) -> dict[str, Any]:
 def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
     """Masked, value-free metadata for a secret row."""
     public_meta = _public_meta(row.get("public_meta"))
-    return {
+    payload = {
         "name": row["name"],
         "group": row.get("group_name"),
         "tags": _loads(row.get("tags")) or [],
@@ -167,6 +211,14 @@ def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
     }
+    pubkey_pin = public_meta.get("avault_pubkey_pin")
+    if isinstance(pubkey_pin, dict):
+        payload["avault_pubkey_pin"] = {
+            key: value
+            for key, value in pubkey_pin.items()
+            if key in {"public_key", "fingerprint", "attested_at", "attestation"}
+        }
+    return payload
 
 
 def _row_sealed(row: dict[str, Any]) -> Sealed:
@@ -1198,6 +1250,22 @@ def _validate_access_request_for_grant(
         raise InvalidRequestError("grant approval must complete an access request")
     if row_dict.get("status") != "pending":
         raise InvalidRequestError("grant approval request is not pending")
+    expires_at = _parse_iso_datetime(row_dict.get("expires_at"))
+    if expires_at is not None and expires_at <= datetime.now(timezone.utc):
+        result = conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id == request_id, vault_requests.c.status == "pending")
+            .values(status="expired", decided_at=_now())
+        )
+        if result.rowcount == 1:
+            audit(
+                conn,
+                "request-expired",
+                secret_name=row_dict.get("secret_name"),
+                delivery={"request_type": row_dict.get("request_type")},
+                request_id=request_id,
+            )
+        raise InvalidRequestError("grant approval request has expired")
     requested_secret = row_dict.get("secret_name")
     if requested_secret not in live_members:
         raise InvalidRequestError("grant scope does not cover the requested secret")
@@ -1297,6 +1365,7 @@ def create_grant(
     ttl = int(ttl_seconds or DEFAULT_GRANT_TTL_SECONDS[scope_type])
     ttl = max(1, min(ttl, _ttl_cap_for_members(conn, members)))
     now_dt = datetime.now(timezone.utc)
+    expires_at = (now_dt + timedelta(seconds=ttl)).isoformat()
     grant_id = _id("vgr")
     try:
         conn.execute(
@@ -1309,7 +1378,7 @@ def create_grant(
                 status="active",
                 created_by_request_id=created_by_request_id,
                 created_at=now_dt.isoformat(),
-                expires_at=(now_dt + timedelta(seconds=ttl)).isoformat(),
+                expires_at=expires_at,
             )
         )
     except Exception:
@@ -1328,7 +1397,7 @@ def create_grant(
         grant_id=grant_id,
     )
     row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().one()
-    cache.put(grant_id, {name: deks_by_secret[name] for name in members})
+    cache.put(grant_id, {name: deks_by_secret[name] for name in members}, expires_at=expires_at)
     return _grant_row_payload(dict(row), cache=cache)
 
 
@@ -1371,6 +1440,40 @@ def revoke_grant(
     audit(conn, "grant-revoked", grant_id=grant_id, delivery={"scope_type": row_dict["scope_type"], "scope_ref": row_dict["scope_ref"]})
     updated = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().one()
     return _grant_row_payload(dict(updated), cache=cache)
+
+
+def revoke_session_grants(
+    conn: Connection,
+    session_id: str,
+    *,
+    cache: VaultGrantDekCache = GRANT_DEK_CACHE,
+) -> int:
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            select(vault_grants).where(vault_grants.c.status == "active", vault_grants.c.session_id == session_id)
+        ).mappings()
+    ]
+    now = _now()
+    revoked = 0
+    for row in rows:
+        result = conn.execute(
+            vault_grants.update()
+            .where(vault_grants.c.id == row["id"], vault_grants.c.status == "active")
+            .values(status="revoked", revoked_at=now)
+        )
+        if result.rowcount != 1:
+            continue
+        cache.drop(row["id"])
+        audit(
+            conn,
+            "grant-revoked-session-archived",
+            grant_id=row["id"],
+            delivery={"scope_type": row["scope_type"], "scope_ref": row["scope_ref"], "session_id": session_id},
+        )
+        revoked += 1
+    return revoked
+
 
 
 def find_active_grant_for_secret(
