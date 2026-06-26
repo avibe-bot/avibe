@@ -9,6 +9,7 @@ import {
   contentUrl,
   fileBrowserErrorMessage,
   fileMeta,
+  isPlainEntryName,
   joinPath,
   listDir,
   makeDir,
@@ -110,8 +111,16 @@ export const AppsFileBrowserPage: React.FC = () => {
   };
 
   const newFolder = async () => {
-    const name = window.prompt(t('apps.fileBrowser.newFolderPrompt'));
-    if (!name) return;
+    const raw = window.prompt(t('apps.fileBrowser.newFolderPrompt'));
+    if (raw == null) return;
+    const name = raw.trim();
+    if (name === '') return;
+    // The prompt collects a name, not a path: reject separators / '.' / '..' before
+    // joining, so "New folder" can't silently create a dir outside the current folder.
+    if (!isPlainEntryName(name)) {
+      setError(t('apps.fileBrowser.errors.invalid_name'));
+      return;
+    }
     try {
       await makeDir(joinPath(cwd, name));
       navigate(cwd);

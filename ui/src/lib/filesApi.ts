@@ -71,6 +71,15 @@ export function joinPath(base: string, name: string): string {
   return base.endsWith('/') || base.endsWith('\\') ? `${base}${name}` : `${base}${sep}${name}`;
 }
 
+// A user-entered entry name must be a single path component, so joinPath(base, name)
+// can only ever address a child of `base`. Reject separators and '.'/'..'/empty —
+// otherwise input like '../scratch' or 'sub/new' would mutate a sibling/nested folder.
+// Mirrors the backend rename_path name validator.
+export function isPlainEntryName(name: string): boolean {
+  const trimmed = name.trim();
+  return trimmed !== '' && trimmed !== '.' && trimmed !== '..' && !trimmed.includes('/') && !trimmed.includes('\\');
+}
+
 export function pathCrumbs(path: string): { label: string; path: string }[] {
   // Windows: split on either separator and keep the drive (e.g. C:\) as the root.
   if (isWindowsPath(path)) {
