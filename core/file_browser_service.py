@@ -661,7 +661,12 @@ def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
                             shutil.copy2(source, temp_target, follow_symlinks=False)
                         _os_rename_noreplace(temp_target, target)
                         temp_target = None
-                        _remove_backup_path(source)
+                        created_target_stat = target.lstat()
+                        try:
+                            _remove_backup_path(source)
+                        except OSError:
+                            _remove_created_cross_fs_move_target(target, source, created_target_stat)
+                            raise
                     except Exception:
                         if temp_target is not None:
                             _remove_path_if_exists(temp_target)
@@ -705,6 +710,19 @@ def _restore_move_backup(backup: Path, target: Path) -> None:
     backup.rename(target)
 
 
+def _remove_created_cross_fs_move_target(target: Path, source: Path, created_target_stat: os.stat_result) -> None:
+    try:
+        target_stat = target.lstat()
+        if (
+            _exists_no_follow(source)
+            and (target_stat.st_dev, target_stat.st_ino)
+            == (created_target_stat.st_dev, created_target_stat.st_ino)
+        ):
+            _remove_backup_path(target)
+    except OSError:
+        logger.debug("Failed to remove rollback target after cross-filesystem move failure", exc_info=True)
+
+
 def _remove_backup_path(path: Path) -> None:
     if _is_dir_no_follow(path):
         shutil.rmtree(path)
@@ -738,8 +756,12 @@ def delete_path(raw_path: str, *, recursive: bool = False) -> dict[str, Any]:
                 target.unlink()
             return {"ok": True}
         except OSError as exc:
-            if stat.S_ISDIR(target_stat.st_mode) and not recursive:
+            if stat.S_ISDIR(target_stat.st_mode) and not recursive and exc.errno in {errno.ENOTEMPTY, errno.EEXIST}:
                 raise ConflictError("not_empty", "Directory is not empty") from exc
+            if isinstance(exc, FileNotFoundError):
+                raise NotFoundError() from exc
+            if isinstance(exc, PermissionError):
+                raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
             raise FileBrowserError("fs_error", str(exc), 400) from exc
 
     return _run_mutation("delete", target, _delete, recursive=recursive)

@@ -518,6 +518,75 @@ def test_mutating_ops_mkdir_rename_move_delete(tmp_path, caplog):
     assert any("file_browser.delete" in record.message for record in caplog.records)
 
 
+def test_delete_non_recursive_directory_maps_not_empty_only_for_not_empty_errno(tmp_path):
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "child.txt").write_text("child", encoding="utf-8")
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.delete_path(str(nested), recursive=False)
+
+    assert exc.value.code == "not_empty"
+    assert exc.value.status_code == 409
+
+
+def test_delete_non_recursive_directory_maps_permission_denied(tmp_path, monkeypatch):
+    folder = tmp_path / "folder"
+    folder.mkdir()
+
+    def fail_rmdir(self: Path) -> None:
+        if self == folder:
+            raise PermissionError(errno.EACCES, "permission denied", str(self))
+        return real_rmdir(self)
+
+    real_rmdir = Path.rmdir
+    monkeypatch.setattr(Path, "rmdir", fail_rmdir)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.delete_path(str(folder), recursive=False)
+
+    assert exc.value.code == "permission_denied"
+    assert exc.value.status_code == 403
+
+
+def test_delete_non_recursive_directory_maps_concurrent_missing_to_not_found(tmp_path, monkeypatch):
+    folder = tmp_path / "folder"
+    folder.mkdir()
+
+    def fail_rmdir(self: Path) -> None:
+        if self == folder:
+            raise FileNotFoundError(errno.ENOENT, "missing", str(self))
+        return real_rmdir(self)
+
+    real_rmdir = Path.rmdir
+    monkeypatch.setattr(Path, "rmdir", fail_rmdir)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.delete_path(str(folder), recursive=False)
+
+    assert exc.value.code == "not_found"
+    assert exc.value.status_code == 404
+
+
+def test_delete_non_recursive_directory_maps_generic_oserror_to_fs_error(tmp_path, monkeypatch):
+    folder = tmp_path / "folder"
+    folder.mkdir()
+
+    def fail_rmdir(self: Path) -> None:
+        if self == folder:
+            raise OSError(errno.EIO, "io error", str(self))
+        return real_rmdir(self)
+
+    real_rmdir = Path.rmdir
+    monkeypatch.setattr(Path, "rmdir", fail_rmdir)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.delete_path(str(folder), recursive=False)
+
+    assert exc.value.code == "fs_error"
+    assert exc.value.status_code == 400
+
+
 def test_move_overwrite_restores_destination_when_move_fails(tmp_path, monkeypatch):
     source = tmp_path / "source.txt"
     destination = tmp_path / "destination.txt"
@@ -642,6 +711,39 @@ def test_move_cross_filesystem_copies_then_removes_source(tmp_path, monkeypatch)
     assert destination.read_text(encoding="utf-8") == "DATA"
     assert not source.exists()
     # No overwrite-temp siblings left behind.
+    assert not list(tmp_path.glob(".dst.txt.avibe-overwrite-*"))
+
+
+def test_move_cross_filesystem_rolls_back_target_when_source_removal_fails(tmp_path, monkeypatch):
+    source = tmp_path / "src.txt"
+    source.write_text("DATA", encoding="utf-8")
+    destination = tmp_path / "dst.txt"
+
+    real_rename = fs._os_rename_noreplace
+    calls = {"n": 0}
+
+    def fake_rename(src: Path, dst: Path) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(errno.EXDEV, "cross-device link")
+        real_rename(src, dst)
+
+    real_remove_backup_path = fs._remove_backup_path
+
+    def fail_source_removal(path: Path) -> None:
+        if Path(path) == source:
+            raise PermissionError(errno.EACCES, "permission denied", str(path))
+        real_remove_backup_path(path)
+
+    monkeypatch.setattr(fs, "_os_rename_noreplace", fake_rename)
+    monkeypatch.setattr(fs, "_remove_backup_path", fail_source_removal)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.move_path(str(source), str(destination), overwrite=False)
+
+    assert exc.value.code == "fs_error"
+    assert source.read_text(encoding="utf-8") == "DATA"
+    assert not destination.exists()
     assert not list(tmp_path.glob(".dst.txt.avibe-overwrite-*"))
 
 
