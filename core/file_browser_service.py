@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import ctypes
+import errno
 import logging
 import mimetypes
 import os
 import shutil
 import stat
+import sys
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -44,6 +47,10 @@ INLINE_SAFE_CONTENT_TYPES = {
     "video/ogg",
     "video/quicktime",
 }
+
+_AT_FDCWD = -100
+_RENAME_NOREPLACE = 1
+_RENAME_NOREPLACE_FALLBACK_WARNED = False
 
 
 class FileBrowserError(Exception):
@@ -140,20 +147,90 @@ def _rename_no_replace(source: Path, target: Path) -> None:
     check before it is a TOCTOU race — a target created in between is silently clobbered.
     ``os.link()`` is atomic and fails with ``FileExistsError`` if the target exists, so use
     link()+unlink() for the common same-directory, regular-file case. Symlinks and
-    directories cannot be hard-linked; for those fall back to a last-moment existence check
-    + rename, where rename onto a different-type or non-empty target fails rather than
-    clobbering (only replacing an empty directory remains a residual race).
+    directories cannot be hard-linked; for those use renameat2(RENAME_NOREPLACE) where
+    available, with a documented platform fallback.
     """
     try:
         os.link(source, target, follow_symlinks=False)
     except FileExistsError as exc:
         raise ConflictError("exists", "Destination already exists") from exc
     except OSError:
-        if _exists_no_follow(target):
-            raise ConflictError("exists", "Destination already exists")
-        source.rename(target)
+        _os_rename_noreplace(source, target)
         return
     os.unlink(source)
+
+
+def _os_rename_noreplace(source: Path, target: Path) -> None:
+    """Rename ``source`` to ``target`` without replacing an existing destination."""
+    try:
+        _glibc_renameat2_noreplace(source, target)
+        return
+    except FileExistsError as exc:
+        raise ConflictError("exists", "Destination already exists") from exc
+    except OSError as exc:
+        if exc.errno == errno.EXDEV:
+            raise
+        if exc.errno not in {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}:
+            raise
+    except AttributeError:
+        pass
+
+    try:
+        os.link(source, target, follow_symlinks=False)
+    except FileExistsError as exc:
+        raise ConflictError("exists", "Destination already exists") from exc
+    except OSError as exc:
+        if exc.errno == errno.EXDEV:
+            raise
+    else:
+        os.unlink(source)
+        return
+
+    _warn_rename_noreplace_fallback()
+    if _exists_no_follow(target):
+        raise ConflictError("exists", "Destination already exists")
+    # Non-Linux or old libc fallback: POSIX rename can still replace a target
+    # that appears after this check, notably an empty directory during directory
+    # rename. Linux deployments should take the atomic renameat2 path above.
+    source.rename(target)
+
+
+def _glibc_renameat2_noreplace(source: Path, target: Path) -> None:
+    if sys.platform != "linux":
+        raise AttributeError("renameat2 is only available on Linux")
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = libc.renameat2
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        _AT_FDCWD,
+        os.fsencode(source),
+        _AT_FDCWD,
+        os.fsencode(target),
+        _RENAME_NOREPLACE,
+    )
+    if result != 0:
+        err = ctypes.get_errno()
+        if err == errno.EEXIST:
+            raise FileExistsError(err, os.strerror(err), str(target))
+        raise OSError(err, os.strerror(err), str(target))
+
+
+def _warn_rename_noreplace_fallback() -> None:
+    global _RENAME_NOREPLACE_FALLBACK_WARNED
+    if _RENAME_NOREPLACE_FALLBACK_WARNED:
+        return
+    _RENAME_NOREPLACE_FALLBACK_WARNED = True
+    logger.warning(
+        "Atomic no-replace rename is unavailable on this platform; falling back to "
+        "check-then-rename with a residual empty-directory race."
+    )
 
 
 def _stat_existing(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
@@ -481,13 +558,31 @@ def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
 
     def _move() -> dict[str, Any]:
         backup: Path | None = None
+        temp_target: Path | None = None
         try:
-            # Re-check at move time: shutil.move()/os.rename() replaces an existing
-            # destination on POSIX, so without this a no-overwrite move would
-            # silently clobber a file created after the earlier precheck.
+            if not overwrite:
+                try:
+                    _os_rename_noreplace(source, target)
+                except OSError as exc:
+                    if exc.errno != errno.EXDEV:
+                        raise
+                    temp_target = _reserve_backup_path(target)
+                    try:
+                        if _is_dir_no_follow(source):
+                            shutil.copytree(source, temp_target, symlinks=True)
+                        else:
+                            shutil.copy2(source, temp_target, follow_symlinks=False)
+                        _os_rename_noreplace(temp_target, target)
+                        temp_target = None
+                        _remove_backup_path(source)
+                    except Exception:
+                        if temp_target is not None:
+                            _remove_path_if_exists(temp_target)
+                        raise
+                return {"ok": True}
+            # Re-check at move time for the overwrite path so file-vs-directory
+            # conflicts are caught before the destination is moved aside.
             if _exists_no_follow(target):
-                if not overwrite:
-                    raise ConflictError("exists", "Destination already exists")
                 if _is_dir_no_follow(target) and source.is_file():
                     raise ConflictError("exists", "Cannot overwrite a directory with a file")
                 backup = _reserve_backup_path(target)
@@ -528,6 +623,13 @@ def _remove_backup_path(path: Path) -> None:
         shutil.rmtree(path)
     else:
         path.unlink()
+
+
+def _remove_path_if_exists(path: Path) -> None:
+    try:
+        _remove_backup_path(path)
+    except FileNotFoundError:
+        pass
 
 
 def delete_path(raw_path: str, *, recursive: bool = False) -> dict[str, Any]:

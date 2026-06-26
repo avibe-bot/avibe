@@ -145,6 +145,27 @@ def test_rename_refuses_to_clobber_target_appearing_after_precheck(tmp_path, mon
     assert src.read_text(encoding="utf-8") == "SRC"  # source intact
 
 
+def test_rename_no_replace_refuses_existing_directory_target(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    src.mkdir()
+    dst = tmp_path / "dst"
+    dst.mkdir()
+
+    def target_exists(*_args, **_kwargs):
+        raise FileExistsError(str(dst))
+
+    real_exists = fs._exists_no_follow
+    monkeypatch.setattr(fs, "_glibc_renameat2_noreplace", target_exists)
+    monkeypatch.setattr(fs, "_exists_no_follow", lambda p: False if Path(p) == dst else real_exists(p))
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs._rename_no_replace(src, dst)
+
+    assert exc.value.code == "exists"
+    assert src.is_dir()
+    assert dst.is_dir()
+
+
 def test_write_is_atomic_and_detects_mtime_conflict(tmp_path):
     path = tmp_path / "doc.txt"
     first = fs.write_file(str(path), "first")
@@ -234,6 +255,23 @@ def test_move_overwrite_restores_destination_when_move_fails(tmp_path, monkeypat
     assert source.read_text(encoding="utf-8") == "source"
     assert destination.read_text(encoding="utf-8") == "destination"
     assert not list(tmp_path.glob(".destination.txt.avibe-overwrite-*"))
+
+
+def test_move_no_overwrite_refuses_target_appearing_after_precheck(tmp_path, monkeypatch):
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination.txt"
+    source.write_text("source", encoding="utf-8")
+    destination.write_text("destination", encoding="utf-8")
+
+    real_exists = fs._exists_no_follow
+    monkeypatch.setattr(fs, "_exists_no_follow", lambda p: False if Path(p) == destination else real_exists(p))
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.move_path(str(source), str(destination), overwrite=False)
+
+    assert exc.value.code == "exists"
+    assert source.read_text(encoding="utf-8") == "source"
+    assert destination.read_text(encoding="utf-8") == "destination"
 
 
 def test_symlink_mutations_operate_on_link_not_target(tmp_path):

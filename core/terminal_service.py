@@ -228,6 +228,7 @@ class TerminalService:
             )
             async with self._lock:
                 self._reserved_sessions.discard(session_id)
+                self._detached_tmux_sessions.pop(session_id, None)
                 self._connections[session_id] = spawned
             return spawned
         except BaseException:
@@ -257,14 +258,9 @@ class TerminalService:
                 # it later.
                 if not client_exited:
                     await _terminate_process(connection.process, signal.SIGHUP)
-                    record = True
-                else:
-                    # The client already exited on its own. Only a real detach (e.g. the
-                    # user hit tmux's detach key) leaves the session/server alive; if the
-                    # shell exited the session is gone, so don't count a dead id against
-                    # max_sessions until the idle timeout — verify it still exists.
-                    record = await _tmux_has_session(connection.session_id)
-                if record:
+                # Only a real detach leaves the tmux session/server alive; if the shell
+                # exited before or during SIGHUP, don't count a dead id against max_sessions.
+                if await _tmux_has_session(connection.session_id):
                     async with self._lock:
                         self._detached_tmux_sessions[connection.session_id] = time.monotonic()
             else:

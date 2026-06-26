@@ -92,6 +92,54 @@ async def _terminal_reconnect_replaces_session(monkeypatch, tmp_path):
         await service.shutdown()
 
 
+def test_reconnect_clears_detached_bookkeeping(monkeypatch, tmp_path):
+    asyncio.run(_reconnect_clears_detached_bookkeeping(monkeypatch, tmp_path))
+
+
+async def _reconnect_clears_detached_bookkeeping(monkeypatch, tmp_path):
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(terminal_service.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: "/usr/bin/tmux")
+    await _set_tmux_has_session(monkeypatch, True)
+
+    class _FakeProcess:
+        returncode = None
+        pid = None
+
+        async def wait(self) -> int:
+            return 0
+
+    async def fake_spawn(*_args, **_kwargs):
+        return _FakeProcess()
+
+    monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", fake_spawn)
+
+    opened_fds: list[int] = []
+
+    def fake_openpty():
+        master = os.open(os.devnull, os.O_RDWR)
+        slave = os.open(os.devnull, os.O_RDWR)
+        opened_fds.extend([master, slave])
+        return master, slave
+
+    monkeypatch.setattr(terminal_service.os, "openpty", fake_openpty)
+
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+    existing = _make_persistent_connection("id", process=_LiveProcess())
+    service._connections["id"] = existing
+    service._detached_tmux_sessions["id"] = 1.0
+
+    try:
+        spawned = await service.open("id")
+        assert service._connections["id"] is spawned
+        assert "id" not in service._detached_tmux_sessions
+    finally:
+        await service.shutdown()
+        for fd in opened_fds:
+            terminal_service._close_fd(fd)
+
+
 def test_terminal_resize_applies_winsize(monkeypatch, tmp_path):
     asyncio.run(_terminal_resize_applies_winsize(monkeypatch, tmp_path))
 
@@ -262,11 +310,23 @@ class _ExitedProcess:
         return 0
 
 
-def _make_persistent_connection(session_id: str) -> "terminal_service.TerminalConnection":
+class _LiveProcess:
+    returncode = None
+    pid = None
+
+    async def wait(self) -> int:
+        return 0
+
+
+def _make_persistent_connection(
+    session_id: str,
+    *,
+    process=None,
+) -> "terminal_service.TerminalConnection":
     fd = os.open(os.devnull, os.O_RDWR)
     return terminal_service.TerminalConnection(
         session_id=session_id,
-        process=_ExitedProcess(),
+        process=process or _ExitedProcess(),
         master_fd=fd,
         persistent=True,
         attached_at=0.0,
@@ -311,6 +371,19 @@ async def _dead_session_not_tracked_when_shell_exits(monkeypatch, tmp_path):
     await service._cleanup_connection(_make_persistent_connection("ended"), detach=True)
 
     assert "ended" not in service._detached_tmux_sessions
+
+
+def test_detach_not_recorded_when_session_gone_despite_live_client(monkeypatch, tmp_path):
+    asyncio.run(_detach_not_recorded_when_session_gone_despite_live_client(monkeypatch, tmp_path))
+
+
+async def _detach_not_recorded_when_session_gone_despite_live_client(monkeypatch, tmp_path):
+    await _set_tmux_has_session(monkeypatch, False)
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+
+    await service._cleanup_connection(_make_persistent_connection("raced", process=_LiveProcess()), detach=True)
+
+    assert "raced" not in service._detached_tmux_sessions
 
 
 def test_open_cleans_up_process_when_registration_fails(monkeypatch, tmp_path):
