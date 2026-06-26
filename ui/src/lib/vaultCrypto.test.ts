@@ -310,6 +310,14 @@ describe('vaultCrypto protected hierarchy', () => {
     expect(copies.at(-1)?.kdf).toBe('argon2id');
   });
 
+  it('rejects blank password wrap factors before deriving VMK copies', async () => {
+    const vmk = newVmk();
+
+    await expect(buildWrapMeta(vmk, [''])).rejects.toThrow(/password/);
+    await expect(buildWrapMeta(vmk, [{ kind: 'password', password: '   ' }])).rejects.toThrow(/password/);
+    await expect(addPasswordCopy(JSON.stringify({ v: 1, copies: [] }), vmk, '')).rejects.toThrow(/password/);
+  });
+
   it('wraps a protected value with a per-record DEK and releases only that DEK', async () => {
     const vmk = newVmk();
     const recordContext = { name: 'OPENAI_API_KEY' };
@@ -342,6 +350,15 @@ describe('vaultCrypto protected hierarchy', () => {
     await expect(releaseProtectedDek(sealed, vmk, { public_key: p2.blind_box.public_key }, recordContext, context)).rejects.toThrow(
       /fingerprint/,
     );
+    await expect(
+      releaseProtectedDek(
+        { ...sealed, wrapped_dek: bytesToBase64(new Uint8Array(48).fill(0x7f)) },
+        vmk,
+        { public_key: p2.blind_box.public_key, fingerprint: '00'.repeat(32) },
+        recordContext,
+        context,
+      ),
+    ).rejects.toThrow(/fingerprint/);
     await expect(releaseProtectedDek(sealed, vmk, avaultPublicKey, { name: 'OTHER_SIGNING_KEY' }, context)).rejects.toThrow(
       /record name/,
     );

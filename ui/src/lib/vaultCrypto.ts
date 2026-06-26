@@ -458,7 +458,15 @@ function parseWrapMeta(wrapMeta: string | WrapMeta): WrapMeta {
 }
 
 function normalizeWrapFactors(factors: VmkWrapFactor[] | string[]): VmkWrapFactor[] {
-  return factors.map((factor) => (typeof factor === 'string' ? { kind: 'password', password: factor } : factor));
+  return factors.map((factor): VmkWrapFactor => {
+    if (typeof factor === 'string') {
+      return { kind: 'password', password: requireNonBlankPassword(factor) };
+    }
+    if (factor.kind === 'password') {
+      return { ...factor, password: requireNonBlankPassword(factor.password) };
+    }
+    return factor;
+  });
 }
 
 async function passwordArgon2idCopy(vmk: BytesLike, factor: PasswordArgon2idFactor): Promise<PasswordArgon2idCopy> {
@@ -506,9 +514,10 @@ async function passwordScryptCopy(vmk: BytesLike, password: string): Promise<Pas
 }
 
 async function passwordCopy(vmk: BytesLike, factor: PasswordWrapFactor): Promise<PasswordArgon2idCopy | PasswordScryptCopy> {
+  const password = requireNonBlankPassword(factor.password);
   return factor.kdf === 'argon2id'
-    ? passwordArgon2idCopy(vmk, factor)
-    : passwordScryptCopy(vmk, factor.password);
+    ? passwordArgon2idCopy(vmk, { ...factor, password })
+    : passwordScryptCopy(vmk, password);
 }
 
 async function passkeyCopy(vmk: BytesLike, factor: PasskeyWrapFactor): Promise<PasskeyPrfCopy> {
@@ -539,11 +548,15 @@ export async function buildWrapMeta(vmk: BytesLike, factors: VmkWrapFactor[] | s
     throw new Error('at least one protected unlock factor is required');
   }
 
-  const copies: WrapCopy[] = [];
-  for (const factor of normalized) {
-    copies.push(factor.kind === 'password' ? await passwordCopy(vmkBytes, factor) : await passkeyCopy(vmkBytes, factor));
+  try {
+    const copies: WrapCopy[] = [];
+    for (const factor of normalized) {
+      copies.push(factor.kind === 'password' ? await passwordCopy(vmkBytes, factor) : await passkeyCopy(vmkBytes, factor));
+    }
+    return JSON.stringify({ v: 1, copies } satisfies WrapMeta);
+  } finally {
+    vmkBytes.fill(0);
   }
-  return JSON.stringify({ v: 1, copies } satisfies WrapMeta);
 }
 
 export async function addPasswordCopy(
@@ -650,11 +663,27 @@ export function protectedRecordAadHex(context: ProtectedRecordContext): string {
   return bytesToHex(protectedRecordAad(context));
 }
 
-function requirePinnedPublicKey(publicKey: AvaultPublicKey): AvaultPublicKey {
+function requireNonBlankPassword(password: string): string {
+  if (typeof password !== 'string' || password.trim() === '') {
+    throw new Error('password must not be empty');
+  }
+  return password;
+}
+
+function requirePinnedPublicKey(publicKey: AvaultPublicKey): AvaultPublicKey & { fingerprint: string } {
   if (!publicKey.fingerprint) {
     throw new Error('protected DEK release requires a pinned avault public key fingerprint');
   }
-  return publicKey;
+  return publicKey as AvaultPublicKey & { fingerprint: string };
+}
+
+async function requireValidPinnedPublicKey(publicKey: AvaultPublicKey): Promise<AvaultPublicKey & { fingerprint: string }> {
+  const pinned = requirePinnedPublicKey(publicKey);
+  const actual = await avaultPublicKeyFingerprint(pinned);
+  if (actual !== pinned.fingerprint.toLowerCase()) {
+    throw new Error('avault public key fingerprint mismatch');
+  }
+  return pinned;
 }
 
 function assertReleaseMatchesRecord(recordContext: ProtectedRecordContext, context: ProtectedDekReleaseBlindBoxContext): void {
@@ -743,9 +772,10 @@ export async function releaseProtectedDek(
 ): Promise<BlindBox> {
   assertDeliveryReleaseContext(context);
   assertReleaseMatchesRecord(recordContext, context);
+  const pinnedPublicKey = await requireValidPinnedPublicKey(publicKey);
   const dek = await unwrapProtectedDek(sealed, vmk, recordContext);
   try {
-    return await sealBlindBox(dek, requirePinnedPublicKey(publicKey), context);
+    return await sealBlindBox(dek, pinnedPublicKey, context);
   } finally {
     dek.fill(0);
   }
