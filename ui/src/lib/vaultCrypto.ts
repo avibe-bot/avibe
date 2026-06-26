@@ -123,6 +123,7 @@ export type BlindBoxApproval = {
 };
 
 export type BlindBoxOperationHashField = string | BytesLike;
+export type ProtectedDeliverKind = 'deliver-run' | 'deliver-fetch' | 'deliver-inject';
 
 export type StandardCreateBlindBoxContext = {
   purpose: 'seal';
@@ -174,12 +175,15 @@ export type ProtectedDekReleaseBlindBoxContext =
   | ProtectedSignBlindBoxContext
   | AgentDeliverBlindBoxContext
   | AgentSignBlindBoxContext;
+export type ProtectedDekDeliveryBlindBoxContext = ProtectedDeliverBlindBoxContext | AgentDeliverBlindBoxContext;
 
 export type BlindBoxContext = StandardCreateBlindBoxContext | ProtectedDekReleaseBlindBoxContext;
 
 export type ProtectedDekReleaseOperation =
   | {
       kind: 'deliver';
+      deliverKind: ProtectedDeliverKind;
+      operationFields: BlindBoxOperationHashField[];
       approval: BlindBoxApproval;
       operationHash: HexOrBytes;
     }
@@ -659,6 +663,14 @@ function assertReleaseMatchesRecord(recordContext: ProtectedRecordContext, conte
   }
 }
 
+function assertDeliveryReleaseContext(
+  context: ProtectedDekReleaseBlindBoxContext,
+): asserts context is ProtectedDekDeliveryBlindBoxContext {
+  if (context.purpose === 'sign' || context.purpose === 'agent-sign') {
+    throw new Error('protected signing keys must be signed locally; DEK release only supports delivery contexts');
+  }
+}
+
 export async function sealProtected(
   value: BytesLike,
   vmk: BytesLike,
@@ -681,6 +693,7 @@ export async function sealProtected(
     };
   } finally {
     dek.fill(0);
+    vmkBytes.fill(0);
   }
 }
 
@@ -691,12 +704,16 @@ export async function unwrapProtectedDek(
 ): Promise<Uint8Array> {
   const vmkBytes = toUint8Array(vmk, 'VMK');
   assertLength(vmkBytes, KEY_BYTES, 'VMK');
-  return aesgcmDecrypt(
-    vmkBytes,
-    base64ToBytes(sealed.dek_nonce),
-    base64ToBytes(sealed.wrapped_dek),
-    protectedRecordAad(context),
-  );
+  try {
+    return await aesgcmDecrypt(
+      vmkBytes,
+      base64ToBytes(sealed.dek_nonce),
+      base64ToBytes(sealed.wrapped_dek),
+      protectedRecordAad(context),
+    );
+  } finally {
+    vmkBytes.fill(0);
+  }
 }
 
 export async function openProtected(
@@ -722,8 +739,9 @@ export async function releaseProtectedDek(
   vmk: BytesLike,
   publicKey: AvaultPublicKey,
   recordContext: ProtectedRecordContext,
-  context: ProtectedDekReleaseBlindBoxContext,
+  context: ProtectedDekDeliveryBlindBoxContext,
 ): Promise<BlindBox> {
+  assertDeliveryReleaseContext(context);
   assertReleaseMatchesRecord(recordContext, context);
   const dek = await unwrapProtectedDek(sealed, vmk, recordContext);
   try {
@@ -971,7 +989,10 @@ export async function protectedDekReleaseBlindBoxContext(
         name: normalizedName,
         approvalNonce: approval.approvalNonce,
         approvalExpiresAtUnix: approval.approvalExpiresAtUnix,
-        operationHash: normalizeOperationHash(operation.operationHash),
+        operationHash: await normalizeAndCheckOperationHash(
+          deliverOperationHashFields(operation.deliverKind, operation.operationFields),
+          operation.operationHash,
+        ),
       };
     case 'sign':
       return {
@@ -1034,6 +1055,23 @@ export async function blindBoxOperationHash(fields: BlindBoxOperationHashField[]
 
 export async function blindBoxSignOperationHash(signScheme: SignatureScheme, digest: HexOrBytes): Promise<Uint8Array> {
   return blindBoxOperationHash(['sign', signScheme, normalizeDigest(digest)]);
+}
+
+function deliverOperationHashFields(
+  deliverKind: ProtectedDeliverKind,
+  operationFields: BlindBoxOperationHashField[],
+): BlindBoxOperationHashField[] {
+  if (!Array.isArray(operationFields) || operationFields.length === 0) {
+    throw new Error('deliver operation fields are required');
+  }
+  return [deliverKind, ...operationFields];
+}
+
+export async function blindBoxDeliverOperationHash(
+  deliverKind: ProtectedDeliverKind,
+  operationFields: BlindBoxOperationHashField[],
+): Promise<Uint8Array> {
+  return blindBoxOperationHash(deliverOperationHashFields(deliverKind, operationFields));
 }
 
 export async function blindBoxAgentDeliverOperationHash(

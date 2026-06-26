@@ -12,6 +12,7 @@ import {
   blindBoxAadHex,
   blindBoxAgentDeliverOperationHash,
   blindBoxAgentSignOperationHash,
+  blindBoxDeliverOperationHash,
   blindBoxOperationHash,
   blindBoxSignOperationHash,
   buildWrapMeta,
@@ -117,6 +118,8 @@ async function blindBoxContextFromVector(vector: (typeof p2.blind_box_aad_exampl
     case 'deliver':
       return await protectedDekReleaseBlindBoxContext(vector.name, {
         kind: 'deliver',
+        deliverKind: vector.operation_hash_kind as 'deliver-run' | 'deliver-fetch' | 'deliver-inject',
+        operationFields: vector.operation_hash_fields_hex.slice(1).map(bytesFromHex),
         approval: approvalFromVector(vector),
         operationHash: vector.operation_hash_hex,
       });
@@ -226,6 +229,16 @@ describe('vaultCrypto blind boxes', () => {
     await expect(
       blindBoxSignOperationHash(sign.sign_scheme as SignatureScheme, sign.digest_hex).then(bytesToHexString),
     ).resolves.toBe(sign.operation_hash_hex);
+    const deliver = p2.blind_box_aad_examples.cases.find((vector) => vector.operation_hash_kind === 'deliver-run');
+    if (!deliver) {
+      throw new Error('missing shared deliver-run operation-hash example');
+    }
+    await expect(
+      blindBoxDeliverOperationHash(
+        deliver.operation_hash_kind as 'deliver-run',
+        deliver.operation_hash_fields_hex.slice(1).map(bytesFromHex),
+      ).then(bytesToHexString),
+    ).resolves.toBe(deliver.operation_hash_hex);
     await expect(
       blindBoxAgentDeliverOperationHash(agentDeliver.name, agentDeliver.ttl_secs).then(bytesToHexString),
     ).resolves.toBe(agentDeliver.operation_hash_hex);
@@ -299,19 +312,20 @@ describe('vaultCrypto protected hierarchy', () => {
 
   it('wraps a protected value with a per-record DEK and releases only that DEK', async () => {
     const vmk = newVmk();
-    const recordContext = { name: 'ETH_SIGNING_KEY' };
+    const recordContext = { name: 'OPENAI_API_KEY' };
     const sealed = await sealProtected(new TextEncoder().encode('protected value'), vmk, recordContext);
     const dek = await unwrapProtectedDek(sealed, vmk, recordContext);
+    const deliver = p2.blind_box_aad_examples.cases.find((vector) => vector.operation_hash_kind === 'deliver-run');
     const sign = p2.blind_box_aad_examples.cases.find((vector) => vector.purpose === 'sign');
-    if (!sign) {
-      throw new Error('missing shared sign AAD example');
+    if (!deliver || !sign) {
+      throw new Error('missing shared AAD examples');
     }
-    const context = await protectedDekReleaseBlindBoxContext('ETH_SIGNING_KEY', {
-      kind: 'sign',
-      digest: sign.digest_hex,
-      signatureScheme: sign.sign_scheme as SignatureScheme,
-      approval: approvalFromVector(sign),
-      operationHash: sign.operation_hash_hex,
+    const context = await protectedDekReleaseBlindBoxContext('OPENAI_API_KEY', {
+      kind: 'deliver',
+      deliverKind: deliver.operation_hash_kind as 'deliver-run',
+      operationFields: deliver.operation_hash_fields_hex.slice(1).map(bytesFromHex),
+      approval: approvalFromVector(deliver),
+      operationHash: deliver.operation_hash_hex,
     });
     const avaultPublicKey = {
       public_key: p2.blind_box.public_key,
@@ -333,27 +347,36 @@ describe('vaultCrypto protected hierarchy', () => {
     );
     await expect(openBlindBox(released, blindBoxAad(context))).resolves.toEqual(dek);
     await expect(
-      protectedDekReleaseBlindBoxContext('ETH_SIGNING_KEY', {
-        kind: 'sign',
-        digest: 'ff'.repeat(32),
-        signatureScheme: SIGN_SCHEME_ECDSA_SECP256K1_RECOVERABLE,
-        approval: approvalFromVector(sign),
-        operationHash: sign.operation_hash_hex,
+      protectedDekReleaseBlindBoxContext('OPENAI_API_KEY', {
+        kind: 'deliver',
+        deliverKind: deliver.operation_hash_kind as 'deliver-run',
+        operationFields: [bytesFromHex('ff')],
+        approval: approvalFromVector(deliver),
+        operationHash: deliver.operation_hash_hex,
       }),
     ).rejects.toThrow(/operation hash/);
+    const signContext = await protectedDekReleaseBlindBoxContext('OPENAI_API_KEY', {
+      kind: 'sign',
+      digest: sign.digest_hex,
+      signatureScheme: sign.sign_scheme as SignatureScheme,
+      approval: approvalFromVector(sign),
+      operationHash: sign.operation_hash_hex,
+    });
+    await expect(releaseProtectedDek(sealed, vmk, avaultPublicKey, recordContext, signContext)).rejects.toThrow(
+      /signed locally/,
+    );
     await expect(
       openBlindBox(
         released,
         blindBoxAad(
-          await protectedDekReleaseBlindBoxContext('ETH_SIGNING_KEY', {
-            kind: 'sign',
-            digest: 'ff'.repeat(32),
-            signatureScheme: SIGN_SCHEME_ECDSA_SECP256K1_RECOVERABLE,
-            approval: approvalFromVector(sign),
-            operationHash: await blindBoxSignOperationHash(
-              SIGN_SCHEME_ECDSA_SECP256K1_RECOVERABLE,
-              'ff'.repeat(32),
-            ),
+          await protectedDekReleaseBlindBoxContext('OPENAI_API_KEY', {
+            kind: 'deliver',
+            deliverKind: deliver.operation_hash_kind as 'deliver-run',
+            operationFields: [bytesFromHex('ff')],
+            approval: approvalFromVector(deliver),
+            operationHash: await blindBoxDeliverOperationHash(deliver.operation_hash_kind as 'deliver-run', [
+              bytesFromHex('ff'),
+            ]),
           }),
         ),
       ),
@@ -365,6 +388,14 @@ describe('vaultCrypto protected hierarchy', () => {
     const keyBuffer = key.buffer.slice(key.byteOffset, key.byteOffset + key.byteLength);
     signDigest(keyBuffer, p2.signing.digest_hex, SIGN_SCHEME_ECDSA_SECP256K1_RECOVERABLE);
     expect(bytesToHexString(new Uint8Array(keyBuffer))).toBe(p2.signing.private_key_hex);
+  });
+
+  it('does not wipe caller-owned VMK ArrayBuffers when unwrapping protected DEKs', async () => {
+    const vmk = newVmk();
+    const vmkBuffer = vmk.buffer.slice(vmk.byteOffset, vmk.byteOffset + vmk.byteLength);
+    const sealed = await sealProtected(new TextEncoder().encode('protected value'), vmkBuffer, { name: 'OPENAI_API_KEY' });
+    await expect(unwrapProtectedDek(sealed, vmkBuffer, { name: 'OPENAI_API_KEY' })).resolves.toHaveLength(32);
+    expect(bytesToHexString(new Uint8Array(vmkBuffer))).toBe(bytesToHexString(vmk));
   });
 
   it('derives a stable passkey KEK from WebAuthn PRF output and salt', async () => {
