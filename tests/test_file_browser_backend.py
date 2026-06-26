@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import errno
-import os
 import logging
+import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -83,6 +85,34 @@ def test_list_truncated_includes_limit(tmp_path, monkeypatch):
     not_truncated = fs.list_directory(str(visible), show_hidden=False)
     assert not_truncated["truncated"] is False
     assert "limit" not in not_truncated
+
+
+def test_list_directory_exact_visible_cap_is_not_truncated(tmp_path, monkeypatch):
+    monkeypatch.setattr(fs, "MAX_LIST_ENTRIES", 3)
+    root = tmp_path / "root"
+    root.mkdir()
+    for index in range(3):
+        (root / f"{index}.txt").write_text(str(index), encoding="utf-8")
+
+    result = fs.list_directory(str(root), show_hidden=False)
+
+    assert [item["name"] for item in result["entries"]] == ["0.txt", "1.txt", "2.txt"]
+    assert result["truncated"] is False
+    assert "limit" not in result
+
+
+def test_list_directory_over_visible_cap_is_truncated_after_full_page(tmp_path, monkeypatch):
+    monkeypatch.setattr(fs, "MAX_LIST_ENTRIES", 3)
+    root = tmp_path / "root"
+    root.mkdir()
+    for index in range(4):
+        (root / f"{index}.txt").write_text(str(index), encoding="utf-8")
+
+    result = fs.list_directory(str(root), show_hidden=False)
+
+    assert len(result["entries"]) == 3
+    assert result["truncated"] is True
+    assert result["limit"] == 3
 
 
 def test_entry_ops_handle_cyclic_symlink(tmp_path):
@@ -207,6 +237,51 @@ def test_delete_refuses_filesystem_root(monkeypatch):
     assert rmtree_calls == []  # the guard fired before any rmtree
 
 
+def test_mutation_entry_paths_reject_dotdot_final_component(tmp_path):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    child = parent / "child"
+    child.mkdir()
+    source = tmp_path / "source.txt"
+    source.write_text("source", encoding="utf-8")
+    rmtree_calls: list[tuple] = []
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(fs.shutil, "rmtree", lambda *args, **kwargs: rmtree_calls.append(args))
+        for raw_path in ("/tmp/..", str(child / "..")):
+            with pytest.raises(FileBrowserError) as exc:
+                fs.delete_path(raw_path, recursive=True)
+            assert exc.value.code == "invalid_path"
+
+        with pytest.raises(FileBrowserError) as rename_exc:
+            fs.rename_path(str(child / ".."), "renamed")
+        assert rename_exc.value.code == "invalid_path"
+
+        with pytest.raises(FileBrowserError) as move_source_exc:
+            fs.move_path(str(child / ".."), str(tmp_path / "moved-source"))
+        assert move_source_exc.value.code == "invalid_path"
+
+        with pytest.raises(FileBrowserError) as move_target_exc:
+            fs.move_path(str(source), str(child / ".."))
+        assert move_target_exc.value.code == "invalid_path"
+
+    assert rmtree_calls == []
+
+
+def test_nested_delete_and_rename_still_work_for_normal_entries(tmp_path):
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    child = nested / "child.txt"
+    child.write_text("child", encoding="utf-8")
+
+    renamed = fs.rename_path(str(child), "renamed.txt")
+    renamed_path = Path(renamed["path"])
+
+    assert renamed_path.read_text(encoding="utf-8") == "child"
+    fs.delete_path(str(nested), recursive=True)
+    assert not nested.exists()
+
+
 def test_move_symlink_over_directory_is_refused(tmp_path):
     # overwrite=True must not let a non-directory replace a directory. is_file() follows
     # symlinks, so a symlink-to-dir (or broken link) slipped past the old guard and the move
@@ -309,6 +384,56 @@ def test_write_preserves_existing_file_mode(tmp_path):
 
     assert path.read_text(encoding="utf-8") == "#!/bin/sh\necho ok\n"
     assert path.stat().st_mode & 0o777 == 0o755
+
+
+def test_write_serializes_expected_mtime_check_and_replace(tmp_path, monkeypatch):
+    path = tmp_path / "doc.txt"
+    path.write_text("base", encoding="utf-8")
+    os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+    expected_mtime = fs._mtime_seconds(path.stat())
+    real_replace = fs.os.replace
+    first_replace_entered = threading.Event()
+    release_first_replace = threading.Event()
+    replace_calls: list[str] = []
+    replace_calls_lock = threading.Lock()
+    results: list[dict[str, object]] = []
+    errors: list[FileBrowserError] = []
+
+    def blocking_replace(src: str, dst: Path) -> None:
+        with replace_calls_lock:
+            call_index = len(replace_calls)
+            replace_calls.append(Path(src).name)
+        if call_index == 0:
+            first_replace_entered.set()
+            assert release_first_replace.wait(2)
+        real_replace(src, dst)
+
+    def write_content(content: str) -> None:
+        try:
+            results.append(fs.write_file(str(path), content, expected_mtime=expected_mtime))
+        except FileBrowserError as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(fs.os, "replace", blocking_replace)
+    first = threading.Thread(target=write_content, args=("first",))
+    first.start()
+    assert first_replace_entered.wait(2)
+
+    second = threading.Thread(target=write_content, args=("second",))
+    second.start()
+    time.sleep(0.1)
+    assert len(replace_calls) == 1
+
+    release_first_replace.set()
+    first.join(2)
+    second.join(2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert [error.code for error in errors] == ["conflict"]
+    assert len(results) == 1
+    assert len(replace_calls) == 1
+    assert path.read_text(encoding="utf-8") == "first"
 
 
 def test_mutating_ops_mkdir_rename_move_delete(tmp_path, caplog):

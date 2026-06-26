@@ -9,6 +9,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,6 +52,8 @@ INLINE_SAFE_CONTENT_TYPES = {
 _AT_FDCWD = -100
 _RENAME_NOREPLACE = 1
 _RENAME_NOREPLACE_FALLBACK_WARNED = False
+_WRITE_LOCKS_MUTEX = threading.Lock()
+_WRITE_LOCKS: dict[str, threading.Lock] = {}
 
 
 class FileBrowserError(Exception):
@@ -109,6 +112,8 @@ def _resolve_existing_path(raw: str) -> Path:
 
 def _resolve_entry_path(raw: str) -> Path:
     expanded = _expanded_absolute_path(raw)
+    if expanded.name in {"", ".", ".."} or _raw_final_component(raw) in {".", ".."}:
+        raise FileBrowserError("invalid_path", "Path must include a valid entry name", 400)
     try:
         parent = expanded.parent.resolve(strict=True)
     except FileNotFoundError as exc:
@@ -116,6 +121,17 @@ def _resolve_entry_path(raw: str) -> Path:
     except (OSError, RuntimeError, ValueError) as exc:
         raise FileBrowserError("invalid_path", str(exc), 400) from exc
     return parent / expanded.name
+
+
+def _raw_final_component(raw: str) -> str:
+    expanded_raw = os.path.expanduser(raw)
+    separators = os.sep
+    if os.altsep:
+        separators += os.altsep
+    stripped = expanded_raw.rstrip(separators)
+    if not stripped:
+        return ""
+    return os.path.basename(stripped)
 
 
 def _resolve_existing_entry_path(raw: str) -> Path:
@@ -330,17 +346,21 @@ def list_directory(raw_path: str, *, show_hidden: bool = False) -> dict[str, Any
         with os.scandir(target) as iterator:
             for entry in iterator:
                 scanned_entries += 1
-                if scanned_entries >= MAX_LIST_ENTRIES:
-                    truncated = True
-                    break
                 if not show_hidden and entry.name.startswith("."):
+                    if scanned_entries > MAX_LIST_ENTRIES:
+                        truncated = True
+                        break
                     continue
-                if len(entries) >= MAX_LIST_ENTRIES:
-                    truncated = True
-                    break
                 payload = _entry_payload(entry)
                 if payload is not None:
                     entries.append(payload)
+                if len(entries) > MAX_LIST_ENTRIES:
+                    entries.pop()
+                    truncated = True
+                    break
+                if scanned_entries > MAX_LIST_ENTRIES:
+                    truncated = True
+                    break
     except PermissionError as exc:
         raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
     except OSError as exc:
@@ -436,6 +456,18 @@ def _fsync_dir(path: Path) -> None:
         os.close(dir_fd)
 
 
+def _write_lock_for(path: Path) -> threading.Lock:
+    # Retained for the process lifetime; this keeps compare-and-replace cheap and
+    # per-path without a cleanup protocol that could race active worker threads.
+    key = str(path)
+    with _WRITE_LOCKS_MUTEX:
+        lock = _WRITE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _WRITE_LOCKS[key] = lock
+        return lock
+
+
 def write_file(raw_path: str, content: str, *, expected_mtime: float | None = None) -> dict[str, Any]:
     if not isinstance(content, str):
         raise FileBrowserError("invalid_content", "Content must be UTF-8 text", 400)
@@ -463,44 +495,45 @@ def write_file(raw_path: str, content: str, *, expected_mtime: float | None = No
             raise ConflictError("conflict", "File changed on disk")
 
     def _write() -> dict[str, Any]:
-        # Re-check at write time to defeat a file→symlink swap between the
-        # checks above and the replace below.
-        if target.is_symlink():
-            raise FileBrowserError("is_symlink", "Refusing to write through a symlink", 400)
-        if target.exists() and not target.is_file():
-            raise FileBrowserError("not_file", "Path is not a regular file", 400)
-        mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else None
-        fd = -1
-        temp_name = ""
-        try:
-            fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=parent)
-            if mode is not None:
-                os.fchmod(fd, mode)
-            with os.fdopen(fd, "wb") as handle:
-                fd = -1
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if expected_mtime is not None:
-                try:
-                    disk_mtime = _mtime_seconds(target.stat())
-                except FileNotFoundError as exc:
-                    raise ConflictError("conflict", "File was removed before save") from exc
-                if abs(disk_mtime - float(expected_mtime)) > 1e-6:
-                    raise ConflictError("conflict", "File changed on disk")
-            os.replace(temp_name, target)
+        with _write_lock_for(target):
+            # Re-check at write time to defeat a file→symlink swap between the
+            # checks above and the replace below.
+            if target.is_symlink():
+                raise FileBrowserError("is_symlink", "Refusing to write through a symlink", 400)
+            if target.exists() and not target.is_file():
+                raise FileBrowserError("not_file", "Path is not a regular file", 400)
+            mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else None
+            fd = -1
             temp_name = ""
-            _fsync_dir(parent)
-            stat_result = target.stat()
-            return {"ok": True, "mtime": _mtime_seconds(stat_result)}
-        finally:
-            if fd >= 0:
-                os.close(fd)
-            if temp_name:
-                try:
-                    os.unlink(temp_name)
-                except FileNotFoundError:
-                    pass
+            try:
+                fd, temp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=parent)
+                if mode is not None:
+                    os.fchmod(fd, mode)
+                with os.fdopen(fd, "wb") as handle:
+                    fd = -1
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if expected_mtime is not None:
+                    try:
+                        disk_mtime = _mtime_seconds(target.stat())
+                    except FileNotFoundError as exc:
+                        raise ConflictError("conflict", "File was removed before save") from exc
+                    if abs(disk_mtime - float(expected_mtime)) > 1e-6:
+                        raise ConflictError("conflict", "File changed on disk")
+                os.replace(temp_name, target)
+                temp_name = ""
+                _fsync_dir(parent)
+                stat_result = target.stat()
+                return {"ok": True, "mtime": _mtime_seconds(stat_result)}
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+                if temp_name:
+                    try:
+                        os.unlink(temp_name)
+                    except FileNotFoundError:
+                        pass
 
     return _run_mutation("write", target, _write)
 
