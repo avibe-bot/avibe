@@ -548,6 +548,13 @@ def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
     if source == target:
         # Moving onto itself is a no-op; never unlink-then-move (it would delete it).
         return {"ok": True}
+    if source.is_symlink():
+        try:
+            same_target = source.resolve() == target.resolve()
+        except (OSError, RuntimeError):
+            same_target = False
+        if same_target:
+            raise ConflictError("invalid_move", "Cannot move a symlink onto the file it points to")
     parent = target.parent
     if not parent.is_dir():
         raise FileBrowserError("not_dir", "Destination parent is not a directory", 400)

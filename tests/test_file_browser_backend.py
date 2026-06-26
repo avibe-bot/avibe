@@ -258,6 +258,34 @@ def test_move_overwrite_restores_destination_when_move_fails(tmp_path, monkeypat
     assert not list(tmp_path.glob(".destination.txt.avibe-overwrite-*"))
 
 
+def test_move_symlink_onto_its_target_is_refused(tmp_path):
+    real = tmp_path / "real.txt"
+    real.write_bytes(b"original bytes")
+    link = tmp_path / "link"
+    link.symlink_to(real)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.move_path(str(link), str(real), overwrite=True)
+
+    assert exc.value.code == "invalid_move"
+    assert real.read_bytes() == b"original bytes"
+    assert real.is_file()
+    assert not real.is_symlink()
+    assert link.is_symlink()
+
+    other_real = tmp_path / "other-real.txt"
+    other_real.write_text("other", encoding="utf-8")
+    other_link = tmp_path / "other-link"
+    other_link.symlink_to(other_real)
+    destination = tmp_path / "destination.txt"
+    destination.write_text("destination", encoding="utf-8")
+
+    assert fs.move_path(str(other_link), str(destination), overwrite=True) == {"ok": True}
+    assert destination.is_symlink()
+    assert destination.resolve() == other_real
+    assert other_real.read_text(encoding="utf-8") == "other"
+
+
 def test_move_no_overwrite_refuses_target_appearing_after_precheck(tmp_path, monkeypatch):
     source = tmp_path / "source.txt"
     destination = tmp_path / "destination.txt"
