@@ -572,7 +572,8 @@ def test_dependencies_status_shape(monkeypatch):
     out = api.dependencies_status()
     assert out["ok"]
     by = {d["id"]: d for d in out["deps"]}
-    assert list(by) == ["askill", "avault", "show-runtime", "node"]
+    assert list(by) == ["askill", "avault", "show-runtime", "tmux", "node"]
+    assert "tmux" in by and by["tmux"]["required"] is False  # tmux is the optional terminal backend
     assert by["askill"]["status"] == "ready" and by["askill"]["version"] == "0.1.13" and by["askill"]["required"]
     assert by["askill"]["latest_version"] is None and by["askill"]["has_update"] is False
     assert by["avault"]["status"] == "ready" and by["avault"]["version"] == "0.0.1" and by["avault"]["required"]
