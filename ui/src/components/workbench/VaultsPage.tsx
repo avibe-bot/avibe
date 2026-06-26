@@ -5,45 +5,12 @@ import { CapabilityTabs } from './CapabilityTabs';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
-import { Input } from '../ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
 import { useApi, type VaultAuditEvent, type VaultSecret } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 
-const AddSecretDialog: React.FC<{ onClose: () => void; onSaved: () => void }> = ({ onClose, onSaved }) => {
+const AddSecretDialog: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const { t } = useTranslation();
-  const api = useApi();
-  const { showToast } = useToast();
-  const [name, setName] = useState('');
-  const [value, setValue] = useState('');
-  const [group, setGroup] = useState('');
-  const [description, setDescription] = useState('');
-  const [allowHosts, setAllowHosts] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const submit = async () => {
-    setSaving(true);
-    setErr(null);
-    try {
-      const policy: Record<string, unknown> = {};
-      const hosts = allowHosts.split(',').map((h) => h.trim()).filter(Boolean);
-      if (hosts.length) policy.allowed_hosts = hosts;
-      await api.createVaultSecret({
-        name: name.trim(),
-        value,
-        group: group.trim() || undefined,
-        description: description.trim() || undefined,
-        policy: Object.keys(policy).length ? policy : undefined,
-      });
-      showToast(t('vaults.created', { name: name.trim() }), 'success');
-      onSaved();
-    } catch (e: any) {
-      setErr(e?.message ?? String(e));
-    } finally {
-      setSaving(false);
-    }
-  };
 
   return (
     <Dialog
@@ -57,37 +24,12 @@ const AddSecretDialog: React.FC<{ onClose: () => void; onSaved: () => void }> = 
           <DialogTitle>{t('vaults.dialog.title')}</DialogTitle>
         </DialogHeader>
         <div className="flex flex-col gap-3">
-          {err && (
-            <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">{err}</div>
-          )}
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="text-xs font-medium text-muted">{t('vaults.dialog.name')}</span>
-            <Input value={name} onChange={(e) => setName(e.target.value.toUpperCase())} placeholder="OPENAI_API_KEY" autoFocus />
-          </label>
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="text-xs font-medium text-muted">{t('vaults.dialog.value')}</span>
-            <Input type="password" value={value} onChange={(e) => setValue(e.target.value)} placeholder={t('vaults.dialog.valuePlaceholder')} />
-          </label>
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="text-xs font-medium text-muted">{t('vaults.dialog.group')}</span>
-            <Input value={group} onChange={(e) => setGroup(e.target.value)} placeholder="default" />
-          </label>
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="text-xs font-medium text-muted">{t('vaults.dialog.description')}</span>
-            <Input value={description} onChange={(e) => setDescription(e.target.value)} />
-          </label>
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="text-xs font-medium text-muted">{t('vaults.dialog.allowHosts')}</span>
-            <Input value={allowHosts} onChange={(e) => setAllowHosts(e.target.value)} placeholder="api.github.com, .example.com" />
-            <span className="text-xs text-muted">{t('vaults.dialog.allowHostsHelp')}</span>
-          </label>
+          <div className="rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">
+            {t('vaults.dialog.browserSealingPending')}
+          </div>
           <div className="mt-2 flex justify-end gap-2">
             <Button variant="ghost" onClick={onClose}>
               {t('vaults.dialog.cancel')}
-            </Button>
-            <Button onClick={submit} disabled={saving || !name.trim() || !value}>
-              {saving ? <Loader2 className="size-4 animate-spin" /> : null}
-              {t('vaults.dialog.save')}
             </Button>
           </div>
         </div>
@@ -227,15 +169,7 @@ export const VaultsPage: React.FC = () => {
           )}
         </div>
       )}
-      {adding && (
-        <AddSecretDialog
-          onClose={() => setAdding(false)}
-          onSaved={() => {
-            setAdding(false);
-            refresh();
-          }}
-        />
-      )}
+      {adding && <AddSecretDialog onClose={() => setAdding(false)} />}
     </div>
   );
 };

@@ -2637,6 +2637,16 @@ def vault_secrets_get():
     return jsonify(api.get_vault_secrets(group=request.args.get("group") or None))
 
 
+@app.route("/api/vault/pubkey", methods=["GET"])
+def vault_pubkey_get():
+    from vibe import api
+
+    try:
+        return jsonify(api.get_vault_pubkey())
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
 @app.route("/api/vault/secrets", methods=["POST"])
 def vault_secrets_post():
     from vibe import api
@@ -2653,6 +2663,69 @@ def vault_secret_delete(name):
 
     try:
         return jsonify(api.delete_vault_secret(name))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/requests", methods=["GET"])
+def vault_requests_get():
+    from vibe import api
+
+    raw_status = request.args.get("status")
+    status = None if raw_status == "all" else raw_status or "pending"
+    req_type = request.args.get("type") or None
+    try:
+        limit = int(request.args.get("limit") or 100)
+    except ValueError:
+        limit = 100
+    return jsonify(api.get_vault_requests(status=status, request_type=req_type, limit=limit))
+
+
+@app.route("/api/vault/grants", methods=["GET"])
+def vault_grants_get():
+    from vibe import api
+
+    raw_status = request.args.get("status")
+    status = None if raw_status == "all" else raw_status or "active"
+    return jsonify(api.get_vault_grants(status=status, session_id=request.args.get("session_id") or None))
+
+
+@app.route("/api/vault/grants", methods=["POST"])
+def vault_grants_post():
+    from vibe import api
+
+    try:
+        return jsonify(api.create_vault_grant(request.json or {}))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/grants/<grant_id>", methods=["DELETE"])
+def vault_grant_delete(grant_id):
+    from vibe import api
+
+    try:
+        return jsonify(api.revoke_vault_grant(grant_id))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/sign", methods=["POST"])
+def vault_sign_post():
+    from vibe import api
+
+    try:
+        return jsonify(api.vault_sign(request.json or {}))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/pubkey-pin", methods=["POST"])
+def vault_pubkey_pin_post():
+    from vibe import api
+
+    try:
+        return jsonify(api.store_vault_pubkey_pin(request.json or {}))
     except ValueError as exc:
         return _vault_error_response(exc)
 

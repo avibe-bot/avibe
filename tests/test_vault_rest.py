@@ -1,0 +1,149 @@
+from __future__ import annotations
+
+from unittest.mock import Mock
+
+from storage.vault_crypto import Sealed
+from tests.ui_server_test_helpers import csrf_headers
+from vibe import api
+from vibe.ui_server import app
+
+
+def _sealed(suffix: str = "1") -> Sealed:
+    return Sealed(ciphertext=f"ct-{suffix}", nonce=f"n-{suffix}", wrap_meta=f"wm-{suffix}")
+
+
+def test_rest_create_rejects_plaintext_value(monkeypatch):
+    seal = Mock(return_value=_sealed())
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    client = app.test_client()
+
+    response = client.post(
+        "/api/vault/secrets",
+        json={"name": "NO_PLAINTEXT", "value": "secret"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["code"] == "blind_box_required"
+    seal.assert_not_called()
+
+
+def test_rest_create_accepts_blind_box(monkeypatch):
+    seal = Mock(return_value=_sealed("rest"))
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    client = app.test_client()
+    blind_box = {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"}
+
+    response = client.post(
+        "/api/vault/secrets",
+        json={"name": "REST_KEY", "blind_box": blind_box},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["secret"]["name"] == "REST_KEY"
+    seal.assert_called_once_with("REST_KEY", blind_box)
+
+
+def test_rest_requests_and_grants_routes(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_REST",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+        }
+    )
+    client = app.test_client()
+    with api._vault_engine().begin() as conn:
+        from storage import vault_service
+
+        req = vault_service.create_access_request(
+            conn,
+            "PROTECTED_REST",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+
+    grant_response = client.post(
+        "/api/vault/grants",
+        json={
+            "scope_type": "secret",
+            "scope_ref": "PROTECTED_REST",
+            "session_id": "ses_1",
+            "request_id": req["id"],
+            "deks_by_secret": {"PROTECTED_REST": "dek"},
+        },
+        headers=csrf_headers(client),
+    )
+    assert grant_response.status_code == 200
+    grant_id = grant_response.get_json()["grant"]["id"]
+    assert client.get("/api/vault/grants").get_json()["grants"][0]["id"] == grant_id
+
+    revoke_response = client.delete(f"/api/vault/grants/{grant_id}", headers=csrf_headers(client))
+    assert revoke_response.status_code == 200
+    assert revoke_response.get_json()["grant"]["status"] == "revoked"
+
+    with api._vault_engine().begin() as conn:
+        vault_service.create_access_request(conn, "PROTECTED_REST", delivery={"command": "python sync.py"})
+    inbox = client.get("/api/vault/requests").get_json()
+    assert inbox["requests"][0]["card"]["card_type"] == "approval"
+
+
+def test_rest_grant_rejects_mismatched_request(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {
+            "name": "A_KEY",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct-a", "nonce": "n-a", "wrap_meta": "wm-a"},
+        }
+    )
+    api.create_vault_secret(
+        {
+            "name": "B_KEY",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct-b", "nonce": "n-b", "wrap_meta": "wm-b"},
+        }
+    )
+    with api._vault_engine().begin() as conn:
+        from storage import vault_service
+
+        req = vault_service.create_access_request(conn, "A_KEY", requester={"session_id": "ses_1"}, delivery={"session_id": "ses_1"})
+    client = app.test_client()
+
+    response = client.post(
+        "/api/vault/grants",
+        json={
+            "scope_type": "secret",
+            "scope_ref": "B_KEY",
+            "session_id": "ses_1",
+            "request_id": req["id"],
+            "deks_by_secret": {"B_KEY": "dek-b"},
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "invalid_request"
+
+
+def test_rest_sign_errors_are_stable(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    client = app.test_client()
+    missing = client.post(
+        "/api/vault/sign",
+        json={"name": "NOPE", "digest": "00" * 32},
+        headers=csrf_headers(client),
+    )
+    assert missing.status_code == 404
+    assert missing.get_json()["code"] == "secret_not_found"
+
+    api.create_vault_secret({"name": "STATIC_KEY", "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"}})
+    not_key = client.post(
+        "/api/vault/sign",
+        json={"name": "STATIC_KEY", "digest": "00" * 32},
+        headers=csrf_headers(client),
+    )
+    assert not_key.status_code == 409
+    assert not_key.get_json()["code"] == "not_signing_key"

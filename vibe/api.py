@@ -1329,27 +1329,64 @@ def get_vault_secrets(*, group: Optional[str] = None) -> dict:
     return {"ok": True, "secrets": secrets}
 
 
+def get_vault_pubkey() -> dict:
+    try:
+        return {"ok": True, **avault_pubkey()}
+    except AvaultError as exc:
+        raise VaultApiError(f"avault pubkey failed: {exc}", code="avault_failed") from exc
+
+
+def _sealed_from_payload(payload: dict):
+    from storage.vault_crypto import Sealed
+
+    if not isinstance(payload, dict):
+        raise VaultApiError("sealed envelope must be an object", code="invalid_envelope")
+    try:
+        ciphertext = str(payload["ciphertext"])
+        nonce = str(payload["nonce"])
+        wrap_meta = payload["wrap_meta"]
+    except KeyError as exc:
+        raise VaultApiError("sealed envelope requires ciphertext, nonce, and wrap_meta", code="invalid_envelope") from exc
+    if isinstance(wrap_meta, dict):
+        wrap_meta = json.dumps(wrap_meta)
+    if not isinstance(wrap_meta, str) or not ciphertext or not nonce or not wrap_meta:
+        raise VaultApiError("sealed envelope fields must be non-empty strings", code="invalid_envelope")
+    return Sealed(ciphertext=ciphertext, nonce=nonce, wrap_meta=wrap_meta)
+
+
 def create_vault_secret(payload: dict) -> dict:
     from storage import vault_crypto, vault_service
 
     if not isinstance(payload, dict):
         raise VaultApiError("payload must be an object", code="invalid_payload")
     name = str(payload.get("name") or "").strip()
-    value = payload.get("value")
-    if value is None or value == "":
-        raise VaultApiError("value is required", code="empty_value")
     if not vault_crypto.is_valid_secret_name(name):
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
     tags = payload.get("tags") if isinstance(payload.get("tags"), list) else None
     policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else None
-    value = str(value)
-    # Seal via avault before the DB transaction. The transient plaintext POST lives only here
-    # (one request, not reused) and is piped to avault's stdin; Avibe keeps only the
-    # ciphertext and non-value-derived metadata.
-    try:
-        sealed = avault_seal(name, value.encode("utf-8"))
-    except AvaultError as exc:
-        raise VaultApiError(f"avault seal failed: {exc}", code="avault_failed") from exc
+    public_meta = payload.get("public_meta") if isinstance(payload.get("public_meta"), dict) else None
+    protection = str(payload.get("protection") or "standard").strip().lower()
+    kind = str(payload.get("kind") or "static").strip().lower()
+    signer_kind = payload.get("signer_kind")
+    if signer_kind is not None:
+        signer_kind = str(signer_kind)
+    if protection == "standard":
+        blind_box = payload.get("blind_box")
+        if not isinstance(blind_box, dict):
+            raise VaultApiError(
+                "standard REST create requires a browser blind_box; CLI stdin/file create remains available",
+                code="blind_box_required",
+            )
+        try:
+            sealed = avault_seal_blind_box(name, blind_box)
+        except AvaultError as exc:
+            raise VaultApiError(f"avault blind-box seal failed: {exc}", code="avault_failed") from exc
+    elif protection == "protected":
+        # Protected-tier encryption is browser-side. Python stores the opaque envelope
+        # and wrap_meta only; no avault open/decrypt happens in this process.
+        sealed = _sealed_from_payload(payload.get("sealed") or payload.get("envelope") or payload)
+    else:
+        raise VaultApiError("invalid protection tier", code="invalid_protection")
     engine = _vault_engine()
     try:
         with engine.begin() as conn:
@@ -1359,15 +1396,19 @@ def create_vault_secret(payload: dict) -> dict:
                 sealed=sealed,
                 group=str(payload.get("group") or vault_service.DEFAULT_GROUP),
                 tags=tags,
+                protection=protection,
+                kind=kind,
+                signer_kind=signer_kind,
                 description=payload.get("description"),
                 policy=policy,
+                public_meta=public_meta,
             )
     except vault_service.InvalidSecretNameError as exc:
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name") from exc
     except vault_service.SecretExistsError as exc:
         raise VaultApiError(f"secret '{name}' already exists", code="secret_exists", status=409) from exc
-    except vault_service.UnsupportedProtectionError as exc:
-        raise VaultApiError(str(exc), code="protected_tier_unavailable") from exc
+    except vault_service.VaultServiceError as exc:
+        raise VaultApiError(str(exc), code="vault_error") from exc
     return {"ok": True, "secret": meta}
 
 
@@ -1390,6 +1431,176 @@ def get_vault_audit(*, secret_name: Optional[str] = None, limit: int = 100) -> d
     with engine.connect() as conn:
         events = vault_service.list_audit(conn, secret_name=secret_name, limit=limit)
     return {"ok": True, "events": events}
+
+
+def get_vault_requests(*, status: Optional[str] = "pending", request_type: Optional[str] = None, limit: int = 100) -> dict:
+    from storage import vault_service
+
+    engine = _vault_engine()
+    with engine.connect() as conn:
+        requests = vault_service.list_requests(conn, status=status, request_type=request_type, limit=limit)
+    return {"ok": True, "requests": requests}
+
+
+def get_vault_grants(*, status: Optional[str] = "active", session_id: Optional[str] = None) -> dict:
+    from storage import vault_service
+
+    engine = _vault_engine()
+    with engine.begin() as conn:
+        grants = vault_service.list_grants(conn, status=status, session_id=session_id)
+    return {"ok": True, "grants": grants}
+
+
+def create_vault_grant(payload: dict) -> dict:
+    from storage import vault_service
+
+    if not isinstance(payload, dict):
+        raise VaultApiError("payload must be an object", code="invalid_payload")
+    try:
+        scope_type = str(payload["scope_type"])
+        scope_ref = str(payload["scope_ref"])
+    except KeyError as exc:
+        raise VaultApiError("scope_type and scope_ref are required", code="invalid_grant") from exc
+    ttl = payload.get("ttl_seconds")
+    try:
+        ttl_seconds = int(ttl) if ttl is not None else None
+    except (TypeError, ValueError) as exc:
+        raise VaultApiError("ttl_seconds must be an integer", code="invalid_grant") from exc
+    deks_by_secret = payload.get("deks_by_secret")
+    if deks_by_secret is not None and not isinstance(deks_by_secret, dict):
+        raise VaultApiError("deks_by_secret must be an object", code="invalid_grant")
+    request_id = payload.get("request_id") or payload.get("created_by_request_id")
+    if not request_id:
+        raise VaultApiError("request_id is required to create a grant", code="missing_request_id")
+    session_id = payload.get("session_id")
+    if payload.get("this_session_only") is False:
+        session_id = None
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            grant = vault_service.create_grant(
+                conn,
+                scope_type=scope_type,
+                scope_ref=scope_ref,
+                session_id=str(session_id) if session_id else None,
+                ttl_seconds=ttl_seconds,
+                created_by_request_id=str(request_id),
+                deks_by_secret={str(k): str(v) for k, v in deks_by_secret.items()} if deks_by_secret else None,
+            )
+    except vault_service.NotGrantableError as exc:
+        raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{exc}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.RequestNotFoundError as exc:
+        raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+    except vault_service.InvalidGrantError as exc:
+        raise VaultApiError(str(exc), code="invalid_grant") from exc
+    return {"ok": True, "grant": grant}
+
+
+def revoke_vault_grant(grant_id: str) -> dict:
+    from storage import vault_service
+
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            grant = vault_service.revoke_grant(conn, grant_id)
+    except vault_service.GrantNotFoundError as exc:
+        raise VaultApiError(f"grant '{grant_id}' not found", code="grant_not_found", status=404) from exc
+    except vault_service.GrantNotActiveError as exc:
+        raise VaultApiError(f"grant '{grant_id}' is not active", code="grant_not_active", status=409) from exc
+    return {"ok": True, "grant": grant}
+
+
+def vault_sign(payload: dict) -> dict:
+    """Sign a digest without returning private key material to Python.
+
+    Standard-tier local keypairs are relayed to ``avault sign``. Protected-tier keypairs
+    are browser-signed; the daemon accepts and audits the public signature object only.
+    """
+    from storage import vault_crypto, vault_service
+
+    if not isinstance(payload, dict):
+        raise VaultApiError("payload must be an object", code="invalid_payload")
+    name = str(payload.get("name") or "").strip()
+    digest = str(payload.get("digest") or "").strip()
+    scheme = str(payload.get("scheme") or "ecdsa-secp256k1-recoverable").strip()
+    if not vault_crypto.is_valid_secret_name(name):
+        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            meta = vault_service.get_secret_meta(conn, name)
+            if meta.get("kind") != "keypair":
+                raise VaultApiError(f"secret '{name}' is not a signing key", code="not_signing_key", status=409)
+            if meta.get("protection") == "protected":
+                signature = payload.get("signature")
+                if not isinstance(signature, dict):
+                    request = vault_service.create_sign_request(
+                        conn,
+                        name,
+                        digest=digest,
+                        scheme=scheme,
+                        requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
+                        delivery=payload.get("delivery") if isinstance(payload.get("delivery"), dict) else None,
+                    )
+                    return {"ok": False, "code": "browser_signature_required", "request": request}
+                request_id = str(payload.get("request_id") or "")
+                if not request_id:
+                    raise VaultApiError("request_id is required to complete protected signing", code="missing_request_id")
+                request = vault_service.complete_sign_request(
+                    conn,
+                    request_id,
+                    name=name,
+                    digest=digest,
+                    scheme=scheme,
+                    signature=signature,
+                    requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
+                )
+                return {"ok": True, "signature": signature, "request": request}
+            key_envelope = vault_service.get_key_envelope(conn, name)
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.RequestNotFoundError as exc:
+        raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+    except vault_service.VaultServiceError as exc:
+        raise VaultApiError(str(exc), code="vault_error") from exc
+    try:
+        signature = avault_sign(key_envelope, digest, scheme, name=name)
+    except AvaultError as exc:
+        raise VaultApiError(f"avault sign failed: {exc}", code="avault_failed") from exc
+    with engine.begin() as conn:
+        vault_service.audit(
+            conn,
+            "signed",
+            secret_name=name,
+            requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
+            delivery={"scheme": scheme, "digest": digest},
+        )
+    return {"ok": True, "signature": signature}
+
+
+def store_vault_pubkey_pin(payload: dict) -> dict:
+    """Store value-free pubkey pin/attestation metadata on a vault secret."""
+    from storage import vault_service
+
+    if not isinstance(payload, dict):
+        raise VaultApiError("payload must be an object", code="invalid_payload")
+    name = str(payload.get("name") or "").strip()
+    pin = payload.get("pin") if isinstance(payload.get("pin"), dict) else None
+    if not name or not pin:
+        raise VaultApiError("name and pin are required", code="invalid_pin")
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            meta = vault_service.store_pubkey_pin(conn, name, pin)
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    return {"ok": True, "secret": meta}
 
 
 def import_vibe_agents(payload: dict) -> dict:
@@ -3742,6 +3953,84 @@ def avault_seal(name: str, value: bytes):
         )
     except (ValueError, KeyError, TypeError) as exc:
         raise AvaultError("avault seal returned malformed output") from exc
+
+
+def avault_pubkey() -> dict:
+    """Return avault's blind-box public key + fingerprint."""
+    proc = _run_avault(["pubkey"])
+    if proc.returncode != 0:
+        raise AvaultError(_avault_detail(proc) or "avault pubkey failed")
+    try:
+        payload = json.loads(proc.stdout)
+    except (ValueError, TypeError) as exc:
+        raise AvaultError("avault pubkey returned malformed output") from exc
+    public_key = payload.get("public_key")
+    fingerprint = payload.get("fingerprint")
+    if not isinstance(public_key, str) or not isinstance(fingerprint, str) or not public_key or not fingerprint:
+        raise AvaultError("avault pubkey returned malformed output")
+    return {"public_key": public_key, "fingerprint": fingerprint}
+
+
+def avault_seal_blind_box(name_or_blind_box, blind_box: dict | None = None):
+    """Relay a browser HPKE blind box to ``avault seal --blind-box``.
+
+    ``avault`` requires the secret name for AAD binding. For convenience, callers may
+    pass ``(name, blind_box)`` or a single object containing ``name`` and ``blind_box``.
+    """
+    from storage.vault_crypto import Sealed
+
+    if blind_box is None:
+        if not isinstance(name_or_blind_box, dict):
+            raise AvaultError("blind-box request must be an object")
+        request = name_or_blind_box
+        name = str(request.get("name") or "")
+        if isinstance(request.get("blind_box"), dict):
+            blind_box = request["blind_box"]
+        else:
+            blind_box = {key: request[key] for key in ("scheme", "enc", "ct") if key in request}
+    else:
+        name = str(name_or_blind_box or "")
+    if not name:
+        raise AvaultError("secret name is required for blind-box seal")
+    body = json.dumps(blind_box).encode("utf-8")
+    proc = _run_avault(["seal", "--name", name, "--blind-box"], stdin=body)
+    if proc.returncode != 0:
+        raise AvaultError(_avault_detail(proc) or "avault blind-box seal failed")
+    try:
+        payload = json.loads(proc.stdout)
+        return Sealed(
+            ciphertext=payload["ciphertext"],
+            nonce=payload["nonce"],
+            wrap_meta=payload["wrap_meta"],
+        )
+    except (ValueError, KeyError, TypeError) as exc:
+        raise AvaultError("avault blind-box seal returned malformed output") from exc
+
+
+def avault_sign(key_envelope, digest: str, scheme: str, dek_blindbox: dict | None = None, *, name: str | None = None) -> dict:
+    """Ask avault to sign a caller-computed 32-byte digest with a local key envelope."""
+    if not name:
+        raise AvaultError("secret name is required for avault sign")
+    body = json.dumps(
+        {
+            "name": name,
+            "key_envelope": _envelope_payload(key_envelope),
+            "digest": digest,
+            "scheme": scheme,
+            "dek_blindbox": dek_blindbox,
+        }
+    ).encode("utf-8")
+    proc = _run_avault(["sign"], stdin=body)
+    if proc.returncode != 0:
+        raise AvaultError(_avault_detail(proc) or "avault sign failed")
+    try:
+        payload = json.loads(proc.stdout)
+    except (ValueError, TypeError) as exc:
+        raise AvaultError("avault sign returned malformed output") from exc
+    signature = payload.get("signature")
+    if not isinstance(signature, str) or not signature:
+        raise AvaultError("avault sign returned malformed output")
+    return {"signature": signature, "recovery_id": payload.get("recovery_id")}
 
 
 def avault_deliver_run(secrets: list[dict], command: list[str]) -> int:

@@ -1,32 +1,37 @@
-"""CRUD + resolve + audit over the vault tables (design: docs/plans/vaults.md).
+"""CRUD + resolve + grants + audit over the vault tables (design: docs/plans/vaults.md).
 
 Data layer for Vaults, sibling to ``storage/messages_service.py`` etc.: functions take
-a SQLAlchemy ``Connection`` and never open their own engine. This module owns the one
-place that decrypts a stored secret (``resolve``) and the one place that writes audit
-rows, so future invariants land here rather than in callers.
+a SQLAlchemy ``Connection`` and never open their own engine. This module owns the
+metadata invariants around stored envelopes, approval requests, scope grants, and audit
+rows so future vault behavior lands here rather than in callers.
 
-P0 scope: the **standard tier** only (machine-key envelope, ``storage/vault_crypto``).
-Creating/resolving a ``protected`` secret raises — that tier (password/passkey, approval,
-browser-side decryption) and scope grants are P1. Secret values are accepted/returned as
-UTF-8 ``str``; nothing here ever logs or audits a value.
+Secret values and key material never live here. Standard-tier values are sealed by
+``avault`` before this layer sees them. Protected-tier values arrive already encrypted
+by the browser; this layer only stores the opaque ciphertext + wrap metadata. Scope
+grants persist metadata only; any released DEK set is held in an in-memory cache and is
+cleared on process restart.
 """
 
 from __future__ import annotations
 
 import json
+import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
 from storage import vault_crypto
-from storage.models import vault_audit, vault_groups, vault_requests, vault_secrets
+from storage.models import vault_audit, vault_grants, vault_groups, vault_links, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
 
 DEFAULT_GROUP = "default"
+GRANT_SCOPE_TYPES = {"secret", "skill", "group"}
+DEFAULT_GRANT_TTL_SECONDS = {"secret": 300, "skill": 900, "group": 900}
+GRANT_TTL_OPTIONS_SECONDS = (300, 900, 3600)
 
 
 class VaultServiceError(Exception):
@@ -49,8 +54,69 @@ class RequestNotFoundError(VaultServiceError):
     pass
 
 
+class InvalidRequestError(VaultServiceError):
+    pass
+
+
 class UnsupportedProtectionError(VaultServiceError):
-    """A protected-tier operation was attempted before P1 ships it."""
+    """A caller attempted a delivery path that still needs the resident agent."""
+
+
+class InvalidGrantError(VaultServiceError):
+    pass
+
+
+class GrantNotFoundError(VaultServiceError):
+    pass
+
+
+class GrantNotActiveError(VaultServiceError):
+    pass
+
+
+class NotGrantableError(VaultServiceError):
+    pass
+
+
+class VaultGrantDekCache:
+    """Process-local cache for released protected DEKs.
+
+    The persisted ``vault_grants`` row records only scope and expiry metadata. Browser
+    approval may release a frozen set of DEKs; those are deliberately held only here so
+    restart clears the grant's key material. The cache stores opaque caller-supplied
+    strings (normally base64 DEKs); it never writes them to SQLite.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._deks_by_grant: dict[str, dict[str, str]] = {}
+
+    def put(self, grant_id: str, deks_by_secret: dict[str, str]) -> None:
+        with self._lock:
+            self._deks_by_grant[grant_id] = dict(deks_by_secret)
+
+    def has(self, grant_id: str, secret_name: str) -> bool:
+        with self._lock:
+            return secret_name in self._deks_by_grant.get(grant_id, {})
+
+    def get(self, grant_id: str, secret_name: str) -> str | None:
+        with self._lock:
+            return self._deks_by_grant.get(grant_id, {}).get(secret_name)
+
+    def covered_names(self, grant_id: str) -> list[str]:
+        with self._lock:
+            return sorted(self._deks_by_grant.get(grant_id, {}))
+
+    def drop(self, grant_id: str) -> None:
+        with self._lock:
+            self._deks_by_grant.pop(grant_id, None)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._deks_by_grant.clear()
+
+
+GRANT_DEK_CACHE = VaultGrantDekCache()
 
 
 def _now() -> str:
@@ -94,6 +160,84 @@ def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
     }
+
+
+def _row_sealed(row: dict[str, Any]) -> Sealed:
+    return Sealed(ciphertext=row["ciphertext"], nonce=row["nonce"], wrap_meta=row["wrap_meta"])
+
+
+def _grant_row_payload(row: dict[str, Any], *, cache: VaultGrantDekCache = GRANT_DEK_CACHE) -> dict[str, Any]:
+    members = _loads(row.get("member_snapshot")) or []
+    if not isinstance(members, list):
+        members = []
+    grant_id = row["id"]
+    return {
+        "id": grant_id,
+        "scope_type": row["scope_type"],
+        "scope_ref": row["scope_ref"],
+        "session_id": row.get("session_id"),
+        "status": row.get("status"),
+        "created_by_request_id": row.get("created_by_request_id"),
+        "created_at": row.get("created_at"),
+        "expires_at": row.get("expires_at"),
+        "revoked_at": row.get("revoked_at"),
+        "member_snapshot": members,
+        "member_count": len(members),
+        "cached_member_count": len(cache.covered_names(grant_id)),
+    }
+
+
+def _request_row_payload(row: dict[str, Any]) -> dict[str, Any]:
+    requester = _loads(row.get("requester"))
+    delivery = _loads(row.get("delivery"))
+    return {
+        "id": row["id"],
+        "request_type": row["request_type"],
+        "secret_name": row.get("secret_name"),
+        "requester": requester if isinstance(requester, dict) else requester,
+        "delivery": delivery if isinstance(delivery, dict) else delivery,
+        "status": row.get("status"),
+        "message_id": row.get("message_id"),
+        "created_at": row.get("created_at"),
+        "decided_at": row.get("decided_at"),
+        "expires_at": row.get("expires_at"),
+        "card": delivery.get("card") if isinstance(delivery, dict) else None,
+    }
+
+
+def _request_json_payloads(row: dict[str, Any]) -> tuple[Any, Any]:
+    return _loads(row.get("requester")), _loads(row.get("delivery"))
+
+
+def _request_session_id(row: dict[str, Any]) -> str | None:
+    requester, delivery = _request_json_payloads(row)
+    for payload in (requester, delivery):
+        if isinstance(payload, dict) and payload.get("session_id"):
+            return str(payload["session_id"])
+    card = delivery.get("card") if isinstance(delivery, dict) else None
+    if isinstance(card, dict) and card.get("session_id"):
+        return str(card["session_id"])
+    return None
+
+
+def _request_card(row: dict[str, Any]) -> dict[str, Any]:
+    _, delivery = _request_json_payloads(row)
+    card = delivery.get("card") if isinstance(delivery, dict) else None
+    return card if isinstance(card, dict) else {}
+
+
+def _secret_policy(row: dict[str, Any]) -> dict[str, Any]:
+    return _loads(row.get("policy")) or {}
+
+
+def _secret_is_grantable(row: dict[str, Any]) -> bool:
+    if row.get("protection") != "protected":
+        return False
+    if row.get("kind") == "keypair":
+        return False
+    if _secret_policy(row).get("always_ask"):
+        return False
+    return True
 
 
 def audit(
@@ -177,28 +321,37 @@ def create_secret(
     group: str = DEFAULT_GROUP,
     tags: list[str] | None = None,
     protection: str = "standard",
+    kind: str = "static",
+    signer_kind: str | None = None,
     description: str | None = None,
     source: str = "manual",
     policy: dict[str, Any] | None = None,
+    public_meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Create a standard-tier secret from an avault-sealed envelope; return masked metadata.
+    """Create a secret from a caller-supplied encrypted envelope; return masked metadata.
 
-    The value is sealed by the caller via the avault client (this layer never sees
-    plaintext or keys). No value-derived metadata is stored or returned.
+    For ``standard`` secrets, the envelope is produced by the avault client. For
+    ``protected`` secrets, the browser has already encrypted the value and built the
+    opaque ``wrap_meta``. This layer never sees plaintext or keys, and stores no
+    value-derived metadata.
 
     ``policy`` is a non-secret JSON dict (e.g. ``allowed_hosts`` + ``auth`` scheme for
     the brokered ``fetch`` mode); it never contains the value.
     """
     if not vault_crypto.is_valid_secret_name(name):
         raise InvalidSecretNameError(name)
-    if protection != "standard":
-        raise UnsupportedProtectionError("only the standard tier is available in P0")
+    if protection not in {"standard", "protected"}:
+        raise VaultServiceError(f"invalid protection tier: {protection!r}")
+    if kind not in {"static", "keypair"}:
+        raise VaultServiceError(f"invalid vault secret kind: {kind!r}")
+    if kind != "keypair" and signer_kind is not None:
+        raise VaultServiceError("signer_kind is only valid for keypair secrets")
     if conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name)).first() is not None:
         raise SecretExistsError(name)
 
     _ensure_group(conn, group)
     now = _now()
-    public_meta = {}
+    public_meta = dict(public_meta or {})
     if description:
         public_meta["description"] = description
     try:
@@ -208,8 +361,9 @@ def create_secret(
                 name=name,
                 group_name=group,
                 tags=json.dumps(tags) if tags else None,
-                kind="static",
-                protection="standard",
+                kind=kind,
+                protection=protection,
+                signer_kind=signer_kind,
                 source=source,
                 ciphertext=sealed.ciphertext,
                 nonce=sealed.nonce,
@@ -246,6 +400,29 @@ def get_secret_meta(conn: Connection, name: str) -> dict[str, Any]:
     return _meta_payload(_require_row(conn, name))
 
 
+def store_pubkey_pin(conn: Connection, name: str, pin: dict[str, Any]) -> dict[str, Any]:
+    """Store avault pubkey pin/attestation metadata without touching value fields."""
+    row = _require_row(conn, name)
+    public_meta = _public_meta(row.get("public_meta"))
+    public_meta["avault_pubkey_pin"] = {
+        key: value
+        for key, value in pin.items()
+        if key in {"public_key", "fingerprint", "attested_at", "attestation"}
+    }
+    conn.execute(
+        vault_secrets.update()
+        .where(vault_secrets.c.name == name)
+        .values(public_meta=json.dumps(public_meta), updated_at=_now())
+    )
+    audit(
+        conn,
+        "pubkey_pinned",
+        secret_name=name,
+        delivery={"fingerprint": public_meta["avault_pubkey_pin"].get("fingerprint")},
+    )
+    return get_secret_meta(conn, name)
+
+
 def list_secrets(conn: Connection, *, group: str | None = None) -> list[dict[str, Any]]:
     """Masked, value-free list. Never decrypts."""
     query = select(vault_secrets).order_by(vault_secrets.c.name)
@@ -260,8 +437,6 @@ def rotate_secret(
     sealed: Sealed,
 ) -> dict[str, Any]:
     row = _require_row(conn, name)
-    if row.get("protection") != "standard":
-        raise UnsupportedProtectionError("only the standard tier is available in P0")
     public_meta = _public_meta(row.get("public_meta"))
     public_meta.pop("preview", None)
     conn.execute(
@@ -296,13 +471,16 @@ def get_envelope(conn: Connection, name: str) -> Sealed:
 
     For the brokered ``fetch`` proxy: the caller hands the envelope to the avault
     client (which decrypts + delivers), then records its own ``record_proxy_use``.
-    Validate any policy (e.g. host allowlist) *before* delivering. Protected-tier
-    raises rather than being handed off — this layer never decrypts.
+    Validate any policy (e.g. host allowlist) *before* delivering.
+
+    Protected delivery is intentionally not routed through this helper until the
+    resident-agent/DEK-blindbox follow-on lands; callers should use
+    :func:`resolve_secret_access` to decide whether an approval/grant is needed.
     """
     row = _require_row(conn, name)
     if row.get("protection") != "standard":
-        raise UnsupportedProtectionError(f"{name} is protected-tier (approval is P1)")
-    return Sealed(ciphertext=row["ciphertext"], nonce=row["nonce"], wrap_meta=row["wrap_meta"])
+        raise UnsupportedProtectionError(f"{name} is protected-tier (resident grant delivery is not wired yet)")
+    return _row_sealed(row)
 
 
 def record_proxy_use(conn: Connection, name: str, *, requester: Any = None, delivery: Any = None) -> None:
@@ -329,9 +507,21 @@ def get_envelopes(conn: Connection, names: list[str]) -> dict[str, Sealed]:
     for name in names:
         row = _require_row(conn, name)
         if row.get("protection") != "standard":
-            raise UnsupportedProtectionError(f"{name} is protected-tier (approval is P1)")
-        out[name] = Sealed(ciphertext=row["ciphertext"], nonce=row["nonce"], wrap_meta=row["wrap_meta"])
+            raise UnsupportedProtectionError(f"{name} is protected-tier (resident grant delivery is not wired yet)")
+        out[name] = _row_sealed(row)
     return out
+
+
+def get_key_envelope(conn: Connection, name: str) -> Sealed:
+    """Return a locally-stored key envelope for signing.
+
+    This is still envelope-only; the caller hands it to avault (standard tier) or to
+    browser-side signing (protected tier). The private key never returns to Python.
+    """
+    row = _require_row(conn, name)
+    if row.get("ciphertext") is None or row.get("nonce") is None or row.get("wrap_meta") is None:
+        raise VaultServiceError(f"{name} does not have a local key envelope")
+    return _row_sealed(row)
 
 
 def record_deliveries(conn: Connection, names: list[str], *, requester: Any = None, mode: str | None = None) -> None:
@@ -368,13 +558,19 @@ def create_provision_request(
     now = _now()
     already = conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name)).first() is not None
     status = "fulfilled" if already else "pending"
+    card = _secure_input_card(name, request_id=request_id, reason=reason, skill=skill)
+    delivery_payload: dict[str, Any] = {"card": card}
+    if reason:
+        delivery_payload["reason"] = reason
+    if skill:
+        delivery_payload["skill"] = skill
     conn.execute(
         vault_requests.insert().values(
             id=request_id,
             request_type="provision",
             secret_name=name,
             requester=json.dumps(requester) if requester is not None else None,
-            delivery=json.dumps({"reason": reason, "skill": skill}) if (reason or skill) else None,
+            delivery=json.dumps(delivery_payload),
             status=status,
             message_id=message_id,
             created_at=now,
@@ -382,7 +578,13 @@ def create_provision_request(
         )
     )
     audit(conn, "provision_requested", secret_name=name, requester=requester, request_id=request_id)
-    return {"id": request_id, "secret_name": name, "status": status, "created_at": now}
+    return {
+        "id": request_id,
+        "secret_name": name,
+        "status": status,
+        "created_at": now,
+        "card": card,
+    }
 
 
 def fulfill_provision(
@@ -410,6 +612,552 @@ def fulfill_provision(
         .values(status="fulfilled", decided_at=_now())
     )
     return meta
+
+
+def _secure_input_card(
+    name: str,
+    *,
+    request_id: str,
+    reason: str | None = None,
+    skill: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "card_type": "secure_input",
+        "request_id": request_id,
+        "secret_name": name,
+        "reason": reason,
+        "skill": skill,
+        "protection_options": ["standard", "protected"],
+        "default_protection": "protected",
+        "value": None,
+    }
+
+
+def _grant_member_rows(conn: Connection, scope_type: str, scope_ref: str) -> list[dict[str, Any]]:
+    if scope_type == "secret":
+        return [_require_row(conn, scope_ref)]
+    if scope_type == "skill":
+        rows = (
+            conn.execute(
+                select(vault_secrets)
+                .select_from(vault_links.join(vault_secrets, vault_links.c.secret_name == vault_secrets.c.name))
+                .where(vault_links.c.skill_name == scope_ref)
+                .order_by(vault_secrets.c.name)
+            )
+            .mappings()
+            .all()
+        )
+        return [dict(row) for row in rows]
+    if scope_type == "group":
+        rows = (
+            conn.execute(
+                select(vault_secrets)
+                .where(vault_secrets.c.group_name == scope_ref)
+                .order_by(vault_secrets.c.name)
+            )
+            .mappings()
+            .all()
+        )
+        return [dict(row) for row in rows]
+    raise InvalidGrantError(f"invalid grant scope_type: {scope_type!r}")
+
+
+def _grantable_member_rows(conn: Connection, scope_type: str, scope_ref: str) -> list[dict[str, Any]]:
+    rows = _grant_member_rows(conn, scope_type, scope_ref)
+    if not rows:
+        return []
+    group_names = {row.get("group_name") for row in rows if row.get("group_name")}
+    grantable_groups = {
+        row["name"]
+        for row in conn.execute(select(vault_groups).where(vault_groups.c.name.in_(group_names))).mappings()
+        if int(row.get("grantable") or 0) == 1
+    }
+    return [
+        row
+        for row in rows
+        if _secret_is_grantable(row) and (row.get("group_name") in grantable_groups)
+    ]
+
+
+def _ttl_cap_for_members(conn: Connection, member_names: list[str]) -> int:
+    if not member_names:
+        return min(DEFAULT_GRANT_TTL_SECONDS.values())
+    rows = (
+        conn.execute(
+            select(vault_groups.c.max_grant_ttl_seconds)
+            .select_from(vault_secrets.join(vault_groups, vault_secrets.c.group_name == vault_groups.c.name))
+            .where(vault_secrets.c.name.in_(member_names))
+        )
+        .scalars()
+        .all()
+    )
+    caps = [int(row) for row in rows if row is not None]
+    return min(caps) if caps else 900
+
+
+def _scope_option(
+    conn: Connection,
+    scope_type: str,
+    scope_ref: str,
+    *,
+    default_ttl_seconds: int,
+) -> dict[str, Any] | None:
+    members = [row["name"] for row in _grantable_member_rows(conn, scope_type, scope_ref)]
+    if not members:
+        return None
+    capped_default = min(default_ttl_seconds, _ttl_cap_for_members(conn, members))
+    return {
+        "scope_type": scope_type,
+        "scope_ref": scope_ref,
+        "default_ttl_seconds": capped_default,
+        "ttl_options_seconds": [
+            seconds for seconds in GRANT_TTL_OPTIONS_SECONDS if seconds <= _ttl_cap_for_members(conn, members)
+        ],
+        "session_binding_default": True,
+        "member_count": len(members),
+        "member_snapshot": members,
+    }
+
+
+def approval_card(
+    conn: Connection,
+    secret_name: str,
+    *,
+    request_id: str,
+    request_type: str = "access",
+    command: str | None = None,
+    egress: str | None = None,
+    skill: str | None = None,
+    session_id: str | None = None,
+    grantable: bool = True,
+) -> dict[str, Any]:
+    row = _require_row(conn, secret_name)
+    group = row.get("group_name") or DEFAULT_GROUP
+    scope_options: list[dict[str, Any]] = []
+    if grantable:
+        scope_options = [
+            option
+            for option in (
+                _scope_option(conn, "secret", secret_name, default_ttl_seconds=DEFAULT_GRANT_TTL_SECONDS["secret"]),
+                _scope_option(conn, "skill", skill, default_ttl_seconds=DEFAULT_GRANT_TTL_SECONDS["skill"]) if skill else None,
+                _scope_option(conn, "group", group, default_ttl_seconds=DEFAULT_GRANT_TTL_SECONDS["group"]),
+            )
+            if option is not None
+        ]
+    return {
+        "card_type": "approval",
+        "request_id": request_id,
+        "request_type": request_type,
+        "secret_name": secret_name,
+        "kind": row.get("kind"),
+        "protection": row.get("protection"),
+        "command": command,
+        "egress": egress,
+        "session_id": session_id,
+        "approve_once": True,
+        "scope_options": scope_options,
+        "value": None,
+    }
+
+
+def create_access_request(
+    conn: Connection,
+    name: str,
+    *,
+    requester: Any = None,
+    delivery: dict[str, Any] | None = None,
+    message_id: str | None = None,
+    expires_at: str | None = None,
+) -> dict[str, Any]:
+    request_id = _id("vrq")
+    delivery_payload = dict(delivery or {})
+    requester_payload = requester if isinstance(requester, dict) else {}
+    card = approval_card(
+        conn,
+        name,
+        request_id=request_id,
+        request_type="access",
+        command=delivery_payload.get("command"),
+        egress=delivery_payload.get("egress"),
+        skill=delivery_payload.get("skill") or requester_payload.get("skill"),
+        session_id=requester_payload.get("session_id"),
+    )
+    delivery_payload["card"] = card
+    conn.execute(
+        vault_requests.insert().values(
+            id=request_id,
+            request_type="access",
+            secret_name=name,
+            requester=json.dumps(requester) if requester is not None else None,
+            delivery=json.dumps(delivery_payload),
+            status="pending",
+            message_id=message_id,
+            created_at=_now(),
+            expires_at=expires_at,
+        )
+    )
+    audit(conn, "access_requested", secret_name=name, requester=requester, delivery=delivery_payload, request_id=request_id)
+    row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
+    return _request_row_payload(dict(row))
+
+
+def create_sign_request(
+    conn: Connection,
+    name: str,
+    *,
+    digest: str,
+    scheme: str,
+    requester: Any = None,
+    delivery: dict[str, Any] | None = None,
+    message_id: str | None = None,
+) -> dict[str, Any]:
+    request_id = _id("vrq")
+    delivery_payload = dict(delivery or {})
+    requester_payload = requester if isinstance(requester, dict) else {}
+    card = approval_card(
+        conn,
+        name,
+        request_id=request_id,
+        request_type="sign",
+        command=delivery_payload.get("command") or f"sign:{scheme}",
+        egress=delivery_payload.get("egress") or "signature",
+        skill=delivery_payload.get("skill") or requester_payload.get("skill"),
+        session_id=requester_payload.get("session_id"),
+        grantable=False,
+    )
+    delivery_payload.update({"digest": digest, "scheme": scheme, "card": card})
+    conn.execute(
+        vault_requests.insert().values(
+            id=request_id,
+            request_type="sign",
+            secret_name=name,
+            requester=json.dumps(requester) if requester is not None else None,
+            delivery=json.dumps(delivery_payload),
+            status="pending",
+            message_id=message_id,
+            created_at=_now(),
+        )
+    )
+    audit(conn, "sign_requested", secret_name=name, requester=requester, delivery=delivery_payload, request_id=request_id)
+    row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
+    return _request_row_payload(dict(row))
+
+
+def complete_sign_request(
+    conn: Connection,
+    request_id: str,
+    *,
+    name: str,
+    digest: str,
+    scheme: str,
+    signature: dict[str, Any],
+    requester: Any = None,
+) -> dict[str, Any]:
+    row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().first()
+    if row is None:
+        raise RequestNotFoundError(request_id)
+    row_dict = dict(row)
+    if row_dict.get("request_type") != "sign":
+        raise InvalidRequestError("signature completion must target a sign request")
+    if row_dict.get("status") != "pending":
+        raise InvalidRequestError("sign request is not pending")
+    if row_dict.get("secret_name") != name:
+        raise InvalidRequestError("signature secret does not match the sign request")
+    _, delivery = _request_json_payloads(row_dict)
+    delivery_payload = delivery if isinstance(delivery, dict) else {}
+    if delivery_payload.get("digest") != digest or delivery_payload.get("scheme") != scheme:
+        raise InvalidRequestError("signature payload does not match the sign request")
+    sig = signature.get("signature")
+    if not isinstance(sig, str) or not sig:
+        raise InvalidRequestError("signature payload requires a non-empty signature")
+    conn.execute(
+        vault_requests.update()
+        .where(vault_requests.c.id == request_id, vault_requests.c.request_type == "sign", vault_requests.c.status == "pending")
+        .values(status="approved", decided_at=_now())
+    )
+    audit(
+        conn,
+        "signed",
+        secret_name=name,
+        requester=requester,
+        delivery={"scheme": scheme, "digest": digest, "browser_signed": True},
+        request_id=request_id,
+    )
+    updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
+    return _request_row_payload(dict(updated))
+
+
+def list_requests(
+    conn: Connection,
+    *,
+    status: str | None = "pending",
+    request_type: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    query = select(vault_requests).order_by(vault_requests.c.created_at.desc(), vault_requests.c.id.desc()).limit(limit)
+    if status is not None:
+        query = query.where(vault_requests.c.status == status)
+    if request_type is not None:
+        query = query.where(vault_requests.c.request_type == request_type)
+    return [_request_row_payload(dict(row)) for row in conn.execute(query).mappings()]
+
+
+def _expire_grant_rows(
+    conn: Connection,
+    rows: list[dict[str, Any]],
+    *,
+    cache: VaultGrantDekCache = GRANT_DEK_CACHE,
+    reason: str = "grant-expired",
+) -> int:
+    now = _now()
+    expired = 0
+    for row in rows:
+        conn.execute(
+            vault_grants.update()
+            .where(vault_grants.c.id == row["id"], vault_grants.c.status == "active")
+            .values(status="expired", revoked_at=now)
+        )
+        cache.drop(row["id"])
+        audit(conn, reason, grant_id=row["id"], delivery={"scope_type": row["scope_type"], "scope_ref": row["scope_ref"]})
+        expired += 1
+    return expired
+
+
+def expire_grants(conn: Connection, *, cache: VaultGrantDekCache = GRANT_DEK_CACHE) -> int:
+    now = _now()
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            select(vault_grants).where(vault_grants.c.status == "active", vault_grants.c.expires_at <= now)
+        ).mappings()
+    ]
+    return _expire_grant_rows(conn, rows, cache=cache)
+
+
+def expire_grants_without_cached_deks(conn: Connection, *, cache: VaultGrantDekCache = GRANT_DEK_CACHE) -> int:
+    """Expire active grant rows whose process-local DEK cache is gone.
+
+    A persisted grant row is only metadata. If the daemon restarts, the cache is empty
+    and the user must approve again rather than treating the row as usable.
+    """
+    rows = [
+        dict(row)
+        for row in conn.execute(select(vault_grants).where(vault_grants.c.status == "active")).mappings()
+        if not cache.covered_names(row["id"])
+    ]
+    return _expire_grant_rows(conn, rows, cache=cache, reason="grant-expired")
+
+
+def _validate_access_request_for_grant(
+    conn: Connection,
+    request_id: str,
+    *,
+    scope_type: str,
+    scope_ref: str,
+    session_id: str | None,
+    members: list[str],
+) -> None:
+    row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().first()
+    if row is None:
+        raise RequestNotFoundError(request_id)
+    row_dict = dict(row)
+    if row_dict.get("request_type") != "access":
+        raise InvalidRequestError("grant approval must complete an access request")
+    if row_dict.get("status") != "pending":
+        raise InvalidRequestError("grant approval request is not pending")
+    requested_secret = row_dict.get("secret_name")
+    if requested_secret not in members:
+        raise InvalidRequestError("grant scope does not cover the requested secret")
+    requested_session_id = _request_session_id(row_dict)
+    if requested_session_id and requested_session_id != session_id:
+        raise InvalidRequestError("grant session does not match the approval request")
+    card = _request_card(row_dict)
+    allowed_scopes = card.get("scope_options") if isinstance(card, dict) else None
+    if isinstance(allowed_scopes, list) and allowed_scopes:
+        if not any(
+            isinstance(option, dict)
+            and option.get("scope_type") == scope_type
+            and option.get("scope_ref") == scope_ref
+            and requested_secret in (option.get("member_snapshot") or [])
+            for option in allowed_scopes
+        ):
+            raise InvalidRequestError("grant scope was not offered by the approval request")
+
+
+def create_grant(
+    conn: Connection,
+    *,
+    scope_type: str,
+    scope_ref: str,
+    session_id: str | None = None,
+    ttl_seconds: int | None = None,
+    created_by_request_id: str | None = None,
+    deks_by_secret: dict[str, str] | None = None,
+    cache: VaultGrantDekCache = GRANT_DEK_CACHE,
+) -> dict[str, Any]:
+    if scope_type not in GRANT_SCOPE_TYPES:
+        raise InvalidGrantError(f"invalid grant scope_type: {scope_type!r}")
+    if not created_by_request_id:
+        raise InvalidRequestError("grant creation requires an approval request")
+    members = [row["name"] for row in _grantable_member_rows(conn, scope_type, scope_ref)]
+    if not members:
+        raise NotGrantableError(f"{scope_type}:{scope_ref} has no grantable static secrets")
+    if not deks_by_secret:
+        raise InvalidGrantError("grant creation requires a released DEK set")
+    missing_deks = [name for name in members if not deks_by_secret.get(name)]
+    if missing_deks:
+        raise InvalidGrantError(f"grant DEK set is missing: {', '.join(missing_deks)}")
+    if created_by_request_id:
+        _validate_access_request_for_grant(
+            conn,
+            created_by_request_id,
+            scope_type=scope_type,
+            scope_ref=scope_ref,
+            session_id=session_id,
+            members=members,
+        )
+    ttl = int(ttl_seconds or DEFAULT_GRANT_TTL_SECONDS[scope_type])
+    ttl = max(1, min(ttl, _ttl_cap_for_members(conn, members)))
+    now_dt = datetime.now(timezone.utc)
+    grant_id = _id("vgr")
+    conn.execute(
+        vault_grants.insert().values(
+            id=grant_id,
+            scope_type=scope_type,
+            scope_ref=scope_ref,
+            member_snapshot=json.dumps(members),
+            session_id=session_id,
+            status="active",
+            created_by_request_id=created_by_request_id,
+            created_at=now_dt.isoformat(),
+            expires_at=(now_dt + timedelta(seconds=ttl)).isoformat(),
+        )
+    )
+    cache.put(grant_id, {name: deks_by_secret[name] for name in members})
+    if created_by_request_id:
+        conn.execute(
+            vault_requests.update()
+            .where(
+                vault_requests.c.id == created_by_request_id,
+                vault_requests.c.request_type == "access",
+                vault_requests.c.status == "pending",
+            )
+            .values(status="approved", decided_at=_now())
+        )
+    audit(
+        conn,
+        "granted",
+        requester={"session_id": session_id} if session_id else None,
+        delivery={"scope_type": scope_type, "scope_ref": scope_ref, "member_count": len(members)},
+        request_id=created_by_request_id,
+        grant_id=grant_id,
+    )
+    row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().one()
+    return _grant_row_payload(dict(row), cache=cache)
+
+
+def list_grants(
+    conn: Connection,
+    *,
+    status: str | None = "active",
+    session_id: str | None = None,
+    cache: VaultGrantDekCache = GRANT_DEK_CACHE,
+) -> list[dict[str, Any]]:
+    expire_grants(conn, cache=cache)
+    expire_grants_without_cached_deks(conn, cache=cache)
+    query = select(vault_grants).order_by(vault_grants.c.created_at.desc(), vault_grants.c.id.desc())
+    if status is not None:
+        query = query.where(vault_grants.c.status == status)
+    if session_id is not None:
+        query = query.where(or_(vault_grants.c.session_id.is_(None), vault_grants.c.session_id == session_id))
+    return [_grant_row_payload(dict(row), cache=cache) for row in conn.execute(query).mappings()]
+
+
+def revoke_grant(
+    conn: Connection,
+    grant_id: str,
+    *,
+    cache: VaultGrantDekCache = GRANT_DEK_CACHE,
+) -> dict[str, Any]:
+    row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().first()
+    if row is None:
+        raise GrantNotFoundError(grant_id)
+    row_dict = dict(row)
+    if row_dict.get("status") != "active":
+        raise GrantNotActiveError(grant_id)
+    now = _now()
+    conn.execute(
+        vault_grants.update()
+        .where(vault_grants.c.id == grant_id)
+        .values(status="revoked", revoked_at=now)
+    )
+    cache.drop(grant_id)
+    audit(conn, "grant-revoked", grant_id=grant_id, delivery={"scope_type": row_dict["scope_type"], "scope_ref": row_dict["scope_ref"]})
+    updated = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().one()
+    return _grant_row_payload(dict(updated), cache=cache)
+
+
+def find_active_grant_for_secret(
+    conn: Connection,
+    secret_name: str,
+    *,
+    session_id: str | None = None,
+    cache: VaultGrantDekCache = GRANT_DEK_CACHE,
+) -> dict[str, Any] | None:
+    expire_grants(conn, cache=cache)
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            select(vault_grants).where(
+                vault_grants.c.status == "active",
+                or_(vault_grants.c.session_id.is_(None), vault_grants.c.session_id == session_id),
+            )
+        ).mappings()
+    ]
+    stale_without_cache: list[dict[str, Any]] = []
+    for row in rows:
+        members = _loads(row.get("member_snapshot")) or []
+        if secret_name not in members:
+            continue
+        if cache.has(row["id"], secret_name):
+            return _grant_row_payload(row, cache=cache)
+        stale_without_cache.append(row)
+    if stale_without_cache:
+        _expire_grant_rows(conn, stale_without_cache, cache=cache, reason="grant-expired")
+    return None
+
+
+def resolve_secret_access(
+    conn: Connection,
+    name: str,
+    *,
+    session_id: str | None = None,
+    requester: Any = None,
+    delivery: dict[str, Any] | None = None,
+    create_request: bool = True,
+    cache: VaultGrantDekCache = GRANT_DEK_CACHE,
+) -> dict[str, Any]:
+    """Resolve an agent access attempt without exposing the value.
+
+    Standard secrets can be delivered by existing one-shot avault paths. Protected
+    secrets require an active in-memory grant; otherwise this records an approval
+    request and returns its structured card data.
+    """
+    row = _require_row(conn, name)
+    if row.get("protection") == "standard":
+        return {"status": "standard", "secret": _meta_payload(row), "envelope": _row_sealed(row)}
+    grant = find_active_grant_for_secret(conn, name, session_id=session_id, cache=cache)
+    if grant is not None:
+        return {"status": "granted", "secret": _meta_payload(row), "grant": grant}
+    request_payload = None
+    if create_request:
+        request_payload = create_access_request(
+            conn,
+            name,
+            requester=requester,
+            delivery={**(delivery or {}), "session_id": session_id},
+        )
+    return {"status": "approval_required", "secret": _meta_payload(row), "request": request_payload}
 
 
 def list_audit(conn: Connection, *, secret_name: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
