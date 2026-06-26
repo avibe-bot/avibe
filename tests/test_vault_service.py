@@ -456,6 +456,25 @@ def test_resolve_access_card_uses_delivery_session_fallback(vault):
     assert grant["session_id"] == "ses_delivery"
 
 
+def test_grant_can_be_intentionally_unbound_from_request_session(vault):
+    _create(vault, name="PROTECTED_KEY", protection="protected")
+    cache = vs.VaultGrantDekCache()
+    with vault.begin() as conn:
+        req = _access_request(conn, "PROTECTED_KEY", session_id="ses_1")
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="PROTECTED_KEY",
+            created_by_request_id=req["id"],
+            deks_by_secret={"PROTECTED_KEY": "dek"},
+            inherit_request_session=False,
+            cache=cache,
+        )
+
+    assert grant["session_id"] is None
+    assert cache.has(grant["id"], "PROTECTED_KEY")
+
+
 def test_keypair_and_always_ask_are_not_grantable(vault):
     _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
     _create(vault, name="STATIC_KEY", protection="protected", policy={"always_ask": True})
@@ -524,6 +543,80 @@ def test_grant_creation_must_match_pending_access_request(vault):
                 created_by_request_id=access_req["id"],
                 deks_by_secret={"A_KEY": "dek-a"},
             )
+
+
+def test_rotating_protected_secret_expires_pending_access_and_sign_requests(vault):
+    _create(vault, name="A_KEY", protection="protected")
+    _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
+    with vault.begin() as conn:
+        access_req = _access_request(conn, "A_KEY", session_id="ses_1")
+        vs.rotate_secret(conn, "A_KEY", _sealed("rotated"))
+        access_status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == access_req["id"])).scalar_one()
+        with pytest.raises(vs.InvalidRequestError):
+            vs.create_grant(
+                conn,
+                scope_type="secret",
+                scope_ref="A_KEY",
+                created_by_request_id=access_req["id"],
+                deks_by_secret={"A_KEY": "dek-a"},
+            )
+
+        sign_req = vs.create_sign_request(conn, "ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")
+        vs.rotate_secret(conn, "ETH_KEY", _sealed("rotated-key"))
+        sign_status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == sign_req["id"])).scalar_one()
+        with pytest.raises(vs.InvalidRequestError):
+            vs.complete_sign_request(
+                conn,
+                sign_req["id"],
+                name="ETH_KEY",
+                digest="00" * 32,
+                scheme="ecdsa-secp256k1-recoverable",
+                signature={"signature": "sig"},
+            )
+
+    assert access_status == "expired"
+    assert sign_status == "expired"
+
+
+def test_deleting_protected_secret_expires_pending_access_requests(vault):
+    _create(vault, name="A_KEY", protection="protected")
+    with vault.begin() as conn:
+        access_req = _access_request(conn, "A_KEY", session_id="ses_1")
+        vs.delete_secret(conn, "A_KEY")
+        status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == access_req["id"])).scalar_one()
+
+    assert status == "expired"
+
+
+def test_sign_request_completion_can_only_claim_pending_once(vault):
+    _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
+    digest = "00" * 32
+    with vault.begin() as conn:
+        sign_req = vs.create_sign_request(conn, "ETH_KEY", digest=digest, scheme="ecdsa-secp256k1-recoverable")
+        first = vs.complete_sign_request(
+            conn,
+            sign_req["id"],
+            name="ETH_KEY",
+            digest=digest,
+            scheme="ecdsa-secp256k1-recoverable",
+            signature={"signature": "sig-1"},
+        )
+        with pytest.raises(vs.InvalidRequestError):
+            vs.complete_sign_request(
+                conn,
+                sign_req["id"],
+                name="ETH_KEY",
+                digest=digest,
+                scheme="ecdsa-secp256k1-recoverable",
+                signature={"signature": "sig-2"},
+            )
+        signed_events = [
+            row["event"]
+            for row in conn.execute(select(vault_audit.c.event).where(vault_audit.c.event == "signed")).mappings()
+        ]
+
+    assert first["status"] == "approved"
+    assert signed_events == ["signed"]
 
 
 def test_skill_grant_uses_vault_links(vault):

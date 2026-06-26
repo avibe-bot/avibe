@@ -449,6 +449,7 @@ def rotate_secret(
     public_meta = _public_meta(row.get("public_meta"))
     public_meta.pop("preview", None)
     if row.get("protection") == "protected":
+        _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
         _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
     conn.execute(
         vault_secrets.update()
@@ -470,6 +471,7 @@ def delete_secret(conn: Connection, name: str, *, cache: VaultGrantDekCache = GR
     if row is None:
         raise SecretNotFoundError(name)
     if row.get("protection") == "protected":
+        _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
         _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
     conn.execute(vault_secrets.delete().where(vault_secrets.c.name == name))
     audit(conn, "deleted", secret_name=name)
@@ -884,11 +886,13 @@ def complete_sign_request(
     sig = signature.get("signature")
     if not isinstance(sig, str) or not sig:
         raise InvalidRequestError("signature payload requires a non-empty signature")
-    conn.execute(
+    claim = conn.execute(
         vault_requests.update()
         .where(vault_requests.c.id == request_id, vault_requests.c.request_type == "sign", vault_requests.c.status == "pending")
         .values(status="approved", decided_at=_now())
     )
+    if claim.rowcount != 1:
+        raise InvalidRequestError("sign request is not pending")
     audit(
         conn,
         "signed",
@@ -952,6 +956,45 @@ def _expire_active_grants_for_secret(
     return _expire_grant_rows(conn, rows, cache=cache, reason=reason)
 
 
+def _expire_pending_requests_for_secret(
+    conn: Connection,
+    secret_name: str,
+    *,
+    reason: str = "request-expired",
+) -> int:
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            select(vault_requests).where(
+                vault_requests.c.secret_name == secret_name,
+                vault_requests.c.status == "pending",
+                vault_requests.c.request_type.in_(("access", "sign")),
+            )
+        ).mappings()
+    ]
+    if not rows:
+        return 0
+    now = _now()
+    expired = 0
+    for row in rows:
+        result = conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id == row["id"], vault_requests.c.status == "pending")
+            .values(status="expired", decided_at=now)
+        )
+        if result.rowcount != 1:
+            continue
+        audit(
+            conn,
+            reason,
+            secret_name=secret_name,
+            delivery={"request_type": row["request_type"]},
+            request_id=row["id"],
+        )
+        expired += 1
+    return expired
+
+
 def expire_grants(conn: Connection, *, cache: VaultGrantDekCache = GRANT_DEK_CACHE) -> int:
     now = _now()
     rows = [
@@ -984,6 +1027,7 @@ def _validate_access_request_for_grant(
     scope_type: str,
     scope_ref: str,
     session_id: str | None,
+    inherit_request_session: bool,
     live_members: list[str],
 ) -> GrantApproval:
     row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().first()
@@ -998,8 +1042,8 @@ def _validate_access_request_for_grant(
     if requested_secret not in live_members:
         raise InvalidRequestError("grant scope does not cover the requested secret")
     requested_session_id = _request_session_id(row_dict)
-    effective_session_id = session_id or requested_session_id
-    if requested_session_id and requested_session_id != effective_session_id:
+    effective_session_id = requested_session_id if session_id is None and inherit_request_session else session_id
+    if requested_session_id and effective_session_id and requested_session_id != effective_session_id:
         raise InvalidRequestError("grant session does not match the approval request")
     card = _request_card(row_dict)
     allowed_scopes = card.get("scope_options") if isinstance(card, dict) else None
@@ -1031,6 +1075,7 @@ def create_grant(
     ttl_seconds: int | None = None,
     created_by_request_id: str | None = None,
     deks_by_secret: dict[str, str] | None = None,
+    inherit_request_session: bool = True,
     cache: VaultGrantDekCache = GRANT_DEK_CACHE,
 ) -> dict[str, Any]:
     if scope_type not in GRANT_SCOPE_TYPES:
@@ -1046,6 +1091,7 @@ def create_grant(
         scope_type=scope_type,
         scope_ref=scope_ref,
         session_id=session_id,
+        inherit_request_session=inherit_request_session,
         live_members=live_members,
     )
     session_id = approval.session_id

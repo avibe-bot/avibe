@@ -1342,14 +1342,18 @@ def _sealed_from_payload(payload: dict):
     if not isinstance(payload, dict):
         raise VaultApiError("sealed envelope must be an object", code="invalid_envelope")
     try:
-        ciphertext = str(payload["ciphertext"])
-        nonce = str(payload["nonce"])
+        ciphertext = payload["ciphertext"]
+        nonce = payload["nonce"]
         wrap_meta = payload["wrap_meta"]
     except KeyError as exc:
         raise VaultApiError("sealed envelope requires ciphertext, nonce, and wrap_meta", code="invalid_envelope") from exc
+    if not isinstance(ciphertext, str) or not ciphertext.strip():
+        raise VaultApiError("sealed envelope fields must be non-empty strings", code="invalid_envelope")
+    if not isinstance(nonce, str) or not nonce.strip():
+        raise VaultApiError("sealed envelope fields must be non-empty strings", code="invalid_envelope")
     if isinstance(wrap_meta, dict):
         wrap_meta = json.dumps(wrap_meta)
-    if not isinstance(wrap_meta, str) or not ciphertext or not nonce or not wrap_meta:
+    if not isinstance(wrap_meta, str) or not wrap_meta.strip():
         raise VaultApiError("sealed envelope fields must be non-empty strings", code="invalid_envelope")
     return Sealed(ciphertext=ciphertext, nonce=nonce, wrap_meta=wrap_meta)
 
@@ -1469,11 +1473,21 @@ def create_vault_grant(payload: dict) -> dict:
     deks_by_secret = payload.get("deks_by_secret")
     if deks_by_secret is not None and not isinstance(deks_by_secret, dict):
         raise VaultApiError("deks_by_secret must be an object", code="invalid_grant")
+    normalized_deks: dict[str, str] | None = None
+    if isinstance(deks_by_secret, dict):
+        normalized_deks = {}
+        for key, value in deks_by_secret.items():
+            if not isinstance(key, str) or not key:
+                raise VaultApiError("deks_by_secret keys must be non-empty strings", code="invalid_grant")
+            if not isinstance(value, str) or not value:
+                raise VaultApiError("deks_by_secret values must be non-empty strings", code="invalid_grant")
+            normalized_deks[key] = value
     request_id = payload.get("request_id") or payload.get("created_by_request_id")
     if not request_id:
         raise VaultApiError("request_id is required to create a grant", code="missing_request_id")
     session_id = payload.get("session_id")
-    if payload.get("this_session_only") is False:
+    inherit_request_session = payload.get("this_session_only") is not False
+    if not inherit_request_session:
         session_id = None
     engine = _vault_engine()
     try:
@@ -1485,7 +1499,8 @@ def create_vault_grant(payload: dict) -> dict:
                 session_id=str(session_id) if session_id else None,
                 ttl_seconds=ttl_seconds,
                 created_by_request_id=str(request_id),
-                deks_by_secret={str(k): str(v) for k, v in deks_by_secret.items()} if deks_by_secret else None,
+                deks_by_secret=normalized_deks,
+                inherit_request_session=inherit_request_session,
             )
     except vault_service.NotGrantableError as exc:
         raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
@@ -1498,6 +1513,19 @@ def create_vault_grant(payload: dict) -> dict:
     except vault_service.InvalidGrantError as exc:
         raise VaultApiError(str(exc), code="invalid_grant") from exc
     return {"ok": True, "grant": grant}
+
+
+def _sign_digest_from_payload(value: object) -> str:
+    if not isinstance(value, str):
+        raise VaultApiError("digest must be a 32-byte hex string", code="invalid_digest")
+    digest = value.strip()
+    try:
+        decoded = bytes.fromhex(digest)
+    except ValueError as exc:
+        raise VaultApiError("digest must be a 32-byte hex string", code="invalid_digest") from exc
+    if len(digest) != 64 or len(decoded) != 32:
+        raise VaultApiError("digest must be a 32-byte hex string", code="invalid_digest")
+    return digest.lower()
 
 
 def revoke_vault_grant(grant_id: str) -> dict:
@@ -1525,7 +1553,7 @@ def vault_sign(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise VaultApiError("payload must be an object", code="invalid_payload")
     name = str(payload.get("name") or "").strip()
-    digest = str(payload.get("digest") or "").strip()
+    digest = _sign_digest_from_payload(payload.get("digest"))
     scheme = str(payload.get("scheme") or "ecdsa-secp256k1-recoverable").strip()
     if not vault_crypto.is_valid_secret_name(name):
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
