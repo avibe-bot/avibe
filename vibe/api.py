@@ -269,6 +269,20 @@ def _npm_binary_candidates_for_prefix(prefix_path: Path, binary: str) -> list[Pa
     return derived_candidates
 
 
+def _windows_executable_candidates(candidates: list[Path]) -> list[Path]:
+    result: list[Path] = []
+    for candidate in candidates:
+        result.append(candidate)
+        if candidate.suffix.lower() not in {".cmd", ".exe"}:
+            result.extend(
+                [
+                    candidate.with_name(f"{candidate.name}.exe"),
+                    candidate.with_name(f"{candidate.name}.cmd"),
+                ]
+            )
+    return result
+
+
 def _candidate_cli_paths(binary: str) -> list[Path]:
     if not binary:
         return []
@@ -296,6 +310,8 @@ def _candidate_cli_paths(binary: str) -> list[Path]:
         Path("/opt/homebrew/bin") / binary,
         Path("/usr/local/bin") / binary,
     ]
+    if os.name == "nt":
+        common_candidates = _windows_executable_candidates(common_candidates)
     for candidate in common_candidates + _nvm_binary_candidates(binary) + _npm_global_binary_candidates(binary):
         if candidate not in candidates:
             candidates.append(candidate)
@@ -3293,7 +3309,7 @@ def _run_install_command(
 
 _ASKILL_INSTALL_LOCK = threading.Lock()
 _AVAULT_INSTALL_LOCK = threading.Lock()
-AVAULT_VERSION = "0.1.0"
+AVAULT_VERSION = "0.1.1"
 _AVAULT_RELEASE_BASE_URL = f"https://github.com/avibe-bot/avault/releases/download/v{AVAULT_VERSION}/"
 
 
@@ -3412,13 +3428,28 @@ def _avault_target() -> tuple[str | None, str]:
 
     if normalized_system == "darwin" and normalized_machine == "arm64":
         return "macos-arm64", platform_label
+    if normalized_system == "darwin" and normalized_machine in {"x86_64", "amd64"}:
+        return "macos-x64", platform_label
     if normalized_system == "linux" and normalized_machine in {"x86_64", "amd64"}:
         return "linux-x64", platform_label
+    if normalized_system == "linux" and normalized_machine in {"aarch64", "arm64"}:
+        return "linux-arm64", platform_label
+    if normalized_system == "windows" and normalized_machine in {"amd64", "x86_64"}:
+        return "windows-x64", platform_label
+    if normalized_system == "windows" and normalized_machine == "arm64":
+        return "windows-arm64", platform_label
     return None, platform_label
 
 
-def _avault_managed_bin_path() -> Path:
-    return Path.home() / ".local" / "bin" / "avault"
+def _avault_binary_name_for_target(target: str) -> str:
+    return "avault.exe" if target.startswith("windows-") else "avault"
+
+
+def _avault_managed_bin_path(target: str | None = None) -> Path:
+    target = target or (_avault_target()[0] or "")
+    # Windows uses the same Avibe-managed bin directory, with the .exe name
+    # that _candidate_cli_paths("avault") checks on Windows.
+    return Path.home() / ".local" / "bin" / _avault_binary_name_for_target(target)
 
 
 def _persist_avault_cli_path(path: str) -> None:
@@ -3455,17 +3486,17 @@ def _download_avault_release_file(url: str) -> bytes:
         return response.read()
 
 
-def _extract_avault_binary(archive_bytes: bytes, output_path: Path) -> None:
+def _extract_avault_binary(archive_bytes: bytes, output_path: Path, member_name: str = "avault") -> None:
     import io
     import tarfile
 
     output_real = output_path.parent.resolve()
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
-        member = next((item for item in archive.getmembers() if item.name == "avault"), None)
+        member = next((item for item in archive.getmembers() if item.name == member_name), None)
         if member is None or not member.isfile():
             raise ValueError("archive does not contain the avault executable")
         target = (output_path.parent / member.name).resolve()
-        if target.parent != output_real or target.name != "avault":
+        if target.parent != output_real or target.name != member_name:
             raise ValueError("archive contains an unsafe avault path")
         source = archive.extractfile(member)
         if source is None:
@@ -3541,15 +3572,18 @@ def install_avault(force: bool = False) -> dict:
                 "path": None,
             }
 
-        install_path = _avault_managed_bin_path()
+        member_name = _avault_binary_name_for_target(target)
+        install_path = _avault_managed_bin_path(target)
         install_path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="avault-install-", dir=install_path.parent) as tmp_dir:
-            tmp_path = Path(tmp_dir) / "avault"
-            _extract_avault_binary(archive_bytes, tmp_path)
-            tmp_path.chmod(0o755)
+            tmp_path = Path(tmp_dir) / member_name
+            _extract_avault_binary(archive_bytes, tmp_path, member_name)
+            if not target.startswith("windows-"):
+                tmp_path.chmod(0o755)
             os.replace(tmp_path, install_path)
-        install_path.chmod(0o755)
-        _clear_macos_quarantine(install_path)
+        if not target.startswith("windows-"):
+            install_path.chmod(0o755)
+            _clear_macos_quarantine(install_path)
         _persist_avault_cli_path(str(install_path))
 
         return {
