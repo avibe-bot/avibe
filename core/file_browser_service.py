@@ -645,32 +645,9 @@ def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
 
     def _move() -> dict[str, Any]:
         backup: Path | None = None
-        temp_target: Path | None = None
         try:
             if not overwrite:
-                try:
-                    _os_rename_noreplace(source, target)
-                except OSError as exc:
-                    if exc.errno != errno.EXDEV:
-                        raise
-                    temp_target = _reserve_backup_path(target)
-                    try:
-                        if _is_dir_no_follow(source):
-                            shutil.copytree(source, temp_target, symlinks=True)
-                        else:
-                            shutil.copy2(source, temp_target, follow_symlinks=False)
-                        _os_rename_noreplace(temp_target, target)
-                        temp_target = None
-                        created_target_stat = target.lstat()
-                        try:
-                            _remove_backup_path(source)
-                        except OSError:
-                            _remove_created_cross_fs_move_target(target, source, created_target_stat)
-                            raise
-                    except Exception:
-                        if temp_target is not None:
-                            _remove_path_if_exists(temp_target)
-                        raise
+                _move_to_absent_target(source, target)
                 return {"ok": True}
             # Re-check at move time for the overwrite path so file-vs-directory
             # conflicts are caught before the destination is moved aside.
@@ -680,7 +657,10 @@ def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
                 backup = _reserve_backup_path(target)
                 target.rename(backup)
             try:
-                shutil.move(str(source), str(target))
+                if backup is None:
+                    _move_to_absent_target(source, target)
+                else:
+                    shutil.move(str(source), str(target))
             except Exception:
                 if backup is not None:
                     _restore_move_backup(backup, target)
@@ -692,6 +672,36 @@ def move_path(raw_src: str, raw_dst: str, *, overwrite: bool = False) -> dict[st
             raise FileBrowserError("fs_error", str(exc), 400) from exc
 
     return _run_mutation("move", source, _move, dst=str(target), overwrite=overwrite)
+
+
+def _move_to_absent_target(source: Path, target: Path) -> None:
+    try:
+        _os_rename_noreplace(source, target)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        _copy_cross_fs_move_to_absent_target(source, target)
+
+
+def _copy_cross_fs_move_to_absent_target(source: Path, target: Path) -> None:
+    temp_target: Path | None = _reserve_backup_path(target)
+    try:
+        if _is_dir_no_follow(source):
+            shutil.copytree(source, temp_target, symlinks=True)
+        else:
+            shutil.copy2(source, temp_target, follow_symlinks=False)
+        _os_rename_noreplace(temp_target, target)
+        temp_target = None
+        created_target_stat = target.lstat()
+        try:
+            _remove_backup_path(source)
+        except OSError:
+            _remove_created_cross_fs_move_target(target, source, created_target_stat)
+            raise
+    except Exception:
+        if temp_target is not None:
+            _remove_path_if_exists(temp_target)
+        raise
 
 
 def _reserve_backup_path(target: Path) -> Path:

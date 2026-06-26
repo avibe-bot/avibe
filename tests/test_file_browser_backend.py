@@ -747,6 +747,63 @@ def test_move_cross_filesystem_rolls_back_target_when_source_removal_fails(tmp_p
     assert not list(tmp_path.glob(".dst.txt.avibe-overwrite-*"))
 
 
+def test_move_overwrite_absent_cross_filesystem_still_moves(tmp_path, monkeypatch):
+    source = tmp_path / "src.txt"
+    source.write_text("DATA", encoding="utf-8")
+    destination = tmp_path / "dst.txt"
+
+    real_rename = fs._os_rename_noreplace
+    calls = {"n": 0}
+
+    def fake_rename(src: Path, dst: Path) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(errno.EXDEV, "cross-device link")
+        real_rename(src, dst)
+
+    monkeypatch.setattr(fs, "_os_rename_noreplace", fake_rename)
+
+    assert fs.move_path(str(source), str(destination), overwrite=True) == {"ok": True}
+    assert destination.read_text(encoding="utf-8") == "DATA"
+    assert not source.exists()
+    assert not list(tmp_path.glob(".dst.txt.avibe-overwrite-*"))
+
+
+def test_move_overwrite_absent_cross_filesystem_rolls_back_target_when_source_removal_fails(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "src.txt"
+    source.write_text("DATA", encoding="utf-8")
+    destination = tmp_path / "dst.txt"
+
+    real_rename = fs._os_rename_noreplace
+    calls = {"n": 0}
+
+    def fake_rename(src: Path, dst: Path) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(errno.EXDEV, "cross-device link")
+        real_rename(src, dst)
+
+    real_remove_backup_path = fs._remove_backup_path
+
+    def fail_source_removal(path: Path) -> None:
+        if Path(path) == source:
+            raise PermissionError(errno.EACCES, "permission denied", str(path))
+        real_remove_backup_path(path)
+
+    monkeypatch.setattr(fs, "_os_rename_noreplace", fake_rename)
+    monkeypatch.setattr(fs, "_remove_backup_path", fail_source_removal)
+
+    with pytest.raises(FileBrowserError) as exc:
+        fs.move_path(str(source), str(destination), overwrite=True)
+
+    assert exc.value.code == "fs_error"
+    assert source.read_text(encoding="utf-8") == "DATA"
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".dst.txt.avibe-overwrite-*"))
+
+
 def test_symlink_mutations_operate_on_link_not_target(tmp_path):
     target = tmp_path / "target.txt"
     target.write_text("target", encoding="utf-8")
