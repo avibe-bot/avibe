@@ -149,6 +149,14 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
       ro.disconnect();
       onData.dispose();
       onResize.dispose();
+      // Detach handlers before closing. A closing socket's onclose can fire asynchronously
+      // *after* its replacement has already reported 'ready' (reconnect / effect remount);
+      // left attached, the stale onclose would mark the live terminal 'closed' or schedule a
+      // spurious 1013 reconnect. The torn-down terminal is being disposed, so its remaining
+      // frames are moot — dropping them at this single chokepoint is the root fix.
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onclose = null;
       try {
         ws.close();
       } catch {
