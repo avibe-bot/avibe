@@ -606,6 +606,7 @@
       "empty": "未打开文件",
       "emptyHint": "从「文件」中打开一个文件，在这里编辑。",
       "openInWindow": "在编辑器窗口中打开",
+      "saveBeforePopOut": "请先保存，再在新窗口中打开",
       "selectAll": "全选",
       "copyAll": "全部复制"
     },

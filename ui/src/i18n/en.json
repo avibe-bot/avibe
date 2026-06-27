@@ -606,6 +606,7 @@
       "empty": "No file open",
       "emptyHint": "Open a file from Files to edit it here.",
       "openInWindow": "Open in editor window",
+      "saveBeforePopOut": "Save before opening in a window",
       "selectAll": "Select all",
       "copyAll": "Copy all"
     },

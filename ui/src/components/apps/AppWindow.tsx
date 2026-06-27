@@ -3,39 +3,8 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { APP_REGISTRY } from '../../apps/registry';
-import { useWindowManager, type WindowBounds, type WindowInstance } from '../../context/WindowManagerContext';
-
-const MIN_W = 360;
-const MIN_H = 240;
-// Keep at least this much of the window (incl. the grabbable titlebar) on-screen.
-const EDGE_KEEP = 120;
-const TITLE_KEEP = 8;
-
-type ResizeDir = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
-
-// Clamp a moved window so its titlebar can't be dragged fully out of reach.
-function clampMove(b: WindowBounds, layerW: number, layerH: number): WindowBounds {
-  return {
-    ...b,
-    x: Math.min(Math.max(b.x, EDGE_KEEP - b.width), layerW - EDGE_KEEP),
-    y: Math.min(Math.max(b.y, TITLE_KEEP), layerH - TITLE_KEEP - 28),
-  };
-}
-
-function resizeBounds(start: WindowBounds, dir: ResizeDir, dx: number, dy: number): WindowBounds {
-  let { x, y, width, height } = start;
-  if (dir.includes('e')) width = Math.max(MIN_W, start.width + dx);
-  if (dir.includes('s')) height = Math.max(MIN_H, start.height + dy);
-  if (dir.includes('w')) {
-    width = Math.max(MIN_W, start.width - dx);
-    x = start.x + (start.width - width);
-  }
-  if (dir.includes('n')) {
-    height = Math.max(MIN_H, start.height - dy);
-    y = start.y + (start.height - height);
-  }
-  return { x, y, width, height };
-}
+import { useWindowManager, type WindowInstance } from '../../context/WindowManagerContext';
+import { clampToLayer, resizeBounds, type ResizeDir } from '../../lib/windowBounds';
 
 const RESIZE_HANDLES: { dir: ResizeDir; className: string }[] = [
   { dir: 'n', className: 'left-2 right-2 top-0 h-1.5 cursor-ns-resize' },
@@ -56,6 +25,7 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
   const { t } = useTranslation();
   const wm = useWindowManager();
   const def = APP_REGISTRY[win.appId];
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const draggingRef = useRef(false);
   // Play the scale-down exit before the window actually leaves (minimize → Dock,
   // or close); the animation's end drives the real action, so the CSS owns the
@@ -70,6 +40,9 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
     e.preventDefault();
     e.stopPropagation();
     wm.focus(win.id);
+    // Give the window real DOM focus so keyboard chords (⌘W/⌘M) target it — the
+    // titlebar/handle stops propagation, so the root's own focus handler won't run.
+    rootRef.current?.focus({ preventScroll: true });
     draggingRef.current = true;
     const startX = e.clientX;
     const startY = e.clientY;
@@ -78,9 +51,11 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
       const dx = ev.clientX - startX;
       const dy = ev.clientY - startY;
       if (kind === 'move') {
-        wm.setBounds(win.id, clampMove({ ...start, x: start.x + dx, y: start.y + dy }, layerWidth, layerHeight));
+        wm.setBounds(win.id, clampToLayer({ ...start, x: start.x + dx, y: start.y + dy }, layerWidth, layerHeight));
       } else {
-        wm.setBounds(win.id, resizeBounds(start, kind, dx, dy));
+        // Clamp resize results too: dragging the N/W edge inward past the min size
+        // moves the origin, which could otherwise push the titlebar off-screen.
+        wm.setBounds(win.id, clampToLayer(resizeBounds(start, kind, dx, dy), layerWidth, layerHeight));
       }
     };
     const onUp = () => {
@@ -108,9 +83,19 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
 
   return (
     <div
+      ref={rootRef}
       role="dialog"
       aria-label={t(def.titleKey)}
-      onPointerDown={() => wm.focus(win.id)}
+      tabIndex={-1}
+      onPointerDown={(e) => {
+        wm.focus(win.id);
+        // Give the window DOM focus (so ⌘W/⌘M target it) — but don't steal focus
+        // from an inner input/editor the click is actually landing in.
+        const tgt = e.target as HTMLElement;
+        if (!tgt.closest('input,textarea,select,button,a,[contenteditable="true"],.monaco-editor')) {
+          rootRef.current?.focus({ preventScroll: true });
+        }
+      }}
       onAnimationEnd={(e) => {
         // Only the root's own exit animation drives the action (ignore the
         // entrance, and any child animation bubbling up).
@@ -119,7 +104,7 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
         else wm.minimize(win.id);
       }}
       className={clsx(
-        'group/win pointer-events-auto absolute flex flex-col overflow-hidden rounded-xl border bg-surface-2',
+        'group/win pointer-events-auto absolute flex flex-col overflow-hidden rounded-xl border bg-surface-2 outline-none',
         win.maximized ? 'rounded-none' : 'rounded-xl',
         exitKind ? 'animate-appwindow-out' : 'animate-appwindow-in',
         focused

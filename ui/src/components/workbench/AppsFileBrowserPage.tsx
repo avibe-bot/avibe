@@ -368,12 +368,14 @@ const ContentPane: React.FC<{ selected: Selected | null; windowed: boolean }> = 
           filename={selected.name}
           mtime={selected.mtime}
           // Inside a window, offer to pop the file out into its own Editor window.
+          // Carry the editor's live mtime (it may have saved since this row opened),
+          // not the row's stale metadata, so the new window won't false-conflict.
           onPopOut={
             windowed
-              ? () =>
+              ? (live) =>
                   wm.openApp('editor', {
                     title: selected.name,
-                    params: { path: selected.path, filename: selected.name, mtime: selected.mtime },
+                    params: { path: selected.path, filename: selected.name, mtime: live.mtime },
                   })
               : undefined
           }

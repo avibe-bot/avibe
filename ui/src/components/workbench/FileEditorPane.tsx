@@ -71,13 +71,15 @@ function monacoLanguage(filename: string): string | undefined {
 
 // Read + edit + save one text/code file. Read-only is just `readOnly`. When
 // `onPopOut` is provided (the in-Files editor pane), a button pops the file out
-// into a standalone Editor window.
+// into a standalone Editor window. Pop-out reports the editor's *live* mtime so
+// the new window saves against the current revision (this pane may have saved
+// since the row was opened), not the stale metadata the row carried.
 export const FileEditorPane: React.FC<{
   path: string;
   filename: string;
   mtime: number | null;
   readOnly?: boolean;
-  onPopOut?: () => void;
+  onPopOut?: (live: { mtime: number | null }) => void;
 }> = ({ path, filename, mtime, readOnly = false, onPopOut }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
@@ -141,8 +143,11 @@ export const FileEditorPane: React.FC<{
             variant="ghost"
             className="size-7 shrink-0 text-muted"
             aria-label={t('apps.editor.openInWindow')}
-            title={t('apps.editor.openInWindow')}
-            onClick={onPopOut}
+            // Block pop-out while dirty: the new window reloads from disk, so
+            // popping out unsaved edits would silently drop them. Save first.
+            title={dirty ? t('apps.editor.saveBeforePopOut') : t('apps.editor.openInWindow')}
+            disabled={dirty}
+            onClick={() => onPopOut({ mtime: savedMtime })}
           >
             <PanelRightOpen className="size-3.5" />
           </Button>
