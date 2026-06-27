@@ -1910,10 +1910,17 @@ const Transcript: React.FC<TranscriptProps> = ({
     // re-arms; a failed load recovers the same way (re-arm regardless of outcome).
     if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
     settleTimerRef.current = window.setTimeout(() => {
-      // Stay disarmed until the in-flight load finishes — a load slower than the
-      // settle would otherwise re-arm mid-flight and let the post-load scroll
-      // re-trigger. The load's own anchor-restore scroll schedules a fresh settle.
-      if (!loadingOlderPropRef.current) canLoadOlderRef.current = true;
+      // Re-arm only once scrolling has STOPPED and the viewport came to rest out of
+      // the trigger band, down in loaded content — not parked at the top and not
+      // mid-load. Evaluating position at rest (not live) is what makes this safe: a
+      // single fling can't "cross" the threshold the way a live scrollTop test
+      // could. After a normal load the anchor restore leaves scrollTop well past
+      // this and schedules the settle that re-arms; a fling that ends parked at the
+      // top stays disarmed, so momentum/bounce can't load another page.
+      const el = scrollRef.current;
+      if (el && !loadingOlderPropRef.current && el.scrollTop > 300) {
+        canLoadOlderRef.current = true;
+      }
     }, 150);
     if (hasOlder && !loadingOlder && canLoadOlderRef.current && el.scrollTop < 120) {
       canLoadOlderRef.current = false;
