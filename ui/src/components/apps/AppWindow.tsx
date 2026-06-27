@@ -46,6 +46,14 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [win.minimized, win.maximized, layerWidth, layerHeight]);
 
+  // A freshly opened window mounts as the top window; give it DOM focus so keyboard
+  // chords route to it — e.g. after a Files pop-out, ⌘W should act on the new Editor
+  // window, not the Files window whose pop-out button was clicked. Mount-only.
+  useEffect(() => {
+    if (wm.focusedId === win.id) rootRef.current?.focus({ preventScroll: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // One pointer gesture (move or resize): attach window-level listeners on down,
   // tear them down on up. Capturing `win.bounds` at gesture start keeps the math
   // stable even as state updates re-render mid-drag.

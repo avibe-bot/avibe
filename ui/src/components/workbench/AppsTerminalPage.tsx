@@ -89,6 +89,25 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean }> = ({ windowed = 
     };
   }, [getAuthSession, windowed]);
 
+  // The React-cleanup DELETE above frees the session on an in-app window close, but it
+  // doesn't run on a tab close / refresh. Dispose on `pagehide` too, with `keepalive` so
+  // the request survives the unload — otherwise the windowed (per-tab id) session can't be
+  // reattached or deleted on the next load and lingers until the backend idle reaper.
+  useEffect(() => {
+    if (!windowed) return;
+    const dispose = () => {
+      const sid = resolvedSessionIdRef.current;
+      if (!sid) return;
+      void apiFetch(`/api/terminal/${encodeURIComponent(sid)}`, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        keepalive: true,
+      }).catch(() => undefined);
+    };
+    window.addEventListener('pagehide', dispose);
+    return () => window.removeEventListener('pagehide', dispose);
+  }, [windowed]);
+
   const loading = <div className="grid h-full w-full place-items-center text-[12px] text-muted">{t('common.loading')}</div>;
   const content =
     sessionId == null ? (
