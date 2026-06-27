@@ -600,6 +600,14 @@
   "apps": {
     "title": "Apps",
     "soon": "Soon",
+    "editor": {
+      "label": "Editor",
+      "desc": "A fast code editor for files on this machine."
+    },
+    "window": {
+      "minimize": "Minimize",
+      "maximize": "Maximize"
+    },
     "fileBrowser": {
       "label": "File Browser",
       "desc": "Browse, view, and edit files on this machine.",

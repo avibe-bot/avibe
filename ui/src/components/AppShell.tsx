@@ -13,6 +13,8 @@ import { ThemeToggle } from './ThemeToggle';
 import { VersionBadge } from './VersionBadge';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { AppsLauncher } from './AppsLauncher';
+import { WindowManagerProvider } from '../context/WindowManagerContext';
+import { WindowLayer } from './apps/WindowLayer';
 import { NewSessionSheet } from './workbench/NewSessionSheet';
 import { SearchPalette } from './workbench/search/SearchPalette';
 import { Button } from './ui/button';
@@ -370,6 +372,7 @@ export const AppShell: React.FC = () => {
     // fought iOS's own scroll-into-view and threw the input off-screen. iOS instead
     // pans the locked page to lift the focused composer above the keyboard.
     // Desktop: normal document flow.
+    <WindowManagerProvider>
     <div className="flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground md:block md:h-auto md:min-h-screen md:overflow-visible">
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-[240px] flex-col border-r border-border bg-surface md:flex">
         <div className="flex h-full flex-col justify-between gap-6 px-4 py-5">
@@ -554,6 +557,11 @@ export const AppShell: React.FC = () => {
           both Workbench and Control Panel; the sidebar field is the workbench
           entry point. */}
       <SearchPalette open={searchOpen} onClose={() => setSearchOpen(false)} />
+
+      {/* App windows float over the workbench main area (desktop). The Dock (P2)
+          and the AppsLauncher bridge open windows via the WindowManager. */}
+      <WindowLayer />
     </div>
+    </WindowManagerProvider>
   );
 };

@@ -1,29 +1,30 @@
 import { useEffect, useRef, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
-import { ChevronUp, FolderTree, LayoutGrid, TerminalSquare } from 'lucide-react';
+import { ChevronUp, CodeXml, FolderTree, LayoutGrid, TerminalSquare } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import type { LucideIcon } from 'lucide-react';
 
-// The "Apps" layer launcher — a Start-menu-style list that opens on hover (and
-// on click, for touch/keyboard) from the sidebar's bottom-left. File Browser and
-// Terminal are the first two apps; Show Pages will become pinnable here later.
-// Mirrors the InboxHoverPopover open/close timer dance so the menu survives the
-// cursor crossing the gap between the trigger and the floating panel.
-type AppItem = { to: string; labelKey: string; descKey: string; icon: LucideIcon; soon?: boolean };
+import { useWindowManager } from '../context/WindowManagerContext';
+import type { AppId } from '../apps/registry';
+
+// The "Apps" launcher in the sidebar's bottom-left. Opens on hover (and click,
+// for touch/keyboard) and now LAUNCHES WINDOWS via the WindowManager rather than
+// navigating to a full page. This is the P1 bridge — P2 replaces it with the full
+// Dock (running indicators + minimized-window thumbnails). Open/close timer dance
+// mirrors InboxHoverPopover so the menu survives the trigger→panel cursor gap.
+type AppItem = { appId: AppId; labelKey: string; descKey: string; icon: LucideIcon };
 
 const APPS: AppItem[] = [
-  { to: '/apps/files', labelKey: 'apps.fileBrowser.label', descKey: 'apps.fileBrowser.desc', icon: FolderTree },
-  { to: '/apps/terminal', labelKey: 'apps.terminal.label', descKey: 'apps.terminal.desc', icon: TerminalSquare },
+  { appId: 'files', labelKey: 'apps.fileBrowser.label', descKey: 'apps.fileBrowser.desc', icon: FolderTree },
+  { appId: 'terminal', labelKey: 'apps.terminal.label', descKey: 'apps.terminal.desc', icon: TerminalSquare },
+  { appId: 'editor', labelKey: 'apps.editor.label', descKey: 'apps.editor.desc', icon: CodeXml },
 ];
 
 export const AppsLauncher: React.FC = () => {
   const { t } = useTranslation();
-  const navigate = useNavigate();
-  const location = useLocation();
+  const { openApp } = useWindowManager();
   const [open, setOpen] = useState(false);
   const closeTimer = useRef<number | null>(null);
-  const active = location.pathname.startsWith('/apps');
 
   const openMenu = () => {
     if (closeTimer.current !== null) {
@@ -45,14 +46,10 @@ export const AppsLauncher: React.FC = () => {
     },
     [],
   );
-  // Dismiss when navigation lands on a new route (tapping an app navigates).
-  useEffect(() => {
-    setOpen(false);
-  }, [location.pathname]);
 
-  const go = (to: string) => {
+  const launch = (appId: AppId) => {
     setOpen(false);
-    navigate(to);
+    openApp(appId);
   };
 
   return (
@@ -64,12 +61,12 @@ export const AppsLauncher: React.FC = () => {
         aria-expanded={open}
         className={clsx(
           'group flex w-full items-center gap-2.5 rounded-lg border px-3 py-2.5 text-[13px] font-medium transition-colors',
-          active || open
-            ? 'border-mint/30 bg-mint/[0.08] text-foreground shadow-[0_0_16px_-4px_rgba(91,255,160,0.5)]'
+          open
+            ? 'border-cyan/40 bg-cyan-soft text-foreground shadow-[0_0_16px_-4px_rgba(63,224,229,0.5)]'
             : 'border-border-strong text-foreground hover:bg-foreground/[0.04]',
         )}
       >
-        <LayoutGrid className={clsx('size-4', active || open ? 'text-mint' : 'text-muted group-hover:text-foreground')} />
+        <LayoutGrid className={clsx('size-4', open ? 'text-cyan' : 'text-muted group-hover:text-foreground')} />
         <span className="flex-1 text-left">{t('apps.title')}</span>
         <ChevronUp className={clsx('size-3.5 shrink-0 text-muted transition-transform', !open && 'rotate-180')} />
       </button>
@@ -87,30 +84,19 @@ export const AppsLauncher: React.FC = () => {
           </div>
           {APPS.map((app) => {
             const Icon = app.icon;
-            const isActive = location.pathname.startsWith(app.to);
             return (
               <button
-                key={app.to}
+                key={app.appId}
                 type="button"
                 role="menuitem"
-                onClick={() => go(app.to)}
-                className={clsx(
-                  'flex items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition',
-                  isActive ? 'bg-mint/[0.08]' : 'hover:bg-foreground/[0.04]',
-                )}
+                onClick={() => launch(app.appId)}
+                className="flex items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition hover:bg-foreground/[0.04]"
               >
                 <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-lg border border-border bg-foreground/[0.03]">
                   <Icon className="size-4 text-mint" />
                 </span>
                 <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span className="flex items-center gap-1.5 text-[12.5px] font-semibold text-foreground">
-                    {t(app.labelKey)}
-                    {app.soon && (
-                      <span className="rounded-full border border-border bg-foreground/[0.04] px-1.5 py-0.5 font-mono text-[9px] font-medium text-muted">
-                        {t('apps.soon')}
-                      </span>
-                    )}
-                  </span>
+                  <span className="text-[12.5px] font-semibold text-foreground">{t(app.labelKey)}</span>
                   <span className="line-clamp-2 text-[11px] leading-relaxed text-muted">{t(app.descKey)}</span>
                 </span>
               </button>
