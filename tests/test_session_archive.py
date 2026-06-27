@@ -3,8 +3,10 @@ row becomes inert (never re-bound by inbound routing or task resolution)."""
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import select
@@ -188,6 +190,33 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
         assert request_statuses[pending_uncovered_req["id"]] == "expired"
         assert request_statuses[sign_req["id"]] == "expired"
         assert request_statuses[other_req["id"]] == "pending"
+
+
+def test_archive_release_vault_scopes_runs_in_threadpool(monkeypatch) -> None:
+    from vibe import api, ui_server
+
+    calls = []
+
+    async def fake_to_thread(func, *args, **kwargs):
+        calls.append((func, args, kwargs))
+        return func(*args, **kwargs)
+
+    release = Mock(side_effect=api.AvaultError("agent release failed"))
+    monkeypatch.setattr(ui_server.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(api, "release_vault_agent_scopes", release)
+
+    asyncio.run(
+        ui_server._archive_release_vault_scopes(
+            "ses_archive",
+            [{"scope_type": "secret", "scope_ref": "ARCHIVE_KEY"}],
+        )
+    )
+
+    assert calls
+    release.assert_called_once_with(
+        [{"scope_type": "secret", "scope_ref": "ARCHIVE_KEY"}],
+        reason="archive_session:ses_archive",
+    )
 
 
 def test_archived_session_not_reused_for_anchor(monkeypatch, tmp_path: Path) -> None:

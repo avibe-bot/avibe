@@ -19,7 +19,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any
 
 from sqlalchemy import or_, select
 from sqlalchemy.engine import Connection
@@ -1486,7 +1486,6 @@ def create_grant(
     created_by_request_id: str | None = None,
     inherit_request_session: bool = True,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
-    on_agent_grant: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     if scope_type not in GRANT_SCOPE_TYPES:
         raise InvalidGrantError(f"invalid grant scope_type: {scope_type!r}")
@@ -1562,17 +1561,6 @@ def create_grant(
         session_id=session_id,
         decided_at=decided_at,
     )
-    if on_agent_grant is not None:
-        on_agent_grant(
-            {
-                "grant_id": grant_id,
-                "scope_type": scope_type,
-                "scope_ref": scope_ref,
-                "ttl_seconds": ttl,
-                "members": members,
-                "session_id": session_id,
-            }
-        )
     cache.put(grant_id, members, expires_at=expires_at)
     return _grant_row_payload(dict(row), cache=cache)
 
@@ -1715,6 +1703,9 @@ def find_active_grant_for_secrets(
         member_set = {str(name) for name in members if isinstance(name, str) and name}
         if not requested.issubset(member_set):
             continue
+        payload = _grant_row_payload(row, cache=cache)
+        if not payload.get("delivery_ready"):
+            continue
         candidates.append((len(member_set), str(row.get("created_at") or ""), str(row.get("id") or ""), row))
     if not candidates:
         return None
@@ -1753,7 +1744,7 @@ def resolve_secret_access(
         or _payload_session_id(requester)
     )
     grant = find_active_grant_for_secret(conn, name, session_id=effective_session_id, cache=cache)
-    if grant is not None:
+    if grant is not None and grant.get("delivery_ready"):
         return {
             "status": "agent_delivery_ready",
             "secret": _meta_payload(row),

@@ -342,6 +342,8 @@ def test_create_and_revoke_grant_api(monkeypatch):
                     "name": "GRANT_KEY",
                     "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
                     "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                    "dek": "raw-dek-must-not-cross-python-agent-boundary",
+                    "value": "plaintext-must-not-cross-python-agent-boundary",
                 }
             ],
         }
@@ -349,7 +351,13 @@ def test_create_and_revoke_grant_api(monkeypatch):
     assert created["grant"]["runtime_member_count"] == 1
     assert created["grant"]["delivery_ready"] is True
     assert agent_grant.call_args.kwargs["ttl_secs"] == 300
-    assert agent_grant.call_args.kwargs["deks"][0]["name"] == "GRANT_KEY"
+    assert agent_grant.call_args.kwargs["deks"] == [
+        {
+            "name": "GRANT_KEY",
+            "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+        }
+    ]
     grants = api.get_vault_grants()["grants"]
     assert grants[0]["id"] == created["grant"]["id"]
     revoked = api.revoke_vault_grant(created["grant"]["id"])
@@ -568,7 +576,49 @@ def test_create_grant_api_requires_resident_agent_deks(monkeypatch):
     assert status == "pending"
 
 
-def test_create_grant_api_keeps_request_pending_when_agent_grant_fails(monkeypatch):
+def test_create_grant_api_relay_runs_after_grant_commit(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
+    with api._vault_engine().begin() as conn:
+        req = vault_service.create_access_request(
+            conn,
+            "GRANT_KEY",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+
+    def relay(**kwargs):
+        with api._vault_engine().connect() as conn:
+            status = conn.execute(select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == req["id"])).scalar_one()
+            grants = vault_service.list_grants(conn, status="active")
+        assert status == "approved"
+        assert len(grants) == 1
+        assert grants[0]["member_snapshot"] == ["GRANT_KEY"]
+        assert grants[0]["delivery_ready"] is False
+        return {"granted": 1, "ttl_secs": kwargs["ttl_secs"]}
+
+    monkeypatch.setattr(api, "avault_agent_grant", relay)
+
+    created = api.create_vault_grant(
+        {
+            "scope_type": "secret",
+            "scope_ref": "GRANT_KEY",
+            "session_id": "ses_1",
+            "request_id": req["id"],
+            "deks": [
+                {
+                    "name": "GRANT_KEY",
+                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                }
+            ],
+        }
+    )
+
+    assert created["grant"]["status"] == "active"
+
+
+def test_create_grant_api_expires_grant_when_agent_grant_fails(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     monkeypatch.setattr(api, "avault_agent_grant", Mock(side_effect=api.AvaultError("grant is missing")))
     api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
@@ -601,8 +651,10 @@ def test_create_grant_api_keeps_request_pending_when_agent_grant_fails(monkeypat
     with api._vault_engine().connect() as conn:
         status = conn.execute(select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == req["id"])).scalar_one()
         grants = vault_service.list_grants(conn, status=None)
-    assert status == "pending"
-    assert grants == []
+    assert status == "approved"
+    assert len(grants) == 1
+    assert grants[0]["status"] == "expired"
+    assert grants[0]["delivery_ready"] is False
 
 
 def test_create_grant_api_preserves_unbound_session_choice(monkeypatch):

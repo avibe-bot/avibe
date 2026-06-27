@@ -12,6 +12,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+from datetime import datetime, timezone
 from http.client import HTTPSConnection
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -1482,6 +1483,26 @@ def get_vault_grants(*, status: Optional[str] = "active", session_id: Optional[s
     return {"ok": True, "grants": grants}
 
 
+def _parse_iso_utc(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _grant_ttl_seconds(grant: dict) -> int:
+    created_at = _parse_iso_utc(grant.get("created_at"))
+    expires_at = _parse_iso_utc(grant.get("expires_at"))
+    if created_at is None or expires_at is None:
+        return 1
+    return max(1, int((expires_at - created_at).total_seconds()))
+
+
 def create_vault_grant(payload: dict) -> dict:
     from storage import vault_service
 
@@ -1509,11 +1530,16 @@ def create_vault_grant(payload: dict) -> dict:
         ]
     if not isinstance(deks, list) or not deks:
         raise VaultApiError("resident agent grant requires sealed DEKs", code="invalid_grant")
+    agent_deks: list[dict[str, Any]] = []
     for item in deks:
         if not isinstance(item, dict):
             raise VaultApiError("resident agent grant DEKs must be objects", code="invalid_grant")
-        if not item.get("name") or not isinstance(item.get("dek_blindbox"), dict) or not isinstance(item.get("approval"), dict):
+        name = item.get("name")
+        dek_blindbox = item.get("dek_blindbox")
+        approval = item.get("approval")
+        if not isinstance(name, str) or not name or not isinstance(dek_blindbox, dict) or not isinstance(approval, dict):
             raise VaultApiError("resident agent grant DEKs require name, dek_blindbox, and approval", code="invalid_grant")
+        agent_deks.append({"name": name, "dek_blindbox": dek_blindbox, "approval": approval})
     request_id = payload.get("request_id") or payload.get("created_by_request_id")
     if not request_id:
         raise VaultApiError("request_id is required to create a grant", code="missing_request_id")
@@ -1524,22 +1550,6 @@ def create_vault_grant(payload: dict) -> dict:
     engine = _vault_engine()
     try:
         with engine.begin() as conn:
-            def _agent_grant(grant_meta: dict) -> None:
-                expected_names = set(grant_meta.get("members") or [])
-                provided_names = {str(item.get("name")) for item in deks if isinstance(item, dict)}
-                if provided_names != expected_names:
-                    raise vault_service.InvalidGrantError("resident agent DEKs must match the approved grant members")
-                try:
-                    avault_agent_grant(
-                        scope_type=str(grant_meta["scope_type"]),
-                        scope_ref=str(grant_meta["scope_ref"]),
-                        ttl_secs=int(grant_meta["ttl_seconds"]),
-                        deks=deks,
-                        expected_pubkey=payload.get("agent_pubkey") if isinstance(payload.get("agent_pubkey"), dict) else None,
-                    )
-                except AvaultError as exc:
-                    raise VaultApiError(f"avault agent grant failed: {exc}", code="avault_failed") from exc
-
             grant = vault_service.create_grant(
                 conn,
                 scope_type=scope_type,
@@ -1548,8 +1558,8 @@ def create_vault_grant(payload: dict) -> dict:
                 ttl_seconds=ttl_seconds,
                 created_by_request_id=str(request_id),
                 inherit_request_session=inherit_request_session,
-                on_agent_grant=_agent_grant,
             )
+            vault_service.GRANT_RUNTIME_CACHE.drop(str(grant["id"]))
     except vault_service.NotGrantableError as exc:
         raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
     except vault_service.SecretNotFoundError as exc:
@@ -1560,6 +1570,37 @@ def create_vault_grant(payload: dict) -> dict:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.InvalidGrantError as exc:
         raise VaultApiError(str(exc), code="invalid_grant") from exc
+    expected_names = set(grant.get("member_snapshot") or [])
+    provided_names = {item["name"] for item in agent_deks}
+    try:
+        if provided_names != expected_names:
+            raise vault_service.InvalidGrantError("resident agent DEKs must match the approved grant members")
+        avault_agent_grant(
+            scope_type=str(grant["scope_type"]),
+            scope_ref=str(grant["scope_ref"]),
+            ttl_secs=_grant_ttl_seconds(grant),
+            deks=agent_deks,
+            expected_pubkey=payload.get("agent_pubkey") if isinstance(payload.get("agent_pubkey"), dict) else None,
+        )
+        vault_service.GRANT_RUNTIME_CACHE.put(
+            str(grant["id"]),
+            list(grant.get("member_snapshot") or []),
+            expires_at=grant.get("expires_at"),
+        )
+        grant = {
+            **grant,
+            "runtime_member_count": len(vault_service.GRANT_RUNTIME_CACHE.covered_names(str(grant["id"]))),
+            "delivery_ready": True,
+            "delivery_status": "agent_cache_ready",
+        }
+    except vault_service.InvalidGrantError as exc:
+        with engine.begin() as conn:
+            vault_service.expire_grant(conn, str(grant["id"]), reason="grant-expired-agent-relay-failed")
+        raise VaultApiError(str(exc), code="invalid_grant") from exc
+    except AvaultError as exc:
+        with engine.begin() as conn:
+            vault_service.expire_grant(conn, str(grant["id"]), reason="grant-expired-agent-relay-failed")
+        raise VaultApiError(f"avault agent grant failed: {exc}", code="avault_failed") from exc
     return {"ok": True, "grant": grant}
 
 
