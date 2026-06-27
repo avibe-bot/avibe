@@ -31,6 +31,9 @@ interface ComboboxProps {
   emptyText?: string
   allowCustomValue?: boolean
   className?: string
+  commitOnClose?: boolean
+  createLabel?: (value: string) => string
+  createHeading?: string
 }
 
 export function Combobox({
@@ -42,6 +45,9 @@ export function Combobox({
   emptyText = "No results found.",
   allowCustomValue = true,
   className,
+  commitOnClose = false,
+  createLabel,
+  createHeading,
 }: ComboboxProps) {
   const [open, setOpen] = React.useState(false)
   const [inputValue, setInputValue] = React.useState("")
@@ -69,9 +75,9 @@ export function Combobox({
     <Popover
       open={open}
       onOpenChange={(next) => {
-        if (!next) {
-          // Commit a typed custom value on close so it isn't lost if the user
-          // tabs/clicks away without picking the "Use ..." item.
+        // Only opt-in consumers (commitOnClose) commit a typed custom value on
+        // close; default keeps every other combobox's behavior unchanged.
+        if (!next && commitOnClose) {
           if (allowCustomValue && inputValue && inputValue !== value) onValueChange(inputValue)
           setInputValue("")
         }
@@ -122,7 +128,7 @@ export function Combobox({
                       value === inputValue ? "opacity-100" : "opacity-0"
                     )}
                   />
-                  Use "{inputValue}"
+                  {createLabel ? createLabel(inputValue) : `Use "${inputValue}"`}
                 </CommandItem>
               </CommandGroup>
             )}
@@ -151,7 +157,7 @@ export function Combobox({
             )}
             {/* Show custom value option if input doesn't match existing options */}
             {allowCustomValue && inputValue && !inputMatchesOption && filteredOptions.length > 0 && (
-              <CommandGroup heading="Custom">
+              <CommandGroup heading={createHeading ?? "Custom"}>
                 <CommandItem
                   value={`custom-${inputValue}`}
                   onSelect={() => {
@@ -166,7 +172,7 @@ export function Combobox({
                       value === inputValue ? "opacity-100" : "opacity-0"
                     )}
                   />
-                  Use "{inputValue}"
+                  {createLabel ? createLabel(inputValue) : `Use "${inputValue}"`}
                 </CommandItem>
               </CommandGroup>
             )}

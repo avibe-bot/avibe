@@ -63,7 +63,7 @@ const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => voi
             <Badge variant="secondary">{t('vaults.standard')}</Badge>
           )}
           {isKeypair ? (
-            <Badge variant="outline">
+            <Badge variant="outline" className="border-violet/40 bg-violet-soft text-violet">
               <Wallet className="size-3" />
               {t('vaults.signing')}
             </Badge>

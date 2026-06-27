@@ -2088,6 +2088,8 @@
       "group": "分组",
       "groupPlaceholder": "选择或新建分组",
       "groupSearch": "搜索或输入新分组",
+      "groupCreate": "使用「{{name}}」",
+      "groupCreateHeading": "新建分组",
       "description": "描述",
       "allowHosts": "允许的域名（用于 vault fetch）",
       "allowHostsHelp": "逗号分隔。通过认证代理使用该密钥时必填；'.example.com' 匹配子域。",

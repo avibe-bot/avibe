@@ -207,6 +207,9 @@ export const VaultSecretForm: React.FC<{
           value={group}
           onValueChange={setGroup}
           allowCustomValue
+          commitOnClose
+          createLabel={(v) => t('vaults.dialog.groupCreate', { name: v })}
+          createHeading={t('vaults.dialog.groupCreateHeading')}
           placeholder={t('vaults.dialog.groupPlaceholder')}
           searchPlaceholder={t('vaults.dialog.groupSearch')}
         />
