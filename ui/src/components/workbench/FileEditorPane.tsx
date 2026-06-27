@@ -118,6 +118,10 @@ export const FileEditorPane: React.FC<{
 
   const dirty = !readOnly && text !== null && text !== original;
   const language = monacoLanguage(filename);
+  // Monaco model URI: keep the file's extension so its TS worker picks JSX/TSX for
+  // .tsx/.jsx (otherwise valid React files show bogus errors), and prefix the window id
+  // so two windows on the same file don't share — and fight over — one model.
+  const monacoPath = windowId ? `${windowId}/${path.replace(/^\/+/, '')}` : path;
 
   // Veto closing the owning window while there are unsaved edits (the close unmounts
   // this pane and the buffer only lives in React state). No-op for the full-page route.
@@ -188,6 +192,7 @@ export const FileEditorPane: React.FC<{
             <MonacoEditor
               value={text}
               language={language}
+              path={monacoPath}
               readOnly={readOnly}
               dark={resolvedTheme === 'dark'}
               onChange={(value) => setText(value)}

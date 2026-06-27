@@ -3,13 +3,13 @@ import { useEffect, useRef, useState } from 'react';
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { AppWindow } from './AppWindow';
 
-// Inside a text-entry surface (xterm's hidden textarea, Monaco's textarea, any
-// input / contenteditable), Ctrl is a control character — ^W deletes a word, ^M is
-// Enter — so the window chord must never hijack it there. Only the Mac Meta chord
-// (⌘W/⌘M) acts as a window command on a text surface.
-function onTextSurface(el: Element | null): boolean {
-  if (!(el instanceof HTMLElement)) return false;
-  return el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.isContentEditable;
+// In the TERMINAL, Ctrl is a control-character stream — ^W deletes a word, ^M is
+// carriage return — so the window chord must never hijack Ctrl there (xterm focuses a
+// hidden textarea inside its `.xterm` root). The editor is the opposite: Monaco has no
+// useful Ctrl+W, so we WANT Ctrl+W to close its window (guarded for unsaved edits)
+// rather than be swallowed and bypass the prompt — hence the exemption is terminal-only.
+function inTerminalSurface(el: Element | null): boolean {
+  return el instanceof HTMLElement && !!el.closest('.xterm');
 }
 
 // The portal layer that hosts app windows. Covers the workbench main area (right
@@ -38,15 +38,15 @@ export const WindowLayer: React.FC = () => {
   // window, which lingers after clicking back into the workbench (empty layer space
   // is pointer-events-none), so gating on it would hijack ⌘W while the user types in
   // the chat composer. Requiring real focus inside the layer lets the chord fall
-  // through to the browser/page everywhere else; and on a text surface only Meta
-  // counts, so terminal/editor Ctrl chords reach the app (see onTextSurface).
+  // through to the browser/page everywhere else; and inside the terminal only Meta
+  // counts, so its Ctrl control-chars (^W/^M) reach the shell (see inTerminalSurface).
   useEffect(() => {
     if (!focusedId) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
       const active = document.activeElement;
       if (!ref.current?.contains(active)) return;
-      if (e.ctrlKey && !e.metaKey && onTextSurface(active)) return;
+      if (e.ctrlKey && !e.metaKey && inTerminalSurface(active)) return;
       const key = e.key.toLowerCase();
       if (key === 'w') {
         e.preventDefault();

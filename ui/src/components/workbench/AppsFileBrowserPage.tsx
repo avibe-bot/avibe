@@ -305,10 +305,13 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
         </div>
       </div>
 
-      {/* Mobile: content opens below the list when a file is selected */}
+      {/* Mobile: content opens below the list when a file is selected. This pane is
+          md:hidden but still mounted on desktop — and windows only ever render on
+          desktop — so it must NOT take `windowId`, or its (clean) editor's close guard
+          would clobber the visible desktop editor's (dirty) guard for the same window. */}
       {selected && (
         <div className="flex min-h-[50vh] flex-col overflow-hidden rounded-xl border border-border bg-surface md:hidden">
-          <ContentPane selected={selected} windowed={windowed} windowId={windowId} />
+          <ContentPane selected={selected} windowed={windowed} />
         </div>
       )}
     </div>

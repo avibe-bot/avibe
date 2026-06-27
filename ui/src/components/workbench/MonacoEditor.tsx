@@ -88,13 +88,19 @@ export interface MonacoEditorProps {
   value: string;
   /** Monaco language id (e.g. `typescript`); falls back to plaintext when omitted. */
   language?: string;
+  /**
+   * Model path/URI for the file. Monaco's TS/JS worker keys JSX/TSX script kind off
+   * the model URI's extension, so `.tsx`/`.jsx` files need a path here or they parse as
+   * plain TS/JS and show bogus syntax errors. Should be unique per open editor.
+   */
+  path?: string;
   readOnly?: boolean;
   /** Resolved app theme — drives the dark VS Code theme vs the light one. */
   dark?: boolean;
   onChange?: (value: string) => void;
 }
 
-export default function MonacoEditor({ value, language, readOnly, dark = true, onChange }: MonacoEditorProps) {
+export default function MonacoEditor({ value, language, path, readOnly, dark = true, onChange }: MonacoEditorProps) {
   const { t } = useTranslation();
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
 
@@ -143,6 +149,7 @@ export default function MonacoEditor({ value, language, readOnly, dark = true, o
       <div className="min-h-0 flex-1">
         <Editor
           theme={dark ? 'avibe-dark' : 'light'}
+          path={path}
           language={language}
           value={value}
           onChange={handleChange}
