@@ -1803,6 +1803,12 @@ const Transcript: React.FC<TranscriptProps> = ({
   const [showJump, setShowJump] = useState(false);
   const loadOlderRef = useRef(onLoadOlder);
   const reloadLatestRef = useRef(onReloadLatest);
+  // Load ONE older page per scroll-into-the-top-zone. Disarmed on trigger and
+  // re-armed only after scrolling back down into loaded content — otherwise the
+  // top threshold stays satisfied (iOS momentum fighting the post-load anchor
+  // restore, or the restore not yet applied) and older pages cascade in until the
+  // very first message.
+  const canLoadOlderRef = useRef(true);
 
   useEffect(() => {
     loadOlderRef.current = onLoadOlder;
@@ -1886,7 +1892,12 @@ const Transcript: React.FC<TranscriptProps> = ({
     // is free to grow). Re-capturing here keeps it current as the user scrolls.
     if (pinned) anchorRef.current = null;
     else captureAnchor();
-    if (hasOlder && !loadingOlder && el.scrollTop < 120) {
+    // Re-arm once clearly back inside loaded content (hysteresis vs the 120 trigger),
+    // so a normal scroll-up loads one page, holds position, and waits for the next
+    // deliberate scroll to the top instead of auto-cascading through all history.
+    if (el.scrollTop > 300) canLoadOlderRef.current = true;
+    if (hasOlder && !loadingOlder && canLoadOlderRef.current && el.scrollTop < 120) {
+      canLoadOlderRef.current = false;
       loadOlderRef.current();
     }
   };
