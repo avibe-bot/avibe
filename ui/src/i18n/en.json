@@ -2040,6 +2040,8 @@
       "close": "Close",
       "previous": "Previous",
       "next": "Next",
+      "zoomIn": "Zoom in",
+      "zoomOut": "Zoom out",
       "loading": "Loading…",
       "error": "Couldn't load this file.",
       "tooLarge": "File too large to preview — download it instead.",
