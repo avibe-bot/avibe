@@ -554,6 +554,8 @@ vault_grants = Table(
     Column("created_at", String, nullable=False),
     Column("expires_at", String, nullable=False),
     Column("revoked_at", String, nullable=True),
+    Column("agent_ready", Integer, nullable=False, server_default=text("0")),
+    Column("agent_ready_at", String, nullable=True),
     Index("ix_vault_grants_status_expires", "status", "expires_at"),
 )
 

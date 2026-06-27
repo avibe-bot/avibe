@@ -322,6 +322,34 @@ def test_create_grant_freezes_scope_members_and_keeps_key_material_out_of_python
     assert json.loads(row["member_snapshot"]) == ["A_KEY", "B_KEY"]
 
 
+def test_find_active_grant_for_secrets_chooses_covering_scope(vault):
+    _create(vault, name="A_KEY", protection="protected", group="crypto")
+    _create(vault, name="B_KEY", protection="protected", group="crypto")
+    with vault.begin() as conn:
+        req_a = _access_request(conn, "A_KEY", session_id="ses_1")
+        secret_grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="A_KEY",
+            session_id="ses_1",
+            created_by_request_id=req_a["id"],
+        )
+        req_group = _access_request(conn, "A_KEY", session_id="ses_1")
+        group_grant = vs.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_1",
+            created_by_request_id=req_group["id"],
+        )
+
+        selected = vs.find_active_grant_for_secrets(conn, ["A_KEY", "B_KEY"], session_id="ses_1")
+
+    assert selected is not None
+    assert selected["id"] == group_grant["id"]
+    assert selected["id"] != secret_grant["id"]
+
+
 def test_group_grant_approves_sibling_requests_in_same_session(vault):
     _create(vault, name="A_KEY", protection="protected", group="crypto")
     _create(vault, name="B_KEY", protection="protected", group="crypto")
@@ -442,7 +470,7 @@ def test_reusing_approval_request_does_not_create_second_grant(vault):
     assert cache.get(first["id"], "A_KEY") is None
 
 
-def test_find_active_grant_uses_metadata_even_without_python_key_cache(vault):
+def test_find_active_grant_uses_persisted_readiness_across_process_cache(vault):
     _create(vault, name="A_KEY", protection="protected")
     cache = vs.VaultGrantRuntimeCache()
     with vault.begin() as conn:
@@ -455,14 +483,247 @@ def test_find_active_grant_uses_metadata_even_without_python_key_cache(vault):
             created_by_request_id=req["id"],
             cache=cache,
         )
-        cache.clear()
-        active = vs.find_active_grant_for_secret(conn, "A_KEY", session_id="ses_1", cache=cache)
+        process_cache = vs.VaultGrantRuntimeCache()
+        active = vs.find_active_grant_for_secret(conn, "A_KEY", session_id="ses_1", cache=process_cache)
+        listed = vs.list_grants(conn, cache=process_cache)
         assert active is not None
         assert active["id"] == grant["id"]
-        assert active["delivery_status"] == "resident_agent_pending"
+        assert listed[0]["id"] == grant["id"]
+        assert listed[0]["delivery_ready"] is True
+        assert listed[0]["delivery_status"] == "agent_cache_ready"
+        assert process_cache.has(grant["id"], "A_KEY")
     with vault.connect() as conn:
         status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
     assert status == "active"
+
+
+def test_unrelayed_grant_is_not_selected_for_delivery(vault):
+    _create(vault, name="A_KEY", protection="protected")
+    cache = vs.VaultGrantRuntimeCache()
+    with vault.begin() as conn:
+        req = _access_request(conn, "A_KEY", session_id="ses_1")
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="A_KEY",
+            session_id="ses_1",
+            created_by_request_id=req["id"],
+            cache_ready=False,
+            cache=cache,
+        )
+        active = vs.find_active_grant_for_secret(conn, "A_KEY", session_id="ses_1", cache=cache)
+        resolved = vs.resolve_secret_access(conn, "A_KEY", session_id="ses_1", create_request=False, cache=cache)
+        ready = vs.mark_grant_agent_ready(conn, grant["id"], cache=cache)
+        process_cache = vs.VaultGrantRuntimeCache()
+        active_after_ready = vs.find_active_grant_for_secret(conn, "A_KEY", session_id="ses_1", cache=process_cache)
+
+    assert active is None
+    assert resolved["status"] == "approval_required"
+    assert ready["delivery_ready"] is True
+    assert active_after_ready is not None
+    assert active_after_ready["id"] == grant["id"]
+    assert process_cache.has(grant["id"], "A_KEY")
+
+
+def test_mark_grant_agent_ready_refreshes_expiry_to_relay_ttl(vault):
+    _create(vault, name="A_KEY", protection="protected")
+    cache = vs.VaultGrantRuntimeCache()
+    with vault.begin() as conn:
+        req = _access_request(conn, "A_KEY", session_id="ses_1")
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="A_KEY",
+            session_id="ses_1",
+            ttl_seconds=300,
+            created_by_request_id=req["id"],
+            cache_ready=False,
+            cache=cache,
+        )
+        before = datetime.now(timezone.utc)
+        ready = vs.mark_grant_agent_ready(conn, grant["id"], ttl_seconds=300, cache=cache)
+        after = datetime.now(timezone.utc)
+
+    expires_at = datetime.fromisoformat(ready["expires_at"])
+    assert before + timedelta(seconds=299) <= expires_at <= after + timedelta(seconds=301)
+    assert ready["delivery_ready"] is True
+
+
+def test_resolve_secret_prefers_cache_ready_grant_over_stale_scope(vault):
+    _create(vault, name="A_KEY", protection="protected", group="crypto")
+    _create(vault, name="B_KEY", protection="protected", group="crypto")
+    cache = vs.VaultGrantRuntimeCache()
+    with vault.begin() as conn:
+        req_group = _access_request(conn, "A_KEY", session_id="ses_1")
+        stale_group = vs.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_1",
+            created_by_request_id=req_group["id"],
+            cache_ready=False,
+            cache=cache,
+        )
+        req_secret = _access_request(conn, "A_KEY", session_id="ses_1")
+        ready_secret = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="A_KEY",
+            session_id="ses_1",
+            created_by_request_id=req_secret["id"],
+            cache=cache,
+        )
+
+        active = vs.find_active_grant_for_secret(conn, "A_KEY", session_id="ses_1", cache=cache)
+        resolved = vs.resolve_secret_access(conn, "A_KEY", session_id="ses_1", create_request=False, cache=cache)
+
+    assert active is not None
+    assert active["id"] == ready_secret["id"]
+    assert active["id"] != stale_group["id"]
+    assert resolved["status"] == "agent_delivery_ready"
+    assert resolved["grant"]["id"] == ready_secret["id"]
+
+
+def test_agent_release_scope_requires_remaining_grants_cover_removed_members(vault):
+    _create(vault, name="A_KEY", protection="protected", group="crypto")
+    cache = vs.VaultGrantRuntimeCache()
+    with vault.begin() as conn:
+        req_narrow = _access_request(conn, "A_KEY", session_id="ses_narrow")
+        narrow_grant = vs.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_narrow",
+            created_by_request_id=req_narrow["id"],
+            cache=cache,
+        )
+        vs.create_secret(conn, name="B_KEY", protection="protected", group="crypto", sealed=_sealed("b"))
+        req_group = _access_request(conn, "A_KEY", session_id="ses_group")
+        group_grant = vs.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_group",
+            created_by_request_id=req_group["id"],
+            cache=cache,
+        )
+        rows = [dict(conn.execute(select(vault_grants).where(vault_grants.c.id == group_grant["id"])).mappings().one())]
+        vs.revoke_grant(conn, group_grant["id"], cache=cache)
+        release_scopes = vs.agent_release_scopes_after_rows(conn, rows, cache=cache)
+
+    assert release_scopes == [{"scope_type": "group", "scope_ref": "crypto"}]
+    assert not cache.has(group_grant["id"], "A_KEY")
+    assert not cache.has(narrow_grant["id"], "A_KEY")
+    with vault.connect() as conn:
+        listed = {grant["id"]: grant for grant in vs.list_grants(conn, status=None, cache=vs.VaultGrantRuntimeCache())}
+    assert listed[narrow_grant["id"]]["delivery_ready"] is False
+
+
+def test_agent_release_scope_skips_when_remaining_members_cover_removed_scope(vault):
+    _create(vault, name="A_KEY", protection="protected", group="crypto")
+    _create(vault, name="B_KEY", protection="protected", group="crypto")
+    cache = vs.VaultGrantRuntimeCache()
+    with vault.begin() as conn:
+        req_1 = _access_request(conn, "A_KEY", session_id="ses_1")
+        grant_1 = vs.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_1",
+            created_by_request_id=req_1["id"],
+            cache=cache,
+        )
+        req_2 = _access_request(conn, "A_KEY", session_id="ses_2")
+        grant_2 = vs.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_2",
+            created_by_request_id=req_2["id"],
+            cache=cache,
+        )
+        rows = [dict(conn.execute(select(vault_grants).where(vault_grants.c.id == grant_1["id"])).mappings().one())]
+        vs.revoke_grant(conn, grant_1["id"], cache=cache)
+        release_scopes = vs.agent_release_scopes_after_rows(conn, rows, cache=cache)
+
+    assert release_scopes == []
+    assert not cache.has(grant_1["id"], "A_KEY")
+    assert cache.has(grant_2["id"], "A_KEY")
+
+
+def test_agent_release_scope_ignores_unready_remaining_grants(vault):
+    _create(vault, name="A_KEY", protection="protected", group="crypto")
+    cache = vs.VaultGrantRuntimeCache()
+    with vault.begin() as conn:
+        req_1 = _access_request(conn, "A_KEY", session_id="ses_1")
+        grant_1 = vs.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_1",
+            created_by_request_id=req_1["id"],
+            cache=cache,
+        )
+        req_2 = _access_request(conn, "A_KEY", session_id="ses_2")
+        grant_2 = vs.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_2",
+            created_by_request_id=req_2["id"],
+            cache_ready=False,
+            cache=cache,
+        )
+        rows = [dict(conn.execute(select(vault_grants).where(vault_grants.c.id == grant_1["id"])).mappings().one())]
+        vs.revoke_grant(conn, grant_1["id"], cache=cache)
+        release_scopes = vs.agent_release_scopes_after_rows(conn, rows, cache=cache)
+
+    assert release_scopes == [{"scope_type": "group", "scope_ref": "crypto"}]
+    assert not cache.has(grant_1["id"], "A_KEY")
+    assert not cache.has(grant_2["id"], "A_KEY")
+    with vault.connect() as conn:
+        listed = {grant["id"]: grant for grant in vs.list_grants(conn, status=None, cache=vs.VaultGrantRuntimeCache())}
+    assert listed[grant_2["id"]]["delivery_ready"] is False
+
+
+def test_agent_release_scope_ignores_expired_remaining_grants(vault):
+    _create(vault, name="A_KEY", protection="protected", group="crypto")
+    cache = vs.VaultGrantRuntimeCache()
+    with vault.begin() as conn:
+        req_1 = _access_request(conn, "A_KEY", session_id="ses_1")
+        grant_1 = vs.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_1",
+            created_by_request_id=req_1["id"],
+            cache=cache,
+        )
+        req_2 = _access_request(conn, "A_KEY", session_id="ses_2")
+        grant_2 = vs.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_2",
+            created_by_request_id=req_2["id"],
+            cache=cache,
+        )
+        conn.execute(
+            vault_grants.update()
+            .where(vault_grants.c.id == grant_2["id"])
+            .values(expires_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat())
+        )
+        rows = [dict(conn.execute(select(vault_grants).where(vault_grants.c.id == grant_1["id"])).mappings().one())]
+        vs.revoke_grant(conn, grant_1["id"], cache=cache)
+        release_scopes = vs.agent_release_scopes_after_rows(conn, rows, cache=cache)
+
+    assert release_scopes == [{"scope_type": "group", "scope_ref": "crypto"}]
+    assert not cache.has(grant_1["id"], "A_KEY")
+    assert not cache.has(grant_2["id"], "A_KEY")
+    with vault.connect() as conn:
+        listed = {grant["id"]: grant for grant in vs.list_grants(conn, status=None, cache=vs.VaultGrantRuntimeCache())}
+    assert listed[grant_2["id"]]["status"] == "expired"
+    assert listed[grant_2["id"]]["delivery_ready"] is False
 
 
 def test_grant_runtime_cache_drops_coverage_at_expiry_without_key_material():
@@ -523,7 +784,7 @@ def test_delete_protected_secret_expires_active_grants_before_recreate(vault):
     assert not cache.has(grant["id"], "A_KEY")
 
 
-def test_active_grant_list_keeps_metadata_when_runtime_cache_is_empty(vault):
+def test_unrelayed_active_grant_list_keeps_metadata_when_runtime_cache_is_empty(vault):
     _create(vault, name="A_KEY", protection="protected")
     cache = vs.VaultGrantRuntimeCache()
     with vault.begin() as conn:
@@ -534,6 +795,7 @@ def test_active_grant_list_keeps_metadata_when_runtime_cache_is_empty(vault):
             scope_ref="A_KEY",
             session_id="ses_1",
             created_by_request_id=req["id"],
+            cache_ready=False,
             cache=cache,
         )
         cache.clear()
@@ -541,7 +803,8 @@ def test_active_grant_list_keeps_metadata_when_runtime_cache_is_empty(vault):
         assert len(listed) == 1
         assert listed[0]["id"] == grant["id"]
         assert listed[0]["runtime_member_count"] == 0
-        assert listed[0]["delivery_status"] == "resident_agent_pending"
+        assert listed[0]["delivery_ready"] is False
+        assert listed[0]["delivery_status"] == "agent_cache_unverified"
     with vault.connect() as conn:
         status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
     assert status == "active"
@@ -599,7 +862,7 @@ def test_resolve_protected_without_grant_returns_approval_card(vault):
     assert "ct-group" not in persisted
 
 
-def test_resolve_protected_with_grant_reports_agent_delivery_pending(vault):
+def test_resolve_protected_with_grant_reports_agent_delivery_ready(vault):
     _create(vault, name="PROTECTED_KEY", protection="protected")
     cache = vs.VaultGrantRuntimeCache()
     with vault.begin() as conn:
@@ -614,11 +877,32 @@ def test_resolve_protected_with_grant_reports_agent_delivery_pending(vault):
         )
         result = vs.resolve_secret_access(conn, "PROTECTED_KEY", session_id="ses_1", create_request=False, cache=cache)
 
-    assert result["status"] == "agent_delivery_pending"
+    assert result["status"] == "agent_delivery_ready"
     assert result["request"] is None
     assert result["grant"]["id"] == grant["id"]
-    assert result["grant"]["delivery_ready"] is False
-    assert result["grant"]["delivery_status"] == "resident_agent_pending"
+    assert result["grant"]["delivery_ready"] is True
+    assert result["envelope"] == _sealed()
+
+
+def test_expire_grant_after_agent_cache_missing_reopens_approval(vault):
+    _create(vault, name="PROTECTED_KEY", protection="protected")
+    cache = vs.VaultGrantRuntimeCache()
+    with vault.begin() as conn:
+        req = _access_request(conn, "PROTECTED_KEY", session_id="ses_1")
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="PROTECTED_KEY",
+            session_id="ses_1",
+            created_by_request_id=req["id"],
+            cache=cache,
+        )
+        expired = vs.expire_grant(conn, grant["id"], cache=cache, reason="grant-expired-agent-cache-missing")
+        result = vs.resolve_secret_access(conn, "PROTECTED_KEY", session_id="ses_1", cache=cache)
+
+    assert expired["status"] == "expired"
+    assert result["status"] == "approval_required"
+    assert result["request"]["secret_name"] == "PROTECTED_KEY"
 
 
 def test_request_inbox_hydrates_unlock_material_without_persisting_it(vault):
@@ -693,7 +977,7 @@ def test_resolve_access_preserves_delivery_session_when_argument_is_missing(vaul
     assert card["session_id"] == "ses_delivery"
     assert json.loads(raw_delivery)["session_id"] == "ses_delivery"
     assert grant["session_id"] == "ses_delivery"
-    assert same_session["status"] == "agent_delivery_pending"
+    assert same_session["status"] == "agent_delivery_ready"
     assert other_session["status"] == "approval_required"
 
 
@@ -729,7 +1013,7 @@ def test_resolve_access_uses_requester_session_for_grant_lookup(vault):
         )
 
     assert grant["session_id"] == "ses_requester"
-    assert same_session["status"] == "agent_delivery_pending"
+    assert same_session["status"] == "agent_delivery_ready"
     assert same_session["grant"]["id"] == grant["id"]
     assert other_session["status"] == "approval_required"
 
@@ -795,7 +1079,30 @@ def test_grant_creation_does_not_require_python_dek_material(vault):
         grant = vs.create_grant(conn, scope_type="secret", scope_ref="A_KEY", created_by_request_id=req["id"])
 
     assert grant["member_snapshot"] == ["A_KEY"]
-    assert grant["delivery_status"] == "resident_agent_pending"
+    assert grant["delivery_status"] == "agent_cache_ready"
+
+
+def test_grant_creation_rejects_expected_member_mismatch_without_claiming_request(vault):
+    _create(vault, name="A_KEY", protection="protected")
+    with vault.begin() as conn:
+        req = _access_request(conn, "A_KEY")
+
+    with pytest.raises(vs.InvalidGrantError):
+        with vault.begin() as conn:
+            vs.create_grant(
+                conn,
+                scope_type="secret",
+                scope_ref="A_KEY",
+                created_by_request_id=req["id"],
+                expected_member_names={"B_KEY"},
+            )
+
+    with vault.connect() as conn:
+        status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.secret_name == "A_KEY")).scalar_one()
+        grants = conn.execute(select(vault_grants)).mappings().all()
+
+    assert status == "pending"
+    assert grants == []
 
 
 def test_grant_creation_must_match_pending_access_request(vault):

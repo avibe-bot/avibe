@@ -2682,6 +2682,16 @@ def vault_pubkey_get():
         return _vault_error_response(exc)
 
 
+@app.route("/api/vault/agent/pubkey", methods=["GET"])
+def vault_agent_pubkey_get():
+    from vibe import api
+
+    try:
+        return jsonify(api.get_vault_agent_pubkey())
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
 @app.route("/api/vault/secrets", methods=["POST"])
 def vault_secrets_post():
     from vibe import api
@@ -5129,6 +5139,19 @@ async def _archive_cancel_turn(session_id: str) -> None:
         logger.debug("archive: cancel in-flight turn failed for %s", session_id, exc_info=True)
 
 
+async def _archive_release_vault_scopes(session_id: str, revoked_vault_scopes: list[dict[str, str]]) -> None:
+    from vibe import api
+
+    try:
+        await asyncio.to_thread(
+            api.release_vault_agent_scopes,
+            revoked_vault_scopes,
+            reason=f"archive_session:{session_id}",
+        )
+    except Exception:
+        logger.debug("archive: resident-agent grant release failed for %s", session_id, exc_info=True)
+
+
 @app.route("/api/sessions/<session_id>", methods=["DELETE"])
 async def sessions_archive(session_id: str):
     """Permanently archive a session and reclaim its bound resources.
@@ -5149,6 +5172,8 @@ async def sessions_archive(session_id: str):
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
 
+    revoked_vault_scopes = session.pop("revoked_vault_grant_scopes", [])
+
     # Broadcast + return immediately — the archive is already committed. Other
     # mounted clients (sidebars, tabs) drop the row live and leave the chat if
     # they're viewing it (mirrors the rename 'updated' event).
@@ -5160,7 +5185,10 @@ async def sessions_archive(session_id: str):
     # Fire-and-forget the in-flight-turn cancel: the cancel client waits up to 30s
     # for the backend interrupt, so awaiting it here would hang the confirm dialog
     # and delay the broadcast for a teardown that has already committed.
-    asyncio.get_running_loop().create_task(_archive_cancel_turn(session_id))
+    loop = asyncio.get_running_loop()
+    if revoked_vault_scopes:
+        loop.create_task(_archive_release_vault_scopes(session_id, revoked_vault_scopes))
+    loop.create_task(_archive_cancel_turn(session_id))
 
     return jsonify(session)
 

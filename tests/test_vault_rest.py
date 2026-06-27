@@ -12,6 +12,10 @@ def _sealed(suffix: str = "1") -> Sealed:
     return Sealed(ciphertext=f"ct-{suffix}", nonce=f"n-{suffix}", wrap_meta=f"wm-{suffix}")
 
 
+def _mock_avault_p2(monkeypatch):
+    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+
+
 def test_rest_create_rejects_protected_plaintext_value(monkeypatch):
     seal = Mock(return_value=_sealed())
     monkeypatch.setattr(api, "avault_seal_blind_box", seal)
@@ -61,8 +65,21 @@ def test_rest_create_accepts_standard_value_fallback(monkeypatch):
     seal.assert_called_once_with("REST_FALLBACK", b"secret")
 
 
+def test_rest_agent_pubkey_route(monkeypatch):
+    monkeypatch.setattr(api, "avault_agent_pubkey", Mock(return_value={"public_key": "pk", "fingerprint": "fp"}))
+    client = app.test_client()
+
+    response = client.get("/api/vault/agent/pubkey")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"ok": True, "public_key": "pk", "fingerprint": "fp"}
+
+
 def test_rest_requests_and_grants_routes(monkeypatch):
+    _mock_avault_p2(monkeypatch)
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    monkeypatch.setattr(api, "avault_agent_grant", Mock(return_value={"granted": 1, "ttl_secs": 300}))
+    monkeypatch.setattr(api, "avault_agent_release", Mock(return_value={"released": True}))
     api.create_vault_secret(
         {
             "name": "PROTECTED_REST",
@@ -88,6 +105,13 @@ def test_rest_requests_and_grants_routes(monkeypatch):
             "scope_ref": "PROTECTED_REST",
             "session_id": "ses_1",
             "request_id": req["id"],
+            "deks": [
+                {
+                    "name": "PROTECTED_REST",
+                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                }
+            ],
         },
         headers=csrf_headers(client),
     )
@@ -106,7 +130,9 @@ def test_rest_requests_and_grants_routes(monkeypatch):
 
 
 def test_rest_grant_rejects_mismatched_request(monkeypatch):
+    _mock_avault_p2(monkeypatch)
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    monkeypatch.setattr(api, "avault_agent_grant", Mock(return_value={"granted": 1, "ttl_secs": 300}))
     api.create_vault_secret(
         {
             "name": "A_KEY",
@@ -134,6 +160,13 @@ def test_rest_grant_rejects_mismatched_request(monkeypatch):
             "scope_ref": "B_KEY",
             "session_id": "ses_1",
             "request_id": req["id"],
+            "deks": [
+                {
+                    "name": "B_KEY",
+                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                }
+            ],
         },
         headers=csrf_headers(client),
     )

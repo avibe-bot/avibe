@@ -56,6 +56,30 @@ def _set(name, value, tmp_path, monkeypatch, capfd, **kw):
     capfd.readouterr()
 
 
+def _set_protected_grant(name: str, *, allow_host: list[str], session_id: str | None = None) -> dict:
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name=name,
+            protection="protected",
+            sealed=_sealed(name.lower()),
+            policy={"allowed_hosts": allow_host},
+        )
+        req = vault_service.create_access_request(
+            conn,
+            name,
+            requester={"source": "cli", "session_id": session_id} if session_id else {"source": "cli"},
+            delivery={"session_id": session_id, "mode": "fetch"} if session_id else {"mode": "fetch"},
+        )
+        return vault_service.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref=name,
+            session_id=session_id,
+            created_by_request_id=req["id"],
+        )
+
+
 def test_fetch_passes_bearer_request_to_avault_and_writes_stdout(tmp_path, capfd, monkeypatch):
     from unittest.mock import Mock
 
@@ -82,6 +106,51 @@ def test_fetch_passes_bearer_request_to_avault_and_writes_stdout(tmp_path, capfd
     assert request["url"] == "https://api.github.com/repos/o/r"
     with cli._open_vault_engine().connect() as conn:
         assert vault_service.get_secret_meta(conn, "GH_PAT")["use_count"] == 1
+
+
+def test_fetch_uses_agent_delivery_for_protected_grant(capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    grant = _set_protected_grant("GH_PAT", allow_host=["api.github.com"])
+    fetch = Mock(return_value={"status": 200, "headers": {}, "body": '{"ok":true}'})
+    monkeypatch.setattr(api, "avault_agent_deliver_fetch", fetch)
+    monkeypatch.setattr(api, "avault_deliver_fetch", Mock())
+
+    code = cli.cmd_vault_fetch(_ns(auth="GH_PAT", url="https://api.github.com/repos/o/r"))
+    captured = capfd.readouterr()
+
+    assert code == 0
+    assert captured.out == '{"ok":true}'
+    fetch.assert_called_once()
+    assert fetch.call_args.kwargs["scope_type"] == grant["scope_type"]
+    assert fetch.call_args.kwargs["scope_ref"] == grant["scope_ref"]
+    assert fetch.call_args.kwargs["sealed"] == _sealed("gh_pat")
+    assert "value" not in repr(fetch.call_args.kwargs)
+
+
+def test_fetch_persists_protected_approval_request_without_grant(capfd):
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="GH_PAT",
+            protection="protected",
+            sealed=_sealed("gh_pat"),
+            policy={"allowed_hosts": ["api.github.com"]},
+        )
+
+    code = cli.cmd_vault_fetch(_ns(auth="GH_PAT", url="https://api.github.com/repos/o/r"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        requests = vault_service.list_requests(conn, status="pending")
+    assert len(requests) == 1
+    assert requests[0]["secret_name"] == "GH_PAT"
+    assert requests[0]["delivery"]["mode"] == "fetch"
+    assert requests[0]["delivery"]["host"] == "api.github.com"
 
 
 def test_fetch_header_auth_request_shape(tmp_path, capfd, monkeypatch):
