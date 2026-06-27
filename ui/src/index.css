@@ -524,6 +524,35 @@ pre,
   font-size: 12px;
   line-height: 1.5;
 }
+/* Copy button for fenced code blocks. The wrapper is the positioning context so
+   the button stays pinned top-right while the <pre> scrolls horizontally. */
+.vr-markdown .vr-code-block { position: relative; }
+.vr-code-copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease, background 0.12s ease;
+}
+.vr-code-block:hover .vr-code-copy,
+.vr-code-copy:focus-visible { opacity: 1; }
+.vr-code-copy:hover { color: var(--foreground); background: var(--surface-3); }
+.vr-code-copy.is-copied { opacity: 1; color: var(--mint); border-color: rgba(91, 255, 160, 0.4); }
+/* Touch devices have no hover — keep the button gently visible so it's tappable. */
+@media (hover: none) {
+  .vr-code-copy { opacity: 0.6; }
+}
 .vr-markdown blockquote {
   margin: 0 0 0.6em;
   padding: 0.2em 0 0.2em 0.9em;
@@ -531,14 +560,26 @@ pre,
   color: var(--muted);
 }
 .vr-markdown hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
+/* Tables are wrapped in a .vr-table-scroll div (see markdown.tsx) that is the
+   horizontal scroll viewport. The table sizes to its own content width — columns
+   sized to content, each capped (below) — and is NOT limited to the bubble width,
+   so when it's wider than the bubble it scrolls inside the wrapper instead of
+   squeezing/wrapping columns to fit (which collapsed a header to one char/line). */
+.vr-markdown .vr-table-scroll { overflow-x: auto; margin: 0 0 0.6em; }
 .vr-markdown table {
   border-collapse: collapse;
-  margin: 0 0 0.6em;
-  display: block;
-  overflow-x: auto;
+  width: max-content;
 }
 .vr-markdown th,
-.vr-markdown td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+.vr-markdown td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+  /* Per-column ceiling: short cells keep their natural width; a long cell wraps
+     within this column instead of stretching into one endless line. Capped to the
+     viewport so a single column can't exceed the screen on mobile. */
+  max-width: min(22rem, 82vw);
+}
 .vr-markdown th { background: var(--surface-2); font-weight: 600; }
 .vr-markdown img { max-width: 100%; border-radius: 8px; }
 .vr-markdown strong { font-weight: 700; }
