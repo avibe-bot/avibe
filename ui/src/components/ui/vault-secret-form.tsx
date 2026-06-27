@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
-import { Eye, EyeOff, Loader2 } from 'lucide-react';
+import { Eye, EyeOff, Loader2, Server, ShieldCheck } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { ApiError, useApi, type DependencyItem } from '@/context/ApiContext';
@@ -212,24 +212,34 @@ export const VaultSecretForm: React.FC<{
       </label>
       <div className="flex flex-col gap-1.5 text-sm font-medium">
         <span>{t('vaults.dialog.protection')}</span>
-        <div className="grid grid-cols-2 rounded-lg border border-border bg-surface-2 p-1">
-          {(['protected', 'standard'] as const).map((option) => (
-            <Button
-              key={option}
-              type="button"
-              variant={protection === option ? 'secondary' : 'ghost'}
-              size="sm"
-              className="h-auto whitespace-normal px-3 py-2 text-left"
-              aria-pressed={protection === option}
-              onClick={() => setProtection(option)}
-            >
-              {option === 'protected' ? t('vaults.dialog.protectedProtection') : t('vaults.dialog.standardProtection')}
-            </Button>
-          ))}
+        <div className="grid grid-cols-2 gap-2.5">
+          {(
+            [
+              { key: 'standard', icon: Server, title: t('vaults.dialog.standardProtection'), desc: t('vaults.dialog.standardHelp') },
+              { key: 'protected', icon: ShieldCheck, title: t('vaults.dialog.protectedProtection'), desc: t('vaults.dialog.protectedHelp') },
+            ] as const
+          ).map(({ key, icon: Icon, title, desc }) => {
+            const selected = protection === key;
+            return (
+              <button
+                key={key}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => setProtection(key)}
+                className={cn(
+                  'flex flex-col gap-1.5 rounded-lg border p-3 text-left transition-colors',
+                  selected ? 'border-mint bg-mint-soft' : 'border-border bg-surface hover:bg-surface-2',
+                )}
+              >
+                <span className="flex items-center gap-2">
+                  <Icon className={cn('size-4', selected ? 'text-mint' : 'text-muted')} />
+                  <span className="text-sm font-semibold text-foreground">{title}</span>
+                </span>
+                <span className="text-xs font-normal text-muted-foreground">{desc}</span>
+              </button>
+            );
+          })}
         </div>
-        <span className="text-xs text-muted-foreground">
-          {protection === 'protected' ? t('vaults.dialog.protectedHelp') : t('vaults.dialog.standardHelp')}
-        </span>
       </div>
       {protection === 'protected' && (
         <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
