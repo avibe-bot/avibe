@@ -837,6 +837,57 @@ def test_session_handler_recreates_cached_claude_client_when_caller_env_changes(
     assert second_client.options.env["AVIBE_RUN_ID"] == "run-two"
 
 
+def test_session_handler_recreates_cached_claude_subagent_when_caller_env_changes(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict[str, Any] = {"clients": []}
+
+    class _RoutingSettingsManager(_SettingsManager):
+        @staticmethod
+        def get_channel_routing(settings_key):
+            return type("Routing", (), {"claude_agent": "reviewer", "model": None, "reasoning_effort": None})()
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+            self.disconnects = 0
+            captured["clients"].append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    controller.settings_manager = _RoutingSettingsManager()
+    controller.platform_settings_managers = {"slack": controller.settings_manager}
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform_specific={
+            "routing_subagent": "reviewer",
+            "task_execution_id": "run-one",
+            "task_trigger_kind": "agent_run",
+            "agent_session_target": {"id": "ses-parent", "agent_backend": "claude"},
+        },
+    )
+
+    first_client = _run_session(handler, context)
+    context.platform_specific["task_execution_id"] = "run-two"
+    second_client = _run_session(handler, context)
+
+    assert first_client is not second_client
+    assert first_client.disconnects == 1
+    assert len(captured["clients"]) == 2
+    assert first_client.options.env["AVIBE_RUN_ID"] == "run-one"
+    assert second_client.options.env["AVIBE_RUN_ID"] == "run-two"
+
+
 def test_session_handler_updates_cached_claude_model_only_when_changed(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 

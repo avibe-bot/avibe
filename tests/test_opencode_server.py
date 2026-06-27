@@ -139,6 +139,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
         manager._restart_for_auth_refresh_locked = AsyncMock(side_effect=lambda: restarted.append(True))  # type: ignore[method-assign]
         manager._start_server = AsyncMock(side_effect=lambda: started.append(True))  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {"pid": 123, "port": 4096, "caller_context_path": manager._caller_context_path()}  # type: ignore[method-assign]
 
         with patch.object(
             SERVER_MODULE,
@@ -159,7 +160,7 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
         manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
         manager._start_server = AsyncMock()  # type: ignore[method-assign]
-        manager._read_pid_file = lambda: {"pid": 123, "caller_context_path": manager._caller_context_path()}  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {"pid": 123, "port": 4096, "caller_context_path": manager._caller_context_path()}  # type: ignore[method-assign]
 
         with patch.object(
             SERVER_MODULE,
@@ -194,6 +195,26 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restarted, [True])
         self.assertEqual(started, [True])
         self.assertFalse(manager._caller_context_plugin_refresh_pending)
+
+    async def test_ensure_running_rejects_unmanaged_healthy_server(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: None  # type: ignore[method-assign]
+        manager._write_pid_file = lambda pid: self.fail("unmanaged server must not be adopted as Avibe-managed")  # type: ignore[method-assign]
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=False),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "not managed by Avibe"):
+                await manager.ensure_running()
+
+        manager._restart_for_auth_refresh_locked.assert_not_awaited()
+        manager._start_server.assert_not_awaited()
 
     async def test_prompt_async_percent_encodes_directory_header(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)

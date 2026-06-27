@@ -40,6 +40,7 @@ DEFAULT_OPENCODE_PORT = 4096
 DEFAULT_OPENCODE_HOST = "127.0.0.1"
 SERVER_START_TIMEOUT = 15
 OPENCODE_LOG_TAIL_BYTES = 2_000_000
+_USE_CURRENT_CALLER_CONTEXT_PATH = object()
 
 
 def _percent_encode_path(path: str) -> str:
@@ -371,16 +372,19 @@ class OpenCodeServerManager:
 
         return data if isinstance(data, dict) else None
 
-    def _write_pid_file(self, pid: int) -> None:
+    def _write_pid_file(self, pid: int, *, caller_context_path: object = _USE_CURRENT_CALLER_CONTEXT_PATH) -> None:
         try:
             self._pid_file.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "pid": pid,
                 "port": self.port,
                 "host": self.host,
-                "caller_context_path": self._caller_context_path(),
                 "started_at": time.time(),
             }
+            if caller_context_path is _USE_CURRENT_CALLER_CONTEXT_PATH:
+                caller_context_path = self._caller_context_path()
+            if isinstance(caller_context_path, str) and caller_context_path:
+                payload["caller_context_path"] = caller_context_path
             self._pid_file.write_text(json.dumps(payload))
         except Exception as e:
             logger.debug(f"Failed to write OpenCode pid file: {e}")
@@ -391,6 +395,17 @@ class OpenCodeServerManager:
                 self._pid_file.unlink()
         except Exception as e:
             logger.debug(f"Failed to clear OpenCode pid file: {e}")
+
+    def _pid_file_references_current_server(self, info: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(info, dict):
+            return False
+        pid = info.get("pid")
+        if not isinstance(pid, int):
+            return False
+        if info.get("port") == self.port:
+            return True
+        cmd = self._get_pid_command(pid)
+        return bool(cmd and self._is_opencode_serve_cmd(cmd, self.port))
 
     @staticmethod
     def _extract_json_object(text: str, start: int) -> Optional[str]:
@@ -875,7 +890,7 @@ class OpenCodeServerManager:
                 actual_pid = actual_pids[0]
                 if actual_pid != pid:
                     logger.info(f"Adopting healthy OpenCode server (updating stale PID {pid} -> {actual_pid})")
-                    self._write_pid_file(actual_pid)
+                    self._write_pid_file(actual_pid, caller_context_path=info.get("caller_context_path"))
                 else:
                     logger.info(f"Adopting healthy OpenCode server pid={pid} from previous run")
             else:
@@ -908,7 +923,13 @@ class OpenCodeServerManager:
 
             if await self._is_healthy():
                 pid_info = self._read_pid_file()
-                if not pid_info or pid_info.get("caller_context_path") != self._caller_context_path():
+                if not self._pid_file_references_current_server(pid_info):
+                    raise RuntimeError(
+                        f"OpenCode server is already healthy on port {self.port}, but it is not managed by Avibe. "
+                        "Stop that server or configure Avibe to use another OPENCODE_PORT so caller context "
+                        "environment variables can be injected safely."
+                    )
+                if pid_info.get("caller_context_path") != self._caller_context_path():
                     self._caller_context_plugin_refresh_pending = True
                 if (
                     self._caller_context_plugin_refresh_pending

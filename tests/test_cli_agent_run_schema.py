@@ -190,19 +190,30 @@ def test_agent_run_async_accepts_callback_session_id(tmp_path: Path, capsys) -> 
 
 
 def test_agent_run_async_requires_callback_or_no_callback_without_caller(tmp_path: Path, capsys) -> None:
-    db_path = tmp_path / "state" / "vibe.sqlite"
-    agent_store = cli.VibeAgentStore(db_path)
-    agent_store.create(name="worker", backend="codex")
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-    args = _parse_agent_run(["--agent", "worker", "--async", "--message", "hi"])
+    from sqlalchemy import func, select
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions
 
-    with (
-        patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_request_store", return_value=request_store),
-        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
-        patch("vibe.cli._primary_platform", return_value="slack"),
-    ):
-        result = cli.cmd_agent_run(args)
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    with patch.dict("os.environ", {"AVIBE_HOME": str(tmp_path)}):
+        ensure_sqlite_state()
+        agent_store = cli.VibeAgentStore(db_path)
+        agent_store.create(name="worker", backend="codex")
+        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        args = _parse_agent_run(["--agent", "worker", "--async", "--message", "hi"])
+
+        with (
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch("vibe.cli._task_request_store", return_value=request_store),
+            patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+            patch("vibe.cli._primary_platform", return_value="slack"),
+        ):
+            result = cli.cmd_agent_run(args)
+
+        engine = create_sqlite_engine(db_path)
+        with engine.connect() as conn:
+            session_count = conn.execute(select(func.count()).select_from(agent_sessions)).scalar_one()
 
     assert result == 1
     captured = capsys.readouterr()
@@ -210,6 +221,7 @@ def test_agent_run_async_requires_callback_or_no_callback_without_caller(tmp_pat
     assert payload["code"] == "missing_async_callback"
     assert "--callback-session-id" in payload["hint"]
     assert "--no-callback" in payload["hint"]
+    assert session_count == 0
 
 
 def test_agent_run_async_defaults_callback_from_caller_env(tmp_path: Path, capsys) -> None:

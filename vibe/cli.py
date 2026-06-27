@@ -3013,6 +3013,28 @@ def cmd_agent_run(args):
         agent = _agent_store().require_enabled(agent_name) if agent_name else None
         fork_result = None
         session_metadata = _session_creation_metadata_from_caller(caller_context)
+        if session_policy in {"existing", "fork"} and session_id:
+            target = resolve_session_id_target(session_id)
+            session_key = target.session_key.to_key()
+            agent = _resolve_agent_for_target(
+                agent_name=agent_name or None,
+                session_id=session_id,
+                session_key=session_key,
+                help_command="vibe agent run --help",
+            )
+        if session_policy == "existing" and (args.post_to or args.deliver_key):
+            _validate_delivery_args(
+                session_id=session_id,
+                session_key=session_key,
+                post_to=args.post_to,
+                deliver_key=args.deliver_key,
+                help_command="vibe agent run --help",
+            )
+        elif session_policy == "create" and args.deliver_key:
+            _parse_validated_session_key(args.deliver_key, help_command="vibe agent run --help")
+        callback_session_id, callback_notice = _resolve_async_callback_session_id(args, caller_context)
+        if callback_session_id:
+            resolve_session_id_target(callback_session_id)
         if session_policy == "create":
             session_id = _reserve_cli_session(
                 agent=agent,
@@ -3032,7 +3054,7 @@ def cmd_agent_run(args):
             session_id = fork_result.session_id
             if agent_name:
                 agent = _agent_store().require_enabled(agent_name)
-        if session_id:
+        if session_id and not session_key:
             target = resolve_session_id_target(session_id)
             session_key = target.session_key.to_key()
             agent = _resolve_agent_for_target(
@@ -3041,7 +3063,9 @@ def cmd_agent_run(args):
                 session_key=session_key,
                 help_command="vibe agent run --help",
             )
-        if session_policy != "none" or args.post_to or args.deliver_key:
+        if (session_policy in {"create", "none"} or fork_result) and (
+            session_policy != "none" or args.post_to or args.deliver_key
+        ):
             _validate_delivery_args(
                 session_id=session_id,
                 session_key=session_key,
@@ -3049,9 +3073,6 @@ def cmd_agent_run(args):
                 deliver_key=args.deliver_key,
                 help_command="vibe agent run --help",
             )
-        callback_session_id, callback_notice = _resolve_async_callback_session_id(args, caller_context)
-        if callback_session_id:
-            resolve_session_id_target(callback_session_id)
         source_kind, source_actor, parent_run_id, provenance_metadata = _agent_run_source_from_caller(caller_context)
         if fork_result:
             provenance_metadata = {

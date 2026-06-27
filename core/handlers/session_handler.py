@@ -207,11 +207,20 @@ class SessionHandler(BaseHandler):
         composite_key: str,
         base_session_id: str,
         working_path: str,
+        context: MessageContext,
         native_session_id: Optional[str],
         explicit_model: Optional[str],
     ) -> ClaudeSDKClient | None:
         client = self.claude_sessions.get(composite_key)
         if client is None:
+            return None
+        caller_env = caller_env_for_platform_payload(getattr(context, "platform_specific", None))
+        if getattr(client, "_vibe_caller_env", {}) != caller_env:
+            logger.info(
+                "Recreating cached Claude subagent SDK client for %s because caller context env changed",
+                composite_key,
+            )
+            await self.cleanup_session(composite_key)
             return None
         if explicit_model:
             try:
@@ -672,6 +681,7 @@ class SessionHandler(BaseHandler):
                 composite_key=cached_key,
                 base_session_id=cached_base,
                 working_path=working_path,
+                context=context,
                 native_session_id=cached_session_id,
                 explicit_model=explicit_model,
             )
@@ -693,6 +703,7 @@ class SessionHandler(BaseHandler):
                     composite_key=composite_key,
                     base_session_id=base_session_id,
                     working_path=working_path,
+                    context=context,
                     native_session_id=stored_claude_session_id,
                     explicit_model=explicit_model,
                 )
