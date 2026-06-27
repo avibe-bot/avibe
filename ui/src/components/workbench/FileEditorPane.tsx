@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useState } from 'react';
+import { Suspense, lazy, useEffect, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Loader2, PanelRightOpen, Save } from 'lucide-react';
 import clsx from 'clsx';
@@ -118,10 +118,14 @@ export const FileEditorPane: React.FC<{
 
   const dirty = !readOnly && text !== null && text !== original;
   const language = monacoLanguage(filename);
-  // Monaco model URI: keep the file's extension so its TS worker picks JSX/TSX for
-  // .tsx/.jsx (otherwise valid React files show bogus errors), and prefix the window id
-  // so two windows on the same file don't share — and fight over — one model.
-  const monacoPath = windowId ? `${windowId}/${path.replace(/^\/+/, '')}` : path;
+  // Monaco reuses models by `path`, so each editor INSTANCE needs a unique model URI.
+  // Otherwise two panes on the same file share one model while keeping separate
+  // original/savedMtime — e.g. the full-page /apps/files route mounts both the desktop
+  // and the md:hidden mobile ContentPane (both windowId-less), so a save in one leaves the
+  // other looking dirty and false-conflicting. Prefix a per-instance id; keep the file
+  // extension so Monaco's TS worker still picks JSX/TSX for .tsx/.jsx.
+  const editorUid = useId();
+  const monacoPath = `${editorUid.replace(/:/g, '')}/${path.replace(/^\/+/, '')}`;
 
   // Veto closing the owning window while there are unsaved edits (the close unmounts
   // this pane and the buffer only lives in React state). No-op for the full-page route.
