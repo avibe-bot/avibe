@@ -638,6 +638,101 @@ async def _open_rejects_same_id_while_terminate_is_in_progress(monkeypatch):
     assert "a" not in service._sessions
 
 
+def test_terminate_keeps_opening_session_reserved_until_abandon_settles(monkeypatch, tmp_path):
+    asyncio.run(_terminate_keeps_opening_session_reserved_until_abandon_settles(monkeypatch, tmp_path))
+
+
+async def _terminate_keeps_opening_session_reserved_until_abandon_settles(monkeypatch, tmp_path):
+    # Windowed terminal ids come from a small reusable slot pool. If DELETE releases an id
+    # while the original websocket open is still abandoning, the next window can reuse the id
+    # and the stale abandon can tear down that newer terminal's tmux session.
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(terminal_service.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: "/usr/bin/tmux")
+
+    killed: list[str] = []
+    kill_started = asyncio.Event()
+
+    async def fake_kill(session_id: str) -> None:
+        killed.append(session_id)
+        kill_started.set()
+
+    monkeypatch.setattr(terminal_service, "_kill_tmux_session", fake_kill)
+
+    opened_fds: list[int] = []
+
+    def fake_openpty():
+        master = os.open(os.devnull, os.O_RDWR)
+        slave = os.open(os.devnull, os.O_RDWR)
+        opened_fds.extend([master, slave])
+        return master, slave
+
+    monkeypatch.setattr(terminal_service.os, "openpty", fake_openpty)
+
+    spawn_started = asyncio.Event()
+    release_stale_spawn = asyncio.Event()
+    spawn_calls = 0
+
+    class _FakeProcess:
+        returncode = None
+        pid = None
+
+        def send_signal(self, _signum: int) -> None:
+            pass
+
+        async def wait(self) -> int:
+            return 0
+
+    async def gated_spawn(*_args, **_kwargs):
+        nonlocal spawn_calls
+        spawn_calls += 1
+        if spawn_calls == 1:
+            spawn_started.set()
+            await release_stale_spawn.wait()
+        return _FakeProcess()
+
+    monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", gated_spawn)
+
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=1)
+    stale_open = asyncio.create_task(service.open("slot-1"))
+    await spawn_started.wait()
+
+    terminate_task = asyncio.create_task(service.terminate("slot-1"))
+    kill_wait = asyncio.create_task(kill_started.wait())
+    done, pending = await asyncio.wait({kill_wait, terminate_task}, timeout=1, return_when=asyncio.FIRST_COMPLETED)
+    assert done
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+
+    try:
+        reused_before_stale_settled: terminal_service.TerminalConnection | None = None
+        try:
+            reused_before_stale_settled = await service.open("slot-1")
+        except terminal_service.TerminalServiceError as exc:
+            assert str(exc) == "session_opening"
+
+        release_stale_spawn.set()
+        with pytest.raises(terminal_service.TerminalServiceError, match="session_opening"):
+            await stale_open
+        assert await terminate_task is True
+
+        replacement = reused_before_stale_settled or await service.open("slot-1")
+        assert service._sessions["slot-1"].connection is replacement
+        assert service._sessions["slot-1"].phase is _Phase.ATTACHED
+        if reused_before_stale_settled is not None:
+            # If the implementation ever allows same-id reuse before the stale open settles,
+            # the stale abandon still must not kill that newer tmux session by id.
+            assert killed == ["slot-1"]
+    finally:
+        release_stale_spawn.set()
+        await asyncio.gather(stale_open, terminate_task, return_exceptions=True)
+        await service.shutdown()
+        for fd in opened_fds:
+            terminal_service._close_fd(fd)
+
+
 def test_dead_session_not_tracked_when_shell_exits(monkeypatch, tmp_path):
     asyncio.run(_dead_session_not_tracked_when_shell_exits(monkeypatch, tmp_path))
 
