@@ -355,6 +355,43 @@ def test_group_grant_approves_sibling_requests_in_same_session(vault):
     }
 
 
+def test_group_grant_expires_stale_sibling_requests(vault):
+    _create(vault, name="A_KEY", protection="protected", group="crypto")
+    _create(vault, name="B_KEY", protection="protected", group="crypto")
+    cache = vs.VaultGrantRuntimeCache()
+    expired_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    with vault.begin() as conn:
+        req_a = _access_request(conn, "A_KEY", session_id="ses_1")
+        req_b = vs.create_access_request(
+            conn,
+            "B_KEY",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+            expires_at=expired_at,
+        )
+        vs.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_1",
+            created_by_request_id=req_a["id"],
+            cache=cache,
+        )
+        statuses = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                select(vault_requests.c.id, vault_requests.c.status).where(
+                    vault_requests.c.id.in_([req_a["id"], req_b["id"]])
+                )
+            ).mappings()
+        }
+
+    assert statuses == {
+        req_a["id"]: "approved",
+        req_b["id"]: "expired",
+    }
+
+
 def test_grant_uses_approval_member_snapshot_not_later_group_members(vault):
     _create(vault, name="A_KEY", protection="protected", group="crypto")
     cache = vs.VaultGrantRuntimeCache()
@@ -657,6 +694,43 @@ def test_resolve_access_preserves_delivery_session_when_argument_is_missing(vaul
     assert json.loads(raw_delivery)["session_id"] == "ses_delivery"
     assert grant["session_id"] == "ses_delivery"
     assert same_session["status"] == "agent_delivery_pending"
+    assert other_session["status"] == "approval_required"
+
+
+def test_resolve_access_uses_requester_session_for_grant_lookup(vault):
+    _create(vault, name="PROTECTED_KEY", protection="protected", group="crypto")
+    cache = vs.VaultGrantRuntimeCache()
+    with vault.begin() as conn:
+        req = vs.create_access_request(
+            conn,
+            "PROTECTED_KEY",
+            requester={"session_id": "ses_requester"},
+        )
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="PROTECTED_KEY",
+            created_by_request_id=req["id"],
+            cache=cache,
+        )
+        same_session = vs.resolve_secret_access(
+            conn,
+            "PROTECTED_KEY",
+            requester={"session_id": "ses_requester"},
+            create_request=False,
+            cache=cache,
+        )
+        other_session = vs.resolve_secret_access(
+            conn,
+            "PROTECTED_KEY",
+            requester={"session_id": "ses_other"},
+            create_request=False,
+            cache=cache,
+        )
+
+    assert grant["session_id"] == "ses_requester"
+    assert same_session["status"] == "agent_delivery_pending"
+    assert same_session["grant"]["id"] == grant["id"]
     assert other_session["status"] == "approval_required"
 
 

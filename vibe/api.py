@@ -1551,6 +1551,8 @@ def vault_sign(payload: dict) -> dict:
     name = str(payload.get("name") or "").strip()
     digest = _sign_digest_from_payload(payload.get("digest"))
     scheme = str(payload.get("scheme") or "ecdsa-secp256k1-recoverable").strip()
+    if scheme not in vault_service.SUPPORTED_SIGNATURE_SCHEMES:
+        raise VaultApiError(f"unsupported signature scheme: {scheme}", code="invalid_request", status=409)
     if not vault_crypto.is_valid_secret_name(name):
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
     engine = _vault_engine()

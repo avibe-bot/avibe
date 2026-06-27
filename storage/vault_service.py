@@ -33,6 +33,11 @@ DEFAULT_GROUP = "default"
 GRANT_SCOPE_TYPES = {"secret", "skill", "group"}
 DEFAULT_GRANT_TTL_SECONDS = {"secret": 300, "skill": 900, "group": 900}
 GRANT_TTL_OPTIONS_SECONDS = (300, 900, 3600)
+SUPPORTED_SIGNATURE_SCHEMES = {
+    "ecdsa-secp256k1-recoverable",
+    "ecdsa-secp256k1-der",
+    "schnorr-secp256k1-bip340",
+}
 
 
 @dataclass(frozen=True)
@@ -360,6 +365,12 @@ def _request_session_id(row: dict[str, Any]) -> str | None:
     card = delivery.get("card") if isinstance(delivery, dict) else None
     if isinstance(card, dict) and card.get("session_id"):
         return str(card["session_id"])
+    return None
+
+
+def _payload_session_id(payload: Any) -> str | None:
+    if isinstance(payload, dict) and payload.get("session_id"):
+        return str(payload["session_id"])
     return None
 
 
@@ -1011,6 +1022,8 @@ def create_sign_request(
     delivery: dict[str, Any] | None = None,
     message_id: str | None = None,
 ) -> dict[str, Any]:
+    if scheme not in SUPPORTED_SIGNATURE_SCHEMES:
+        raise InvalidRequestError(f"unsupported signature scheme: {scheme}")
     request_id = _id("vrq")
     delivery_payload = dict(delivery or {})
     requester_payload = requester if isinstance(requester, dict) else {}
@@ -1051,6 +1064,8 @@ def _signature_bytes(raw: str) -> bytes:
 
 
 def _validate_signature_payload(scheme: str, signature: dict[str, Any]) -> None:
+    if scheme not in SUPPORTED_SIGNATURE_SCHEMES:
+        raise InvalidRequestError(f"unsupported signature scheme: {scheme}")
     if not isinstance(signature, dict):
         raise InvalidRequestError("signature payload must be an object")
     sig = signature.get("signature")
@@ -1076,8 +1091,6 @@ def _validate_signature_payload(scheme: str, signature: dict[str, Any]) -> None:
         if recovery_id is not None:
             raise InvalidRequestError("BIP340 Schnorr signatures must not include recovery_id")
         return
-    raise InvalidRequestError(f"unsupported signature scheme: {scheme}")
-
 
 def complete_sign_request(
     conn: Connection,
@@ -1371,7 +1384,25 @@ def _approve_sibling_access_requests_for_grant(
         if _request_session_id(dict(row)) == target_session_id
     ]
     approved = 0
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
     for row in rows:
+        expires_at = _parse_iso_datetime(row.get("expires_at"))
+        if expires_at is not None and expires_at <= now_dt:
+            result = conn.execute(
+                vault_requests.update()
+                .where(vault_requests.c.id == row["id"], vault_requests.c.status == "pending")
+                .values(status="expired", decided_at=now)
+            )
+            if result.rowcount == 1:
+                audit(
+                    conn,
+                    "request-expired",
+                    secret_name=row.get("secret_name"),
+                    delivery={"request_type": row.get("request_type"), "session_id": target_session_id},
+                    request_id=row["id"],
+                )
+            continue
         result = conn.execute(
             vault_requests.update()
             .where(vault_requests.c.id == row["id"], vault_requests.c.status == "pending")
@@ -1598,9 +1629,11 @@ def resolve_secret_access(
     if row.get("protection") == "standard":
         return {"status": "standard", "secret": _meta_payload(row), "envelope": _row_sealed(row)}
     delivery_payload = dict(delivery or {})
-    effective_session_id = session_id
-    if effective_session_id is None and delivery_payload.get("session_id"):
-        effective_session_id = str(delivery_payload["session_id"])
+    effective_session_id = (
+        session_id
+        or _payload_session_id(delivery_payload)
+        or _payload_session_id(requester)
+    )
     grant = find_active_grant_for_secret(conn, name, session_id=effective_session_id, cache=cache)
     if grant is not None:
         return {

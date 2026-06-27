@@ -416,6 +416,27 @@ def test_protected_sign_requires_browser_signature(monkeypatch):
     assert result["request"]["card"]["scope_options"] == []
 
 
+def test_protected_sign_rejects_unsupported_scheme_before_request(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {
+            "name": "ETH_KEY",
+            "protection": "protected",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+        }
+    )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.vault_sign({"name": "ETH_KEY", "digest": "00" * 32, "scheme": "not-a-real-scheme"})
+
+    assert exc.value.code == "invalid_request"
+    assert api.get_vault_requests()["requests"] == []
+
+
 def test_protected_sign_completion_requires_matching_request(monkeypatch):
     from unittest.mock import Mock
 
