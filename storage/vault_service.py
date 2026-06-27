@@ -1286,6 +1286,7 @@ def agent_release_scopes_after_rows(
     active_rows = [
         dict(row)
         for row in conn.execute(select(vault_grants).where(vault_grants.c.status == "active")).mappings()
+        if _grant_agent_ready(dict(row))
     ]
     active_by_scope: dict[tuple[str, str], set[str]] = {}
     for row in active_rows:

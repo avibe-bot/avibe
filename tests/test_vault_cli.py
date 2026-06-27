@@ -9,6 +9,7 @@ import argparse
 import io
 import json
 import shutil
+import threading
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -325,6 +326,20 @@ def test_agent_run_trampoline_clears_agent_environment(tmp_path):
     assert '. "$env_file"; cd "$cwd" || exit 125; exec "$@"' in command[2]
 
 
+def test_agent_run_stdin_polling_uses_stdlib_select(monkeypatch):
+    source = type("FdSource", (), {"fileno": lambda self: 10})()
+    called = Mock(return_value=([10], [], []))
+    monkeypatch.setattr(cli.select_module, "select", called)
+    read = Mock(return_value=b"stdin chunk")
+    monkeypatch.setattr(cli.os, "read", read)
+
+    chunk = cli._AgentRunOutputBridge._read_stdin_chunk(source, threading.Event())
+
+    assert chunk == b"stdin chunk"
+    called.assert_called_once()
+    read.assert_called_once_with(10, 8192)
+
+
 def test_shell_env_exports_can_use_explicit_env():
     exports = cli._shell_env_exports({"KEEP": "ok", "BAD-NAME": "no", "SECRET": "old"}, exclude={"SECRET"})
 
@@ -404,6 +419,25 @@ def test_run_expires_grant_when_agent_cache_is_missing(capfd, monkeypatch):
     assert requests[0]["secret_name"] == "PROTECTED_KEY"
 
 
+def test_run_reopens_only_one_approval_when_group_agent_cache_is_missing(capfd, monkeypatch):
+    from vibe import api
+
+    grant = _set_group_grant(["A_KEY", "B_KEY"])
+    monkeypatch.setattr(api, "avault_agent_deliver_run", Mock(side_effect=api.AvaultError("grant is missing or expired")))
+
+    code = cli.cmd_vault_run(_ns(env=["A_KEY", "B_KEY"], command_argv=["python3", "-c", "pass"]))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
+        requests = vault_service.list_requests(conn, status="pending")
+    assert status == "expired"
+    assert len(requests) == 1
+    assert requests[0]["secret_name"] == "A_KEY"
+
+
 def test_run_persists_protected_approval_request_without_grant(capfd):
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))
@@ -420,7 +454,7 @@ def test_run_persists_protected_approval_request_without_grant(capfd):
     assert requests[0]["delivery"]["mode"] == "run"
 
 
-def test_run_skips_protected_delivery_audit_when_agent_returns_pre_spawn_70(capfd, monkeypatch):
+def test_run_records_protected_delivery_when_child_exits_70(capfd, monkeypatch):
     from vibe import api
 
     _set_protected_grant("PROTECTED_KEY")
@@ -430,7 +464,7 @@ def test_run_skips_protected_delivery_audit_when_agent_returns_pre_spawn_70(capf
     assert cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"])) == 70
     cli.cmd_vault_list(_ns())
     secret = json.loads(capfd.readouterr().out)["secrets"][0]
-    assert secret["use_count"] == 0
+    assert secret["use_count"] == 1
 
 
 def test_run_skips_delivery_audit_when_avault_returns_70(tmp_path, capfd, monkeypatch):

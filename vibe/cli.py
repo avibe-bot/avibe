@@ -7,7 +7,7 @@ import logging
 import math
 import os
 import platform
-import select
+import select as select_module
 import shlex
 import shutil
 import signal
@@ -3493,6 +3493,7 @@ def _expire_agent_grant_after_missing(
                 )
                 if first_request is None and isinstance(resolved.get("request"), dict):
                     first_request = resolved["request"]
+                    break
     except Exception:
         pass
     return first_request
@@ -3699,7 +3700,7 @@ class _AgentRunOutputBridge:
                 return b""
         while not stop_event.is_set():
             try:
-                ready, _, _ = select.select([fileno], [], [], 0.05)
+                ready, _, _ = select_module.select([fileno], [], [], 0.05)
             except (OSError, ValueError):
                 try:
                     return source.read(8192)
@@ -4032,11 +4033,11 @@ def cmd_vault_run(args):
             return 1
         _print_task_error(TaskCliError(f"avault deliver failed: {exc}", code="avault_failed", help_command=help_command))
         return 1
-    # avault exits 70 only on an internal failure BEFORE spawning the child (bad envelope /
-    # decrypt / store) — no delivery happened, so skip the audit. Any other code means the child
-    # ran with the secret in its env → record the delivery now. A bookkeeping failure must not
-    # crash or change the child's real exit code.
-    if exit_code != 70:
+    # One-shot avault exits 70 only on an internal failure before spawning the child, so no
+    # delivery happened there. Resident-agent protected runs raise AvaultError for agent-side
+    # failures; a returned 70 is the child's real exit code and must still be audited.
+    delivered = grant is not None or exit_code != 70
+    if delivered:
         try:
             with engine.begin() as conn:
                 vault_service.record_deliveries(

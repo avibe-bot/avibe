@@ -651,6 +651,41 @@ def test_agent_release_scope_skips_when_remaining_members_cover_removed_scope(va
     assert cache.has(grant_2["id"], "A_KEY")
 
 
+def test_agent_release_scope_ignores_unready_remaining_grants(vault):
+    _create(vault, name="A_KEY", protection="protected", group="crypto")
+    cache = vs.VaultGrantRuntimeCache()
+    with vault.begin() as conn:
+        req_1 = _access_request(conn, "A_KEY", session_id="ses_1")
+        grant_1 = vs.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_1",
+            created_by_request_id=req_1["id"],
+            cache=cache,
+        )
+        req_2 = _access_request(conn, "A_KEY", session_id="ses_2")
+        grant_2 = vs.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_2",
+            created_by_request_id=req_2["id"],
+            cache_ready=False,
+            cache=cache,
+        )
+        rows = [dict(conn.execute(select(vault_grants).where(vault_grants.c.id == grant_1["id"])).mappings().one())]
+        vs.revoke_grant(conn, grant_1["id"], cache=cache)
+        release_scopes = vs.agent_release_scopes_after_rows(conn, rows, cache=cache)
+
+    assert release_scopes == [{"scope_type": "group", "scope_ref": "crypto"}]
+    assert not cache.has(grant_1["id"], "A_KEY")
+    assert not cache.has(grant_2["id"], "A_KEY")
+    with vault.connect() as conn:
+        listed = {grant["id"]: grant for grant in vs.list_grants(conn, status=None, cache=vs.VaultGrantRuntimeCache())}
+    assert listed[grant_2["id"]]["delivery_ready"] is False
+
+
 def test_agent_release_scope_ignores_expired_remaining_grants(vault):
     _create(vault, name="A_KEY", protection="protected", group="crypto")
     cache = vs.VaultGrantRuntimeCache()
