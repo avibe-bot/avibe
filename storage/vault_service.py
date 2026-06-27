@@ -1273,6 +1273,7 @@ def agent_release_scopes_after_rows(
 
     if not rows:
         return []
+    expire_grants(conn, cache=cache)
     active_rows = [
         dict(row)
         for row in conn.execute(select(vault_grants).where(vault_grants.c.status == "active")).mappings()

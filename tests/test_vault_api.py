@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import socket
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -368,7 +369,7 @@ def test_create_and_revoke_grant_api(monkeypatch, avault_p2):
     )
     assert created["grant"]["runtime_member_count"] == 1
     assert created["grant"]["delivery_ready"] is True
-    assert agent_grant.call_args.kwargs["ttl_secs"] == 300
+    assert 1 <= agent_grant.call_args.kwargs["ttl_secs"] <= 300
     assert agent_grant.call_args.kwargs["deks"] == [
         {
             "name": "GRANT_KEY",
@@ -817,6 +818,59 @@ def test_create_grant_api_expires_grant_when_agent_grant_fails(monkeypatch, avau
     assert grants[0]["status"] == "expired"
     assert grants[0]["delivery_ready"] is False
     agent_release.assert_called_once_with(scope_type="secret", scope_ref="GRANT_KEY")
+
+
+def test_create_grant_api_rejects_partial_agent_cache(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    monkeypatch.setattr(api, "avault_agent_grant", Mock(return_value={"granted": 0, "ttl_secs": 300}))
+    agent_release = Mock(return_value={"released": True})
+    monkeypatch.setattr(api, "avault_agent_release", agent_release)
+    api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
+    with api._vault_engine().begin() as conn:
+        req = vault_service.create_access_request(
+            conn,
+            "GRANT_KEY",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_grant(
+            {
+                "scope_type": "secret",
+                "scope_ref": "GRANT_KEY",
+                "session_id": "ses_1",
+                "request_id": req["id"],
+                "deks": [
+                    {
+                        "name": "GRANT_KEY",
+                        "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                        "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                    }
+                ],
+            }
+        )
+
+    assert exc.value.code == "avault_failed"
+    assert "cached fewer DEKs" in str(exc.value)
+    with api._vault_engine().connect() as conn:
+        grants = vault_service.list_grants(conn, status=None)
+    assert len(grants) == 1
+    assert grants[0]["status"] == "expired"
+    assert grants[0]["delivery_ready"] is False
+    agent_release.assert_called_once_with(scope_type="secret", scope_ref="GRANT_KEY")
+
+
+def test_grant_ttl_uses_remaining_db_lifetime():
+    now = datetime.now(timezone.utc)
+    ttl = api._grant_ttl_seconds(
+        {
+            "created_at": (now - timedelta(seconds=900)).isoformat(),
+            "expires_at": (now + timedelta(seconds=120)).isoformat(),
+        }
+    )
+
+    assert 1 <= ttl <= 120
 
 
 def test_create_grant_api_releases_scope_when_mark_ready_fails(monkeypatch, avault_p2):

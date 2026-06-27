@@ -3535,7 +3535,15 @@ def _preflight_vault_inject_batch(engine, names: list[str]) -> dict[str, dict]:
 class _AgentRunOutputBridge:
     """Stream protected child stdio through temporary FIFOs owned by this CLI."""
 
-    def __init__(self, stdout, stderr, *, stdin=None, env_exclude: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        stdout,
+        stderr,
+        *,
+        stdin=None,
+        env_exclude: set[str] | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
         if not hasattr(os, "mkfifo"):
             raise TaskCliError("protected vault run output streaming requires Unix FIFOs", code="unsupported_platform")
         runtime_dir = paths.get_runtime_dir()
@@ -3562,9 +3570,10 @@ class _AgentRunOutputBridge:
         stdin = stdin if stdin is not None else getattr(sys.stdin, "buffer", sys.stdin)
         self._stdin_stop = threading.Event()
         self._env_stop = threading.Event()
+        env = os.environ if env is None else env
         self._env_thread = threading.Thread(
             target=self._write_env_fifo,
-            args=(self.env_path, _shell_env_exports(os.environ, exclude=env_exclude).encode("utf-8"), self._env_stop),
+            args=(self.env_path, _shell_env_exports(env, exclude=env_exclude).encode("utf-8"), self._env_stop),
             daemon=True,
         )
         self._env_thread.start()
@@ -3735,6 +3744,8 @@ def _agent_run_command(
     """
 
     shell = shutil.which("sh") or "/bin/sh"
+    env_binary = shlex.quote(shutil.which("env") or "/usr/bin/env")
+    inner_shell = shlex.quote(shell)
     child_argv = list(command_argv)
     if child_argv:
         executable = child_argv[0]
@@ -3748,7 +3759,8 @@ def _agent_run_command(
             (
                 'stdout_fifo=$1; stderr_fifo=$2; stdin_fifo=$3; env_file=$4; cwd=$5; shift 5; '
                 'exec <"$stdin_fifo" >"$stdout_fifo" 2>"$stderr_fifo"; '
-                '. "$env_file"; cd "$cwd" || exit 125; exec "$@"'
+                f'cd "$cwd" || exit 125; exec {env_binary} -i {inner_shell} -c \'. "$1"; shift; exec "$@"\' '
+                'avibe-vault-run-env "$env_file" "$@"'
             ),
             "avibe-vault-run",
             stdout_path,
@@ -3773,18 +3785,6 @@ def _resolve_cli_output_path(path: str) -> str:
     if not output_path.is_absolute():
         output_path = Path.cwd() / output_path
     return str(output_path)
-
-
-def _stdio_has_tty() -> bool:
-    for stream in (sys.stdin, sys.stdout, sys.stderr):
-        isatty = getattr(stream, "isatty", None)
-        if callable(isatty):
-            try:
-                if isatty():
-                    return True
-            except OSError:
-                continue
-    return False
 
 
 def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: list[str]):
@@ -3985,12 +3985,6 @@ def cmd_vault_run(args):
 
     try:
         if grant is not None:
-            if _stdio_has_tty():
-                raise TaskCliError(
-                    "protected vault run does not yet support interactive TTY commands",
-                    code="protected_tty_unsupported",
-                    help_command=help_command,
-                )
             secret_env_names = {str(secret["env"]) for secret in secrets if secret.get("env")}
             with _AgentRunOutputBridge(
                 sys.stdout.buffer,

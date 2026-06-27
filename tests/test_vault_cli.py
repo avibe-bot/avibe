@@ -236,13 +236,16 @@ def test_run_delivers_protected_secret_under_agent_grant(tmp_path, capfd, monkey
     assert deliver.call_args.kwargs["scope_ref"] == grant["scope_ref"]
     assert deliver.call_args.kwargs["secrets"] == [{"name": "PROTECTED_KEY", "env": "LOCAL_NAME", "envelope": _sealed("protected")}]
     command = deliver.call_args.kwargs["command"]
+    env_binary = shutil.which("env") or "/usr/bin/env"
+    shell = shutil.which("sh") or "/bin/sh"
     assert command[:4] == [
-        shutil.which("sh") or "/bin/sh",
+        shell,
         "-c",
         (
             'stdout_fifo=$1; stderr_fifo=$2; stdin_fifo=$3; env_file=$4; cwd=$5; shift 5; '
             'exec <"$stdin_fifo" >"$stdout_fifo" 2>"$stderr_fifo"; '
-            '. "$env_file"; cd "$cwd" || exit 125; exec "$@"'
+            f'cd "$cwd" || exit 125; exec {env_binary} -i {shell} -c \'. "$1"; shift; exec "$@"\' '
+            'avibe-vault-run-env "$env_file" "$@"'
         ),
         "avibe-vault-run",
     ]
@@ -278,21 +281,55 @@ def test_run_reports_fifo_bridge_errors(capfd, monkeypatch):
     deliver.assert_not_called()
 
 
-def test_run_rejects_protected_tty_without_delivering(capfd, monkeypatch):
+def test_run_allows_tty_stdio_for_protected_delivery(tmp_path, monkeypatch):
     from vibe import api
 
+    monkeypatch.chdir(tmp_path)
+
+    class TtyBytes(io.BytesIO):
+        def isatty(self):
+            return True
+
+    fake_stdin = type("FakeStdin", (), {"buffer": TtyBytes(), "isatty": lambda self: True})()
+    fake_stdout = type("FakeStdout", (), {"buffer": TtyBytes(), "isatty": lambda self: True})()
+    fake_stderr = type("FakeStderr", (), {"buffer": TtyBytes(), "isatty": lambda self: True})()
+    monkeypatch.setattr(cli.sys, "stdin", fake_stdin)
+    monkeypatch.setattr(cli.sys, "stdout", fake_stdout)
+    monkeypatch.setattr(cli.sys, "stderr", fake_stderr)
     _set_protected_grant("PROTECTED_KEY")
-    monkeypatch.setattr(cli, "_stdio_has_tty", lambda: True)
-    deliver = Mock()
+    deliver = Mock(return_value={"exit_code": 0})
     monkeypatch.setattr(api, "avault_agent_deliver_run", deliver)
     monkeypatch.setattr(api, "avault_deliver_run", Mock())
 
-    code = cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"]))
-    captured = capfd.readouterr()
+    assert cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"])) == 0
+    deliver.assert_called_once()
 
-    assert code == 1
-    assert json.loads(captured.err)["code"] == "protected_tty_unsupported"
-    deliver.assert_not_called()
+
+def test_agent_run_trampoline_clears_agent_environment(tmp_path):
+    env_file = tmp_path / "env.sh"
+    env_file.write_text("export KEEP=value\n")
+    stdout = tmp_path / "stdout"
+    stderr = tmp_path / "stderr"
+    stdin = tmp_path / "stdin"
+    command = cli._agent_run_command(
+        ["python3", "-c", "pass"],
+        stdout_path=str(stdout),
+        stderr_path=str(stderr),
+        stdin_path=str(stdin),
+        env_path=str(env_file),
+    )
+
+    assert "exec " in command[2]
+    assert "env -i " in command[2]
+    assert ". \"$1\"; shift; exec \"$@\"" in command[2]
+
+
+def test_shell_env_exports_can_use_explicit_env():
+    exports = cli._shell_env_exports({"KEEP": "ok", "BAD-NAME": "no", "SECRET": "old"}, exclude={"SECRET"})
+
+    assert "export KEEP=ok\n" in exports
+    assert "BAD-NAME" not in exports
+    assert "SECRET" not in exports
 
 
 def test_run_prefers_common_grant_for_protected_batch(tmp_path, capfd, monkeypatch):

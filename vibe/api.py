@@ -1497,11 +1497,22 @@ def _parse_iso_utc(value: object) -> datetime | None:
 
 
 def _grant_ttl_seconds(grant: dict) -> int:
-    created_at = _parse_iso_utc(grant.get("created_at"))
     expires_at = _parse_iso_utc(grant.get("expires_at"))
-    if created_at is None or expires_at is None:
+    if expires_at is None:
         return 1
-    return max(1, int((expires_at - created_at).total_seconds()))
+    now = datetime.now(timezone.utc)
+    remaining = (expires_at - now).total_seconds()
+    if remaining <= 0:
+        return 0
+    return max(1, int(remaining))
+
+
+def _agent_grant_cached_all(result: dict, expected_count: int) -> bool:
+    granted = result.get("granted")
+    try:
+        return int(granted) == expected_count
+    except (TypeError, ValueError):
+        return False
 
 
 def _grant_scope_payload(grant: dict) -> list[dict[str, str]]:
@@ -1624,13 +1635,23 @@ def create_vault_grant(payload: dict) -> dict:
         raise VaultApiError(str(exc), code="invalid_grant") from exc
     agent_relayed = False
     try:
-        avault_agent_grant(
+        relay_ttl = _grant_ttl_seconds(grant)
+        if relay_ttl <= 0:
+            _cleanup_failed_agent_grant(
+                engine=engine,
+                grant=grant,
+                reason=f"create_vault_grant:{grant['id']}:expired-before-relay",
+            )
+            raise VaultApiError("grant expired before resident agent relay", code="invalid_grant", status=409)
+        agent_result = avault_agent_grant(
             scope_type=str(grant["scope_type"]),
             scope_ref=str(grant["scope_ref"]),
-            ttl_secs=_grant_ttl_seconds(grant),
+            ttl_secs=relay_ttl,
             deks=agent_deks,
             expected_pubkey=expected_pubkey,
         )
+        if not _agent_grant_cached_all(agent_result, len(agent_deks)):
+            raise AvaultError("avault agent grant cached fewer DEKs than requested")
         agent_relayed = True
         with engine.begin() as conn:
             grant = vault_service.mark_grant_agent_ready(conn, str(grant["id"]))
