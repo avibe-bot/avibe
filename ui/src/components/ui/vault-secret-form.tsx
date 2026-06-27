@@ -9,7 +9,7 @@ import { sealBlindBox, standardCreateBlindBoxContext } from '@/lib/vaultCrypto';
 import { Button } from './button';
 import { Input } from './input';
 
-const AVAULT_P2_MIN_VERSION = '0.1.2';
+const AVAULT_P2_MIN_VERSION = '0.1.3';
 type VaultProtection = 'standard' | 'protected';
 
 function versionAtLeast(current: string | null | undefined, minimum: string): boolean {

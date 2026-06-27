@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from vibe.avault_agent import AvaultAgentClient, AvaultAgentError
+from vibe.avault_agent import AvaultAgentClient, AvaultAgentError, AvaultAgentManager
 from vibe.avault_agent import _ensure_agent_socket_parent, default_agent_socket_path
 
 
@@ -130,3 +130,22 @@ def test_agent_socket_path_uses_avibe_home_and_secures_directories(tmp_path, mon
 
     assert stat.S_IMODE(avibe_home.stat().st_mode) == 0o700
     assert stat.S_IMODE(socket_path.parent.stat().st_mode) == 0o700
+
+
+def test_agent_manager_reads_output_written_after_offsets(tmp_path):
+    manager = AvaultAgentManager(socket_path=tmp_path / "avault.sock")
+    manager.stdout_path = tmp_path / "stdout.log"
+    manager.stderr_path = tmp_path / "stderr.log"
+    manager.stdout_path.write_bytes(b"old-out\n")
+    manager.stderr_path.write_bytes(b"old-err\n")
+
+    offsets = manager.output_offsets()
+    with manager.stdout_path.open("ab") as handle:
+        handle.write(b"new-out\n")
+    with manager.stderr_path.open("ab") as handle:
+        handle.write(b"new-err\n")
+
+    assert manager.read_output_since(offsets) == {
+        "stdout": b"new-out\n",
+        "stderr": b"new-err\n",
+    }

@@ -1580,6 +1580,20 @@ def revoke_grant(
     return _grant_row_payload(dict(updated), cache=cache)
 
 
+def has_active_grant_for_scope(conn: Connection, *, scope_type: str, scope_ref: str) -> bool:
+    expire_grants(conn)
+    return (
+        conn.execute(
+            select(vault_grants.c.id).where(
+                vault_grants.c.status == "active",
+                vault_grants.c.scope_type == scope_type,
+                vault_grants.c.scope_ref == scope_ref,
+            )
+        ).first()
+        is not None
+    )
+
+
 def revoke_session_grants(
     conn: Connection,
     session_id: str,

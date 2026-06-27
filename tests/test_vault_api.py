@@ -354,6 +354,45 @@ def test_create_and_revoke_grant_api(monkeypatch):
     agent_release.assert_called_once_with(scope_type="secret", scope_ref="GRANT_KEY")
 
 
+def test_revoke_grant_keeps_agent_scope_when_other_active_grant_exists(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_release = Mock(return_value={"released": True})
+    monkeypatch.setattr(api, "avault_agent_release", agent_release)
+    api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
+    with api._vault_engine().begin() as conn:
+        req_1 = vault_service.create_access_request(
+            conn,
+            "GRANT_KEY",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant_1 = vault_service.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="GRANT_KEY",
+            created_by_request_id=req_1["id"],
+        )
+        req_2 = vault_service.create_access_request(
+            conn,
+            "GRANT_KEY",
+            requester={"session_id": "ses_2"},
+            delivery={"session_id": "ses_2"},
+        )
+        grant_2 = vault_service.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="GRANT_KEY",
+            created_by_request_id=req_2["id"],
+        )
+
+    revoked = api.revoke_vault_grant(grant_1["id"])
+
+    assert revoked["grant"]["status"] == "revoked"
+    agent_release.assert_not_called()
+    with api._vault_engine().connect() as conn:
+        assert vault_service.find_active_grant_for_secret(conn, "GRANT_KEY", session_id="ses_2")["id"] == grant_2["id"]
+
+
 def test_agent_grant_rejects_pubkey_mismatch(monkeypatch):
     agent_client = Mock()
     monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
@@ -376,6 +415,27 @@ def test_agent_grant_rejects_pubkey_mismatch(monkeypatch):
         )
 
     agent_client.grant.assert_not_called()
+
+
+def test_agent_deliver_run_returns_exit_and_forwarded_output(monkeypatch):
+    class FakeManager:
+        def request_with_output(self, request):
+            client = Mock()
+            client.deliver_run.return_value = {"exit_code": 7}
+            result = request(client)
+            return result, {"stdout": b"child out\n", "stderr": b"child err\n"}
+
+    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_avault_agent_manager", lambda: FakeManager())
+
+    result = api.avault_agent_deliver_run(
+        scope_type="secret",
+        scope_ref="GRANT_KEY",
+        secrets=[{"name": "GRANT_KEY", "env": "GRANT_KEY", "envelope": _sealed()}],
+        command=["python3", "-c", "pass"],
+    )
+
+    assert result == {"exit_code": 7, "stdout": b"child out\n", "stderr": b"child err\n"}
 
 
 def test_create_grant_api_requires_resident_agent_deks(monkeypatch):

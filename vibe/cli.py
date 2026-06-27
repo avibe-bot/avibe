@@ -3494,6 +3494,21 @@ def _agent_missing_grant(exc: Exception) -> bool:
     return "grant is missing or expired" in text or "grant does not cover" in text
 
 
+def _preflight_vault_run_batch(engine, mapping: dict[str, str]) -> None:
+    from storage import vault_service
+
+    with engine.connect() as conn:
+        tiers = {
+            str(vault_service.get_secret_meta(conn, vault_name).get("protection") or "standard")
+            for vault_name in set(mapping.values())
+        }
+    if len(tiers) > 1:
+        raise TaskCliError(
+            "mixing protected and standard secrets in one vault run is not wired yet",
+            code="mixed_protection_tiers",
+        )
+
+
 def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: list[str]):
     from storage import vault_service
 
@@ -3653,6 +3668,7 @@ def cmd_vault_run(args):
                 example="vibe vault run --env OPENAI_API_KEY -- python sync.py",
             )
         engine = _open_vault_engine()
+        _preflight_vault_run_batch(engine, mapping)
         grant, secrets = _resolve_vault_run_delivery(engine, mapping, command_argv)
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
@@ -3673,12 +3689,17 @@ def cmd_vault_run(args):
 
     try:
         if grant is not None:
-            exit_code = api.avault_agent_deliver_run(
+            result = api.avault_agent_deliver_run(
                 scope_type=grant["scope_type"],
                 scope_ref=grant["scope_ref"],
                 secrets=secrets,
                 command=command_argv,
             )
+            sys.stdout.buffer.write(result.get("stdout") or b"")
+            sys.stdout.buffer.flush()
+            sys.stderr.buffer.write(result.get("stderr") or b"")
+            sys.stderr.buffer.flush()
+            exit_code = int(result["exit_code"])
         else:
             exit_code = api.avault_deliver_run(secrets, command_argv)
     except api.AvaultError as exc:

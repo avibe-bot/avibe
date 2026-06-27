@@ -8,6 +8,7 @@ Plaintext and DEKs stay inside ``avault``.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import threading
@@ -189,6 +190,8 @@ class AvaultAgentManager:
         self.start_timeout = start_timeout
         self._lock = threading.RLock()
         self._process: subprocess.Popen | None = None
+        self.stdout_path = paths.get_runtime_dir() / "avault_agent_stdout.log"
+        self.stderr_path = paths.get_runtime_dir() / "avault_agent_stderr.log"
 
     def client(self) -> AvaultAgentClient:
         return AvaultAgentClient(self.socket_path, ensure_agent=self.ensure_running)
@@ -211,11 +214,9 @@ class AvaultAgentManager:
     def _spawn_locked(self) -> None:
         binary = self._binary_resolver()
         _ensure_agent_socket_parent(self.socket_path.parent)
-        stdout_path = paths.get_runtime_dir() / "avault_agent_stdout.log"
-        stderr_path = paths.get_runtime_dir() / "avault_agent_stderr.log"
-        stdout_path.parent.mkdir(parents=True, exist_ok=True)
-        stdout = stdout_path.open("ab")
-        stderr = stderr_path.open("ab")
+        self.stdout_path.parent.mkdir(parents=True, exist_ok=True)
+        stdout = self.stdout_path.open("ab")
+        stderr = self.stderr_path.open("ab")
         try:
             self._process = subprocess.Popen(
                 [
@@ -273,6 +274,25 @@ class AvaultAgentManager:
             proc.kill()
             proc.wait(timeout=2)
 
+    def output_offsets(self) -> dict[str, int]:
+        return {
+            "stdout": _file_size(self.stdout_path),
+            "stderr": _file_size(self.stderr_path),
+        }
+
+    def read_output_since(self, offsets: dict[str, int]) -> dict[str, bytes]:
+        return {
+            "stdout": _read_file_since(self.stdout_path, int(offsets.get("stdout") or 0)),
+            "stderr": _read_file_since(self.stderr_path, int(offsets.get("stderr") or 0)),
+        }
+
+    def request_with_output(self, request: Callable[[AvaultAgentClient], dict[str, Any]]) -> tuple[dict[str, Any], dict[str, bytes]]:
+        with self._lock:
+            offsets = self.output_offsets()
+            result = request(self.client())
+            output = self.read_output_since(offsets)
+        return result, output
+
 
 def default_agent_socket_path() -> Path:
     return paths.get_vibe_remote_dir() / "run" / "avault.sock"
@@ -317,3 +337,20 @@ def _read_exact(sock: socket.socket, size: int) -> bytes:
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except FileNotFoundError:
+        return 0
+
+
+def _read_file_since(path: Path, offset: int) -> bytes:
+    try:
+        with path.open("rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            handle.seek(offset if 0 <= offset <= size else 0)
+            return handle.read()
+    except FileNotFoundError:
+        return b""

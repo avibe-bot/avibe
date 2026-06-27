@@ -1570,14 +1570,20 @@ def revoke_vault_grant(grant_id: str) -> dict:
     try:
         with engine.begin() as conn:
             grant = vault_service.revoke_grant(conn, grant_id)
+            release_agent_scope = not vault_service.has_active_grant_for_scope(
+                conn,
+                scope_type=grant["scope_type"],
+                scope_ref=grant["scope_ref"],
+            )
     except vault_service.GrantNotFoundError as exc:
         raise VaultApiError(f"grant '{grant_id}' not found", code="grant_not_found", status=404) from exc
     except vault_service.GrantNotActiveError as exc:
         raise VaultApiError(f"grant '{grant_id}' is not active", code="grant_not_active", status=409) from exc
-    try:
-        avault_agent_release(scope_type=grant["scope_type"], scope_ref=grant["scope_ref"])
-    except AvaultError:
-        logger.warning("revoke_vault_grant: failed to release resident agent grant %s", grant_id, exc_info=True)
+    if release_agent_scope:
+        try:
+            avault_agent_release(scope_type=grant["scope_type"], scope_ref=grant["scope_ref"])
+        except AvaultError:
+            logger.warning("revoke_vault_grant: failed to release resident agent grant %s", grant_id, exc_info=True)
     return {"ok": True, "grant": grant}
 
 
@@ -3602,7 +3608,7 @@ _ASKILL_INSTALL_LOCK = threading.Lock()
 _AVAULT_INSTALL_LOCK = threading.Lock()
 _AVAULT_AGENT_MANAGER_LOCK = threading.Lock()
 _AVAULT_AGENT_MANAGER = None
-AVAULT_P2_MIN_VERSION = "0.1.2"
+AVAULT_P2_MIN_VERSION = "0.1.3"
 # Installer pin must reference a published manifest-pinned release. It may lag
 # the P2 surface; standard sealing remains usable while P2-only entry points
 # gate on AVAULT_P2_MIN_VERSION below.
@@ -4084,6 +4090,10 @@ def _require_avault_path() -> str:
 
 
 def _avault_agent_client():
+    return _avault_agent_manager().client()
+
+
+def _avault_agent_manager():
     from vibe.avault_agent import AvaultAgentManager
 
     global _AVAULT_AGENT_MANAGER
@@ -4094,7 +4104,7 @@ def _avault_agent_client():
                 command_env=_command_env_for,
             )
         manager = _AVAULT_AGENT_MANAGER
-    return manager.client()
+    return manager
 
 
 def _run_avault(
@@ -4342,24 +4352,28 @@ def avault_agent_deliver_run(
     scope_ref: str,
     secrets: list[dict],
     command: list[str],
-) -> int:
+) -> dict:
     """Run a child under a protected grant. Plaintext stays inside avault."""
     from vibe.avault_agent import AvaultAgentError
 
     _require_avault_p2_surface("resident agent deliver run")
+    manager = _avault_agent_manager()
     try:
-        result = _avault_agent_client().deliver_run(
-            scope_type=scope_type,
-            scope_ref=scope_ref,
-            command=command,
-            secrets=[_agent_secret_payload(secret, target_field="env") for secret in secrets],
+        result, output = manager.request_with_output(
+            lambda client: client.deliver_run(
+                scope_type=scope_type,
+                scope_ref=scope_ref,
+                command=command,
+                secrets=[_agent_secret_payload(secret, target_field="env") for secret in secrets],
+            )
         )
     except AvaultAgentError as exc:
         raise AvaultError(str(exc)) from exc
     try:
-        return int(result["exit_code"])
+        exit_code = int(result["exit_code"])
     except (KeyError, TypeError, ValueError) as exc:
         raise AvaultError("avault agent deliver run returned malformed output") from exc
+    return {"exit_code": exit_code, "stdout": output["stdout"], "stderr": output["stderr"]}
 
 
 def avault_agent_deliver_fetch(
