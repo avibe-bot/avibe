@@ -1809,6 +1809,10 @@ const Transcript: React.FC<TranscriptProps> = ({
   // restore, or the restore not yet applied) and older pages cascade in until the
   // very first message.
   const canLoadOlderRef = useRef(true);
+  // Set just before the anchor-restore writes scrollTop, so the scroll event it
+  // emits doesn't count as the user "leaving the top zone" and re-arm the loader
+  // (which would let an iOS momentum fling immediately re-trigger the cascade).
+  const anchorRestoreScrollRef = useRef(false);
 
   useEffect(() => {
     loadOlderRef.current = onLoadOlder;
@@ -1895,7 +1899,13 @@ const Transcript: React.FC<TranscriptProps> = ({
     // Re-arm once clearly back inside loaded content (hysteresis vs the 120 trigger),
     // so a normal scroll-up loads one page, holds position, and waits for the next
     // deliberate scroll to the top instead of auto-cascading through all history.
-    if (el.scrollTop > 300) canLoadOlderRef.current = true;
+    if (anchorRestoreScrollRef.current) {
+      // This scroll event came from the programmatic anchor restore, not the user —
+      // consume it without re-arming so a momentum fling can't immediately re-fire.
+      anchorRestoreScrollRef.current = false;
+    } else if (el.scrollTop > 300) {
+      canLoadOlderRef.current = true;
+    }
     if (hasOlder && !loadingOlder && canLoadOlderRef.current && el.scrollTop < 120) {
       canLoadOlderRef.current = false;
       loadOlderRef.current();
@@ -1998,7 +2008,10 @@ const Transcript: React.FC<TranscriptProps> = ({
       const delta = currentTop - anchor.top;
       // Sub-pixel rect noise would otherwise write scrollTop on every fire; only
       // correct a real (≥0.5px) drift so reading history stays perfectly still.
-      if (Math.abs(delta) >= 0.5) el.scrollTop += delta;
+      if (Math.abs(delta) >= 0.5) {
+        anchorRestoreScrollRef.current = true;
+        el.scrollTop += delta;
+      }
     });
     ro.observe(content);
     return () => ro.disconnect();
