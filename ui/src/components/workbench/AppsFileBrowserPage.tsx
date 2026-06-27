@@ -4,6 +4,7 @@ import { ChevronRight, Download, File as FileIcon, Folder, FolderPlus, Loader2, 
 import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
+import { useWindowManager } from '../../context/WindowManagerContext';
 import { previewKind } from '../../lib/filePreview';
 import {
   contentUrl,
@@ -21,8 +22,8 @@ import {
 } from '../../lib/filesApi';
 import { Button } from '../ui/button';
 
-// Lazy-load the editor so CodeMirror + @codemirror/language-data stay out of the
-// main bundle until a text file is actually opened.
+// Lazy-load the editor so Monaco stays out of the main bundle until a text file
+// is actually opened.
 const FileEditorPane = lazy(() => import('./FileEditorPane').then((m) => ({ default: m.FileEditorPane })));
 
 type Selected = { path: string; name: string; kind: string; mime: string | null; mtime: number | null; size: number | null };
@@ -297,14 +298,14 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean }> = ({ windowed
 
         {/* Right: content pane (desktop) */}
         <div className="hidden min-w-0 flex-1 md:flex">
-          <ContentPane selected={selected} />
+          <ContentPane selected={selected} windowed={windowed} />
         </div>
       </div>
 
       {/* Mobile: content opens below the list when a file is selected */}
       {selected && (
         <div className="flex min-h-[50vh] flex-col overflow-hidden rounded-xl border border-border bg-surface md:hidden">
-          <ContentPane selected={selected} />
+          <ContentPane selected={selected} windowed={windowed} />
         </div>
       )}
     </div>
@@ -330,8 +331,9 @@ const FavRow: React.FC<{ icon: React.ReactNode; label: string; active: boolean; 
   </button>
 );
 
-const ContentPane: React.FC<{ selected: Selected | null }> = ({ selected }) => {
+const ContentPane: React.FC<{ selected: Selected | null; windowed: boolean }> = ({ selected, windowed }) => {
   const { t } = useTranslation();
+  const wm = useWindowManager();
   if (!selected) {
     return (
       <div className="grid flex-1 place-items-center p-6 text-center text-[12.5px] text-muted">
@@ -360,7 +362,22 @@ const ContentPane: React.FC<{ selected: Selected | null }> = ({ selected }) => {
       >
         {/* key by path: remount per file so an in-flight save/load can never apply its
             result to a different file (stale clean/dirty baseline or wrong expected_mtime). */}
-        <FileEditorPane key={selected.path} path={selected.path} filename={selected.name} mtime={selected.mtime} />
+        <FileEditorPane
+          key={selected.path}
+          path={selected.path}
+          filename={selected.name}
+          mtime={selected.mtime}
+          // Inside a window, offer to pop the file out into its own Editor window.
+          onPopOut={
+            windowed
+              ? () =>
+                  wm.openApp('editor', {
+                    title: selected.name,
+                    params: { path: selected.path, filename: selected.name, mtime: selected.mtime },
+                  })
+              : undefined
+          }
+        />
       </Suspense>
     );
   }

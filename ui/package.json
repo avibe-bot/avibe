@@ -15,10 +15,10 @@
     "validate:theme": "node scripts/validate-theme.mjs"
   },
   "dependencies": {
-    "@codemirror/language-data": "^6.5.2",
     "@hpke/core": "^1.9.0",
     "@hpke/dhkem-x25519": "^1.8.0",
     "@lexical/react": "^0.45.0",
+    "@monaco-editor/react": "^4.7.0",
     "@noble/curves": "^2.2.0",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-label": "^2.1.8",
@@ -27,7 +27,6 @@
     "@radix-ui/react-slot": "^1.2.4",
     "@shikijs/langs": "^4.2.0",
     "@shikijs/themes": "^4.2.0",
-    "@uiw/react-codemirror": "^4.25.10",
     "@uiw/react-json-view": "^2.0.0-alpha.43",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
@@ -42,6 +41,7 @@
     "lexical": "^0.45.0",
     "lexical-beautiful-mentions": "^0.1.48",
     "lucide-react": "^0.562.0",
+    "monaco-editor": "^0.55.1",
     "papaparse": "^5.5.3",
     "qrcode.react": "^4.2.0",
     "react": "^19.2.0",

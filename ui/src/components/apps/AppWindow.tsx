@@ -147,7 +147,7 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
       </div>
 
       <div className="min-h-0 flex-1 overflow-hidden">
-        <Body windowId={win.id} />
+        <Body windowId={win.id} params={win.params} />
       </div>
 
       {!win.maximized &&

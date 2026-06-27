@@ -602,7 +602,12 @@
     "soon": "Soon",
     "editor": {
       "label": "Editor",
-      "desc": "A fast code editor for files on this machine."
+      "desc": "A fast code editor for files on this machine.",
+      "empty": "No file open",
+      "emptyHint": "Open a file from Files to edit it here.",
+      "openInWindow": "Open in editor window",
+      "selectAll": "Select all",
+      "copyAll": "Copy all"
     },
     "window": {
       "minimize": "Minimize",

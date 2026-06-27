@@ -19,8 +19,8 @@ export interface AppDefinition {
   /** Tint for the Dock tile + window title icon — a CSS var token name. */
   accent: string;
   defaultSize: { width: number; height: number };
-  /** The window body. Receives the owning window id. */
-  Component: React.FC<{ windowId: string }>;
+  /** The window body. Receives the owning window id and its launch params. */
+  Component: React.FC<{ windowId: string; params?: Record<string, unknown> }>;
 }
 
 const Loading: React.FC = () => {
@@ -28,19 +28,14 @@ const Loading: React.FC = () => {
   return <div className="grid h-full w-full place-items-center bg-surface text-[12px] text-muted">{t('common.loading')}</div>;
 };
 
-// Temporary body for apps not yet ported (editor → Monaco lands in P4).
-const PlaceholderBody: React.FC<{ icon: LucideIcon; accent: string }> = ({ icon: Icon, accent }) => (
-  <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-surface">
-    <Icon className="size-10" style={{ color: `var(${accent})` }} />
-    <Loading />
-  </div>
-);
-
 const FilesBody = lazy(() =>
   import('../components/workbench/AppsFileBrowserPage').then((m) => ({ default: m.AppsFileBrowserPage })),
 );
 const TerminalBody = lazy(() =>
   import('../components/workbench/AppsTerminalPage').then((m) => ({ default: m.AppsTerminalPage })),
+);
+const EditorBody = lazy(() =>
+  import('../components/workbench/EditorApp').then((m) => ({ default: m.EditorApp })),
 );
 
 export const APP_REGISTRY: Record<AppId, AppDefinition> = {
@@ -74,7 +69,11 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     icon: CodeXml,
     accent: '--violet',
     defaultSize: { width: 1000, height: 640 },
-    Component: () => <PlaceholderBody icon={CodeXml} accent="--violet" />,
+    Component: ({ params }) => (
+      <Suspense fallback={<Loading />}>
+        <EditorBody params={params} />
+      </Suspense>
+    ),
   },
 };
 

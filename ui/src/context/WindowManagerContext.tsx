@@ -16,6 +16,8 @@ export interface WindowInstance {
   appId: AppId;
   /** Optional per-instance title override (e.g. an open file path); falls back to the app's titleKey. */
   title?: string;
+  /** Per-instance launch params surfaced to the app body (e.g. the file an Editor window opens). */
+  params?: Record<string, unknown>;
   bounds: WindowBounds;
   z: number;
   minimized: boolean;
@@ -27,6 +29,7 @@ export interface WindowInstance {
 export interface OpenAppOptions {
   title?: string;
   bounds?: Partial<WindowBounds>;
+  params?: Record<string, unknown>;
 }
 
 export interface WindowManagerValue {
@@ -87,6 +90,7 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
         id,
         appId,
         title: opts?.title,
+        params: opts?.params,
         bounds,
         z,
         minimized: false,

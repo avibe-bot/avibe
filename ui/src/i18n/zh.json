@@ -602,7 +602,12 @@
     "soon": "即将上线",
     "editor": {
       "label": "编辑器",
-      "desc": "本机文件的快速代码编辑器。"
+      "desc": "本机文件的快速代码编辑器。",
+      "empty": "未打开文件",
+      "emptyHint": "从「文件」中打开一个文件，在这里编辑。",
+      "openInWindow": "在编辑器窗口中打开",
+      "selectAll": "全选",
+      "copyAll": "全部复制"
     },
     "window": {
       "minimize": "最小化",

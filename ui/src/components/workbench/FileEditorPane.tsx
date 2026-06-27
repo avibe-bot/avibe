@@ -1,39 +1,88 @@
 import { Suspense, lazy, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Loader2, Save } from 'lucide-react';
-import { languages } from '@codemirror/language-data';
+import { Loader2, PanelRightOpen, Save } from 'lucide-react';
 import clsx from 'clsx';
 
+import { useTheme } from '../../context/ThemeContext';
 import { Button } from '../ui/button';
 import { fileBrowserErrorMessage, readText, writeFile } from '../../lib/filesApi';
 
-// CodeMirror 6 is heavy; lazy-load it so it stays out of the main bundle (same
-// approach as the file-viewer modal). @uiw/react-codemirror's default export is
-// the editor component.
-const CodeMirror = lazy(() => import('@uiw/react-codemirror'));
+// Monaco (the VS Code kernel) is heavy; lazy-load it so it stays out of the main
+// bundle and only loads when a file is actually opened for editing.
+const MonacoEditor = lazy(() => import('./MonacoEditor'));
 
-async function loadLanguageExtension(filename: string): Promise<any[]> {
-  const ext = filename.includes('.') ? filename.split('.').pop()!.toLowerCase() : '';
-  if (!ext) return [];
-  const desc = (languages as any[]).find((lang) => lang.extensions?.includes(ext));
-  if (!desc) return [];
-  try {
-    return [await desc.load()];
-  } catch {
-    return [];
-  }
+// Map a filename to a Monaco language id. Monaco colours unknown languages as
+// plaintext, so this only needs to cover the common cases; the heavy semantic
+// languages (ts/js/json/css/html) also have workers wired in MonacoEditor.
+const LANGUAGE_BY_EXT: Record<string, string> = {
+  ts: 'typescript',
+  tsx: 'typescript',
+  cts: 'typescript',
+  mts: 'typescript',
+  js: 'javascript',
+  jsx: 'javascript',
+  cjs: 'javascript',
+  mjs: 'javascript',
+  json: 'json',
+  jsonc: 'json',
+  css: 'css',
+  scss: 'scss',
+  less: 'less',
+  html: 'html',
+  htm: 'html',
+  xml: 'xml',
+  svg: 'xml',
+  md: 'markdown',
+  markdown: 'markdown',
+  py: 'python',
+  rb: 'ruby',
+  go: 'go',
+  rs: 'rust',
+  java: 'java',
+  kt: 'kotlin',
+  c: 'c',
+  h: 'c',
+  cpp: 'cpp',
+  cc: 'cpp',
+  hpp: 'cpp',
+  cs: 'csharp',
+  php: 'php',
+  swift: 'swift',
+  sh: 'shell',
+  bash: 'shell',
+  zsh: 'shell',
+  yml: 'yaml',
+  yaml: 'yaml',
+  toml: 'ini',
+  ini: 'ini',
+  cfg: 'ini',
+  sql: 'sql',
+  dockerfile: 'dockerfile',
+  graphql: 'graphql',
+  lua: 'lua',
+};
+
+function monacoLanguage(filename: string): string | undefined {
+  const lower = filename.toLowerCase();
+  if (lower === 'dockerfile') return 'dockerfile';
+  const ext = lower.includes('.') ? lower.split('.').pop()! : '';
+  return LANGUAGE_BY_EXT[ext];
 }
 
-// Read + edit + save one text/code file. Read-only is just `editable={false}`.
-export const FileEditorPane: React.FC<{ path: string; filename: string; mtime: number | null }> = ({
-  path,
-  filename,
-  mtime,
-}) => {
+// Read + edit + save one text/code file. Read-only is just `readOnly`. When
+// `onPopOut` is provided (the in-Files editor pane), a button pops the file out
+// into a standalone Editor window.
+export const FileEditorPane: React.FC<{
+  path: string;
+  filename: string;
+  mtime: number | null;
+  readOnly?: boolean;
+  onPopOut?: () => void;
+}> = ({ path, filename, mtime, readOnly = false, onPopOut }) => {
   const { t } = useTranslation();
+  const { resolvedTheme } = useTheme();
   const [text, setText] = useState<string | null>(null);
   const [original, setOriginal] = useState('');
-  const [langExt, setLangExt] = useState<any[]>([]);
   const [savedMtime, setSavedMtime] = useState<number | null>(mtime);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -57,18 +106,16 @@ export const FileEditorPane: React.FC<{ path: string; filename: string; mtime: n
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
-    void loadLanguageExtension(filename).then((ext) => {
-      if (!cancelled) setLangExt(ext);
-    });
     return () => {
       cancelled = true;
     };
   }, [path, filename, mtime]);
 
-  const dirty = text !== null && text !== original;
+  const dirty = !readOnly && text !== null && text !== original;
+  const language = monacoLanguage(filename);
 
   async function save() {
-    if (text === null || saving) return;
+    if (text === null || saving || readOnly) return;
     setSaving(true);
     setError(null);
     try {
@@ -87,17 +134,32 @@ export const FileEditorPane: React.FC<{ path: string; filename: string; mtime: n
       <div className="flex items-center gap-2 border-b border-border px-3 py-2">
         <span className="flex-1 truncate font-mono text-[12px] text-foreground">{filename}</span>
         {dirty && <span className="size-1.5 shrink-0 rounded-full bg-mint" title={t('apps.fileBrowser.unsaved')} />}
-        <Button
-          type="button"
-          size="sm"
-          variant="brand"
-          disabled={!dirty || saving || text === null}
-          onClick={() => void save()}
-          className="h-7 gap-1.5 px-2.5 text-[12px]"
-        >
-          {saving ? <Loader2 className="size-3 animate-spin" /> : <Save className="size-3" />}
-          {t('apps.fileBrowser.save')}
-        </Button>
+        {onPopOut && (
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            className="size-7 shrink-0 text-muted"
+            aria-label={t('apps.editor.openInWindow')}
+            title={t('apps.editor.openInWindow')}
+            onClick={onPopOut}
+          >
+            <PanelRightOpen className="size-3.5" />
+          </Button>
+        )}
+        {!readOnly && (
+          <Button
+            type="button"
+            size="sm"
+            variant="brand"
+            disabled={!dirty || saving || text === null}
+            onClick={() => void save()}
+            className="h-7 gap-1.5 px-2.5 text-[12px]"
+          >
+            {saving ? <Loader2 className="size-3 animate-spin" /> : <Save className="size-3" />}
+            {t('apps.fileBrowser.save')}
+          </Button>
+        )}
       </div>
 
       {error && (
@@ -106,17 +168,17 @@ export const FileEditorPane: React.FC<{ path: string; filename: string; mtime: n
         </div>
       )}
 
-      <div className={clsx('min-h-0 flex-1 overflow-auto', loading && 'grid place-items-center')}>
+      <div className={clsx('min-h-0 flex-1', loading && 'grid place-items-center')}>
         {loading ? (
           <Loader2 className="size-5 animate-spin text-muted" />
         ) : text === null ? null : (
           <Suspense fallback={<div className="p-4 text-[12px] text-muted">{t('common.loading')}</div>}>
-            <CodeMirror
+            <MonacoEditor
               value={text}
-              height="100%"
-              extensions={langExt}
-              onChange={(value: string) => setText(value)}
-              basicSetup={{ lineNumbers: true, highlightActiveLine: true }}
+              language={language}
+              readOnly={readOnly}
+              dark={resolvedTheme === 'dark'}
+              onChange={(value) => setText(value)}
             />
           </Suspense>
         )}
