@@ -534,11 +534,17 @@ pre,
 .vr-markdown table {
   border-collapse: collapse;
   margin: 0 0 0.6em;
+  /* Size to the table's natural content width (so cells keep their own width and
+     never get squeezed/wrapped to fit a narrow chat bubble — e.g. a header
+     collapsing to one char per line), and scroll horizontally within the bubble
+     when that exceeds it. The table width is decoupled from the bubble width. */
   display: block;
+  width: max-content;
+  max-width: 100%;
   overflow-x: auto;
 }
 .vr-markdown th,
-.vr-markdown td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+.vr-markdown td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; white-space: nowrap; }
 .vr-markdown th { background: var(--surface-2); font-weight: 600; }
 .vr-markdown img { max-width: 100%; border-radius: 8px; }
 .vr-markdown strong { font-weight: 700; }
