@@ -45,9 +45,9 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     icon: Folder,
     accent: '--cyan',
     defaultSize: { width: 920, height: 600 },
-    Component: () => (
+    Component: ({ windowId }) => (
       <Suspense fallback={<Loading />}>
-        <FilesBody windowed />
+        <FilesBody windowed windowId={windowId} />
       </Suspense>
     ),
   },
@@ -57,11 +57,11 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     icon: SquareTerminal,
     accent: '--mint',
     defaultSize: { width: 820, height: 540 },
-    Component: ({ windowId }) => (
+    Component: () => (
       <Suspense fallback={<Loading />}>
-        {/* Key the terminal session by the window instance so each terminal window
-            (and the /apps/terminal route) gets its own backend session. */}
-        <TerminalBody windowed windowKey={windowId} />
+        {/* Each windowed terminal takes a bounded, reused session slot internally so
+            it gets its own backend session without leaking ids (see AppsTerminalPage). */}
+        <TerminalBody windowed />
       </Suspense>
     ),
   },
@@ -71,9 +71,9 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     icon: CodeXml,
     accent: '--violet',
     defaultSize: { width: 1000, height: 640 },
-    Component: ({ params }) => (
+    Component: ({ windowId, params }) => (
       <Suspense fallback={<Loading />}>
-        <EditorBody params={params} />
+        <EditorBody windowId={windowId} params={params} />
       </Suspense>
     ),
   },

@@ -8,7 +8,7 @@ import { FileCode2 } from 'lucide-react';
 // shows a tasteful empty state.
 const FileEditorPane = lazy(() => import('./FileEditorPane').then((m) => ({ default: m.FileEditorPane })));
 
-export const EditorApp: React.FC<{ params?: Record<string, unknown> }> = ({ params }) => {
+export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, unknown> }> = ({ windowId, params }) => {
   const { t } = useTranslation();
   const path = typeof params?.path === 'string' ? params.path : null;
   const mtime = typeof params?.mtime === 'number' ? params.mtime : null;
@@ -39,7 +39,7 @@ export const EditorApp: React.FC<{ params?: Record<string, unknown> }> = ({ para
         fallback={<div className="grid h-full w-full place-items-center text-[12px] text-muted">{t('common.loading')}</div>}
       >
         {/* key by path: remount per file so a stale load/save can't apply to a different file. */}
-        <FileEditorPane key={path} path={path} filename={filename} mtime={mtime} />
+        <FileEditorPane key={path} path={path} filename={filename} mtime={mtime} windowId={windowId} />
       </Suspense>
     </div>
   );

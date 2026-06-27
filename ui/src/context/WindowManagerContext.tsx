@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
 import { APP_REGISTRY, type AppId } from '../apps/registry';
 
@@ -45,6 +45,13 @@ export interface WindowManagerValue {
   toggleMaximize: (id: string) => void;
   /** Patch a window's bounds (used by drag + resize). */
   setBounds: (id: string, bounds: Partial<WindowBounds>) => void;
+  /**
+   * Register (or clear, by passing null) a guard a window body uses to veto closing.
+   * The getter returns a confirm message when closing would lose work, else null.
+   */
+  setCloseGuard: (id: string, getMessage: (() => string | null) | null) => void;
+  /** Run a window's close guard (confirm if it has a message); true = may close. */
+  confirmClose: (id: string) => boolean;
 }
 
 const WindowManagerContext = createContext<WindowManagerValue | null>(null);
@@ -59,6 +66,20 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
   const idSeq = useRef(0);
   const zSeq = useRef(0);
   const openCount = useRef(0);
+  // Per-window close guards: a body (e.g. a dirty editor) registers a getter that
+  // returns a confirm message when closing would lose work. Held in a ref so it
+  // never triggers re-renders.
+  const closeGuards = useRef(new Map<string, () => string | null>());
+
+  const setCloseGuard = useCallback((id: string, getMessage: (() => string | null) | null) => {
+    if (getMessage) closeGuards.current.set(id, getMessage);
+    else closeGuards.current.delete(id);
+  }, []);
+
+  const confirmClose = useCallback((id: string): boolean => {
+    const message = closeGuards.current.get(id)?.();
+    return !message || window.confirm(message);
+  }, []);
 
   const focus = useCallback((id: string) => {
     setWindows((prev) => {
@@ -101,6 +122,7 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
   }, []);
 
   const close = useCallback((id: string) => {
+    closeGuards.current.delete(id);
     setWindows((prev) => prev.filter((w) => w.id !== id));
   }, []);
 
@@ -140,8 +162,20 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
   }, [windows]);
 
   const value = useMemo<WindowManagerValue>(
-    () => ({ windows, focusedId, openApp, close, focus, minimize, restore, toggleMaximize, setBounds }),
-    [windows, focusedId, openApp, close, focus, minimize, restore, toggleMaximize, setBounds],
+    () => ({
+      windows,
+      focusedId,
+      openApp,
+      close,
+      focus,
+      minimize,
+      restore,
+      toggleMaximize,
+      setBounds,
+      setCloseGuard,
+      confirmClose,
+    }),
+    [windows, focusedId, openApp, close, focus, minimize, restore, toggleMaximize, setBounds, setCloseGuard, confirmClose],
   );
 
   return <WindowManagerContext.Provider value={value}>{children}</WindowManagerContext.Provider>;
@@ -151,4 +185,18 @@ export function useWindowManager(): WindowManagerValue {
   const ctx = useContext(WindowManagerContext);
   if (!ctx) throw new Error('useWindowManager must be used within a WindowManagerProvider');
   return ctx;
+}
+
+// A window body calls this to veto its own close while there's unsaved work: pass
+// the owning window id and a confirm message (or null when clean). No-ops for a
+// non-windowed (full-page) mount, where windowId is undefined.
+export function useWindowCloseGuard(windowId: string | undefined, message: string | null): void {
+  const { setCloseGuard } = useWindowManager();
+  const messageRef = useRef(message);
+  messageRef.current = message;
+  useEffect(() => {
+    if (!windowId) return;
+    setCloseGuard(windowId, () => messageRef.current);
+    return () => setCloseGuard(windowId, null);
+  }, [windowId, setCloseGuard]);
 }

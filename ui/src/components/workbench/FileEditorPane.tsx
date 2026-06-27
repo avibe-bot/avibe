@@ -4,6 +4,7 @@ import { Loader2, PanelRightOpen, Save } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useTheme } from '../../context/ThemeContext';
+import { useWindowCloseGuard } from '../../context/WindowManagerContext';
 import { Button } from '../ui/button';
 import { fileBrowserErrorMessage, readText, writeFile } from '../../lib/filesApi';
 
@@ -80,7 +81,9 @@ export const FileEditorPane: React.FC<{
   mtime: number | null;
   readOnly?: boolean;
   onPopOut?: (live: { mtime: number | null }) => void;
-}> = ({ path, filename, mtime, readOnly = false, onPopOut }) => {
+  /** The owning window id, when this editor lives in a window — enables the unsaved-close guard. */
+  windowId?: string;
+}> = ({ path, filename, mtime, readOnly = false, onPopOut, windowId }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [text, setText] = useState<string | null>(null);
@@ -115,6 +118,10 @@ export const FileEditorPane: React.FC<{
 
   const dirty = !readOnly && text !== null && text !== original;
   const language = monacoLanguage(filename);
+
+  // Veto closing the owning window while there are unsaved edits (the close unmounts
+  // this pane and the buffer only lives in React state). No-op for the full-page route.
+  useWindowCloseGuard(windowId, dirty ? t('apps.editor.confirmDiscardClose') : null);
 
   async function save() {
     if (text === null || saving || readOnly) return;

@@ -19,7 +19,7 @@ function onTextSurface(el: Element | null): boolean {
 // so their terminal/editor state survives a minimize). Desktop-only — mobile opens
 // apps full screen (P5), so no free-floating windows there.
 export const WindowLayer: React.FC = () => {
-  const { windows, focusedId, close, minimize } = useWindowManager();
+  const { windows, focusedId, close, minimize, confirmClose } = useWindowManager();
   const ref = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
 
@@ -50,7 +50,7 @@ export const WindowLayer: React.FC = () => {
       const key = e.key.toLowerCase();
       if (key === 'w') {
         e.preventDefault();
-        close(focusedId);
+        if (confirmClose(focusedId)) close(focusedId);
       } else if (key === 'm') {
         e.preventDefault();
         minimize(focusedId);
@@ -58,7 +58,7 @@ export const WindowLayer: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [focusedId, close, minimize]);
+  }, [focusedId, close, minimize, confirmClose]);
 
   // Render every window — minimized ones stay mounted (hidden + inert via AppWindow)
   // so their app body keeps its state. The layer is only aria-hidden when nothing is

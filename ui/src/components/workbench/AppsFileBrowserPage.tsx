@@ -35,7 +35,10 @@ const MAX_EDIT_BYTES = 1024 * 1024;
 // Whole-machine Finder: favorites rail (pinned projects + OS defaults), a
 // breadcrumb + dir/file list (left), and a content pane (right) that views or
 // edits the selected file. Backend contract: src/lib/filesApi.ts → /api/files/*.
-export const AppsFileBrowserPage: React.FC<{ windowed?: boolean }> = ({ windowed = false }) => {
+export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: string }> = ({
+  windowed = false,
+  windowId,
+}) => {
   const { t } = useTranslation();
   const { projects } = useWorkbenchProjectsTree();
   const [cwd, setCwd] = useState('');
@@ -298,14 +301,14 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean }> = ({ windowed
 
         {/* Right: content pane (desktop) */}
         <div className="hidden min-w-0 flex-1 md:flex">
-          <ContentPane selected={selected} windowed={windowed} />
+          <ContentPane selected={selected} windowed={windowed} windowId={windowId} />
         </div>
       </div>
 
       {/* Mobile: content opens below the list when a file is selected */}
       {selected && (
         <div className="flex min-h-[50vh] flex-col overflow-hidden rounded-xl border border-border bg-surface md:hidden">
-          <ContentPane selected={selected} windowed={windowed} />
+          <ContentPane selected={selected} windowed={windowed} windowId={windowId} />
         </div>
       )}
     </div>
@@ -331,7 +334,11 @@ const FavRow: React.FC<{ icon: React.ReactNode; label: string; active: boolean; 
   </button>
 );
 
-const ContentPane: React.FC<{ selected: Selected | null; windowed: boolean }> = ({ selected, windowed }) => {
+const ContentPane: React.FC<{ selected: Selected | null; windowed: boolean; windowId?: string }> = ({
+  selected,
+  windowed,
+  windowId,
+}) => {
   const { t } = useTranslation();
   const wm = useWindowManager();
   if (!selected) {
@@ -367,6 +374,7 @@ const ContentPane: React.FC<{ selected: Selected | null; windowed: boolean }> = 
           path={selected.path}
           filename={selected.name}
           mtime={selected.mtime}
+          windowId={windowId}
           // Inside a window, offer to pop the file out into its own Editor window.
           // Carry the editor's live mtime (it may have saved since this row opened),
           // not the row's stale metadata, so the new window won't false-conflict.

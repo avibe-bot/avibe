@@ -607,8 +607,12 @@
       "emptyHint": "从「文件」中打开一个文件，在这里编辑。",
       "openInWindow": "在编辑器窗口中打开",
       "saveBeforePopOut": "请先保存，再在新窗口中打开",
+      "confirmDiscardClose": "放弃未保存的更改并关闭此窗口？",
       "selectAll": "全选",
       "copyAll": "全部复制"
+    },
+    "dock": {
+      "newInstanceHint": "⌘ 点击可新建窗口"
     },
     "window": {
       "minimize": "最小化",

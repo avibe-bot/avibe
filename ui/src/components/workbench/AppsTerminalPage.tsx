@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useApi } from '../../context/ApiContext';
+import { acquireTerminalSlot, releaseTerminalSlot } from '../../lib/terminalSlots';
 
 // Lazy so xterm.js stays out of the main bundle until the Terminal is opened.
 const TerminalView = lazy(() => import('./TerminalView').then((m) => ({ default: m.TerminalView })));
@@ -36,11 +37,9 @@ function getSessionId(identity: string | null, windowKey?: string): string {
 
 // `windowed` renders just the terminal filling its parent (an AppWindow body) — no
 // page header / viewport-height wrapper, since the window chrome supplies the title.
-// `windowKey` (the owning window id) makes each windowed terminal its own session.
-export const AppsTerminalPage: React.FC<{ windowed?: boolean; windowKey?: string }> = ({
-  windowed = false,
-  windowKey,
-}) => {
+// A windowed terminal also takes a bounded, reused session slot so each window gets
+// its own backend session without minting unbounded session ids.
+export const AppsTerminalPage: React.FC<{ windowed?: boolean }> = ({ windowed = false }) => {
   const { t } = useTranslation();
   const { getAuthSession } = useApi();
   // Resolve the signed-in identity first, then derive the (account-scoped) session id, so we
@@ -48,8 +47,12 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean; windowKey?: string
   const [sessionId, setSessionId] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
+    // Take a bounded slot for the lifetime of a windowed terminal (released on close),
+    // so opening/closing terminal windows reuses session ids instead of exhausting the
+    // backend's session cap. The route terminal takes no slot — it keeps its persistent id.
+    const slot = windowed ? acquireTerminalSlot() : null;
     const resolve = (identity: string | null) => {
-      if (!cancelled) setSessionId(getSessionId(identity, windowKey));
+      if (!cancelled) setSessionId(getSessionId(identity, slot != null ? `w${slot}` : undefined));
     };
     getAuthSession()
       // Prefer the stable OIDC subject; email can be absent or shared across subjects, which
@@ -58,8 +61,9 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean; windowKey?: string
       .catch(() => resolve(null));
     return () => {
       cancelled = true;
+      if (slot != null) releaseTerminalSlot(slot);
     };
-  }, [getAuthSession, windowKey]);
+  }, [getAuthSession, windowed]);
 
   const loading = <div className="grid h-full w-full place-items-center text-[12px] text-muted">{t('common.loading')}</div>;
   const content =

@@ -38,9 +38,12 @@ export const Dock: React.FC = () => {
           <button
             key={app.id}
             type="button"
-            title={t(app.titleKey)}
+            title={running ? `${t(app.titleKey)} · ${t('apps.dock.newInstanceHint')}` : t(app.titleKey)}
             aria-label={t(app.titleKey)}
-            onClick={() => activate(app.id)}
+            // Plain click focuses/restores the existing window; a modifier-click
+            // (⌘/Ctrl/Alt) always opens another instance — windows are multi-instance,
+            // but otherwise there'd be no UI path to a second Files/Terminal window.
+            onClick={(e) => (e.metaKey || e.ctrlKey || e.altKey ? wm.openApp(app.id) : activate(app.id))}
             className="flex flex-col items-center gap-1.5"
           >
             <span

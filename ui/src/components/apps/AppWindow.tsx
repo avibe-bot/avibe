@@ -87,7 +87,16 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
     : { left: win.bounds.x, top: win.bounds.y, width: win.bounds.width, height: win.bounds.height, zIndex: win.z };
 
   const lights: { key: string; color: string; glyph: string; onClick: () => void; label: string }[] = [
-    { key: 'close', color: '#ff5f57', glyph: '×', onClick: () => setExitKind((k) => k ?? 'close'), label: t('common.close') },
+    {
+      key: 'close',
+      color: '#ff5f57',
+      glyph: '×',
+      // A dirty editor body can veto the close (confirm) before the exit animation.
+      onClick: () => {
+        if (wm.confirmClose(win.id)) setExitKind((k) => k ?? 'close');
+      },
+      label: t('common.close'),
+    },
     // Minimize is a mounted hide (no exit animation): the body keeps running and
     // `inert` on the root pulls focus out, so nothing is trapped in a hidden window.
     { key: 'min', color: '#febc2e', glyph: '–', onClick: () => wm.minimize(win.id), label: t('apps.window.minimize') },
