@@ -1803,16 +1803,16 @@ const Transcript: React.FC<TranscriptProps> = ({
   const [showJump, setShowJump] = useState(false);
   const loadOlderRef = useRef(onLoadOlder);
   const reloadLatestRef = useRef(onReloadLatest);
-  // Load ONE older page per scroll-into-the-top-zone. Disarmed on trigger and
-  // re-armed only after scrolling back down into loaded content — otherwise the
-  // top threshold stays satisfied (iOS momentum fighting the post-load anchor
-  // restore, or the restore not yet applied) and older pages cascade in until the
-  // very first message.
+  // Load ONE older page per scroll gesture, not a cascade. The top threshold can
+  // stay satisfied across many scroll events — momentum/inertial scrolling (iOS
+  // touch AND macOS trackpad in Chrome) keeps firing while the post-load anchor
+  // restore + overshoot ride through the trigger zone — which fired older-page
+  // loads back-to-back all the way to the first message. So disarm on trigger and
+  // re-arm only once scrolling has SETTLED (a continuous fling keeps resetting the
+  // timer; a new deliberate scroll after the pause re-arms). Settle-based re-arm
+  // also recovers a failed load (it re-arms regardless of outcome).
   const canLoadOlderRef = useRef(true);
-  // Set just before the anchor-restore writes scrollTop, so the scroll event it
-  // emits doesn't count as the user "leaving the top zone" and re-arm the loader
-  // (which would let an iOS momentum fling immediately re-trigger the cascade).
-  const anchorRestoreScrollRef = useRef(false);
+  const settleTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     loadOlderRef.current = onLoadOlder;
@@ -1899,13 +1899,15 @@ const Transcript: React.FC<TranscriptProps> = ({
     // Re-arm once clearly back inside loaded content (hysteresis vs the 120 trigger),
     // so a normal scroll-up loads one page, holds position, and waits for the next
     // deliberate scroll to the top instead of auto-cascading through all history.
-    if (anchorRestoreScrollRef.current) {
-      // This scroll event came from the programmatic anchor restore, not the user —
-      // consume it without re-arming so a momentum fling can't immediately re-fire.
-      anchorRestoreScrollRef.current = false;
-    } else if (el.scrollTop > 300) {
+    // Re-arm only after scrolling SETTLES (~150ms idle). A continuous fling — and
+    // the programmatic anchor-restore scroll plus any momentum overshoot it rides
+    // through the top zone — keeps resetting this, so one gesture loads exactly one
+    // older page instead of cascading. The next deliberate scroll after the pause
+    // re-arms; a failed load recovers the same way (re-arm regardless of outcome).
+    if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
+    settleTimerRef.current = window.setTimeout(() => {
       canLoadOlderRef.current = true;
-    }
+    }, 150);
     if (hasOlder && !loadingOlder && canLoadOlderRef.current && el.scrollTop < 120) {
       canLoadOlderRef.current = false;
       loadOlderRef.current();
@@ -2008,10 +2010,7 @@ const Transcript: React.FC<TranscriptProps> = ({
       const delta = currentTop - anchor.top;
       // Sub-pixel rect noise would otherwise write scrollTop on every fire; only
       // correct a real (≥0.5px) drift so reading history stays perfectly still.
-      if (Math.abs(delta) >= 0.5) {
-        anchorRestoreScrollRef.current = true;
-        el.scrollTop += delta;
-      }
+      if (Math.abs(delta) >= 0.5) el.scrollTop += delta;
     });
     ro.observe(content);
     return () => ro.disconnect();
