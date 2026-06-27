@@ -66,7 +66,18 @@ export function Combobox({
   )
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) {
+          // Commit a typed custom value on close so it isn't lost if the user
+          // tabs/clicks away without picking the "Use ..." item.
+          if (allowCustomValue && inputValue && inputValue !== value) onValueChange(inputValue)
+          setInputValue("")
+        }
+        setOpen(next)
+      }}
+    >
       <PopoverTrigger asChild>
         <button
           type="button"
