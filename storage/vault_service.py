@@ -1703,9 +1703,6 @@ def find_active_grant_for_secrets(
         member_set = {str(name) for name in members if isinstance(name, str) and name}
         if not requested.issubset(member_set):
             continue
-        payload = _grant_row_payload(row, cache=cache)
-        if not payload.get("delivery_ready"):
-            continue
         candidates.append((len(member_set), str(row.get("created_at") or ""), str(row.get("id") or ""), row))
     if not candidates:
         return None
@@ -1744,7 +1741,7 @@ def resolve_secret_access(
         or _payload_session_id(requester)
     )
     grant = find_active_grant_for_secret(conn, name, session_id=effective_session_id, cache=cache)
-    if grant is not None and grant.get("delivery_ready"):
+    if grant is not None:
         return {
             "status": "agent_delivery_ready",
             "secret": _meta_payload(row),
