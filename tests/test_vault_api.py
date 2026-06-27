@@ -445,13 +445,17 @@ def test_agent_grant_rejects_pubkey_mismatch(monkeypatch):
     agent_client.grant.assert_not_called()
 
 
-def test_agent_deliver_run_returns_exit_and_forwarded_output(monkeypatch):
+def test_agent_deliver_run_reuses_resident_agent_socket(monkeypatch):
+    seen_timeout = []
+
+    class FakeClient:
+        def deliver_run(self, **kwargs):
+            return {"exit_code": 7}
+
     class FakeManager:
-        def request_with_output(self, request):
-            client = Mock()
-            client.deliver_run.return_value = {"exit_code": 7}
-            result = request(client)
-            return result, {"stdout": b"child out\n", "stderr": b"child err\n"}
+        def client(self, *, timeout=None):
+            seen_timeout.append(timeout)
+            return FakeClient()
 
     monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
     monkeypatch.setattr(api, "_avault_agent_manager", lambda: FakeManager())
@@ -463,7 +467,35 @@ def test_agent_deliver_run_returns_exit_and_forwarded_output(monkeypatch):
         command=["python3", "-c", "pass"],
     )
 
-    assert result == {"exit_code": 7, "stdout": b"child out\n", "stderr": b"child err\n"}
+    assert result == {"exit_code": 7}
+    assert seen_timeout == [None]
+
+
+def test_agent_deliver_fetch_uses_finite_timeout(monkeypatch):
+    seen_timeout = []
+
+    class FakeClient:
+        def deliver_fetch(self, **kwargs):
+            return {"status": 200, "headers": {}, "body": "ok"}
+
+    class FakeManager:
+        def client(self, *, timeout=None):
+            seen_timeout.append(timeout)
+            return FakeClient()
+
+    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_avault_agent_manager", lambda: FakeManager())
+
+    result = api.avault_agent_deliver_fetch(
+        scope_type="secret",
+        scope_ref="GRANT_KEY",
+        name="GRANT_KEY",
+        sealed=_sealed(),
+        request={"method": "GET", "url": "https://example.com", "allowed_hosts": ["example.com"], "inject": {"type": "bearer"}},
+    )
+
+    assert result["status"] == 200
+    assert seen_timeout == [api._AVAULT_FETCH_TIMEOUT_SECONDS]
 
 
 def test_create_grant_api_requires_resident_agent_deks(monkeypatch):

@@ -4386,15 +4386,12 @@ def avault_agent_deliver_run(
     from vibe.avault_agent import AvaultAgentError
 
     _require_avault_p2_surface("resident agent deliver run")
-    manager = _avault_agent_manager()
     try:
-        result, output = manager.request_with_output(
-            lambda client: client.deliver_run(
-                scope_type=scope_type,
-                scope_ref=scope_ref,
-                command=command,
-                secrets=[_agent_secret_payload(secret, target_field="env") for secret in secrets],
-            )
+        result = _avault_agent_manager().client(timeout=None).deliver_run(
+            scope_type=scope_type,
+            scope_ref=scope_ref,
+            command=command,
+            secrets=[_agent_secret_payload(secret, target_field="env") for secret in secrets],
         )
     except AvaultAgentError as exc:
         raise AvaultError(str(exc)) from exc
@@ -4402,7 +4399,7 @@ def avault_agent_deliver_run(
         exit_code = int(result["exit_code"])
     except (KeyError, TypeError, ValueError) as exc:
         raise AvaultError("avault agent deliver run returned malformed output") from exc
-    return {"exit_code": exit_code, "stdout": output["stdout"], "stderr": output["stderr"]}
+    return {"exit_code": exit_code}
 
 
 def avault_agent_deliver_fetch(
@@ -4418,7 +4415,7 @@ def avault_agent_deliver_fetch(
 
     _require_avault_p2_surface("resident agent deliver fetch")
     try:
-        return _avault_agent_manager().client(timeout=None).deliver_fetch(
+        return _avault_agent_manager().client(timeout=_AVAULT_FETCH_TIMEOUT_SECONDS).deliver_fetch(
             scope_type=scope_type,
             scope_ref=scope_ref,
             name=name,

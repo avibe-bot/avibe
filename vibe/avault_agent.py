@@ -190,11 +190,7 @@ class AvaultAgentManager:
         self.idle_timeout_secs = idle_timeout_secs
         self.start_timeout = start_timeout
         self._lock = threading.RLock()
-        self._output_lock = threading.Lock()
         self._process: subprocess.Popen | None = None
-        self._owned_socket_identity: tuple[int, int] | None = None
-        self._stdout = bytearray()
-        self._stderr = bytearray()
 
     def client(self, *, timeout: float | None = DEFAULT_AGENT_SOCKET_TIMEOUT) -> AvaultAgentClient:
         return AvaultAgentClient(self.socket_path, timeout=timeout, ensure_agent=self.ensure_running)
@@ -209,7 +205,6 @@ class AvaultAgentManager:
                 self._terminate_process_locked()
             self._spawn_locked()
             self._wait_for_socket_locked()
-            self._owned_socket_identity = _socket_identity(self.socket_path)
 
     def reset(self) -> None:
         with self._lock:
@@ -232,15 +227,13 @@ class AvaultAgentManager:
                     str(self.idle_timeout_secs),
                 ],
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 env=self._command_env(binary) if self._command_env else None,
                 **isolated_subprocess_kwargs(),
             )
         except FileNotFoundError as exc:
             raise AvaultAgentError("avault binary not found") from exc
-        _start_pipe_reader(self._process.stdout, self._stdout, self._output_lock)
-        _start_pipe_reader(self._process.stderr, self._stderr, self._output_lock)
 
     def _wait_for_socket_locked(self) -> None:
         deadline = time.monotonic() + self.start_timeout
@@ -266,7 +259,6 @@ class AvaultAgentManager:
     def _terminate_process_locked(self) -> None:
         proc = self._process
         self._process = None
-        self._owned_socket_identity = None
         if proc is None or proc.poll() is not None:
             return
         proc.terminate()
@@ -275,46 +267,6 @@ class AvaultAgentManager:
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=2)
-
-    def _has_owned_process_locked(self) -> bool:
-        return self._process is not None and self._process.poll() is None
-
-    def _has_owned_socket_locked(self) -> bool:
-        return self._owned_socket_identity is not None and self._owned_socket_identity == _socket_identity(self.socket_path)
-
-    def _ensure_owned_agent_running_locked(self) -> None:
-        if self._has_owned_process_locked() and self._has_owned_socket_locked():
-            if self._socket_responds():
-                return
-            self._terminate_process_locked()
-        elif self._has_owned_process_locked():
-            self._terminate_process_locked()
-        _ensure_agent_socket_parent(self.socket_path.parent)
-        _unlink_agent_socket(self.socket_path)
-        self._spawn_locked()
-        self._wait_for_socket_locked()
-        self._owned_socket_identity = _socket_identity(self.socket_path)
-
-    def request_with_output(self, request: Callable[[AvaultAgentClient], dict[str, Any]]) -> tuple[dict[str, Any], dict[str, bytes]]:
-        with self._lock:
-            self._ensure_owned_agent_running_locked()
-            self._clear_output()
-            result = request(AvaultAgentClient(self.socket_path, timeout=None))
-            output = self._drain_output()
-        return result, output
-
-    def _clear_output(self) -> None:
-        with self._output_lock:
-            self._stdout.clear()
-            self._stderr.clear()
-
-    def _drain_output(self) -> dict[str, bytes]:
-        _wait_for_output_idle(self._output_lock, self._stdout, self._stderr)
-        with self._output_lock:
-            output = {"stdout": bytes(self._stdout), "stderr": bytes(self._stderr)}
-            self._stdout.clear()
-            self._stderr.clear()
-        return output
 
 
 def default_agent_socket_path() -> Path:
@@ -343,25 +295,6 @@ def _remove_stale_agent_socket(path: Path) -> None:
             return
     except OSError:
         path.unlink(missing_ok=True)
-
-
-def _unlink_agent_socket(path: Path) -> None:
-    try:
-        mode = path.lstat().st_mode
-    except FileNotFoundError:
-        return
-    if stat.S_ISSOCK(mode):
-        path.unlink(missing_ok=True)
-
-
-def _socket_identity(path: Path) -> tuple[int, int] | None:
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return None
-    if not stat.S_ISSOCK(info.st_mode):
-        return None
-    return (info.st_dev, info.st_ino)
 
 
 def _missing_binary_resolver() -> str:
@@ -395,28 +328,3 @@ def _read_exact(sock: socket.socket, size: int) -> bytes:
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
-
-
-def _start_pipe_reader(pipe, buffer: bytearray, lock: threading.Lock) -> None:
-    if pipe is None:
-        return
-
-    def _reader() -> None:
-        with pipe:
-            while chunk := pipe.read(8192):
-                with lock:
-                    buffer.extend(chunk)
-
-    threading.Thread(target=_reader, daemon=True).start()
-
-
-def _wait_for_output_idle(lock: threading.Lock, stdout: bytearray, stderr: bytearray) -> None:
-    previous = (-1, -1)
-    deadline = time.monotonic() + 1.0
-    while time.monotonic() < deadline:
-        with lock:
-            current = (len(stdout), len(stderr))
-        if current == previous:
-            return
-        previous = current
-        time.sleep(0.01)

@@ -198,7 +198,18 @@ def test_run_delivers_protected_secret_under_agent_grant(tmp_path, capfd, monkey
 
     monkeypatch.chdir(tmp_path)
     grant = _set_protected_grant("PROTECTED_KEY")
-    deliver = Mock(return_value={"exit_code": 0, "stdout": b"protected out\n", "stderr": b"protected err\n"})
+
+    def _deliver(**kwargs):
+        command = kwargs["command"]
+        stdout_path = command[4]
+        stderr_path = command[5]
+        with open(stdout_path, "wb", buffering=0) as stdout:
+            stdout.write(b"protected out\n")
+        with open(stderr_path, "wb", buffering=0) as stderr:
+            stderr.write(b"protected err\n")
+        return {"exit_code": 0}
+
+    deliver = Mock(side_effect=_deliver)
     monkeypatch.setattr(api, "avault_agent_deliver_run", deliver)
     monkeypatch.setattr(api, "avault_deliver_run", Mock())
 
@@ -208,21 +219,23 @@ def test_run_delivers_protected_secret_under_agent_grant(tmp_path, capfd, monkey
     assert code == 0
     assert "protected out\n" in captured.out
     assert "protected err\n" in captured.err
-    deliver.assert_called_once_with(
-        scope_type=grant["scope_type"],
-        scope_ref=grant["scope_ref"],
-        secrets=[{"name": "PROTECTED_KEY", "env": "LOCAL_NAME", "envelope": _sealed("protected")}],
-        command=[
-            shutil.which("sh") or "/bin/sh",
-            "-c",
-            'cd "$1" || exit 125; shift; exec "$@"',
-            "avibe-vault-run",
-            str(tmp_path),
-            shutil.which("python3") or "python3",
-            "-c",
-            "pass",
-        ],
-    )
+    deliver.assert_called_once()
+    assert deliver.call_args.kwargs["scope_type"] == grant["scope_type"]
+    assert deliver.call_args.kwargs["scope_ref"] == grant["scope_ref"]
+    assert deliver.call_args.kwargs["secrets"] == [{"name": "PROTECTED_KEY", "env": "LOCAL_NAME", "envelope": _sealed("protected")}]
+    command = deliver.call_args.kwargs["command"]
+    assert command[:4] == [
+        shutil.which("sh") or "/bin/sh",
+        "-c",
+        'stdout_fifo=$1; stderr_fifo=$2; cwd=$3; shift 3; exec >"$stdout_fifo" 2>"$stderr_fifo"; cd "$cwd" || exit 125; exec "$@"',
+        "avibe-vault-run",
+    ]
+    assert command[6:] == [
+        str(tmp_path),
+        shutil.which("python3") or "python3",
+        "-c",
+        "pass",
+    ]
     assert "value" not in repr(deliver.call_args.kwargs)
     with cli._open_vault_engine().connect() as conn:
         assert vault_service.get_secret_meta(conn, "PROTECTED_KEY")["use_count"] == 1
@@ -319,7 +332,7 @@ def test_run_records_protected_delivery_when_child_returns_70(capfd, monkeypatch
     from vibe import api
 
     _set_protected_grant("PROTECTED_KEY")
-    monkeypatch.setattr(api, "avault_agent_deliver_run", Mock(return_value={"exit_code": 70, "stdout": b"", "stderr": b""}))
+    monkeypatch.setattr(api, "avault_agent_deliver_run", Mock(return_value={"exit_code": 70}))
     monkeypatch.setattr(api, "avault_deliver_run", Mock())
 
     assert cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"])) == 70

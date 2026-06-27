@@ -12,6 +12,8 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -3536,7 +3538,69 @@ def _preflight_vault_inject_batch(engine, names: list[str]) -> dict[str, dict]:
     )
 
 
-def _agent_run_command(command_argv: list[str], *, cwd: str | None = None) -> list[str]:
+class _AgentRunOutputBridge:
+    """Stream protected child output through temporary FIFOs owned by this CLI."""
+
+    def __init__(self, stdout, stderr) -> None:
+        if not hasattr(os, "mkfifo"):
+            raise TaskCliError("protected vault run output streaming requires Unix FIFOs", code="unsupported_platform")
+        runtime_dir = paths.get_runtime_dir()
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        self._tmpdir = Path(tempfile.mkdtemp(prefix="vault-run-", dir=str(runtime_dir)))
+        self._tmpdir.chmod(0o700)
+        self.stdout_path = self._tmpdir / "stdout"
+        self.stderr_path = self._tmpdir / "stderr"
+        os.mkfifo(self.stdout_path, 0o600)
+        os.mkfifo(self.stderr_path, 0o600)
+        self._keeper_fds = [
+            os.open(self.stdout_path, os.O_RDWR | os.O_NONBLOCK),
+            os.open(self.stderr_path, os.O_RDWR | os.O_NONBLOCK),
+        ]
+        self._threads = [
+            threading.Thread(target=self._copy_fifo, args=(self.stdout_path, stdout), daemon=True),
+            threading.Thread(target=self._copy_fifo, args=(self.stderr_path, stderr), daemon=True),
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
+    def close(self) -> None:
+        for fd in self._keeper_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self._keeper_fds.clear()
+        for thread in self._threads:
+            thread.join(timeout=2)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    @staticmethod
+    def _copy_fifo(path: Path, target) -> None:
+        try:
+            with path.open("rb", buffering=0) as source:
+                while True:
+                    chunk = source.read(8192)
+                    if not chunk:
+                        break
+                    target.write(chunk)
+                    target.flush()
+        except OSError:
+            return
+
+
+def _agent_run_command(
+    command_argv: list[str],
+    *,
+    cwd: str | None = None,
+    stdout_path: str | None = None,
+    stderr_path: str | None = None,
+) -> list[str]:
     """Preserve the invoking cwd when a resident agent executes the child.
 
     The current avault agent frame has no cwd field. Wrap the command in a tiny
@@ -3551,6 +3615,17 @@ def _agent_run_command(command_argv: list[str], *, cwd: str | None = None) -> li
         has_path_separator = os.sep in executable or (os.altsep is not None and os.altsep in executable)
         if not has_path_separator and (resolved := shutil.which(executable)):
             child_argv[0] = resolved
+    if stdout_path and stderr_path:
+        return [
+            shell,
+            "-c",
+            'stdout_fifo=$1; stderr_fifo=$2; cwd=$3; shift 3; exec >"$stdout_fifo" 2>"$stderr_fifo"; cd "$cwd" || exit 125; exec "$@"',
+            "avibe-vault-run",
+            stdout_path,
+            stderr_path,
+            cwd or os.getcwd(),
+            *child_argv,
+        ]
     return [
         shell,
         "-c",
@@ -3752,23 +3827,25 @@ def cmd_vault_run(args):
         _print_task_error(exc, help_command=help_command)
         return 1
     # Hand the envelopes + command to avault: it decrypts, spawns the child with the secret
-    # env, waits, and zeroizes. The plaintext never returns here; the child inherits our stdio
-    # so its output passes through. Envelopes (no plaintext) go on avault's stdin.
+    # env, waits, and zeroizes. The plaintext never returns here. Protected agent runs stream
+    # child stdout/stderr through temporary FIFOs because the resident-agent JSON protocol only
+    # returns the exit code.
     from vibe import api
 
     try:
         delivered_by_agent = grant is not None
         if grant is not None:
-            result = api.avault_agent_deliver_run(
-                scope_type=grant["scope_type"],
-                scope_ref=grant["scope_ref"],
-                secrets=secrets,
-                command=_agent_run_command(command_argv),
-            )
-            sys.stdout.buffer.write(result.get("stdout") or b"")
-            sys.stdout.buffer.flush()
-            sys.stderr.buffer.write(result.get("stderr") or b"")
-            sys.stderr.buffer.flush()
+            with _AgentRunOutputBridge(sys.stdout.buffer, sys.stderr.buffer) as output_bridge:
+                result = api.avault_agent_deliver_run(
+                    scope_type=grant["scope_type"],
+                    scope_ref=grant["scope_ref"],
+                    secrets=secrets,
+                    command=_agent_run_command(
+                        command_argv,
+                        stdout_path=str(output_bridge.stdout_path),
+                        stderr_path=str(output_bridge.stderr_path),
+                    ),
+                )
             exit_code = int(result["exit_code"])
         else:
             exit_code = api.avault_deliver_run(secrets, command_argv)

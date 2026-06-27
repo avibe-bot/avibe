@@ -132,64 +132,16 @@ def test_agent_socket_path_uses_avibe_home_and_secures_directories(tmp_path, mon
     assert stat.S_IMODE(socket_path.parent.stat().st_mode) == 0o700
 
 
-def test_agent_manager_captures_only_per_request_output_in_memory(tmp_path, monkeypatch):
-    manager = AvaultAgentManager(socket_path=tmp_path / "avault.sock")
-    seen_timeout: list[float | None] = []
-    monkeypatch.setattr(manager, "_ensure_owned_agent_running_locked", lambda: None)
-    with manager._output_lock:
-        manager._stdout.extend(b"old-out\n")
-        manager._stderr.extend(b"old-err\n")
-
-    def _request(client):
-        seen_timeout.append(client.timeout)
-        with manager._output_lock:
-            manager._stdout.extend(b"new-out\n")
-            manager._stderr.extend(b"new-err\n")
-        return {"exit_code": 0}
-
-    result, output = manager.request_with_output(_request)
-
-    assert result == {"exit_code": 0}
-    assert output == {
-        "stdout": b"new-out\n",
-        "stderr": b"new-err\n",
-    }
-    assert seen_timeout == [None]
-    assert not (tmp_path / "stdout.log").exists()
-    assert not (tmp_path / "stderr.log").exists()
-
-
-def test_agent_manager_replaces_foreign_socket_for_output_capture(tmp_path, monkeypatch):
-    socket_path = Path(tempfile.mkdtemp(prefix="avault-owned-", dir="/tmp")) / "s"
-    spawned = []
-
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        listener.bind(str(socket_path))
-        listener.listen(1)
+def test_agent_manager_preserves_live_socket_with_cached_grants(tmp_path, monkeypatch):
+    socket_path = Path(tempfile.mkdtemp(prefix="avault-live-", dir="/tmp")) / "s"
+    with FakeAgentServer(socket_path, [{"ok": True, "result": {"public_key": "pk", "fingerprint": "fp"}}]) as server:
         manager = AvaultAgentManager(socket_path=socket_path)
+        monkeypatch.setattr(manager, "_spawn_locked", lambda: pytest.fail("live agent socket should be reused"))
 
-        def _spawn_locked():
-            spawned.append(True)
-            manager._owned_socket_identity = None
+        manager.ensure_running()
 
-            class FakeProcess:
-                def poll(self):
-                    return None
-
-            manager._process = FakeProcess()
-
-        monkeypatch.setattr(manager, "_spawn_locked", _spawn_locked)
-        monkeypatch.setattr(manager, "_wait_for_socket_locked", lambda: None)
-
-        result, output = manager.request_with_output(lambda _client: {"exit_code": 0})
-
-        assert result == {"exit_code": 0}
-        assert output == {"stdout": b"", "stderr": b""}
-        assert spawned == [True]
-        assert not socket_path.exists()
-    finally:
-        listener.close()
+    assert socket_path.exists()
+    assert [request["type"] for request in server.requests] == ["pubkey"]
 
 
 def test_remove_stale_agent_socket_unlinks_dead_socket(tmp_path):
