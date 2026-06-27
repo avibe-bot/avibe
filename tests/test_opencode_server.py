@@ -196,6 +196,28 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(started, [True])
         self.assertFalse(manager._caller_context_plugin_refresh_pending)
 
+    async def test_cleanup_stale_managed_pid_does_not_inherit_caller_context_for_new_pid(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        pid_info = {"pid": 111, "port": 4096, "caller_context_path": manager._caller_context_path()}
+        writes = []
+        manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: pid_info  # type: ignore[method-assign]
+        manager._find_opencode_serve_pids = lambda port: [222]  # type: ignore[method-assign]
+
+        def _write_pid_file(pid, *, caller_context_path=SERVER_MODULE._USE_CURRENT_CALLER_CONTEXT_PATH):
+            writes.append((pid, caller_context_path))
+            pid_info.clear()
+            pid_info.update({"pid": pid, "port": 4096})
+            if isinstance(caller_context_path, str) and caller_context_path:
+                pid_info["caller_context_path"] = caller_context_path
+
+        manager._write_pid_file = _write_pid_file  # type: ignore[method-assign]
+
+        await manager._cleanup_orphaned_managed_server()
+
+        self.assertEqual(writes, [(222, None)])
+        self.assertNotIn("caller_context_path", pid_info)
+
     async def test_ensure_running_rejects_unmanaged_healthy_server(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]

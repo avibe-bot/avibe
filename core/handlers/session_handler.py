@@ -208,12 +208,19 @@ class SessionHandler(BaseHandler):
         base_session_id: str,
         working_path: str,
         context: MessageContext,
+        session_key: str,
         native_session_id: Optional[str],
         explicit_model: Optional[str],
     ) -> ClaudeSDKClient | None:
         client = self.claude_sessions.get(composite_key)
         if client is None:
             return None
+        self.ensure_agent_session_id(
+            context,
+            session_key=session_key,
+            agent_name="claude",
+            session_anchor=base_session_id,
+        )
         caller_env = caller_env_for_platform_payload(getattr(context, "platform_specific", None))
         if getattr(client, "_vibe_caller_env", {}) != caller_env:
             logger.info(
@@ -682,6 +689,7 @@ class SessionHandler(BaseHandler):
                 base_session_id=cached_base,
                 working_path=working_path,
                 context=context,
+                session_key=session_key,
                 native_session_id=cached_session_id,
                 explicit_model=explicit_model,
             )
@@ -704,6 +712,7 @@ class SessionHandler(BaseHandler):
                     base_session_id=base_session_id,
                     working_path=working_path,
                     context=context,
+                    session_key=session_key,
                     native_session_id=stored_claude_session_id,
                     explicit_model=explicit_model,
                 )

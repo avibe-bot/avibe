@@ -2827,7 +2827,7 @@ def _agent_run_source_from_caller(caller_context) -> tuple[str, Optional[str], O
     return "agent", caller_context.session_id, caller_context.run_id, metadata
 
 
-def _resolve_async_callback_session_id(args, caller_context):
+def _resolve_async_callback_session_id(args, caller_context, *, target_session_id: Optional[str] = None):
     explicit_callback = (getattr(args, "callback_session_id", None) or "").strip() or None
     no_callback = bool(getattr(args, "no_callback", False))
     if not bool(getattr(args, "async_run", False)):
@@ -2845,10 +2845,22 @@ def _resolve_async_callback_session_id(args, caller_context):
             ),
         }
     if caller_context is not None:
+        caller_session_id = caller_context.session_id
+        if target_session_id and target_session_id == caller_session_id:
+            raise TaskCliError(
+                "This async Agent Run targets the caller Session itself, so Avibe cannot safely default a callback.",
+                code="self_callback_requires_explicit_policy",
+                hint=(
+                    "Pass --no-callback when continuing the same Session asynchronously, or pass "
+                    "--callback-session-id <session-id> to send the final result to a different caller Session. "
+                    "Default callbacks are only inferred when the delegated run targets a different Session."
+                ),
+                help_command="vibe agent run --help",
+            )
         return caller_context.session_id, {
             "code": "callback_defaulted_to_caller_session",
             "message": "Async callback defaulted to the caller Session from AVIBE_SESSION_ID.",
-            "callback_session_id": caller_context.session_id,
+            "callback_session_id": caller_session_id,
         }
     raise TaskCliError(
         "This async Agent Run has no callback target.",
@@ -3032,7 +3044,11 @@ def cmd_agent_run(args):
             )
         elif session_policy == "create" and args.deliver_key:
             _parse_validated_session_key(args.deliver_key, help_command="vibe agent run --help")
-        callback_session_id, callback_notice = _resolve_async_callback_session_id(args, caller_context)
+        callback_session_id, callback_notice = _resolve_async_callback_session_id(
+            args,
+            caller_context,
+            target_session_id=session_id,
+        )
         if callback_session_id:
             resolve_session_id_target(callback_session_id)
         if session_policy == "create":

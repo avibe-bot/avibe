@@ -407,6 +407,11 @@ class OpenCodeServerManager:
         cmd = self._get_pid_command(pid)
         return bool(cmd and self._is_opencode_serve_cmd(cmd, self.port))
 
+    def _pid_file_has_caller_context_binding(self, info: Optional[Dict[str, Any]]) -> bool:
+        if not self._pid_file_references_current_server(info):
+            return False
+        return bool(isinstance(info, dict) and info.get("caller_context_path") == self._caller_context_path())
+
     @staticmethod
     def _extract_json_object(text: str, start: int) -> Optional[str]:
         if start < 0 or start >= len(text) or text[start] != "{":
@@ -890,7 +895,7 @@ class OpenCodeServerManager:
                 actual_pid = actual_pids[0]
                 if actual_pid != pid:
                     logger.info(f"Adopting healthy OpenCode server (updating stale PID {pid} -> {actual_pid})")
-                    self._write_pid_file(actual_pid, caller_context_path=info.get("caller_context_path"))
+                    self._write_pid_file(actual_pid, caller_context_path=None)
                 else:
                     logger.info(f"Adopting healthy OpenCode server pid={pid} from previous run")
             else:
@@ -929,7 +934,7 @@ class OpenCodeServerManager:
                         "Stop that server or configure Avibe to use another OPENCODE_PORT so caller context "
                         "environment variables can be injected safely."
                     )
-                if pid_info.get("caller_context_path") != self._caller_context_path():
+                if not self._pid_file_has_caller_context_binding(pid_info):
                     self._caller_context_plugin_refresh_pending = True
                 if (
                     self._caller_context_plugin_refresh_pending
