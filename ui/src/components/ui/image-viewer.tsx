@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronLeft, ChevronRight, Download, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, X, ZoomIn, ZoomOut } from 'lucide-react';
+import { TransformWrapper, TransformComponent, type ReactZoomPanPinchRef } from 'react-zoom-pan-pinch';
 
 import { Button } from '@/components/ui/button';
 import { handleMediaDownloadClick, mediaDownloadHref } from '@/lib/downloadMedia';
@@ -41,6 +42,9 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
 
   const open = React.useCallback((next: string) => setSrc(next), []);
   const close = React.useCallback(() => setSrc(null), []);
+  // Controls the zoom/pan transform (wired to the desktop +/- buttons). The
+  // wrapper is keyed on ``src`` so paging to another image remounts it back to 1x.
+  const transformRef = React.useRef<ReactZoomPanPinchRef>(null);
 
   const index = src ? images.indexOf(src) : -1;
   const pageable = index >= 0 && images.length > 1;
@@ -88,7 +92,33 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
           role="dialog"
           aria-modal="true"
         >
-          <div className="absolute right-4 top-4 flex items-center gap-2">
+          <div className="absolute right-4 top-4 z-10 flex items-center gap-2">
+            {/* Zoom buttons: a pointer-device affordance (touch zooms by pinch).
+                stopPropagation so clicking a control doesn't also close the viewer. */}
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={(e) => {
+                e.stopPropagation();
+                transformRef.current?.zoomOut();
+              }}
+              aria-label={t('chat.viewer.zoomOut')}
+              className={`hidden sm:inline-flex ${OVERLAY_BTN}`}
+            >
+              <ZoomOut className="size-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={(e) => {
+                e.stopPropagation();
+                transformRef.current?.zoomIn();
+              }}
+              aria-label={t('chat.viewer.zoomIn')}
+              className={`hidden sm:inline-flex ${OVERLAY_BTN}`}
+            >
+              <ZoomIn className="size-4" />
+            </Button>
             <Button
               asChild
               variant="ghost"
@@ -127,7 +157,7 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
                   step(-1);
                 }}
                 aria-label={t('chat.viewer.previous')}
-                className={`absolute left-4 top-1/2 -translate-y-1/2 rounded-full ${OVERLAY_BTN}`}
+                className={`absolute left-4 top-1/2 z-10 -translate-y-1/2 rounded-full ${OVERLAY_BTN}`}
               >
                 <ChevronLeft className="size-5" />
               </Button>
@@ -139,20 +169,40 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
                   step(1);
                 }}
                 aria-label={t('chat.viewer.next')}
-                className={`absolute right-4 top-1/2 -translate-y-1/2 rounded-full ${OVERLAY_BTN}`}
+                className={`absolute right-4 top-1/2 z-10 -translate-y-1/2 rounded-full ${OVERLAY_BTN}`}
               >
                 <ChevronRight className="size-5" />
               </Button>
             </>
           )}
-          <img
-            src={src}
-            alt=""
-            onClick={(e) => e.stopPropagation()}
-            className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain shadow-2xl"
-          />
+          {/* Zoom/pan the image IN-COMPONENT: the app viewport disables native
+              pinch-zoom (user-scalable=no, for the iOS keyboard fix), so the
+              lightbox provides its own. Mobile: pinch to zoom, drag to pan, double
+              tap to toggle. Desktop: wheel to zoom, drag to pan, double-click /
+              the +/- buttons. Keyed on src so paging resets to a fit view. The
+              wrapping div stops a click inside the image area from closing the
+              viewer (the dark backdrop around it still closes on click). */}
+          <div onClick={(e) => e.stopPropagation()}>
+            <TransformWrapper
+              key={src}
+              ref={transformRef}
+              initialScale={1}
+              minScale={1}
+              maxScale={5}
+              centerOnInit
+              doubleClick={{ mode: 'toggle' }}
+            >
+              <TransformComponent wrapperStyle={{ maxHeight: '90vh', maxWidth: '90vw', cursor: 'grab' }}>
+                <img
+                  src={src}
+                  alt=""
+                  className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain shadow-2xl"
+                />
+              </TransformComponent>
+            </TransformWrapper>
+          </div>
           {pageable && (
-            <span className="absolute bottom-4 left-1/2 -translate-x-1/2 rounded-full bg-white/10 px-3 py-1 font-mono text-[11px] text-white">
+            <span className="absolute bottom-4 left-1/2 z-10 -translate-x-1/2 rounded-full bg-white/10 px-3 py-1 font-mono text-[11px] text-white">
               {index + 1} / {images.length}
             </span>
           )}
