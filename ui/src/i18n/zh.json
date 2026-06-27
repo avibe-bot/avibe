@@ -2088,6 +2088,24 @@
     "standard": "标准档",
     "signing": "签名",
     "secretCount": "{{count}} 个密钥",
+    "grants": {
+      "title": "活跃授权",
+      "subtitle": "Agent 当前可用的授权——吊销即刻断开访问。",
+      "expiresIn": "{{time}} 后过期",
+      "expired": "已过期",
+      "revoke": "吊销",
+      "revokeConfirm": "立即吊销对「{{scope}}」的访问?Agent 将即刻失去访问权。",
+      "revoked": "已吊销对「{{scope}}」的访问",
+      "scope": {
+        "secret": "密钥",
+        "skill": "技能",
+        "group": "分组"
+      },
+      "session": {
+        "this": "本会话",
+        "any": "全部会话"
+      }
+    },
     "view": {
       "all": "全部",
       "byGroup": "按分组"

@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { History, KeyRound, Loader2, Plus, RefreshCw, Trash2, Wallet } from 'lucide-react';
+import { Clock, History, KeyRound, Layers, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, ShieldOff, Trash2, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
-import { useApi, type VaultAuditEvent, type VaultSecret } from '../../context/ApiContext';
+import { useApi, type VaultAuditEvent, type VaultGrant, type VaultSecret } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { VaultSecretForm } from '../ui/vault-secret-form';
 
@@ -84,17 +84,76 @@ const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => voi
   );
 };
 
+const SCOPE_ICON: Record<VaultGrant['scope_type'], typeof KeyRound> = {
+  secret: KeyRound,
+  skill: Puzzle,
+  group: Layers,
+};
+
+/** Compact, locale-neutral countdown to a grant's expiry. */
+function formatRemaining(expiresAt: string, now: number): { text: string; expired: boolean; urgent: boolean } {
+  const end = Date.parse(expiresAt);
+  const secs = Math.floor((end - now) / 1000);
+  if (Number.isNaN(end) || secs <= 0) return { text: '', expired: true, urgent: true };
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  const text = h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${s}s` : `${s}s`;
+  return { text, expired: false, urgent: secs <= 60 };
+}
+
+const GrantRow: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: VaultGrant) => void }> = ({
+  grant: g,
+  now,
+  onRevoke,
+}) => {
+  const { t } = useTranslation();
+  const Icon = SCOPE_ICON[g.scope_type] ?? KeyRound;
+  const rem = formatRemaining(g.expires_at, now);
+  return (
+    <div className="flex items-center gap-3.5 rounded-xl border border-border bg-surface px-4 py-3">
+      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-mint/10 text-mint">
+        <Icon className="size-4" />
+      </div>
+      <div className="flex min-w-0 flex-col gap-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="truncate font-mono text-sm font-semibold">{g.scope_ref}</span>
+          <Badge variant="secondary">{t(`vaults.grants.scope.${g.scope_type}`)}</Badge>
+          <Badge variant="outline">
+            {g.session_id ? t('vaults.grants.session.this') : t('vaults.grants.session.any')}
+          </Badge>
+        </div>
+        <span className="flex items-center gap-1.5 text-xs text-muted">
+          <span>{t('vaults.secretCount', { count: g.runtime_member_count })}</span>
+          <span aria-hidden>·</span>
+          <Clock className="size-3" />
+          <span className={rem.urgent ? 'text-warning' : undefined}>
+            {rem.expired ? t('vaults.grants.expired') : t('vaults.grants.expiresIn', { time: rem.text })}
+          </span>
+        </span>
+      </div>
+      <div className="ml-auto">
+        <Button variant="ghost" size="icon" onClick={() => onRevoke(g)} aria-label={t('vaults.grants.revoke')}>
+          <ShieldOff className="size-4" />
+        </Button>
+      </div>
+    </div>
+  );
+};
+
 export const VaultsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
   const [secrets, setSecrets] = useState<VaultSecret[]>([]);
+  const [grants, setGrants] = useState<VaultGrant[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
   const [audit, setAudit] = useState<VaultAuditEvent[]>([]);
   const [view, setView] = useState<ViewMode>('all');
+  const [now, setNow] = useState(() => Date.now());
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -107,11 +166,27 @@ export const VaultsPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
+    // Active grants are a best-effort control strip; a grants failure (e.g. an
+    // older backend) must not blank out the secret inventory.
+    try {
+      const res = await api.getVaultGrants({ status: 'active' });
+      setGrants(res.grants ?? []);
+    } catch {
+      setGrants([]);
+    }
   }, [api]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Tick once a second only while there are live grants to count down.
+  const hasGrants = grants.length > 0;
+  useEffect(() => {
+    if (!hasGrants) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [hasGrants]);
 
   const groups = useMemo(() => {
     const byGroup = new Map<string, VaultSecret[]>();
@@ -146,6 +221,17 @@ export const VaultsPage: React.FC = () => {
     }
   };
 
+  const onRevokeGrant = async (g: VaultGrant) => {
+    if (!window.confirm(t('vaults.grants.revokeConfirm', { scope: g.scope_ref }))) return;
+    try {
+      await api.revokeVaultGrant(g.id);
+      showToast(t('vaults.grants.revoked', { scope: g.scope_ref }), 'success');
+      refresh();
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    }
+  };
+
   return (
     <div className="mx-auto flex w-full max-w-[1200px] flex-col gap-5 py-2">
       <CapabilityTabs />
@@ -170,6 +256,19 @@ export const VaultsPage: React.FC = () => {
       />
       {error && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
+      )}
+      {grants.length > 0 && (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-2 px-1">
+            <ShieldCheck className="size-4 text-mint" />
+            <span className="text-sm font-semibold">{t('vaults.grants.title')}</span>
+            <Badge variant="secondary">{grants.length}</Badge>
+            <span className="hidden text-xs text-muted sm:inline">{t('vaults.grants.subtitle')}</span>
+          </div>
+          {grants.map((g) => (
+            <GrantRow key={g.id} grant={g} now={now} onRevoke={onRevokeGrant} />
+          ))}
+        </div>
       )}
       {secrets.length > 0 ? (
         <div className="flex items-center gap-1 self-start rounded-lg border border-border bg-surface p-1">
