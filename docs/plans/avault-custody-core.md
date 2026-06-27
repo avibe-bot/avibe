@@ -1,6 +1,6 @@
 # avault — Rust custody core for Avibe Vaults (Avibe-side integration)
 
-**Status:** Approved · implementation started. The custody core lives in its own repo:
+**Status:** P0→P2 implemented & merged (2026-06-28); agent-consumer integration + protected-tier browser sandbox remain — see §15. The custody core lives in its own repo:
 [`avibe-bot/avault`](https://github.com/avibe-bot/avault) (Rust). The **authoritative full
 design** is `avault/docs/DESIGN.md` (mirrored from this document). **This doc now tracks the
 Avibe side** — how the Python daemon integrates avault — and stays in sync with the repo.
@@ -387,14 +387,29 @@ This is an internal store selection inside `avault`, not an Avibe-level plugin l
 
 ## 15. Roadmap
 
+> **Implementation status — 2026-06-28.** P0→P2 are implemented and merged. What
+> remains is the *consumer-facing* surface (how an agent asks for and receives a
+> secret in a normal turn) and the protected tier's browser sandbox — see §15.1.
+
 | Phase | Scope | State |
 |---|---|---|
-| **P0** | Python standard tier: DB + envelope + delivery + `$<NAME>` (#631) | **done — keep & merge; not replaced before P1** |
-| **P1** | `avault-core` + CLI + `file+mlock` store; Rust takes standard-tier seal/open; blind-box create; `vibe runtime prepare` ensure + Dependencies card. Closes the memory-hygiene gap. | next |
-| **P2** | Resident agent + `SO_PEERCRED` + scope-grant DEK cache + signer (secp256k1; approval-card context in the sign prompt). Protected-tier non-browser factors via hardware stores. | after P1 |
-| **P3** | Multi-factor (passkey-PRF copies, TPM, KMS KEK); external `SignerProvider` (hardware wallet / WalletConnect). | later |
+| **P0** | Python standard tier: DB + envelope + delivery + `$<NAME>` (#631) | **superseded** — Python value-crypto removed; all paths route through avault |
+| **P1** | `avault-core` + CLI + `file+mlock` store; Rust takes standard-tier seal/open; blind-box create; `vibe runtime prepare` ensure + Dependencies card | **merged** |
+| **P1.1** | complete the deliver surface (`deliver fetch` / `inject`) | **merged** |
+| **P2** | resident agent (`SO_PEERCRED`/`LOCAL_PEERCRED` socket) + scope-grant DEK cache + secp256k1 signer (ECDSA-recoverable + DER + Schnorr-BIP340) + `file+passphrase` store + operation-bound blind-box AAD; protected delivery through the agent; browser crypto library; Vaults UI (hub, create form, active-access control center) | **merged** — avault #10, browser #674, Python #673, delivery #677, UI #678 + #685 |
 
-**Recommendation:** make P1 **CLI-only** — push the agent, grants, and signing to P2 — so the first step is small and headlessly verifiable.
+### 15.1 Remaining after P2 (open items for the owner)
+
+Established by an audit of merged code on 2026-06-28 — deliberately *not* in P2:
+
+1. **Agent-facing consumer surface — the real usability gap.** The deliver primitives exist in Python (`deliver run`/`fetch`/`inject` via the avault CLI + resident agent), but there is no routed/agent-facing surface to *discover* vaults/scopes and *request* a secret within a normal turn, and the request→approval→grant flow has no in-chat producer yet. Net effect: the grant/request management UI is in place but stays empty until this lands. **Open decision:** the consumer-surface shape — an askill-shaped CLI the agent calls (recommended), vs HTTP endpoints, vs the resident-agent socket directly.
+2. **In-chat approval card (design ①②).** The approve flow is multi-branch — access→grant (scope picker; standard tier works today) vs per-use sign (`grantable=False`) vs protected (browser sandbox, next version). Needs a UX pass on where the card lives (chat vs hub) before building.
+3. **Keypair creation in the UI.** `create_secret` takes a caller-sealed envelope; generating a signing key needs a browser keygen+seal flow (the crypto lib exists).
+4. **Deny-request endpoint.** None yet; pending requests only auto-expire via `expires_at`.
+5. **Protected tier end-to-end → next version.** Browser signing sandbox (cross-origin iframe isolation), WalletConnect-first + local iframe fallback, with all protected-tier crypto (sign *and* non-sign) unified in the sandbox.
+6. **Tags as loadable bundles** (group stays single-select) → next increment: `--env-tag` + `tag:` grant scope.
+
+**Dropped (decided 2026-06-28):** a per-secret **ETH/BTC chain badge** — keypairs are chain-agnostic secp256k1; the chain is fixed by the signature *scheme* at sign time, not a secret attribute. The "Signing" badge is the correct representation.
 
 ---
 
