@@ -13,6 +13,14 @@ const TerminalView = lazy(() => import('./TerminalView').then((m) => ({ default:
 // onto one shared tmux session (which would expose terminal state/commands across clients).
 const FALLBACK_SESSION_ID = `wb-${Math.random().toString(36).slice(2, 10)}`;
 
+// A per-tab token mixed into WINDOWED terminal session ids. The slot pool is module-local
+// (so it's per browser tab), but the localStorage base id is shared across tabs in the same
+// profile — so two tabs would both resolve their first windowed terminal to `<base>-w0` and
+// fight over (reconnect/replace/DELETE) one backend session. This discriminator keeps each
+// tab's windowed terminals distinct. The route terminal is intentionally shared/persistent
+// across tabs (its own shell), so it does NOT use this.
+const TAB_TOKEN = Math.random().toString(36).slice(2, 8);
+
 // A stable per-browser session id so the tmux-backed session reconnects to the same shell
 // after a refresh / network drop (persistence). Falls back to the in-memory id above when
 // localStorage is unavailable. The key is scoped to the signed-in account so a different
@@ -56,7 +64,7 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean }> = ({ windowed = 
     const slot = windowed ? acquireTerminalSlot() : null;
     const resolve = (identity: string | null) => {
       if (cancelled) return;
-      const nextSessionId = getSessionId(identity, slot != null ? `w${slot}` : undefined);
+      const nextSessionId = getSessionId(identity, slot != null ? `${TAB_TOKEN}-w${slot}` : undefined);
       resolvedSessionIdRef.current = nextSessionId;
       setSessionId(nextSessionId);
     };

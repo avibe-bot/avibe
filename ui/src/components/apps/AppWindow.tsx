@@ -37,7 +37,10 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
   // layer shrank (the gesture clamps can't fire in those cases). Deliberately not
   // keyed on win.bounds — a drag clamps itself, and re-running here would fight it.
   useEffect(() => {
-    if (win.minimized || win.maximized) return;
+    // Skip while hidden, and when the layer reports 0×0 — it's `hidden md:block`, so
+    // below the md breakpoint the ResizeObserver sees no size; clamping to a zero layer
+    // would shove a normal window to a negative origin and persist that off-screen.
+    if (win.minimized || win.maximized || layerWidth === 0 || layerHeight === 0) return;
     const c = clampToLayer(win.bounds, layerWidth, layerHeight);
     if (c.x !== win.bounds.x || c.y !== win.bounds.y) wm.setBounds(win.id, c);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -108,6 +111,9 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
       ref={rootRef}
       role="dialog"
       aria-label={t(def.titleKey)}
+      // Keyboard chords resolve their target window from the DOM-focused element via
+      // this id, so they act on the window you're actually typing in (not just the top).
+      data-window-id={win.id}
       // Minimized windows stay mounted (to preserve their body state) but go fully
       // inert: hidden from assistive tech, out of the tab order, non-interactive —
       // and React/the browser moves focus out automatically.
@@ -115,10 +121,11 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
       tabIndex={-1}
       onPointerDown={(e) => {
         wm.focus(win.id);
-        // Give the window DOM focus (so ⌘W/⌘M target it) — but don't steal focus
-        // from an inner input/editor the click is actually landing in.
+        // Give the window DOM focus (so ⌘W/⌘M target it) — but don't steal focus from
+        // an inner control/editor/terminal the click lands in (xterm's screen isn't a
+        // textarea, so it needs an explicit exemption or terminal input would break).
         const tgt = e.target as HTMLElement;
-        if (!tgt.closest('input,textarea,select,button,a,[contenteditable="true"],.monaco-editor')) {
+        if (!tgt.closest('input,textarea,select,button,a,[contenteditable="true"],.monaco-editor,.xterm')) {
           rootRef.current?.focus({ preventScroll: true });
         }
       }}

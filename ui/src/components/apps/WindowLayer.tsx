@@ -19,7 +19,7 @@ function inTerminalSurface(el: Element | null): boolean {
 // so their terminal/editor state survives a minimize). Desktop-only — mobile opens
 // apps full screen (P5), so no free-floating windows there.
 export const WindowLayer: React.FC = () => {
-  const { windows, focusedId, close, minimize, confirmClose } = useWindowManager();
+  const { windows, close, minimize, confirmClose } = useWindowManager();
   const ref = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
 
@@ -33,32 +33,34 @@ export const WindowLayer: React.FC = () => {
     return () => ro.disconnect();
   }, []);
 
-  // ⌘W / Ctrl+W closes the focused window, ⌘M / Ctrl+M minimizes it — but only when
-  // DOM focus is genuinely inside a window. `focusedId` alone is just the top z-order
-  // window, which lingers after clicking back into the workbench (empty layer space
-  // is pointer-events-none), so gating on it would hijack ⌘W while the user types in
-  // the chat composer. Requiring real focus inside the layer lets the chord fall
-  // through to the browser/page everywhere else; and inside the terminal only Meta
-  // counts, so its Ctrl control-chars (^W/^M) reach the shell (see inTerminalSurface).
+  // ⌘W / Ctrl+W closes — ⌘M / Ctrl+M minimizes — the window the keyboard is actually
+  // in, resolved from the DOM-focused element's `data-window-id`. NOT the top z-order
+  // window: focus can tab or programmatically move into a lower window, and acting on
+  // the top one would then close/minimize the wrong window (a dirty editor or terminal
+  // the user isn't in). When focus isn't inside any window — the chat composer, another
+  // page — the chord falls through to the browser. Inside the terminal only Meta counts,
+  // so its Ctrl control-chars (^W/^M) reach the shell (see inTerminalSurface).
   useEffect(() => {
-    if (!focusedId) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
       const active = document.activeElement;
-      if (!ref.current?.contains(active)) return;
+      const winEl = active instanceof Element ? active.closest('[data-window-id]') : null;
+      if (!winEl || !ref.current?.contains(winEl)) return;
       if (e.ctrlKey && !e.metaKey && inTerminalSurface(active)) return;
+      const targetId = winEl.getAttribute('data-window-id');
+      if (!targetId) return;
       const key = e.key.toLowerCase();
       if (key === 'w') {
         e.preventDefault();
-        if (confirmClose(focusedId)) close(focusedId);
+        if (confirmClose(targetId)) close(targetId);
       } else if (key === 'm') {
         e.preventDefault();
-        minimize(focusedId);
+        minimize(targetId);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [focusedId, close, minimize, confirmClose]);
+  }, [close, minimize, confirmClose]);
 
   // Render every window — minimized ones stay mounted (hidden + inert via AppWindow)
   // so their app body keeps its state. The layer is only aria-hidden when nothing is
