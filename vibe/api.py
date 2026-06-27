@@ -3556,8 +3556,9 @@ def _run_install_command(
 _ASKILL_INSTALL_LOCK = threading.Lock()
 _AVAULT_INSTALL_LOCK = threading.Lock()
 AVAULT_P2_MIN_VERSION = "0.1.3"
-# Installer pin must reference a published manifest-pinned release. Runtime P2
-# entry points still gate on AVAULT_P2_MIN_VERSION below until the P2 artifact is published.
+# Installer pin must reference a published manifest-pinned release. It may lag
+# the P2 surface; standard sealing remains usable while P2-only entry points
+# gate on AVAULT_P2_MIN_VERSION below.
 AVAULT_VERSION = "0.1.2"
 _AVAULT_RELEASE_BASE_URL = f"https://github.com/avibe-bot/avault/releases/download/v{AVAULT_VERSION}/"
 
@@ -3792,10 +3793,6 @@ def install_avault(force: bool = False) -> dict:
     path = _resolve_avault_cli_path()
     if path and not force:
         existing_version = _probe_avault_version(path)
-        if not _version_at_least(existing_version, AVAULT_P2_MIN_VERSION):
-            result = _avault_p2_release_unavailable_result(existing=path, existing_version=existing_version)
-            result["output"] = None
-            return result
         return {
             "ok": True,
             "message": backend_t("dependencies.avault.ready"),
@@ -3811,10 +3808,6 @@ def install_avault(force: bool = False) -> dict:
     if target is None:
         if path:
             existing_version = _probe_avault_version(path)
-            if not _version_at_least(existing_version, AVAULT_P2_MIN_VERSION):
-                result = _avault_p2_release_unavailable_result(existing=path, existing_version=existing_version)
-                result["output"] = None
-                return result
             return {
                 "ok": True,
                 "message": backend_t("dependencies.avault.ready"),
@@ -3829,11 +3822,6 @@ def install_avault(force: bool = False) -> dict:
             "output": None,
             "path": None,
         }
-    if not _managed_avault_release_satisfies_p2():
-        existing_version = _probe_avault_version(path) if path else None
-        result = _avault_p2_release_unavailable_result(existing=path, existing_version=existing_version)
-        result["output"] = None
-        return result
 
     try:
         manifest_url = urllib.parse.urljoin(_AVAULT_RELEASE_BASE_URL, "manifest.json")
@@ -3889,7 +3877,12 @@ def install_avault(force: bool = False) -> dict:
 
 
 def ensure_avault_installed(force: bool = False) -> dict:
-    """Ensure avault is present and new enough for the Vaults P2 surface."""
+    """Ensure avault is present.
+
+    The managed pin can be older than the P2 surface while still supporting the
+    standard seal path. P2-only commands call ``_require_avault_p2_surface`` at
+    their own boundary instead of making dependency install fail.
+    """
     if not _AVAULT_INSTALL_LOCK.acquire(blocking=False):
         return {
             "ok": False,
@@ -3900,20 +3893,20 @@ def ensure_avault_installed(force: bool = False) -> dict:
     try:
         existing = _resolve_avault_cli_path()
         existing_version = _probe_avault_version(existing) if existing else None
-        if existing and _version_at_least(existing_version, AVAULT_P2_MIN_VERSION):
-            if force and _managed_avault_release_satisfies_p2():
-                pass
-            else:
-                return {
-                    "ok": True,
-                    "installed": True,
-                    "changed": False,
-                    "path": existing,
-                    "version": existing_version,
-                }
-        if not _managed_avault_release_satisfies_p2():
-            return _avault_p2_release_unavailable_result(existing=existing, existing_version=existing_version)
-        needs_upgrade = bool(existing and not _version_at_least(existing_version, AVAULT_P2_MIN_VERSION))
+        existing_is_p2 = _version_at_least(existing_version, AVAULT_P2_MIN_VERSION)
+        can_managed_install_p2 = _managed_avault_release_satisfies_p2()
+        if existing and (
+            (existing_is_p2 and (not force or not can_managed_install_p2))
+            or (not existing_is_p2 and not force and not can_managed_install_p2)
+        ):
+            return {
+                "ok": True,
+                "installed": True,
+                "changed": False,
+                "path": existing,
+                "version": existing_version,
+            }
+        needs_upgrade = bool(existing and not existing_is_p2 and can_managed_install_p2)
         result = install_avault(force=force or needs_upgrade)
         resolved = _resolve_avault_cli_path()
         installed = bool(resolved)
@@ -3929,12 +3922,7 @@ def ensure_avault_installed(force: bool = False) -> dict:
                 result.get("message") or backend_t("dependencies.avault.installedNotFound")
             )
         elif result.get("ok") and not _version_at_least(resolved_version, AVAULT_P2_MIN_VERSION):
-            result["ok"] = False
-            result["message"] = backend_t(
-                "dependencies.avault.versionTooOld",
-                version=resolved_version or "unknown",
-                required=AVAULT_P2_MIN_VERSION,
-            )
+            result["status"] = "upgrade_required"
         return result
     finally:
         _AVAULT_INSTALL_LOCK.release()
