@@ -53,6 +53,9 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
   // gestures), so we can't tell "clicked the image" from "clicked the empty stage"
   // by event target — decide by hit-testing the image's rect in the backdrop click.
   const imgRef = React.useRef<HTMLImageElement>(null);
+  // The 90vw×90vh zoom stage. A zoomed image's rect overflows it (clipped), so the
+  // close hit-test must also require the click to be inside the visible stage.
+  const stageRef = React.useRef<HTMLDivElement>(null);
 
   const index = src ? images.indexOf(src) : -1;
   const pageable = index >= 0 && images.length > 1;
@@ -102,15 +105,18 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
           onClick={(e) => {
             // A real pan happened this press → don't treat the release as a close.
             if (interactedRef.current) return;
-            // Click on the (possibly zoomed) image itself → don't close; only the
-            // dark area around it acts as the backdrop.
-            const r = imgRef.current?.getBoundingClientRect();
+            // Keep the viewer open only when the click is on the VISIBLE image:
+            // inside the image rect AND inside the stage. (A zoomed image's rect
+            // overflows the stage; those clipped parts are dark margin → close.)
+            const inside = (rect?: DOMRect) =>
+              !!rect &&
+              e.clientX >= rect.left &&
+              e.clientX <= rect.right &&
+              e.clientY >= rect.top &&
+              e.clientY <= rect.bottom;
             if (
-              r &&
-              e.clientX >= r.left &&
-              e.clientX <= r.right &&
-              e.clientY >= r.top &&
-              e.clientY <= r.bottom
+              inside(imgRef.current?.getBoundingClientRect()) &&
+              inside(stageRef.current?.getBoundingClientRect())
             ) {
               return;
             }
@@ -209,7 +215,7 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
               the +/- buttons. Keyed on src so paging resets to a fit view. Closing
               by click is decided in the backdrop handler (hit-test the image rect +
               the pan flag), since the library makes the <img> pointer-events:none. */}
-          <div>
+          <div ref={stageRef}>
             <TransformWrapper
               key={src}
               ref={transformRef}
