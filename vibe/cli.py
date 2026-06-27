@@ -3509,9 +3509,35 @@ def _preflight_vault_run_batch(engine, mapping: dict[str, str]) -> None:
         )
 
 
+def _agent_run_command(command_argv: list[str], *, cwd: str | None = None) -> list[str]:
+    """Preserve the invoking cwd when a resident agent executes the child.
+
+    The current avault agent frame has no cwd field. Wrap the command in a tiny
+    shell trampoline so the long-lived agent executes the requested argv from
+    the CLI's working directory without shell-interpolating any user argument.
+    """
+
+    shell = shutil.which("sh") or "/bin/sh"
+    child_argv = list(command_argv)
+    if child_argv:
+        executable = child_argv[0]
+        has_path_separator = os.sep in executable or (os.altsep is not None and os.altsep in executable)
+        if not has_path_separator and (resolved := shutil.which(executable)):
+            child_argv[0] = resolved
+    return [
+        shell,
+        "-c",
+        'cd "$1" || exit 125; shift; exec "$@"',
+        "avibe-vault-run",
+        cwd or os.getcwd(),
+        *child_argv,
+    ]
+
+
 def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: list[str]):
     from storage import vault_service
 
+    _preflight_vault_run_batch(engine, mapping)
     secrets = []
     grant: dict | None = None
     approval_error: TaskCliError | None = None
@@ -3668,7 +3694,6 @@ def cmd_vault_run(args):
                 example="vibe vault run --env OPENAI_API_KEY -- python sync.py",
             )
         engine = _open_vault_engine()
-        _preflight_vault_run_batch(engine, mapping)
         grant, secrets = _resolve_vault_run_delivery(engine, mapping, command_argv)
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
@@ -3688,12 +3713,13 @@ def cmd_vault_run(args):
     from vibe import api
 
     try:
+        delivered_by_agent = grant is not None
         if grant is not None:
             result = api.avault_agent_deliver_run(
                 scope_type=grant["scope_type"],
                 scope_ref=grant["scope_ref"],
                 secrets=secrets,
-                command=command_argv,
+                command=_agent_run_command(command_argv),
             )
             sys.stdout.buffer.write(result.get("stdout") or b"")
             sys.stdout.buffer.flush()
@@ -3718,7 +3744,7 @@ def cmd_vault_run(args):
     # decrypt / store) — no delivery happened, so skip the audit. Any other code means the child
     # ran with the secret in its env → record the delivery now. A bookkeeping failure must not
     # crash or change the child's real exit code.
-    if exit_code != 70:
+    if delivered_by_agent or exit_code != 70:
         try:
             with engine.begin() as conn:
                 vault_service.record_deliveries(

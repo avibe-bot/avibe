@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import shutil
 from unittest.mock import Mock
 
 import pytest
@@ -173,9 +174,10 @@ def test_run_calls_avault_with_env_mapping_and_records_delivery(tmp_path, capfd,
     assert secret["last_used_at"] is not None
 
 
-def test_run_delivers_protected_secret_under_agent_grant(capfd, monkeypatch):
+def test_run_delivers_protected_secret_under_agent_grant(tmp_path, capfd, monkeypatch):
     from vibe import api
 
+    monkeypatch.chdir(tmp_path)
     grant = _set_protected_grant("PROTECTED_KEY")
     deliver = Mock(return_value={"exit_code": 0, "stdout": b"protected out\n", "stderr": b"protected err\n"})
     monkeypatch.setattr(api, "avault_agent_deliver_run", deliver)
@@ -191,7 +193,16 @@ def test_run_delivers_protected_secret_under_agent_grant(capfd, monkeypatch):
         scope_type=grant["scope_type"],
         scope_ref=grant["scope_ref"],
         secrets=[{"name": "PROTECTED_KEY", "env": "LOCAL_NAME", "envelope": _sealed("protected")}],
-        command=["python3", "-c", "pass"],
+        command=[
+            shutil.which("sh") or "/bin/sh",
+            "-c",
+            'cd "$1" || exit 125; shift; exec "$@"',
+            "avibe-vault-run",
+            str(tmp_path),
+            shutil.which("python3") or "python3",
+            "-c",
+            "pass",
+        ],
     )
     assert "value" not in repr(deliver.call_args.kwargs)
     with cli._open_vault_engine().connect() as conn:
@@ -208,6 +219,19 @@ def test_run_rejects_mixed_tiers_before_creating_approval(tmp_path, capfd, monke
 
     assert code == 1
     assert json.loads(captured.err)["code"] == "mixed_protection_tiers"
+    with cli._open_vault_engine().connect() as conn:
+        assert vault_service.list_requests(conn, status="pending") == []
+
+
+def test_run_rejects_missing_later_secret_before_creating_approval(capfd):
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))
+
+    code = cli.cmd_vault_run(_ns(env=["PROTECTED_KEY", "MISSING_KEY"], command_argv=["python3", "-c", "pass"]))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "secret_not_found"
     with cli._open_vault_engine().connect() as conn:
         assert vault_service.list_requests(conn, status="pending") == []
 
@@ -244,6 +268,19 @@ def test_run_persists_protected_approval_request_without_grant(capfd):
     assert len(requests) == 1
     assert requests[0]["secret_name"] == "PROTECTED_KEY"
     assert requests[0]["delivery"]["mode"] == "run"
+
+
+def test_run_records_protected_delivery_when_child_returns_70(capfd, monkeypatch):
+    from vibe import api
+
+    _set_protected_grant("PROTECTED_KEY")
+    monkeypatch.setattr(api, "avault_agent_deliver_run", Mock(return_value={"exit_code": 70, "stdout": b"", "stderr": b""}))
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    assert cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"])) == 70
+    cli.cmd_vault_list(_ns())
+    secret = json.loads(capfd.readouterr().out)["secrets"][0]
+    assert secret["use_count"] == 1
 
 
 def test_run_skips_delivery_audit_when_avault_returns_70(tmp_path, capfd, monkeypatch):

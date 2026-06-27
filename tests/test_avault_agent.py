@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from vibe.avault_agent import AvaultAgentClient, AvaultAgentError, AvaultAgentManager
-from vibe.avault_agent import _ensure_agent_socket_parent, default_agent_socket_path
+from vibe.avault_agent import _ensure_agent_socket_parent, _remove_stale_agent_socket, default_agent_socket_path
 
 
 class FakeAgentServer:
@@ -132,20 +132,45 @@ def test_agent_socket_path_uses_avibe_home_and_secures_directories(tmp_path, mon
     assert stat.S_IMODE(socket_path.parent.stat().st_mode) == 0o700
 
 
-def test_agent_manager_reads_output_written_after_offsets(tmp_path):
+def test_agent_manager_captures_only_per_request_output_in_memory(tmp_path, monkeypatch):
     manager = AvaultAgentManager(socket_path=tmp_path / "avault.sock")
-    manager.stdout_path = tmp_path / "stdout.log"
-    manager.stderr_path = tmp_path / "stderr.log"
-    manager.stdout_path.write_bytes(b"old-out\n")
-    manager.stderr_path.write_bytes(b"old-err\n")
+    seen_timeout: list[float | None] = []
 
-    offsets = manager.output_offsets()
-    with manager.stdout_path.open("ab") as handle:
-        handle.write(b"new-out\n")
-    with manager.stderr_path.open("ab") as handle:
-        handle.write(b"new-err\n")
+    def _client(*, timeout=None):
+        seen_timeout.append(timeout)
+        return object()
 
-    assert manager.read_output_since(offsets) == {
+    monkeypatch.setattr(manager, "client", _client)
+    with manager._output_lock:
+        manager._stdout.extend(b"old-out\n")
+        manager._stderr.extend(b"old-err\n")
+
+    def _request(_client):
+        with manager._output_lock:
+            manager._stdout.extend(b"new-out\n")
+            manager._stderr.extend(b"new-err\n")
+        return {"exit_code": 0}
+
+    result, output = manager.request_with_output(_request)
+
+    assert result == {"exit_code": 0}
+    assert output == {
         "stdout": b"new-out\n",
         "stderr": b"new-err\n",
     }
+    assert seen_timeout == [None]
+    assert not (tmp_path / "stdout.log").exists()
+    assert not (tmp_path / "stderr.log").exists()
+
+
+def test_remove_stale_agent_socket_unlinks_dead_socket(tmp_path):
+    socket_path = Path(tempfile.mkdtemp(prefix="avault-stale-", dir="/tmp")) / "s"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        listener.bind(str(socket_path))
+    finally:
+        listener.close()
+
+    assert socket_path.exists()
+    _remove_stale_agent_socket(socket_path)
+    assert not socket_path.exists()

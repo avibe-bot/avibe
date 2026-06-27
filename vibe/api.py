@@ -4389,7 +4389,7 @@ def avault_agent_deliver_fetch(
 
     _require_avault_p2_surface("resident agent deliver fetch")
     try:
-        return _avault_agent_client().deliver_fetch(
+        return _avault_agent_manager().client(timeout=None).deliver_fetch(
             scope_type=scope_type,
             scope_ref=scope_ref,
             name=name,

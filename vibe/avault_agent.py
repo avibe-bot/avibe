@@ -8,9 +8,9 @@ Plaintext and DEKs stay inside ``avault``.
 from __future__ import annotations
 
 import json
-import os
 import socket
 import subprocess
+import stat
 import threading
 import time
 from pathlib import Path
@@ -37,7 +37,7 @@ class AvaultAgentClient:
         self,
         socket_path: str | Path | None = None,
         *,
-        timeout: float = DEFAULT_AGENT_SOCKET_TIMEOUT,
+        timeout: float | None = DEFAULT_AGENT_SOCKET_TIMEOUT,
         ensure_agent: Callable[[], None] | None = None,
     ) -> None:
         self.socket_path = Path(socket_path) if socket_path is not None else default_agent_socket_path()
@@ -70,7 +70,8 @@ class AvaultAgentClient:
                 self._ensure_agent()
             try:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-                    sock.settimeout(self.timeout)
+                    if self.timeout is not None:
+                        sock.settimeout(self.timeout)
                     sock.connect(str(self.socket_path))
                     _write_frame(sock, body)
                     return _read_json_frame(sock)
@@ -189,12 +190,13 @@ class AvaultAgentManager:
         self.idle_timeout_secs = idle_timeout_secs
         self.start_timeout = start_timeout
         self._lock = threading.RLock()
+        self._output_lock = threading.Lock()
         self._process: subprocess.Popen | None = None
-        self.stdout_path = paths.get_runtime_dir() / "avault_agent_stdout.log"
-        self.stderr_path = paths.get_runtime_dir() / "avault_agent_stderr.log"
+        self._stdout = bytearray()
+        self._stderr = bytearray()
 
-    def client(self) -> AvaultAgentClient:
-        return AvaultAgentClient(self.socket_path, ensure_agent=self.ensure_running)
+    def client(self, *, timeout: float | None = DEFAULT_AGENT_SOCKET_TIMEOUT) -> AvaultAgentClient:
+        return AvaultAgentClient(self.socket_path, timeout=timeout, ensure_agent=self.ensure_running)
 
     def ensure_running(self) -> None:
         if self._socket_responds():
@@ -214,9 +216,7 @@ class AvaultAgentManager:
     def _spawn_locked(self) -> None:
         binary = self._binary_resolver()
         _ensure_agent_socket_parent(self.socket_path.parent)
-        self.stdout_path.parent.mkdir(parents=True, exist_ok=True)
-        stdout = self.stdout_path.open("ab")
-        stderr = self.stderr_path.open("ab")
+        _remove_stale_agent_socket(self.socket_path)
         try:
             self._process = subprocess.Popen(
                 [
@@ -230,16 +230,15 @@ class AvaultAgentManager:
                     str(self.idle_timeout_secs),
                 ],
                 stdin=subprocess.DEVNULL,
-                stdout=stdout,
-                stderr=stderr,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 env=self._command_env(binary) if self._command_env else None,
                 **isolated_subprocess_kwargs(),
             )
         except FileNotFoundError as exc:
             raise AvaultAgentError("avault binary not found") from exc
-        finally:
-            stdout.close()
-            stderr.close()
+        _start_pipe_reader(self._process.stdout, self._stdout, self._output_lock)
+        _start_pipe_reader(self._process.stderr, self._stderr, self._output_lock)
 
     def _wait_for_socket_locked(self) -> None:
         deadline = time.monotonic() + self.start_timeout
@@ -274,24 +273,25 @@ class AvaultAgentManager:
             proc.kill()
             proc.wait(timeout=2)
 
-    def output_offsets(self) -> dict[str, int]:
-        return {
-            "stdout": _file_size(self.stdout_path),
-            "stderr": _file_size(self.stderr_path),
-        }
-
-    def read_output_since(self, offsets: dict[str, int]) -> dict[str, bytes]:
-        return {
-            "stdout": _read_file_since(self.stdout_path, int(offsets.get("stdout") or 0)),
-            "stderr": _read_file_since(self.stderr_path, int(offsets.get("stderr") or 0)),
-        }
-
     def request_with_output(self, request: Callable[[AvaultAgentClient], dict[str, Any]]) -> tuple[dict[str, Any], dict[str, bytes]]:
         with self._lock:
-            offsets = self.output_offsets()
-            result = request(self.client())
-            output = self.read_output_since(offsets)
+            self._clear_output()
+            result = request(self.client(timeout=None))
+            output = self._drain_output()
         return result, output
+
+    def _clear_output(self) -> None:
+        with self._output_lock:
+            self._stdout.clear()
+            self._stderr.clear()
+
+    def _drain_output(self) -> dict[str, bytes]:
+        _wait_for_output_idle(self._output_lock, self._stdout, self._stderr)
+        with self._output_lock:
+            output = {"stdout": bytes(self._stdout), "stderr": bytes(self._stderr)}
+            self._stdout.clear()
+            self._stderr.clear()
+        return output
 
 
 def default_agent_socket_path() -> Path:
@@ -304,6 +304,22 @@ def _ensure_agent_socket_parent(path: Path) -> None:
     avibe_home.chmod(0o700)
     path.mkdir(parents=True, exist_ok=True)
     path.chmod(0o700)
+
+
+def _remove_stale_agent_socket(path: Path) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISSOCK(mode):
+        return
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.2)
+            sock.connect(str(path))
+            return
+    except OSError:
+        path.unlink(missing_ok=True)
 
 
 def _missing_binary_resolver() -> str:
@@ -339,18 +355,26 @@ def _read_exact(sock: socket.socket, size: int) -> bytes:
     return b"".join(chunks)
 
 
-def _file_size(path: Path) -> int:
-    try:
-        return path.stat().st_size
-    except FileNotFoundError:
-        return 0
+def _start_pipe_reader(pipe, buffer: bytearray, lock: threading.Lock) -> None:
+    if pipe is None:
+        return
+
+    def _reader() -> None:
+        with pipe:
+            while chunk := pipe.read(8192):
+                with lock:
+                    buffer.extend(chunk)
+
+    threading.Thread(target=_reader, daemon=True).start()
 
 
-def _read_file_since(path: Path, offset: int) -> bytes:
-    try:
-        with path.open("rb") as handle:
-            size = os.fstat(handle.fileno()).st_size
-            handle.seek(offset if 0 <= offset <= size else 0)
-            return handle.read()
-    except FileNotFoundError:
-        return b""
+def _wait_for_output_idle(lock: threading.Lock, stdout: bytearray, stderr: bytearray) -> None:
+    previous = (-1, -1)
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        with lock:
+            current = (len(stdout), len(stderr))
+        if current == previous:
+            return
+        previous = current
+        time.sleep(0.01)
