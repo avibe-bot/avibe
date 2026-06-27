@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import platform
+import select
 import shlex
 import shutil
 import signal
@@ -3540,9 +3541,9 @@ def _preflight_vault_inject_batch(engine, names: list[str]) -> dict[str, dict]:
 
 
 class _AgentRunOutputBridge:
-    """Stream protected child output through temporary FIFOs owned by this CLI."""
+    """Stream protected child stdio through temporary FIFOs owned by this CLI."""
 
-    def __init__(self, stdout, stderr) -> None:
+    def __init__(self, stdout, stderr, *, stdin=None, env_exclude: set[str] | None = None) -> None:
         if not hasattr(os, "mkfifo"):
             raise TaskCliError("protected vault run output streaming requires Unix FIFOs", code="unsupported_platform")
         runtime_dir = paths.get_runtime_dir()
@@ -3551,21 +3552,36 @@ class _AgentRunOutputBridge:
         self._tmpdir.chmod(0o700)
         self.stdout_path = self._tmpdir / "stdout"
         self.stderr_path = self._tmpdir / "stderr"
+        self.stdin_path = self._tmpdir / "stdin"
         self.env_path = self._tmpdir / "env.sh"
-        os.mkfifo(self.stdout_path, 0o600)
-        os.mkfifo(self.stderr_path, 0o600)
-        os.mkfifo(self.env_path, 0o600)
-        self._keeper_fds = [
-            os.open(self.stdout_path, os.O_RDWR | os.O_NONBLOCK),
-            os.open(self.stderr_path, os.O_RDWR | os.O_NONBLOCK),
-        ]
+        self._keeper_fds: list[int] = []
+        try:
+            os.mkfifo(self.stdout_path, 0o600)
+            os.mkfifo(self.stderr_path, 0o600)
+            os.mkfifo(self.stdin_path, 0o600)
+            os.mkfifo(self.env_path, 0o600)
+            self._keeper_fds = [
+                os.open(self.stdout_path, os.O_RDWR | os.O_NONBLOCK),
+                os.open(self.stderr_path, os.O_RDWR | os.O_NONBLOCK),
+            ]
+        except OSError as exc:
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
+            raise TaskCliError("protected vault run stdio streaming requires Unix FIFOs", code="unsupported_platform") from exc
+        stdin = stdin if stdin is not None else getattr(sys.stdin, "buffer", sys.stdin)
+        self._stdin_stop = threading.Event()
         self._env_stop = threading.Event()
         self._env_thread = threading.Thread(
             target=self._write_env_fifo,
-            args=(self.env_path, _shell_env_exports(os.environ).encode("utf-8"), self._env_stop),
+            args=(self.env_path, _shell_env_exports(os.environ, exclude=env_exclude).encode("utf-8"), self._env_stop),
             daemon=True,
         )
         self._env_thread.start()
+        self._stdin_thread = threading.Thread(
+            target=self._copy_stdin_fifo,
+            args=(self.stdin_path, stdin, self._stdin_stop),
+            daemon=True,
+        )
+        self._stdin_thread.start()
         self._threads = [
             threading.Thread(target=self._copy_fifo, args=(self.stdout_path, stdout), daemon=True),
             threading.Thread(target=self._copy_fifo, args=(self.stderr_path, stderr), daemon=True),
@@ -3588,7 +3604,9 @@ class _AgentRunOutputBridge:
         self._keeper_fds.clear()
         for thread in self._threads:
             thread.join(timeout=2)
+        self._stdin_stop.set()
         self._env_stop.set()
+        self._stdin_thread.join(timeout=2)
         self._env_thread.join(timeout=2)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
@@ -3607,33 +3625,87 @@ class _AgentRunOutputBridge:
 
     @staticmethod
     def _write_env_fifo(path: Path, script: bytes, stop_event: threading.Event) -> None:
+        fd = _AgentRunOutputBridge._open_fifo_writer(path, stop_event)
+        if fd is None:
+            return
+        try:
+            _AgentRunOutputBridge._write_all(fd, script, stop_event)
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _copy_stdin_fifo(path: Path, source, stop_event: threading.Event) -> None:
+        fd = _AgentRunOutputBridge._open_fifo_writer(path, stop_event)
+        if fd is None:
+            return
+        try:
+            while not stop_event.is_set():
+                chunk = _AgentRunOutputBridge._read_stdin_chunk(source, stop_event)
+                if not chunk:
+                    return
+                if isinstance(chunk, str):
+                    chunk = chunk.encode()
+                _AgentRunOutputBridge._write_all(fd, chunk, stop_event)
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _open_fifo_writer(path: Path, stop_event: threading.Event) -> int | None:
         while not stop_event.is_set():
             try:
-                fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+                return os.open(path, os.O_WRONLY | os.O_NONBLOCK)
             except OSError as exc:
                 if exc.errno in {errno.ENXIO, errno.ENOENT}:
                     time.sleep(0.01)
                     continue
                 return
+        return None
+
+    @staticmethod
+    def _write_all(fd: int, data: bytes, stop_event: threading.Event) -> None:
+        view = memoryview(data)
+        offset = 0
+        while offset < len(view) and not stop_event.is_set():
             try:
-                offset = 0
-                while offset < len(script) and not stop_event.is_set():
-                    try:
-                        written = os.write(fd, script[offset:])
-                    except BlockingIOError:
-                        time.sleep(0.01)
-                        continue
-                    if written <= 0:
-                        break
-                    offset += written
-                return
+                written = os.write(fd, view[offset:])
+            except BlockingIOError:
+                time.sleep(0.01)
+                continue
             except OSError:
                 return
-            finally:
+            if written <= 0:
+                return
+            offset += written
+
+    @staticmethod
+    def _read_stdin_chunk(source, stop_event: threading.Event):
+        try:
+            fileno = source.fileno()
+        except (AttributeError, OSError, ValueError):
+            try:
+                return source.read(8192)
+            except (OSError, ValueError):
+                return b""
+        while not stop_event.is_set():
+            try:
+                ready, _, _ = select.select([fileno], [], [], 0.05)
+            except (OSError, ValueError):
                 try:
-                    os.close(fd)
+                    return source.read(8192)
+                except (OSError, ValueError):
+                    return b""
+            if ready:
+                try:
+                    return os.read(fileno, 8192)
                 except OSError:
-                    pass
+                    return b""
+        return b""
 
 
 def _is_shell_env_name(name: str) -> bool:
@@ -3642,9 +3714,12 @@ def _is_shell_env_name(name: str) -> bool:
     return all(ch == "_" or "A" <= ch <= "Z" or "a" <= ch <= "z" or "0" <= ch <= "9" for ch in name)
 
 
-def _shell_env_exports(env: Mapping[str, str]) -> str:
+def _shell_env_exports(env: Mapping[str, str], *, exclude: set[str] | None = None) -> str:
+    excluded = exclude or set()
     lines: list[str] = []
     for name, value in env.items():
+        if name in excluded:
+            continue
         if not _is_shell_env_name(name) or "\x00" in value:
             continue
         lines.append(f"export {name}={shlex.quote(value)}\n")
@@ -3657,6 +3732,7 @@ def _agent_run_command(
     cwd: str | None = None,
     stdout_path: str | None = None,
     stderr_path: str | None = None,
+    stdin_path: str | None = None,
     env_path: str | None = None,
 ) -> list[str]:
     """Preserve the invoking cwd when a resident agent executes the child.
@@ -3673,17 +3749,19 @@ def _agent_run_command(
         has_path_separator = os.sep in executable or (os.altsep is not None and os.altsep in executable)
         if not has_path_separator and (resolved := shutil.which(executable)):
             child_argv[0] = resolved
-    if stdout_path and stderr_path and env_path:
+    if stdout_path and stderr_path and stdin_path and env_path:
         return [
             shell,
             "-c",
             (
-                'stdout_fifo=$1; stderr_fifo=$2; env_file=$3; cwd=$4; shift 4; '
-                'exec >"$stdout_fifo" 2>"$stderr_fifo"; . "$env_file"; cd "$cwd" || exit 125; exec "$@"'
+                'stdout_fifo=$1; stderr_fifo=$2; stdin_fifo=$3; env_file=$4; cwd=$5; shift 5; '
+                'exec <"$stdin_fifo" >"$stdout_fifo" 2>"$stderr_fifo"; '
+                '. "$env_file"; cd "$cwd" || exit 125; exec "$@"'
             ),
             "avibe-vault-run",
             stdout_path,
             stderr_path,
+            stdin_path,
             env_path,
             cwd or os.getcwd(),
             *child_argv,
@@ -3696,6 +3774,13 @@ def _agent_run_command(
         cwd or os.getcwd(),
         *child_argv,
     ]
+
+
+def _resolve_cli_output_path(path: str) -> str:
+    output_path = Path(path).expanduser()
+    if not output_path.is_absolute():
+        output_path = Path.cwd() / output_path
+    return str(output_path)
 
 
 def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: list[str]):
@@ -3897,7 +3982,12 @@ def cmd_vault_run(args):
     try:
         delivered_by_agent = grant is not None
         if grant is not None:
-            with _AgentRunOutputBridge(sys.stdout.buffer, sys.stderr.buffer) as output_bridge:
+            secret_env_names = {str(secret["env"]) for secret in secrets if secret.get("env")}
+            with _AgentRunOutputBridge(
+                sys.stdout.buffer,
+                sys.stderr.buffer,
+                env_exclude=secret_env_names,
+            ) as output_bridge:
                 result = api.avault_agent_deliver_run(
                     scope_type=grant["scope_type"],
                     scope_ref=grant["scope_ref"],
@@ -3906,12 +3996,16 @@ def cmd_vault_run(args):
                         command_argv,
                         stdout_path=str(output_bridge.stdout_path),
                         stderr_path=str(output_bridge.stderr_path),
+                        stdin_path=str(output_bridge.stdin_path),
                         env_path=str(output_bridge.env_path),
                     ),
                 )
             exit_code = int(result["exit_code"])
         else:
             exit_code = api.avault_deliver_run(secrets, command_argv)
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
     except api.AvaultError as exc:
         if grant is not None and _agent_missing_grant(exc):
             _expire_agent_grant_after_missing(
@@ -4366,14 +4460,15 @@ def cmd_vault_inject(args):
         if fmt not in ("dotenv", "json"):
             raise TaskCliError(f"unknown --format: {fmt!r} (dotenv|json)", code="invalid_format", help_command=help_command)
         engine = _open_vault_engine()
-        grant, secrets = _resolve_vault_inject_delivery(engine, keys, path=str(out), fmt=fmt)
+        resolved_out = _resolve_cli_output_path(str(out))
+        grant, secrets = _resolve_vault_inject_delivery(engine, keys, path=resolved_out, fmt=fmt)
         # avault writes the 0600 file atomically; if the path is unwritable it raises and no
         # delivery is recorded.
         if grant is not None:
             api.avault_agent_deliver_inject(
                 scope_type=grant["scope_type"],
                 scope_ref=grant["scope_ref"],
-                path=out,
+                path=resolved_out,
                 fmt=fmt,
                 secrets=secrets,
             )
@@ -4386,7 +4481,7 @@ def cmd_vault_inject(args):
                 vault_service.record_deliveries(conn, keys, requester={"source": "cli", "pid": os.getpid()}, mode=f"inject:{fmt}")
         except Exception:
             pass
-        _print_cli_payload("vault_inject", written=True, path=str(out), format=fmt, keys=keys)
+        _print_cli_payload("vault_inject", written=True, path=resolved_out if grant is not None else str(out), format=fmt, keys=keys)
         return 0
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
@@ -4403,7 +4498,7 @@ def cmd_vault_inject(args):
                 engine,
                 grant["id"],
                 keys,
-                delivery={"mode": "inject", "path": str(out), "format": fmt},
+                delivery={"mode": "inject", "path": _resolve_cli_output_path(str(out)), "format": fmt},
             )
             _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
             return 1

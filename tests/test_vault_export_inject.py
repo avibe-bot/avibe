@@ -129,6 +129,31 @@ def test_inject_uses_agent_delivery_for_protected_grant(tmp_path, capfd, monkeyp
     assert "value" not in repr(inject.call_args.kwargs)
 
 
+def test_inject_resolves_protected_relative_output_in_caller_cwd(tmp_path, capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    monkeypatch.chdir(tmp_path)
+    grant = _set_protected_grant("PROTECTED_KEY")
+    inject = Mock(return_value=None)
+    monkeypatch.setattr(api, "avault_agent_deliver_inject", inject)
+    monkeypatch.setattr(api, "avault_deliver_inject", Mock())
+    expected = str(tmp_path / ".env")
+
+    assert cli.cmd_vault_inject(_ns(keys="PROTECTED_KEY", out=".env", format="dotenv")) == 0
+    payload = json.loads(capfd.readouterr().out)
+
+    inject.assert_called_once_with(
+        scope_type=grant["scope_type"],
+        scope_ref=grant["scope_ref"],
+        path=expected,
+        fmt="dotenv",
+        secrets=[{"name": "PROTECTED_KEY", "key": "PROTECTED_KEY", "envelope": _sealed("protected_key")}],
+    )
+    assert payload["path"] == expected
+
+
 def test_inject_persists_protected_approval_request_without_grant(tmp_path, capfd):
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected_key"))

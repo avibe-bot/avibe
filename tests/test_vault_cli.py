@@ -200,16 +200,21 @@ def test_run_delivers_protected_secret_under_agent_grant(tmp_path, capfd, monkey
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PYTHONPATH", "caller-pythonpath")
     monkeypatch.setenv("AWS_PROFILE", "caller-profile")
+    monkeypatch.setenv("LOCAL_NAME", "stale-caller-secret")
+    monkeypatch.setattr(cli.sys, "stdin", type("FakeStdin", (), {"buffer": io.BytesIO(b"caller stdin\n")})())
     grant = _set_protected_grant("PROTECTED_KEY")
 
     def _deliver(**kwargs):
         command = kwargs["command"]
         stdout_path = command[4]
         stderr_path = command[5]
-        env_path = command[6]
+        stdin_path = command[6]
+        env_path = command[7]
         env_script = Path(env_path).read_text()
         assert "export PYTHONPATH=caller-pythonpath\n" in env_script
         assert "export AWS_PROFILE=caller-profile\n" in env_script
+        assert "export LOCAL_NAME=" not in env_script
+        assert Path(stdin_path).read_bytes() == b"caller stdin\n"
         with open(stdout_path, "wb", buffering=0) as stdout:
             stdout.write(b"protected out\n")
         with open(stderr_path, "wb", buffering=0) as stderr:
@@ -235,12 +240,13 @@ def test_run_delivers_protected_secret_under_agent_grant(tmp_path, capfd, monkey
         shutil.which("sh") or "/bin/sh",
         "-c",
         (
-            'stdout_fifo=$1; stderr_fifo=$2; env_file=$3; cwd=$4; shift 4; '
-            'exec >"$stdout_fifo" 2>"$stderr_fifo"; . "$env_file"; cd "$cwd" || exit 125; exec "$@"'
+            'stdout_fifo=$1; stderr_fifo=$2; stdin_fifo=$3; env_file=$4; cwd=$5; shift 5; '
+            'exec <"$stdin_fifo" >"$stdout_fifo" 2>"$stderr_fifo"; '
+            '. "$env_file"; cd "$cwd" || exit 125; exec "$@"'
         ),
         "avibe-vault-run",
     ]
-    assert command[7:] == [
+    assert command[8:] == [
         str(tmp_path),
         shutil.which("python3") or "python3",
         "-c",
@@ -249,6 +255,27 @@ def test_run_delivers_protected_secret_under_agent_grant(tmp_path, capfd, monkey
     assert "value" not in repr(deliver.call_args.kwargs)
     with cli._open_vault_engine().connect() as conn:
         assert vault_service.get_secret_meta(conn, "PROTECTED_KEY")["use_count"] == 1
+
+
+def test_run_reports_fifo_bridge_errors(capfd, monkeypatch):
+    from vibe import api
+
+    _set_protected_grant("PROTECTED_KEY")
+    monkeypatch.setattr(
+        cli,
+        "_AgentRunOutputBridge",
+        Mock(side_effect=cli.TaskCliError("protected run FIFOs are unsupported", code="unsupported_platform")),
+    )
+    deliver = Mock()
+    monkeypatch.setattr(api, "avault_agent_deliver_run", deliver)
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"]))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "unsupported_platform"
+    deliver.assert_not_called()
 
 
 def test_run_prefers_common_grant_for_protected_batch(tmp_path, capfd, monkeypatch):
