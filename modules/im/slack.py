@@ -1325,20 +1325,45 @@ class SlackBot(BaseIMClient):
             logger.warning(f"Unexpected error fetching shared thread from {channel_id}/{message_ts}: {e}")
             return None
 
+    @staticmethod
+    def _slack_reaction_name(emoji: str) -> str:
+        """Translate a unicode reaction emoji to the Slack short name.
+
+        Slack's ``reactions.add`` / ``reactions.remove`` require the short name
+        (e.g. ``ok_hand``), NOT the raw unicode character — sending the codepoint
+        returns ``invalid_name``. Every emoji used as a reaction by the processing
+        indicator / handlers must be mapped here: 👀 ack, 👌 queued, 🤖 subagent.
+        """
+        name = (emoji or "").strip()
+        if name.startswith(":") and name.endswith(":") and len(name) > 2:
+            name = name[1:-1]
+        aliases = {
+            "👀": "eyes",
+            "eye": "eyes",
+            "🤖": "robot_face",
+            "robot": "robot_face",
+            "👌": "ok_hand",
+            "ok": "ok_hand",
+        }
+        return aliases.get(name, name)
+
     async def add_reaction(self, context: MessageContext, message_id: str, emoji: str) -> bool:
         """Add a reaction emoji to a Slack message."""
         self._ensure_clients()
 
-        name = (emoji or "").strip()
-        if name.startswith(":") and name.endswith(":") and len(name) > 2:
-            name = name[1:-1]
-        if name in ["👀", "eyes", "eye"]:
-            name = "eyes"
-        elif name in ["🤖", "robot_face", "robot"]:
-            name = "robot_face"
-
+        name = self._slack_reaction_name(emoji)
         if not name:
             return False
+        if not name.isascii():
+            # Slack reaction names are ASCII short names (e.g. ``ok_hand``). A
+            # non-ASCII value here is a raw unicode emoji with no mapping, which
+            # reactions.add rejects with ``invalid_name`` — surface it instead of
+            # failing silently. Add the mapping to ``_slack_reaction_name``.
+            logger.warning(
+                "Slack reaction %r has no short-name mapping; reactions.add will reject it. "
+                "Add it to SlackBot._slack_reaction_name.",
+                emoji,
+            )
 
         try:
             await self.web_client.reactions_add(
@@ -1377,14 +1402,7 @@ class SlackBot(BaseIMClient):
         """Remove a reaction emoji from a Slack message."""
         self._ensure_clients()
 
-        name = (emoji or "").strip()
-        if name.startswith(":") and name.endswith(":") and len(name) > 2:
-            name = name[1:-1]
-        if name in ["👀", "eyes", "eye"]:
-            name = "eyes"
-        elif name in ["🤖", "robot_face", "robot"]:
-            name = "robot_face"
-
+        name = self._slack_reaction_name(emoji)
         if not name:
             return False
 

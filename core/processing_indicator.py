@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 
 _PROCESSING_INDICATOR_MODES = ("typing", "reaction", "message")
 ACK_REACTION_EMOJI = "👀"
+# Shown while an IM message is waiting behind a running turn (blocked on the
+# runtime gate). It is promoted to ACK_REACTION_EMOJI when this message's turn
+# actually starts. See AgentService.handle_message (show_queued_reaction /
+# promote_reaction_to_running).
+QUEUED_REACTION_EMOJI = "👌"
 
 
 @dataclass
@@ -34,6 +39,14 @@ class ProcessingIndicatorHandle:
     ack_reaction_emoji: Optional[str] = None
     typing_indicator_active: bool = False
     typing_indicator_task: Optional[asyncio.Task] = None
+    # True when the reaction indicator is the selected mode for this turn. The
+    # reaction itself is added at the runtime gate (queued 👌 → running 👀), not
+    # here, so this flag tells the gate hooks whether to act. It is intentionally
+    # NOT part of to_snapshot/from_snapshot: the only snapshot/restore path
+    # (OpenCode poll loop) runs AFTER the reaction was already promoted to 👀, and
+    # finish() keys off ack_reaction_emoji directly, so the flag is not load-bearing
+    # across a restore.
+    reaction_indicator_selected: bool = False
 
     def to_snapshot(self) -> dict[str, Any]:
         payload = self.context.platform_specific or {}
@@ -198,13 +211,18 @@ class ProcessingIndicatorService:
 
         if self._concise_status_bubble_active(context):
             # The concise status bubble is the primary progress indicator, but we
-            # still want the lightweight 👀 received-ack reaction AND typing
-            # keepalive (both best-effort, both cleaned up on finish). We only drop
-            # the ack MESSAGE mode — a separate text bubble would duplicate the
-            # status bubble and can't be deleted on Slack. (B2)
+            # still want the lightweight reaction ack AND typing keepalive (both
+            # best-effort, both cleaned up on finish). We only drop the ack MESSAGE
+            # mode — a separate text bubble would duplicate the status bubble and
+            # can't be deleted on Slack. (B2)
+            #
+            # The reaction is SELECTED here but ADDED at the runtime gate so a
+            # message waiting behind a running turn shows the queued 👌 and only
+            # flips to 👀 when its turn truly starts (show_queued_reaction /
+            # promote_reaction_to_running). Typing stays eager for immediate feedback.
             capabilities = self._capabilities(context)
             if self._mode_supported(capabilities, "reaction", context):
-                await self._start_reaction_indicator(handle)
+                handle.reaction_indicator_selected = True
             if self._mode_supported(capabilities, "typing", context):
                 await self._start_typing_indicator(handle)
             return handle
@@ -214,7 +232,12 @@ class ProcessingIndicatorService:
                 return handle
             if mode == "typing" and await self._start_typing_indicator(handle):
                 return handle
-            if mode == "reaction" and await self._start_reaction_indicator(handle):
+            if mode == "reaction":
+                # Reaction is the selected mode but is added at the runtime gate
+                # (queued 👌 → running 👀), not eagerly here. Selecting it preserves
+                # the single-mode "first match wins" contract: we stop trying lower
+                # modes just as if the reaction had been applied.
+                handle.reaction_indicator_selected = True
                 return handle
 
         return handle
@@ -255,14 +278,19 @@ class ProcessingIndicatorService:
         handle.typing_indicator_task = asyncio.create_task(self._typing_keepalive_loop(context))
         return True
 
-    async def _start_reaction_indicator(self, handle: ProcessingIndicatorHandle) -> bool:
+    async def _start_reaction_indicator(
+        self,
+        handle: ProcessingIndicatorHandle,
+        *,
+        emoji: str = ACK_REACTION_EMOJI,
+    ) -> bool:
         context = handle.context
         message_id = self._reaction_target_message_id(context)
         if not message_id:
             return False
         im_client = self._get_im_client(context)
         try:
-            ok = await im_client.add_reaction(context, message_id, ACK_REACTION_EMOJI)
+            ok = await im_client.add_reaction(context, message_id, emoji)
         except Exception as ack_err:
             logger.debug("Failed to add reaction ack: %s", ack_err)
             return False
@@ -272,8 +300,90 @@ class ProcessingIndicatorService:
             return False
 
         handle.ack_reaction_message_id = message_id
-        handle.ack_reaction_emoji = ACK_REACTION_EMOJI
+        handle.ack_reaction_emoji = emoji
         return True
+
+    def _resolve_handle(self, request_or_handle: Any) -> tuple[ProcessingIndicatorHandle, Optional[Any]]:
+        if isinstance(request_or_handle, ProcessingIndicatorHandle):
+            return request_or_handle, None
+        request = request_or_handle
+        return self.handle_from_request(request), request
+
+    @staticmethod
+    def _sync_reaction_to_request(handle: ProcessingIndicatorHandle, request: Optional[Any]) -> None:
+        # Keep the request's parallel reaction fields in lockstep with the handle.
+        # handle_from_request prefers the live handle object, but the OpenCode poll
+        # snapshot path reads request.ack_reaction_* directly, so they must not drift.
+        if request is not None:
+            request.ack_reaction_message_id = handle.ack_reaction_message_id
+            request.ack_reaction_emoji = handle.ack_reaction_emoji
+
+    async def show_queued_reaction(self, request_or_handle: Any) -> bool:
+        """Add the queued 👌 reaction for a message waiting behind a running turn.
+
+        Acts only when the reaction indicator is the selected mode for this turn and
+        no reaction is shown yet. Returns True only when 👌 was actually applied, so
+        the caller knows it must be cleaned up if the queued message is cancelled
+        before it ever runs.
+        """
+        handle, request = self._resolve_handle(request_or_handle)
+        if not handle.reaction_indicator_selected:
+            return False
+        if handle.ack_reaction_emoji:
+            return False
+        applied = await self._start_reaction_indicator(handle, emoji=QUEUED_REACTION_EMOJI)
+        if applied:
+            self._sync_reaction_to_request(handle, request)
+        return applied
+
+    async def promote_reaction_to_running(self, request_or_handle: Any, *, agent_name: Optional[str] = None) -> None:
+        """Switch the reaction to the running 👀 when this turn actually starts.
+
+        queued 👌 shown -> remove 👌 then add 👀; nothing shown yet (non-busy fast
+        path) -> add 👀; already 👀 -> no-op (idempotent). No-op when the reaction
+        indicator is not the selected mode. If the 👀 add fails at runtime, fall back
+        through the remaining indicator modes (``agent_name`` labels the ack message).
+        """
+        handle, request = self._resolve_handle(request_or_handle)
+        if not handle.reaction_indicator_selected:
+            return
+        if handle.ack_reaction_emoji == ACK_REACTION_EMOJI:
+            return
+        if handle.ack_reaction_emoji == QUEUED_REACTION_EMOJI and handle.ack_reaction_message_id:
+            removed = False
+            try:
+                removed = bool(
+                    await self._get_im_client(handle.context).remove_reaction(
+                        handle.context,
+                        handle.ack_reaction_message_id,
+                        handle.ack_reaction_emoji,
+                    )
+                )
+            except Exception as err:
+                logger.debug("Failed to remove queued reaction on promote: %s", err)
+            if not removed:
+                # The queued 👌 is still on the message. Keep owning it on the handle
+                # (do NOT clear the fields and do NOT stack 👀 on top) so finish() can
+                # still remove it on the terminal result. Better a stale 👌 that gets
+                # cleaned up than a leaked one or two reactions at once.
+                return
+            handle.ack_reaction_message_id = None
+            handle.ack_reaction_emoji = None
+        applied = await self._start_reaction_indicator(handle, emoji=ACK_REACTION_EMOJI)
+        if not applied and not handle.typing_indicator_active and not handle.ack_message_id:
+            # The reaction add failed at runtime (e.g. missing reactions scope or a
+            # transient API error). Because start() deferred the reaction, the normal
+            # mode loop never tried a lower candidate — fall through the remaining
+            # modes here so the user still gets a processing ack instead of none (P2):
+            # typing first when supported, else the ack message (e.g. Lark/Feishu
+            # support reactions + message but NOT typing). Best-effort, capability-gated.
+            capabilities = self._capabilities(handle.context)
+            fell_back = False
+            if self._mode_supported(capabilities, "typing", handle.context):
+                fell_back = await self._start_typing_indicator(handle)
+            if not fell_back and self._mode_supported(capabilities, "message", handle.context):
+                await self._start_message_indicator(handle, agent_name or "")
+        self._sync_reaction_to_request(handle, request)
 
     @staticmethod
     def _turn_tokens(context: MessageContext) -> set[str]:

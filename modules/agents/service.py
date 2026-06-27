@@ -43,12 +43,75 @@ class AgentService:
         agent = self.get(agent_name)
         runtime_key = self._runtime_turn_key(agent, request)
         gate = self._get_turn_gate(runtime_key)
-        await gate.lock.acquire()
+        # Only a message that is ACTUALLY queued behind a running turn shows the
+        # queued 👌. The gate is held for the whole turn (released only on the
+        # terminal result via the outbound dispatcher), so gate.lock.locked() here
+        # means another turn for this runtime key is in flight and this message will
+        # block on acquire() below — surface that wait with 👌, then promote it to
+        # the running 👀 once the gate is acquired. A non-contended message skips 👌
+        # entirely and goes straight to 👀 at promote_reaction_to_running, so it does
+        # NOT flash 👌→👀. Reaction add/remove is owned by the processing indicator
+        # and is a no-op on platforms / modes without a reaction indicator (e.g.
+        # WeChat, typing-only, avibe Web).
+        indicator = getattr(self.controller, "processing_indicator", None)
+        queued_reaction_task: Optional[asyncio.Task] = None
+        if indicator is not None and gate.lock.locked():
+            # Contended: show the queued 👌. Fire it as a CONCURRENT task instead of
+            # awaiting it here — awaiting a network reaction call before acquire()
+            # would leave this turn OUT of the lock's FIFO waiter queue, so a later
+            # same-runtime message could reach acquire() first and reorder prompts
+            # within the session (Codex P1). Calling acquire() immediately reserves
+            # this turn's place in the queue; the task adds 👌 concurrently while we
+            # block, and we join it after acquiring (before promoting to 👀).
+            queued_reaction_task = asyncio.create_task(indicator.show_queued_reaction(request))
+        try:
+            await gate.lock.acquire()
+        except BaseException:
+            # Cancellation (e.g. SIGTERM / shutdown) while still waiting in the
+            # queue is raised by acquire() OUTSIDE the main try block below, so its
+            # CancelledError handler never runs. Let the queued-reaction task settle,
+            # then clean up the 👌 (and any eager typing) so it does not leak.
+            if queued_reaction_task is not None:
+                try:
+                    await queued_reaction_task
+                except BaseException:
+                    pass
+                if indicator is not None:
+                    try:
+                        # Pass the request (not the handle) so finish() clears BOTH
+                        # the handle and the flat request.ack_reaction_* fields.
+                        await indicator.finish(request)
+                    except Exception:
+                        logger.debug("Failed to clean up queued reaction on cancel", exc_info=True)
+            raise
         gate.token = uuid.uuid4().hex
         gate.backend = agent.name
         gate.runtime_started = False
         self._stamp_runtime_turn(request, runtime_key, gate.token)
         try:
+            # Register the indicator handle for terminal/cancel cleanup BEFORE the
+            # reaction awaits below. If the turn is cancelled (shutdown / supersede)
+            # while promote is awaiting the reaction API, the scheduled terminal tidy
+            # resolves the handle by turn token from this registry — tracking it first
+            # ensures a queued 👌 or fallback typing/message indicator is still
+            # finished instead of leaking on the message (Codex P2).
+            self._track_processing_indicator_turn(request)
+            # Settle the concurrently-added queued 👌 and promote it to the running
+            # 👀 INSIDE this cancellation-managed try. A cancel (shutdown / supersede)
+            # during these awaits must reach the CancelledError handler below so the
+            # runtime turn is released; otherwise the gate token + lock would leak and
+            # later prompts for this runtime key would block forever (Codex P1). Each
+            # is individually guarded so a reaction failure can't break the turn.
+            if queued_reaction_task is not None:
+                try:
+                    await queued_reaction_task
+                except Exception:
+                    logger.debug("Failed to settle queued reaction", exc_info=True)
+            if indicator is not None:
+                try:
+                    await indicator.promote_reaction_to_running(request, agent_name=agent_name)
+                except Exception:
+                    logger.debug("Failed to promote reaction to running", exc_info=True)
             # INBOUND status chokepoint (one of exactly two — the other is the outbound
             # MessageDispatcher.emit_agent_message). Every turn, every source (chat /
             # scheduled / Show Page), every backend funnels through here, so this is the
@@ -66,7 +129,6 @@ class AgentService:
             # are optional and guarded so a missing hook or a bubble failure can
             # never break the turn.
             await self._begin_turn_status(request.context)
-            self._track_processing_indicator_turn(request)
             await agent.handle_message(request)
         except asyncio.CancelledError:
             # Shutdown / SIGTERM / supersede cancels the turn mid-flight. Without a
