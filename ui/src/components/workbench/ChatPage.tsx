@@ -1813,6 +1813,10 @@ const Transcript: React.FC<TranscriptProps> = ({
   // also recovers a failed load (it re-arms regardless of outcome).
   const canLoadOlderRef = useRef(true);
   const settleTimerRef = useRef<number | null>(null);
+  // Mirror loadingOlder so the settle timer (which closes over a stale value)
+  // can avoid re-arming while a page load is still in flight.
+  const loadingOlderPropRef = useRef(loadingOlder);
+  loadingOlderPropRef.current = loadingOlder;
 
   useEffect(() => {
     loadOlderRef.current = onLoadOlder;
@@ -1906,7 +1910,10 @@ const Transcript: React.FC<TranscriptProps> = ({
     // re-arms; a failed load recovers the same way (re-arm regardless of outcome).
     if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
     settleTimerRef.current = window.setTimeout(() => {
-      canLoadOlderRef.current = true;
+      // Stay disarmed until the in-flight load finishes — a load slower than the
+      // settle would otherwise re-arm mid-flight and let the post-load scroll
+      // re-trigger. The load's own anchor-restore scroll schedules a fresh settle.
+      if (!loadingOlderPropRef.current) canLoadOlderRef.current = true;
     }, 150);
     if (hasOlder && !loadingOlder && canLoadOlderRef.current && el.scrollTop < 120) {
       canLoadOlderRef.current = false;
