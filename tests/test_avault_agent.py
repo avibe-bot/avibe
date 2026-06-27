@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import signal
 import stat
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -185,6 +187,44 @@ def test_agent_manager_recreates_owned_agent_when_socket_disappears(tmp_path, mo
     assert waited == [True]
 
 
+def test_agent_manager_reset_signals_process_group(tmp_path, monkeypatch):
+    socket_path = Path(tempfile.mkdtemp(prefix="avault-reset-", dir="/tmp")) / "s"
+    manager = AvaultAgentManager(socket_path=socket_path)
+    proc = MockProcess()
+    manager._process = proc
+    signals: list[int] = []
+
+    def _signal_process_tree(process, sig, logger, label):
+        assert process is proc
+        assert label == "avault agent"
+        signals.append(sig)
+
+    monkeypatch.setattr("vibe.avault_agent.signal_process_tree", _signal_process_tree)
+
+    manager.reset()
+
+    assert signals == [signal.SIGTERM]
+    assert proc.terminated is False
+    assert proc.killed is False
+    assert manager._process is None
+
+
+def test_agent_manager_reset_kills_process_group_after_timeout(tmp_path, monkeypatch):
+    socket_path = Path(tempfile.mkdtemp(prefix="avault-reset-kill-", dir="/tmp")) / "s"
+    manager = AvaultAgentManager(socket_path=socket_path)
+    proc = MockProcess(wait_timeout=True)
+    manager._process = proc
+    signals: list[int] = []
+    monkeypatch.setattr("vibe.avault_agent.signal_process_tree", lambda process, sig, logger, label: signals.append(sig))
+
+    manager.reset()
+
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert proc.terminated is False
+    assert proc.killed is False
+    assert manager._process is None
+
+
 def test_agent_client_does_not_retry_deliver_after_frame_write_timeout(tmp_path):
     socket_path = Path(tempfile.mkdtemp(prefix="avault-timeout-", dir="/tmp")) / "s"
     ready = threading.Event()
@@ -239,9 +279,11 @@ def test_remove_stale_agent_socket_unlinks_dead_socket(tmp_path):
 
 
 class MockProcess:
-    def __init__(self):
+    def __init__(self, *, wait_timeout: bool = False):
         self.terminated = False
         self.killed = False
+        self.wait_timeout = wait_timeout
+        self.wait_calls = 0
 
     def poll(self):
         return None
@@ -250,6 +292,9 @@ class MockProcess:
         self.terminated = True
 
     def wait(self, timeout=None):
+        self.wait_calls += 1
+        if self.wait_timeout and self.wait_calls == 1:
+            raise subprocess.TimeoutExpired("mock", timeout)
         return None
 
     def kill(self):

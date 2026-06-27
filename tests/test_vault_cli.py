@@ -278,6 +278,23 @@ def test_run_reports_fifo_bridge_errors(capfd, monkeypatch):
     deliver.assert_not_called()
 
 
+def test_run_rejects_protected_tty_without_delivering(capfd, monkeypatch):
+    from vibe import api
+
+    _set_protected_grant("PROTECTED_KEY")
+    monkeypatch.setattr(cli, "_stdio_has_tty", lambda: True)
+    deliver = Mock()
+    monkeypatch.setattr(api, "avault_agent_deliver_run", deliver)
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"]))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "protected_tty_unsupported"
+    deliver.assert_not_called()
+
+
 def test_run_prefers_common_grant_for_protected_batch(tmp_path, capfd, monkeypatch):
     from vibe import api
 

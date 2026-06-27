@@ -684,23 +684,24 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
     #     then no-ops on that in-flight send), and the saved composer draft.
     from storage.messages_service import clear_draft, clear_pending, clear_queued
     from storage.vault_service import (
-        active_grant_scopes_for_session,
+        agent_release_scopes_after_rows,
         expire_session_requests,
-        has_active_grant_for_scope,
         revoke_session_grants,
+        vault_grants,
     )
 
     clear_queued(conn, session_id)
     clear_pending(conn, session_id)
     clear_draft(conn, session_id)
-    revoked_vault_grant_scopes = active_grant_scopes_for_session(conn, session_id)
+    revoked_vault_grant_rows = [
+        dict(row)
+        for row in conn.execute(
+            select(vault_grants).where(vault_grants.c.status == "active", vault_grants.c.session_id == session_id)
+        ).mappings()
+    ]
     expire_session_requests(conn, session_id)
     revoke_session_grants(conn, session_id)
-    revoked_vault_grant_scopes = [
-        scope
-        for scope in revoked_vault_grant_scopes
-        if not has_active_grant_for_scope(conn, scope_type=scope["scope_type"], scope_ref=scope["scope_ref"])
-    ]
+    revoked_vault_grant_scopes = agent_release_scopes_after_rows(conn, revoked_vault_grant_rows)
 
     # 4) Take the Show Page offline so a shared link can't keep serving the
     #    archived session (no-op when the session never had one).

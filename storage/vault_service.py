@@ -286,6 +286,13 @@ def _grant_row_payload(row: dict[str, Any], *, cache: VaultGrantRuntimeCache = G
     }
 
 
+def _grant_member_names(row: dict[str, Any]) -> list[str]:
+    members = _loads(row.get("member_snapshot")) or []
+    if not isinstance(members, list):
+        return []
+    return [str(name) for name in members if isinstance(name, str) and name]
+
+
 def _unique_grant_scopes(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
     seen: set[tuple[str, str]] = set()
     scopes: list[dict[str, str]] = []
@@ -1227,6 +1234,54 @@ def active_grant_scopes_for_session(conn: Connection, session_id: str) -> list[d
     return _unique_grant_scopes(rows)
 
 
+def agent_release_scopes_after_rows(
+    conn: Connection,
+    rows: list[dict[str, Any]],
+    *,
+    cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+) -> list[dict[str, str]]:
+    """Return resident-agent scopes that must be dropped after grant rows stop being active.
+
+    The agent cache is keyed by scope, not grant id. Keeping a scope is valid only
+    when the remaining active grants for that scope still cover every member that
+    had been cached under the removed rows.
+    """
+
+    if not rows:
+        return []
+    active_rows = [
+        dict(row)
+        for row in conn.execute(select(vault_grants).where(vault_grants.c.status == "active")).mappings()
+    ]
+    active_by_scope: dict[tuple[str, str], set[str]] = {}
+    for row in active_rows:
+        key = (str(row["scope_type"]), str(row["scope_ref"]))
+        active_by_scope.setdefault(key, set()).update(_grant_member_names(row))
+
+    removed_by_scope: dict[tuple[str, str], set[str]] = {}
+    for row in rows:
+        key = (str(row["scope_type"]), str(row["scope_ref"]))
+        removed_by_scope.setdefault(key, set()).update(_grant_member_names(row))
+
+    release_scopes: list[dict[str, str]] = []
+    for (scope_type, scope_ref), removed_members in removed_by_scope.items():
+        if removed_members.issubset(active_by_scope.get((scope_type, scope_ref), set())):
+            continue
+        stale_scope_grants = [
+            dict(row)
+            for row in conn.execute(
+                select(vault_grants).where(
+                    vault_grants.c.scope_type == scope_type,
+                    vault_grants.c.scope_ref == scope_ref,
+                )
+            ).mappings()
+        ]
+        for stale_row in stale_scope_grants:
+            cache.drop(str(stale_row["id"]))
+        release_scopes.append({"scope_type": scope_type, "scope_ref": scope_ref})
+    return release_scopes
+
+
 def expire_grant(
     conn: Connection,
     grant_id: str,
@@ -1486,6 +1541,7 @@ def create_grant(
     created_by_request_id: str | None = None,
     inherit_request_session: bool = True,
     expected_member_names: set[str] | list[str] | tuple[str, ...] | None = None,
+    cache_ready: bool = True,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
 ) -> dict[str, Any]:
     if scope_type not in GRANT_SCOPE_TYPES:
@@ -1564,7 +1620,8 @@ def create_grant(
         session_id=session_id,
         decided_at=decided_at,
     )
-    cache.put(grant_id, members, expires_at=expires_at)
+    if cache_ready:
+        cache.put(grant_id, members, expires_at=expires_at)
     return _grant_row_payload(dict(row), cache=cache)
 
 
@@ -1621,18 +1678,26 @@ def revoke_grant(
     return _grant_row_payload(dict(updated), cache=cache)
 
 
-def has_active_grant_for_scope(conn: Connection, *, scope_type: str, scope_ref: str) -> bool:
-    expire_grants(conn)
-    return (
-        conn.execute(
-            select(vault_grants.c.id).where(
-                vault_grants.c.status == "active",
-                vault_grants.c.scope_type == scope_type,
-                vault_grants.c.scope_ref == scope_ref,
-            )
-        ).first()
-        is not None
-    )
+def mark_grant_agent_ready(
+    conn: Connection,
+    grant_id: str,
+    *,
+    cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+) -> dict[str, Any]:
+    row = conn.execute(
+        select(vault_grants).where(
+            vault_grants.c.id == grant_id,
+            vault_grants.c.status == "active",
+        )
+    ).mappings().first()
+    if row is None:
+        raise GrantNotActiveError(grant_id)
+    row_dict = dict(row)
+    members = _grant_member_names(row_dict)
+    if not members:
+        raise InvalidGrantError("grant has no cached members")
+    cache.put(grant_id, members, expires_at=row_dict.get("expires_at"))
+    return _grant_row_payload(row_dict, cache=cache)
 
 
 def revoke_session_grants(
@@ -1715,8 +1780,9 @@ def find_active_grant_for_secrets(
     if not candidates:
         return None
     ready_candidates = [item for item in candidates if item[0]]
-    if ready_candidates:
-        candidates = ready_candidates
+    if not ready_candidates:
+        return None
+    candidates = ready_candidates
     member_count = min(item[1] for item in candidates)
     _, _, _, _, row = max(
         (item for item in candidates if item[1] == member_count),

@@ -422,6 +422,46 @@ def test_revoke_grant_keeps_agent_scope_when_other_active_grant_exists(monkeypat
         assert vault_service.find_active_grant_for_secret(conn, "GRANT_KEY", session_id="ses_2")["id"] == grant_2["id"]
 
 
+def test_revoke_grant_releases_scope_when_remaining_members_do_not_cover_cache(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_release = Mock(return_value={"released": True})
+    monkeypatch.setattr(api, "avault_agent_release", agent_release)
+    api.create_vault_secret({"name": "A_KEY", "protection": "protected", "group": "crypto", "sealed": {"ciphertext": "ct-a", "nonce": "n-a", "wrap_meta": "wm-a"}})
+    with api._vault_engine().begin() as conn:
+        req_narrow = vault_service.create_access_request(
+            conn,
+            "A_KEY",
+            requester={"session_id": "ses_narrow"},
+            delivery={"session_id": "ses_narrow"},
+        )
+        vault_service.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_narrow",
+            created_by_request_id=req_narrow["id"],
+        )
+        vault_service.create_secret(conn, name="B_KEY", protection="protected", group="crypto", sealed=_sealed("b"))
+        req_group = vault_service.create_access_request(
+            conn,
+            "A_KEY",
+            requester={"session_id": "ses_group"},
+            delivery={"session_id": "ses_group"},
+        )
+        group_grant = vault_service.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_group",
+            created_by_request_id=req_group["id"],
+        )
+
+    revoked = api.revoke_vault_grant(group_grant["id"])
+
+    assert revoked["grant"]["status"] == "revoked"
+    agent_release.assert_called_once_with(scope_type="group", scope_ref="crypto")
+
+
 def test_delete_protected_secret_releases_agent_scope(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     agent_release = Mock(return_value={"released": True})

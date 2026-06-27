@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
+from sqlalchemy import select
 
 from config import paths
 from config.v2_config import CONFIG_LOCK, V2Config
@@ -1446,17 +1447,9 @@ def delete_vault_secret(name: str) -> dict:
     release_scopes: list[dict[str, str]] = []
     try:
         with engine.begin() as conn:
-            release_scopes = vault_service.active_grant_scopes_for_secret(conn, name)
+            grant_rows = vault_service.active_grant_rows_for_secret(conn, name)
             vault_service.delete_secret(conn, name)
-            release_scopes = [
-                scope
-                for scope in release_scopes
-                if not vault_service.has_active_grant_for_scope(
-                    conn,
-                    scope_type=scope["scope_type"],
-                    scope_ref=scope["scope_ref"],
-                )
-            ]
+            release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
     release_vault_agent_scopes(release_scopes, reason="delete_vault_secret")
@@ -1571,8 +1564,8 @@ def create_vault_grant(payload: dict) -> dict:
                 created_by_request_id=str(request_id),
                 inherit_request_session=inherit_request_session,
                 expected_member_names=provided_names,
+                cache_ready=False,
             )
-            vault_service.GRANT_RUNTIME_CACHE.drop(str(grant["id"]))
     except vault_service.NotGrantableError as exc:
         raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
     except vault_service.SecretNotFoundError as exc:
@@ -1591,31 +1584,18 @@ def create_vault_grant(payload: dict) -> dict:
             deks=agent_deks,
             expected_pubkey=payload.get("agent_pubkey") if isinstance(payload.get("agent_pubkey"), dict) else None,
         )
-        vault_service.GRANT_RUNTIME_CACHE.put(
-            str(grant["id"]),
-            list(grant.get("member_snapshot") or []),
-            expires_at=grant.get("expires_at"),
-        )
-        grant = {
-            **grant,
-            "runtime_member_count": len(vault_service.GRANT_RUNTIME_CACHE.covered_names(str(grant["id"]))),
-            "delivery_ready": True,
-            "delivery_status": "agent_cache_ready",
-        }
+        with engine.begin() as conn:
+            grant = vault_service.mark_grant_agent_ready(conn, str(grant["id"]))
     except vault_service.InvalidGrantError as exc:
         with engine.begin() as conn:
             vault_service.expire_grant(conn, str(grant["id"]), reason="grant-expired-agent-relay-failed")
         raise VaultApiError(str(exc), code="invalid_grant") from exc
     except AvaultError as exc:
         with engine.begin() as conn:
+            grant_rows = [dict(row) for row in conn.execute(select(vault_service.vault_grants).where(vault_service.vault_grants.c.id == str(grant["id"]))).mappings()]
             vault_service.expire_grant(conn, str(grant["id"]), reason="grant-expired-agent-relay-failed")
-            release_agent_scope = not vault_service.has_active_grant_for_scope(
-                conn,
-                scope_type=str(grant["scope_type"]),
-                scope_ref=str(grant["scope_ref"]),
-            )
-        if release_agent_scope:
-            _release_failed_grant_scope(str(grant["scope_type"]), str(grant["scope_ref"]), reason=f"create_vault_grant:{grant['id']}")
+            release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
+        release_vault_agent_scopes(release_scopes, reason=f"create_vault_grant:{grant['id']}")
         raise _vault_api_error_from_avault(exc, prefix="avault agent grant failed") from exc
     return {"ok": True, "grant": grant}
 
@@ -1639,21 +1619,15 @@ def revoke_vault_grant(grant_id: str) -> dict:
     engine = _vault_engine()
     try:
         with engine.begin() as conn:
+            grant_row = conn.execute(select(vault_service.vault_grants).where(vault_service.vault_grants.c.id == grant_id)).mappings().first()
+            grant_rows = [dict(grant_row)] if grant_row is not None else []
             grant = vault_service.revoke_grant(conn, grant_id)
-            release_agent_scope = not vault_service.has_active_grant_for_scope(
-                conn,
-                scope_type=grant["scope_type"],
-                scope_ref=grant["scope_ref"],
-            )
+            release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
     except vault_service.GrantNotFoundError as exc:
         raise VaultApiError(f"grant '{grant_id}' not found", code="grant_not_found", status=404) from exc
     except vault_service.GrantNotActiveError as exc:
         raise VaultApiError(f"grant '{grant_id}' is not active", code="grant_not_active", status=409) from exc
-    if release_agent_scope:
-        release_vault_agent_scopes(
-            [{"scope_type": grant["scope_type"], "scope_ref": grant["scope_ref"]}],
-            reason=f"revoke_vault_grant:{grant_id}",
-        )
+    release_vault_agent_scopes(release_scopes, reason=f"revoke_vault_grant:{grant_id}")
     return {"ok": True, "grant": grant}
 
 

@@ -8,6 +8,8 @@ Plaintext and DEKs stay inside ``avault``.
 from __future__ import annotations
 
 import json
+import logging
+import signal
 import socket
 import subprocess
 import stat
@@ -17,8 +19,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from config import paths
-from core.process_isolation import isolated_subprocess_kwargs
+from core.process_isolation import KILL_SIGNAL, isolated_subprocess_kwargs, signal_process_tree
 from vibe.i18n import t as backend_t
+
+logger = logging.getLogger(__name__)
 
 MAX_AGENT_FRAME_BYTES = 1024 * 1024
 DEFAULT_AGENT_SOCKET_TIMEOUT = 20.0
@@ -272,11 +276,11 @@ class AvaultAgentManager:
         self._process = None
         if proc is None or proc.poll() is not None:
             return
-        proc.terminate()
+        signal_process_tree(proc, signal.SIGTERM, logger, "avault agent")
         try:
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            signal_process_tree(proc, KILL_SIGNAL, logger, "avault agent")
             proc.wait(timeout=2)
 
 

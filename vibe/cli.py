@@ -3457,17 +3457,9 @@ def cmd_vault_rm(args):
         engine = _open_vault_engine()
         release_scopes: list[dict[str, str]] = []
         with engine.begin() as conn:
-            release_scopes = vault_service.active_grant_scopes_for_secret(conn, args.name)
+            grant_rows = vault_service.active_grant_rows_for_secret(conn, args.name)
             vault_service.delete_secret(conn, args.name)
-            release_scopes = [
-                scope
-                for scope in release_scopes
-                if not vault_service.has_active_grant_for_scope(
-                    conn,
-                    scope_type=scope["scope_type"],
-                    scope_ref=scope["scope_ref"],
-                )
-            ]
+            release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
         api.release_vault_agent_scopes(release_scopes, reason="vault_rm")
         _print_cli_payload("vault_secret", removed=True, name=args.name)
         return 0
@@ -3783,6 +3775,18 @@ def _resolve_cli_output_path(path: str) -> str:
     return str(output_path)
 
 
+def _stdio_has_tty() -> bool:
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        isatty = getattr(stream, "isatty", None)
+        if callable(isatty):
+            try:
+                if isatty():
+                    return True
+            except OSError:
+                continue
+    return False
+
+
 def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: list[str]):
     from storage import vault_service
 
@@ -3982,6 +3986,12 @@ def cmd_vault_run(args):
     try:
         delivered_by_agent = grant is not None
         if grant is not None:
+            if _stdio_has_tty():
+                raise TaskCliError(
+                    "protected vault run does not yet support interactive TTY commands",
+                    code="protected_tty_unsupported",
+                    help_command=help_command,
+                )
             secret_env_names = {str(secret["env"]) for secret in secrets if secret.get("env")}
             with _AgentRunOutputBridge(
                 sys.stdout.buffer,
