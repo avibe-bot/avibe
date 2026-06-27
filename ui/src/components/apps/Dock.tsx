@@ -20,8 +20,16 @@ export const Dock: React.FC = () => {
     const own = windows.filter((w) => w.appId === appId);
     const visible = own.filter((w) => !w.minimized);
     if (visible.length > 0) {
-      wm.focus(visible.reduce((a, b) => (b.z > a.z ? b : a)).id);
+      const top = visible.reduce((a, b) => (b.z > a.z ? b : a));
+      wm.focus(top.id);
+      // Pull DOM focus straight to it: if it was already the top window, wm.focus is a
+      // no-op so the focusedId-keyed focus effect won't re-fire, and the chord (routed by
+      // document.activeElement) would otherwise stay on this Dock button. The element is
+      // already rendered + visible here, so focusing it directly is safe.
+      (document.querySelector(`[data-window-id="${top.id}"]`) as HTMLElement | null)?.focus?.({ preventScroll: true });
     } else if (own.length > 0) {
+      // Restored from minimized: the element is inert until the next render, so DOM focus is
+      // handled by AppWindow's focus-on-becoming-top effect rather than a direct call here.
       wm.restore(own.reduce((a, b) => (b.z > a.z ? b : a)).id);
     } else {
       wm.openApp(appId);
