@@ -459,7 +459,8 @@ def test_find_active_grant_uses_metadata_even_without_python_key_cache(vault):
         active = vs.find_active_grant_for_secret(conn, "A_KEY", session_id="ses_1", cache=cache)
         assert active is not None
         assert active["id"] == grant["id"]
-        assert active["delivery_status"] == "resident_agent_pending"
+        assert active["delivery_ready"] is False
+        assert active["delivery_status"] == "agent_cache_unverified"
     with vault.connect() as conn:
         status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
     assert status == "active"
@@ -541,7 +542,8 @@ def test_active_grant_list_keeps_metadata_when_runtime_cache_is_empty(vault):
         assert len(listed) == 1
         assert listed[0]["id"] == grant["id"]
         assert listed[0]["runtime_member_count"] == 0
-        assert listed[0]["delivery_status"] == "resident_agent_pending"
+        assert listed[0]["delivery_ready"] is False
+        assert listed[0]["delivery_status"] == "agent_cache_unverified"
     with vault.connect() as conn:
         status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
     assert status == "active"
@@ -599,7 +601,7 @@ def test_resolve_protected_without_grant_returns_approval_card(vault):
     assert "ct-group" not in persisted
 
 
-def test_resolve_protected_with_grant_reports_agent_delivery_pending(vault):
+def test_resolve_protected_with_grant_reports_agent_delivery_ready(vault):
     _create(vault, name="PROTECTED_KEY", protection="protected")
     cache = vs.VaultGrantRuntimeCache()
     with vault.begin() as conn:
@@ -614,11 +616,32 @@ def test_resolve_protected_with_grant_reports_agent_delivery_pending(vault):
         )
         result = vs.resolve_secret_access(conn, "PROTECTED_KEY", session_id="ses_1", create_request=False, cache=cache)
 
-    assert result["status"] == "agent_delivery_pending"
+    assert result["status"] == "agent_delivery_ready"
     assert result["request"] is None
     assert result["grant"]["id"] == grant["id"]
-    assert result["grant"]["delivery_ready"] is False
-    assert result["grant"]["delivery_status"] == "resident_agent_pending"
+    assert result["grant"]["delivery_ready"] is True
+    assert result["envelope"] == _sealed()
+
+
+def test_expire_grant_after_agent_cache_missing_reopens_approval(vault):
+    _create(vault, name="PROTECTED_KEY", protection="protected")
+    cache = vs.VaultGrantRuntimeCache()
+    with vault.begin() as conn:
+        req = _access_request(conn, "PROTECTED_KEY", session_id="ses_1")
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="PROTECTED_KEY",
+            session_id="ses_1",
+            created_by_request_id=req["id"],
+            cache=cache,
+        )
+        expired = vs.expire_grant(conn, grant["id"], cache=cache, reason="grant-expired-agent-cache-missing")
+        result = vs.resolve_secret_access(conn, "PROTECTED_KEY", session_id="ses_1", cache=cache)
+
+    assert expired["status"] == "expired"
+    assert result["status"] == "approval_required"
+    assert result["request"]["secret_name"] == "PROTECTED_KEY"
 
 
 def test_request_inbox_hydrates_unlock_material_without_persisting_it(vault):
@@ -693,7 +716,7 @@ def test_resolve_access_preserves_delivery_session_when_argument_is_missing(vaul
     assert card["session_id"] == "ses_delivery"
     assert json.loads(raw_delivery)["session_id"] == "ses_delivery"
     assert grant["session_id"] == "ses_delivery"
-    assert same_session["status"] == "agent_delivery_pending"
+    assert same_session["status"] == "agent_delivery_ready"
     assert other_session["status"] == "approval_required"
 
 
@@ -729,7 +752,7 @@ def test_resolve_access_uses_requester_session_for_grant_lookup(vault):
         )
 
     assert grant["session_id"] == "ses_requester"
-    assert same_session["status"] == "agent_delivery_pending"
+    assert same_session["status"] == "agent_delivery_ready"
     assert same_session["grant"]["id"] == grant["id"]
     assert other_session["status"] == "approval_required"
 
@@ -795,7 +818,7 @@ def test_grant_creation_does_not_require_python_dek_material(vault):
         grant = vs.create_grant(conn, scope_type="secret", scope_ref="A_KEY", created_by_request_id=req["id"])
 
     assert grant["member_snapshot"] == ["A_KEY"]
-    assert grant["delivery_status"] == "resident_agent_pending"
+    assert grant["delivery_status"] == "agent_cache_ready"
 
 
 def test_grant_creation_must_match_pending_access_request(vault):

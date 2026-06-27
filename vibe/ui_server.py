@@ -2647,6 +2647,16 @@ def vault_pubkey_get():
         return _vault_error_response(exc)
 
 
+@app.route("/api/vault/agent/pubkey", methods=["GET"])
+def vault_agent_pubkey_get():
+    from vibe import api
+
+    try:
+        return jsonify(api.get_vault_agent_pubkey())
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
 @app.route("/api/vault/secrets", methods=["POST"])
 def vault_secrets_post():
     from vibe import api

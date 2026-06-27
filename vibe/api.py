@@ -1336,6 +1336,13 @@ def get_vault_pubkey() -> dict:
         raise VaultApiError(f"avault pubkey failed: {exc}", code="avault_failed") from exc
 
 
+def get_vault_agent_pubkey() -> dict:
+    try:
+        return {"ok": True, **avault_agent_pubkey()}
+    except AvaultError as exc:
+        raise VaultApiError(f"avault agent pubkey failed: {exc}", code="avault_failed") from exc
+
+
 def _sealed_from_payload(payload: dict):
     from storage.vault_crypto import Sealed
 
@@ -1477,8 +1484,23 @@ def create_vault_grant(payload: dict) -> dict:
         ttl_seconds = int(ttl) if ttl is not None else None
     except (TypeError, ValueError) as exc:
         raise VaultApiError("ttl_seconds must be an integer", code="invalid_grant") from exc
-    if payload.get("deks_by_secret") is not None:
-        raise VaultApiError("protected grant DEKs must be handled by the resident avault agent", code="invalid_grant")
+    deks = payload.get("deks")
+    if deks is None:
+        deks = payload.get("agent_deks")
+    if deks is None and isinstance(payload.get("deks_by_secret"), dict):
+        deks = [
+            {"name": name, **dek}
+            if isinstance(dek, dict)
+            else {"name": name, "dek_blindbox": dek}
+            for name, dek in payload["deks_by_secret"].items()
+        ]
+    if not isinstance(deks, list) or not deks:
+        raise VaultApiError("resident agent grant requires sealed DEKs", code="invalid_grant")
+    for item in deks:
+        if not isinstance(item, dict):
+            raise VaultApiError("resident agent grant DEKs must be objects", code="invalid_grant")
+        if not item.get("name") or not isinstance(item.get("dek_blindbox"), dict) or not isinstance(item.get("approval"), dict):
+            raise VaultApiError("resident agent grant DEKs require name, dek_blindbox, and approval", code="invalid_grant")
     request_id = payload.get("request_id") or payload.get("created_by_request_id")
     if not request_id:
         raise VaultApiError("request_id is required to create a grant", code="missing_request_id")
@@ -1489,6 +1511,22 @@ def create_vault_grant(payload: dict) -> dict:
     engine = _vault_engine()
     try:
         with engine.begin() as conn:
+            def _agent_grant(grant_meta: dict) -> None:
+                expected_names = set(grant_meta.get("members") or [])
+                provided_names = {str(item.get("name")) for item in deks if isinstance(item, dict)}
+                if provided_names != expected_names:
+                    raise vault_service.InvalidGrantError("resident agent DEKs must match the approved grant members")
+                try:
+                    avault_agent_grant(
+                        scope_type=str(grant_meta["scope_type"]),
+                        scope_ref=str(grant_meta["scope_ref"]),
+                        ttl_secs=int(grant_meta["ttl_seconds"]),
+                        deks=deks,
+                        expected_pubkey=payload.get("agent_pubkey") if isinstance(payload.get("agent_pubkey"), dict) else None,
+                    )
+                except AvaultError as exc:
+                    raise VaultApiError(f"avault agent grant failed: {exc}", code="avault_failed") from exc
+
             grant = vault_service.create_grant(
                 conn,
                 scope_type=scope_type,
@@ -1497,6 +1535,7 @@ def create_vault_grant(payload: dict) -> dict:
                 ttl_seconds=ttl_seconds,
                 created_by_request_id=str(request_id),
                 inherit_request_session=inherit_request_session,
+                on_agent_grant=_agent_grant,
             )
     except vault_service.NotGrantableError as exc:
         raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
@@ -1535,6 +1574,10 @@ def revoke_vault_grant(grant_id: str) -> dict:
         raise VaultApiError(f"grant '{grant_id}' not found", code="grant_not_found", status=404) from exc
     except vault_service.GrantNotActiveError as exc:
         raise VaultApiError(f"grant '{grant_id}' is not active", code="grant_not_active", status=409) from exc
+    try:
+        avault_agent_release(scope_type=grant["scope_type"], scope_ref=grant["scope_ref"])
+    except AvaultError:
+        logger.warning("revoke_vault_grant: failed to release resident agent grant %s", grant_id, exc_info=True)
     return {"ok": True, "grant": grant}
 
 
@@ -3557,7 +3600,9 @@ def _run_install_command(
 
 _ASKILL_INSTALL_LOCK = threading.Lock()
 _AVAULT_INSTALL_LOCK = threading.Lock()
-AVAULT_P2_MIN_VERSION = "0.1.3"
+_AVAULT_AGENT_MANAGER_LOCK = threading.Lock()
+_AVAULT_AGENT_MANAGER = None
+AVAULT_P2_MIN_VERSION = "0.1.2"
 # Installer pin must reference a published manifest-pinned release. It may lag
 # the P2 surface; standard sealing remains usable while P2-only entry points
 # gate on AVAULT_P2_MIN_VERSION below.
@@ -4038,6 +4083,20 @@ def _require_avault_path() -> str:
     return path
 
 
+def _avault_agent_client():
+    from vibe.avault_agent import AvaultAgentManager
+
+    global _AVAULT_AGENT_MANAGER
+    with _AVAULT_AGENT_MANAGER_LOCK:
+        if _AVAULT_AGENT_MANAGER is None:
+            _AVAULT_AGENT_MANAGER = AvaultAgentManager(
+                binary_resolver=_require_avault_path,
+                command_env=_command_env_for,
+            )
+        manager = _AVAULT_AGENT_MANAGER
+    return manager.client()
+
+
 def _run_avault(
     args: list[str],
     *,
@@ -4101,6 +4160,22 @@ def avault_pubkey() -> dict:
     fingerprint = payload.get("fingerprint")
     if not isinstance(public_key, str) or not isinstance(fingerprint, str) or not public_key or not fingerprint:
         raise AvaultError("avault pubkey returned malformed output")
+    return {"public_key": public_key, "fingerprint": fingerprint}
+
+
+def avault_agent_pubkey() -> dict:
+    """Return the resident agent's ephemeral blind-box public key."""
+    from vibe.avault_agent import AvaultAgentError
+
+    _require_avault_p2_surface("resident agent pubkey")
+    try:
+        payload = _avault_agent_client().pubkey()
+    except AvaultAgentError as exc:
+        raise AvaultError(str(exc)) from exc
+    public_key = payload.get("public_key")
+    fingerprint = payload.get("fingerprint")
+    if not isinstance(public_key, str) or not isinstance(fingerprint, str) or not public_key or not fingerprint:
+        raise AvaultError("avault agent pubkey returned malformed output")
     return {"public_key": public_key, "fingerprint": fingerprint}
 
 
@@ -4209,6 +4284,132 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> int:
         # which surfaces its exit code.
         pass
     return proc.wait()
+
+
+def _agent_secret_payload(secret: dict, *, target_field: str) -> dict:
+    return {
+        "name": secret["name"],
+        target_field: secret[target_field],
+        "envelope": _envelope_payload(secret["envelope"]),
+    }
+
+
+def avault_agent_grant(
+    *,
+    scope_type: str,
+    scope_ref: str,
+    ttl_secs: int,
+    deks: list[dict],
+    expected_pubkey: dict | None = None,
+) -> dict:
+    """Cache browser-released protected DEKs in the resident agent."""
+    from vibe.avault_agent import AvaultAgentError
+
+    _require_avault_p2_surface("resident agent grant")
+    if expected_pubkey is not None:
+        current = avault_agent_pubkey()
+        expected_fingerprint = expected_pubkey.get("fingerprint")
+        if expected_fingerprint and expected_fingerprint != current.get("fingerprint"):
+            raise AvaultError("avault agent pubkey fingerprint mismatch")
+        expected_public_key = expected_pubkey.get("public_key")
+        if expected_public_key and expected_public_key != current.get("public_key"):
+            raise AvaultError("avault agent public key mismatch")
+    try:
+        return _avault_agent_client().grant(
+            scope_type=scope_type,
+            scope_ref=scope_ref,
+            ttl_secs=ttl_secs,
+            deks=deks,
+        )
+    except AvaultAgentError as exc:
+        raise AvaultError(str(exc)) from exc
+
+
+def avault_agent_release(*, scope_type: str, scope_ref: str) -> dict:
+    """Drop a resident-agent protected grant if present."""
+    from vibe.avault_agent import AvaultAgentError
+
+    _require_avault_p2_surface("resident agent release")
+    try:
+        return _avault_agent_client().release(scope_type=scope_type, scope_ref=scope_ref)
+    except AvaultAgentError as exc:
+        raise AvaultError(str(exc)) from exc
+
+
+def avault_agent_deliver_run(
+    *,
+    scope_type: str,
+    scope_ref: str,
+    secrets: list[dict],
+    command: list[str],
+) -> int:
+    """Run a child under a protected grant. Plaintext stays inside avault."""
+    from vibe.avault_agent import AvaultAgentError
+
+    _require_avault_p2_surface("resident agent deliver run")
+    try:
+        result = _avault_agent_client().deliver_run(
+            scope_type=scope_type,
+            scope_ref=scope_ref,
+            command=command,
+            secrets=[_agent_secret_payload(secret, target_field="env") for secret in secrets],
+        )
+    except AvaultAgentError as exc:
+        raise AvaultError(str(exc)) from exc
+    try:
+        return int(result["exit_code"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AvaultError("avault agent deliver run returned malformed output") from exc
+
+
+def avault_agent_deliver_fetch(
+    *,
+    scope_type: str,
+    scope_ref: str,
+    name: str,
+    sealed,
+    request: dict,
+) -> dict:
+    """Broker an HTTP request under a protected grant."""
+    from vibe.avault_agent import AvaultAgentError
+
+    _require_avault_p2_surface("resident agent deliver fetch")
+    try:
+        return _avault_agent_client().deliver_fetch(
+            scope_type=scope_type,
+            scope_ref=scope_ref,
+            name=name,
+            envelope=_envelope_payload(sealed),
+            request=request,
+        )
+    except AvaultAgentError as exc:
+        raise AvaultError(str(exc)) from exc
+
+
+def avault_agent_deliver_inject(
+    *,
+    scope_type: str,
+    scope_ref: str,
+    path: str,
+    fmt: str,
+    secrets: list[dict],
+) -> None:
+    """Render a protected-grant secret file inside avault."""
+    from vibe.avault_agent import AvaultAgentError
+
+    _require_avault_p2_surface("resident agent deliver inject")
+    try:
+        result = _avault_agent_client().deliver_inject(
+            scope_type=scope_type,
+            scope_ref=scope_ref,
+            path=str(path),
+            fmt=fmt,
+            secrets=[_agent_secret_payload(secret, target_field="key") for secret in secrets],
+        )
+    except AvaultAgentError as exc:
+        raise AvaultError(str(exc)) from exc
+    if result.get("ok") is not True:
+        raise AvaultError("avault agent inject returned malformed output")
 
 
 def avault_deliver_fetch(name: str, sealed, request: dict) -> dict:

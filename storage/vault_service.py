@@ -19,7 +19,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import or_, select
 from sqlalchemy.engine import Connection
@@ -94,9 +94,8 @@ class VaultGrantRuntimeCache:
     """Process-local grant delivery readiness tracker.
 
     This intentionally stores no DEKs, plaintext, or browser-unwrapped key material.
-    Phase B can populate it with resident-agent-owned opaque handles when delivery is
-    wired; for Phase A/P2 metadata-only grants, active rows remain valid while
-    delivery reports ``resident_agent_pending``.
+    The resident avault agent owns the actual DEK cache; this cache only remembers
+    which persisted grant rows should be deliverable through that agent process.
     """
 
     def __init__(self) -> None:
@@ -267,6 +266,8 @@ def _grant_row_payload(row: dict[str, Any], *, cache: VaultGrantRuntimeCache = G
     if not isinstance(members, list):
         members = []
     grant_id = row["id"]
+    runtime_members = cache.covered_names(grant_id)
+    runtime_ready = bool(members) and set(members).issubset(set(runtime_members))
     return {
         "id": grant_id,
         "scope_type": row["scope_type"],
@@ -279,9 +280,9 @@ def _grant_row_payload(row: dict[str, Any], *, cache: VaultGrantRuntimeCache = G
         "revoked_at": row.get("revoked_at"),
         "member_snapshot": members,
         "member_count": len(members),
-        "runtime_member_count": len(cache.covered_names(grant_id)),
-        "delivery_ready": False,
-        "delivery_status": "resident_agent_pending",
+        "runtime_member_count": len(runtime_members),
+        "delivery_ready": runtime_ready,
+        "delivery_status": "agent_cache_ready" if runtime_ready else "agent_cache_unverified",
     }
 
 
@@ -1189,6 +1190,23 @@ def _expire_active_grants_for_secret(
     return _expire_grant_rows(conn, rows, cache=cache, reason=reason)
 
 
+def expire_grant(
+    conn: Connection,
+    grant_id: str,
+    *,
+    cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    reason: str = "grant-expired",
+) -> dict[str, Any]:
+    row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().first()
+    if row is None:
+        raise GrantNotFoundError(grant_id)
+    row_dict = dict(row)
+    if row_dict.get("status") == "active":
+        _expire_grant_rows(conn, [row_dict], cache=cache, reason=reason)
+        row_dict = dict(conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().one())
+    return _grant_row_payload(row_dict, cache=cache)
+
+
 def _expire_pending_requests_for_secret(
     conn: Connection,
     secret_name: str,
@@ -1431,6 +1449,7 @@ def create_grant(
     created_by_request_id: str | None = None,
     inherit_request_session: bool = True,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    on_agent_grant: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     if scope_type not in GRANT_SCOPE_TYPES:
         raise InvalidGrantError(f"invalid grant scope_type: {scope_type!r}")
@@ -1506,6 +1525,17 @@ def create_grant(
         session_id=session_id,
         decided_at=decided_at,
     )
+    if on_agent_grant is not None:
+        on_agent_grant(
+            {
+                "grant_id": grant_id,
+                "scope_type": scope_type,
+                "scope_ref": scope_ref,
+                "ttl_seconds": ttl,
+                "members": members,
+                "session_id": session_id,
+            }
+        )
     cache.put(grant_id, members, expires_at=expires_at)
     return _grant_row_payload(dict(row), cache=cache)
 
@@ -1621,9 +1651,9 @@ def resolve_secret_access(
     """Resolve an agent access attempt without exposing the value.
 
     Standard secrets can be delivered by existing one-shot avault paths. Protected
-    secrets can collect approval/grant metadata now, but resident-agent delivery
-    is a Phase-B follow-on; an active grant is therefore reported as pending
-    agent delivery instead of usable.
+    secrets with an active metadata grant should be delivered by the resident
+    avault agent; if the agent reports that its in-memory cache is gone, callers
+    expire the grant and re-run this resolver to create a fresh approval request.
     """
     row = _require_row(conn, name)
     if row.get("protection") == "standard":
@@ -1637,9 +1667,10 @@ def resolve_secret_access(
     grant = find_active_grant_for_secret(conn, name, session_id=effective_session_id, cache=cache)
     if grant is not None:
         return {
-            "status": "agent_delivery_pending",
+            "status": "agent_delivery_ready",
             "secret": _meta_payload(row),
             "grant": grant,
+            "envelope": _row_sealed(row),
             "request": None,
         }
     request_payload = None

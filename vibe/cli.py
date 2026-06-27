@@ -3462,6 +3462,168 @@ def cmd_vault_rm(args):
         return 1
 
 
+def _expire_agent_grant_after_missing(
+    engine,
+    grant_id: str,
+    names: list[str],
+    *,
+    delivery: dict | None = None,
+) -> dict | None:
+    from storage import vault_service
+
+    first_request = None
+    try:
+        with engine.begin() as conn:
+            vault_service.expire_grant(conn, grant_id, reason="grant-expired-agent-cache-missing")
+            for name in names:
+                resolved = vault_service.resolve_secret_access(
+                    conn,
+                    name,
+                    requester={"source": "cli", "pid": os.getpid()},
+                    delivery=delivery or {},
+                )
+                if first_request is None and isinstance(resolved.get("request"), dict):
+                    first_request = resolved["request"]
+    except Exception:
+        pass
+    return first_request
+
+
+def _agent_missing_grant(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "grant is missing or expired" in text or "grant does not cover" in text
+
+
+def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: list[str]):
+    from storage import vault_service
+
+    secrets = []
+    grant: dict | None = None
+    approval_error: TaskCliError | None = None
+    with engine.begin() as conn:
+        for env_name, vault_name in mapping.items():
+            resolved = vault_service.resolve_secret_access(
+                conn,
+                vault_name,
+                requester={"source": "cli", "pid": os.getpid()},
+                delivery={"mode": "run", "command": command_argv},
+            )
+            if resolved["status"] == "approval_required":
+                req = resolved.get("request") or {}
+                approval_error = TaskCliError(
+                    f"secret '{vault_name}' needs approval before protected delivery",
+                    code="approval_required",
+                    details={"request_id": req.get("id")},
+                )
+                break
+            if resolved["status"] == "standard":
+                secrets.append({"name": vault_name, "env": env_name, "envelope": resolved["envelope"], "protected": False})
+                continue
+            if resolved["status"] == "agent_delivery_ready":
+                current_grant = resolved["grant"]
+                if grant is None:
+                    grant = current_grant
+                elif grant["scope_type"] != current_grant["scope_type"] or grant["scope_ref"] != current_grant["scope_ref"]:
+                    raise TaskCliError(
+                        "protected vault run currently requires all protected secrets to share one active grant",
+                        code="mixed_grants",
+                    )
+                secrets.append({"name": vault_name, "env": env_name, "envelope": resolved["envelope"], "protected": True})
+                continue
+            raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
+    if approval_error is not None:
+        raise approval_error
+    protected = [item for item in secrets if item["protected"]]
+    standard = [item for item in secrets if not item["protected"]]
+    if protected and standard:
+        raise TaskCliError(
+            "mixing protected and standard secrets in one vault run is not wired yet",
+            code="mixed_protection_tiers",
+        )
+    selected = protected or standard
+    return grant, [{key: value for key, value in item.items() if key != "protected"} for item in selected]
+
+
+def _resolve_single_vault_delivery(
+    engine,
+    name: str,
+    *,
+    requester: dict,
+    delivery: dict,
+) -> tuple[dict | None, object]:
+    from storage import vault_service
+
+    with engine.begin() as conn:
+        resolved = vault_service.resolve_secret_access(
+            conn,
+            name,
+            requester=requester,
+            delivery=delivery,
+        )
+    if resolved["status"] == "approval_required":
+        req = resolved.get("request") or {}
+        raise TaskCliError(
+            f"secret '{name}' needs approval before protected delivery",
+            code="approval_required",
+            details={"request_id": req.get("id")},
+        )
+    if resolved["status"] == "standard":
+        return None, resolved["envelope"]
+    if resolved["status"] == "agent_delivery_ready":
+        return resolved["grant"], resolved["envelope"]
+    raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
+
+
+def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: str):
+    from storage import vault_service
+
+    secrets = []
+    grant: dict | None = None
+    approval_error: TaskCliError | None = None
+    with engine.begin() as conn:
+        for name in names:
+            resolved = vault_service.resolve_secret_access(
+                conn,
+                name,
+                requester={"source": "cli", "pid": os.getpid()},
+                delivery={"mode": "inject", "path": path, "format": fmt},
+            )
+            if resolved["status"] == "approval_required":
+                req = resolved.get("request") or {}
+                approval_error = TaskCliError(
+                    f"secret '{name}' needs approval before protected delivery",
+                    code="approval_required",
+                    details={"request_id": req.get("id")},
+                )
+                break
+            if resolved["status"] == "standard":
+                secrets.append({"name": name, "key": name, "envelope": resolved["envelope"], "protected": False})
+                continue
+            if resolved["status"] == "agent_delivery_ready":
+                current_grant = resolved["grant"]
+                if grant is None:
+                    grant = current_grant
+                elif grant["scope_type"] != current_grant["scope_type"] or grant["scope_ref"] != current_grant["scope_ref"]:
+                    raise TaskCliError(
+                        "protected vault inject currently requires all protected secrets to share one active grant",
+                        code="mixed_grants",
+                    )
+                secrets.append({"name": name, "key": name, "envelope": resolved["envelope"], "protected": True})
+                continue
+            raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
+    if approval_error is not None:
+        raise approval_error
+    protected = [item for item in secrets if item["protected"]]
+    standard = [item for item in secrets if not item["protected"]]
+    if protected and standard:
+        raise TaskCliError(
+            "mixing protected and standard secrets in one vault inject is not wired yet",
+            code="mixed_protection_tiers",
+        )
+    selected = protected or standard
+    return grant, [{key: value for key, value in item.items() if key != "protected"} for item in selected]
+
+
 def cmd_vault_run(args):
     from storage import vault_service
 
@@ -3491,8 +3653,7 @@ def cmd_vault_run(args):
                 example="vibe vault run --env OPENAI_API_KEY -- python sync.py",
             )
         engine = _open_vault_engine()
-        with engine.connect() as conn:
-            envelopes = vault_service.get_envelopes(conn, sorted(set(mapping.values())))
+        grant, secrets = _resolve_vault_run_delivery(engine, mapping, command_argv)
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
         return 1
@@ -3510,13 +3671,26 @@ def cmd_vault_run(args):
     # so its output passes through. Envelopes (no plaintext) go on avault's stdin.
     from vibe import api
 
-    secrets = [
-        {"name": vault_name, "env": env_name, "envelope": envelopes[vault_name]}
-        for env_name, vault_name in mapping.items()
-    ]
     try:
-        exit_code = api.avault_deliver_run(secrets, command_argv)
+        if grant is not None:
+            exit_code = api.avault_agent_deliver_run(
+                scope_type=grant["scope_type"],
+                scope_ref=grant["scope_ref"],
+                secrets=secrets,
+                command=command_argv,
+            )
+        else:
+            exit_code = api.avault_deliver_run(secrets, command_argv)
     except api.AvaultError as exc:
+        if grant is not None and _agent_missing_grant(exc):
+            _expire_agent_grant_after_missing(
+                engine,
+                grant["id"],
+                sorted(set(mapping.values())),
+                delivery={"mode": "run", "command": command_argv},
+            )
+            _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
+            return 1
         _print_task_error(TaskCliError(f"avault deliver failed: {exc}", code="avault_failed", help_command=help_command))
         return 1
     # avault exits 70 only on an internal failure BEFORE spawning the child (bad envelope /
@@ -3711,8 +3885,12 @@ def cmd_vault_fetch(args):
     from vibe import api
 
     help_command = "vibe vault fetch --help"
+    engine = None
+    grant = None
+    name = getattr(args, "auth", "")
+    host = ""
+    method = "GET"
     try:
-        name = args.auth
         url = args.url
         method = (getattr(args, "method", None) or "GET").upper()
         headers = _parse_headers(getattr(args, "header", None))
@@ -3786,7 +3964,8 @@ def cmd_vault_fetch(args):
                 # legacy / hand-edited policies. Reject BEFORE handing off so a bad policy never
                 # even unwraps the secret.
                 _reject_forbidden_header(auth.get("name", ""), help_command=help_command)
-            sealed = vault_service.get_envelope(conn, name)
+            # Envelope resolution happens below through resolve_secret_access so
+            # protected-tier secrets can use an active resident-agent grant.
 
         # Hand the envelope + request to avault: it injects the credential at egress, performs
         # the request, and returns ONLY the response (status/headers/body) — the value never
@@ -3806,7 +3985,22 @@ def cmd_vault_fetch(args):
             "body": body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else body,
             "inject": inject,
         }
-        result = api.avault_deliver_fetch(name, sealed, request)
+        grant, sealed = _resolve_single_vault_delivery(
+            engine,
+            name,
+            requester={"source": "cli", "pid": os.getpid()},
+            delivery={"mode": "fetch", "host": host, "method": method},
+        )
+        if grant is not None:
+            result = api.avault_agent_deliver_fetch(
+                scope_type=grant["scope_type"],
+                scope_ref=grant["scope_ref"],
+                name=name,
+                sealed=sealed,
+                request=request,
+            )
+        else:
+            result = api.avault_deliver_fetch(name, sealed, request)
         status = int(result.get("status") or 0)
         resp_body = result.get("body") or ""
 
@@ -3833,6 +4027,17 @@ def cmd_vault_fetch(args):
         _print_task_error(exc)
         return 1
     except api.AvaultError as exc:
+        if engine is not None and isinstance(grant, dict) and _agent_missing_grant(exc):
+            grant_id = grant.get("id")
+            if grant_id:
+                _expire_agent_grant_after_missing(
+                    engine,
+                    grant_id,
+                    [name],
+                    delivery={"mode": "fetch", "host": host, "method": method},
+                )
+                _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
+                return 1
         _print_task_error(TaskCliError(f"request failed: {exc}", code="request_failed", help_command=help_command))
         return 1
     except Exception as exc:
@@ -3908,6 +4113,9 @@ def cmd_vault_inject(args):
     from vibe import api
 
     help_command = "vibe vault inject --help"
+    engine = None
+    grant = None
+    keys: list[str] = []
     try:
         keys = [k.strip() for k in (getattr(args, "keys", None) or "").split(",") if k.strip()]
         keys = list(dict.fromkeys(keys))  # dedupe, preserve order: A,A is one entry + one audit
@@ -3927,12 +4135,19 @@ def cmd_vault_inject(args):
         if fmt not in ("dotenv", "json"):
             raise TaskCliError(f"unknown --format: {fmt!r} (dotenv|json)", code="invalid_format", help_command=help_command)
         engine = _open_vault_engine()
-        with engine.connect() as conn:
-            envelopes = vault_service.get_envelopes(conn, keys)
-        secrets = [{"name": k, "key": k, "envelope": envelopes[k]} for k in keys]
+        grant, secrets = _resolve_vault_inject_delivery(engine, keys, path=str(out), fmt=fmt)
         # avault writes the 0600 file atomically; if the path is unwritable it raises and no
         # delivery is recorded.
-        api.avault_deliver_inject(out, fmt, secrets)
+        if grant is not None:
+            api.avault_agent_deliver_inject(
+                scope_type=grant["scope_type"],
+                scope_ref=grant["scope_ref"],
+                path=out,
+                fmt=fmt,
+                secrets=secrets,
+            )
+        else:
+            api.avault_deliver_inject(out, fmt, secrets)
         # The file is on disk → delivered. A bookkeeping failure must not report a failed command
         # (callers would retry though the secrets are already written), so record best-effort.
         try:
@@ -3952,6 +4167,15 @@ def cmd_vault_inject(args):
         _print_task_error(exc)
         return 1
     except api.AvaultError as exc:
+        if engine is not None and isinstance(grant, dict) and _agent_missing_grant(exc):
+            _expire_agent_grant_after_missing(
+                engine,
+                grant["id"],
+                keys,
+                delivery={"mode": "inject", "path": str(out), "format": fmt},
+            )
+            _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
+            return 1
         _print_task_error(TaskCliError(f"avault inject failed: {exc}", code="avault_failed", help_command=help_command))
         return 1
     except Exception as exc:

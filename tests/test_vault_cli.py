@@ -13,7 +13,7 @@ from unittest.mock import Mock
 import pytest
 
 from storage import vault_service
-from storage.models import vault_audit
+from storage.models import vault_audit, vault_grants
 from storage.vault_crypto import Sealed
 from vibe import cli
 
@@ -58,6 +58,24 @@ def _set_secret(name: str, value: str, tmp_path, monkeypatch, capfd, *, sealed: 
     assert cli.cmd_vault_set(_ns(name=name, from_file=str(vf))) == 0
     capfd.readouterr()
     return seal_mock
+
+
+def _set_protected_grant(name: str, *, session_id: str | None = None) -> dict:
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name=name, protection="protected", sealed=_sealed("protected"))
+        req = vault_service.create_access_request(
+            conn,
+            name,
+            requester={"source": "cli", "session_id": session_id} if session_id else {"source": "cli"},
+            delivery={"session_id": session_id, "mode": "run"} if session_id else {"mode": "run"},
+        )
+        return vault_service.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref=name,
+            session_id=session_id,
+            created_by_request_id=req["id"],
+        )
 
 
 @pytest.mark.parametrize(
@@ -153,6 +171,62 @@ def test_run_calls_avault_with_env_mapping_and_records_delivery(tmp_path, capfd,
     secret = json.loads(capfd.readouterr().out)["secrets"][0]
     assert secret["use_count"] == 1
     assert secret["last_used_at"] is not None
+
+
+def test_run_delivers_protected_secret_under_agent_grant(capfd, monkeypatch):
+    from vibe import api
+
+    grant = _set_protected_grant("PROTECTED_KEY")
+    deliver = Mock(return_value=0)
+    monkeypatch.setattr(api, "avault_agent_deliver_run", deliver)
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(_ns(env=["LOCAL_NAME=PROTECTED_KEY"], command_argv=["python3", "-c", "pass"]))
+
+    assert code == 0
+    deliver.assert_called_once_with(
+        scope_type=grant["scope_type"],
+        scope_ref=grant["scope_ref"],
+        secrets=[{"name": "PROTECTED_KEY", "env": "LOCAL_NAME", "envelope": _sealed("protected")}],
+        command=["python3", "-c", "pass"],
+    )
+    assert "value" not in repr(deliver.call_args.kwargs)
+    with cli._open_vault_engine().connect() as conn:
+        assert vault_service.get_secret_meta(conn, "PROTECTED_KEY")["use_count"] == 1
+
+
+def test_run_expires_grant_when_agent_cache_is_missing(capfd, monkeypatch):
+    from vibe import api
+
+    grant = _set_protected_grant("PROTECTED_KEY")
+    monkeypatch.setattr(api, "avault_agent_deliver_run", Mock(side_effect=api.AvaultError("grant is missing or expired")))
+
+    code = cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"]))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
+        requests = vault_service.list_requests(conn, status="pending")
+    assert status == "expired"
+    assert requests[0]["secret_name"] == "PROTECTED_KEY"
+
+
+def test_run_persists_protected_approval_request_without_grant(capfd):
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))
+
+    code = cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"]))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        requests = vault_service.list_requests(conn, status="pending")
+    assert len(requests) == 1
+    assert requests[0]["secret_name"] == "PROTECTED_KEY"
+    assert requests[0]["delivery"]["mode"] == "run"
 
 
 def test_run_skips_delivery_audit_when_avault_returns_70(tmp_path, capfd, monkeypatch):
