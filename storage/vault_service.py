@@ -555,7 +555,7 @@ def store_pubkey_pin(conn: Connection, name: str, pin: dict[str, Any]) -> dict[s
     conn.execute(
         vault_secrets.update()
         .where(vault_secrets.c.name == name)
-        .values(public_meta=json.dumps(public_meta), updated_at=_now())
+        .values(public_meta=json.dumps(public_meta))
     )
     audit(
         conn,
@@ -1597,7 +1597,11 @@ def resolve_secret_access(
     row = _require_row(conn, name)
     if row.get("protection") == "standard":
         return {"status": "standard", "secret": _meta_payload(row), "envelope": _row_sealed(row)}
-    grant = find_active_grant_for_secret(conn, name, session_id=session_id, cache=cache)
+    delivery_payload = dict(delivery or {})
+    effective_session_id = session_id
+    if effective_session_id is None and delivery_payload.get("session_id"):
+        effective_session_id = str(delivery_payload["session_id"])
+    grant = find_active_grant_for_secret(conn, name, session_id=effective_session_id, cache=cache)
     if grant is not None:
         return {
             "status": "agent_delivery_pending",
@@ -1607,11 +1611,13 @@ def resolve_secret_access(
         }
     request_payload = None
     if create_request:
+        if effective_session_id is not None:
+            delivery_payload["session_id"] = effective_session_id
         request_payload = create_access_request(
             conn,
             name,
             requester=requester,
-            delivery={**(delivery or {}), "session_id": session_id},
+            delivery=delivery_payload,
         )
     return {"status": "approval_required", "secret": _meta_payload(row), "request": request_payload}
 

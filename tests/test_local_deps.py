@@ -524,6 +524,24 @@ def test_ensure_avault_keeps_existing_standard_release_below_p2_minimum(monkeypa
     assert out["version"] == "0.1.2"
 
 
+def test_ensure_avault_force_reports_manual_upgrade_when_pin_is_below_p2(monkeypatch):
+    monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: False)
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: "0.1.2")
+    monkeypatch.setattr(api, "install_avault", lambda force=False: pytest.fail("should not reinstall old avault"))
+
+    out = api.ensure_avault_installed(force=True)
+
+    assert out["ok"] is False
+    assert out["installed"] is True
+    assert out["changed"] is False
+    assert out["path"] == "/usr/local/bin/avault"
+    assert out["version"] == "0.1.2"
+    assert out["status"] == "upgrade_required"
+    assert out["reason"] == "avault_p2_release_unavailable"
+
+
 def test_ensure_avault_installs_pinned_standard_release_when_p2_pin_unavailable(monkeypatch):
     monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: False)
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")

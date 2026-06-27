@@ -110,6 +110,25 @@ def test_pubkey_pin_metadata_round_trips_through_masked_meta(vault):
     assert "ignored" not in listed_meta["avault_pubkey_pin"]
 
 
+def test_pubkey_pin_does_not_change_secret_version(vault):
+    _create(vault, name="A_KEY", protection="protected", group="crypto")
+    with vault.begin() as conn:
+        req = _access_request(conn, "A_KEY", session_id="ses_1")
+        before = dict(conn.execute(select(vault_secrets).where(vault_secrets.c.name == "A_KEY")).mappings().one())
+        vs.store_pubkey_pin(conn, "A_KEY", {"public_key": "02" + "ab" * 32, "fingerprint": "fp_123"})
+        after = dict(conn.execute(select(vault_secrets).where(vault_secrets.c.name == "A_KEY")).mappings().one())
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="A_KEY",
+            session_id="ses_1",
+            created_by_request_id=req["id"],
+        )
+
+    assert before["updated_at"] == after["updated_at"]
+    assert grant["member_snapshot"] == ["A_KEY"]
+
+
 def test_get_envelope_and_get_envelopes_return_stored_envelopes(vault):
     _create(vault, name="A_KEY")
     with vault.begin() as conn:
@@ -596,6 +615,49 @@ def test_resolve_access_card_uses_delivery_session_fallback(vault):
             created_by_request_id=req_id,
         )
     assert grant["session_id"] == "ses_delivery"
+
+
+def test_resolve_access_preserves_delivery_session_when_argument_is_missing(vault):
+    _create(vault, name="PROTECTED_KEY", protection="protected", group="crypto")
+    cache = vs.VaultGrantRuntimeCache()
+    with vault.begin() as conn:
+        result = vs.resolve_secret_access(
+            conn,
+            "PROTECTED_KEY",
+            requester={},
+            delivery={"session_id": "ses_delivery", "command": "deploy"},
+            cache=cache,
+        )
+        card = result["request"]["card"]
+        req_id = result["request"]["id"]
+        raw_delivery = conn.execute(select(vault_requests.c.delivery).where(vault_requests.c.id == req_id)).scalar_one()
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="PROTECTED_KEY",
+            created_by_request_id=req_id,
+            cache=cache,
+        )
+        same_session = vs.resolve_secret_access(
+            conn,
+            "PROTECTED_KEY",
+            delivery={"session_id": "ses_delivery"},
+            create_request=False,
+            cache=cache,
+        )
+        other_session = vs.resolve_secret_access(
+            conn,
+            "PROTECTED_KEY",
+            delivery={"session_id": "ses_other"},
+            create_request=False,
+            cache=cache,
+        )
+
+    assert card["session_id"] == "ses_delivery"
+    assert json.loads(raw_delivery)["session_id"] == "ses_delivery"
+    assert grant["session_id"] == "ses_delivery"
+    assert same_session["status"] == "agent_delivery_pending"
+    assert other_session["status"] == "approval_required"
 
 
 def test_grant_can_be_intentionally_unbound_from_request_session(vault):

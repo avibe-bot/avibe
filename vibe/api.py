@@ -3578,6 +3578,7 @@ def _avault_p2_release_unavailable_result(*, existing: str | None = None, existi
         "changed": False,
         "path": existing,
         "version": existing_version,
+        "status": "upgrade_required",
         "reason": "avault_p2_release_unavailable",
         "message": backend_t(
             "dependencies.avault.p2ReleaseUnavailable",
@@ -3895,6 +3896,8 @@ def ensure_avault_installed(force: bool = False) -> dict:
         existing_version = _probe_avault_version(existing) if existing else None
         existing_is_p2 = _version_at_least(existing_version, AVAULT_P2_MIN_VERSION)
         can_managed_install_p2 = _managed_avault_release_satisfies_p2()
+        if existing and not existing_is_p2 and force and not can_managed_install_p2:
+            return _avault_p2_release_unavailable_result(existing=existing, existing_version=existing_version)
         if existing and (
             (existing_is_p2 and (not force or not can_managed_install_p2))
             or (not existing_is_p2 and not force and not can_managed_install_p2)
