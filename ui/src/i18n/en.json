@@ -606,7 +606,8 @@
     },
     "window": {
       "minimize": "Minimize",
-      "maximize": "Maximize"
+      "maximize": "Maximize",
+      "restore": "Restore"
     },
     "fileBrowser": {
       "label": "File Browser",
