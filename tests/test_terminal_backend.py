@@ -733,6 +733,124 @@ async def _terminate_keeps_opening_session_reserved_until_abandon_settles(monkey
             terminal_service._close_fd(fd)
 
 
+def test_terminate_during_abandon_recheck_clears_terminating(monkeypatch, tmp_path):
+    asyncio.run(_terminate_during_abandon_recheck_clears_terminating(monkeypatch, tmp_path))
+
+
+async def _terminate_during_abandon_recheck_clears_terminating(monkeypatch, tmp_path):
+    # DELETE can arrive while a cancelled open is already abandoning: _abandon_open has
+    # sampled the slot as OPENING, released the lock, and is awaiting teardown/has-session.
+    # It must re-read the slot before settling so the mid-abandon CLOSING transition clears
+    # _terminating and frees the reusable window terminal id.
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(terminal_service.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: "/usr/bin/tmux")
+
+    opened_fds: list[int] = []
+
+    def fake_openpty():
+        master = os.open(os.devnull, os.O_RDWR)
+        slave = os.open(os.devnull, os.O_RDWR)
+        opened_fds.extend([master, slave])
+        return master, slave
+
+    monkeypatch.setattr(terminal_service.os, "openpty", fake_openpty)
+
+    class _FakeProcess:
+        returncode = None
+        pid = None
+
+        def send_signal(self, signum: int) -> None:
+            self.returncode = -signum
+
+        def kill(self) -> None:
+            self.returncode = -signal.SIGKILL
+
+        async def wait(self) -> int:
+            return self.returncode or 0
+
+    spawn_started = asyncio.Event()
+    release_spawn = asyncio.Event()
+
+    async def gated_spawn(*_args, **_kwargs):
+        spawn_started.set()
+        await release_spawn.wait()
+        return _FakeProcess()
+
+    monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", gated_spawn)
+
+    async def fake_has_session(_session_id: str) -> bool:
+        return True
+
+    monkeypatch.setattr(terminal_service, "_tmux_has_session", fake_has_session)
+
+    killed: list[str] = []
+
+    async def fake_kill(session_id: str) -> None:
+        killed.append(session_id)
+
+    monkeypatch.setattr(terminal_service, "_kill_tmux_session", fake_kill)
+
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=1)
+    teardown_started = asyncio.Event()
+    release_teardown = asyncio.Event()
+    teardown_calls = 0
+
+    async def gated_teardown(
+        connection: terminal_service.TerminalConnection,
+        *,
+        kill_session: bool,
+    ) -> None:
+        nonlocal teardown_calls
+        teardown_calls += 1
+        if teardown_calls == 1:
+            teardown_started.set()
+            await release_teardown.wait()
+        fd, connection.master_fd = connection.master_fd, -1
+        if fd >= 0:
+            terminal_service._close_fd(fd)
+        if kill_session and connection.persistent:
+            await fake_kill(connection.session_id)
+        if connection.process.returncode is None:
+            connection.process.send_signal(signal.SIGHUP if connection.persistent else signal.SIGTERM)
+
+    monkeypatch.setattr(service, "_teardown_client", gated_teardown)
+
+    stale_open = asyncio.create_task(service.open("slot-race"))
+    await spawn_started.wait()
+    await service._lock.acquire()
+    try:
+        release_spawn.set()
+        await asyncio.sleep(0)
+        stale_open.cancel()
+    finally:
+        service._lock.release()
+
+    await teardown_started.wait()
+    terminate_task = asyncio.create_task(service.terminate("slot-race"))
+    assert await terminate_task is True
+    assert service._sessions["slot-race"].phase is _Phase.CLOSING
+    assert "slot-race" in service._terminating
+
+    release_teardown.set()
+    with pytest.raises(asyncio.CancelledError):
+        await stale_open
+
+    assert "slot-race" not in service._terminating
+    assert "slot-race" not in service._sessions
+    assert killed == ["slot-race"]
+
+    replacement = await service.open("slot-race")
+    try:
+        assert service._sessions["slot-race"].connection is replacement
+        assert service._sessions["slot-race"].phase is _Phase.ATTACHED
+    finally:
+        await service.shutdown()
+        for fd in opened_fds:
+            terminal_service._close_fd(fd)
+
+
 def test_dead_session_not_tracked_when_shell_exits(monkeypatch, tmp_path):
     asyncio.run(_dead_session_not_tracked_when_shell_exits(monkeypatch, tmp_path))
 

@@ -297,32 +297,58 @@ class TerminalService:
         # Reconcile an open that never registered. The slot object is the open-attempt token:
         # a same-id slot created later is not ours, so a stale abandon must not remove it or
         # kill its tmux session by id.
+        terminating_open = False
+        killed_session = False
         async with self._lock:
             slot = self._sessions.get(session_id)
             owns_slot = slot is opening_slot and slot.phase in (_Phase.OPENING, _Phase.CLOSING)
             terminating_open = owns_slot and slot.phase is _Phase.CLOSING
             slot_missing = slot is None
         try:
+            kill_spawned_session = slot_missing or terminating_open
             if spawned is not None:
-                await self._teardown_client(spawned, kill_session=slot_missing or terminating_open)
+                await self._teardown_client(spawned, kill_session=kill_spawned_session)
+                killed_session = kill_spawned_session and spawned.persistent
             # Re-track only when our slot is still ours AND a tmux session for this id is alive —
             # which covers a failed reconnect to an existing DETACHED session (its tmux server is
             # still up) regardless of whether our own child spawned. A session that does not exist
             # (fresh open whose spawn failed before creating one) is simply dropped.
-            alive = owns_slot and not terminating_open and await _tmux_has_session(session_id)
-            if owns_slot:
-                async with self._lock:
-                    if self._sessions.get(session_id) is opening_slot:
-                        if alive:
-                            opening_slot.phase = _Phase.DETACHED
-                            opening_slot.connection = None
-                            opening_slot.persistent = True
-                            opening_slot.detached_at = time.monotonic()
-                        else:
-                            self._sessions.pop(session_id, None)
+            async with self._lock:
+                slot = self._sessions.get(session_id)
+                owns_slot = slot is opening_slot and slot.phase in (_Phase.OPENING, _Phase.CLOSING)
+                current_terminating_open = owns_slot and slot.phase is _Phase.CLOSING
+                terminating_open = terminating_open or current_terminating_open
+            if not owns_slot:
+                return
+            if current_terminating_open:
+                if not killed_session:
+                    await _kill_tmux_session(session_id)
+                    killed_session = True
+                return
+
+            alive = await _tmux_has_session(session_id)
+            needs_terminate_kill = False
+            async with self._lock:
+                slot = self._sessions.get(session_id)
+                if slot is opening_slot and slot.phase is _Phase.CLOSING:
+                    terminating_open = True
+                    needs_terminate_kill = not killed_session
+                elif slot is opening_slot and slot.phase is _Phase.OPENING:
+                    if alive:
+                        opening_slot.phase = _Phase.DETACHED
+                        opening_slot.connection = None
+                        opening_slot.persistent = True
+                        opening_slot.detached_at = time.monotonic()
+                    else:
+                        self._sessions.pop(session_id, None)
+            if needs_terminate_kill:
+                await _kill_tmux_session(session_id)
+                killed_session = True
         finally:
             if terminating_open:
                 async with self._lock:
+                    if self._sessions.get(session_id) is opening_slot:
+                        self._sessions.pop(session_id, None)
                     self._terminating.discard(session_id)
 
     async def close(self, connection: TerminalConnection) -> None:
