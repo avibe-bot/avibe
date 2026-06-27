@@ -382,7 +382,7 @@ def test_run_persists_protected_approval_request_without_grant(capfd):
     assert requests[0]["delivery"]["mode"] == "run"
 
 
-def test_run_records_protected_delivery_when_child_returns_70(capfd, monkeypatch):
+def test_run_skips_protected_delivery_audit_when_agent_returns_pre_spawn_70(capfd, monkeypatch):
     from vibe import api
 
     _set_protected_grant("PROTECTED_KEY")
@@ -392,7 +392,7 @@ def test_run_records_protected_delivery_when_child_returns_70(capfd, monkeypatch
     assert cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"])) == 70
     cli.cmd_vault_list(_ns())
     secret = json.loads(capfd.readouterr().out)["secrets"][0]
-    assert secret["use_count"] == 1
+    assert secret["use_count"] == 0
 
 
 def test_run_skips_delivery_audit_when_avault_returns_70(tmp_path, capfd, monkeypatch):

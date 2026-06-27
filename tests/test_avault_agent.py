@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from vibe.avault_agent import AvaultAgentClient, AvaultAgentError, AvaultAgentManager
+from vibe.avault_agent import DEFAULT_AGENT_IDLE_TIMEOUT_SECS, AvaultAgentClient, AvaultAgentError, AvaultAgentManager
 from vibe.avault_agent import _ensure_agent_socket_parent, _remove_stale_agent_socket, default_agent_socket_path
 
 
@@ -133,6 +133,12 @@ def test_agent_socket_path_uses_avibe_home_and_secures_directories(tmp_path, mon
 
     assert stat.S_IMODE(avibe_home.stat().st_mode) == 0o700
     assert stat.S_IMODE(socket_path.parent.stat().st_mode) == 0o700
+
+
+def test_agent_default_idle_timeout_covers_longest_grant_ttl():
+    from storage.vault_service import GRANT_TTL_OPTIONS_SECONDS
+
+    assert DEFAULT_AGENT_IDLE_TIMEOUT_SECS >= max(GRANT_TTL_OPTIONS_SECONDS)
 
 
 def test_agent_manager_preserves_live_socket_with_cached_grants(tmp_path, monkeypatch):

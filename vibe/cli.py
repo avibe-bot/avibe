@@ -3984,7 +3984,6 @@ def cmd_vault_run(args):
     from vibe import api
 
     try:
-        delivered_by_agent = grant is not None
         if grant is not None:
             if _stdio_has_tty():
                 raise TaskCliError(
@@ -4032,7 +4031,7 @@ def cmd_vault_run(args):
     # decrypt / store) — no delivery happened, so skip the audit. Any other code means the child
     # ran with the secret in its env → record the delivery now. A bookkeeping failure must not
     # crash or change the child's real exit code.
-    if delivered_by_agent or exit_code != 70:
+    if exit_code != 70:
         try:
             with engine.begin() as conn:
                 vault_service.record_deliveries(
