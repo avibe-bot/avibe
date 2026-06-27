@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next';
 
 import { ApiError, useApi, type DependencyItem } from '@/context/ApiContext';
 import { cn } from '@/lib/utils';
-import { sealStandardCreateBlindBox, VaultBlindBoxError } from '@/lib/vaultBlindBox';
+import { sealBlindBox, standardCreateBlindBoxContext } from '@/lib/vaultCrypto';
 import { Button } from './button';
 import { Input } from './input';
 
@@ -124,10 +124,10 @@ export const VaultSecretForm: React.FC<{
         .split(',')
         .map((host) => host.trim())
         .filter(Boolean);
-      let blindBox: Awaited<ReturnType<typeof sealStandardCreateBlindBox>> | undefined;
+      let blindBox: Awaited<ReturnType<typeof sealBlindBox>> | undefined;
       if (p2Ready) {
         const pubkey = await api.getVaultPubkey();
-        blindBox = await sealStandardCreateBlindBox(secretName, value, pubkey);
+        blindBox = await sealBlindBox(value, pubkey, standardCreateBlindBoxContext(secretName));
       }
       const created = await api.createVaultSecret(
         {
@@ -150,8 +150,12 @@ export const VaultSecretForm: React.FC<{
       setValue('');
       onCreated(secretName, 'created');
     } catch (err: unknown) {
-      if (err instanceof VaultBlindBoxError) {
-        setError(t(`vaults.dialog.errors.${err.code}`));
+      if (err instanceof Error && err.message.includes('fingerprint mismatch')) {
+        setError(t('vaults.dialog.errors.fingerprintMismatch'));
+      } else if (err instanceof Error && err.message.includes('AAD field is too large')) {
+        setError(t('vaults.dialog.errors.aadFieldTooLarge'));
+      } else if (err instanceof Error && (err.message.includes('public key') || err.message.includes('blind-box'))) {
+        setError(t('vaults.dialog.errors.invalidPublicKey'));
       } else if (err instanceof ApiError && err.code === 'secret_exists') {
         handleExistingSecret();
       } else {
