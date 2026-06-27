@@ -2064,6 +2064,13 @@
     "proxyBound": "Proxy-bound",
     "used": "used {{count}}×",
     "neverUsed": "never used",
+    "standard": "Standard",
+    "signing": "Signing",
+    "secretCount": "{{count}} secrets",
+    "view": {
+      "all": "All",
+      "byGroup": "By group"
+    },
     "delete": "Delete",
     "deleteConfirm": "Delete secret \"{{name}}\"? Agents will no longer be able to use it.",
     "deleted": "Deleted {{name}}",

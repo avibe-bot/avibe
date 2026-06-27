@@ -2063,6 +2063,13 @@
     "proxyBound": "已绑定代理",
     "used": "已使用 {{count}} 次",
     "neverUsed": "从未使用",
+    "standard": "标准档",
+    "signing": "签名",
+    "secretCount": "{{count}} 个密钥",
+    "view": {
+      "all": "全部",
+      "byGroup": "按分组"
+    },
     "delete": "删除",
     "deleteConfirm": "删除密钥「{{name}}」？Agent 将无法再使用它。",
     "deleted": "已删除 {{name}}",

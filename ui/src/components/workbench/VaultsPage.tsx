@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import { History, KeyRound, Loader2, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { History, KeyRound, Loader2, Plus, RefreshCw, Trash2, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
@@ -33,6 +33,56 @@ const AddSecretDialog: React.FC<{
   );
 };
 
+type ViewMode = 'all' | 'group';
+
+const hasProxy = (s: VaultSecret): boolean => {
+  const hosts = (s.policy as { allowed_hosts?: string[] })?.allowed_hosts;
+  return Array.isArray(hosts) && hosts.length > 0;
+};
+
+const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => void }> = ({ secret: s, onDelete }) => {
+  const { t } = useTranslation();
+  const isKeypair = s.kind === 'keypair';
+  const isProtected = s.protection === 'protected';
+  return (
+    <div className="flex items-center gap-3.5 rounded-xl border border-border bg-surface px-4 py-3">
+      <div
+        className={`flex size-9 shrink-0 items-center justify-center rounded-lg ${
+          isKeypair ? 'bg-violet/10 text-violet' : 'bg-accent/10 text-accent'
+        }`}
+      >
+        {isKeypair ? <Wallet className="size-4" /> : <KeyRound className="size-4" />}
+      </div>
+      <div className="flex min-w-0 flex-col gap-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="truncate font-mono text-sm font-semibold">{s.name}</span>
+          {isProtected ? (
+            <Badge variant="warning">{t('vaults.protected')}</Badge>
+          ) : (
+            <Badge variant="secondary">{t('vaults.standard')}</Badge>
+          )}
+          {isKeypair ? (
+            <Badge variant="outline">
+              <Wallet className="size-3" />
+              {t('vaults.signing')}
+            </Badge>
+          ) : null}
+          {hasProxy(s) ? <Badge variant="info">{t('vaults.proxyBound')}</Badge> : null}
+        </div>
+        <span className="truncate text-xs text-muted">
+          {s.description ? `${s.description} · ` : ''}
+          {s.last_used_at ? t('vaults.used', { count: s.use_count }) : t('vaults.neverUsed')}
+        </span>
+      </div>
+      <div className="ml-auto">
+        <Button variant="ghost" size="icon" onClick={() => onDelete(s.name)} aria-label={t('vaults.delete')}>
+          <Trash2 className="size-4" />
+        </Button>
+      </div>
+    </div>
+  );
+};
+
 export const VaultsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
@@ -43,6 +93,7 @@ export const VaultsPage: React.FC = () => {
   const [adding, setAdding] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
   const [audit, setAudit] = useState<VaultAuditEvent[]>([]);
+  const [view, setView] = useState<ViewMode>('all');
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -60,6 +111,15 @@ export const VaultsPage: React.FC = () => {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  const groups = useMemo(() => {
+    const byGroup = new Map<string, VaultSecret[]>();
+    for (const s of secrets) {
+      const key = s.group || 'default';
+      (byGroup.get(key) ?? byGroup.set(key, []).get(key)!).push(s);
+    }
+    return [...byGroup.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [secrets]);
 
   const toggleAudit = useCallback(async () => {
     const next = !showAudit;
@@ -110,6 +170,16 @@ export const VaultsPage: React.FC = () => {
       {error && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
       )}
+      {secrets.length > 0 ? (
+        <div className="flex items-center gap-1 self-start rounded-lg border border-border bg-surface p-1">
+          <Button variant={view === 'all' ? 'secondary' : 'ghost'} size="sm" onClick={() => setView('all')}>
+            {t('vaults.view.all')}
+          </Button>
+          <Button variant={view === 'group' ? 'secondary' : 'ghost'} size="sm" onClick={() => setView('group')}>
+            {t('vaults.view.byGroup')}
+          </Button>
+        </div>
+      ) : null}
       {loading && secrets.length === 0 ? (
         <div className="flex items-center gap-2 px-1 text-sm text-muted">
           <Loader2 className="size-4 animate-spin" />
@@ -117,32 +187,24 @@ export const VaultsPage: React.FC = () => {
         </div>
       ) : secrets.length === 0 ? (
         <div className="rounded-2xl border border-border bg-surface p-8 text-center text-sm text-muted">{t('vaults.empty')}</div>
+      ) : view === 'group' ? (
+        <div className="flex flex-col gap-4">
+          {groups.map(([group, items]) => (
+            <div key={group} className="flex flex-col gap-2">
+              <div className="flex items-center gap-2 px-1 text-xs font-semibold text-muted">
+                <span>{group}</span>
+                <span className="font-normal">{t('vaults.secretCount', { count: items.length })}</span>
+              </div>
+              {items.map((s) => (
+                <SecretRow key={s.name} secret={s} onDelete={onDelete} />
+              ))}
+            </div>
+          ))}
+        </div>
       ) : (
         <div className="flex flex-col gap-2">
           {secrets.map((s) => (
-            <div key={s.name} className="flex items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3">
-              <KeyRound className="size-4 shrink-0 text-muted" />
-              <div className="flex min-w-0 flex-col">
-                <div className="flex items-center gap-2">
-                  <span className="truncate font-mono text-sm font-semibold">{s.name}</span>
-                  <Badge variant="secondary">{s.group}</Badge>
-                  {s.protection === 'protected' && <Badge variant="warning">{t('vaults.protected')}</Badge>}
-                  {Array.isArray((s.policy as { allowed_hosts?: string[] })?.allowed_hosts) &&
-                  ((s.policy as { allowed_hosts?: string[] }).allowed_hosts?.length ?? 0) > 0 ? (
-                    <Badge variant="info">{t('vaults.proxyBound')}</Badge>
-                  ) : null}
-                </div>
-                <span className="truncate text-xs text-muted">
-                  {s.description ? `${s.description} · ` : ''}
-                  {s.last_used_at ? t('vaults.used', { count: s.use_count }) : t('vaults.neverUsed')}
-                </span>
-              </div>
-              <div className="ml-auto">
-                <Button variant="ghost" size="icon" onClick={() => onDelete(s.name)} aria-label={t('vaults.delete')}>
-                  <Trash2 className="size-4" />
-                </Button>
-              </div>
-            </div>
+            <SecretRow key={s.name} secret={s} onDelete={onDelete} />
           ))}
         </div>
       )}
