@@ -1894,6 +1894,25 @@ const Transcript: React.FC<TranscriptProps> = ({
     });
   }, [needsLatestReload, scrollToBottom]);
 
+  // Re-arm the older-page loader once scrolling has settled (~150ms idle) AND the
+  // viewport is at rest out of the trigger band (scrollTop > 300, i.e. down in
+  // loaded content) — or a load just failed (no content/restore was added, so the
+  // position gate can never re-arm and we must recover anyway). Evaluating at rest
+  // is what stops a single fling from "crossing" the threshold; the in-flight guard
+  // keeps it disarmed until the load resolves. Called from the scroll handler AND
+  // from a failed load (a slow failure parked at the top emits no further scroll,
+  // so it has to schedule its own re-arm here).
+  const scheduleReArm = useCallback(() => {
+    if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
+    settleTimerRef.current = window.setTimeout(() => {
+      const node = scrollRef.current;
+      if (node && !loadingOlderPropRef.current && (node.scrollTop > 300 || loadFailedRef.current)) {
+        canLoadOlderRef.current = true;
+        loadFailedRef.current = false;
+      }
+    }, 150);
+  }, []);
+
   const handleScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
@@ -1908,34 +1927,21 @@ const Transcript: React.FC<TranscriptProps> = ({
     // is free to grow). Re-capturing here keeps it current as the user scrolls.
     if (pinned) anchorRef.current = null;
     else captureAnchor();
-    // Re-arm once clearly back inside loaded content (hysteresis vs the 120 trigger),
-    // so a normal scroll-up loads one page, holds position, and waits for the next
-    // deliberate scroll to the top instead of auto-cascading through all history.
-    // Re-arm only after scrolling SETTLES (~150ms idle). A continuous fling — and
-    // the programmatic anchor-restore scroll plus any momentum overshoot it rides
-    // through the top zone — keeps resetting this, so one gesture loads exactly one
-    // older page instead of cascading. The next deliberate scroll after the pause
-    // re-arms; a failed load recovers the same way (re-arm regardless of outcome).
-    if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
-    settleTimerRef.current = window.setTimeout(() => {
-      // Re-arm only once scrolling has STOPPED and the viewport came to rest out of
-      // the trigger band, down in loaded content — not parked at the top and not
-      // mid-load. Evaluating position at rest (not live) is what makes this safe: a
-      // single fling can't "cross" the threshold the way a live scrollTop test
-      // could. After a normal load the anchor restore leaves scrollTop well past
-      // this and schedules the settle that re-arms; a fling that ends parked at the
-      // top stays disarmed, so momentum/bounce can't load another page.
-      const el = scrollRef.current;
-      if (el && !loadingOlderPropRef.current && (el.scrollTop > 300 || loadFailedRef.current)) {
-        canLoadOlderRef.current = true;
-        loadFailedRef.current = false;
-      }
-    }, 150);
+    // One older page per scroll gesture: re-arm only on settle, at rest, out of the
+    // top zone (see scheduleReArm) — a continuous fling keeps resetting it, so the
+    // anchor-restore scroll + momentum can't cascade more pages.
+    scheduleReArm();
     if (hasOlder && !loadingOlder && canLoadOlderRef.current && el.scrollTop < 120) {
       canLoadOlderRef.current = false;
       loadFailedRef.current = false;
       void Promise.resolve(loadOlderRef.current()).then((ok) => {
-        if (ok === false) loadFailedRef.current = true;
+        if (ok === false) {
+          // Fetch failed: no content/restore, viewport parked at top. A slow failure
+          // already missed the in-flight-skipped settle and won't get another scroll,
+          // so schedule the re-arm here too (it ignores position when loadFailedRef).
+          loadFailedRef.current = true;
+          scheduleReArm();
+        }
       });
     }
   };
