@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -1503,6 +1504,49 @@ def _grant_ttl_seconds(grant: dict) -> int:
     return max(1, int((expires_at - created_at).total_seconds()))
 
 
+def _grant_scope_payload(grant: dict) -> list[dict[str, str]]:
+    scope_type = str(grant.get("scope_type") or "")
+    scope_ref = str(grant.get("scope_ref") or "")
+    if not scope_type or not scope_ref:
+        return []
+    return [{"scope_type": scope_type, "scope_ref": scope_ref}]
+
+
+def _cleanup_failed_agent_grant(
+    *,
+    engine: Any,
+    grant: dict,
+    reason: str,
+    force_release_on_cleanup_failure: bool = False,
+) -> None:
+    from storage import vault_service
+
+    release_scopes: list[dict[str, str]] = []
+    try:
+        with engine.begin() as conn:
+            grant_rows = [
+                dict(row)
+                for row in conn.execute(
+                    select(vault_service.vault_grants).where(
+                        vault_service.vault_grants.c.id == str(grant["id"])
+                    )
+                ).mappings()
+            ]
+            with contextlib.suppress(Exception):
+                vault_service.expire_grant(conn, str(grant["id"]), reason="grant-expired-agent-relay-failed")
+            release_scopes = (
+                vault_service.agent_release_scopes_after_rows(conn, grant_rows)
+                if grant_rows
+                else _grant_scope_payload(grant)
+            )
+    except Exception:
+        if not force_release_on_cleanup_failure:
+            raise
+        logger.warning("%s: failed to update grant DB state; releasing resident scope", reason, exc_info=True)
+        release_scopes = _grant_scope_payload(grant)
+    release_vault_agent_scopes(release_scopes, reason=reason)
+
+
 def create_vault_grant(payload: dict) -> dict:
     from storage import vault_service
 
@@ -1544,8 +1588,10 @@ def create_vault_grant(payload: dict) -> dict:
     request_id = payload.get("request_id") or payload.get("created_by_request_id")
     if not request_id:
         raise VaultApiError("request_id is required to create a grant", code="missing_request_id")
+    expected_pubkey = payload.get("agent_pubkey") if isinstance(payload.get("agent_pubkey"), dict) else None
     try:
         _require_avault_p2_surface("resident agent grant")
+        validate_avault_agent_pubkey(expected_pubkey)
     except AvaultError as exc:
         raise _vault_api_error_from_avault(exc, prefix="avault agent grant failed") from exc
     session_id = payload.get("session_id")
@@ -1576,27 +1622,44 @@ def create_vault_grant(payload: dict) -> dict:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.InvalidGrantError as exc:
         raise VaultApiError(str(exc), code="invalid_grant") from exc
+    agent_relayed = False
     try:
         avault_agent_grant(
             scope_type=str(grant["scope_type"]),
             scope_ref=str(grant["scope_ref"]),
             ttl_secs=_grant_ttl_seconds(grant),
             deks=agent_deks,
-            expected_pubkey=payload.get("agent_pubkey") if isinstance(payload.get("agent_pubkey"), dict) else None,
+            expected_pubkey=expected_pubkey,
         )
+        agent_relayed = True
         with engine.begin() as conn:
             grant = vault_service.mark_grant_agent_ready(conn, str(grant["id"]))
-    except vault_service.InvalidGrantError as exc:
-        with engine.begin() as conn:
-            vault_service.expire_grant(conn, str(grant["id"]), reason="grant-expired-agent-relay-failed")
+    except (vault_service.InvalidGrantError, vault_service.GrantNotActiveError) as exc:
+        if agent_relayed:
+            _cleanup_failed_agent_grant(
+                engine=engine,
+                grant=grant,
+                reason=f"create_vault_grant:{grant['id']}:mark-ready-failed",
+                force_release_on_cleanup_failure=True,
+            )
         raise VaultApiError(str(exc), code="invalid_grant") from exc
     except AvaultError as exc:
-        with engine.begin() as conn:
-            grant_rows = [dict(row) for row in conn.execute(select(vault_service.vault_grants).where(vault_service.vault_grants.c.id == str(grant["id"]))).mappings()]
-            vault_service.expire_grant(conn, str(grant["id"]), reason="grant-expired-agent-relay-failed")
-            release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
-        release_vault_agent_scopes(release_scopes, reason=f"create_vault_grant:{grant['id']}")
+        _cleanup_failed_agent_grant(
+            engine=engine,
+            grant=grant,
+            reason=f"create_vault_grant:{grant['id']}",
+            force_release_on_cleanup_failure=True,
+        )
         raise _vault_api_error_from_avault(exc, prefix="avault agent grant failed") from exc
+    except Exception:
+        if agent_relayed:
+            _cleanup_failed_agent_grant(
+                engine=engine,
+                grant=grant,
+                reason=f"create_vault_grant:{grant['id']}:mark-ready-failed",
+                force_release_on_cleanup_failure=True,
+            )
+        raise
     return {"ok": True, "grant": grant}
 
 
@@ -4363,14 +4426,7 @@ def avault_agent_grant(
     from vibe.avault_agent import AvaultAgentError
 
     _require_avault_p2_surface("resident agent grant")
-    if expected_pubkey is not None:
-        current = avault_agent_pubkey()
-        expected_fingerprint = expected_pubkey.get("fingerprint")
-        if expected_fingerprint and expected_fingerprint != current.get("fingerprint"):
-            raise AvaultError("avault agent pubkey fingerprint mismatch")
-        expected_public_key = expected_pubkey.get("public_key")
-        if expected_public_key and expected_public_key != current.get("public_key"):
-            raise AvaultError("avault agent public key mismatch")
+    validate_avault_agent_pubkey(expected_pubkey)
     try:
         return _avault_agent_client().grant(
             scope_type=scope_type,
@@ -4380,6 +4436,19 @@ def avault_agent_grant(
         )
     except AvaultAgentError as exc:
         raise AvaultError(str(exc)) from exc
+
+
+def validate_avault_agent_pubkey(expected_pubkey: dict | None) -> None:
+    """Fail before DB approval if the browser sealed to a stale resident key."""
+    if expected_pubkey is None:
+        return
+    current = avault_agent_pubkey()
+    expected_fingerprint = expected_pubkey.get("fingerprint")
+    if expected_fingerprint and expected_fingerprint != current.get("fingerprint"):
+        raise AvaultError("avault agent pubkey fingerprint mismatch")
+    expected_public_key = expected_pubkey.get("public_key")
+    if expected_public_key and expected_public_key != current.get("public_key"):
+        raise AvaultError("avault agent public key mismatch")
 
 
 def avault_agent_release(*, scope_type: str, scope_ref: str) -> dict:

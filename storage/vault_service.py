@@ -266,8 +266,11 @@ def _grant_row_payload(row: dict[str, Any], *, cache: VaultGrantRuntimeCache = G
     if not isinstance(members, list):
         members = []
     grant_id = row["id"]
+    persisted_ready = _grant_agent_ready(row)
+    if persisted_ready and members:
+        cache.put(grant_id, members, expires_at=row.get("expires_at"))
     runtime_members = cache.covered_names(grant_id)
-    runtime_ready = bool(members) and set(members).issubset(set(runtime_members))
+    runtime_ready = persisted_ready and bool(members) and set(members).issubset(set(runtime_members))
     return {
         "id": grant_id,
         "scope_type": row["scope_type"],
@@ -284,6 +287,27 @@ def _grant_row_payload(row: dict[str, Any], *, cache: VaultGrantRuntimeCache = G
         "delivery_ready": runtime_ready,
         "delivery_status": "agent_cache_ready" if runtime_ready else "agent_cache_unverified",
     }
+
+
+def _grant_agent_ready(row: dict[str, Any]) -> bool:
+    if row.get("status") != "active":
+        return False
+    try:
+        ready = int(row.get("agent_ready") or 0) == 1
+    except (TypeError, ValueError):
+        ready = False
+    if not ready:
+        return False
+    expires_at = _parse_iso_datetime(row.get("expires_at"))
+    return expires_at is None or expires_at > datetime.now(timezone.utc)
+
+
+def _clear_grant_agent_ready(conn: Connection, grant_id: str) -> None:
+    conn.execute(
+        vault_grants.update()
+        .where(vault_grants.c.id == grant_id)
+        .values(agent_ready=0, agent_ready_at=None)
+    )
 
 
 def _grant_member_names(row: dict[str, Any]) -> list[str]:
@@ -1193,7 +1217,7 @@ def _expire_grant_rows(
         conn.execute(
             vault_grants.update()
             .where(vault_grants.c.id == row["id"], vault_grants.c.status == "active")
-            .values(status="expired", revoked_at=now)
+            .values(status="expired", revoked_at=now, agent_ready=0, agent_ready_at=None)
         )
         cache.drop(row["id"])
         audit(conn, reason, grant_id=row["id"], delivery={"scope_type": row["scope_type"], "scope_ref": row["scope_ref"]})
@@ -1278,6 +1302,16 @@ def agent_release_scopes_after_rows(
         ]
         for stale_row in stale_scope_grants:
             cache.drop(str(stale_row["id"]))
+            _clear_grant_agent_ready(conn, str(stale_row["id"]))
+        conn.execute(
+            vault_grants.update()
+            .where(
+                vault_grants.c.scope_type == scope_type,
+                vault_grants.c.scope_ref == scope_ref,
+                vault_grants.c.status == "active",
+            )
+            .values(agent_ready=0, agent_ready_at=None)
+        )
         release_scopes.append({"scope_type": scope_type, "scope_ref": scope_ref})
     return release_scopes
 
@@ -1595,6 +1629,8 @@ def create_grant(
                 created_by_request_id=created_by_request_id,
                 created_at=now_dt.isoformat(),
                 expires_at=expires_at,
+                agent_ready=1 if cache_ready else 0,
+                agent_ready_at=now_dt.isoformat() if cache_ready else None,
             )
         )
     except Exception:
@@ -1670,7 +1706,7 @@ def revoke_grant(
     conn.execute(
         vault_grants.update()
         .where(vault_grants.c.id == grant_id)
-        .values(status="revoked", revoked_at=now)
+        .values(status="revoked", revoked_at=now, agent_ready=0, agent_ready_at=None)
     )
     cache.drop(grant_id)
     audit(conn, "grant-revoked", grant_id=grant_id, delivery={"scope_type": row_dict["scope_type"], "scope_ref": row_dict["scope_ref"]})
@@ -1696,6 +1732,15 @@ def mark_grant_agent_ready(
     members = _grant_member_names(row_dict)
     if not members:
         raise InvalidGrantError("grant has no cached members")
+    ready_at = _now()
+    result = conn.execute(
+        vault_grants.update()
+        .where(vault_grants.c.id == grant_id, vault_grants.c.status == "active")
+        .values(agent_ready=1, agent_ready_at=ready_at)
+    )
+    if result.rowcount != 1:
+        raise GrantNotActiveError(grant_id)
+    row_dict = dict(conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().one())
     cache.put(grant_id, members, expires_at=row_dict.get("expires_at"))
     return _grant_row_payload(row_dict, cache=cache)
 
@@ -1718,7 +1763,7 @@ def revoke_session_grants(
         result = conn.execute(
             vault_grants.update()
             .where(vault_grants.c.id == row["id"], vault_grants.c.status == "active")
-            .values(status="revoked", revoked_at=now)
+            .values(status="revoked", revoked_at=now, agent_ready=0, agent_ready_at=None)
         )
         if result.rowcount != 1:
             continue
