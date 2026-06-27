@@ -1329,27 +1329,75 @@ def get_vault_secrets(*, group: Optional[str] = None) -> dict:
     return {"ok": True, "secrets": secrets}
 
 
+def get_vault_pubkey() -> dict:
+    try:
+        return {"ok": True, **avault_pubkey()}
+    except AvaultError as exc:
+        raise VaultApiError(f"avault pubkey failed: {exc}", code="avault_failed") from exc
+
+
+def _sealed_from_payload(payload: dict):
+    from storage.vault_crypto import Sealed
+
+    if not isinstance(payload, dict):
+        raise VaultApiError("sealed envelope must be an object", code="invalid_envelope")
+    try:
+        ciphertext = payload["ciphertext"]
+        nonce = payload["nonce"]
+        wrap_meta = payload["wrap_meta"]
+    except KeyError as exc:
+        raise VaultApiError("sealed envelope requires ciphertext, nonce, and wrap_meta", code="invalid_envelope") from exc
+    if not isinstance(ciphertext, str) or not ciphertext.strip():
+        raise VaultApiError("sealed envelope fields must be non-empty strings", code="invalid_envelope")
+    if not isinstance(nonce, str) or not nonce.strip():
+        raise VaultApiError("sealed envelope fields must be non-empty strings", code="invalid_envelope")
+    if isinstance(wrap_meta, dict):
+        wrap_meta = json.dumps(wrap_meta)
+    if not isinstance(wrap_meta, str) or not wrap_meta.strip():
+        raise VaultApiError("sealed envelope fields must be non-empty strings", code="invalid_envelope")
+    return Sealed(ciphertext=ciphertext, nonce=nonce, wrap_meta=wrap_meta)
+
+
 def create_vault_secret(payload: dict) -> dict:
     from storage import vault_crypto, vault_service
 
     if not isinstance(payload, dict):
         raise VaultApiError("payload must be an object", code="invalid_payload")
     name = str(payload.get("name") or "").strip()
-    value = payload.get("value")
-    if value is None or value == "":
-        raise VaultApiError("value is required", code="empty_value")
     if not vault_crypto.is_valid_secret_name(name):
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
     tags = payload.get("tags") if isinstance(payload.get("tags"), list) else None
     policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else None
-    value = str(value)
-    # Seal via avault before the DB transaction. The transient plaintext POST lives only here
-    # (one request, not reused) and is piped to avault's stdin; Avibe keeps only the
-    # ciphertext and non-value-derived metadata.
-    try:
-        sealed = avault_seal(name, value.encode("utf-8"))
-    except AvaultError as exc:
-        raise VaultApiError(f"avault seal failed: {exc}", code="avault_failed") from exc
+    public_meta = payload.get("public_meta") if isinstance(payload.get("public_meta"), dict) else None
+    protection = str(payload.get("protection") or "standard").strip().lower()
+    kind = str(payload.get("kind") or "static").strip().lower()
+    signer_kind = payload.get("signer_kind")
+    if signer_kind is not None:
+        signer_kind = str(signer_kind)
+    if protection == "standard":
+        blind_box = payload.get("blind_box")
+        value = payload.get("value")
+        if isinstance(blind_box, dict):
+            try:
+                sealed = avault_seal_blind_box(name, blind_box)
+            except AvaultError as exc:
+                raise VaultApiError(f"avault blind-box seal failed: {exc}", code="avault_failed") from exc
+        elif isinstance(value, str) and value:
+            try:
+                sealed = avault_seal(name, value.encode("utf-8"))
+            except AvaultError as exc:
+                raise VaultApiError(f"avault seal failed: {exc}", code="avault_failed") from exc
+        else:
+            raise VaultApiError(
+                "standard create requires a browser blind_box or value fallback",
+                code="blind_box_required",
+            )
+    elif protection == "protected":
+        # Protected-tier encryption is browser-side. Python stores the opaque envelope
+        # and wrap_meta only; no avault open/decrypt happens in this process.
+        sealed = _sealed_from_payload(payload.get("sealed") or payload.get("envelope") or payload)
+    else:
+        raise VaultApiError("invalid protection tier", code="invalid_protection")
     engine = _vault_engine()
     try:
         with engine.begin() as conn:
@@ -1359,15 +1407,19 @@ def create_vault_secret(payload: dict) -> dict:
                 sealed=sealed,
                 group=str(payload.get("group") or vault_service.DEFAULT_GROUP),
                 tags=tags,
+                protection=protection,
+                kind=kind,
+                signer_kind=signer_kind,
                 description=payload.get("description"),
                 policy=policy,
+                public_meta=public_meta,
             )
     except vault_service.InvalidSecretNameError as exc:
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name") from exc
     except vault_service.SecretExistsError as exc:
         raise VaultApiError(f"secret '{name}' already exists", code="secret_exists", status=409) from exc
-    except vault_service.UnsupportedProtectionError as exc:
-        raise VaultApiError(str(exc), code="protected_tier_unavailable") from exc
+    except vault_service.VaultServiceError as exc:
+        raise VaultApiError(str(exc), code="vault_error") from exc
     return {"ok": True, "secret": meta}
 
 
@@ -1390,6 +1442,200 @@ def get_vault_audit(*, secret_name: Optional[str] = None, limit: int = 100) -> d
     with engine.connect() as conn:
         events = vault_service.list_audit(conn, secret_name=secret_name, limit=limit)
     return {"ok": True, "events": events}
+
+
+def get_vault_requests(*, status: Optional[str] = "pending", request_type: Optional[str] = None, limit: int = 100) -> dict:
+    from storage import vault_service
+
+    engine = _vault_engine()
+    with engine.connect() as conn:
+        requests = vault_service.list_requests(conn, status=status, request_type=request_type, limit=limit)
+    return {"ok": True, "requests": requests}
+
+
+def get_vault_grants(*, status: Optional[str] = "active", session_id: Optional[str] = None) -> dict:
+    from storage import vault_service
+
+    engine = _vault_engine()
+    with engine.begin() as conn:
+        grants = vault_service.list_grants(conn, status=status, session_id=session_id)
+    return {"ok": True, "grants": grants}
+
+
+def create_vault_grant(payload: dict) -> dict:
+    from storage import vault_service
+
+    if not isinstance(payload, dict):
+        raise VaultApiError("payload must be an object", code="invalid_payload")
+    try:
+        scope_type = str(payload["scope_type"])
+        scope_ref = str(payload["scope_ref"])
+    except KeyError as exc:
+        raise VaultApiError("scope_type and scope_ref are required", code="invalid_grant") from exc
+    ttl = payload.get("ttl_seconds")
+    try:
+        ttl_seconds = int(ttl) if ttl is not None else None
+    except (TypeError, ValueError) as exc:
+        raise VaultApiError("ttl_seconds must be an integer", code="invalid_grant") from exc
+    if payload.get("deks_by_secret") is not None:
+        raise VaultApiError("protected grant DEKs must be handled by the resident avault agent", code="invalid_grant")
+    request_id = payload.get("request_id") or payload.get("created_by_request_id")
+    if not request_id:
+        raise VaultApiError("request_id is required to create a grant", code="missing_request_id")
+    session_id = payload.get("session_id")
+    inherit_request_session = payload.get("this_session_only") is not False
+    if not inherit_request_session:
+        session_id = None
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            grant = vault_service.create_grant(
+                conn,
+                scope_type=scope_type,
+                scope_ref=scope_ref,
+                session_id=str(session_id) if session_id else None,
+                ttl_seconds=ttl_seconds,
+                created_by_request_id=str(request_id),
+                inherit_request_session=inherit_request_session,
+            )
+    except vault_service.NotGrantableError as exc:
+        raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{exc}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.RequestNotFoundError as exc:
+        raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+    except vault_service.InvalidGrantError as exc:
+        raise VaultApiError(str(exc), code="invalid_grant") from exc
+    return {"ok": True, "grant": grant}
+
+
+def _sign_digest_from_payload(value: object) -> str:
+    if not isinstance(value, str):
+        raise VaultApiError("digest must be a 32-byte hex string", code="invalid_digest")
+    digest = value.strip()
+    try:
+        decoded = bytes.fromhex(digest)
+    except ValueError as exc:
+        raise VaultApiError("digest must be a 32-byte hex string", code="invalid_digest") from exc
+    if len(digest) != 64 or len(decoded) != 32:
+        raise VaultApiError("digest must be a 32-byte hex string", code="invalid_digest")
+    return digest.lower()
+
+
+def revoke_vault_grant(grant_id: str) -> dict:
+    from storage import vault_service
+
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            grant = vault_service.revoke_grant(conn, grant_id)
+    except vault_service.GrantNotFoundError as exc:
+        raise VaultApiError(f"grant '{grant_id}' not found", code="grant_not_found", status=404) from exc
+    except vault_service.GrantNotActiveError as exc:
+        raise VaultApiError(f"grant '{grant_id}' is not active", code="grant_not_active", status=409) from exc
+    return {"ok": True, "grant": grant}
+
+
+def vault_sign(payload: dict) -> dict:
+    """Sign a digest without returning private key material to Python.
+
+    Standard-tier local keypairs are relayed to ``avault sign``. Protected-tier keypairs
+    are browser-signed; the daemon accepts and audits the public signature object only.
+    """
+    from storage import vault_crypto, vault_service
+
+    if not isinstance(payload, dict):
+        raise VaultApiError("payload must be an object", code="invalid_payload")
+    name = str(payload.get("name") or "").strip()
+    digest = _sign_digest_from_payload(payload.get("digest"))
+    scheme = str(payload.get("scheme") or "ecdsa-secp256k1-recoverable").strip()
+    if scheme not in vault_service.SUPPORTED_SIGNATURE_SCHEMES:
+        raise VaultApiError(f"unsupported signature scheme: {scheme}", code="invalid_request", status=409)
+    if not vault_crypto.is_valid_secret_name(name):
+        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            meta = vault_service.get_secret_meta(conn, name)
+            if meta.get("kind") != "keypair":
+                raise VaultApiError(f"secret '{name}' is not a signing key", code="not_signing_key", status=409)
+            signer_kind = meta.get("signer_kind") or "local"
+            if signer_kind != "local":
+                raise VaultApiError(
+                    f"secret '{name}' uses signer_kind '{signer_kind}', which is not locally signable",
+                    code="unsupported_signer_kind",
+                    status=409,
+                )
+            if meta.get("protection") == "protected":
+                signature = payload.get("signature")
+                if not isinstance(signature, dict):
+                    request = vault_service.create_sign_request(
+                        conn,
+                        name,
+                        digest=digest,
+                        scheme=scheme,
+                        requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
+                        delivery=payload.get("delivery") if isinstance(payload.get("delivery"), dict) else None,
+                    )
+                    return {"ok": False, "code": "browser_signature_required", "request": request}
+                request_id = str(payload.get("request_id") or "")
+                if not request_id:
+                    raise VaultApiError("request_id is required to complete protected signing", code="missing_request_id")
+                request = vault_service.complete_sign_request(
+                    conn,
+                    request_id,
+                    name=name,
+                    digest=digest,
+                    scheme=scheme,
+                    signature=signature,
+                    requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
+                )
+                return {"ok": True, "signature": signature, "request": request}
+            key_envelope = vault_service.get_key_envelope(conn, name)
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.RequestNotFoundError as exc:
+        raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+    except vault_service.VaultServiceError as exc:
+        raise VaultApiError(str(exc), code="vault_error") from exc
+    try:
+        signature = avault_sign(key_envelope, digest, scheme, name=name)
+    except AvaultError as exc:
+        raise VaultApiError(f"avault sign failed: {exc}", code="avault_failed") from exc
+    try:
+        with engine.begin() as conn:
+            vault_service.record_signing_use(
+                conn,
+                name,
+                requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
+                delivery={"scheme": scheme, "digest": digest},
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("vault_sign: signature produced but usage audit failed for %s: %s", name, exc)
+    return {"ok": True, "signature": signature}
+
+
+def store_vault_pubkey_pin(payload: dict) -> dict:
+    """Store value-free pubkey pin/attestation metadata on a vault secret."""
+    from storage import vault_service
+
+    if not isinstance(payload, dict):
+        raise VaultApiError("payload must be an object", code="invalid_payload")
+    name = str(payload.get("name") or "").strip()
+    pin = payload.get("pin") if isinstance(payload.get("pin"), dict) else None
+    if not name or not pin:
+        raise VaultApiError("name and pin are required", code="invalid_pin")
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            meta = vault_service.store_pubkey_pin(conn, name, pin)
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    return {"ok": True, "secret": meta}
 
 
 def import_vibe_agents(payload: dict) -> dict:
@@ -3311,12 +3557,37 @@ def _run_install_command(
 
 _ASKILL_INSTALL_LOCK = threading.Lock()
 _AVAULT_INSTALL_LOCK = threading.Lock()
+AVAULT_P2_MIN_VERSION = "0.1.3"
+# Installer pin must reference a published manifest-pinned release. It may lag
+# the P2 surface; standard sealing remains usable while P2-only entry points
+# gate on AVAULT_P2_MIN_VERSION below.
 AVAULT_VERSION = "0.1.2"
 _AVAULT_RELEASE_BASE_URL = f"https://github.com/avibe-bot/avault/releases/download/v{AVAULT_VERSION}/"
 
 
 def _truncate_install_output(output: str, limit: int = 8192) -> str:
     return output if len(output) <= limit else "...(truncated)\n" + output[-limit:]
+
+
+def _managed_avault_release_satisfies_p2() -> bool:
+    return _version_at_least(AVAULT_VERSION, AVAULT_P2_MIN_VERSION)
+
+
+def _avault_p2_release_unavailable_result(*, existing: str | None = None, existing_version: str | None = None) -> dict:
+    return {
+        "ok": False,
+        "installed": bool(existing),
+        "changed": False,
+        "path": existing,
+        "version": existing_version,
+        "status": "upgrade_required",
+        "reason": "avault_p2_release_unavailable",
+        "message": backend_t(
+            "dependencies.avault.p2ReleaseUnavailable",
+            pinned=AVAULT_VERSION,
+            required=AVAULT_P2_MIN_VERSION,
+        ),
+    }
 
 
 def install_askill() -> dict:
@@ -3524,11 +3795,13 @@ def install_avault(force: bool = False) -> dict:
     """
     path = _resolve_avault_cli_path()
     if path and not force:
+        existing_version = _probe_avault_version(path)
         return {
             "ok": True,
             "message": backend_t("dependencies.avault.ready"),
             "output": None,
             "path": path,
+            "version": existing_version,
         }
 
     import hashlib
@@ -3537,11 +3810,13 @@ def install_avault(force: bool = False) -> dict:
     target, platform_label = _avault_target()
     if target is None:
         if path:
+            existing_version = _probe_avault_version(path)
             return {
                 "ok": True,
                 "message": backend_t("dependencies.avault.ready"),
                 "output": None,
                 "path": path,
+                "version": existing_version,
                 "changed": False,
             }
         return {
@@ -3605,7 +3880,12 @@ def install_avault(force: bool = False) -> dict:
 
 
 def ensure_avault_installed(force: bool = False) -> dict:
-    """Ensure avault is present. Idempotent until the manifest installer lands."""
+    """Ensure avault is present.
+
+    The managed pin can be older than the P2 surface while still supporting the
+    standard seal path. P2-only commands call ``_require_avault_p2_surface`` at
+    their own boundary instead of making dependency install fail.
+    """
     if not _AVAULT_INSTALL_LOCK.acquire(blocking=False):
         return {
             "ok": False,
@@ -3615,31 +3895,47 @@ def ensure_avault_installed(force: bool = False) -> dict:
         }
     try:
         existing = _resolve_avault_cli_path()
-        if existing and not force:
-            return {"ok": True, "installed": True, "changed": False, "path": existing}
-        result = install_avault(force=force)
+        existing_version = _probe_avault_version(existing) if existing else None
+        existing_is_p2 = _version_at_least(existing_version, AVAULT_P2_MIN_VERSION)
+        can_managed_install_p2 = _managed_avault_release_satisfies_p2()
+        if existing and not existing_is_p2 and force and not can_managed_install_p2:
+            return _avault_p2_release_unavailable_result(existing=existing, existing_version=existing_version)
+        if existing and (
+            (existing_is_p2 and (not force or not can_managed_install_p2))
+            or (not existing_is_p2 and not force and not can_managed_install_p2)
+        ):
+            return {
+                "ok": True,
+                "installed": True,
+                "changed": False,
+                "path": existing,
+                "version": existing_version,
+            }
+        needs_upgrade = bool(existing and not existing_is_p2 and can_managed_install_p2)
+        result = install_avault(force=force or needs_upgrade)
         resolved = _resolve_avault_cli_path()
         installed = bool(resolved)
+        resolved_version = _probe_avault_version(resolved) if resolved else None
         result["installed"] = installed
+        result["version"] = resolved_version
         if "changed" not in result:
-            result["changed"] = installed and bool(result.get("ok")) and (not existing or force)
+            result["changed"] = installed and bool(result.get("ok")) and (not existing or force or needs_upgrade)
         result["path"] = resolved
         if result.get("ok") and not installed:
             result["ok"] = False
             result["message"] = (
                 result.get("message") or backend_t("dependencies.avault.installedNotFound")
             )
+        elif result.get("ok") and not _version_at_least(resolved_version, AVAULT_P2_MIN_VERSION):
+            result["status"] = "upgrade_required"
         return result
     finally:
         _AVAULT_INSTALL_LOCK.release()
 
 
-def avault_status() -> dict:
-    """Report whether avault is installed and its version (best-effort)."""
-    path = _resolve_avault_cli_path()
+def _probe_avault_version(path: str | None) -> str | None:
     if not path:
-        return {"id": "avault", "installed": False, "version": None, "status": "missing", "path": None}
-    version: str | None = None
+        return None
     try:
         proc = subprocess.run(
             [path, "version"],
@@ -3651,10 +3947,57 @@ def avault_status() -> dict:
         )
         text = (proc.stdout or proc.stderr or "").strip()
         if proc.returncode == 0 and text:
-            version = text.split()[-1]
+            return text.split()[-1]
     except Exception:  # noqa: BLE001
-        version = None
-    return {"id": "avault", "installed": True, "version": version, "status": "ready", "path": path}
+        return None
+    return None
+
+
+def avault_status() -> dict:
+    """Report whether avault is installed and its version (best-effort)."""
+    path = _resolve_avault_cli_path()
+    if not path:
+        return {"id": "avault", "installed": False, "version": None, "status": "missing", "path": None}
+    version = _probe_avault_version(path)
+    status = "ready" if _version_at_least(version, AVAULT_P2_MIN_VERSION) else "upgrade_required"
+    return {"id": "avault", "installed": True, "version": version, "status": status, "path": path}
+
+
+def _version_at_least(current: str | None, minimum: str) -> bool:
+    if not current:
+        return False
+    try:
+        from packaging.version import InvalidVersion, Version
+
+        try:
+            return Version(current) >= Version(minimum)
+        except InvalidVersion:
+            pass
+    except Exception:  # pragma: no cover - packaging is a transitive dep
+        pass
+
+    def _parts(value: str) -> tuple[int, ...] | None:
+        core = value.split("+", 1)[0].split("-", 1)[0]
+        try:
+            return tuple(int(part) for part in core.split("."))
+        except ValueError:
+            return None
+
+    cur_parts = _parts(current)
+    min_parts = _parts(minimum)
+    if cur_parts is None or min_parts is None:
+        return False
+    width = max(len(cur_parts), len(min_parts))
+    return cur_parts + (0,) * (width - len(cur_parts)) >= min_parts + (0,) * (width - len(min_parts))
+
+
+def _require_avault_p2_surface(feature: str) -> None:
+    status = avault_status()
+    if not status.get("installed"):
+        raise AvaultError(f"avault is required for {feature}")
+    version = status.get("version")
+    if not _version_at_least(version, AVAULT_P2_MIN_VERSION):
+        raise AvaultError(f"{feature} requires avault >= {AVAULT_P2_MIN_VERSION}; installed {version or 'unknown'}")
 
 
 # ---------------------------------------------------------------------------
@@ -3742,6 +4085,92 @@ def avault_seal(name: str, value: bytes):
         )
     except (ValueError, KeyError, TypeError) as exc:
         raise AvaultError("avault seal returned malformed output") from exc
+
+
+def avault_pubkey() -> dict:
+    """Return avault's blind-box public key + fingerprint."""
+    _require_avault_p2_surface("blind-box pubkey")
+    proc = _run_avault(["pubkey"])
+    if proc.returncode != 0:
+        raise AvaultError(_avault_detail(proc) or "avault pubkey failed")
+    try:
+        payload = json.loads(proc.stdout)
+    except (ValueError, TypeError) as exc:
+        raise AvaultError("avault pubkey returned malformed output") from exc
+    public_key = payload.get("public_key")
+    fingerprint = payload.get("fingerprint")
+    if not isinstance(public_key, str) or not isinstance(fingerprint, str) or not public_key or not fingerprint:
+        raise AvaultError("avault pubkey returned malformed output")
+    return {"public_key": public_key, "fingerprint": fingerprint}
+
+
+def avault_seal_blind_box(name_or_blind_box, blind_box: dict | None = None):
+    """Relay a browser HPKE blind box to ``avault seal --blind-box``.
+
+    ``avault`` requires the secret name for AAD binding. For convenience, callers may
+    pass ``(name, blind_box)`` or a single object containing ``name`` and ``blind_box``.
+    """
+    from storage.vault_crypto import Sealed
+
+    if blind_box is None:
+        if not isinstance(name_or_blind_box, dict):
+            raise AvaultError("blind-box request must be an object")
+        request = name_or_blind_box
+        name = str(request.get("name") or "")
+        if isinstance(request.get("blind_box"), dict):
+            blind_box = request["blind_box"]
+        else:
+            blind_box = {key: request[key] for key in ("scheme", "enc", "ct") if key in request}
+    else:
+        name = str(name_or_blind_box or "")
+    if not name:
+        raise AvaultError("secret name is required for blind-box seal")
+    _require_avault_p2_surface("blind-box seal")
+    body = json.dumps(blind_box).encode("utf-8")
+    proc = _run_avault(["seal", "--name", name, "--blind-box"], stdin=body)
+    if proc.returncode != 0:
+        raise AvaultError(_avault_detail(proc) or "avault blind-box seal failed")
+    try:
+        payload = json.loads(proc.stdout)
+        return Sealed(
+            ciphertext=payload["ciphertext"],
+            nonce=payload["nonce"],
+            wrap_meta=payload["wrap_meta"],
+        )
+    except (ValueError, KeyError, TypeError) as exc:
+        raise AvaultError("avault blind-box seal returned malformed output") from exc
+
+
+def avault_sign(
+    key_envelope,
+    digest: str,
+    scheme: str,
+    *,
+    name: str | None = None,
+) -> dict:
+    """Ask avault to sign a caller-computed 32-byte digest with a local key envelope."""
+    if not name:
+        raise AvaultError("secret name is required for avault sign")
+    _require_avault_p2_surface("vault signing")
+    body = json.dumps(
+        {
+            "name": name,
+            "key_envelope": _envelope_payload(key_envelope),
+            "digest": digest,
+            "scheme": scheme,
+        }
+    ).encode("utf-8")
+    proc = _run_avault(["sign"], stdin=body)
+    if proc.returncode != 0:
+        raise AvaultError(_avault_detail(proc) or "avault sign failed")
+    try:
+        payload = json.loads(proc.stdout)
+    except (ValueError, TypeError) as exc:
+        raise AvaultError("avault sign returned malformed output") from exc
+    signature = payload.get("signature")
+    if not isinstance(signature, str) or not signature:
+        raise AvaultError("avault sign returned malformed output")
+    return {"signature": signature, "recovery_id": payload.get("recovery_id")}
 
 
 def avault_deliver_run(secrets: list[dict], command: list[str]) -> int:

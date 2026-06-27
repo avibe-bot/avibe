@@ -44,7 +44,9 @@
       "checksumMismatch": "avault 下载校验失败。",
       "installFailed": "avault 安装失败：{error}",
       "installedNotFound": "avault 已安装，但当前 PATH 找不到它；请重启服务或检查 PATH。",
-      "alreadyRunning": "avault 安装或更新正在运行，请稍后重试。"
+      "alreadyRunning": "avault 安装或更新正在运行，请稍后重试。",
+      "versionTooOld": "已安装 avault {version}，但 Vaults 需要 >= {required}。",
+      "p2ReleaseUnavailable": "Avibe 托管 avault 安装器当前固定到 {pinned}，但 Vaults 需要 >= {required}。请手动安装兼容版本，或等待 P2 avault 发布版。"
     }
   },
   "error": {

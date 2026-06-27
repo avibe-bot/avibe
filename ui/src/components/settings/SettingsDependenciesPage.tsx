@@ -82,6 +82,7 @@ export const SettingsDependenciesPage: React.FC = () => {
 
   const statusText = (d: DependencyItem) => {
     if (!d.installed) return t('settings.dependencies.statusMissing');
+    if (d.status === 'upgrade_required') return t('settings.dependencies.statusUpgradeRequired');
     const word = d.kind === 'node' ? t('settings.dependencies.statusDetected') : t('settings.dependencies.statusReady');
     return d.version ? `${word} · v${String(d.version).replace(/^v/i, '')}` : word;
   };
@@ -129,7 +130,7 @@ export const SettingsDependenciesPage: React.FC = () => {
                 detail={t(`settings.dependencies.items.${d.id}.detail`)}
                 actions={
                   <>
-                    <Badge variant={d.installed ? 'success' : 'destructive'} className="font-mono">
+                    <Badge variant={d.status === 'upgrade_required' ? 'warning' : d.installed ? 'success' : 'destructive'} className="font-mono">
                       {statusText(d)}
                     </Badge>
                     {showAction && (
