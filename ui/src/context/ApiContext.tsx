@@ -306,7 +306,7 @@ export type ApiContextType = {
   createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
   getVaultRequests: (params?: { status?: string; type?: string; limit?: number }) => Promise<{ ok: boolean; requests: VaultRequest[] }>;
-  getVaultGrants: (params?: { status?: string; sessionId?: string }) => Promise<{ ok: boolean; grants: VaultGrant[] }>;
+  getVaultGrants: (params?: { status?: string; sessionId?: string }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; grants: VaultGrant[] }>;
   createVaultGrant: (payload: Record<string, unknown>) => Promise<{ ok: boolean; grant: VaultGrant; code?: string; message?: string }>;
   revokeVaultGrant: (grantId: string) => Promise<{ ok: boolean; grant?: VaultGrant; code?: string; message?: string }>;
   signVaultDigest: (payload: Record<string, unknown>) => Promise<{ ok: boolean; signature?: Record<string, unknown>; request?: VaultRequest; code?: string; message?: string }>;
@@ -1389,15 +1389,21 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     throw new ApiError(errorMessage, res.status, errorCode);
   };
 
-  const getJson = async (path: string) => {
+  const getJson = async (path: string, { handleError = true }: { handleError?: boolean } = {}) => {
     const res = await apiFetch(path);
-    if (!res.ok) {
+    if (!res.ok && handleError) {
       await handleApiError(res, path);
     }
     return res.json();
   };
 
-  const getCachedJson = (path: string, ttlMs = 1500) => {
+  const getCachedJson = (path: string, ttlMs = 1500, opts?: { handleError?: boolean }) => {
+    // Best-effort callers (handleError: false) bypass the shared read cache so a
+    // silently-failing request can't hand its suppressed-error promise to a
+    // toast-enabled caller hitting the same path.
+    if (opts?.handleError === false) {
+      return getJson(path, opts);
+    }
     const now = Date.now();
     const cached = readCacheRef.current.get(path);
     if (cached && cached.expiresAt > now) {
@@ -2016,12 +2022,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const qs = search.toString();
       return getCachedJson(qs ? `/api/vault/requests?${qs}` : '/api/vault/requests', 1500);
     },
-    getVaultGrants: (params) => {
+    getVaultGrants: (params, opts) => {
       const search = new URLSearchParams();
       if (params?.status) search.set('status', params.status);
       if (params?.sessionId) search.set('session_id', params.sessionId);
       const qs = search.toString();
-      return getCachedJson(qs ? `/api/vault/grants?${qs}` : '/api/vault/grants', 1500);
+      return getCachedJson(qs ? `/api/vault/grants?${qs}` : '/api/vault/grants', 1500, opts);
     },
     createVaultGrant: (payload) => postJson('/api/vault/grants', payload),
     revokeVaultGrant: (grantId) => deleteJson(`/api/vault/grants/${encodeURIComponent(grantId)}`),

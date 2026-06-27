@@ -90,16 +90,17 @@ const SCOPE_ICON: Record<VaultGrant['scope_type'], typeof KeyRound> = {
   group: Layers,
 };
 
-/** Compact, locale-neutral countdown to a grant's expiry. */
-function formatRemaining(expiresAt: string, now: number): { text: string; expired: boolean; urgent: boolean } {
+/** Break a grant's time-to-expiry into parts; the units are localized in the row. */
+function remaining(expiresAt: string, now: number): { h: number; m: number; s: number; expired: boolean; urgent: boolean } {
   const end = Date.parse(expiresAt);
   const secs = Math.floor((end - now) / 1000);
-  if (Number.isNaN(end) || secs <= 0) return { text: '', expired: true, urgent: true };
-  const h = Math.floor(secs / 3600);
-  const m = Math.floor((secs % 3600) / 60);
-  const s = secs % 60;
-  const text = h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${s}s` : `${s}s`;
-  return { text, expired: false, urgent: secs <= 60 };
+  if (Number.isNaN(end) || secs <= 0) return { h: 0, m: 0, s: 0, expired: true, urgent: true };
+  return { h: Math.floor(secs / 3600), m: Math.floor((secs % 3600) / 60), s: secs % 60, expired: false, urgent: secs <= 60 };
+}
+
+function isExpired(expiresAt: string, now: number): boolean {
+  const end = Date.parse(expiresAt);
+  return !Number.isNaN(end) && end <= now;
 }
 
 const GrantRow: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: VaultGrant) => void }> = ({
@@ -109,7 +110,13 @@ const GrantRow: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: Vau
 }) => {
   const { t } = useTranslation();
   const Icon = SCOPE_ICON[g.scope_type] ?? KeyRound;
-  const rem = formatRemaining(g.expires_at, now);
+  const rem = remaining(g.expires_at, now);
+  const time =
+    rem.h > 0
+      ? t('vaults.grants.dur.hm', { h: rem.h, m: rem.m })
+      : rem.m > 0
+        ? t('vaults.grants.dur.ms', { m: rem.m, s: rem.s })
+        : t('vaults.grants.dur.s', { s: rem.s });
   return (
     <div className="flex items-center gap-3.5 rounded-xl border border-border bg-surface px-4 py-3">
       <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-mint/10 text-mint">
@@ -120,7 +127,7 @@ const GrantRow: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: Vau
           <span className="truncate font-mono text-sm font-semibold">{g.scope_ref}</span>
           <Badge variant="secondary">{t(`vaults.grants.scope.${g.scope_type}`)}</Badge>
           <Badge variant="outline">
-            {g.session_id ? t('vaults.grants.session.this') : t('vaults.grants.session.any')}
+            {g.session_id ? t('vaults.grants.session.bound') : t('vaults.grants.session.any')}
           </Badge>
         </div>
         <span className="flex items-center gap-1.5 text-xs text-muted">
@@ -128,7 +135,7 @@ const GrantRow: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: Vau
           <span aria-hidden>·</span>
           <Clock className="size-3" />
           <span className={rem.urgent ? 'text-warning' : undefined}>
-            {rem.expired ? t('vaults.grants.expired') : t('vaults.grants.expiresIn', { time: rem.text })}
+            {rem.expired ? t('vaults.grants.expired') : t('vaults.grants.expiresIn', { time })}
           </span>
         </span>
       </div>
@@ -167,9 +174,10 @@ export const VaultsPage: React.FC = () => {
       setLoading(false);
     }
     // Active grants are a best-effort control strip; a grants failure (e.g. an
-    // older backend) must not blank out the secret inventory.
+    // older backend without the route) must neither blank out the secret
+    // inventory nor surface an error toast, so suppress error handling here.
     try {
-      const res = await api.getVaultGrants({ status: 'active' });
+      const res = await api.getVaultGrants({ status: 'active' }, { handleError: false });
       setGrants(res.grants ?? []);
     } catch {
       setGrants([]);
@@ -180,11 +188,22 @@ export const VaultsPage: React.FC = () => {
     refresh();
   }, [refresh]);
 
-  // Tick once a second only while there are live grants to count down.
+  // Tick once a second while there are live grants: advance the countdown and
+  // drop any grant that has reached its expiry. The backend's status=active
+  // filter only applies at fetch time, so without this the "Active access"
+  // strip and its count would linger on a dead grant and the timer would run
+  // forever; when the last grant expires the interval tears down on its own.
   const hasGrants = grants.length > 0;
   useEffect(() => {
     if (!hasGrants) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    const id = setInterval(() => {
+      const t = Date.now();
+      setNow(t);
+      setGrants((prev) => {
+        const live = prev.filter((g) => !isExpired(g.expires_at, t));
+        return live.length === prev.length ? prev : live;
+      });
+    }, 1000);
     return () => clearInterval(id);
   }, [hasGrants]);
 

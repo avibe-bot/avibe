@@ -2102,8 +2102,13 @@
         "skill": "Skill",
         "group": "Group"
       },
+      "dur": {
+        "hm": "{{h}}h {{m}}m",
+        "ms": "{{m}}m {{s}}s",
+        "s": "{{s}}s"
+      },
       "session": {
-        "this": "This session",
+        "bound": "Session-bound",
         "any": "Any session"
       }
     },
