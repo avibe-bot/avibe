@@ -71,9 +71,18 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean }> = ({ windowed = 
       slotRef.current = null;
       const sid = resolvedSessionIdRef.current;
       if (sid) {
+        // Only return the slot to the pool once the backend session is actually GONE.
+        // apiFetch resolves on non-2xx and network errors are swallowed, but a failed
+        // DELETE (auth/origin/CSRF/server error) means the session may still be alive
+        // (only detached via the WS close) — reusing the slot would then mint the same id
+        // and reconnect a new window to the old shell, leaking its commands/state. 404 =
+        // already gone, so that's safe to release too. On any other failure keep the slot
+        // reserved (lost for this page, but the pool just hands out the next free index).
         void apiFetch(`/api/terminal/${encodeURIComponent(sid)}`, { method: 'DELETE', credentials: 'same-origin' })
-          .catch(() => undefined)
-          .finally(() => releaseTerminalSlot(slot));
+          .then((res) => {
+            if (res.ok || res.status === 404) releaseTerminalSlot(slot);
+          })
+          .catch(() => undefined);
       } else {
         releaseTerminalSlot(slot);
       }
