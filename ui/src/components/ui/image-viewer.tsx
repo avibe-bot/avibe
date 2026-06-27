@@ -49,6 +49,10 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
   // land on the dark stage after dragging a zoomed image) doesn't close the modal.
   // Reset on each pointer-down; clicking the empty stage WITHOUT panning closes.
   const interactedRef = React.useRef(false);
+  // The <img> has pointer-events:none under react-zoom-pan-pinch (the wrapper owns
+  // gestures), so we can't tell "clicked the image" from "clicked the empty stage"
+  // by event target — decide by hit-testing the image's rect in the backdrop click.
+  const imgRef = React.useRef<HTMLImageElement>(null);
 
   const index = src ? images.indexOf(src) : -1;
   const pageable = index >= 0 && images.length > 1;
@@ -95,8 +99,22 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
           onPointerDown={() => {
             interactedRef.current = false;
           }}
-          onClick={() => {
-            if (!interactedRef.current) close();
+          onClick={(e) => {
+            // A real pan happened this press → don't treat the release as a close.
+            if (interactedRef.current) return;
+            // Click on the (possibly zoomed) image itself → don't close; only the
+            // dark area around it acts as the backdrop.
+            const r = imgRef.current?.getBoundingClientRect();
+            if (
+              r &&
+              e.clientX >= r.left &&
+              e.clientX <= r.right &&
+              e.clientY >= r.top &&
+              e.clientY <= r.bottom
+            ) {
+              return;
+            }
+            close();
           }}
           role="dialog"
           aria-modal="true"
@@ -188,9 +206,9 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
               pinch-zoom (user-scalable=no, for the iOS keyboard fix), so the
               lightbox provides its own. Mobile: pinch to zoom, drag to pan, double
               tap to toggle. Desktop: wheel to zoom, drag to pan, double-click /
-              the +/- buttons. Keyed on src so paging resets to a fit view. Only the
-              <img> stops the close-click; the dark stage AROUND a fitted image still
-              closes on click (a pan sets interactedRef so its release doesn't). */}
+              the +/- buttons. Keyed on src so paging resets to a fit view. Closing
+              by click is decided in the backdrop handler (hit-test the image rect +
+              the pan flag), since the library makes the <img> pointer-events:none. */}
           <div>
             <TransformWrapper
               key={src}
@@ -200,7 +218,9 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
               maxScale={5}
               centerOnInit
               doubleClick={{ mode: 'toggle' }}
-              onPanningStart={() => {
+              onPanning={() => {
+                // Set only on ACTUAL movement (not pan-start, which fires on
+                // pointer-down), so a clean tap on the empty stage still closes.
                 interactedRef.current = true;
               }}
             >
@@ -211,9 +231,9 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
                   the stage; zooming scales the image into the full area. */}
               <TransformComponent wrapperStyle={{ width: '90vw', height: '90vh', cursor: 'grab' }}>
                 <img
+                  ref={imgRef}
                   src={src}
                   alt=""
-                  onClick={(e) => e.stopPropagation()}
                   className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain shadow-2xl"
                 />
               </TransformComponent>
