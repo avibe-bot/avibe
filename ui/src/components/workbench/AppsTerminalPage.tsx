@@ -55,16 +55,40 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean }> = ({ windowed = 
   // never briefly mount the terminal under the wrong key. email is null for local/unauth.
   const [sessionId, setSessionId] = useState<string | null>(null);
   const resolvedSessionIdRef = useRef<string | null>(null);
+  const slotRef = useRef<number | null>(null);
+
+  // Slot + backend-session lifecycle is tied to MOUNT, not to identity: acquire a bounded
+  // slot for a windowed terminal on mount (so open/close churn reuses session ids instead
+  // of exhausting the backend cap), and dispose the backend session + release the slot only
+  // on unmount = window close. Keeping this OUT of the identity effect below is the point:
+  // an ApiContext re-render hands `getAuthSession` a fresh identity, and if disposal lived
+  // in that effect's cleanup it would DELETE a live terminal on every such refresh.
+  useEffect(() => {
+    if (!windowed) return;
+    const slot = acquireTerminalSlot();
+    slotRef.current = slot;
+    return () => {
+      slotRef.current = null;
+      const sid = resolvedSessionIdRef.current;
+      if (sid) {
+        void apiFetch(`/api/terminal/${encodeURIComponent(sid)}`, { method: 'DELETE', credentials: 'same-origin' })
+          .catch(() => undefined)
+          .finally(() => releaseTerminalSlot(slot));
+      } else {
+        releaseTerminalSlot(slot);
+      }
+    };
+  }, [windowed]);
+
+  // Resolve the (account-scoped) session id from the signed-in identity. May re-run when the
+  // identity source changes; it only updates the id — it never disposes a session (that's the
+  // mount-scoped effect above) — so a context refresh can't kill a live terminal.
   useEffect(() => {
     let cancelled = false;
-    resolvedSessionIdRef.current = null;
-    // Take a bounded slot for the lifetime of a windowed terminal (released on close),
-    // so opening/closing terminal windows reuses session ids instead of exhausting the
-    // backend's session cap. The route terminal takes no slot — it keeps its persistent id.
-    const slot = windowed ? acquireTerminalSlot() : null;
     const resolve = (identity: string | null) => {
       if (cancelled) return;
-      const nextSessionId = getSessionId(identity, slot != null ? `${TAB_TOKEN}-w${slot}` : undefined);
+      const slot = slotRef.current;
+      const nextSessionId = getSessionId(identity, windowed && slot != null ? `${TAB_TOKEN}-w${slot}` : undefined);
       resolvedSessionIdRef.current = nextSessionId;
       setSessionId(nextSessionId);
     };
@@ -75,17 +99,6 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean }> = ({ windowed = 
       .catch(() => resolve(null));
     return () => {
       cancelled = true;
-      const sessionToDispose = resolvedSessionIdRef.current;
-      if (slot != null && sessionToDispose) {
-        void apiFetch(`/api/terminal/${encodeURIComponent(sessionToDispose)}`, {
-          method: 'DELETE',
-          credentials: 'same-origin',
-        })
-          .catch(() => undefined)
-          .finally(() => releaseTerminalSlot(slot));
-      } else if (slot != null) {
-        releaseTerminalSlot(slot);
-      }
     };
   }, [getAuthSession, windowed]);
 

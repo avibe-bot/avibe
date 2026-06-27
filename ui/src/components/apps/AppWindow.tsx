@@ -46,13 +46,18 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [win.minimized, win.maximized, layerWidth, layerHeight]);
 
-  // A freshly opened window mounts as the top window; give it DOM focus so keyboard
-  // chords route to it — e.g. after a Files pop-out, ⌘W should act on the new Editor
-  // window, not the Files window whose pop-out button was clicked. Mount-only.
+  // Pull DOM focus to this window when it BECOMES the focused (top) window without a
+  // pointer click already placing focus inside it — i.e. opened via openApp, or
+  // activated / restored from the Dock (which only raise z-order). The keyboard chord
+  // routes by document.activeElement, so otherwise a Dock-activated or freshly-opened
+  // window wouldn't receive ⌘W/⌘M. The `contains` guard avoids yanking focus from an
+  // inner field the user just clicked (pointerdown already focuses those).
   useEffect(() => {
-    if (wm.focusedId === win.id) rootRef.current?.focus({ preventScroll: true });
+    if (win.minimized || wm.focusedId !== win.id) return;
+    if (rootRef.current?.contains(document.activeElement)) return;
+    rootRef.current?.focus({ preventScroll: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [wm.focusedId, win.minimized]);
 
   // One pointer gesture (move or resize): attach window-level listeners on down,
   // tear them down on up. Capturing `win.bounds` at gesture start keeps the math
