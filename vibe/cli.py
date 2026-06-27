@@ -2594,6 +2594,13 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="--async returns immediately. Remove --wait-timeout, or run synchronously without --async.",
             help_command=help_command,
         )
+    if (getattr(args, "callback_session_id", None) or "").strip() and bool(getattr(args, "no_callback", False)):
+        raise TaskCliError(
+            "use either --callback-session-id or --no-callback, not both",
+            code="conflicting_callback_policy",
+            hint="Pass --callback-session-id to receive a follow-up, or --no-callback to intentionally inspect the run later.",
+            help_command=help_command,
+        )
     if (getattr(args, "callback_session_id", None) or "").strip() and not bool(getattr(args, "async_run", False)):
         raise TaskCliError(
             "--callback-session-id requires --async",
@@ -2823,13 +2830,6 @@ def _agent_run_source_from_caller(caller_context) -> tuple[str, Optional[str], O
 def _resolve_async_callback_session_id(args, caller_context):
     explicit_callback = (getattr(args, "callback_session_id", None) or "").strip() or None
     no_callback = bool(getattr(args, "no_callback", False))
-    if explicit_callback and no_callback:
-        raise TaskCliError(
-            "use either --callback-session-id or --no-callback, not both",
-            code="conflicting_callback_policy",
-            hint="Pass --callback-session-id to receive a follow-up, or --no-callback to intentionally inspect the run later.",
-            help_command="vibe agent run --help",
-        )
     if not bool(getattr(args, "async_run", False)):
         return explicit_callback, None
     if explicit_callback:

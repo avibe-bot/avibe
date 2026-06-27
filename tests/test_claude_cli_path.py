@@ -794,6 +794,49 @@ def test_session_handler_does_not_repeat_claude_model_control_request(monkeypatc
     assert first_client.model_calls == []
 
 
+def test_session_handler_recreates_cached_claude_client_when_caller_env_changes(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict[str, Any] = {"clients": []}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+            self.disconnects = 0
+            captured["clients"].append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform_specific={
+            "task_execution_id": "run-one",
+            "task_trigger_kind": "agent_run",
+            "agent_session_target": {"id": "ses-parent", "agent_backend": "claude"},
+        },
+    )
+
+    first_client = _run_session(handler, context)
+    context.platform_specific["task_execution_id"] = "run-two"
+    second_client = _run_session(handler, context)
+
+    assert first_client is not second_client
+    assert first_client.disconnects == 1
+    assert len(captured["clients"]) == 2
+    assert first_client.options.env["AVIBE_RUN_ID"] == "run-one"
+    assert second_client.options.env["AVIBE_RUN_ID"] == "run-two"
+
+
 def test_session_handler_updates_cached_claude_model_only_when_changed(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 

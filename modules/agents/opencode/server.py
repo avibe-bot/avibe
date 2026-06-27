@@ -94,6 +94,9 @@ class OpenCodeServerManager:
         self._pending_runtime_config: Optional[tuple[str, int, int]] = None
         self._last_prompt_started_at: dict[str, float] = {}
 
+    def _caller_context_path(self) -> str:
+        return server_environment()["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"]
+
     def _get_lock(self) -> asyncio.Lock:
         """Get or create an asyncio.Lock bound to the current event loop."""
         current_loop = asyncio.get_event_loop()
@@ -375,6 +378,7 @@ class OpenCodeServerManager:
                 "pid": pid,
                 "port": self.port,
                 "host": self.host,
+                "caller_context_path": self._caller_context_path(),
                 "started_at": time.time(),
             }
             self._pid_file.write_text(json.dumps(payload))
@@ -903,6 +907,9 @@ class OpenCodeServerManager:
             await self._cleanup_orphaned_managed_server()
 
             if await self._is_healthy():
+                pid_info = self._read_pid_file()
+                if not pid_info or pid_info.get("caller_context_path") != self._caller_context_path():
+                    self._caller_context_plugin_refresh_pending = True
                 if (
                     self._caller_context_plugin_refresh_pending
                     and self._active_requests == 0
@@ -916,6 +923,11 @@ class OpenCodeServerManager:
                     await self._start_server()
                     self._caller_context_plugin_refresh_pending = False
                     return self.base_url
+                if self._caller_context_plugin_refresh_pending:
+                    raise RuntimeError(
+                        "OpenCode caller-context plugin refresh is pending while existing runs are active; "
+                        "retry after the active run finishes so the server can restart with AVIBE_* env injection."
+                    )
                 # If the server is already running (e.g., started by a previous run),
                 # record its PID so shutdown can clean it up.
                 if not self._read_pid_file():

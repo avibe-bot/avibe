@@ -176,6 +176,15 @@ class SessionHandler(BaseHandler):
             await self.cleanup_session(composite_key)
             return None
 
+        caller_env = caller_env_for_platform_payload(getattr(context, "platform_specific", None))
+        if getattr(client, "_vibe_caller_env", {}) != caller_env:
+            logger.info(
+                "Recreating cached Claude SDK client for %s because caller context env changed",
+                composite_key,
+            )
+            await self.cleanup_session(composite_key)
+            return None
+
         try:
             await self._set_claude_model_if_needed(client, current_model)
         except Exception as e:
@@ -874,6 +883,7 @@ class SessionHandler(BaseHandler):
 
         # Create new Claude client
         client = ClaudeSDKClient(options=options)
+        setattr(client, "_vibe_caller_env", caller_env_for_platform_payload(getattr(context, "platform_specific", None)))
 
         # Log the actual options being used
         logger.info("ClaudeAgentOptions details:")
