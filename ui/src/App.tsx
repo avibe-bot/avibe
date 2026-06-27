@@ -11,8 +11,6 @@ import { VaultsPage } from './components/workbench/VaultsPage';
 import { ChatPage } from './components/workbench/ChatPage';
 import { ProjectsPage } from './components/workbench/ProjectsPage';
 import { MorePage } from './components/workbench/MorePage';
-import { AppsFileBrowserPage } from './components/workbench/AppsFileBrowserPage';
-import { AppsTerminalPage } from './components/workbench/AppsTerminalPage';
 import { Dashboard } from './components/Dashboard';
 import { ChannelList } from './components/steps/ChannelList';
 import { UserList } from './components/steps/UserList';
@@ -36,8 +34,18 @@ import { WorkbenchInboxProvider } from './context/WorkbenchInboxContext';
 import { WorkbenchProjectsProvider } from './context/WorkbenchProjectsContext';
 import { ComposerBridgeProvider } from './context/ComposerBridgeContext';
 import { AgentationToggle } from './components/AgentationToggle';
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+
+// Apps layer pages are lazy: they share their chunk with the windowed app bodies
+// (registry.tsx) instead of being pulled into the main entry by these routes, so
+// the file browser / xterm code loads only when an app actually opens.
+const AppsFileBrowserPage = lazy(() =>
+  import('./components/workbench/AppsFileBrowserPage').then((m) => ({ default: m.AppsFileBrowserPage })),
+);
+const AppsTerminalPage = lazy(() =>
+  import('./components/workbench/AppsTerminalPage').then((m) => ({ default: m.AppsTerminalPage })),
+);
 import { hasConfiguredPlatformCredentials } from './lib/platforms';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
@@ -265,6 +273,13 @@ const AuthGuard = ({ children }: { children: ReactNode }) => {
     return children;
 };
 
+// Brief fallback while a lazy Apps route chunk loads (the pages render their own
+// loading state once mounted).
+const AppsRouteFallback = () => {
+  const { t } = useTranslation();
+  return <div className="grid min-h-[40vh] place-items-center text-[12px] text-muted">{t('common.loading')}</div>;
+};
+
 function AppRoutes() {
   return (
     <>
@@ -289,8 +304,22 @@ function AppRoutes() {
         {/* Apps layer — File Browser (Phase 1) + Terminal (Phase 2). The
             sidebar Apps launcher opens these; /apps lands on the file browser. */}
         <Route path="/apps" element={<Navigate to="/apps/files" replace />} />
-        <Route path="/apps/files" element={<AppsFileBrowserPage />} />
-        <Route path="/apps/terminal" element={<AppsTerminalPage />} />
+        <Route
+          path="/apps/files"
+          element={
+            <Suspense fallback={<AppsRouteFallback />}>
+              <AppsFileBrowserPage />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/apps/terminal"
+          element={
+            <Suspense fallback={<AppsRouteFallback />}>
+              <AppsTerminalPage />
+            </Suspense>
+          }
+        />
         <Route path="/chat/:sessionId" element={<ChatPage />} />
 
         {/* Control Panel mode — existing pages moved under /admin/* */}
