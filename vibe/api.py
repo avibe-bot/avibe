@@ -1497,14 +1497,14 @@ def _parse_iso_utc(value: object) -> datetime | None:
 
 
 def _grant_ttl_seconds(grant: dict) -> int:
+    created_at = _parse_iso_utc(grant.get("created_at"))
     expires_at = _parse_iso_utc(grant.get("expires_at"))
     if expires_at is None:
         return 1
-    now = datetime.now(timezone.utc)
-    remaining = (expires_at - now).total_seconds()
-    if remaining <= 0:
-        return 0
-    return max(1, int(remaining))
+    if created_at is None:
+        return 1
+    approved_lifetime = (expires_at - created_at).total_seconds()
+    return max(1, int(round(approved_lifetime)))
 
 
 def _agent_grant_cached_all(result: dict, expected_count: int) -> bool:
@@ -1636,13 +1636,6 @@ def create_vault_grant(payload: dict) -> dict:
     agent_relayed = False
     try:
         relay_ttl = _grant_ttl_seconds(grant)
-        if relay_ttl <= 0:
-            _cleanup_failed_agent_grant(
-                engine=engine,
-                grant=grant,
-                reason=f"create_vault_grant:{grant['id']}:expired-before-relay",
-            )
-            raise VaultApiError("grant expired before resident agent relay", code="invalid_grant", status=409)
         agent_result = avault_agent_grant(
             scope_type=str(grant["scope_type"]),
             scope_ref=str(grant["scope_ref"]),
@@ -1654,7 +1647,7 @@ def create_vault_grant(payload: dict) -> dict:
             raise AvaultError("avault agent grant cached fewer DEKs than requested")
         agent_relayed = True
         with engine.begin() as conn:
-            grant = vault_service.mark_grant_agent_ready(conn, str(grant["id"]))
+            grant = vault_service.mark_grant_agent_ready(conn, str(grant["id"]), ttl_seconds=relay_ttl)
     except (vault_service.InvalidGrantError, vault_service.GrantNotActiveError) as exc:
         if agent_relayed:
             _cleanup_failed_agent_grant(

@@ -210,10 +210,12 @@ def test_run_delivers_protected_secret_under_agent_grant(tmp_path, capfd, monkey
         stderr_path = command[5]
         stdin_path = command[6]
         env_path = command[7]
+        keep_env_path = command[8]
         env_script = Path(env_path).read_text()
         assert "export PYTHONPATH=caller-pythonpath\n" in env_script
         assert "export AWS_PROFILE=caller-profile\n" in env_script
         assert "export LOCAL_NAME=" not in env_script
+        assert Path(keep_env_path).read_text() == "LOCAL_NAME\n"
         assert Path(stdin_path).read_bytes() == b"caller stdin\n"
         with open(stdout_path, "wb", buffering=0) as stdout:
             stdout.write(b"protected out\n")
@@ -236,20 +238,14 @@ def test_run_delivers_protected_secret_under_agent_grant(tmp_path, capfd, monkey
     assert deliver.call_args.kwargs["scope_ref"] == grant["scope_ref"]
     assert deliver.call_args.kwargs["secrets"] == [{"name": "PROTECTED_KEY", "env": "LOCAL_NAME", "envelope": _sealed("protected")}]
     command = deliver.call_args.kwargs["command"]
-    env_binary = shutil.which("env") or "/usr/bin/env"
     shell = shutil.which("sh") or "/bin/sh"
-    assert command[:4] == [
-        shell,
-        "-c",
-        (
-            'stdout_fifo=$1; stderr_fifo=$2; stdin_fifo=$3; env_file=$4; cwd=$5; shift 5; '
-            'exec <"$stdin_fifo" >"$stdout_fifo" 2>"$stderr_fifo"; '
-            f'cd "$cwd" || exit 125; exec {env_binary} -i {shell} -c \'. "$1"; shift; exec "$@"\' '
-            'avibe-vault-run-env "$env_file" "$@"'
-        ),
-        "avibe-vault-run",
-    ]
-    assert command[8:] == [
+    assert command[:2] == [shell, "-c"]
+    assert command[3] == "avibe-vault-run"
+    assert "env -i" not in command[2]
+    assert 'grep' in command[2]
+    assert 'unset "$name"' in command[2]
+    assert '. "$env_file"; cd "$cwd" || exit 125; exec "$@"' in command[2]
+    assert command[9:] == [
         str(tmp_path),
         shutil.which("python3") or "python3",
         "-c",
@@ -311,17 +307,22 @@ def test_agent_run_trampoline_clears_agent_environment(tmp_path):
     stdout = tmp_path / "stdout"
     stderr = tmp_path / "stderr"
     stdin = tmp_path / "stdin"
+    keep_env = tmp_path / "keep-env"
+    keep_env.write_text("SECRET\n")
     command = cli._agent_run_command(
         ["python3", "-c", "pass"],
         stdout_path=str(stdout),
         stderr_path=str(stderr),
         stdin_path=str(stdin),
         env_path=str(env_file),
+        keep_env_path=str(keep_env),
     )
 
     assert "exec " in command[2]
-    assert "env -i " in command[2]
-    assert ". \"$1\"; shift; exec \"$@\"" in command[2]
+    assert "env -i " not in command[2]
+    assert 'grep' in command[2]
+    assert 'unset "$name"' in command[2]
+    assert '. "$env_file"; cd "$cwd" || exit 125; exec "$@"' in command[2]
 
 
 def test_shell_env_exports_can_use_explicit_env():

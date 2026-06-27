@@ -3554,12 +3554,16 @@ class _AgentRunOutputBridge:
         self.stderr_path = self._tmpdir / "stderr"
         self.stdin_path = self._tmpdir / "stdin"
         self.env_path = self._tmpdir / "env.sh"
+        self.keep_env_path = self._tmpdir / "keep-env"
         self._keeper_fds: list[int] = []
         try:
             os.mkfifo(self.stdout_path, 0o600)
             os.mkfifo(self.stderr_path, 0o600)
             os.mkfifo(self.stdin_path, 0o600)
             os.mkfifo(self.env_path, 0o600)
+            keep_env_names = sorted(name for name in (env_exclude or set()) if _is_shell_env_name(name))
+            self.keep_env_path.write_text("".join(f"{name}\n" for name in keep_env_names), encoding="utf-8")
+            self.keep_env_path.chmod(0o600)
             self._keeper_fds = [
                 os.open(self.stdout_path, os.O_RDWR | os.O_NONBLOCK),
                 os.open(self.stderr_path, os.O_RDWR | os.O_NONBLOCK),
@@ -3735,6 +3739,7 @@ def _agent_run_command(
     stderr_path: str | None = None,
     stdin_path: str | None = None,
     env_path: str | None = None,
+    keep_env_path: str | None = None,
 ) -> list[str]:
     """Preserve the invoking cwd when a resident agent executes the child.
 
@@ -3745,28 +3750,33 @@ def _agent_run_command(
 
     shell = shutil.which("sh") or "/bin/sh"
     env_binary = shlex.quote(shutil.which("env") or "/usr/bin/env")
-    inner_shell = shlex.quote(shell)
+    grep_binary = shlex.quote(shutil.which("grep") or "/usr/bin/grep")
+    sed_binary = shlex.quote(shutil.which("sed") or "/usr/bin/sed")
     child_argv = list(command_argv)
     if child_argv:
         executable = child_argv[0]
         has_path_separator = os.sep in executable or (os.altsep is not None and os.altsep in executable)
         if not has_path_separator and (resolved := shutil.which(executable)):
             child_argv[0] = resolved
-    if stdout_path and stderr_path and stdin_path and env_path:
+    if stdout_path and stderr_path and stdin_path and env_path and keep_env_path:
         return [
             shell,
             "-c",
             (
-                'stdout_fifo=$1; stderr_fifo=$2; stdin_fifo=$3; env_file=$4; cwd=$5; shift 5; '
+                'stdout_fifo=$1; stderr_fifo=$2; stdin_fifo=$3; env_file=$4; keep_env_file=$5; cwd=$6; shift 6; '
                 'exec <"$stdin_fifo" >"$stdout_fifo" 2>"$stderr_fifo"; '
-                f'cd "$cwd" || exit 125; exec {env_binary} -i {inner_shell} -c \'. "$1"; shift; exec "$@"\' '
-                'avibe-vault-run-env "$env_file" "$@"'
+                f'for name in $({env_binary} | {sed_binary} "s/=.*//"); do '
+                'case "$name" in ""|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*|[0123456789]*) continue;; esac; '
+                f'if ! {grep_binary} -Fqx "$name" "$keep_env_file"; then unset "$name"; fi; '
+                'done; '
+                '. "$env_file"; cd "$cwd" || exit 125; exec "$@"'
             ),
             "avibe-vault-run",
             stdout_path,
             stderr_path,
             stdin_path,
             env_path,
+            keep_env_path,
             cwd or os.getcwd(),
             *child_argv,
         ]
@@ -4001,6 +4011,7 @@ def cmd_vault_run(args):
                         stderr_path=str(output_bridge.stderr_path),
                         stdin_path=str(output_bridge.stdin_path),
                         env_path=str(output_bridge.env_path),
+                        keep_env_path=str(output_bridge.keep_env_path),
                     ),
                 )
             exit_code = int(result["exit_code"])

@@ -525,6 +525,30 @@ def test_unrelayed_grant_is_not_selected_for_delivery(vault):
     assert process_cache.has(grant["id"], "A_KEY")
 
 
+def test_mark_grant_agent_ready_refreshes_expiry_to_relay_ttl(vault):
+    _create(vault, name="A_KEY", protection="protected")
+    cache = vs.VaultGrantRuntimeCache()
+    with vault.begin() as conn:
+        req = _access_request(conn, "A_KEY", session_id="ses_1")
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="A_KEY",
+            session_id="ses_1",
+            ttl_seconds=300,
+            created_by_request_id=req["id"],
+            cache_ready=False,
+            cache=cache,
+        )
+        before = datetime.now(timezone.utc)
+        ready = vs.mark_grant_agent_ready(conn, grant["id"], ttl_seconds=300, cache=cache)
+        after = datetime.now(timezone.utc)
+
+    expires_at = datetime.fromisoformat(ready["expires_at"])
+    assert before + timedelta(seconds=299) <= expires_at <= after + timedelta(seconds=301)
+    assert ready["delivery_ready"] is True
+
+
 def test_resolve_secret_prefers_cache_ready_grant_over_stale_scope(vault):
     _create(vault, name="A_KEY", protection="protected", group="crypto")
     _create(vault, name="B_KEY", protection="protected", group="crypto")

@@ -1271,9 +1271,18 @@ def agent_release_scopes_after_rows(
     had been cached under the removed rows.
     """
 
+    now = _now()
+    expired_rows = [
+        dict(row)
+        for row in conn.execute(
+            select(vault_grants).where(vault_grants.c.status == "active", vault_grants.c.expires_at <= now)
+        ).mappings()
+    ]
+    if expired_rows:
+        _expire_grant_rows(conn, expired_rows, cache=cache)
+    rows = [*rows, *expired_rows]
     if not rows:
         return []
-    expire_grants(conn, cache=cache)
     active_rows = [
         dict(row)
         for row in conn.execute(select(vault_grants).where(vault_grants.c.status == "active")).mappings()
@@ -1719,6 +1728,7 @@ def mark_grant_agent_ready(
     conn: Connection,
     grant_id: str,
     *,
+    ttl_seconds: int | None = None,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
 ) -> dict[str, Any]:
     row = conn.execute(
@@ -1733,11 +1743,16 @@ def mark_grant_agent_ready(
     members = _grant_member_names(row_dict)
     if not members:
         raise InvalidGrantError("grant has no cached members")
-    ready_at = _now()
+    ready_at_dt = datetime.now(timezone.utc)
+    ready_at = ready_at_dt.isoformat()
+    values: dict[str, Any] = {"agent_ready": 1, "agent_ready_at": ready_at}
+    if ttl_seconds is not None:
+        ttl = max(1, int(ttl_seconds))
+        values["expires_at"] = (ready_at_dt + timedelta(seconds=ttl)).isoformat()
     result = conn.execute(
         vault_grants.update()
         .where(vault_grants.c.id == grant_id, vault_grants.c.status == "active")
-        .values(agent_ready=1, agent_ready_at=ready_at)
+        .values(**values)
     )
     if result.rowcount != 1:
         raise GrantNotActiveError(grant_id)

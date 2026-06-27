@@ -369,7 +369,7 @@ def test_create_and_revoke_grant_api(monkeypatch, avault_p2):
     )
     assert created["grant"]["runtime_member_count"] == 1
     assert created["grant"]["delivery_ready"] is True
-    assert 1 <= agent_grant.call_args.kwargs["ttl_secs"] <= 300
+    assert agent_grant.call_args.kwargs["ttl_secs"] == 300
     assert agent_grant.call_args.kwargs["deks"] == [
         {
             "name": "GRANT_KEY",
@@ -861,7 +861,7 @@ def test_create_grant_api_rejects_partial_agent_cache(monkeypatch, avault_p2):
     agent_release.assert_called_once_with(scope_type="secret", scope_ref="GRANT_KEY")
 
 
-def test_grant_ttl_uses_remaining_db_lifetime():
+def test_grant_ttl_uses_approved_lifetime():
     now = datetime.now(timezone.utc)
     ttl = api._grant_ttl_seconds(
         {
@@ -870,7 +870,7 @@ def test_grant_ttl_uses_remaining_db_lifetime():
         }
     )
 
-    assert 1 <= ttl <= 120
+    assert ttl == 1020
 
 
 def test_create_grant_api_releases_scope_when_mark_ready_fails(monkeypatch, avault_p2):
