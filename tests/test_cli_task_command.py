@@ -218,7 +218,8 @@ def test_hook_send_help_describes_runtime_effects(capsys) -> None:
     assert "`--post-to channel` changes where the message is posted, not which session is continued." in captured.out
     assert "`--message` and `--message-file` provide the one-shot async user message that will be queued immediately." in captured.out
     assert "--session-id" in captured.out
-    assert "vibe agent run --async --session-id sesk8m4q2p7x" in captured.out
+    assert "vibe agent run --async --session-id sesk8m4q2p7x --no-callback" in captured.out
+    assert "--callback-session-id sescaller123" in captured.out
 
 
 def test_task_list_help_mentions_completed_one_shots_hidden_by_default(capsys) -> None:
@@ -261,7 +262,7 @@ def test_hook_send_help_includes_examples_and_threadless_guidance(capsys) -> Non
     assert "--post-to" in captured.out
     assert "--deliver-key" in captured.out
     assert "--session-id" in captured.out
-    assert "vibe agent run --async --session-id sesk8m4q2p7x" in captured.out
+    assert "vibe agent run --async --session-id sesk8m4q2p7x --no-callback" in captured.out
 
 
 def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
@@ -275,7 +276,7 @@ def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
     assert "--fork-session FORK_SESSION" in captured.out
     assert "Use --fork-session to create a new Session by forking an existing Session's native backend context." in captured.out
     assert "Forks keep the same backend as the source Session." in captured.out
-    assert "vibe agent run --async --fork-session sesk8m4q2p7x" in captured.out
+    assert "vibe agent run --async --fork-session sesk8m4q2p7x --callback-session-id sescaller123" in captured.out
     assert "Do not combine --fork-session with --session-id, --create-session, --create-session-per-run, --deliver-key, or --post-to." in captured.out
 
 

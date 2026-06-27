@@ -333,8 +333,8 @@ def _hook_send_examples_text() -> str:
           `--message` and `--message-file` provide the one-shot async user message that will be queued immediately.
 
         Examples:
-          vibe agent run --async --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
-          vibe agent run --async --session-id sesk8m4q2p7x --message 'Share the benchmark result.'
+          vibe agent run --async --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
+          vibe agent run --async --session-id sesk8m4q2p7x --callback-session-id sescaller123 --message 'Share the benchmark result.'
         """
     )
 
@@ -643,8 +643,8 @@ def _agent_run_examples_text() -> str:
 
         Examples:
           vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
-          vibe agent run --async --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
-          vibe agent run --async --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
+          vibe agent run --async --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
+          vibe agent run --async --fork-session sesk8m4q2p7x --callback-session-id sescaller123 --message 'Explore this alternate fix from the current context.'
           vibe agent run --fork-session sesk8m4q2p7x --agent reviewer --model gpt-5.4 --reasoning-effort high --message 'Review the forked context.'
         """
     )

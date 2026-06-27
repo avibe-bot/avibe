@@ -90,7 +90,9 @@ def caller_context_from_platform_payload(payload: Mapping[str, object] | None) -
     if not session_id:
         return None
     run_id = _clean(payload.get("task_execution_id"))
-    source = _clean(payload.get("task_trigger_kind") or payload.get("source_kind") or "agent_turn")
+    source_kind = _clean(payload.get("source_kind"))
+    trigger_kind = _clean(payload.get("task_trigger_kind"))
+    source = source_kind if source_kind == "callback" else trigger_kind or source_kind or "agent_turn"
     backend = backend or _clean(payload.get("vibe_agent_backend"))
     return CallerContext(
         session_id=session_id,

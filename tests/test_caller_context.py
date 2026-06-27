@@ -60,3 +60,17 @@ def test_caller_context_from_platform_payload_prefers_agent_session_target() -> 
         "native_session_id": "oc-session",
     }
     assert context.to_env()[AVIBE_NATIVE_SESSION_ID_ENV] == "oc-session"
+
+
+def test_caller_context_from_platform_payload_preserves_callback_source() -> None:
+    context = caller_context_from_platform_payload(
+        {
+            "agent_session_id": "ses-callback",
+            "task_execution_id": "run-callback",
+            "task_trigger_kind": "agent_run",
+            "source_kind": "callback",
+        }
+    )
+
+    assert context is not None
+    assert context.source == "callback"

@@ -333,6 +333,8 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             except Exception:
                 logger.warning("Failed to bind OpenCode caller context for session %s", session_id, exc_info=True)
 
+            await server.mark_run_active(session_id)
+            run_registered = True
             await server.prompt_async(
                 session_id=session_id,
                 directory=request.working_path,
@@ -345,8 +347,6 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             )
             get_started_at = getattr(server, "get_last_prompt_started_at", None)
             prompt_started_at = get_started_at(session_id) if callable(get_started_at) else None
-            await server.mark_run_active(session_id)
-            run_registered = True
             self.mark_runtime_turn_started(request.context)
 
             logger.info(
