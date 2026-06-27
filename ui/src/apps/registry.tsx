@@ -1,11 +1,13 @@
+import { Suspense, lazy } from 'react';
 import { CodeXml, Folder, SquareTerminal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { LucideIcon } from 'lucide-react';
 
 // The catalogue of windowed apps. The WindowManager + Dock are headless of any
 // specific app; everything app-specific (title, icon, default window size, body)
-// lives here so adding an app is one registry entry. Real app bodies are wired in
-// P3 — P1 ships a shared placeholder so the windowing foundation is verifiable.
+// lives here so adding an app is one registry entry. App bodies are lazy-loaded
+// so opening the workbench doesn't pull file-browser / xterm code into the main
+// bundle — each loads only when its window first opens.
 
 export type AppId = 'files' | 'terminal' | 'editor';
 
@@ -14,23 +16,32 @@ export interface AppDefinition {
   /** i18n key for the window title / Dock label. */
   titleKey: string;
   icon: LucideIcon;
-  /** Tint used for the Dock tile + window title icon. A CSS var token name. */
+  /** Tint for the Dock tile + window title icon — a CSS var token name. */
   accent: string;
   defaultSize: { width: number; height: number };
   /** The window body. Receives the owning window id. */
   Component: React.FC<{ windowId: string }>;
 }
 
-// Temporary P1 body — centered app glyph + a muted line. Replaced per-app in P3.
-const PlaceholderBody: React.FC<{ icon: LucideIcon; accent: string }> = ({ icon: Icon, accent }) => {
+const Loading: React.FC = () => {
   const { t } = useTranslation();
-  return (
-    <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-surface">
-      <Icon className="size-10" style={{ color: `var(${accent})` }} />
-      <span className="text-[12px] text-muted">{t('common.loading')}</span>
-    </div>
-  );
+  return <div className="grid h-full w-full place-items-center bg-surface text-[12px] text-muted">{t('common.loading')}</div>;
 };
+
+// Temporary body for apps not yet ported (editor → Monaco lands in P4).
+const PlaceholderBody: React.FC<{ icon: LucideIcon; accent: string }> = ({ icon: Icon, accent }) => (
+  <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-surface">
+    <Icon className="size-10" style={{ color: `var(${accent})` }} />
+    <Loading />
+  </div>
+);
+
+const FilesBody = lazy(() =>
+  import('../components/workbench/AppsFileBrowserPage').then((m) => ({ default: m.AppsFileBrowserPage })),
+);
+const TerminalBody = lazy(() =>
+  import('../components/workbench/AppsTerminalPage').then((m) => ({ default: m.AppsTerminalPage })),
+);
 
 export const APP_REGISTRY: Record<AppId, AppDefinition> = {
   files: {
@@ -38,8 +49,12 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     titleKey: 'apps.fileBrowser.label',
     icon: Folder,
     accent: '--cyan',
-    defaultSize: { width: 900, height: 600 },
-    Component: () => <PlaceholderBody icon={Folder} accent="--cyan" />,
+    defaultSize: { width: 920, height: 600 },
+    Component: () => (
+      <Suspense fallback={<Loading />}>
+        <FilesBody windowed />
+      </Suspense>
+    ),
   },
   terminal: {
     id: 'terminal',
@@ -47,7 +62,11 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     icon: SquareTerminal,
     accent: '--mint',
     defaultSize: { width: 820, height: 540 },
-    Component: () => <PlaceholderBody icon={SquareTerminal} accent="--mint" />,
+    Component: () => (
+      <Suspense fallback={<Loading />}>
+        <TerminalBody windowed />
+      </Suspense>
+    ),
   },
   editor: {
     id: 'editor',

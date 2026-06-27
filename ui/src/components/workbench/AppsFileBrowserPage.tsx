@@ -34,7 +34,7 @@ const MAX_EDIT_BYTES = 1024 * 1024;
 // Whole-machine Finder: favorites rail (pinned projects + OS defaults), a
 // breadcrumb + dir/file list (left), and a content pane (right) that views or
 // edits the selected file. Backend contract: src/lib/filesApi.ts → /api/files/*.
-export const AppsFileBrowserPage: React.FC = () => {
+export const AppsFileBrowserPage: React.FC<{ windowed?: boolean }> = ({ windowed = false }) => {
   const { t } = useTranslation();
   const { projects } = useWorkbenchProjectsTree();
   const [cwd, setCwd] = useState('');
@@ -139,13 +139,27 @@ export const AppsFileBrowserPage: React.FC = () => {
   const crumbs = cwd ? pathCrumbs(cwd) : [];
 
   return (
-    <div className="flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]">
-      <div>
-        <h1 className="text-[18px] font-semibold text-foreground">{t('apps.fileBrowser.label')}</h1>
-        <p className="text-[12px] text-muted">{t('apps.fileBrowser.tagline')}</p>
-      </div>
+    <div
+      className={
+        windowed
+          ? 'flex h-full w-full flex-col'
+          : 'flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]'
+      }
+    >
+      {!windowed && (
+        <div>
+          <h1 className="text-[18px] font-semibold text-foreground">{t('apps.fileBrowser.label')}</h1>
+          <p className="text-[12px] text-muted">{t('apps.fileBrowser.tagline')}</p>
+        </div>
+      )}
 
-      <div className="flex min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-surface">
+      <div
+        className={
+          windowed
+            ? 'flex min-h-0 flex-1 overflow-hidden bg-surface'
+            : 'flex min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-surface'
+        }
+      >
         {/* Left: breadcrumb toolbar + favorites + listing */}
         <div className="flex w-full min-w-0 flex-col md:w-[320px] md:border-r md:border-border">
           <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-2">

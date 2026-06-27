@@ -30,7 +30,9 @@ function getSessionId(identity: string | null): string {
   }
 }
 
-export const AppsTerminalPage: React.FC = () => {
+// `windowed` renders just the terminal filling its parent (an AppWindow body) — no
+// page header / viewport-height wrapper, since the window chrome supplies the title.
+export const AppsTerminalPage: React.FC<{ windowed?: boolean }> = ({ windowed = false }) => {
   const { t } = useTranslation();
   const { getAuthSession } = useApi();
   // Resolve the signed-in identity first, then derive the (account-scoped) session id, so we
@@ -50,23 +52,28 @@ export const AppsTerminalPage: React.FC = () => {
       cancelled = true;
     };
   }, [getAuthSession]);
+
+  const loading = <div className="grid h-full w-full place-items-center text-[12px] text-muted">{t('common.loading')}</div>;
+  const content =
+    sessionId == null ? (
+      loading
+    ) : (
+      <Suspense fallback={loading}>
+        <TerminalView sessionId={sessionId} />
+      </Suspense>
+    );
+
+  if (windowed) {
+    return <div className="h-full w-full overflow-hidden bg-surface">{content}</div>;
+  }
+
   return (
     <div className="flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]">
       <div>
         <h1 className="text-[18px] font-semibold text-foreground">{t('apps.terminal.label')}</h1>
         <p className="text-[12px] text-muted">{t('apps.terminal.tagline')}</p>
       </div>
-      <div className="flex min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-surface">
-        {sessionId == null ? (
-          <div className="grid flex-1 place-items-center text-[12px] text-muted">{t('common.loading')}</div>
-        ) : (
-          <Suspense
-            fallback={<div className="grid flex-1 place-items-center text-[12px] text-muted">{t('common.loading')}</div>}
-          >
-            <TerminalView sessionId={sessionId} />
-          </Suspense>
-        )}
-      </div>
+      <div className="flex min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-surface">{content}</div>
     </div>
   );
 };
