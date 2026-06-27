@@ -203,6 +203,14 @@ export const Markdown: React.FC<{
           </a>
         );
       },
+      // Wrap tables in a horizontal-scroll viewport so a wide table scrolls within
+      // the bubble instead of squeezing its columns to fit (see index.css). A plain
+      // <div> is valid in both interactive and preview (clickable-row) surfaces.
+      table: ({ children }) => (
+        <div className="vr-table-scroll">
+          <table>{children}</table>
+        </div>
+      ),
       ...(interactive
         ? {
             // Fenced code blocks get a hover/tap copy button. Only on the
