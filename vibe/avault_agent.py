@@ -63,16 +63,19 @@ class AvaultAgentClient:
 
     def _round_trip(self, body: bytes) -> Any:
         last_error: OSError | None = None
+        request_error = False
         for attempt in range(2):
             if attempt == 1 and self._ensure_agent is None:
                 break
             if attempt == 1:
                 self._ensure_agent()
+            write_started = False
             try:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
                     if self.timeout is not None:
                         sock.settimeout(self.timeout)
                     sock.connect(str(self.socket_path))
+                    write_started = True
                     _write_frame(sock, body)
                     return _read_json_frame(sock)
             except FileNotFoundError as exc:
@@ -81,8 +84,12 @@ class AvaultAgentClient:
                 last_error = exc
             except OSError as exc:
                 last_error = exc
-                if attempt == 1:
+                if write_started or attempt == 1:
+                    request_error = write_started
                     break
+        if request_error:
+            detail = f": {last_error}" if last_error else ""
+            raise AvaultAgentError(f"avault agent request failed{detail}")
         detail = f": {last_error}" if last_error else ""
         raise AvaultAgentError(f"failed to connect to avault agent{detail}")
 
@@ -202,7 +209,8 @@ class AvaultAgentManager:
             if self._socket_responds():
                 return
             if self._process is not None and self._process.poll() is None:
-                self._terminate_process_locked()
+                return
+            self._process = None
             self._spawn_locked()
             self._wait_for_socket_locked()
 
@@ -293,8 +301,10 @@ def _remove_stale_agent_socket(path: Path) -> None:
             sock.settimeout(0.2)
             sock.connect(str(path))
             return
-    except OSError:
+    except ConnectionRefusedError:
         path.unlink(missing_ok=True)
+    except OSError:
+        return
 
 
 def _missing_binary_resolver() -> str:

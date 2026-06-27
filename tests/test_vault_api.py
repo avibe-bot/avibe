@@ -6,6 +6,9 @@ REST create delegates sealing to avault and stores only the returned envelope.
 from __future__ import annotations
 
 import json
+import socket
+import tempfile
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -419,6 +422,44 @@ def test_delete_protected_secret_releases_agent_scope(monkeypatch):
 
     assert removed["removed"] is True
     agent_release.assert_called_once_with(scope_type="secret", scope_ref="GRANT_KEY")
+
+
+def test_release_agent_scope_fail_closed_resets_and_quarantines_socket(monkeypatch):
+    socket_path = Path(tempfile.mkdtemp(prefix="avault-release-", dir="/tmp")) / "s"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    listener.bind(str(socket_path))
+    listener.listen(1)
+
+    class Manager:
+        def __init__(self) -> None:
+            self.socket_path = socket_path
+            self.reset = Mock()
+
+    manager = Manager()
+    monkeypatch.setattr(api, "_avault_agent_manager", lambda: manager)
+    monkeypatch.setattr(api, "avault_agent_release", Mock(side_effect=api.AvaultError("timed out waiting for release")))
+    try:
+        api.release_vault_agent_scopes([{"scope_type": "secret", "scope_ref": "GRANT_KEY"}], reason="test")
+    finally:
+        listener.close()
+
+    manager.reset.assert_called_once()
+    assert not socket_path.exists()
+
+
+def test_release_agent_scope_ignores_absent_agent(monkeypatch):
+    manager = Mock()
+    manager.socket_path = Path("/tmp/missing-avault.sock")
+    monkeypatch.setattr(api, "_avault_agent_manager", lambda: manager)
+    monkeypatch.setattr(
+        api,
+        "avault_agent_release",
+        Mock(side_effect=api.AvaultError("failed to connect to avault agent: [Errno 2] No such file or directory")),
+    )
+
+    api.release_vault_agent_scopes([{"scope_type": "secret", "scope_ref": "GRANT_KEY"}], reason="test")
+
+    manager.reset.assert_not_called()
 
 
 def test_agent_grant_rejects_pubkey_mismatch(monkeypatch):

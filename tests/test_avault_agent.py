@@ -5,6 +5,7 @@ import stat
 import socket
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -144,6 +145,59 @@ def test_agent_manager_preserves_live_socket_with_cached_grants(tmp_path, monkey
     assert [request["type"] for request in server.requests] == ["pubkey"]
 
 
+def test_agent_manager_does_not_kill_owned_agent_on_slow_liveness_probe(tmp_path, monkeypatch):
+    socket_path = Path(tempfile.mkdtemp(prefix="avault-slow-", dir="/tmp")) / "s"
+    manager = AvaultAgentManager(socket_path=socket_path)
+    manager._process = MockProcess()
+    monkeypatch.setattr(manager, "_socket_responds", lambda: False)
+    monkeypatch.setattr(manager, "_terminate_process_locked", lambda: pytest.fail("live agent should be preserved"))
+    monkeypatch.setattr(manager, "_spawn_locked", lambda: pytest.fail("live agent should not be replaced"))
+
+    manager.ensure_running()
+
+    assert manager._process is not None
+
+
+def test_agent_client_does_not_retry_deliver_after_frame_write_timeout(tmp_path):
+    socket_path = Path(tempfile.mkdtemp(prefix="avault-timeout-", dir="/tmp")) / "s"
+    ready = threading.Event()
+    requests: list[dict[str, Any]] = []
+
+    def _serve() -> None:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(socket_path))
+            listener.listen(8)
+            ready.set()
+            conn, _ = listener.accept()
+            with conn:
+                requests.append(_read_frame(conn))
+                time.sleep(0.2)
+
+    thread = threading.Thread(target=_serve, daemon=True)
+    thread.start()
+    assert ready.wait(2)
+    ensure_calls = 0
+
+    def _ensure() -> None:
+        nonlocal ensure_calls
+        ensure_calls += 1
+
+    client = AvaultAgentClient(socket_path, timeout=0.05, ensure_agent=_ensure)
+    with pytest.raises(AvaultAgentError, match="request failed"):
+        client.deliver_fetch(
+            scope_type="secret",
+            scope_ref="API_TOKEN",
+            name="API_TOKEN",
+            envelope={"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+            request={"headers": []},
+        )
+
+    thread.join(1)
+    assert len(requests) == 1
+    assert requests[0]["type"] == "deliver"
+    assert ensure_calls == 0
+
+
 def test_remove_stale_agent_socket_unlinks_dead_socket(tmp_path):
     socket_path = Path(tempfile.mkdtemp(prefix="avault-stale-", dir="/tmp")) / "s"
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -155,3 +209,8 @@ def test_remove_stale_agent_socket_unlinks_dead_socket(tmp_path):
     assert socket_path.exists()
     _remove_stale_agent_socket(socket_path)
     assert not socket_path.exists()
+
+
+class MockProcess:
+    def poll(self):
+        return None

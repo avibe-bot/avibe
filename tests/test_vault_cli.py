@@ -9,6 +9,7 @@ import argparse
 import io
 import json
 import shutil
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -197,12 +198,18 @@ def test_run_delivers_protected_secret_under_agent_grant(tmp_path, capfd, monkey
     from vibe import api
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", "caller-pythonpath")
+    monkeypatch.setenv("AWS_PROFILE", "caller-profile")
     grant = _set_protected_grant("PROTECTED_KEY")
 
     def _deliver(**kwargs):
         command = kwargs["command"]
         stdout_path = command[4]
         stderr_path = command[5]
+        env_path = command[6]
+        env_script = Path(env_path).read_text()
+        assert "export PYTHONPATH=caller-pythonpath\n" in env_script
+        assert "export AWS_PROFILE=caller-profile\n" in env_script
         with open(stdout_path, "wb", buffering=0) as stdout:
             stdout.write(b"protected out\n")
         with open(stderr_path, "wb", buffering=0) as stderr:
@@ -227,10 +234,13 @@ def test_run_delivers_protected_secret_under_agent_grant(tmp_path, capfd, monkey
     assert command[:4] == [
         shutil.which("sh") or "/bin/sh",
         "-c",
-        'stdout_fifo=$1; stderr_fifo=$2; cwd=$3; shift 3; exec >"$stdout_fifo" 2>"$stderr_fifo"; cd "$cwd" || exit 125; exec "$@"',
+        (
+            'stdout_fifo=$1; stderr_fifo=$2; env_file=$3; cwd=$4; shift 4; '
+            'exec >"$stdout_fifo" 2>"$stderr_fifo"; . "$env_file"; cd "$cwd" || exit 125; exec "$@"'
+        ),
         "avibe-vault-run",
     ]
-    assert command[6:] == [
+    assert command[7:] == [
         str(tmp_path),
         shutil.which("python3") or "python3",
         "-c",

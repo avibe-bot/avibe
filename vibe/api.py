@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import ssl
+import stat
 import subprocess
 import threading
 import time
@@ -4358,6 +4359,35 @@ def avault_agent_release(*, scope_type: str, scope_ref: str) -> dict:
         raise AvaultError(str(exc)) from exc
 
 
+def _agent_release_failure_is_absent(exc: AvaultError) -> bool:
+    detail = str(exc).lower()
+    return (
+        "failed to connect to avault agent" in detail
+        and (
+            "no such file" in detail
+            or "connection refused" in detail
+            or "errno 2" in detail
+            or "errno 61" in detail
+            or "errno 111" in detail
+        )
+    )
+
+
+def _quarantine_resident_agent_socket(path: Path) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if stat.S_ISSOCK(mode):
+        path.unlink(missing_ok=True)
+
+
+def _fail_closed_resident_agent_after_release_failure() -> None:
+    manager = _avault_agent_manager()
+    manager.reset()
+    _quarantine_resident_agent_socket(manager.socket_path)
+
+
 def release_vault_agent_scopes(scopes: list[dict[str, str]], *, reason: str) -> None:
     seen: set[tuple[str, str]] = set()
     for scope in scopes:
@@ -4371,8 +4401,21 @@ def release_vault_agent_scopes(scopes: list[dict[str, str]], *, reason: str) -> 
         seen.add(key)
         try:
             avault_agent_release(scope_type=scope_type, scope_ref=scope_ref)
-        except AvaultError:
-            logger.warning("%s: failed to release resident agent grant %s:%s", reason, scope_type, scope_ref, exc_info=True)
+        except AvaultError as exc:
+            if _agent_release_failure_is_absent(exc):
+                logger.debug("%s: resident agent absent while releasing grant %s:%s", reason, scope_type, scope_ref)
+                continue
+            try:
+                _fail_closed_resident_agent_after_release_failure()
+            except OSError as reset_exc:
+                raise AvaultError("failed to clear resident agent after release failure") from reset_exc
+            logger.warning(
+                "%s: release failed for resident agent grant %s:%s; reset resident agent cache",
+                reason,
+                scope_type,
+                scope_ref,
+                exc_info=True,
+            )
 
 
 def avault_agent_deliver_run(

@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import errno
 import getpass
 import json
 import logging
@@ -20,7 +21,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from textwrap import dedent
-from typing import NamedTuple, Optional
+from typing import Mapping, NamedTuple, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -3550,12 +3551,21 @@ class _AgentRunOutputBridge:
         self._tmpdir.chmod(0o700)
         self.stdout_path = self._tmpdir / "stdout"
         self.stderr_path = self._tmpdir / "stderr"
+        self.env_path = self._tmpdir / "env.sh"
         os.mkfifo(self.stdout_path, 0o600)
         os.mkfifo(self.stderr_path, 0o600)
+        os.mkfifo(self.env_path, 0o600)
         self._keeper_fds = [
             os.open(self.stdout_path, os.O_RDWR | os.O_NONBLOCK),
             os.open(self.stderr_path, os.O_RDWR | os.O_NONBLOCK),
         ]
+        self._env_stop = threading.Event()
+        self._env_thread = threading.Thread(
+            target=self._write_env_fifo,
+            args=(self.env_path, _shell_env_exports(os.environ).encode("utf-8"), self._env_stop),
+            daemon=True,
+        )
+        self._env_thread.start()
         self._threads = [
             threading.Thread(target=self._copy_fifo, args=(self.stdout_path, stdout), daemon=True),
             threading.Thread(target=self._copy_fifo, args=(self.stderr_path, stderr), daemon=True),
@@ -3578,6 +3588,8 @@ class _AgentRunOutputBridge:
         self._keeper_fds.clear()
         for thread in self._threads:
             thread.join(timeout=2)
+        self._env_stop.set()
+        self._env_thread.join(timeout=2)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     @staticmethod
@@ -3593,6 +3605,51 @@ class _AgentRunOutputBridge:
         except OSError:
             return
 
+    @staticmethod
+    def _write_env_fifo(path: Path, script: bytes, stop_event: threading.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError as exc:
+                if exc.errno in {errno.ENXIO, errno.ENOENT}:
+                    time.sleep(0.01)
+                    continue
+                return
+            try:
+                offset = 0
+                while offset < len(script) and not stop_event.is_set():
+                    try:
+                        written = os.write(fd, script[offset:])
+                    except BlockingIOError:
+                        time.sleep(0.01)
+                        continue
+                    if written <= 0:
+                        break
+                    offset += written
+                return
+            except OSError:
+                return
+            finally:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+
+def _is_shell_env_name(name: str) -> bool:
+    if not name or not (name[0] == "_" or "A" <= name[0] <= "Z" or "a" <= name[0] <= "z"):
+        return False
+    return all(ch == "_" or "A" <= ch <= "Z" or "a" <= ch <= "z" or "0" <= ch <= "9" for ch in name)
+
+
+def _shell_env_exports(env: Mapping[str, str]) -> str:
+    lines: list[str] = []
+    for name, value in env.items():
+        if not _is_shell_env_name(name) or "\x00" in value:
+            continue
+        lines.append(f"export {name}={shlex.quote(value)}\n")
+    return "".join(lines)
+
 
 def _agent_run_command(
     command_argv: list[str],
@@ -3600,6 +3657,7 @@ def _agent_run_command(
     cwd: str | None = None,
     stdout_path: str | None = None,
     stderr_path: str | None = None,
+    env_path: str | None = None,
 ) -> list[str]:
     """Preserve the invoking cwd when a resident agent executes the child.
 
@@ -3615,14 +3673,18 @@ def _agent_run_command(
         has_path_separator = os.sep in executable or (os.altsep is not None and os.altsep in executable)
         if not has_path_separator and (resolved := shutil.which(executable)):
             child_argv[0] = resolved
-    if stdout_path and stderr_path:
+    if stdout_path and stderr_path and env_path:
         return [
             shell,
             "-c",
-            'stdout_fifo=$1; stderr_fifo=$2; cwd=$3; shift 3; exec >"$stdout_fifo" 2>"$stderr_fifo"; cd "$cwd" || exit 125; exec "$@"',
+            (
+                'stdout_fifo=$1; stderr_fifo=$2; env_file=$3; cwd=$4; shift 4; '
+                'exec >"$stdout_fifo" 2>"$stderr_fifo"; . "$env_file"; cd "$cwd" || exit 125; exec "$@"'
+            ),
             "avibe-vault-run",
             stdout_path,
             stderr_path,
+            env_path,
             cwd or os.getcwd(),
             *child_argv,
         ]
@@ -3844,6 +3906,7 @@ def cmd_vault_run(args):
                         command_argv,
                         stdout_path=str(output_bridge.stdout_path),
                         stderr_path=str(output_bridge.stderr_path),
+                        env_path=str(output_bridge.env_path),
                     ),
                 )
             exit_code = int(result["exit_code"])
