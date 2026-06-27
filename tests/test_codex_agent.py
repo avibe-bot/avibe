@@ -1084,6 +1084,33 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
+    def test_inject_caller_env_config_merges_shell_environment_policy(self):
+        agent = object.__new__(CodexAgent)
+        params = {"config": {"shell_environment_policy": {"set": {"KEEP": "1"}}}}
+        request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "task_execution_id": "run-parent",
+                    "task_trigger_kind": "agent_run",
+                    "agent_session_target": {
+                        "id": "ses-parent",
+                        "agent_backend": "codex",
+                        "native_session_id": "thread-parent",
+                    },
+                }
+            )
+        )
+
+        agent._inject_caller_env_config(params, request)
+
+        set_env = params["config"]["shell_environment_policy"]["set"]
+        self.assertEqual(set_env["KEEP"], "1")
+        self.assertEqual(set_env["AVIBE_SESSION_ID"], "ses-parent")
+        self.assertEqual(set_env["AVIBE_RUN_ID"], "run-parent")
+        self.assertEqual(set_env["AVIBE_CALLER_SOURCE"], "agent_run")
+        self.assertEqual(set_env["AVIBE_CALLER_BACKEND"], "codex")
+        self.assertEqual(set_env["AVIBE_NATIVE_SESSION_ID"], "thread-parent")
+
     async def test_start_thread_requests_danger_full_access(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="slack", reply_enhancements=False))

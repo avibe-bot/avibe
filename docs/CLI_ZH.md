@@ -184,10 +184,10 @@ vibe task remove <task-id>
 
 ```bash
 vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
-vibe agent run --async --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
-vibe agent run --async --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
+vibe agent run --async --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
+vibe agent run --async --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --async --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
-vibe agent run --async --create-session --deliver-key slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
+vibe agent run --async --no-callback --create-session --deliver-key slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
 ```
 
 当一个新 Agent Session 需要从现有 Session 的 native backend 上下文分叉，而不是空白开始时，
@@ -197,10 +197,13 @@ vibe agent run --async --create-session --deliver-key slack::channel::C999 --age
 不要把 `--fork-session` 和 `--session-id`、`--create-session`、`--deliver-key`
 或 `--post-to` 混用。
 
-当异步 run 的最终结果文本需要回到调用方 Session 时，使用
-`--callback-session-id`。这个 callback 与普通投递相互独立：即使目标 run 已经把
-结果发到了自己的 IM scope，调用方 Session 仍然会收到结果并触发一次跟进
-Agent 消息。system、tool call、assistant 中间过程消息不会包含在 callback 里。
+异步 run 需要明确 callback 策略，除非命令运行在 Avibe 已注入 caller context
+的 Agent 环境内。当最终结果文本需要回到调用方 Session 时，使用
+`--callback-session-id`；当你有意不自动回调、后续会通过 `vibe runs show`
+或 runs 列表/轮询查看结果时，使用 `--no-callback`。Agent 内部发起的 Harness
+调用会默认把 callback 指向当前调用方 Session。这个 callback 与普通投递相互独立：
+即使目标 run 已经把结果发到了自己的 IM scope，调用方 Session 仍然会收到结果并触发一次
+跟进 Agent 消息。system、tool call、assistant 中间过程消息不会包含在 callback 里。
 
 `vibe hook send` 仅作为 deprecated 兼容入口保留。新的自动化入口应使用
 `vibe agent run`。

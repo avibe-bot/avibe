@@ -25,6 +25,7 @@ import aiohttp
 
 from config import paths
 from core.process_isolation import isolated_subprocess_kwargs, terminate_process_tree
+from modules.agents.opencode.caller_context import ensure_plugin_installed, server_environment
 from modules.agents.opencode.config_reconciler import OpenCodeConfigReconciler
 from vibe import runtime
 from vibe.opencode_config import (
@@ -89,6 +90,7 @@ class OpenCodeServerManager:
         self._active_run_sessions: set[str] = set()
         self._auth_refresh_pending = False
         self._auth_refresh_pending_port: Optional[int] = None
+        self._caller_context_plugin_refresh_pending = False
         self._pending_runtime_config: Optional[tuple[str, int, int]] = None
         self._last_prompt_started_at: dict[str, float] = {}
 
@@ -893,11 +895,27 @@ class OpenCodeServerManager:
 
     async def ensure_running(self) -> str:
         async with self._get_lock():
+            plugin_install = ensure_plugin_installed()
+            if plugin_install.changed:
+                self._caller_context_plugin_refresh_pending = True
             if self._auth_refresh_pending and self._active_requests == 0 and not self._has_active_run_sessions():
                 await self._restart_for_auth_refresh_locked()
             await self._cleanup_orphaned_managed_server()
 
             if await self._is_healthy():
+                if (
+                    self._caller_context_plugin_refresh_pending
+                    and self._active_requests == 0
+                    and not self._has_active_run_sessions()
+                ):
+                    logger.info(
+                        "Restarting OpenCode server to load updated Avibe caller-context plugin at %s",
+                        plugin_install.path,
+                    )
+                    await self._restart_for_auth_refresh_locked()
+                    await self._start_server()
+                    self._caller_context_plugin_refresh_pending = False
+                    return self.base_url
                 # If the server is already running (e.g., started by a previous run),
                 # record its PID so shutdown can clean it up.
                 if not self._read_pid_file():
@@ -923,6 +941,7 @@ class OpenCodeServerManager:
                 )
 
             await self._start_server()
+            self._caller_context_plugin_refresh_pending = False
             return self.base_url
 
     async def _is_healthy(self) -> bool:
@@ -988,6 +1007,7 @@ class OpenCodeServerManager:
 
         env = os.environ.copy()
         env["OPENCODE_ENABLE_EXA"] = "1"
+        env.update(server_environment())
 
         try:
             self._process = await asyncio.create_subprocess_exec(

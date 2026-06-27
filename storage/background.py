@@ -1146,7 +1146,7 @@ class SQLiteBackgroundTaskStore:
             "last_run_id": payload.get("last_run_id"),
             "last_error": payload.get("last_error"),
             "last_exit_code": None,
-            "metadata_json": _json_dumps({}),
+            "metadata_json": _json_dumps(payload.get("metadata") or {}),
         }
 
     def _watch_values(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1186,7 +1186,7 @@ class SQLiteBackgroundTaskStore:
             "last_run_at": None,
             "last_error": payload.get("last_error"),
             "last_exit_code": payload.get("last_exit_code"),
-            "metadata_json": _json_dumps({}),
+            "metadata_json": _json_dumps(payload.get("metadata") or {}),
         }
 
     def _run_values(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1259,6 +1259,7 @@ class SQLiteBackgroundTaskStore:
             "last_run_at": row["last_run_at"],
             "last_run_id": row["last_run_id"],
             "last_error": row["last_error"],
+            "metadata": _json_loads(row["metadata_json"], {}),
         }
 
     @staticmethod
@@ -1291,6 +1292,7 @@ class SQLiteBackgroundTaskStore:
             "last_event_at": row["last_event_at"],
             "last_error": row["last_error"],
             "last_exit_code": row["last_exit_code"],
+            "metadata": _json_loads(row["metadata_json"], {}),
         }
 
     @staticmethod

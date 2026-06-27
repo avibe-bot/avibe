@@ -30,6 +30,7 @@ from config.v2_config import (
     DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
 )
 from core.avibe_cloud import avibe_cloud_url_available
+from core.caller_context import caller_env_for_platform_payload
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 
@@ -817,6 +818,7 @@ class SessionHandler(BaseHandler):
         from vibe.claude_config import build_claude_subprocess_env
 
         claude_env = build_claude_subprocess_env(getattr(self.config, "claude", None))
+        claude_env.update(caller_env_for_platform_payload(getattr(context, "platform_specific", None)))
         claude_env[AVIBE_CLAUDE_PROCESS_OWNER_ENV] = AVIBE_CLAUDE_SESSION_OWNER
         if self._should_mark_claude_isolated_env():
             claude_env["IS_SANDBOX"] = "1"

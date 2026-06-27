@@ -866,5 +866,5 @@ vibe
 vibe status
 vibe doctor
 vibe task list --brief
-vibe agent run --async --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
+vibe agent run --async --no-callback --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
 ```

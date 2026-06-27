@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sqlite3
 import sys
 from contextlib import redirect_stderr
@@ -245,6 +246,54 @@ def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:
     assert payload["watch"]["command"] == []
     assert payload["watch"]["mode"] == "once"
     assert payload["watch"]["retry_exit_codes"] == [75]
+
+
+def test_watch_add_records_caller_context_metadata(tmp_path: Path, capsys) -> None:
+    store_path = tmp_path / "watches.json"
+    runtime_path = tmp_path / "watch_runtime.json"
+    store = ManagedWatchStore(store_path)
+    runtime_store = WatchRuntimeStateStore(runtime_path)
+    args = _parse_watch_add(
+        [
+            "--session-key",
+            "slack::channel::C123",
+            "--shell",
+            "python3 scripts/wait.py",
+        ]
+    )
+    caller_env = {
+        "AVIBE_SESSION_ID": "sesCaller",
+        "AVIBE_RUN_ID": "runCaller",
+        "AVIBE_CALLER_SOURCE": "agent_turn",
+        "AVIBE_CALLER_BACKEND": "opencode",
+        "AVIBE_NATIVE_SESSION_ID": "native-opencode-1",
+    }
+
+    with (
+        patch.dict(os.environ, caller_env, clear=False),
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch("vibe.cli._wait_for_watch_startup", side_effect=lambda *args, **kwargs: _startup_ok(store, runtime_store, args[2])),
+    ):
+        result = cli.cmd_watch_add(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    expected = {
+        "kind": "caller_context",
+        "caller": {
+            "session_id": "sesCaller",
+            "run_id": "runCaller",
+            "source": "agent_turn",
+            "backend": "opencode",
+            "native_session_id": "native-opencode-1",
+        },
+    }
+    assert payload["watch"]["metadata"]["created_by"] == expected
+    stored = ManagedWatchStore(store_path).get_watch(payload["watch"]["id"])
+    assert stored is not None
+    assert stored.metadata["created_by"] == expected
 
 
 def test_watch_add_accepts_message_template(tmp_path: Path, capsys) -> None:

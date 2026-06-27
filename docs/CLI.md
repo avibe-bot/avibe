@@ -203,10 +203,10 @@ a scheduled task definition.
 
 ```bash
 vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
-vibe agent run --async --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
-vibe agent run --async --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
+vibe agent run --async --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
+vibe agent run --async --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --async --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
-vibe agent run --async --create-session --deliver-key slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
+vibe agent run --async --no-callback --create-session --deliver-key slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
 ```
 
 Use `--fork-session <session-id>` when a new Agent Session should branch from
@@ -217,11 +217,15 @@ stays the same; a cross-backend fork is rejected. Do not combine
 `--fork-session` with `--session-id`, `--create-session`, `--deliver-key`, or
 `--post-to`.
 
-Use `--callback-session-id` when an async run should send its final result text
-back into a caller Session as a follow-up Agent message. The callback is
-independent from ordinary delivery: if the target run also posts to its IM scope,
-the caller Session still receives the result. Process messages such as system
-notes, tool calls, and intermediate assistant updates are not included.
+Async runs need an explicit callback policy unless the command is running inside
+an Avibe-injected Agent environment. Use `--callback-session-id` when the final
+result text should return to a caller Session as a follow-up Agent message; use
+`--no-callback` when you intentionally want to inspect the run later with
+`vibe runs show` or by listing/polling runs. Agent-initiated Harness calls
+default the callback to the current caller Session. The callback is independent
+from ordinary delivery: if the target run also posts to its IM scope, the caller
+Session still receives the result. Process messages such as system notes, tool
+calls, and intermediate assistant updates are not included.
 
 `vibe hook send` is kept only as a deprecated compatibility entrypoint. New
 automation should use `vibe agent run`.

@@ -122,6 +122,7 @@ def reserve_agent_session(
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     workdir: Optional[str] = None,
+    metadata: Optional[dict] = None,
     db_path: Optional[Path] = None,
 ) -> Optional[str]:
     """Reserve a new ``agent_sessions`` row keyed by an IM-style scope.
@@ -142,6 +143,7 @@ def reserve_agent_session(
             model=model,
             reasoning_effort=reasoning_effort,
             workdir=workdir,
+            metadata=metadata,
         )
     finally:
         service.close()
@@ -157,6 +159,7 @@ def reserve_private_agent_session(
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     workdir: Optional[str] = None,
+    metadata: Optional[dict] = None,
     db_path: Optional[Path] = None,
 ) -> Optional[str]:
     """Reserve a private (no IM scope) session, e.g. when ``vibe agent run``
@@ -175,6 +178,7 @@ def reserve_private_agent_session(
             model=model,
             reasoning_effort=reasoning_effort,
             workdir=workdir,
+            metadata=metadata,
         )
     finally:
         service.close()

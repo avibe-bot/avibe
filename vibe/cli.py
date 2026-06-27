@@ -35,6 +35,7 @@ from core.scheduled_tasks import (
     resolve_session_id_target,
     session_anchor_for_target,
 )
+from core.caller_context import caller_context_from_env
 from core.vibe_agents import VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
@@ -1674,6 +1675,7 @@ def _wait_for_watch_startup(
 
 def cmd_task_add(args):
     try:
+        caller_context = caller_context_from_env()
         schedule_type = "cron" if args.cron else "at"
         session_policy = _validate_definition_session_policy(
             args,
@@ -1749,6 +1751,7 @@ def cmd_task_add(args):
                 session_policy=session_policy,
                 cron=args.cron,
                 timezone_name=timezone_name,
+                metadata=_definition_creation_metadata_from_caller(caller_context),
             )
         else:
             try:
@@ -1774,6 +1777,7 @@ def cmd_task_add(args):
                 session_policy=session_policy,
                 run_at=run_at,
                 timezone_name=timezone_name,
+                metadata=_definition_creation_metadata_from_caller(caller_context),
             )
         warnings = _collect_target_warnings(session_target, delivery_target)
         task_payload = _task_payload(task)
@@ -2597,6 +2601,13 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="Callback delivery happens after an asynchronous run completes.",
             help_command=help_command,
         )
+    if bool(getattr(args, "no_callback", False)) and not bool(getattr(args, "async_run", False)):
+        raise TaskCliError(
+            "--no-callback requires --async",
+            code="no_callback_requires_async",
+            hint="Only asynchronous runs need an explicit callback or no-callback policy.",
+            help_command=help_command,
+        )
     if fork_session and (session_id or create_session or create_per_run):
         raise TaskCliError(
             "use --fork-session without --session-id or session creation flags",
@@ -2787,7 +2798,79 @@ def _resolve_run_cwd(args, *, session_policy: str, help_command: str) -> Optiona
     return os.getcwd()
 
 
-def _reserve_cli_session(*, agent, deliver_key: Optional[str], workdir: Optional[str] = None) -> str:
+def _session_creation_metadata_from_caller(caller_context) -> dict:
+    if caller_context is None:
+        return {}
+    return {
+        "created_by": {
+            "kind": "caller_context",
+            "caller": caller_context.to_metadata(),
+        }
+    }
+
+
+def _definition_creation_metadata_from_caller(caller_context) -> dict:
+    return _session_creation_metadata_from_caller(caller_context)
+
+
+def _agent_run_source_from_caller(caller_context) -> tuple[str, Optional[str], Optional[str], dict]:
+    if caller_context is None:
+        return "cli", None, None, {}
+    metadata = {"caller_context": caller_context.to_metadata()}
+    return "agent", caller_context.session_id, caller_context.run_id, metadata
+
+
+def _resolve_async_callback_session_id(args, caller_context):
+    explicit_callback = (getattr(args, "callback_session_id", None) or "").strip() or None
+    no_callback = bool(getattr(args, "no_callback", False))
+    if explicit_callback and no_callback:
+        raise TaskCliError(
+            "use either --callback-session-id or --no-callback, not both",
+            code="conflicting_callback_policy",
+            hint="Pass --callback-session-id to receive a follow-up, or --no-callback to intentionally inspect the run later.",
+            help_command="vibe agent run --help",
+        )
+    if not bool(getattr(args, "async_run", False)):
+        return explicit_callback, None
+    if explicit_callback:
+        return explicit_callback, None
+    if no_callback:
+        return None, {
+            "code": "async_run_without_callback",
+            "message": (
+                "Started async Agent Run without a callback. This run will not post its final result back into a "
+                "Session automatically. Track it with `vibe runs show <run-id>` or by polling/listing runs for the "
+                "target Session. To receive a follow-up message next time, use `--callback-session-id <session-id>` "
+                "or run from a resolved caller context so Avibe can default the callback to the current Session."
+            ),
+        }
+    if caller_context is not None:
+        return caller_context.session_id, {
+            "code": "callback_defaulted_to_caller_session",
+            "message": "Async callback defaulted to the caller Session from AVIBE_SESSION_ID.",
+            "callback_session_id": caller_context.session_id,
+        }
+    raise TaskCliError(
+        "This async Agent Run has no callback target.",
+        code="missing_async_callback",
+        hint=(
+            "Pass --callback-session-id <session-id> to send the final result back to a specific Agent Session, "
+            "or pass --no-callback to run without an automatic follow-up and inspect the result later with "
+            "`vibe runs show <run-id>` or by polling/listing runs for the target Session. "
+            "`--callback-session-id` identifies the Session that should receive the delegated run's final result; "
+            "when Avibe can resolve the caller context, this defaults to the current caller Session."
+        ),
+        help_command="vibe agent run --help",
+    )
+
+
+def _reserve_cli_session(
+    *,
+    agent,
+    deliver_key: Optional[str],
+    workdir: Optional[str] = None,
+    metadata: Optional[dict] = None,
+) -> str:
     # Route through ``core.services.sessions`` so the CLI shares the same
     # business API as the UI server and the future N3 internal endpoint;
     # see docs/plans/workbench-dispatch-architecture.md §6 (C2).
@@ -2805,6 +2888,7 @@ def _reserve_cli_session(*, agent, deliver_key: Optional[str], workdir: Optional
             model=agent.model,
             reasoning_effort=agent.reasoning_effort,
             workdir=workdir,
+            metadata=metadata,
         )
     else:
         platform = _primary_platform()
@@ -2818,6 +2902,7 @@ def _reserve_cli_session(*, agent, deliver_key: Optional[str], workdir: Optional
             model=agent.model,
             reasoning_effort=agent.reasoning_effort,
             workdir=workdir,
+            metadata=metadata,
         )
     if not session_id:
         raise TaskCliError(
@@ -2893,6 +2978,7 @@ def _reserve_definition_session(*, agent_name: Optional[str], deliver_key: str, 
 
 def cmd_agent_run(args):
     try:
+        caller_context = caller_context_from_env()
         message = _resolve_message_input(
             args,
             help_command="vibe agent run --help",
@@ -2926,10 +3012,16 @@ def cmd_agent_run(args):
         run_cwd = _resolve_run_cwd(args, session_policy=session_policy, help_command="vibe agent run --help")
         agent = _agent_store().require_enabled(agent_name) if agent_name else None
         fork_result = None
+        session_metadata = _session_creation_metadata_from_caller(caller_context)
         if session_policy == "create":
-            session_id = _reserve_cli_session(agent=agent, deliver_key=args.deliver_key, workdir=run_cwd)
+            session_id = _reserve_cli_session(
+                agent=agent,
+                deliver_key=args.deliver_key,
+                workdir=run_cwd,
+                metadata=session_metadata,
+            )
         elif session_policy == "none":
-            session_id = _reserve_cli_session(agent=agent, deliver_key=None, workdir=run_cwd)
+            session_id = _reserve_cli_session(agent=agent, deliver_key=None, workdir=run_cwd, metadata=session_metadata)
         elif session_policy == "fork":
             fork_result = _reserve_forked_cli_session(
                 source_session_id=(args.fork_session or "").strip(),
@@ -2957,9 +3049,15 @@ def cmd_agent_run(args):
                 deliver_key=args.deliver_key,
                 help_command="vibe agent run --help",
             )
-        callback_session_id = (getattr(args, "callback_session_id", None) or "").strip() or None
+        callback_session_id, callback_notice = _resolve_async_callback_session_id(args, caller_context)
         if callback_session_id:
             resolve_session_id_target(callback_session_id)
+        source_kind, source_actor, parent_run_id, provenance_metadata = _agent_run_source_from_caller(caller_context)
+        if fork_result:
+            provenance_metadata = {
+                **provenance_metadata,
+                "session_fork": fork_result.fork.to_metadata(),
+            }
         request_store = _task_request_store()
         request = request_store.enqueue_agent_run(
             agent_name=agent.name if agent else None,
@@ -2975,12 +3073,11 @@ def cmd_agent_run(args):
             post_to=args.post_to,
             deliver_key=args.deliver_key,
             message=message,
+            source_kind=source_kind,
+            source_actor=source_actor,
+            parent_run_id=parent_run_id,
             callback_session_id=callback_session_id,
-            metadata={
-                "session_fork": fork_result.fork.to_metadata(),
-            }
-            if fork_result
-            else None,
+            metadata=provenance_metadata or None,
         )
         payload = {
             "accepted": True,
@@ -2993,6 +3090,8 @@ def cmd_agent_run(args):
             "deliver_key": args.deliver_key,
             "callback_session_id": callback_session_id,
             "async": bool(args.async_run),
+            "caller_context": caller_context.to_metadata() if caller_context else None,
+            "callback_notice": callback_notice,
             "run": {
                 "id": request.id,
                 "status": "queued",
@@ -3000,6 +3099,9 @@ def cmd_agent_run(args):
                 "agent_name": agent.name if agent else None,
                 "session_id": session_id,
                 "callback_session_id": callback_session_id,
+                "source_kind": source_kind,
+                "source_actor": source_actor,
+                "parent_run_id": parent_run_id,
             },
         }
         if fork_result:
@@ -4053,6 +4155,7 @@ def cmd_vault_key_import(args):
 
 def cmd_watch_add(args):
     try:
+        caller_context = caller_context_from_env()
         session_policy = _validate_definition_session_policy(
             args,
             schedule_type="watch",
@@ -4123,6 +4226,7 @@ def cmd_watch_add(args):
             deliver_key=args.deliver_key,
             agent_name=agent_name,
             session_policy=session_policy,
+            metadata=_definition_creation_metadata_from_caller(caller_context),
         )
         runtime_store = _watch_runtime_store()
         watch, runtime_entry = _wait_for_watch_startup(store, runtime_store, watch.id)
@@ -6750,6 +6854,11 @@ def build_parser():
     )
     agent_run_parser.add_argument("--post-to", choices=("thread", "channel"))
     agent_run_parser.add_argument("--callback-session-id", help="Caller Session ID to receive the completed async run result")
+    agent_run_parser.add_argument(
+        "--no-callback",
+        action="store_true",
+        help="For async runs, intentionally skip automatic callback delivery and inspect the run later.",
+    )
     agent_run_parser.add_argument("--async", dest="async_run", action="store_true", help="Queue the run and return immediately")
     agent_run_parser.add_argument("--wait-timeout", type=float, help="Maximum seconds the CLI waits for a synchronous run result")
     agent_message_group = agent_run_parser.add_mutually_exclusive_group(required=True)

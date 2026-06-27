@@ -131,6 +131,48 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
             "/tmp/a%2520b",
         )
 
+    async def test_ensure_running_restarts_healthy_server_when_caller_context_plugin_changes(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        restarted = []
+        started = []
+        manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._restart_for_auth_refresh_locked = AsyncMock(side_effect=lambda: restarted.append(True))  # type: ignore[method-assign]
+        manager._start_server = AsyncMock(side_effect=lambda: started.append(True))  # type: ignore[method-assign]
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=True),
+        ):
+            base_url = await manager.ensure_running()
+
+        self.assertEqual(base_url, "http://127.0.0.1:4096")
+        self.assertEqual(restarted, [True])
+        self.assertEqual(started, [True])
+        self.assertFalse(manager._caller_context_plugin_refresh_pending)
+
+    async def test_ensure_running_defers_plugin_restart_while_run_active(self):
+        manager = OpenCodeServerManager(binary="opencode", port=4096)
+        manager._active_run_sessions.add("ses-active")
+        manager._is_healthy = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        manager._cleanup_orphaned_managed_server = AsyncMock()  # type: ignore[method-assign]
+        manager._restart_for_auth_refresh_locked = AsyncMock()  # type: ignore[method-assign]
+        manager._start_server = AsyncMock()  # type: ignore[method-assign]
+        manager._read_pid_file = lambda: {"pid": 123}  # type: ignore[method-assign]
+
+        with patch.object(
+            SERVER_MODULE,
+            "ensure_plugin_installed",
+            return_value=types.SimpleNamespace(path=Path("/tmp/plugin.js"), changed=True),
+        ):
+            base_url = await manager.ensure_running()
+
+        self.assertEqual(base_url, "http://127.0.0.1:4096")
+        manager._restart_for_auth_refresh_locked.assert_not_awaited()
+        manager._start_server.assert_not_awaited()
+        self.assertTrue(manager._caller_context_plugin_refresh_pending)
+
     async def test_prompt_async_percent_encodes_directory_header(self):
         manager = OpenCodeServerManager(binary="opencode", port=4096)
         fake_session = _FakeSession()

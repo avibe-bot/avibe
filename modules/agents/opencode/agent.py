@@ -17,6 +17,7 @@ from core.avibe_cloud import avibe_cloud_url_available
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 from modules.agents.base import AgentRequest, BaseAgent
 
+from .caller_context import bind_session as bind_caller_context_session
 from .client_manager import OpenCodeClientManager
 from .message_processor import OpenCodeMessageProcessorMixin
 from .poll_loop import OpenCodePollLoop, restored_session_key_from_poll_info
@@ -326,6 +327,11 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             )
             if request.vibe_agent_system_prompt:
                 system_prompt_injection = f"{request.vibe_agent_system_prompt}\n\n{system_prompt_injection}"
+
+            try:
+                bind_caller_context_session(session_id, request.context.platform_specific or {})
+            except Exception:
+                logger.warning("Failed to bind OpenCode caller context for session %s", session_id, exc_info=True)
 
             await server.prompt_async(
                 session_id=session_id,

@@ -14,6 +14,7 @@ from config.v2_config import (
     DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
 )
 from core.avibe_cloud import avibe_cloud_url_available
+from core.caller_context import caller_env_for_platform_payload
 from core.services.session_fork import fork_source_state, pending_native_fork
 from core.system_prompt_injection import (
     build_forked_session_correction_prompt,
@@ -725,6 +726,19 @@ class CodexAgent(BaseAgent):
     # Thread management
     # ------------------------------------------------------------------
 
+    def _inject_caller_env_config(self, params: Dict[str, Any], request: AgentRequest) -> None:
+        context = getattr(request, "context", None)
+        env = caller_env_for_platform_payload(getattr(context, "platform_specific", None))
+        if not env:
+            return
+        config = dict(params.get("config") or {})
+        shell_policy = dict(config.get("shell_environment_policy") or {})
+        set_env = dict(shell_policy.get("set") or {})
+        set_env.update(env)
+        shell_policy["set"] = set_env
+        config["shell_environment_policy"] = shell_policy
+        params["config"] = config
+
     async def _start_thread(
         self,
         transport: CodexTransport,
@@ -740,6 +754,7 @@ class CodexAgent(BaseAgent):
         developer_instructions = self._build_thread_developer_instructions(request)
         if developer_instructions:
             params["developerInstructions"] = developer_instructions
+        self._inject_caller_env_config(params, request)
 
         resp = await transport.send_request("thread/start", params)
         # thread/start returns Thread directly OR may nest under "thread"
@@ -778,6 +793,7 @@ class CodexAgent(BaseAgent):
             params["developerInstructions"] = developer_instructions
         if effective_model:
             params["model"] = effective_model
+        self._inject_caller_env_config(params, request)
 
         self._mark_fork_correction_pending(request.base_session_id)
         try:
@@ -932,6 +948,7 @@ class CodexAgent(BaseAgent):
                     "threadId": persisted,
                     "developerInstructions": self._build_thread_developer_instructions(request),
                 }
+                self._inject_caller_env_config(resume_params, request)
                 model_provider = await self._resolve_resume_model_provider_override(transport, request, persisted)
                 if model_provider:
                     resume_params["modelProvider"] = model_provider
@@ -1143,6 +1160,7 @@ class CodexAgent(BaseAgent):
             "threadId": thread_id,
             "developerInstructions": developer_instructions,
         }
+        self._inject_caller_env_config(resume_params, request)
         model_provider = await self._resolve_resume_model_provider_override(transport, request, thread_id)
         if model_provider:
             resume_params["modelProvider"] = model_provider

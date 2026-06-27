@@ -512,6 +512,45 @@ def test_session_handler_marks_claude_sdk_session_process_owner(monkeypatch, tmp
     assert registered == [{"client": client, "native_session_id": None, "owner": "session"}]
 
 
+def test_session_handler_injects_caller_context_env(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self) -> None:
+            captured["connected"] = True
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform_specific={
+            "task_execution_id": "run-parent",
+            "task_trigger_kind": "agent_run",
+            "agent_session_target": {
+                "id": "ses-parent",
+                "agent_backend": "claude",
+                "native_session_id": "claude-native",
+            },
+        },
+    )
+
+    _run_session(handler, context)
+
+    env = captured["options"].env
+    assert env["AVIBE_SESSION_ID"] == "ses-parent"
+    assert env["AVIBE_RUN_ID"] == "run-parent"
+    assert env["AVIBE_CALLER_SOURCE"] == "agent_run"
+    assert env["AVIBE_CALLER_BACKEND"] == "claude"
+    assert env["AVIBE_NATIVE_SESSION_ID"] == "claude-native"
+
+
 def test_session_handler_coalesces_concurrent_claude_client_creates(
     monkeypatch, tmp_path: Path
 ) -> None:
