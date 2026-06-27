@@ -13,7 +13,8 @@ import { VaultSecretForm } from '../ui/vault-secret-form';
 const AddSecretDialog: React.FC<{
   onClose: () => void;
   onCreated: (name: string, reason?: 'created' | 'already_exists') => void;
-}> = ({ onClose, onCreated }) => {
+  groups: string[];
+}> = ({ onClose, onCreated, groups }) => {
   const { t } = useTranslation();
 
   return (
@@ -27,7 +28,7 @@ const AddSecretDialog: React.FC<{
         <DialogHeader>
           <DialogTitle>{t('vaults.dialog.title')}</DialogTitle>
         </DialogHeader>
-        <VaultSecretForm onCancel={onClose} onCreated={onCreated} />
+        <VaultSecretForm onCancel={onClose} onCreated={onCreated} groups={groups} />
       </DialogContent>
     </Dialog>
   );
@@ -228,6 +229,7 @@ export const VaultsPage: React.FC = () => {
       )}
       {adding && (
         <AddSecretDialog
+          groups={groups.map(([g]) => g)}
           onClose={() => setAdding(false)}
           onCreated={(name, reason) => {
             if (reason === 'already_exists') return;

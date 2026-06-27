@@ -7,6 +7,7 @@ import { ApiError, useApi, type DependencyItem } from '@/context/ApiContext';
 import { cn } from '@/lib/utils';
 import { sealBlindBox, standardCreateBlindBoxContext } from '@/lib/vaultCrypto';
 import { Button } from './button';
+import { Combobox } from './combobox';
 import { Input } from './input';
 
 const AVAULT_P2_MIN_VERSION = '0.1.3';
@@ -49,6 +50,7 @@ export const VaultSecretForm: React.FC<{
   className?: string;
   defaultProtection?: VaultProtection;
   treatExistingAsFulfilled?: boolean;
+  groups?: string[];
 }> = ({
   fixedName,
   onCancel,
@@ -56,6 +58,7 @@ export const VaultSecretForm: React.FC<{
   className,
   defaultProtection = 'standard',
   treatExistingAsFulfilled = false,
+  groups = [],
 }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -199,7 +202,14 @@ export const VaultSecretForm: React.FC<{
       </label>
       <label className="flex flex-col gap-1.5 text-sm font-medium">
         {t('vaults.dialog.group')}
-        <Input value={group} onChange={(event) => setGroup(event.target.value)} />
+        <Combobox
+          options={groups.map((g) => ({ value: g, label: g }))}
+          value={group}
+          onValueChange={setGroup}
+          allowCustomValue
+          placeholder={t('vaults.dialog.groupPlaceholder')}
+          searchPlaceholder={t('vaults.dialog.groupSearch')}
+        />
       </label>
       <label className="flex flex-col gap-1.5 text-sm font-medium">
         {t('vaults.dialog.description')}

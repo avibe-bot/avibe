@@ -2087,6 +2087,8 @@
       "p2UnavailableStandardFallback": "Browser-side sealing requires avault {{version}} or newer. Installed: {{installed}}. Standard secrets can still be saved through the local avault seal fallback.",
       "browserSealingPending": "Browser-side sealing requires a compatible avault release. This UI never sends plaintext values to Python.",
       "group": "Group",
+      "groupPlaceholder": "Pick or create a group",
+      "groupSearch": "Search or type a new group",
       "description": "Description",
       "allowHosts": "Allowed hosts (for vault fetch)",
       "allowHostsHelp": "Comma-separated. Required to use this secret via the brokered HTTP proxy; '.example.com' matches subdomains.",
