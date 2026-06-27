@@ -88,6 +88,7 @@ class TerminalService:
         # One entry per session id, each in exactly one phase. Capacity is simply
         # len(self._sessions) — no cross-collection arithmetic to keep in sync.
         self._sessions: dict[str, _Session] = {}
+        self._terminating: set[str] = set()
         self._lock = asyncio.Lock()
         self._reaper_task: asyncio.Task | None = None
         self._closed = False
@@ -204,6 +205,8 @@ class TerminalService:
         async with self._lock:
             self._forget_finished_locked()
             current = self._sessions.get(session_id)
+            if session_id in self._terminating:
+                raise TerminalServiceError("session_opening")
             if current is not None and current.phase in (_Phase.OPENING, _Phase.CLOSING):
                 # Either an open is in progress, or the session is mid-teardown (e.g. the
                 # reaper is awaiting a kill-session). Reject rather than reuse the id — a
@@ -323,6 +326,38 @@ class TerminalService:
             await self._teardown_client(connection, kill_session=False)
             return
         await self._finalize_connection(connection)
+
+    async def terminate(self, session_id: str) -> bool:
+        """End a terminal session by id and remove it from capacity accounting.
+
+        Used by windowed terminals whose UI lifetime is intentionally ephemeral. A
+        normal websocket close detaches from tmux for reconnect durability; this path
+        kills the backing session so closing a window frees the backend slot.
+        """
+
+        safe_session_id = sanitize_session_id(session_id)
+        async with self._lock:
+            if safe_session_id in self._terminating:
+                return False
+            slot = self._sessions.get(safe_session_id)
+            tracked = slot is not None
+            self._terminating.add(safe_session_id)
+            terminating_slot = slot
+            connection = slot.connection if slot is not None else None
+            if slot is not None:
+                slot.phase = _Phase.CLOSING
+
+        try:
+            if connection is not None:
+                await self._teardown_client(connection, kill_session=True)
+            else:
+                await _kill_tmux_session(safe_session_id)
+        finally:
+            async with self._lock:
+                if terminating_slot is not None and self._sessions.get(safe_session_id) is terminating_slot:
+                    self._sessions.pop(safe_session_id, None)
+                self._terminating.discard(safe_session_id)
+        return tracked
 
     async def _finalize_connection(self, connection: TerminalConnection) -> None:
         # Detach the client, then settle the CLOSING slot against tmux reality. The slot stays

@@ -16,6 +16,15 @@ termios = pytest.importorskip("termios")
 
 from starlette.websockets import WebSocketDisconnect
 
+from config.v2_config import (
+    AgentsConfig,
+    PlatformsConfig,
+    RemoteAccessConfig,
+    RuntimeConfig,
+    SlackConfig,
+    UiConfig,
+    V2Config,
+)
 from core import terminal_service
 from core.terminal_service import (
     TerminalService,
@@ -25,6 +34,8 @@ from core.terminal_service import (
     _tmux_socket_name,
     sanitize_session_id,
 )
+from tests.ui_server_test_helpers import csrf_headers
+from vibe import remote_access
 from vibe import ui_server
 from vibe.ui_server import app
 
@@ -60,6 +71,28 @@ class _RecordingWebSocket:
 
     async def close(self, code: int = 1000) -> None:
         self.calls.append(("close", code))
+
+
+def _save_remote_config(tmp_path) -> V2Config:
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        platform="slack",
+        platforms=PlatformsConfig(enabled=["slack"], primary="slack"),
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        ui=UiConfig(),
+        remote_access=RemoteAccessConfig(),
+    )
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = True
+    cloud.public_url = "https://alex.avibe.bot"
+    cloud.client_id = "vr_client_123"
+    cloud.instance_id = "inst_123"
+    cloud.session_secret = "session-secret"
+    config.save()
+    return config
 
 
 def test_terminal_ephemeral_pty_round_trip(monkeypatch, tmp_path):
@@ -509,6 +542,100 @@ async def _detached_session_tracked_when_client_exits(monkeypatch, tmp_path):
     await service.close(conn)
 
     assert service._sessions["detached"].phase is _Phase.DETACHED
+
+
+def test_terminate_drops_only_target_session_and_frees_capacity(monkeypatch, tmp_path):
+    asyncio.run(_terminate_drops_only_target_session_and_frees_capacity(monkeypatch, tmp_path))
+
+
+async def _terminate_drops_only_target_session_and_frees_capacity(monkeypatch, tmp_path):
+    killed: list[str] = []
+
+    async def fake_kill(session_id: str) -> None:
+        killed.append(session_id)
+
+    monkeypatch.setattr(terminal_service, "_kill_tmux_session", fake_kill)
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: None)
+    monkeypatch.setattr(terminal_service.Path, "home", lambda: tmp_path / "home")
+    (tmp_path / "home").mkdir()
+
+    opened_fds: list[int] = []
+
+    def fake_openpty():
+        master = os.open(os.devnull, os.O_RDWR)
+        slave = os.open(os.devnull, os.O_RDWR)
+        opened_fds.extend([master, slave])
+        return master, slave
+
+    class _FakeProcess:
+        returncode = None
+        pid = None
+
+        def send_signal(self, _signum: int) -> None:
+            pass
+
+        async def wait(self) -> int:
+            return 0
+
+    async def fake_spawn(*_args, **_kwargs):
+        return _FakeProcess()
+
+    monkeypatch.setattr(terminal_service.os, "openpty", fake_openpty)
+    monkeypatch.setattr(terminal_service.asyncio, "create_subprocess_exec", fake_spawn)
+
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+    service._sessions["a"] = _Session("a", _Phase.DETACHED, persistent=True, detached_at=1.0)
+    service._sessions["b"] = _Session("b", _Phase.DETACHED, persistent=True, detached_at=1.0)
+
+    try:
+        assert await service.terminate("a") is True
+
+        assert killed == ["a"]
+        assert "a" not in service._sessions
+        assert service._sessions["b"].phase is _Phase.DETACHED
+
+        # The target was removed from _sessions, so the cap has room for one new id.
+        # If terminate only killed tmux but left "a" registered, this open fails with
+        # too_many_sessions because "a" + "b" still fill max_sessions=2.
+        conn = await service.open("c")
+        assert conn.session_id == "c"
+        assert set(service._sessions) == {"b", "c"}
+
+        assert await service.terminate("missing") is False
+    finally:
+        await service.shutdown()
+        for fd in opened_fds:
+            terminal_service._close_fd(fd)
+
+
+def test_open_rejects_same_id_while_terminate_is_in_progress(monkeypatch):
+    asyncio.run(_open_rejects_same_id_while_terminate_is_in_progress(monkeypatch))
+
+
+async def _open_rejects_same_id_while_terminate_is_in_progress(monkeypatch):
+    gate = asyncio.Event()
+    killed: list[str] = []
+
+    async def gated_kill(session_id: str) -> None:
+        killed.append(session_id)
+        await gate.wait()
+
+    monkeypatch.setattr(terminal_service, "_kill_tmux_session", gated_kill)
+
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+    service._sessions["a"] = _Session("a", _Phase.DETACHED, persistent=True, detached_at=1.0)
+
+    terminate_task = asyncio.create_task(service.terminate("a"))
+    await asyncio.sleep(0.02)
+    try:
+        with pytest.raises(terminal_service.TerminalServiceError, match="session_opening"):
+            await service.open("a")
+    finally:
+        gate.set()
+        await terminate_task
+
+    assert killed == ["a"]
+    assert "a" not in service._sessions
 
 
 def test_dead_session_not_tracked_when_shell_exits(monkeypatch, tmp_path):
@@ -1125,6 +1252,127 @@ def test_terminal_websocket_accepts_local_origin_from_same_port(monkeypatch, tmp
         pass
 
     assert accepted is True
+
+
+def test_terminal_delete_terminates_scoped_local_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(ui_server, "TERMINAL_SUPPORTED", True)
+    terminated: list[str] = []
+
+    class _FakeService:
+        async def terminate(self, session_id: str) -> bool:
+            terminated.append(session_id)
+            return True
+
+    monkeypatch.setattr(ui_server, "get_terminal_service", lambda: _FakeService())
+
+    client = app.test_client()
+    response = client.delete(
+        "/api/terminal/local-session",
+        headers=csrf_headers(client, "http://127.0.0.1:5123"),
+    )
+
+    assert response.status_code == 204
+    assert terminated == ["local-session"]
+
+
+def test_terminal_delete_rejects_disallowed_origin_without_terminating(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(ui_server, "TERMINAL_SUPPORTED", True)
+    terminated: list[str] = []
+
+    class _FakeService:
+        async def terminate(self, session_id: str) -> bool:
+            terminated.append(session_id)
+            return True
+
+    monkeypatch.setattr(ui_server, "get_terminal_service", lambda: _FakeService())
+
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:5123")
+    headers["Origin"] = "http://127.0.0.1:3000"
+    response = client.delete("/api/terminal/local-session", base_url="http://127.0.0.1:5123", headers=headers)
+
+    assert response.status_code == 403
+    assert terminated == []
+
+
+def test_terminal_delete_rejects_forwarded_origin_proxy_without_terminating(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(ui_server, "TERMINAL_SUPPORTED", True)
+    _save_remote_config(tmp_path)
+    terminated: list[str] = []
+
+    class _FakeService:
+        async def terminate(self, session_id: str) -> bool:
+            terminated.append(session_id)
+            return True
+
+    monkeypatch.setattr(ui_server, "get_terminal_service", lambda: _FakeService())
+
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:5123")
+    # The generic HTTP CSRF guard accepts this loopback-origin-proxy shape because
+    # _current_origin honors the forwarded host/proto. Terminal disposal still must
+    # apply the stricter terminal Origin guard, which rejects forwarded metadata.
+    headers.update(
+        {
+            "Origin": "https://vibe.example",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "vibe.example",
+        }
+    )
+    response = client.delete("/api/terminal/local-session", base_url="http://127.0.0.1:5123", headers=headers)
+
+    assert response.status_code == 403
+    assert terminated == []
+
+
+def test_terminal_delete_scopes_remote_subject_and_rejects_cross_subject(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(ui_server, "TERMINAL_SUPPORTED", True)
+    config = _save_remote_config(tmp_path)
+    user_one_effective = ui_server._terminal_effective_session_id("shared-session", "user-1")
+    terminated: list[str] = []
+
+    class _FakeService:
+        async def terminate(self, session_id: str) -> bool:
+            terminated.append(session_id)
+            return session_id == user_one_effective
+
+    monkeypatch.setattr(ui_server, "get_terminal_service", lambda: _FakeService())
+
+    user_two_client = app.test_client()
+    user_two_client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_access.make_session_cookie(config, "user-2@example.com", "user-2"),
+        domain="alex.avibe.bot",
+    )
+    headers = csrf_headers(user_two_client, "https://alex.avibe.bot")
+    response = user_two_client.delete(
+        "/api/terminal/shared-session",
+        base_url="https://alex.avibe.bot",
+        headers=headers,
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+    malicious_response = user_two_client.delete(
+        f"/api/terminal/{user_one_effective}",
+        base_url="https://alex.avibe.bot",
+        headers=headers,
+        environ_base={"REMOTE_ADDR": "203.0.113.10"},
+    )
+
+    assert response.status_code == 404
+    assert malicious_response.status_code == 404
+    assert terminated == [
+        ui_server._terminal_effective_session_id("shared-session", "user-2"),
+        ui_server._terminal_effective_session_id(user_one_effective, "user-2"),
+    ]
+    assert user_one_effective not in terminated
 
 
 def test_terminal_service_ignores_invalid_limit_env(monkeypatch):

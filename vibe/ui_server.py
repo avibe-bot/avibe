@@ -20,6 +20,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlsplit, urlunsplit
 
@@ -2144,7 +2145,41 @@ async def terminal_websocket(websocket: WebSocket, session_id: str):
         logger.info("terminal.session_close session_ref=%s remote_addr=%s", session_ref, remote_addr)
 
 
-def _show_runtime_websocket_authorized(websocket: WebSocket) -> bool:
+@app.route("/api/terminal/<session_id>", methods=["DELETE"])
+async def terminal_session_delete(session_id: str):
+    if not _terminal_enabled():
+        return jsonify({"ok": False, "error": "terminal_disabled"}), 403
+    if not TERMINAL_SUPPORTED:
+        return jsonify({"ok": False, "error": "terminal_unsupported"}), 403
+
+    terminal_request = _terminal_http_request_adapter()
+    if not _terminal_origin_allowed(terminal_request):
+        return jsonify({"ok": False, "error": "terminal_origin_forbidden"}), 403
+    if not _show_runtime_websocket_authorized(terminal_request):
+        return jsonify({"ok": False, "error": "terminal_unauthorized"}), 403
+
+    remote_subject = _remote_access_websocket_subject(terminal_request)
+    effective_session_id = _terminal_effective_session_id(session_id, remote_subject)
+    session_ref = _terminal_session_log_ref(effective_session_id)
+    terminated = await get_terminal_service().terminate(effective_session_id)
+    if not terminated:
+        logger.info("terminal.session_delete_absent session_ref=%s", session_ref)
+        return jsonify({"ok": False, "error": "terminal_session_not_found"}), 404
+    logger.info("terminal.session_delete session_ref=%s", session_ref)
+    return Response(status=204)
+
+
+def _terminal_http_request_adapter() -> SimpleNamespace:
+    scheme = "wss" if request.is_secure else "ws"
+    return SimpleNamespace(
+        headers=request.headers,
+        cookies=request.cookies,
+        client=SimpleNamespace(host=request.remote_addr or ""),
+        url=SimpleNamespace(scheme=scheme),
+    )
+
+
+def _show_runtime_websocket_authorized(websocket: Any) -> bool:
     config = _load_remote_access_config()
     if config is None:
         return _websocket_is_local_request(websocket)
@@ -2155,7 +2190,7 @@ def _show_runtime_websocket_authorized(websocket: WebSocket) -> bool:
     return _remote_access_websocket_session_payload(websocket, config) is not None
 
 
-def _remote_access_websocket_session_payload(websocket: WebSocket, config: V2Config | None) -> dict[str, Any] | None:
+def _remote_access_websocket_session_payload(websocket: Any, config: V2Config | None) -> dict[str, Any] | None:
     if config is None or _websocket_is_local_request(websocket, config):
         return None
     if _websocket_normalized_host(websocket) != _remote_access_public_host(config):
@@ -2170,7 +2205,7 @@ def _remote_access_websocket_session_payload(websocket: WebSocket, config: V2Con
     )
 
 
-def _remote_access_websocket_subject(websocket: WebSocket) -> str | None:
+def _remote_access_websocket_subject(websocket: Any) -> str | None:
     payload = _remote_access_websocket_session_payload(websocket, _load_remote_access_config())
     if not payload:
         return None
@@ -2191,7 +2226,7 @@ def _terminal_session_log_ref(effective_session_id: str) -> str:
     return hashlib.sha256(effective_session_id.encode("utf-8")).hexdigest()[:16]
 
 
-def _terminal_origin_allowed(websocket: WebSocket) -> bool:
+def _terminal_origin_allowed(websocket: Any) -> bool:
     origin = _request_origin(websocket.headers.get("origin"))
     if not origin:
         return False
@@ -2242,7 +2277,7 @@ def _terminal_origin_scheme_matches_socket(origin_scheme: str | None, socket_sch
     return origin_secure == socket_secure
 
 
-def _websocket_is_local_request(websocket: WebSocket, config: V2Config | None = None) -> bool:
+def _websocket_is_local_request(websocket: Any, config: V2Config | None = None) -> bool:
     if _websocket_has_forwarded_metadata(websocket):
         return False
     client_host = _websocket_client_host(websocket)
@@ -2259,7 +2294,7 @@ def _websocket_is_local_request(websocket: WebSocket, config: V2Config | None = 
     return _websocket_is_setup_host_request(websocket, config)
 
 
-def _websocket_has_forwarded_metadata(websocket: WebSocket) -> bool:
+def _websocket_has_forwarded_metadata(websocket: Any) -> bool:
     forwarded_headers = (
         "Forwarded",
         "X-Forwarded-For",
@@ -2277,14 +2312,14 @@ def _websocket_has_forwarded_metadata(websocket: WebSocket) -> bool:
     return any(websocket.headers.get(header) for header in forwarded_headers)
 
 
-def _websocket_client_host(websocket: WebSocket) -> str:
+def _websocket_client_host(websocket: Any) -> str:
     client_host = websocket.client.host if websocket.client else ""
     if client_host == "testclient":
         return websocket.headers.get(TEST_REMOTE_ADDR_HEADER) or client_host
     return client_host
 
 
-def _websocket_peer_address(websocket: WebSocket) -> ipaddress._BaseAddress | None:
+def _websocket_peer_address(websocket: Any) -> ipaddress._BaseAddress | None:
     client_host = _websocket_client_host(websocket).strip()
     if not client_host or client_host in {"localhost", "testclient"}:
         return None
@@ -2296,7 +2331,7 @@ def _websocket_peer_address(websocket: WebSocket) -> ipaddress._BaseAddress | No
     return mapped or address
 
 
-def _websocket_is_trusted_docker_peer(websocket: WebSocket) -> bool:
+def _websocket_is_trusted_docker_peer(websocket: Any) -> bool:
     if not _env_flag_enabled("VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS"):
         return False
     if not _has_loopback_only_docker_port_binding():
@@ -2308,7 +2343,7 @@ def _websocket_is_trusted_docker_peer(websocket: WebSocket) -> bool:
     return address in _trusted_docker_loopback_peer_addresses()
 
 
-def _websocket_is_trusted_docker_loopback_request(websocket: WebSocket) -> bool:
+def _websocket_is_trusted_docker_loopback_request(websocket: Any) -> bool:
     if _websocket_has_forwarded_metadata(websocket):
         return False
     if not _is_loopback_host(websocket.headers.get("host")):
@@ -2316,12 +2351,12 @@ def _websocket_is_trusted_docker_loopback_request(websocket: WebSocket) -> bool:
     return _websocket_is_trusted_docker_peer(websocket)
 
 
-def _websocket_is_private_peer(websocket: WebSocket) -> bool:
+def _websocket_is_private_peer(websocket: Any) -> bool:
     address = _websocket_peer_address(websocket)
     return address is not None and _is_private_address(address)
 
 
-def _websocket_peer_shares_setup_host_network(websocket: WebSocket, setup_address: ipaddress._BaseAddress) -> bool:
+def _websocket_peer_shares_setup_host_network(websocket: Any, setup_address: ipaddress._BaseAddress) -> bool:
     peer = _websocket_peer_address(websocket)
     if peer is None:
         return False
@@ -2336,7 +2371,7 @@ def _websocket_peer_shares_setup_host_network(websocket: WebSocket, setup_addres
     return peer in network
 
 
-def _websocket_is_wildcard_setup_host_request(websocket: WebSocket, config: V2Config | None) -> bool:
+def _websocket_is_wildcard_setup_host_request(websocket: Any, config: V2Config | None) -> bool:
     if config is None:
         return False
     setup_host = _normalized_host(getattr(config.ui, "setup_host", ""))
@@ -2363,7 +2398,7 @@ def _websocket_is_wildcard_setup_host_request(websocket: WebSocket, config: V2Co
     return _websocket_peer_shares_setup_host_network(websocket, host_address)
 
 
-def _websocket_is_setup_host_request(websocket: WebSocket, config: V2Config | None) -> bool:
+def _websocket_is_setup_host_request(websocket: Any, config: V2Config | None) -> bool:
     if config is None:
         return False
     setup_host = _normalized_host(getattr(config.ui, "setup_host", ""))
@@ -2390,7 +2425,7 @@ def _websocket_is_setup_host_request(websocket: WebSocket, config: V2Config | No
     return True
 
 
-def _websocket_normalized_host(websocket: WebSocket) -> str:
+def _websocket_normalized_host(websocket: Any) -> str:
     return _normalized_host(websocket.headers.get("x-forwarded-host") or websocket.headers.get("host"))
 
 

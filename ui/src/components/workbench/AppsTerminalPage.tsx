@@ -1,7 +1,8 @@
-import { Suspense, lazy, useEffect, useState } from 'react';
+import { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useApi } from '../../context/ApiContext';
+import { apiFetch } from '../../lib/apiFetch';
 import { acquireTerminalSlot, releaseTerminalSlot } from '../../lib/terminalSlots';
 
 // Lazy so xterm.js stays out of the main bundle until the Terminal is opened.
@@ -45,14 +46,19 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean }> = ({ windowed = 
   // Resolve the signed-in identity first, then derive the (account-scoped) session id, so we
   // never briefly mount the terminal under the wrong key. email is null for local/unauth.
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const resolvedSessionIdRef = useRef<string | null>(null);
   useEffect(() => {
     let cancelled = false;
+    resolvedSessionIdRef.current = null;
     // Take a bounded slot for the lifetime of a windowed terminal (released on close),
     // so opening/closing terminal windows reuses session ids instead of exhausting the
     // backend's session cap. The route terminal takes no slot — it keeps its persistent id.
     const slot = windowed ? acquireTerminalSlot() : null;
     const resolve = (identity: string | null) => {
-      if (!cancelled) setSessionId(getSessionId(identity, slot != null ? `w${slot}` : undefined));
+      if (cancelled) return;
+      const nextSessionId = getSessionId(identity, slot != null ? `w${slot}` : undefined);
+      resolvedSessionIdRef.current = nextSessionId;
+      setSessionId(nextSessionId);
     };
     getAuthSession()
       // Prefer the stable OIDC subject; email can be absent or shared across subjects, which
@@ -61,7 +67,17 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean }> = ({ windowed = 
       .catch(() => resolve(null));
     return () => {
       cancelled = true;
-      if (slot != null) releaseTerminalSlot(slot);
+      const sessionToDispose = resolvedSessionIdRef.current;
+      if (slot != null && sessionToDispose) {
+        void apiFetch(`/api/terminal/${encodeURIComponent(sessionToDispose)}`, {
+          method: 'DELETE',
+          credentials: 'same-origin',
+        })
+          .catch(() => undefined)
+          .finally(() => releaseTerminalSlot(slot));
+      } else if (slot != null) {
+        releaseTerminalSlot(slot);
+      }
     };
   }, [getAuthSession, windowed]);
 
