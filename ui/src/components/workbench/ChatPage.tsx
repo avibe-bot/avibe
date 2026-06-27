@@ -365,20 +365,23 @@ export const ChatPage: React.FC = () => {
     }
   }, [api, sessionId]);
 
-  const loadOlderMessages = useCallback(async () => {
-    if (!sessionId || !olderCursor || loadingOlderRef.current) return;
+  // Returns false only when the fetch itself failed, so the transcript scroller can
+  // re-arm and let a later scroll retry; true for success / no-op / stale session.
+  const loadOlderMessages = useCallback(async (): Promise<boolean> => {
+    if (!sessionId || !olderCursor || loadingOlderRef.current) return true;
     loadingOlderRef.current = true;
     setLoadingOlder(true);
     try {
       const res = await api.listSessionMessages(sessionId, { limit: 50, beforeId: olderCursor });
-      if (sessionId !== sessionIdRef.current) return; // switched chats mid-fetch
+      if (sessionId !== sessionIdRef.current) return true; // switched chats mid-fetch
       const older = res.messages.filter(isTranscriptMessage);
       if (older.length) {
         setMessages((prev) => mergeById(prev, older));
       }
       setOlderCursor(res.next_before_id ?? null);
+      return true;
     } catch {
-      /* keep the current transcript; another scroll can retry */
+      return false; // keep the transcript; caller re-arms so a later scroll retries
     } finally {
       if (sessionId === sessionIdRef.current) {
         loadingOlderRef.current = false;
@@ -1731,7 +1734,7 @@ interface TranscriptProps {
   working: boolean;
   hasOlder: boolean;
   loadingOlder: boolean;
-  onLoadOlder: () => void;
+  onLoadOlder: () => void | Promise<boolean>;
   needsLatestReload: boolean;
   onReloadLatest: () => Promise<boolean>;
   // Deep-link jump (P5): the message id to scroll to once it's in the DOM, a
@@ -1817,6 +1820,11 @@ const Transcript: React.FC<TranscriptProps> = ({
   // can avoid re-arming while a page load is still in flight.
   const loadingOlderPropRef = useRef(loadingOlder);
   loadingOlderPropRef.current = loadingOlder;
+  // A failed load adds no content → no anchor restore → the viewport stays at the
+  // top, where the position gate below would never re-arm. Mark it so the settle
+  // re-arms regardless of position and a later scroll can retry. Re-arming at
+  // settle (not immediately) avoids a retry storm within the same fling.
+  const loadFailedRef = useRef(false);
 
   useEffect(() => {
     loadOlderRef.current = onLoadOlder;
@@ -1918,13 +1926,17 @@ const Transcript: React.FC<TranscriptProps> = ({
       // this and schedules the settle that re-arms; a fling that ends parked at the
       // top stays disarmed, so momentum/bounce can't load another page.
       const el = scrollRef.current;
-      if (el && !loadingOlderPropRef.current && el.scrollTop > 300) {
+      if (el && !loadingOlderPropRef.current && (el.scrollTop > 300 || loadFailedRef.current)) {
         canLoadOlderRef.current = true;
+        loadFailedRef.current = false;
       }
     }, 150);
     if (hasOlder && !loadingOlder && canLoadOlderRef.current && el.scrollTop < 120) {
       canLoadOlderRef.current = false;
-      loadOlderRef.current();
+      loadFailedRef.current = false;
+      void Promise.resolve(loadOlderRef.current()).then((ok) => {
+        if (ok === false) loadFailedRef.current = true;
+      });
     }
   };
 
