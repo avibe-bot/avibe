@@ -1485,6 +1485,7 @@ def create_grant(
     ttl_seconds: int | None = None,
     created_by_request_id: str | None = None,
     inherit_request_session: bool = True,
+    expected_member_names: set[str] | list[str] | tuple[str, ...] | None = None,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
 ) -> dict[str, Any]:
     if scope_type not in GRANT_SCOPE_TYPES:
@@ -1507,6 +1508,8 @@ def create_grant(
     members = approval.members
     if any(name not in live_members for name in members):
         raise InvalidRequestError("grant approval snapshot has stale members")
+    if expected_member_names is not None and set(members) != set(expected_member_names):
+        raise InvalidGrantError("resident agent DEKs must match the approved grant members")
     decided_at = _now()
     claim = conn.execute(
         vault_requests.update()
@@ -1579,6 +1582,19 @@ def list_grants(
     if session_id is not None:
         query = query.where(or_(vault_grants.c.session_id.is_(None), vault_grants.c.session_id == session_id))
     return [_grant_row_payload(dict(row), cache=cache) for row in conn.execute(query).mappings()]
+
+
+def expire_active_grants(
+    conn: Connection,
+    *,
+    cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    reason: str = "grant-expired-agent-cache-reset",
+) -> int:
+    rows = [
+        dict(row)
+        for row in conn.execute(select(vault_grants).where(vault_grants.c.status == "active")).mappings()
+    ]
+    return _expire_grant_rows(conn, rows, cache=cache, reason=reason)
 
 
 def revoke_grant(

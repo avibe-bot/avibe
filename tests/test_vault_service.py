@@ -849,6 +849,29 @@ def test_grant_creation_does_not_require_python_dek_material(vault):
     assert grant["delivery_status"] == "agent_cache_ready"
 
 
+def test_grant_creation_rejects_expected_member_mismatch_without_claiming_request(vault):
+    _create(vault, name="A_KEY", protection="protected")
+    with vault.begin() as conn:
+        req = _access_request(conn, "A_KEY")
+
+    with pytest.raises(vs.InvalidGrantError):
+        with vault.begin() as conn:
+            vs.create_grant(
+                conn,
+                scope_type="secret",
+                scope_ref="A_KEY",
+                created_by_request_id=req["id"],
+                expected_member_names={"B_KEY"},
+            )
+
+    with vault.connect() as conn:
+        status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.secret_name == "A_KEY")).scalar_one()
+        grants = conn.execute(select(vault_grants)).mappings().all()
+
+    assert status == "pending"
+    assert grants == []
+
+
 def test_grant_creation_must_match_pending_access_request(vault):
     _create(vault, name="A_KEY", protection="protected")
     _create(vault, name="B_KEY", protection="protected")

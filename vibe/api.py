@@ -1311,6 +1311,13 @@ class VaultApiError(ValueError):
         self.status = status
 
 
+def _vault_api_error_from_avault(exc: "AvaultError", *, prefix: str) -> VaultApiError:
+    message = str(exc)
+    if "requires avault >=" in message:
+        return VaultApiError(f"{prefix}: {message}", code="avault_upgrade_required", status=409)
+    return VaultApiError(f"{prefix}: {message}", code="avault_failed")
+
+
 def _vault_engine():
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
@@ -1342,7 +1349,7 @@ def get_vault_agent_pubkey() -> dict:
     try:
         return {"ok": True, **avault_agent_pubkey()}
     except AvaultError as exc:
-        raise VaultApiError(f"avault agent pubkey failed: {exc}", code="avault_failed") from exc
+        raise _vault_api_error_from_avault(exc, prefix="avault agent pubkey failed") from exc
 
 
 def _sealed_from_payload(payload: dict):
@@ -1540,9 +1547,14 @@ def create_vault_grant(payload: dict) -> dict:
         if not isinstance(name, str) or not name or not isinstance(dek_blindbox, dict) or not isinstance(approval, dict):
             raise VaultApiError("resident agent grant DEKs require name, dek_blindbox, and approval", code="invalid_grant")
         agent_deks.append({"name": name, "dek_blindbox": dek_blindbox, "approval": approval})
+    provided_names = {item["name"] for item in agent_deks}
     request_id = payload.get("request_id") or payload.get("created_by_request_id")
     if not request_id:
         raise VaultApiError("request_id is required to create a grant", code="missing_request_id")
+    try:
+        _require_avault_p2_surface("resident agent grant")
+    except AvaultError as exc:
+        raise _vault_api_error_from_avault(exc, prefix="avault agent grant failed") from exc
     session_id = payload.get("session_id")
     inherit_request_session = payload.get("this_session_only") is not False
     if not inherit_request_session:
@@ -1558,6 +1570,7 @@ def create_vault_grant(payload: dict) -> dict:
                 ttl_seconds=ttl_seconds,
                 created_by_request_id=str(request_id),
                 inherit_request_session=inherit_request_session,
+                expected_member_names=provided_names,
             )
             vault_service.GRANT_RUNTIME_CACHE.drop(str(grant["id"]))
     except vault_service.NotGrantableError as exc:
@@ -1570,11 +1583,7 @@ def create_vault_grant(payload: dict) -> dict:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.InvalidGrantError as exc:
         raise VaultApiError(str(exc), code="invalid_grant") from exc
-    expected_names = set(grant.get("member_snapshot") or [])
-    provided_names = {item["name"] for item in agent_deks}
     try:
-        if provided_names != expected_names:
-            raise vault_service.InvalidGrantError("resident agent DEKs must match the approved grant members")
         avault_agent_grant(
             scope_type=str(grant["scope_type"]),
             scope_ref=str(grant["scope_ref"]),
@@ -1598,9 +1607,10 @@ def create_vault_grant(payload: dict) -> dict:
             vault_service.expire_grant(conn, str(grant["id"]), reason="grant-expired-agent-relay-failed")
         raise VaultApiError(str(exc), code="invalid_grant") from exc
     except AvaultError as exc:
+        _release_failed_grant_scope(str(grant["scope_type"]), str(grant["scope_ref"]), reason=f"create_vault_grant:{grant['id']}")
         with engine.begin() as conn:
             vault_service.expire_grant(conn, str(grant["id"]), reason="grant-expired-agent-relay-failed")
-        raise VaultApiError(f"avault agent grant failed: {exc}", code="avault_failed") from exc
+        raise _vault_api_error_from_avault(exc, prefix="avault agent grant failed") from exc
     return {"ok": True, "grant": grant}
 
 
@@ -4102,7 +4112,10 @@ def _require_avault_p2_surface(feature: str) -> None:
         raise AvaultError(f"avault is required for {feature}")
     version = status.get("version")
     if not _version_at_least(version, AVAULT_P2_MIN_VERSION):
-        raise AvaultError(f"{feature} requires avault >= {AVAULT_P2_MIN_VERSION}; installed {version or 'unknown'}")
+        detail = f"{feature} requires avault >= {AVAULT_P2_MIN_VERSION}; installed {version or 'unknown'}"
+        if not _managed_avault_release_satisfies_p2():
+            detail = f"{detail}; managed avault install is pinned to {AVAULT_VERSION}"
+        raise AvaultError(detail)
 
 
 # ---------------------------------------------------------------------------
@@ -4424,9 +4437,28 @@ def _quarantine_resident_agent_socket(path: Path) -> None:
 
 
 def _fail_closed_resident_agent_after_release_failure() -> None:
+    from storage import vault_service
+
     manager = _avault_agent_manager()
     manager.reset()
     _quarantine_resident_agent_socket(manager.socket_path)
+    engine = _vault_engine()
+    with engine.begin() as conn:
+        vault_service.expire_active_grants(
+            conn,
+            reason="grant-expired-agent-cache-reset",
+        )
+
+
+def _release_failed_grant_scope(scope_type: str, scope_ref: str, *, reason: str) -> None:
+    try:
+        release_vault_agent_scopes([{"scope_type": scope_type, "scope_ref": scope_ref}], reason=reason)
+    except AvaultError:
+        logger.warning(
+            "%s: failed to clear resident agent scope after failed grant relay",
+            reason,
+            exc_info=True,
+        )
 
 
 def release_vault_agent_scopes(scopes: list[dict[str, str]], *, reason: str) -> None:

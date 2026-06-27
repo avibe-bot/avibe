@@ -12,6 +12,10 @@ def _sealed(suffix: str = "1") -> Sealed:
     return Sealed(ciphertext=f"ct-{suffix}", nonce=f"n-{suffix}", wrap_meta=f"wm-{suffix}")
 
 
+def _mock_avault_p2(monkeypatch):
+    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+
+
 def test_rest_create_rejects_protected_plaintext_value(monkeypatch):
     seal = Mock(return_value=_sealed())
     monkeypatch.setattr(api, "avault_seal_blind_box", seal)
@@ -72,6 +76,7 @@ def test_rest_agent_pubkey_route(monkeypatch):
 
 
 def test_rest_requests_and_grants_routes(monkeypatch):
+    _mock_avault_p2(monkeypatch)
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     monkeypatch.setattr(api, "avault_agent_grant", Mock(return_value={"granted": 1, "ttl_secs": 300}))
     monkeypatch.setattr(api, "avault_agent_release", Mock(return_value={"released": True}))
@@ -125,6 +130,7 @@ def test_rest_requests_and_grants_routes(monkeypatch):
 
 
 def test_rest_grant_rejects_mismatched_request(monkeypatch):
+    _mock_avault_p2(monkeypatch)
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     monkeypatch.setattr(api, "avault_agent_grant", Mock(return_value={"granted": 1, "ttl_secs": 300}))
     api.create_vault_secret(
