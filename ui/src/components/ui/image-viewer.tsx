@@ -192,7 +192,12 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
               centerOnInit
               doubleClick={{ mode: 'toggle' }}
             >
-              <TransformComponent wrapperStyle={{ maxHeight: '90vh', maxWidth: '90vw', cursor: 'grab' }}>
+              {/* The zoom viewport is the whole 90vw×90vh stage, NOT shrunk to the
+                  image box (the #681 bug: a wide-but-short image was boxed in its
+                  letterbox strip, so zooming couldn't grow it into the free height).
+                  The content auto-sizes to the image and centerOnInit centers it in
+                  the stage; zooming scales the image into the full area. */}
+              <TransformComponent wrapperStyle={{ width: '90vw', height: '90vh', cursor: 'grab' }}>
                 <img
                   src={src}
                   alt=""
