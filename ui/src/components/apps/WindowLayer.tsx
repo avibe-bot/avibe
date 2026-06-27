@@ -9,7 +9,7 @@ import { AppWindow } from './AppWindow';
 // re-enables pointer events on itself. Desktop-only — mobile opens apps full
 // screen (P5), so no free-floating windows there.
 export const WindowLayer: React.FC = () => {
-  const { windows } = useWindowManager();
+  const { windows, focusedId, close, minimize } = useWindowManager();
   const ref = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
 
@@ -22,6 +22,26 @@ export const WindowLayer: React.FC = () => {
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  // ⌘W / Ctrl+W closes the focused window, ⌘M / Ctrl+M minimizes it. Scoped to
+  // when a window actually owns focus — otherwise the chord falls through to the
+  // browser (e.g. ⌘W still closes the tab when no window is open).
+  useEffect(() => {
+    if (!focusedId) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      const key = e.key.toLowerCase();
+      if (key === 'w') {
+        e.preventDefault();
+        close(focusedId);
+      } else if (key === 'm') {
+        e.preventDefault();
+        minimize(focusedId);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [focusedId, close, minimize]);
 
   const visible = windows.filter((w) => !w.minimized);
 

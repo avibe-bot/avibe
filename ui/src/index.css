@@ -431,6 +431,20 @@ pre,
   animation: slide-in 0.2s ease-out;
 }
 
+/* App windows (Apps layer): a subtle scale+fade on open/restore, and a
+   scale-down toward the Dock on minimize/close. Short enough to read as
+   responsiveness, not a transition you wait on. */
+@keyframes appwindow-in {
+  from { opacity: 0; transform: scale(0.97) translateY(6px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes appwindow-out {
+  from { opacity: 1; transform: scale(1) translateY(0); }
+  to { opacity: 0; transform: scale(0.94) translateY(12px); }
+}
+.animate-appwindow-in { animation: appwindow-in 140ms ease-out; }
+.animate-appwindow-out { animation: appwindow-out 130ms ease-in forwards; }
+
 /* Chat compose "thinking" indicator — three dots fading in sequence while we
    wait for the agent's first streamed chunk (workbench ChatPage). */
 @keyframes vr-typing {

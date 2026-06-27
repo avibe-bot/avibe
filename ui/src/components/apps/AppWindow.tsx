@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -57,6 +57,10 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
   const wm = useWindowManager();
   const def = APP_REGISTRY[win.appId];
   const draggingRef = useRef(false);
+  // Play the scale-down exit before the window actually leaves (minimize → Dock,
+  // or close); the animation's end drives the real action, so the CSS owns the
+  // timing. The entrance animation covers open + restore via remount.
+  const [exitKind, setExitKind] = useState<'min' | 'close' | null>(null);
 
   // One pointer gesture (move or resize): attach window-level listeners on down,
   // tear them down on up. Capturing `win.bounds` at gesture start keeps the math
@@ -97,8 +101,8 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
     : { left: win.bounds.x, top: win.bounds.y, width: win.bounds.width, height: win.bounds.height, zIndex: win.z };
 
   const lights: { key: string; color: string; glyph: string; onClick: () => void; label: string }[] = [
-    { key: 'close', color: '#ff5f57', glyph: '×', onClick: () => wm.close(win.id), label: t('common.close') },
-    { key: 'min', color: '#febc2e', glyph: '–', onClick: () => wm.minimize(win.id), label: t('apps.window.minimize') },
+    { key: 'close', color: '#ff5f57', glyph: '×', onClick: () => setExitKind((k) => k ?? 'close'), label: t('common.close') },
+    { key: 'min', color: '#febc2e', glyph: '–', onClick: () => setExitKind((k) => k ?? 'min'), label: t('apps.window.minimize') },
     { key: 'max', color: '#28c840', glyph: '+', onClick: () => wm.toggleMaximize(win.id), label: t('apps.window.maximize') },
   ];
 
@@ -107,9 +111,17 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
       role="dialog"
       aria-label={t(def.titleKey)}
       onPointerDown={() => wm.focus(win.id)}
+      onAnimationEnd={(e) => {
+        // Only the root's own exit animation drives the action (ignore the
+        // entrance, and any child animation bubbling up).
+        if (e.target !== e.currentTarget || !exitKind) return;
+        if (exitKind === 'close') wm.close(win.id);
+        else wm.minimize(win.id);
+      }}
       className={clsx(
         'group/win pointer-events-auto absolute flex flex-col overflow-hidden rounded-xl border bg-surface-2',
         win.maximized ? 'rounded-none' : 'rounded-xl',
+        exitKind ? 'animate-appwindow-out' : 'animate-appwindow-in',
         focused
           ? 'border-border-strong shadow-[0_28px_60px_-12px_rgba(0,0,0,0.7)]'
           : 'border-border shadow-[0_16px_40px_-16px_rgba(0,0,0,0.6)]',
