@@ -147,6 +147,7 @@ def test_agent_manager_preserves_live_socket_with_cached_grants(tmp_path, monkey
 
 def test_agent_manager_does_not_kill_owned_agent_on_slow_liveness_probe(tmp_path, monkeypatch):
     socket_path = Path(tempfile.mkdtemp(prefix="avault-slow-", dir="/tmp")) / "s"
+    socket_path.touch()
     manager = AvaultAgentManager(socket_path=socket_path)
     manager._process = MockProcess()
     monkeypatch.setattr(manager, "_socket_responds", lambda: False)
@@ -156,6 +157,32 @@ def test_agent_manager_does_not_kill_owned_agent_on_slow_liveness_probe(tmp_path
     manager.ensure_running()
 
     assert manager._process is not None
+
+
+def test_agent_manager_recreates_owned_agent_when_socket_disappears(tmp_path, monkeypatch):
+    socket_path = Path(tempfile.mkdtemp(prefix="avault-missing-", dir="/tmp")) / "s"
+    manager = AvaultAgentManager(socket_path=socket_path)
+    old_process = MockProcess()
+    replacement = MockProcess()
+    manager._process = old_process
+    spawned: list[bool] = []
+    waited: list[bool] = []
+    monkeypatch.setattr(manager, "_socket_responds", lambda: False)
+
+    def _spawn() -> None:
+        spawned.append(True)
+        manager._process = replacement
+
+    monkeypatch.setattr(manager, "_spawn_locked", _spawn)
+    monkeypatch.setattr(manager, "_wait_for_socket_locked", lambda: waited.append(True))
+
+    manager.ensure_running()
+
+    assert old_process.terminated is True
+    assert old_process.killed is False
+    assert manager._process is replacement
+    assert spawned == [True]
+    assert waited == [True]
 
 
 def test_agent_client_does_not_retry_deliver_after_frame_write_timeout(tmp_path):
@@ -212,5 +239,18 @@ def test_remove_stale_agent_socket_unlinks_dead_socket(tmp_path):
 
 
 class MockProcess:
+    def __init__(self):
+        self.terminated = False
+        self.killed = False
+
     def poll(self):
         return None
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        return None
+
+    def kill(self):
+        self.killed = True

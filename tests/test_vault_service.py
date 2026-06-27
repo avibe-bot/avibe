@@ -494,6 +494,41 @@ def test_find_active_grant_uses_metadata_even_without_python_key_cache(vault):
     assert status == "active"
 
 
+def test_resolve_secret_prefers_cache_ready_grant_over_stale_scope(vault):
+    _create(vault, name="A_KEY", protection="protected", group="crypto")
+    _create(vault, name="B_KEY", protection="protected", group="crypto")
+    cache = vs.VaultGrantRuntimeCache()
+    with vault.begin() as conn:
+        req_group = _access_request(conn, "A_KEY", session_id="ses_1")
+        stale_group = vs.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_1",
+            created_by_request_id=req_group["id"],
+            cache=cache,
+        )
+        cache.drop(stale_group["id"])
+        req_secret = _access_request(conn, "A_KEY", session_id="ses_1")
+        ready_secret = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="A_KEY",
+            session_id="ses_1",
+            created_by_request_id=req_secret["id"],
+            cache=cache,
+        )
+
+        active = vs.find_active_grant_for_secret(conn, "A_KEY", session_id="ses_1", cache=cache)
+        resolved = vs.resolve_secret_access(conn, "A_KEY", session_id="ses_1", create_request=False, cache=cache)
+
+    assert active is not None
+    assert active["id"] == ready_secret["id"]
+    assert active["id"] != stale_group["id"]
+    assert resolved["status"] == "agent_delivery_ready"
+    assert resolved["grant"]["id"] == ready_secret["id"]
+
+
 def test_grant_runtime_cache_drops_coverage_at_expiry_without_key_material():
     cache = vs.VaultGrantRuntimeCache()
     expires_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()

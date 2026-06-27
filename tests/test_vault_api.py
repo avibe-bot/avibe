@@ -737,6 +737,60 @@ def test_create_grant_api_expires_grant_when_agent_grant_fails(monkeypatch, avau
     agent_release.assert_called_once_with(scope_type="secret", scope_ref="GRANT_KEY")
 
 
+def test_create_grant_api_keeps_shared_agent_scope_when_relay_fails(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    monkeypatch.setattr(api, "avault_agent_grant", Mock(side_effect=api.AvaultError("grant is missing")))
+    agent_release = Mock(return_value={"released": True})
+    monkeypatch.setattr(api, "avault_agent_release", agent_release)
+    api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
+    with api._vault_engine().begin() as conn:
+        existing_req = vault_service.create_access_request(
+            conn,
+            "GRANT_KEY",
+            requester={"session_id": "ses_existing"},
+            delivery={"session_id": "ses_existing"},
+        )
+        existing_grant = vault_service.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="GRANT_KEY",
+            session_id="ses_existing",
+            created_by_request_id=existing_req["id"],
+        )
+        req = vault_service.create_access_request(
+            conn,
+            "GRANT_KEY",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_grant(
+            {
+                "scope_type": "secret",
+                "scope_ref": "GRANT_KEY",
+                "session_id": "ses_1",
+                "request_id": req["id"],
+                "deks": [
+                    {
+                        "name": "GRANT_KEY",
+                        "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                        "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                    }
+                ],
+            }
+        )
+
+    assert exc.value.code == "avault_failed"
+    agent_release.assert_not_called()
+    with api._vault_engine().connect() as conn:
+        grants = {grant["id"]: grant for grant in vault_service.list_grants(conn, status=None)}
+    assert grants[existing_grant["id"]]["status"] == "active"
+    expired = [grant for grant in grants.values() if grant["id"] != existing_grant["id"]]
+    assert len(expired) == 1
+    assert expired[0]["status"] == "expired"
+
+
 def test_create_grant_api_preserves_unbound_session_choice(monkeypatch, avault_p2):
     from unittest.mock import Mock
 

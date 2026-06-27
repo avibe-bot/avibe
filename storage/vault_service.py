@@ -1675,22 +1675,7 @@ def find_active_grant_for_secret(
     session_id: str | None = None,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
 ) -> dict[str, Any] | None:
-    expire_grants(conn, cache=cache)
-    rows = [
-        dict(row)
-        for row in conn.execute(
-            select(vault_grants).where(
-                vault_grants.c.status == "active",
-                or_(vault_grants.c.session_id.is_(None), vault_grants.c.session_id == session_id),
-            )
-        ).mappings()
-    ]
-    for row in rows:
-        members = _loads(row.get("member_snapshot")) or []
-        if secret_name not in members:
-            continue
-        return _grant_row_payload(row, cache=cache)
-    return None
+    return find_active_grant_for_secrets(conn, [secret_name], session_id=session_id, cache=cache)
 
 
 def find_active_grant_for_secrets(
@@ -1713,19 +1698,29 @@ def find_active_grant_for_secrets(
             )
         ).mappings()
     ]
-    candidates: list[tuple[int, str, str, dict[str, Any]]] = []
+    candidates: list[tuple[bool, int, str, str, dict[str, Any]]] = []
     for row in rows:
         members = _loads(row.get("member_snapshot")) or []
         member_set = {str(name) for name in members if isinstance(name, str) and name}
         if not requested.issubset(member_set):
             continue
-        candidates.append((len(member_set), str(row.get("created_at") or ""), str(row.get("id") or ""), row))
+        payload = _grant_row_payload(row, cache=cache)
+        candidates.append((
+            bool(payload.get("delivery_ready")),
+            len(member_set),
+            str(row.get("created_at") or ""),
+            str(row.get("id") or ""),
+            row,
+        ))
     if not candidates:
         return None
-    member_count = min(item[0] for item in candidates)
-    _, _, _, row = max(
-        (item for item in candidates if item[0] == member_count),
-        key=lambda item: (item[1], item[2]),
+    ready_candidates = [item for item in candidates if item[0]]
+    if ready_candidates:
+        candidates = ready_candidates
+    member_count = min(item[1] for item in candidates)
+    _, _, _, _, row = max(
+        (item for item in candidates if item[1] == member_count),
+        key=lambda item: (item[2], item[3]),
     )
     return _grant_row_payload(row, cache=cache)
 

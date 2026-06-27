@@ -209,8 +209,11 @@ class AvaultAgentManager:
             if self._socket_responds():
                 return
             if self._process is not None and self._process.poll() is None:
-                return
-            self._process = None
+                if self.socket_path.exists():
+                    return
+                self._terminate_process_locked()
+            else:
+                self._process = None
             self._spawn_locked()
             self._wait_for_socket_locked()
 

@@ -1607,9 +1607,15 @@ def create_vault_grant(payload: dict) -> dict:
             vault_service.expire_grant(conn, str(grant["id"]), reason="grant-expired-agent-relay-failed")
         raise VaultApiError(str(exc), code="invalid_grant") from exc
     except AvaultError as exc:
-        _release_failed_grant_scope(str(grant["scope_type"]), str(grant["scope_ref"]), reason=f"create_vault_grant:{grant['id']}")
         with engine.begin() as conn:
             vault_service.expire_grant(conn, str(grant["id"]), reason="grant-expired-agent-relay-failed")
+            release_agent_scope = not vault_service.has_active_grant_for_scope(
+                conn,
+                scope_type=str(grant["scope_type"]),
+                scope_ref=str(grant["scope_ref"]),
+            )
+        if release_agent_scope:
+            _release_failed_grant_scope(str(grant["scope_type"]), str(grant["scope_ref"]), reason=f"create_vault_grant:{grant['id']}")
         raise _vault_api_error_from_avault(exc, prefix="avault agent grant failed") from exc
     return {"ok": True, "grant": grant}
 
