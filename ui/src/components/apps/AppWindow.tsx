@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -27,10 +27,21 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
   const def = APP_REGISTRY[win.appId];
   const rootRef = useRef<HTMLDivElement | null>(null);
   const draggingRef = useRef(false);
-  // Play the scale-down exit before the window actually leaves (minimize → Dock,
-  // or close); the animation's end drives the real action, so the CSS owns the
-  // timing. The entrance animation covers open + restore via remount.
-  const [exitKind, setExitKind] = useState<'min' | 'close' | null>(null);
+  // Closing plays a scale-down exit whose animationEnd drives the real unmount (the
+  // CSS owns the timing). Minimizing is a pure mounted hide (see className) so the
+  // window body — terminal session, editor buffer — stays alive and intact.
+  const [exitKind, setExitKind] = useState<'close' | null>(null);
+
+  // Keep a visible window reachable when the geometry around it changes without a
+  // drag: the layer shrinking, or the window being restored / un-maximized after the
+  // layer shrank (the gesture clamps can't fire in those cases). Deliberately not
+  // keyed on win.bounds — a drag clamps itself, and re-running here would fight it.
+  useEffect(() => {
+    if (win.minimized || win.maximized) return;
+    const c = clampToLayer(win.bounds, layerWidth, layerHeight);
+    if (c.x !== win.bounds.x || c.y !== win.bounds.y) wm.setBounds(win.id, c);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [win.minimized, win.maximized, layerWidth, layerHeight]);
 
   // One pointer gesture (move or resize): attach window-level listeners on down,
   // tear them down on up. Capturing `win.bounds` at gesture start keeps the math
@@ -77,7 +88,9 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
 
   const lights: { key: string; color: string; glyph: string; onClick: () => void; label: string }[] = [
     { key: 'close', color: '#ff5f57', glyph: '×', onClick: () => setExitKind((k) => k ?? 'close'), label: t('common.close') },
-    { key: 'min', color: '#febc2e', glyph: '–', onClick: () => setExitKind((k) => k ?? 'min'), label: t('apps.window.minimize') },
+    // Minimize is a mounted hide (no exit animation): the body keeps running and
+    // `inert` on the root pulls focus out, so nothing is trapped in a hidden window.
+    { key: 'min', color: '#febc2e', glyph: '–', onClick: () => wm.minimize(win.id), label: t('apps.window.minimize') },
     { key: 'max', color: '#28c840', glyph: '+', onClick: () => wm.toggleMaximize(win.id), label: t('apps.window.maximize') },
   ];
 
@@ -86,6 +99,10 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
       ref={rootRef}
       role="dialog"
       aria-label={t(def.titleKey)}
+      // Minimized windows stay mounted (to preserve their body state) but go fully
+      // inert: hidden from assistive tech, out of the tab order, non-interactive —
+      // and React/the browser moves focus out automatically.
+      inert={win.minimized}
       tabIndex={-1}
       onPointerDown={(e) => {
         wm.focus(win.id);
@@ -97,16 +114,20 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
         }
       }}
       onAnimationEnd={(e) => {
-        // Only the root's own exit animation drives the action (ignore the
-        // entrance, and any child animation bubbling up).
-        if (e.target !== e.currentTarget || !exitKind) return;
-        if (exitKind === 'close') wm.close(win.id);
-        else wm.minimize(win.id);
+        // Only the root's own close animation drives the unmount (ignore the
+        // entrance, and any child animation bubbling up). Minimize doesn't animate
+        // here — it's a CSS transition on the className, not a keyframe.
+        if (e.target !== e.currentTarget || exitKind !== 'close') return;
+        wm.close(win.id);
       }}
       className={clsx(
-        'group/win pointer-events-auto absolute flex flex-col overflow-hidden rounded-xl border bg-surface-2 outline-none',
+        'group/win absolute flex flex-col overflow-hidden border bg-surface-2 outline-none',
+        'origin-center transition-[transform,opacity] duration-200 ease-out',
         win.maximized ? 'rounded-none' : 'rounded-xl',
-        exitKind ? 'animate-appwindow-out' : 'animate-appwindow-in',
+        exitKind === 'close' ? 'animate-appwindow-out' : 'animate-appwindow-in',
+        // Minimize = mounted hide: the body stays alive (terminal/editor state
+        // preserved) while the window scales away and stops taking pointer events.
+        win.minimized ? 'pointer-events-none scale-90 opacity-0' : 'pointer-events-auto',
         focused
           ? 'border-border-strong shadow-[0_28px_60px_-12px_rgba(0,0,0,0.7)]'
           : 'border-border shadow-[0_16px_40px_-16px_rgba(0,0,0,0.6)]',

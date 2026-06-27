@@ -16,7 +16,7 @@ const FALLBACK_SESSION_ID = `wb-${Math.random().toString(36).slice(2, 10)}`;
 // localStorage is unavailable. The key is scoped to the signed-in account so a different
 // remote (OIDC) user in the same browser can't inherit — and reconnect to — the previous
 // user's live shell; local/unauthenticated sessions (identity == null) share one key.
-function getSessionId(identity: string | null): string {
+function getSessionId(identity: string | null, windowKey?: string): string {
   const KEY = identity ? `avibe.terminal.sessionId.${encodeURIComponent(identity)}` : 'avibe.terminal.sessionId';
   try {
     let id = window.localStorage.getItem(KEY);
@@ -24,15 +24,23 @@ function getSessionId(identity: string | null): string {
       id = `wb-${Math.random().toString(36).slice(2, 10)}`;
       window.localStorage.setItem(KEY, id);
     }
-    return id;
+    // A windowed terminal appends its (per-instance, life-stable) window id, so two
+    // terminal windows — or a window and the /apps/terminal route — don't share one
+    // backend session. The service evicts a session's previous client on attach, so a
+    // shared id would make them disconnect each other.
+    return windowKey ? `${id}-${windowKey}` : id;
   } catch {
-    return FALLBACK_SESSION_ID;
+    return windowKey ? `${FALLBACK_SESSION_ID}-${windowKey}` : FALLBACK_SESSION_ID;
   }
 }
 
 // `windowed` renders just the terminal filling its parent (an AppWindow body) — no
 // page header / viewport-height wrapper, since the window chrome supplies the title.
-export const AppsTerminalPage: React.FC<{ windowed?: boolean }> = ({ windowed = false }) => {
+// `windowKey` (the owning window id) makes each windowed terminal its own session.
+export const AppsTerminalPage: React.FC<{ windowed?: boolean; windowKey?: string }> = ({
+  windowed = false,
+  windowKey,
+}) => {
   const { t } = useTranslation();
   const { getAuthSession } = useApi();
   // Resolve the signed-in identity first, then derive the (account-scoped) session id, so we
@@ -41,7 +49,7 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean }> = ({ windowed = 
   useEffect(() => {
     let cancelled = false;
     const resolve = (identity: string | null) => {
-      if (!cancelled) setSessionId(getSessionId(identity));
+      if (!cancelled) setSessionId(getSessionId(identity, windowKey));
     };
     getAuthSession()
       // Prefer the stable OIDC subject; email can be absent or shared across subjects, which
@@ -51,7 +59,7 @@ export const AppsTerminalPage: React.FC<{ windowed?: boolean }> = ({ windowed = 
     return () => {
       cancelled = true;
     };
-  }, [getAuthSession]);
+  }, [getAuthSession, windowKey]);
 
   const loading = <div className="grid h-full w-full place-items-center text-[12px] text-muted">{t('common.loading')}</div>;
   const content =

@@ -57,9 +57,11 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     icon: SquareTerminal,
     accent: '--mint',
     defaultSize: { width: 820, height: 540 },
-    Component: () => (
+    Component: ({ windowId }) => (
       <Suspense fallback={<Loading />}>
-        <TerminalBody windowed />
+        {/* Key the terminal session by the window instance so each terminal window
+            (and the /apps/terminal route) gets its own backend session. */}
+        <TerminalBody windowed windowKey={windowId} />
       </Suspense>
     ),
   },
