@@ -3446,12 +3446,25 @@ def cmd_vault_list(args):
 
 def cmd_vault_rm(args):
     from storage import vault_service
+    from vibe import api
 
     help_command = "vibe vault rm --help"
     try:
         engine = _open_vault_engine()
+        release_scopes: list[dict[str, str]] = []
         with engine.begin() as conn:
+            release_scopes = vault_service.active_grant_scopes_for_secret(conn, args.name)
             vault_service.delete_secret(conn, args.name)
+            release_scopes = [
+                scope
+                for scope in release_scopes
+                if not vault_service.has_active_grant_for_scope(
+                    conn,
+                    scope_type=scope["scope_type"],
+                    scope_ref=scope["scope_ref"],
+                )
+            ]
+        api.release_vault_agent_scopes(release_scopes, reason="vault_rm")
         _print_cli_payload("vault_secret", removed=True, name=args.name)
         return 0
     except vault_service.SecretNotFoundError:
@@ -3494,19 +3507,33 @@ def _agent_missing_grant(exc: Exception) -> bool:
     return "grant is missing or expired" in text or "grant does not cover" in text
 
 
-def _preflight_vault_run_batch(engine, mapping: dict[str, str]) -> None:
+def _preflight_vault_names(engine, names: list[str], *, mixed_message: str, mixed_code: str = "mixed_protection_tiers") -> dict[str, dict]:
     from storage import vault_service
 
+    metas: dict[str, dict] = {}
     with engine.connect() as conn:
-        tiers = {
-            str(vault_service.get_secret_meta(conn, vault_name).get("protection") or "standard")
-            for vault_name in set(mapping.values())
-        }
+        for name in dict.fromkeys(names):
+            metas[name] = vault_service.get_secret_meta(conn, name)
+    tiers = {str(meta.get("protection") or "standard") for meta in metas.values()}
     if len(tiers) > 1:
-        raise TaskCliError(
-            "mixing protected and standard secrets in one vault run is not wired yet",
-            code="mixed_protection_tiers",
-        )
+        raise TaskCliError(mixed_message, code=mixed_code)
+    return metas
+
+
+def _preflight_vault_run_batch(engine, mapping: dict[str, str]) -> dict[str, dict]:
+    return _preflight_vault_names(
+        engine,
+        list(mapping.values()),
+        mixed_message="mixing protected and standard secrets in one vault run is not wired yet",
+    )
+
+
+def _preflight_vault_inject_batch(engine, names: list[str]) -> dict[str, dict]:
+    return _preflight_vault_names(
+        engine,
+        names,
+        mixed_message="mixing protected and standard secrets in one vault inject is not wired yet",
+    )
 
 
 def _agent_run_command(command_argv: list[str], *, cwd: str | None = None) -> list[str]:
@@ -3537,7 +3564,15 @@ def _agent_run_command(command_argv: list[str], *, cwd: str | None = None) -> li
 def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: list[str]):
     from storage import vault_service
 
-    _preflight_vault_run_batch(engine, mapping)
+    metas = _preflight_vault_run_batch(engine, mapping)
+    if metas and {str(meta.get("protection") or "standard") for meta in metas.values()} == {"protected"}:
+        with engine.begin() as conn:
+            common_grant = vault_service.find_active_grant_for_secrets(conn, list(mapping.values()))
+            if common_grant is not None:
+                return common_grant, [
+                    {"name": vault_name, "env": env_name, "envelope": vault_service.get_protected_envelope(conn, vault_name)}
+                    for env_name, vault_name in mapping.items()
+                ]
     secrets = []
     grant: dict | None = None
     approval_error: TaskCliError | None = None
@@ -3618,6 +3653,15 @@ def _resolve_single_vault_delivery(
 def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: str):
     from storage import vault_service
 
+    metas = _preflight_vault_inject_batch(engine, names)
+    if metas and {str(meta.get("protection") or "standard") for meta in metas.values()} == {"protected"}:
+        with engine.begin() as conn:
+            common_grant = vault_service.find_active_grant_for_secrets(conn, names)
+            if common_grant is not None:
+                return common_grant, [
+                    {"name": name, "key": name, "envelope": vault_service.get_protected_envelope(conn, name)}
+                    for name in names
+                ]
     secrets = []
     grant: dict | None = None
     approval_error: TaskCliError | None = None

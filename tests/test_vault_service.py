@@ -322,6 +322,34 @@ def test_create_grant_freezes_scope_members_and_keeps_key_material_out_of_python
     assert json.loads(row["member_snapshot"]) == ["A_KEY", "B_KEY"]
 
 
+def test_find_active_grant_for_secrets_chooses_covering_scope(vault):
+    _create(vault, name="A_KEY", protection="protected", group="crypto")
+    _create(vault, name="B_KEY", protection="protected", group="crypto")
+    with vault.begin() as conn:
+        req_a = _access_request(conn, "A_KEY", session_id="ses_1")
+        secret_grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="A_KEY",
+            session_id="ses_1",
+            created_by_request_id=req_a["id"],
+        )
+        req_group = _access_request(conn, "A_KEY", session_id="ses_1")
+        group_grant = vs.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref="crypto",
+            session_id="ses_1",
+            created_by_request_id=req_group["id"],
+        )
+
+        selected = vs.find_active_grant_for_secrets(conn, ["A_KEY", "B_KEY"], session_id="ses_1")
+
+    assert selected is not None
+    assert selected["id"] == group_grant["id"]
+    assert selected["id"] != secret_grant["id"]
+
+
 def test_group_grant_approves_sibling_requests_in_same_session(vault):
     _create(vault, name="A_KEY", protection="protected", group="crypto")
     _create(vault, name="B_KEY", protection="protected", group="crypto")

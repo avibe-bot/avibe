@@ -147,6 +147,20 @@ def test_inject_persists_protected_approval_request_without_grant(tmp_path, capf
     assert requests[0]["delivery"]["path"] == str(out)
 
 
+def test_inject_rejects_missing_later_secret_before_creating_approval(tmp_path, capfd):
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected_key"))
+    out = tmp_path / "secrets.env"
+
+    code = cli.cmd_vault_inject(_ns(keys="PROTECTED_KEY,MISSING_KEY", out=str(out), format="dotenv"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "secret_not_found"
+    with cli._open_vault_engine().connect() as conn:
+        assert vault_service.list_requests(conn, status="pending") == []
+
+
 @pytest.mark.parametrize("fmt", ["yaml", "toml"])
 def test_inject_rejects_unavailable_formats_before_avault(tmp_path, capfd, monkeypatch, fmt):
     from unittest.mock import Mock

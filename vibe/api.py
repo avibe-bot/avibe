@@ -1434,11 +1434,23 @@ def delete_vault_secret(name: str) -> dict:
     from storage import vault_service
 
     engine = _vault_engine()
+    release_scopes: list[dict[str, str]] = []
     try:
         with engine.begin() as conn:
+            release_scopes = vault_service.active_grant_scopes_for_secret(conn, name)
             vault_service.delete_secret(conn, name)
+            release_scopes = [
+                scope
+                for scope in release_scopes
+                if not vault_service.has_active_grant_for_scope(
+                    conn,
+                    scope_type=scope["scope_type"],
+                    scope_ref=scope["scope_ref"],
+                )
+            ]
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    release_vault_agent_scopes(release_scopes, reason="delete_vault_secret")
     return {"ok": True, "removed": True, "name": name}
 
 
@@ -1580,10 +1592,10 @@ def revoke_vault_grant(grant_id: str) -> dict:
     except vault_service.GrantNotActiveError as exc:
         raise VaultApiError(f"grant '{grant_id}' is not active", code="grant_not_active", status=409) from exc
     if release_agent_scope:
-        try:
-            avault_agent_release(scope_type=grant["scope_type"], scope_ref=grant["scope_ref"])
-        except AvaultError:
-            logger.warning("revoke_vault_grant: failed to release resident agent grant %s", grant_id, exc_info=True)
+        release_vault_agent_scopes(
+            [{"scope_type": grant["scope_type"], "scope_ref": grant["scope_ref"]}],
+            reason=f"revoke_vault_grant:{grant_id}",
+        )
     return {"ok": True, "grant": grant}
 
 
@@ -4337,13 +4349,30 @@ def avault_agent_grant(
 
 def avault_agent_release(*, scope_type: str, scope_ref: str) -> dict:
     """Drop a resident-agent protected grant if present."""
-    from vibe.avault_agent import AvaultAgentError
+    from vibe.avault_agent import AvaultAgentClient, AvaultAgentError
 
     _require_avault_p2_surface("resident agent release")
     try:
-        return _avault_agent_client().release(scope_type=scope_type, scope_ref=scope_ref)
+        return AvaultAgentClient(_avault_agent_manager().socket_path, timeout=1.0).release(scope_type=scope_type, scope_ref=scope_ref)
     except AvaultAgentError as exc:
         raise AvaultError(str(exc)) from exc
+
+
+def release_vault_agent_scopes(scopes: list[dict[str, str]], *, reason: str) -> None:
+    seen: set[tuple[str, str]] = set()
+    for scope in scopes:
+        scope_type = str(scope.get("scope_type") or "")
+        scope_ref = str(scope.get("scope_ref") or "")
+        if not scope_type or not scope_ref:
+            continue
+        key = (scope_type, scope_ref)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            avault_agent_release(scope_type=scope_type, scope_ref=scope_ref)
+        except AvaultError:
+            logger.warning("%s: failed to release resident agent grant %s:%s", reason, scope_type, scope_ref, exc_info=True)
 
 
 def avault_agent_deliver_run(

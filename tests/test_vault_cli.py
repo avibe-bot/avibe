@@ -79,6 +79,25 @@ def _set_protected_grant(name: str, *, session_id: str | None = None) -> dict:
         )
 
 
+def _set_group_grant(names: list[str], *, group: str = "crypto", session_id: str | None = None) -> dict:
+    with cli._open_vault_engine().begin() as conn:
+        for name in names:
+            vault_service.create_secret(conn, name=name, protection="protected", group=group, sealed=_sealed(name.lower()))
+        req = vault_service.create_access_request(
+            conn,
+            names[0],
+            requester={"source": "cli", "session_id": session_id} if session_id else {"source": "cli"},
+            delivery={"session_id": session_id, "mode": "run"} if session_id else {"mode": "run"},
+        )
+        return vault_service.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref=group,
+            session_id=session_id,
+            created_by_request_id=req["id"],
+        )
+
+
 @pytest.mark.parametrize(
     "specs,expected",
     [
@@ -207,6 +226,32 @@ def test_run_delivers_protected_secret_under_agent_grant(tmp_path, capfd, monkey
     assert "value" not in repr(deliver.call_args.kwargs)
     with cli._open_vault_engine().connect() as conn:
         assert vault_service.get_secret_meta(conn, "PROTECTED_KEY")["use_count"] == 1
+
+
+def test_run_prefers_common_grant_for_protected_batch(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    monkeypatch.chdir(tmp_path)
+    group_grant = _set_group_grant(["A_KEY", "B_KEY"])
+    with cli._open_vault_engine().begin() as conn:
+        req = vault_service.create_access_request(
+            conn,
+            "A_KEY",
+            requester={"source": "cli"},
+            delivery={"mode": "run"},
+        )
+        vault_service.create_grant(conn, scope_type="secret", scope_ref="A_KEY", created_by_request_id=req["id"])
+    deliver = Mock(return_value={"exit_code": 0, "stdout": b"", "stderr": b""})
+    monkeypatch.setattr(api, "avault_agent_deliver_run", deliver)
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(_ns(env=["A_KEY", "B_KEY"], command_argv=["python3", "-c", "pass"]))
+
+    assert code == 0
+    deliver.assert_called_once()
+    assert deliver.call_args.kwargs["scope_type"] == group_grant["scope_type"]
+    assert deliver.call_args.kwargs["scope_ref"] == group_grant["scope_ref"]
+    assert [secret["name"] for secret in deliver.call_args.kwargs["secrets"]] == ["A_KEY", "B_KEY"]
 
 
 def test_run_rejects_mixed_tiers_before_creating_approval(tmp_path, capfd, monkeypatch):

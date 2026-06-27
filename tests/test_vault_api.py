@@ -393,6 +393,34 @@ def test_revoke_grant_keeps_agent_scope_when_other_active_grant_exists(monkeypat
         assert vault_service.find_active_grant_for_secret(conn, "GRANT_KEY", session_id="ses_2")["id"] == grant_2["id"]
 
 
+def test_delete_protected_secret_releases_agent_scope(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_release = Mock(return_value={"released": True})
+    monkeypatch.setattr(api, "avault_agent_release", agent_release)
+    api.create_vault_secret(
+        {"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}}
+    )
+    with api._vault_engine().begin() as conn:
+        req = vault_service.create_access_request(
+            conn,
+            "GRANT_KEY",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        vault_service.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="GRANT_KEY",
+            session_id="ses_1",
+            created_by_request_id=req["id"],
+        )
+
+    removed = api.delete_vault_secret("GRANT_KEY")
+
+    assert removed["removed"] is True
+    agent_release.assert_called_once_with(scope_type="secret", scope_ref="GRANT_KEY")
+
+
 def test_agent_grant_rejects_pubkey_mismatch(monkeypatch):
     agent_client = Mock()
     monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)

@@ -145,6 +145,7 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
     assert result["status"] == "archived"
     assert result["agent_status"] == "idle"
     assert result["reclaimed"] == {"tasks": 1, "watches": 1, "runs": 2, "queued": 0}
+    assert result["revoked_vault_grant_scopes"] == [{"scope_type": "secret", "scope_ref": "ARCHIVE_KEY"}]
 
     with engine.connect() as conn:
         live_defs = (

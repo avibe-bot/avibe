@@ -192,6 +192,7 @@ class AvaultAgentManager:
         self._lock = threading.RLock()
         self._output_lock = threading.Lock()
         self._process: subprocess.Popen | None = None
+        self._owned_socket_identity: tuple[int, int] | None = None
         self._stdout = bytearray()
         self._stderr = bytearray()
 
@@ -208,6 +209,7 @@ class AvaultAgentManager:
                 self._terminate_process_locked()
             self._spawn_locked()
             self._wait_for_socket_locked()
+            self._owned_socket_identity = _socket_identity(self.socket_path)
 
     def reset(self) -> None:
         with self._lock:
@@ -264,6 +266,7 @@ class AvaultAgentManager:
     def _terminate_process_locked(self) -> None:
         proc = self._process
         self._process = None
+        self._owned_socket_identity = None
         if proc is None or proc.poll() is not None:
             return
         proc.terminate()
@@ -273,10 +276,30 @@ class AvaultAgentManager:
             proc.kill()
             proc.wait(timeout=2)
 
+    def _has_owned_process_locked(self) -> bool:
+        return self._process is not None and self._process.poll() is None
+
+    def _has_owned_socket_locked(self) -> bool:
+        return self._owned_socket_identity is not None and self._owned_socket_identity == _socket_identity(self.socket_path)
+
+    def _ensure_owned_agent_running_locked(self) -> None:
+        if self._has_owned_process_locked() and self._has_owned_socket_locked():
+            if self._socket_responds():
+                return
+            self._terminate_process_locked()
+        elif self._has_owned_process_locked():
+            self._terminate_process_locked()
+        _ensure_agent_socket_parent(self.socket_path.parent)
+        _unlink_agent_socket(self.socket_path)
+        self._spawn_locked()
+        self._wait_for_socket_locked()
+        self._owned_socket_identity = _socket_identity(self.socket_path)
+
     def request_with_output(self, request: Callable[[AvaultAgentClient], dict[str, Any]]) -> tuple[dict[str, Any], dict[str, bytes]]:
         with self._lock:
+            self._ensure_owned_agent_running_locked()
             self._clear_output()
-            result = request(self.client(timeout=None))
+            result = request(AvaultAgentClient(self.socket_path, timeout=None))
             output = self._drain_output()
         return result, output
 
@@ -320,6 +343,25 @@ def _remove_stale_agent_socket(path: Path) -> None:
             return
     except OSError:
         path.unlink(missing_ok=True)
+
+
+def _unlink_agent_socket(path: Path) -> None:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if stat.S_ISSOCK(mode):
+        path.unlink(missing_ok=True)
+
+
+def _socket_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISSOCK(info.st_mode):
+        return None
+    return (info.st_dev, info.st_ino)
 
 
 def _missing_binary_resolver() -> str:

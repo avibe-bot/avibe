@@ -286,6 +286,18 @@ def _grant_row_payload(row: dict[str, Any], *, cache: VaultGrantRuntimeCache = G
     }
 
 
+def _unique_grant_scopes(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    seen: set[tuple[str, str]] = set()
+    scopes: list[dict[str, str]] = []
+    for row in rows:
+        key = (str(row["scope_type"]), str(row["scope_ref"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        scopes.append({"scope_type": key[0], "scope_ref": key[1]})
+    return scopes
+
+
 def _hydrate_card_unlock_material(conn: Connection, row: dict[str, Any], card: dict[str, Any]) -> dict[str, Any]:
     card = dict(card)
     secret_name = row.get("secret_name")
@@ -644,6 +656,13 @@ def get_envelope(conn: Connection, name: str) -> Sealed:
     row = _require_row(conn, name)
     if row.get("protection") != "standard":
         raise UnsupportedProtectionError(f"{name} is protected-tier (resident grant delivery is not wired yet)")
+    return _row_sealed(row)
+
+
+def get_protected_envelope(conn: Connection, name: str) -> Sealed:
+    row = _require_row(conn, name)
+    if row.get("protection") != "protected":
+        raise UnsupportedProtectionError(f"{name} is standard-tier")
     return _row_sealed(row)
 
 
@@ -1182,12 +1201,30 @@ def _expire_active_grants_for_secret(
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
     reason: str = "grant-expired",
 ) -> int:
-    rows = [
+    rows = active_grant_rows_for_secret(conn, secret_name)
+    return _expire_grant_rows(conn, rows, cache=cache, reason=reason)
+
+
+def active_grant_rows_for_secret(conn: Connection, secret_name: str) -> list[dict[str, Any]]:
+    return [
         dict(row)
         for row in conn.execute(select(vault_grants).where(vault_grants.c.status == "active")).mappings()
         if secret_name in (_loads(row.get("member_snapshot")) or [])
     ]
-    return _expire_grant_rows(conn, rows, cache=cache, reason=reason)
+
+
+def active_grant_scopes_for_secret(conn: Connection, secret_name: str) -> list[dict[str, str]]:
+    return _unique_grant_scopes(active_grant_rows_for_secret(conn, secret_name))
+
+
+def active_grant_scopes_for_session(conn: Connection, session_id: str) -> list[dict[str, str]]:
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            select(vault_grants).where(vault_grants.c.status == "active", vault_grants.c.session_id == session_id)
+        ).mappings()
+    ]
+    return _unique_grant_scopes(rows)
 
 
 def expire_grant(
@@ -1650,6 +1687,43 @@ def find_active_grant_for_secret(
             continue
         return _grant_row_payload(row, cache=cache)
     return None
+
+
+def find_active_grant_for_secrets(
+    conn: Connection,
+    secret_names: list[str],
+    *,
+    session_id: str | None = None,
+    cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+) -> dict[str, Any] | None:
+    expire_grants(conn, cache=cache)
+    requested = {str(name) for name in secret_names if str(name)}
+    if not requested:
+        return None
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            select(vault_grants).where(
+                vault_grants.c.status == "active",
+                or_(vault_grants.c.session_id.is_(None), vault_grants.c.session_id == session_id),
+            )
+        ).mappings()
+    ]
+    candidates: list[tuple[int, str, str, dict[str, Any]]] = []
+    for row in rows:
+        members = _loads(row.get("member_snapshot")) or []
+        member_set = {str(name) for name in members if isinstance(name, str) and name}
+        if not requested.issubset(member_set):
+            continue
+        candidates.append((len(member_set), str(row.get("created_at") or ""), str(row.get("id") or ""), row))
+    if not candidates:
+        return None
+    member_count = min(item[0] for item in candidates)
+    _, _, _, row = max(
+        (item for item in candidates if item[0] == member_count),
+        key=lambda item: (item[1], item[2]),
+    )
+    return _grant_row_payload(row, cache=cache)
 
 
 def resolve_secret_access(

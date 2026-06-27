@@ -5124,6 +5124,12 @@ async def sessions_archive(session_id: str):
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
 
+    revoked_vault_scopes = session.pop("revoked_vault_grant_scopes", [])
+    if revoked_vault_scopes:
+        from vibe import api
+
+        api.release_vault_agent_scopes(revoked_vault_scopes, reason=f"archive_session:{session_id}")
+
     # Broadcast + return immediately — the archive is already committed. Other
     # mounted clients (sidebars, tabs) drop the row live and leave the chat if
     # they're viewing it (mirrors the rename 'updated' event).
