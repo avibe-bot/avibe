@@ -38,3 +38,22 @@ Branch: `feat/apps-windowing-polish` off origin/master.
 Build strictly to the frames → `npm run build` + UI vitest green → **Codex views it
 in a real browser and cross-checks each app vs its design frame for omissions** →
 open PR (not draft) → Codex review loop to pass → Alex eyeballs.
+
+## Drifts caught by the self visual cross-check (fixed pre-Codex)
+Running the branch in a real browser (chrome-devtools) against the frames surfaced
+four drifts that build-green never would — the exact reason for the visual gate:
+- **Editor had a redundant header.** Each tab rendered the FileEditorPane's own
+  `filename + Save` bar on top of the editor tab → two headers. `dnYPx` shows tabs →
+  Monaco directly. Fixed: `FileEditorPane` gains a `chromeless` mode (used by the IDE);
+  save is now ⌘S (wired through Monaco), dirty shows as the tab dot.
+- **Editor status bar showed the file path**, not `Ln x, Col y · Spaces: 2 · <Lang>`
+  as in `dnYPx`. Fixed: live cursor + language surfaced from Monaco into the bar.
+- **Terminal scrollback was dead.** tmux drives the outer terminal's ALTERNATE screen,
+  so the browser xterm keeps no scrollback and the wheel did nothing. Root-cause fix:
+  the tmux launch now sets `mouse on` (wheel → tmux copy-mode history) + `set-clipboard on`
+  (selection → OSC 52 clipboard). The fill-height half was the RAF-refit from the rebuild.
+- **Maximize did not cover the sidebar.** The `<aside>` was `z-30` (and `position:fixed`
+  always forms a stacking context), so the whole sidebar floated above the window layer.
+  Fixed per `If1Tt`: aside un-stacked so a maximized window covers the nav; a second Apps
+  launcher (`FloatingApps`) renders outside the aside and shows only while maximized, so
+  the Dock stays reachable on top.
