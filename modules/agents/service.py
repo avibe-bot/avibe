@@ -253,6 +253,22 @@ class AgentService:
         gate = self._turn_gates.get(runtime_key)
         return bool(gate is not None and gate.token == runtime_token and gate.runtime_started)
 
+    @staticmethod
+    def _lock_has_live_waiters(lock: asyncio.Lock) -> bool:
+        """True when ``lock`` has at least one not-yet-cancelled queued waiter.
+
+        ``asyncio.Lock.locked()`` reports only whether the lock is HELD, not whether
+        coroutines are queued waiting for it — but acquiring a lock that is free yet
+        has waiters still suspends. ``begin_agent_initiated_turn`` needs this signal
+        to stay strictly non-blocking. ``_waiters`` is a CPython asyncio internal (a
+        deque or ``None``); guarded with ``getattr`` so a future runtime that drops
+        it degrades to "no waiters" instead of raising.
+        """
+        waiters = getattr(lock, "_waiters", None)
+        if not waiters:
+            return False
+        return any(not w.cancelled() for w in waiters)
+
     async def begin_agent_initiated_turn(
         self, agent_name: str, context: Any, runtime_key: str
     ) -> Optional[str]:
@@ -269,18 +285,26 @@ class AgentService:
         notify + gate release) as a user turn.
 
         Returns the fresh turn token when the gate was free and a turn was opened,
-        else ``None`` when a real turn already holds the gate (let it own the
-        output — the agent-initiated emit then adopts that turn's token instead).
+        else ``None`` when the gate is contended (a user turn holds OR is queued on
+        it) — let that turn own the output; the agent-initiated emit then adopts its
+        token instead.
 
-        Acquiring a FREE ``asyncio.Lock`` never suspends, so the ``locked()`` check
-        and ``acquire()`` run in one event-loop step: a concurrent user turn can
-        not slip between them and double-open the gate.
+        STRICTLY NON-BLOCKING: this runs ON the long-lived Claude receiver, which is
+        the only reader of the SDK stream. An ``asyncio.Lock`` can be momentarily
+        unlocked while it still has QUEUED WAITERS (a user turn that blocked on this
+        gate while the previous turn held it, between that turn's release and the
+        waiter resuming). In that window ``locked()`` is False, yet
+        ``await acquire()`` would SUSPEND the receiver behind the queued user turn —
+        and the receiver is what reads that turn's terminal result to release the
+        gate, so the session would deadlock. So bail unless the gate is free AND has
+        no live waiters; the ``acquire()`` below then completes synchronously
+        without yielding, so no concurrent turn can slip in (Codex P1).
         """
         runtime_key = str(runtime_key or "").strip()
         if not runtime_key:
             return None
         gate = self._get_turn_gate(runtime_key)
-        if gate.lock.locked():
+        if gate.lock.locked() or self._lock_has_live_waiters(gate.lock):
             return None
         await gate.lock.acquire()
         gate.token = uuid.uuid4().hex

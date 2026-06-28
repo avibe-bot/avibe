@@ -163,6 +163,27 @@ separate, broader change (it also affects normal turns) left as a follow-up.
   `_consume_suppressed_synthetic_result` / cleanup, so real later turns still
   open). Regression test:
   `test_suppressed_synthetic_result_does_not_open_a_turn`.
+- **Codex P1 — receiver deadlock on queued gate waiters.** `asyncio.Lock` can be
+  momentarily unlocked while it still has queued waiters (a user turn that blocked
+  on the gate while the previous turn held it). `locked()` is False in that window,
+  so `await gate.lock.acquire()` would SUSPEND the long-lived Claude receiver
+  behind the queued user turn — and the receiver is the only reader of that turn's
+  terminal result (which releases the gate), so the session deadlocks. Fix:
+  `begin_agent_initiated_turn` is now strictly non-blocking — it bails unless the
+  gate is free AND has no live waiters (`_lock_has_live_waiters`), so the
+  `acquire()` completes synchronously. Regression test:
+  `test_does_not_block_when_a_user_turn_is_queued_on_the_gate`.
+- **Codex P2 — Stop control for agent-initiated turns (DEFERRED, follow-up).**
+  `begin_agent_initiated_turn` writes session status `running` but does not add a
+  `Turn` to `SessionTurnManager.in_flight` or publish `turn.start`, so the
+  Workbench cancel endpoint returns `not_in_flight` — a long-running
+  agent-initiated turn shows running but has no working Stop button. Deferred:
+  doing it right is real FSM work (a `Turn` needs a cancelable task; `in_flight`
+  must be popped on every agent-initiated terminal/EOF/error/cancel path;
+  `turn.start`/`turn.end` published; reset-stale interaction) — a medium change
+  with its own review/test surface, not a bugfix-PR add-on. Agent-initiated turns
+  are typically short (report a result and end) and still settle themselves on
+  their terminal result, so the gap is narrow. Tracked as a follow-up issue.
 
 ## Backend parity (Codex / OpenCode)
 

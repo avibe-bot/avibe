@@ -17,6 +17,7 @@ user turn.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -155,6 +156,32 @@ class BeginAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(token)
         # Untouched: the real turn still owns the gate.
         self.assertEqual(gate.token, "R1")
+
+    async def test_does_not_block_when_a_user_turn_is_queued_on_the_gate(self):
+        # Regression (Codex P1): an asyncio.Lock can be momentarily unlocked while
+        # it still has QUEUED WAITERS (a user turn that blocked on the gate while
+        # the previous turn held it). locked() is False then, but awaiting acquire()
+        # would suspend the long-lived receiver behind the queued user turn —
+        # deadlocking the session (the receiver is what reads that turn's result to
+        # release the gate). begin must be strictly non-blocking when a waiter exists.
+        agent, service = _build_agent()
+        runtime_key = "S:/w"
+        gate = service._get_turn_gate(runtime_key)
+        await gate.lock.acquire()  # "turn A" holds the gate
+        waiter = asyncio.ensure_future(gate.lock.acquire())  # "turn B" queues
+        await asyncio.sleep(0)  # let B register as a waiter
+        try:
+            # The deadlock window: A releases → lock unlocked but B still queued.
+            gate.lock.release()
+            context = SimpleNamespace(platform_specific={"agent_session_id": "s"})
+            token = await asyncio.wait_for(
+                service.begin_agent_initiated_turn("claude", context, runtime_key),
+                timeout=1.0,  # wait_for proves it returned without suspending behind B
+            )
+            self.assertIsNone(token)
+        finally:
+            await waiter  # B acquires
+            gate.lock.release()
 
     async def test_suppressed_synthetic_result_does_not_open_a_turn(self):
         # Regression (Codex P1): a malformed-tool-use synthetic error pops the
