@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ClipboardCopy, TextSelect } from 'lucide-react';
 import * as monaco from 'monaco-editor';
@@ -98,14 +98,31 @@ export interface MonacoEditorProps {
   /** Resolved app theme — drives the dark VS Code theme vs the light one. */
   dark?: boolean;
   onChange?: (value: string) => void;
+  /** Save the file — bound to ⌘S / Ctrl+S inside the editor (the IDE has no visible save button). */
+  onSave?: () => void;
+  /** Live 1-based cursor position, for an IDE status bar (`Ln x, Col y`). */
+  onCursorChange?: (line: number, column: number) => void;
 }
 
-export default function MonacoEditor({ value, language, path, readOnly, dark = true, onChange }: MonacoEditorProps) {
+export default function MonacoEditor({ value, language, path, readOnly, dark = true, onChange, onSave, onCursorChange }: MonacoEditorProps) {
   const { t } = useTranslation();
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
+  // Keep the latest callbacks in refs: the ⌘S command + cursor listener are bound
+  // once on mount (Monaco can't cleanly rebind a command), so they must read live
+  // closures rather than capture the first render's.
+  const onSaveRef = useRef(onSave);
+  const onCursorRef = useRef(onCursorChange);
+  useEffect(() => {
+    onSaveRef.current = onSave;
+    onCursorRef.current = onCursorChange;
+  });
 
   const handleMount: OnMount = (editor) => {
     editorRef.current = editor;
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => onSaveRef.current?.());
+    const pos = editor.getPosition();
+    if (pos) onCursorRef.current?.(pos.lineNumber, pos.column);
+    editor.onDidChangeCursorPosition((e) => onCursorRef.current?.(e.position.lineNumber, e.position.column));
   };
   const handleChange: OnChange = (next) => onChange?.(next ?? '');
 

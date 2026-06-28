@@ -613,6 +613,8 @@
       "openFolderPrompt": "要打开的文件夹路径",
       "browseFiles": "浏览文件…",
       "selectFileHint": "从左侧资源管理器选择文件进行编辑",
+      "lineCol": "行 {{line}}，列 {{col}}",
+      "spaces": "空格：{{n}}",
       "empty": "未打开文件",
       "emptyHint": "从「文件」中打开一个文件，在这里编辑。",
       "openInWindow": "在编辑器窗口中打开",

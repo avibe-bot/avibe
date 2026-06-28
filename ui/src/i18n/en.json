@@ -613,6 +613,8 @@
       "openFolderPrompt": "Folder path to open",
       "browseFiles": "Browse Files…",
       "selectFileHint": "Select a file from the explorer to edit",
+      "lineCol": "Ln {{line}}, Col {{col}}",
+      "spaces": "Spaces: {{n}}",
       "empty": "No file open",
       "emptyHint": "Open a file from Files to edit it here.",
       "openInWindow": "Open in editor window",

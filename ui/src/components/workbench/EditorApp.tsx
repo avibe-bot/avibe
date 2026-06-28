@@ -17,6 +17,49 @@ function dirOf(path: string): string {
   return '/' + parts.join('/');
 }
 
+// Human language label for the status bar (design dnYPx shows e.g. "TypeScript React").
+const LANGUAGE_LABEL: Record<string, string> = {
+  ts: 'TypeScript',
+  tsx: 'TypeScript React',
+  cts: 'TypeScript',
+  mts: 'TypeScript',
+  js: 'JavaScript',
+  jsx: 'JavaScript React',
+  cjs: 'JavaScript',
+  mjs: 'JavaScript',
+  json: 'JSON',
+  jsonc: 'JSON',
+  css: 'CSS',
+  scss: 'SCSS',
+  less: 'Less',
+  html: 'HTML',
+  md: 'Markdown',
+  markdown: 'Markdown',
+  py: 'Python',
+  rb: 'Ruby',
+  go: 'Go',
+  rs: 'Rust',
+  java: 'Java',
+  c: 'C',
+  cpp: 'C++',
+  cs: 'C#',
+  php: 'PHP',
+  sh: 'Shell',
+  bash: 'Shell',
+  yml: 'YAML',
+  yaml: 'YAML',
+  toml: 'TOML',
+  sql: 'SQL',
+};
+
+function languageLabel(filename: string | undefined): string {
+  if (!filename) return 'Plain Text';
+  const lower = filename.toLowerCase();
+  if (lower === 'dockerfile') return 'Dockerfile';
+  const ext = lower.includes('.') ? lower.split('.').pop()! : '';
+  return LANGUAGE_LABEL[ext] ?? 'Plain Text';
+}
+
 // The Editor IDE (design dnYPx + welcome w0qoC): activity bar + collapsible explorer tree +
 // editor tabs + Monaco + cyan status bar; a VS-Code-style welcome when nothing is open.
 // Monaco is fully integrated here. Files opens a file via openApp('editor', { params: { path } }).
@@ -27,11 +70,13 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [active, setActive] = useState<string | null>(null);
   const [dirty, setDirty] = useState<Record<string, boolean>>({});
+  const [cursor, setCursor] = useState<{ line: number; col: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const openFile = useCallback((path: string, name: string) => {
     setRoot((r) => r ?? dirOf(path));
     setTabs((ts) => (ts.some((x) => x.path === path) ? ts : [...ts, { path, name }]));
+    setCursor(null);
     setActive(path);
   }, []);
 
@@ -123,7 +168,14 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                         active === tab.path ? 'bg-[#0b0b14] text-foreground shadow-[inset_0_2px_0_0_var(--cyan)]' : 'text-muted hover:bg-foreground/[0.04]',
                       )}
                     >
-                      <button type="button" onClick={() => setActive(tab.path)} className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (tab.path !== active) setCursor(null);
+                          setActive(tab.path);
+                        }}
+                        className="flex items-center gap-1.5"
+                      >
                         <CodeXml className="size-3.5 text-cyan" />
                         {tab.name}
                         {dirty[tab.path] && <span className="size-1.5 rounded-full bg-mint" />}
@@ -154,7 +206,9 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                           path={tab.path}
                           filename={tab.name}
                           mtime={null}
+                          chromeless
                           onDirtyChange={(d) => setDirty((prev) => (prev[tab.path] === d ? prev : { ...prev, [tab.path]: d }))}
+                          onCursor={active === tab.path ? (line, col) => setCursor({ line, col }) : undefined}
                         />
                       </Suspense>
                     </div>
@@ -174,7 +228,15 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
         <span className="flex items-center gap-1.5">
           <CircleCheck className="size-3" /> 0 ⚠ 0
         </span>
-        <span className="ml-auto truncate">{active ?? t('apps.editor.label')}</span>
+        {active ? (
+          <>
+            <span className="ml-auto tabular-nums">{t('apps.editor.lineCol', { line: cursor?.line ?? 1, col: cursor?.col ?? 1 })}</span>
+            <span>{t('apps.editor.spaces', { n: 2 })}</span>
+            <span className="truncate">{languageLabel(tabs.find((x) => x.path === active)?.name)}</span>
+          </>
+        ) : (
+          <span className="ml-auto truncate opacity-80">{t('apps.editor.label')}</span>
+        )}
       </div>
     </div>
   );
