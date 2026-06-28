@@ -362,6 +362,19 @@ def test_terminal_tmux_launch_command_uses_safe_session():
         "-g",
         "status",
         "off",
+        # mouse mode routes the browser xterm's wheel into tmux copy-mode so history is
+        # scrollable (tmux owns the alternate screen); set-clipboard lets a selection reach
+        # the system clipboard via OSC 52.
+        ";",
+        "set-option",
+        "-g",
+        "mouse",
+        "on",
+        ";",
+        "set-option",
+        "-g",
+        "set-clipboard",
+        "on",
     ]
     assert _tmux_socket_name().startswith("avibe-")
 
