@@ -2119,6 +2119,30 @@
     "deleteConfirm": "删除密钥「{{name}}」？Agent 将无法再使用它。",
     "deleted": "已删除 {{name}}",
     "created": "已保存 {{name}}",
+    "protected": {
+      "checking": "正在检查你的保护层…",
+      "unlocked": "保护层已在本会话解锁",
+      "lock": "锁定",
+      "setupTitle": "设置你的保护层",
+      "unlockTitle": "解锁以添加保护层密钥",
+      "setupHelp": "选择在浏览器里如何解锁保护层密钥。机器单独永远无法解密。",
+      "unlockHelp": "确认你的解锁因子,用现有的保护层主密钥封装这条密钥。",
+      "setupPasskey": "用 passkey 设置",
+      "unlockPasskey": "用 passkey 解锁",
+      "usePasswordInstead": "改用密码(较弱)",
+      "setPasswordLabel": "保护层密码",
+      "passwordLabel": "保护层密码",
+      "passwordPlaceholder": "输入一个强密码",
+      "setupPasswordCta": "设置",
+      "unlockCta": "解锁",
+      "passwordLessSecure": "密码不如 passkey 安全——任何人知道它都能解锁这个保护层。",
+      "errors": {
+        "prfUnavailable": "这个 passkey/浏览器不支持加密所需的 PRF 扩展。请用平台 passkey(Touch ID / Windows Hello)或改用密码。",
+        "cancelled": "passkey 提示被取消了。",
+        "noPasskey": "这个保护层没有配置 passkey。请用密码。",
+        "wrongFactor": "无法解锁——密码或 passkey 不对。"
+      }
+    },
     "dialog": {
       "title": "添加密钥",
       "name": "名称",

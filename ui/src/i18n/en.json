@@ -2120,6 +2120,30 @@
     "deleteConfirm": "Delete secret \"{{name}}\"? Agents will no longer be able to use it.",
     "deleted": "Deleted {{name}}",
     "created": "Saved {{name}}",
+    "protected": {
+      "checking": "Checking your protected vault…",
+      "unlocked": "Protected vault unlocked for this session",
+      "lock": "Lock",
+      "setupTitle": "Set up your protected vault",
+      "unlockTitle": "Unlock to add a protected secret",
+      "setupHelp": "Choose how to unlock protected secrets in the browser. The machine alone can never decrypt them.",
+      "unlockHelp": "Confirm your unlock factor to seal this secret under your existing vault key.",
+      "setupPasskey": "Set up with a passkey",
+      "unlockPasskey": "Unlock with passkey",
+      "usePasswordInstead": "Use a password instead (less secure)",
+      "setPasswordLabel": "Vault password",
+      "passwordLabel": "Vault password",
+      "passwordPlaceholder": "Enter a strong password",
+      "setupPasswordCta": "Set up",
+      "unlockCta": "Unlock",
+      "passwordLessSecure": "A password is less secure than a passkey — anyone who learns it can unlock this vault.",
+      "errors": {
+        "prfUnavailable": "This passkey/browser doesn't support the PRF extension needed for encryption. Try a platform passkey (Touch ID / Windows Hello) or use a password.",
+        "cancelled": "Passkey prompt was cancelled.",
+        "noPasskey": "No passkey is configured for this vault. Use your password.",
+        "wrongFactor": "Couldn't unlock — wrong password or passkey."
+      }
+    },
     "dialog": {
       "title": "Add a secret",
       "name": "Name",
