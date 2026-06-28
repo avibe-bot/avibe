@@ -219,27 +219,22 @@ export function useProtectedVault() {
 
   /** Seal a value under the unlocked VMK into a stored protected envelope. */
   const sealValue = useCallback(
-    async (name: string, value: string): Promise<ProtectedRecordEnvelope> => {
+    async (name: string, value: string): Promise<{ envelope: ProtectedRecordEnvelope; establishingVmk: boolean }> => {
       const { vmk, wrapMeta, freshSetup } = sessionVault;
       if (!vmk || !wrapMeta) throw new Error('vault-locked');
-      if (freshSetup) {
-        // Guard against a concurrent first-time setup (another tab) splitting the VMK:
-        // if a vault now exists, this fresh VMK is stale — refuse and force a reload.
-        try {
-          const res = await api.getVaultVmk();
-          if (res?.ok && res.exists) throw new Error('vault-already-initialized');
-        } catch (err) {
-          if (err instanceof Error && err.message === 'vault-already-initialized') throw err;
-          // Discovery failure here is best-effort; don't block the create.
-        }
-      }
       const sealed = await sealProtected(new TextEncoder().encode(value), vmk, { name });
-      const envelope = packProtectedRecord(sealed, wrapMeta);
-      sessionVault.freshSetup = false;
-      return envelope;
+      // `establishingVmk` lets the create transaction enforce the atomic single-init
+      // guard server-side (a UI re-check here can't be race-free); the daemon rejects a
+      // second VMK so concurrent first-time setups can't split the key history.
+      return { envelope: packProtectedRecord(sealed, wrapMeta), establishingVmk: freshSetup };
     },
-    [api],
+    [],
   );
+
+  const afterCreated = useCallback(() => {
+    // The vault now exists server-side; subsequent creates this session aren't "establishing".
+    sessionVault.freshSetup = false;
+  }, []);
 
   const lock = useCallback(() => {
     sessionVault.vmk?.fill(0);
@@ -258,5 +253,5 @@ export function useProtectedVault() {
     }
   }, []);
 
-  return { status, error, setError, refresh, setupPassword, setupPasskey, unlockPassword, unlockPasskey, sealValue, lock, hasPasskey };
+  return { status, error, setError, refresh, setupPassword, setupPasskey, unlockPassword, unlockPasskey, sealValue, afterCreated, lock, hasPasskey };
 }

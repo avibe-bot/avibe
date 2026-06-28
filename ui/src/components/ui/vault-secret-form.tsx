@@ -5,7 +5,7 @@ import { useTranslation } from 'react-i18next';
 
 import { ApiError, useApi, type DependencyItem } from '@/context/ApiContext';
 import { cn } from '@/lib/utils';
-import { sealBlindBox, standardCreateBlindBoxContext } from '@/lib/vaultCrypto';
+import { sealBlindBox, standardCreateBlindBoxContext, type ProtectedRecordEnvelope } from '@/lib/vaultCrypto';
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { Button } from './button';
 import { Combobox } from './combobox';
@@ -140,26 +140,39 @@ export const VaultSecretForm: React.FC<{
         policy: hosts.length ? { allowed_hosts: hosts } : undefined,
       };
       let cryptoFields:
-        | { sealed: Awaited<ReturnType<typeof protectedVault.sealValue>> }
+        | { sealed: ProtectedRecordEnvelope }
         | { blind_box: Awaited<ReturnType<typeof sealBlindBox>> }
         | { value: string };
+      let establishingVmk = false;
       if (protection === 'protected') {
         // Browser-sealed under the session VMK; the daemon stores it opaquely (no avault, no plaintext).
-        cryptoFields = { sealed: await protectedVault.sealValue(secretName, value) };
+        const sealed = await protectedVault.sealValue(secretName, value);
+        cryptoFields = { sealed: sealed.envelope };
+        establishingVmk = sealed.establishingVmk;
       } else if (p2Ready) {
         const pubkey = await api.getVaultPubkey();
         cryptoFields = { blind_box: await sealBlindBox(value, pubkey, standardCreateBlindBoxContext(secretName)) };
       } else {
         cryptoFields = { value };
       }
-      const created = await api.createVaultSecret({ ...base, ...cryptoFields }, { handleError: false });
+      const created = await api.createVaultSecret(
+        { ...base, ...cryptoFields, ...(establishingVmk ? { establishing_vmk: true } : {}) },
+        { handleError: false },
+      );
       if (!created.ok) {
         if (created.code === 'secret_exists') {
           handleExistingSecret();
           return;
         }
+        if (created.code === 'vault_already_initialized') {
+          // Another tab established the vault first — force a reload/unlock instead of splitting keys.
+          setError(t('vaults.protectedUnlock.errors.alreadyInitialized'));
+          protectedVault.lock();
+          return;
+        }
         throw new Error(created.message || created.code || t('vaults.request.saveFailed'));
       }
+      if (protection === 'protected') protectedVault.afterCreated();
       setValue('');
       onCreated(secretName, 'created');
     } catch (err: unknown) {

@@ -101,6 +101,8 @@ export type VaultCreatePayload = {
   signer_kind?: string | null;
   policy?: Record<string, unknown>;
   public_meta?: Record<string, unknown>;
+  /** Set on the first protected secret so the daemon atomically guards single VMK init. */
+  establishing_vmk?: boolean;
 };
 
 export type ApiContextType = {

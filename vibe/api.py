@@ -1397,6 +1397,7 @@ def create_vault_secret(payload: dict) -> dict:
     policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else None
     public_meta = payload.get("public_meta") if isinstance(payload.get("public_meta"), dict) else None
     protection = str(payload.get("protection") or "standard").strip().lower()
+    establishing_vmk = bool(payload.get("establishing_vmk"))
     kind = str(payload.get("kind") or "static").strip().lower()
     signer_kind = payload.get("signer_kind")
     if signer_kind is not None:
@@ -1440,11 +1441,14 @@ def create_vault_secret(payload: dict) -> dict:
                 description=payload.get("description"),
                 policy=policy,
                 public_meta=public_meta,
+                establishing_vmk=establishing_vmk,
             )
     except vault_service.InvalidSecretNameError as exc:
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name") from exc
     except vault_service.SecretExistsError as exc:
         raise VaultApiError(f"secret '{name}' already exists", code="secret_exists", status=409) from exc
+    except vault_service.VaultAlreadyInitializedError as exc:
+        raise VaultApiError(str(exc), code="vault_already_initialized", status=409) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
     return {"ok": True, "secret": meta}
