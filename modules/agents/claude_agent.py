@@ -559,6 +559,22 @@ class ClaudeAgent(BaseAgent):
                     message_type = self._detect_message_type(message)
                     formatter = self._get_formatter(context)
 
+                    # Unsolicited backend output (a background-task completion or
+                    # a ScheduleWakeup re-invoked the agent inside this SDK
+                    # process) reaches this long-lived receiver with no Avibe turn
+                    # open. Open an agent-initiated turn so the reply is persisted
+                    # + delivered + notified instead of dropped by the outbound
+                    # active-turn guard. Content messages only — system/user
+                    # frames never carry a user-facing reply.
+                    if message_type in ("assistant", "result"):
+                        await self._maybe_begin_agent_initiated_turn(
+                            context,
+                            composite_key,
+                            base_session_id,
+                            working_path,
+                            session_key,
+                        )
+
                     if message_type == "assistant":
                         toolcalls = []
                         text_parts = []
@@ -1068,6 +1084,73 @@ class ClaudeAgent(BaseAgent):
 
     def _has_pending_requests(self, composite_key: str) -> bool:
         return bool(self._pending_requests.get(composite_key))
+
+    async def _maybe_begin_agent_initiated_turn(
+        self,
+        context: MessageContext,
+        composite_key: str,
+        base_session_id: str,
+        working_path: str,
+        session_key: str,
+    ) -> None:
+        """Open a turn for UNSOLICITED backend output (no Avibe query behind it).
+
+        Claude Code re-invokes the agent loop inside this same SDK process when a
+        background task completes or a ScheduleWakeup fires, streaming a fresh
+        assistant/result run onto this long-lived receiver. The previous turn's
+        terminal result already released the runtime gate and this receiver's
+        reused context still carries that turn's (now stale) token, so the
+        outbound active-turn guard would drop the whole reply — it would never be
+        persisted, delivered, or pushed.
+
+        When output arrives with NO pending request, open an agent-initiated turn
+        and synthesize a pending ``AgentRequest`` for it. The existing
+        assistant/result handlers then treat it exactly like a normal turn (token
+        adoption keeps the gate token live across the assistant→result sequence,
+        the result pops the synthetic request and the dispatcher's result
+        ``finally`` releases the gate, and an EOF/error/cancel settles it through
+        the same paths). No-op when a turn is already in flight for this session
+        (a real user turn, or an agent-initiated turn already opened for an
+        earlier message of this same run).
+        """
+        if self._has_pending_requests(composite_key):
+            return
+        service = getattr(self.controller, "agent_service", None)
+        begin = getattr(service, "begin_agent_initiated_turn", None)
+        if not callable(begin):
+            return
+        payload = getattr(context, "platform_specific", None) or {}
+        runtime_key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip() or composite_key
+        token = await begin(self.name, context, runtime_key)
+        if not token:
+            # A real turn already holds the gate; let its machinery own this emit.
+            return
+        # Mark the session ACTIVE so this in-flight agent-initiated turn gets the
+        # SAME idle-eviction exemption a user turn gets in ``handle_message``.
+        # Without it the turn is protected only by per-message activity touches and
+        # could be reclaimed mid-turn if it goes quiet past the idle timeout (e.g.
+        # it kicks off its own long background work). The terminal result / EOF /
+        # error / cancel paths all mark the session idle again, so this stays
+        # balanced; the stuck-active backstop still reclaims a wedged turn. (The
+        # SILENT wait BEFORE this first output is still bounded by the idle timeout
+        # — once the session is evicted the receiver is gone and no agent-initiated
+        # turn can open. See docs/plans/agent-initiated-turn-outbox.md.)
+        mark_active = getattr(self.session_handler, "mark_session_active", None)
+        if callable(mark_active):
+            mark_active(composite_key)
+        request = AgentRequest(
+            context=context,
+            message="",
+            working_path=working_path,
+            base_session_id=base_session_id,
+            composite_session_id=composite_key,
+            session_key=session_key,
+        )
+        self._pending_requests.setdefault(composite_key, []).append(request)
+        logger.info(
+            "Opened agent-initiated turn for session %s (unsolicited backend output)",
+            composite_key,
+        )
 
     def _mark_session_idle_if_no_pending_requests(self, composite_key: str) -> bool:
         if self._has_pending_requests(composite_key):
