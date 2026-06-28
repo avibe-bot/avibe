@@ -13,7 +13,7 @@ import { ThemeToggle } from './ThemeToggle';
 import { VersionBadge } from './VersionBadge';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { AppsLauncher } from './AppsLauncher';
-import { WindowManagerProvider } from '../context/WindowManagerContext';
+import { WindowManagerProvider, useWindowManager } from '../context/WindowManagerContext';
 import { WindowLayer } from './apps/WindowLayer';
 import { NewSessionSheet } from './workbench/NewSessionSheet';
 import { SearchPalette } from './workbench/search/SearchPalette';
@@ -204,6 +204,23 @@ const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButton }> =
         {right.map((item) => <MobileNavLink key={item.to} item={item} />)}
       </div>
     </nav>
+  );
+};
+
+// When a window is MAXIMIZED it covers the sidebar (design If1Tt), so the in-sidebar Apps
+// launcher is hidden behind it. This floats a second Apps launcher at the bottom-left, ABOVE the
+// window layer, so the Dock stays reachable in full-screen — exactly the "Apps button floats on
+// top" of If1Tt. It must live OUTSIDE the aside: the aside is `position: fixed`, which always
+// forms a stacking context, so anything inside it can't rise above the window layer. Desktop-only
+// (windows are md+). Only one Apps launcher is ever visible — the sidebar's is covered when this shows.
+const FloatingApps: React.FC = () => {
+  const { windows } = useWindowManager();
+  const anyMaximized = windows.some((w) => w.maximized && !w.minimized);
+  if (!anyMaximized) return null;
+  return (
+    <div className="fixed bottom-5 left-4 z-30 hidden w-[184px] md:flex">
+      <AppsLauncher />
+    </div>
   );
 };
 
@@ -571,6 +588,8 @@ export const AppShell: React.FC = () => {
       {/* App windows float over the workbench main area (desktop). The Dock (P2)
           and the AppsLauncher bridge open windows via the WindowManager. */}
       <WindowLayer />
+      {/* The Apps launcher floats back on top when a window is maximized (If1Tt). */}
+      <FloatingApps />
     </div>
     </WindowManagerProvider>
   );
