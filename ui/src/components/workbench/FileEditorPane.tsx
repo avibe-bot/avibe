@@ -213,7 +213,10 @@ export const FileEditorPane: React.FC<{
               language={language}
               path={monacoPath}
               readOnly={readOnly}
-              dark={resolvedTheme === 'dark'}
+              // Monaco is JS-themed (it can't read the window's `data-theme="dark"` CSS), so in the
+              // IDE (chromeless = the always-dark Editor window) force the dark theme; otherwise a
+              // light global theme leaves a white Monaco slab inside a dark window (design dnYPx is dark).
+              dark={chromeless || resolvedTheme === 'dark'}
               onChange={(value) => setText(value)}
               onSave={() => void save()}
               onCursorChange={onCursor}

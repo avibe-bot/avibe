@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Copy, Plus, SquarePlus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -19,8 +19,20 @@ export const Dock: React.FC = () => {
   const minimized = windows.filter((w) => w.minimized);
   const [menuApp, setMenuApp] = useState<AppId | null>(null);
 
+  // The per-tile context menu is a transient popover — Esc dismisses it (the backdrop handles
+  // click-outside). Without this it lingered on screen after the user moved on (Codex).
+  useEffect(() => {
+    if (!menuApp) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenuApp(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [menuApp]);
+
   // Click an app: focus its front window, else un-minimize its top window, else launch one.
   const activate = (appId: AppId) => {
+    setMenuApp(null); // any tile interaction dismisses a lingering context menu
     const own = windows.filter((w) => w.appId === appId);
     const visible = own.filter((w) => !w.minimized);
     if (visible.length > 0) {
