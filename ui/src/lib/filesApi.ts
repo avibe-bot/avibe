@@ -152,6 +152,9 @@ export function downloadFile(path: string): void {
   const a = document.createElement('a');
   a.href = contentUrl(path, true);
   a.rel = 'noopener';
+  // download attr: keep this a download even if the server returns a JSON error (file removed /
+  // permission / auth) instead of an attachment, so the SPA is never navigated to the error body.
+  a.download = '';
   a.style.display = 'none';
   document.body.appendChild(a);
   a.click();

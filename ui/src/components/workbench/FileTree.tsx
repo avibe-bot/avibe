@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Braces, ChevronDown, ChevronRight, FileCode2, FileText, File as FileIcon, Hash, Image as ImageIcon, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 
-import { joinPath, listDir, type FsEntry } from '../../lib/filesApi';
+import { fileBrowserErrorMessage, joinPath, listDir, type FsEntry } from '../../lib/filesApi';
 
 // Icon + accent per file extension (matches the explorer in design dnYPx).
 const EXT: Record<string, { Icon: typeof FileIcon; color: string }> = {
@@ -49,17 +50,25 @@ const Dir: React.FC<{ path: string; name: string; depth: number; activePath: str
   showHidden,
   onOpenFile,
 }) => {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(depth === 0);
   const [entries, setEntries] = useState<FsEntry[] | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
+    setError(null);
     listDir(path, showHidden)
       .then((r) => setEntries(sortEntries(r.entries)))
-      .catch(() => setEntries([]))
+      .catch((e: unknown) => {
+        // Don't render an unlistable folder as an empty one — surface the failure so the user
+        // knows entries are hidden by an error (permission/deletion/transient), not absent.
+        setEntries([]);
+        setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.listFailed')));
+      })
       .finally(() => setLoading(false));
-  }, [path, showHidden]);
+  }, [path, showHidden, t]);
 
   useEffect(() => {
     if (open && entries === null) load();
@@ -83,6 +92,11 @@ const Dir: React.FC<{ path: string; name: string; depth: number; activePath: str
           {loading && entries === null && (
             <div style={{ paddingLeft: 8 + (depth + 1) * 14 }} className="py-1">
               <Loader2 className="size-3.5 animate-spin text-muted" />
+            </div>
+          )}
+          {error && (
+            <div style={{ paddingLeft: 8 + (depth + 1) * 14 }} className="truncate py-1 pr-2 text-[11.5px] text-destructive" title={error}>
+              {error}
             </div>
           )}
           {entries?.map((e) =>

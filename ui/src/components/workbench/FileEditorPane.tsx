@@ -145,7 +145,9 @@ export const FileEditorPane: React.FC<{
   useWindowCloseGuard(windowId, dirty ? t('apps.editor.confirmDiscardClose') : null);
 
   async function save() {
-    if (text === null || saving || readOnly) return;
+    // ⌘S reaches here even when the buffer is clean (the visible Save button is disabled but the
+    // Monaco command isn't); skip the no-op PUT so it doesn't bump mtime / wake file watchers.
+    if (text === null || saving || readOnly || !dirty) return;
     setSaving(true);
     setError(null);
     try {
