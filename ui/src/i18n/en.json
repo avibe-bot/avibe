@@ -2130,24 +2130,24 @@
       "unlockTitle": "Unlock to add a protected secret",
       "setupHelp": "Choose how to unlock protected secrets in the browser. The machine alone can never decrypt them.",
       "unlockHelp": "Confirm your unlock factor to seal this secret under your existing vault key.",
-      "setupPasskey": "Set up with a passkey",
-      "unlockPasskey": "Unlock with passkey",
-      "usePasswordInstead": "Use a password instead (less secure)",
-      "setPasswordLabel": "Vault password",
+      "setPasswordLabel": "Recovery password",
       "passwordLabel": "Vault password",
       "passwordPlaceholder": "Enter a strong password",
       "confirmLabel": "Confirm password",
       "confirmPlaceholder": "Re-enter the password",
-      "setupPasswordCta": "Set up",
+      "passwordRecoveryNote": "Your password is the recovery factor — keep it safe. A passkey adds quick, stronger unlock on top.",
+      "setupWithPasskey": "Set up with passkey",
+      "setupPasswordOnly": "Use password only",
+      "unlockPasskey": "Unlock with passkey",
       "unlockCta": "Unlock",
-      "passwordLessSecure": "A password is less secure than a passkey — anyone who learns it can unlock this vault.",
       "errors": {
         "prfUnavailable": "This passkey/browser doesn't support the PRF extension needed for encryption. Try a platform passkey (Touch ID / Windows Hello) or use a password.",
         "cancelled": "Passkey prompt was cancelled.",
         "noPasskey": "No passkey is configured for this vault. Use your password.",
         "wrongFactor": "Couldn't unlock — wrong password or passkey.",
         "discoveryFailed": "Couldn't load your protected vault. Check your connection and retry — don't set up a new one, or you'll split your vault keys.",
-        "mismatch": "The passwords don't match."
+        "mismatch": "The passwords don't match.",
+        "alreadyInitialized": "This vault was just set up elsewhere. Reload and unlock with your existing password or passkey."
       }
     },
     "dialog": {
