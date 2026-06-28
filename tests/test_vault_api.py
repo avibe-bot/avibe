@@ -176,6 +176,49 @@ def test_create_protected_stores_browser_envelope_without_avault(monkeypatch):
     assert json.loads(row["wrap_meta"]) == {"v": 1, "wrapped_dek": "dek"}
 
 
+def test_get_vault_vmk_returns_latest_protected_wrap_meta(monkeypatch):
+    from unittest.mock import Mock
+
+    assert api.get_vault_vmk() == {"ok": True, "exists": False, "wrap_meta": None}
+
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("standard")))
+    api.create_vault_secret(
+        {
+            "name": "STANDARD_KEY",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        }
+    )
+    assert api.get_vault_vmk() == {"ok": True, "exists": False, "wrap_meta": None}
+
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_OLD",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct-old", "nonce": "n-old", "wrap_meta": '{"vmk":"old"}'},
+        }
+    )
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_NEW",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct-new", "nonce": "n-new", "wrap_meta": '{"vmk":"new"}'},
+        }
+    )
+    with api._vault_engine().begin() as conn:
+        conn.execute(
+            vault_secrets.update()
+            .where(vault_secrets.c.name == "PROTECTED_OLD")
+            .values(updated_at="2026-01-01T00:00:00+00:00")
+        )
+        conn.execute(
+            vault_secrets.update()
+            .where(vault_secrets.c.name == "PROTECTED_NEW")
+            .values(updated_at="2026-01-02T00:00:00+00:00")
+        )
+
+    assert api.get_vault_vmk() == {"ok": True, "exists": True, "wrap_meta": '{"vmk":"new"}'}
+
+
 def test_create_protected_rejects_non_string_envelope_fields(monkeypatch):
     from unittest.mock import Mock
 
