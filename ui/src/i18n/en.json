@@ -677,6 +677,8 @@
       "placeholder": "The Terminal arrives in Phase 2: a real shell with tmux-backed persistent sessions.",
       "tagline": "A real shell, in your browser.",
       "persistent": "Persistent",
+      "tabTitle": "Shell {{n}}",
+      "newTab": "New tab",
       "reconnect": "Reconnect",
       "exitCode": "exit {{code}}",
       "disabled": "Terminal unavailable: it may be turned off on the server (VIBE_UI_ENABLE_TERMINAL=0) or this session isn't authorized.",

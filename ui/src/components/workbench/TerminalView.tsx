@@ -62,13 +62,21 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
     const fit = new FitAddon();
     term.loadAddon(fit);
     termRef.current = term;
-    if (containerRef.current) {
-      term.open(containerRef.current);
+    const refit = () => {
       try {
         fit.fit();
       } catch {
         /* container not measured yet */
       }
+    };
+    if (containerRef.current) {
+      term.open(containerRef.current);
+      refit();
+      // The window opens with a scale transition (transform doesn't change layout size,
+      // so the container's height is already real) but the first fit can still land before
+      // the panel is laid out — refit on the next frame so xterm uses the FULL height
+      // instead of getting stuck a few rows tall (the "only top half / can't scroll" bug).
+      requestAnimationFrame(refit);
     }
 
     const onData = term.onData((data: string) => {

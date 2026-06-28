@@ -677,6 +677,8 @@
       "placeholder": "终端将在第二阶段上线:真实 shell,配 tmux 持久化会话。",
       "tagline": "在浏览器里跑真实 shell。",
       "persistent": "持久会话",
+      "tabTitle": "终端 {{n}}",
+      "newTab": "新建标签",
       "reconnect": "重新连接",
       "exitCode": "退出码 {{code}}",
       "disabled": "终端不可用:可能在服务端被关掉(VIBE_UI_ENABLE_TERMINAL=0),或当前会话未获授权。",
