@@ -156,6 +156,38 @@ class BeginAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         # Untouched: the real turn still owns the gate.
         self.assertEqual(gate.token, "R1")
 
+    async def test_suppressed_synthetic_result_does_not_open_a_turn(self):
+        # Regression (Codex P1): a malformed-tool-use synthetic error pops the
+        # real pending request and arms _suppressed_synthetic_results for the
+        # PAIRED ResultMessage, which is skipped with no terminal emit. Opening an
+        # agent-initiated turn for it would leak the gate/pending/active flag and
+        # block the next user message. The detection must skip while suppression
+        # is pending.
+        active_calls: list[str] = []
+        agent, service = _build_agent(active_calls=active_calls)
+        composite_key = "session-3:/tmp/work"
+        context = SimpleNamespace(
+            user_id="U1",
+            channel_id="C1",
+            platform="avibe",
+            platform_specific={
+                "agent_runtime_turn_key": composite_key,
+                "agent_runtime_turn_token": "OLD",
+                "agent_session_id": "sess-3",
+            },
+        )
+        agent._suppressed_synthetic_results.add(composite_key)
+
+        await agent._maybe_begin_agent_initiated_turn(
+            context, composite_key, "session-3", "/tmp/work", "session-key"
+        )
+
+        gate = service._get_turn_gate(composite_key)
+        self.assertFalse(gate.lock.locked())  # no turn opened
+        self.assertEqual(gate.token, "")  # no token minted
+        self.assertEqual(active_calls, [])  # session not marked active
+        self.assertFalse(agent._has_pending_requests(composite_key))  # no synthetic request
+
 
 class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
     async def test_unsolicited_reply_is_delivered_not_dropped(self):

@@ -148,6 +148,22 @@ separate, broader change (it also affects normal turns) left as a follow-up.
 - [x] regression test
 - [x] ruff + focused pytest
 
+## Review fixes (PR #687)
+
+- **Codex P1 — suppressed synthetic result leak.** A malformed-tool-use synthetic
+  API error pops the turn's real pending request and arms
+  `_suppressed_synthetic_results` for the PAIRED `ResultMessage`, which the result
+  branch skips (`continue`) with no terminal emit. That paired result reached the
+  new detection hook with an empty FIFO + free gate, so it opened an
+  agent-initiated turn that was then skipped — leaking the gate / pending request
+  / active flag until EOF and blocking the next user message. This hit **normal
+  user turns** too (any turn ending in a malformed tool call), not just
+  agent-initiated ones. Fix: `_maybe_begin_agent_initiated_turn` returns early
+  when `composite_key in _suppressed_synthetic_results` (the set is cleared by
+  `_consume_suppressed_synthetic_result` / cleanup, so real later turns still
+  open). Regression test:
+  `test_suppressed_synthetic_result_does_not_open_a_turn`.
+
 ## Backend parity (Codex / OpenCode)
 
 The bug needs two co-conditions: (1) the backend re-invokes its own agent loop

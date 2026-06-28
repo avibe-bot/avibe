@@ -1115,6 +1115,18 @@ class ClaudeAgent(BaseAgent):
         """
         if self._has_pending_requests(composite_key):
             return
+        # A malformed-tool-use synthetic API error pops the turn's real pending
+        # request and arms ``_suppressed_synthetic_results`` for the PAIRED
+        # ResultMessage, which the result branch then skips (``continue``) with NO
+        # terminal emit. That paired result reaches this hook with an empty FIFO +
+        # free gate, so opening an agent-initiated turn for it would leak the gate /
+        # pending request / active flag until EOF — and the NEXT user message for
+        # this Claude session would block behind the leaked gate (Codex P1). Skip
+        # while a suppressed synthetic result is pending; the set is cleared by
+        # ``_consume_suppressed_synthetic_result`` / cleanup, so real later turns
+        # open normally.
+        if composite_key in self._suppressed_synthetic_results:
+            return
         service = getattr(self.controller, "agent_service", None)
         begin = getattr(service, "begin_agent_initiated_turn", None)
         if not callable(begin):
