@@ -3733,7 +3733,7 @@ AVAULT_P2_MIN_VERSION = "0.1.3"
 # Installer pin must reference a published manifest-pinned release. It may lag
 # the P2 surface; standard sealing remains usable while P2-only entry points
 # gate on AVAULT_P2_MIN_VERSION below.
-AVAULT_VERSION = "0.1.2"
+AVAULT_VERSION = "0.1.3"
 _AVAULT_RELEASE_BASE_URL = f"https://github.com/avibe-bot/avault/releases/download/v{AVAULT_VERSION}/"
 
 
@@ -4070,6 +4070,25 @@ def ensure_avault_installed(force: bool = False) -> dict:
         existing_version = _probe_avault_version(existing) if existing else None
         existing_is_p2 = _version_at_least(existing_version, AVAULT_P2_MIN_VERSION)
         can_managed_install_p2 = _managed_avault_release_satisfies_p2()
+        # Never downgrade: keep an existing binary that is strictly newer than the
+        # managed pin, even under ``force``. ``force`` may still reinstall an equal
+        # or older managed version to repair a binary, but it must not replace a
+        # newer user/custom avault (e.g. 0.1.4) with the older managed release. A
+        # genuinely broken binary can't report a version, so it isn't matched here
+        # and still gets repaired below.
+        existing_newer_than_pin = (
+            existing_is_p2
+            and _version_at_least(existing_version, AVAULT_VERSION)
+            and not _version_at_least(AVAULT_VERSION, existing_version)
+        )
+        if existing and existing_newer_than_pin:
+            return {
+                "ok": True,
+                "installed": True,
+                "changed": False,
+                "path": existing,
+                "version": existing_version,
+            }
         if existing and not existing_is_p2 and force and not can_managed_install_p2:
             return _avault_p2_release_unavailable_result(existing=existing, existing_version=existing_version)
         if existing and (

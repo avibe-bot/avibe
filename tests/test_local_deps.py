@@ -33,10 +33,12 @@ class _FakeHTTPResponse:
 
 
 def _fake_avault_archive(
-    content: bytes = b"#!/bin/sh\necho avault 0.1.2\n",
+    content: bytes | None = None,
     *,
     member_name: str = "avault",
 ) -> bytes:
+    if content is None:
+        content = f"#!/bin/sh\necho avault {api.AVAULT_VERSION}\n".encode()
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w:gz") as archive:
         info = tarfile.TarInfo(member_name)
@@ -51,8 +53,10 @@ def _installable_avault_release(
     *,
     target: str = "macos-arm64",
     sha256: str | None = None,
-    content: bytes = b"#!/bin/sh\necho avault 0.1.2\n",
+    content: bytes | None = None,
 ):
+    if content is None:
+        content = f"#!/bin/sh\necho avault {api.AVAULT_VERSION}\n".encode()
     member_name = api._avault_binary_name_for_target(target)
     archive = _fake_avault_archive(content=content, member_name=member_name)
     digest = sha256 or hashlib.sha256(archive).hexdigest()
@@ -483,6 +487,28 @@ def test_ensure_avault_force_does_not_downgrade_compatible_binary_when_pin_is_ol
         "changed": False,
         "path": "/usr/local/bin/avault",
         "version": api.AVAULT_P2_MIN_VERSION,
+    }
+
+
+def test_ensure_avault_force_does_not_downgrade_newer_binary(monkeypatch):
+    # A user/custom avault newer than the managed pin must survive `force` prepare,
+    # even though the managed pin now satisfies the P2 gate (Codex #686 P2 finding).
+    newer = "9.9.9"
+    assert api._version_at_least(newer, api.AVAULT_VERSION)
+    monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: True)
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: newer)
+    monkeypatch.setattr(api, "install_avault", lambda force=False: pytest.fail("should not downgrade a newer avault"))
+
+    out = api.ensure_avault_installed(force=True)
+
+    assert out == {
+        "ok": True,
+        "installed": True,
+        "changed": False,
+        "path": "/usr/local/bin/avault",
+        "version": newer,
     }
 
 

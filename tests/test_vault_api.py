@@ -197,7 +197,11 @@ def test_create_protected_rejects_non_string_envelope_fields(monkeypatch):
 
 
 def test_agent_pubkey_reports_upgrade_required_when_managed_pin_lacks_p2(monkeypatch):
-    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": api.AVAULT_VERSION})
+    # An installed avault that predates the P2 surface (below AVAULT_P2_MIN_VERSION),
+    # paired with a managed pin that also lacks P2.
+    installed_pre_p2 = "0.1.2"
+    assert not api._version_at_least(installed_pre_p2, api.AVAULT_P2_MIN_VERSION)
+    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": installed_pre_p2})
     monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: False)
 
     with pytest.raises(api.VaultApiError) as exc:
