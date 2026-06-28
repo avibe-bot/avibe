@@ -166,16 +166,21 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       window.open(contentUrl(full, true), '_blank', 'noopener');
       return;
     }
-    // Editable + desktop → editor window. Fetch the CURRENT mtime so the save baseline isn't a
-    // stale listing value (an agent/terminal may have touched the file since it was listed). Safe
-    // to await — opening an internal window doesn't depend on user activation.
-    let mtime = e.mtime;
+    // Editable + desktop → editor window. Fetch CURRENT metadata: it gives the save-baseline mtime
+    // AND re-validates the open (the file may have grown past the cap or become a symlink since it
+    // was listed) — if it's no longer editable, download instead. Safe to await: opening an internal
+    // window needs no user activation, and the rare changed-since-listing download is acceptable.
     try {
-      mtime = (await fileMeta(full)).mtime;
+      const m = await fileMeta(full);
+      if (!isEditableFile(m)) {
+        window.open(contentUrl(full, true), '_blank', 'noopener');
+        return;
+      }
+      wm.openApp('editor', { title: e.name, params: { path: full, filename: e.name, mtime: m.mtime } });
     } catch {
-      /* keep the listing mtime as the baseline */
+      // Metadata fetch failed — open with the listing mtime as the baseline.
+      wm.openApp('editor', { title: e.name, params: { path: full, filename: e.name, mtime: e.mtime } });
     }
-    wm.openApp('editor', { title: e.name, params: { path: full, filename: e.name, mtime } });
   };
 
   const createNamed = async (kind: 'file' | 'dir') => {

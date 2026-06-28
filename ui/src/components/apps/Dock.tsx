@@ -87,14 +87,15 @@ export const Dock: React.FC = () => {
               </button>
               <span className="size-1.5 rounded-full" style={{ backgroundColor: running ? `var(${app.accent})` : 'transparent' }} />
 
-              {/* ＋ reveals on hover (or stays while its menu is open): opens another window. */}
+              {/* ＋ reveals on hover and directly opens another window (the one-click affordance the
+                  label advertises). The New Window / Show All Windows menu is the tile's right-click. */}
               <button
                 type="button"
                 title={t('apps.dock.newWindow')}
                 aria-label={t('apps.dock.newWindow')}
                 onClick={(e) => {
                   e.stopPropagation();
-                  setMenuApp((cur) => (cur === app.id ? null : app.id));
+                  openNew(app.id);
                 }}
                 className={clsx(
                   'absolute -right-1 -top-1 grid size-4 place-items-center rounded-full border border-border-strong bg-surface-2 text-muted shadow transition hover:text-foreground',

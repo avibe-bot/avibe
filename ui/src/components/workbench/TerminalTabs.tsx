@@ -55,6 +55,9 @@ export const TerminalTabs: React.FC<{ windowed?: boolean }> = ({ windowed = fals
   const tabSeq = useRef(0);
   const [tabs, setTabs] = useState<Tab[]>(() => [{ key: ++tabSeq.current, slot: windowed ? acquireTerminalSlot() : null }]);
   const [active, setActive] = useState<number>(() => tabs[0]?.key ?? 0);
+  // Whether sessions actually persist (tmux available) — reported by TerminalView's ready frame.
+  // Drives the tab-bar badge so it never falsely promises persistence for a plain-shell fallback.
+  const [persistent, setPersistent] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -162,9 +165,11 @@ export const TerminalTabs: React.FC<{ windowed?: boolean }> = ({ windowed = fals
             <Plus className="size-3.5" strokeWidth={2.5} />
           </button>
         </div>
-        <span className="shrink-0 rounded-full border border-mint/30 bg-mint/[0.08] px-2 py-0.5 text-[10px] font-medium text-mint">
-          {t('apps.terminal.persistent')}
-        </span>
+        {persistent && (
+          <span className="shrink-0 rounded-full border border-mint/30 bg-mint/[0.08] px-2 py-0.5 text-[10px] font-medium text-mint">
+            {t('apps.terminal.persistent')}
+          </span>
+        )}
       </div>
 
       {/* Panels: all tabs stay mounted so switching preserves each shell; hidden ones use
@@ -176,7 +181,7 @@ export const TerminalTabs: React.FC<{ windowed?: boolean }> = ({ windowed = fals
             <div key={tab.key} className={clsx('absolute inset-0', tab.key === active ? 'block' : 'hidden')}>
               {sid == null ? loading : (
                 <Suspense fallback={loading}>
-                  <TerminalView sessionId={sid} />
+                  <TerminalView sessionId={sid} onPersistent={setPersistent} />
                 </Suspense>
               )}
             </div>

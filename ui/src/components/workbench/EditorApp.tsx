@@ -50,12 +50,15 @@ const LANGUAGE_LABEL: Record<string, string> = {
   sql: 'SQL',
 };
 
-function languageLabel(filename: string | undefined): string {
-  if (!filename) return 'Plain Text';
+// Canonical language identifier for the status bar (e.g. "TypeScript React"). These are product
+// names shown untranslated, exactly like VS Code's language indicator; the generic "plain text"
+// fallback IS localized, at the call site. Returns undefined when there's no specific language.
+function languageLabel(filename: string | undefined): string | undefined {
+  if (!filename) return undefined;
   const lower = filename.toLowerCase();
   if (lower === 'dockerfile') return 'Dockerfile';
   const ext = lower.includes('.') ? lower.split('.').pop()! : '';
-  return LANGUAGE_LABEL[ext] ?? 'Plain Text';
+  return LANGUAGE_LABEL[ext];
 }
 
 // The Editor IDE (design dnYPx + welcome w0qoC): activity bar + collapsible explorer tree +
@@ -88,14 +91,18 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
         window.open(contentUrl(path, true), '_blank', 'noopener');
         return;
       }
-      // Fresh mtime so the save baseline isn't a stale listing value.
-      let mtime = entry.mtime;
+      // Fetch fresh metadata: gives the save-baseline mtime AND re-validates (the file may have
+      // grown past the cap or become a symlink since it was listed) → download if no longer editable.
       try {
-        mtime = (await fileMeta(path)).mtime;
+        const m = await fileMeta(path);
+        if (!isEditableFile(m)) {
+          window.open(contentUrl(path, true), '_blank', 'noopener');
+          return;
+        }
+        openFile(path, entry.name, m.mtime);
       } catch {
-        /* keep the listing mtime */
+        openFile(path, entry.name, entry.mtime);
       }
-      openFile(path, entry.name, mtime);
     },
     [openFile],
   );
@@ -288,7 +295,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
           <>
             <span className="ml-auto tabular-nums">{t('apps.editor.lineCol', { line: cursor?.line ?? 1, col: cursor?.col ?? 1 })}</span>
             <span>{t('apps.editor.spaces', { n: 2 })}</span>
-            <span className="truncate">{languageLabel(tabs.find((x) => x.path === active)?.name)}</span>
+            <span className="truncate">{languageLabel(tabs.find((x) => x.path === active)?.name) ?? t('apps.editor.plainText')}</span>
           </>
         ) : (
           <span className="ml-auto truncate opacity-80">{t('apps.editor.label')}</span>

@@ -38,7 +38,7 @@ function buildWsUrl(sessionId: string): string {
   return `${proto}://${window.location.host}/api/terminal/${encodeURIComponent(sessionId)}`;
 }
 
-export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => {
+export const TerminalView: React.FC<{ sessionId: string; onPersistent?: (persistent: boolean) => void }> = ({ sessionId, onPersistent }) => {
   const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -46,8 +46,12 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
   const ctrlStickyRef = useRef(false);
   const busyRetriesRef = useRef(0);
   const retryTimerRef = useRef<number | null>(null);
+  // Report actual session persistence (from the backend 'ready' frame) up to the tab bar, so its
+  // badge reflects reality — tmux-backed = persistent, plain-shell fallback = not. Held in a ref so
+  // the WS effect (which doesn't depend on the prop) always calls the latest callback.
+  const onPersistentRef = useRef(onPersistent);
+  onPersistentRef.current = onPersistent;
   const [status, setStatus] = useState<Status>('connecting');
-  const [persistent, setPersistent] = useState(false);
   const [exitCode, setExitCode] = useState<number | null>(null);
   const [reconnectKey, setReconnectKey] = useState(0);
 
@@ -113,7 +117,7 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
           if (msg.type === 'ready') {
             busyRetriesRef.current = 0; // a successful attach resets the transient-retry budget
             setStatus('ready');
-            setPersistent(!!msg.persistent);
+            onPersistentRef.current?.(!!msg.persistent);
           } else if (msg.type === 'exit') {
             setExitCode(typeof msg.code === 'number' ? msg.code : null);
             setStatus('closed');
@@ -199,9 +203,6 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
           {t(`apps.terminal.status.${status}`)}
           {status === 'closed' && exitCode != null ? ` · ${t('apps.terminal.exitCode', { code: exitCode })}` : ''}
         </span>
-        {status === 'ready' && persistent && (
-          <span className="rounded-full border border-border px-1.5 text-[10px]">{t('apps.terminal.persistent')}</span>
-        )}
         {(status === 'closed' || status === 'error') && (
           <Button
             type="button"

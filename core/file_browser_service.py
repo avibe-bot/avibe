@@ -571,6 +571,12 @@ def write_file(
                         handle.flush()
                         os.fsync(handle.fileno())
                 except OSError as exc:
+                    # O_EXCL already created the file; remove the partial/empty leftover so a
+                    # retry isn't blocked by a stale `exists` (the temp+replace path self-cleans).
+                    try:
+                        os.unlink(target)
+                    except OSError:
+                        pass
                     raise FileBrowserError("fs_error", str(exc), 400) from exc
                 _fsync_dir(parent)
                 return {"ok": True, "mtime": _mtime_seconds(target.stat())}
