@@ -16,6 +16,7 @@
     "configure": "Configure",
     "cancel": "Cancel",
     "clear": "Clear",
+    "retry": "Retry",
     "loading": "Loading...",
     "saving": "Saving...",
     "saved": "Saved",
@@ -163,7 +164,9 @@
       "label": "Custom link",
       "hint": "3–64 letters, numbers, dash, or underscore. Must be unique.",
       "placeholder": "my-page",
-      "toast": { "saved": "Custom link updated" },
+      "toast": {
+        "saved": "Custom link updated"
+      },
       "errors": {
         "taken": "That custom link is already taken. Pick another.",
         "invalid": "Use 3–64 letters, numbers, dash, or underscore, starting and ending with a letter or number.",
@@ -558,9 +561,9 @@
     "paired": "Pairing",
     "connector": "Remote access",
     "flowTitle": "Setup steps",
-    "flowStep1": "Open <console>avibe.bot</console>, sign in, click \u201CPair an Avibe\u201D, and claim your own domain.",
+    "flowStep1": "Open <console>avibe.bot</console>, sign in, click “Pair an Avibe”, and claim your own domain.",
     "flowStep2": "Copy the pairing key shown there.",
-    "flowStep3": "Paste it here to finish pairing \u2014 then reach Avibe from anywhere.",
+    "flowStep3": "Paste it here to finish pairing — then reach Avibe from anywhere.",
     "actionNeeded": "Action needed",
     "ready": "Ready",
     "stateNeedsAttention": "Needs attention"

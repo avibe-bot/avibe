@@ -95,9 +95,18 @@ const Dir: React.FC<{ path: string; name: string; depth: number; activePath: str
             </div>
           )}
           {error && (
-            <div style={{ paddingLeft: 8 + (depth + 1) * 14 }} className="truncate py-1 pr-2 text-[11.5px] text-destructive" title={error}>
-              {error}
-            </div>
+            // Clickable so a transient failure (perms fixed, dir recreated, network/auth hiccup) is
+            // retryable in place — storing [] on error would otherwise wedge the entries===null
+            // load guard and keep showing the stale error until the whole tree remounts.
+            <button
+              type="button"
+              onClick={load}
+              style={{ paddingLeft: 8 + (depth + 1) * 14 }}
+              className="flex w-full items-center gap-1 truncate py-1 pr-2 text-left text-[11.5px] text-destructive transition hover:bg-destructive/[0.06]"
+              title={`${error} — ${t('common.retry')}`}
+            >
+              <span className="truncate">{error}</span>
+            </button>
           )}
           {entries?.map((e) =>
             e.kind === 'dir' ? (

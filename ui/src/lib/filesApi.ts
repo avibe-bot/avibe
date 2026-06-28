@@ -152,8 +152,12 @@ export function downloadFile(path: string): void {
   const a = document.createElement('a');
   a.href = contentUrl(path, true);
   a.rel = 'noopener';
+  // target=_blank: if remote-auth expired, /content 302-redirects to the Cloud login — that
+  // cross-origin redirect would otherwise replace the SPA in this tab. Sending it to a new context
+  // keeps the app intact (a real attachment still downloads in-place, so no stray tab opens).
+  a.target = '_blank';
   // download attr: keep this a download even if the server returns a JSON error (file removed /
-  // permission / auth) instead of an attachment, so the SPA is never navigated to the error body.
+  // permission) instead of an attachment, so the SPA is never navigated to the error body.
   a.download = '';
   a.style.display = 'none';
   document.body.appendChild(a);
