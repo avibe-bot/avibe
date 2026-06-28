@@ -179,6 +179,7 @@ Create, inspect, update, run, pause, resume, or remove scheduled tasks.
 
 ```bash
 vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
+vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'   # inside an Avibe Agent shell
 vibe task list --brief
 vibe task update <task-id> --cron '*/30 * * * *'
 vibe task run <task-id>
@@ -192,6 +193,11 @@ Use `vibe task add --help` and `vibe task update --help` for the full command su
 - `--deliver-key` for an explicit delivery target
 - `--cron` and `--at` scheduling
 - `--name`, `--timezone`, and message file support
+
+When `vibe task add` runs inside an Avibe-injected Agent shell, `--session-id`
+may be omitted. Avibe defaults the task target to the caller Session from
+`AVIBE_SESSION_ID` and reports that default in the command output. Explicit
+`--session-id`, session creation flags, and delivery flags still win.
 
 `--session-key` remains accepted for older scripts, but new tasks should use
 the Agent Session ID shown in the active Avibe prompt.
@@ -242,6 +248,10 @@ vibe watch add \
   --session-id sesk8m4q2p7x \
   --message 'Test run finished. Summarize the failures and propose next steps.' \
   -- ./scripts/run_tests.sh
+
+vibe watch add \
+  --message 'Test run finished. Summarize the failures and propose next steps.' \
+  -- ./scripts/run_tests.sh     # inside an Avibe Agent shell
 
 # Alternative: pass the command through a shell with --shell
 vibe watch add \

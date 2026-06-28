@@ -499,6 +499,58 @@ def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys) -> Non
     assert stored.metadata["created_by"] == expected
 
 
+def test_task_add_defaults_target_to_caller_session(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="codex", backend="codex")
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+    with cli.create_sqlite_engine(db_path).begin() as conn:
+        now = "2026-06-28T00:00:00+00:00"
+        scope_id = upsert_scope(conn, "avibe", "project", "proj-cli-defaults", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="sesCaller",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_name="codex",
+                agent_variant="default",
+                session_anchor="anchor_sesCaller",
+                native_session_id="native-caller",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+    store_path = tmp_path / "scheduled_tasks.json"
+    store = cli.ScheduledTaskStore(store_path)
+    args = _parse_task_add(["--cron", "0 * * * *", "--message", "hello"])
+
+    with (
+        patch.dict(os.environ, {"AVIBE_SESSION_ID": "sesCaller"}, clear=False),
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["task"]["session_id"] == "sesCaller"
+    assert payload["task"]["session_policy"] == "existing"
+    assert payload["session_default_notice"] == {
+        "code": "session_defaulted_to_caller",
+        "message": "Task target Session defaulted to the caller Session from AVIBE_SESSION_ID.",
+        "session_id": "sesCaller",
+    }
+
+
 def test_task_update_missing_id_returns_guidance(tmp_path: Path) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
 

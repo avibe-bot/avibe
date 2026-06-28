@@ -271,13 +271,13 @@ def _task_add_examples_text() -> str:
     return dedent(
         """\
         Session target:
-          Use --session-id with the current Agent Session ID, for example sesk8m4q2p7x.
+          Use --session-id with the target Agent Session ID, for example sesk8m4q2p7x.
+          Inside an Avibe Agent shell, omit --session-id to default to the caller Session from AVIBE_SESSION_ID.
 
         Guidance:
           If this is your first time using this command, read this whole help entry before creating a task.
           `--session-id` chooses which Agent Session Avibe will continue using when the task runs.
-          Keep the current session id when future runs should stay in the same session.
-          If no session id is available, trigger this from an active Avibe conversation instead of guessing.
+          Omit --session-id only when this task should follow the current caller Session.
           `--post-to channel` changes where the message is posted, not which session is continued.
           Use --deliver-key only when delivery must go to a different explicit target.
           `--message` and `--message-file` provide the stored user message that will be sent each time the task runs.
@@ -324,7 +324,7 @@ def _hook_send_examples_text() -> str:
           New automation should use `vibe agent run --async`.
 
         Session target:
-          Use --session-id with the current Agent Session ID, for example sesk8m4q2p7x.
+          Use --session-id with the target Agent Session ID, for example sesk8m4q2p7x.
 
         Guidance:
           If this is your first time creating an async one-shot run, use `vibe agent run --async --help`.
@@ -527,7 +527,7 @@ def _show_path_examples_text() -> str:
         src/styles.css, index.html, and a sample api/health.ts handler.
 
         First-run workflow:
-          1. Run: vibe show path --session-id sesk8m4q2p7x
+          1. Run: vibe show path
           2. Write or update src/App.tsx in the returned path.
           3. Share the active URL if the command output includes one.
           4. Run `vibe show update --visibility public` only when the user asks for a shareable public link.
@@ -607,14 +607,14 @@ def _watch_add_examples_text() -> str:
     return dedent(
         """\
         Session target:
-          Use --session-id with the current Agent Session ID, for example sesk8m4q2p7x.
+          Use --session-id with the target Agent Session ID, for example sesk8m4q2p7x.
+          Inside an Avibe Agent shell, omit --session-id to default to the caller Session from AVIBE_SESSION_ID.
 
         Guidance:
           If this is your first time using this command, read this whole help entry before creating a watch.
           Use a watch when a script should wait in the background and send a follow-up when it detects an event or reaches a terminal failure.
           `--session-id` chooses which Agent Session Avibe will continue using for follow-up messages from the watch.
-          Keep the current session id when follow-up should continue in the same session.
-          If no session id is available, trigger this from an active Avibe conversation instead of guessing.
+          Omit --session-id only when this watch should follow up in the current caller Session.
           `--post-to channel` changes where the follow-up is posted, not which session is continued.
           Use --deliver-key only when delivery must go to a different explicit target.
           `--prefix` becomes the instruction text of the follow-up hook. On a successful cycle, Avibe prepends `--prefix` before waiter stdout and joins them with a blank line when both exist.
@@ -1291,6 +1291,49 @@ def _resolve_session_target_args(
     return session_id or None, session_key
 
 
+def _default_session_id_from_caller(caller_context) -> Optional[str]:
+    if caller_context is None:
+        return None
+    session_id = (getattr(caller_context, "session_id", None) or "").strip()
+    if not session_id:
+        return None
+    return session_id
+
+
+def _apply_caller_session_default(args, caller_context, *, purpose: str) -> Optional[dict[str, str]]:
+    if (getattr(args, "session_id", None) or "").strip():
+        return None
+    if (getattr(args, "session_key", None) or "").strip():
+        return None
+    if bool(getattr(args, "create_session", False)) or bool(getattr(args, "create_session_per_run", False)):
+        return None
+    if (getattr(args, "fork_session", None) or "").strip():
+        return None
+    default_session_id = _default_session_id_from_caller(caller_context)
+    if not default_session_id:
+        return None
+    setattr(args, "session_id", default_session_id)
+    return {
+        "code": "session_defaulted_to_caller",
+        "message": f"{purpose} defaulted to the caller Session from AVIBE_SESSION_ID.",
+        "session_id": default_session_id,
+    }
+
+
+def _resolve_show_session_id(args, *, help_command: str) -> tuple[str, Optional[dict[str, str]]]:
+    caller_context = caller_context_from_env()
+    notice = _apply_caller_session_default(args, caller_context, purpose="Show Page session")
+    session_id = (getattr(args, "session_id", None) or "").strip()
+    if not session_id:
+        raise TaskCliError(
+            "Show Page session id is required outside an Avibe Agent environment.",
+            code="missing_session_target",
+            hint="Pass --session-id, or run this command from an Avibe Agent shell where AVIBE_SESSION_ID is injected.",
+            help_command=help_command,
+        )
+    return session_id, notice
+
+
 def _validate_delivery_args(
     *,
     session_key: str,
@@ -1680,11 +1723,17 @@ def _wait_for_watch_startup(
 def cmd_task_add(args):
     try:
         caller_context = caller_context_from_env()
+        session_default_notice = _apply_caller_session_default(
+            args,
+            caller_context,
+            purpose="Task target Session",
+        )
         schedule_type = "cron" if args.cron else "at"
         session_policy = _validate_definition_session_policy(
             args,
             schedule_type=schedule_type,
             help_command="vibe task add --help",
+            allow_caller_session_default=caller_context is not None,
         )
         message = _resolve_prompt_input(
             args,
@@ -1785,11 +1834,16 @@ def cmd_task_add(args):
             )
         warnings = _collect_target_warnings(session_target, delivery_target)
         task_payload = _task_payload(task)
+        payload_fields = {
+            "definition": task_payload,
+            "task": task_payload,
+            "warnings": warnings,
+        }
+        if session_default_notice:
+            payload_fields["session_default_notice"] = session_default_notice
         _print_cli_payload(
             "run_definition",
-            definition=task_payload,
-            task=task_payload,
-            warnings=warnings,
+            **payload_fields,
         )
         return 0
     except Exception as exc:
@@ -2664,7 +2718,13 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
     return "none"
 
 
-def _validate_definition_session_policy(args, *, schedule_type: str | None, help_command: str) -> str:
+def _validate_definition_session_policy(
+    args,
+    *,
+    schedule_type: str | None,
+    help_command: str,
+    allow_caller_session_default: bool = False,
+) -> str:
     session_id = (getattr(args, "session_id", None) or "").strip()
     session_key = (getattr(args, "session_key", None) or "").strip()
     create_session = bool(getattr(args, "create_session", False))
@@ -2698,10 +2758,15 @@ def _validate_definition_session_policy(args, *, schedule_type: str | None, help
         return "create_per_run"
     if session_id or session_key:
         return "existing"
+    if allow_caller_session_default:
+        return "existing"
     raise TaskCliError(
         "one session policy is required",
         code="missing_session_policy",
-        hint="Use --session-id to continue a Session, or --create-session with --deliver-key to create one.",
+        hint=(
+            "Use --session-id to continue a Session, or --create-session with --deliver-key to create one. "
+            "Inside an Avibe Agent shell, Avibe can default this to the caller Session from AVIBE_SESSION_ID."
+        ),
         help_command=help_command,
     )
 
@@ -4758,10 +4823,16 @@ def cmd_vault_key_import(args):
 def cmd_watch_add(args):
     try:
         caller_context = caller_context_from_env()
+        session_default_notice = _apply_caller_session_default(
+            args,
+            caller_context,
+            purpose="Watch target Session",
+        )
         session_policy = _validate_definition_session_policy(
             args,
             schedule_type="watch",
             help_command="vibe watch add --help",
+            allow_caller_session_default=caller_context is not None,
         )
         command, shell_command = _resolve_watch_command(args, help_command="vibe watch add --help")
         session_id, session_key = _resolve_session_target_args(
@@ -4834,11 +4905,16 @@ def cmd_watch_add(args):
         watch, runtime_entry = _wait_for_watch_startup(store, runtime_store, watch.id)
         warnings = _collect_target_warnings(session_target, delivery_target)
         watch_payload = _watch_payload(watch, runtime_entry)
+        payload_fields = {
+            "definition": watch_payload,
+            "watch": watch_payload,
+            "warnings": warnings,
+        }
+        if session_default_notice:
+            payload_fields["session_default_notice"] = session_default_notice
         _print_cli_payload(
             "run_definition",
-            definition=watch_payload,
-            watch=watch_payload,
-            warnings=warnings,
+            **payload_fields,
         )
         return 0
     except Exception as exc:
@@ -6245,8 +6321,11 @@ def _print_show_page_error(exc: Exception) -> None:
         "ok": False,
         "code": code,
         "error": str(exc),
-        "help_command": "vibe show --help",
+        "help_command": getattr(exc, "help_command", None) or "vibe show --help",
     }
+    hint = getattr(exc, "hint", None)
+    if hint:
+        payload["hint"] = hint
     print(json.dumps(payload, indent=2), file=sys.stderr)
 
 
@@ -6317,10 +6396,15 @@ def cmd_show_path(args):
 
     store = _load_show_page_store()
     try:
-        page = store.ensure(args.session_id)
-        page_dir = ensure_show_page_dir(args.session_id)
-        _prewarm_show_page_session_best_effort(args.session_id)
-        payload = _show_page_result(page, message=f"Show Page workspace is ready at {page_dir}.")
+        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show path --help")
+        page = store.ensure(session_id)
+        page_dir = ensure_show_page_dir(session_id)
+        _prewarm_show_page_session_best_effort(session_id)
+        payload = _show_page_result(
+            page,
+            message=f"Show Page workspace is ready at {page_dir}.",
+            extra={"session_default_notice": session_default_notice} if session_default_notice else None,
+        )
         if getattr(args, "json", False):
             _print_json(payload)
         else:
@@ -6341,22 +6425,29 @@ def _prewarm_show_page_session_best_effort(session_id: str, *, base_path: str | 
 def cmd_show_status(args):
     store = _load_show_page_store()
     try:
-        page = store.get(args.session_id)
+        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show status --help")
+        page = store.get(session_id)
         if page is None:
             payload = {
                 "ok": False,
                 "code": "show_page_not_found",
-                "session_id": args.session_id,
+                "session_id": session_id,
                 "message": "No Show Page exists for this session.",
-                "next_actions": [f"Run `vibe show path --session-id {args.session_id}` to create the workspace."],
+                "next_actions": [f"Run `vibe show path --session-id {session_id}` to create the workspace."],
             }
+            if session_default_notice:
+                payload["session_default_notice"] = session_default_notice
             if getattr(args, "json", False):
                 _print_json(payload)
             else:
                 print("No Show Page exists for this session.")
-                print(f"Run: vibe show path --session-id {args.session_id}")
+                print(f"Run: vibe show path --session-id {session_id}")
             return 1
-        payload = _show_page_result(page, message=f"Show Page is {page.visibility}.")
+        payload = _show_page_result(
+            page,
+            message=f"Show Page is {page.visibility}.",
+            extra={"session_default_notice": session_default_notice} if session_default_notice else None,
+        )
         if getattr(args, "json", False):
             _print_json(payload)
         else:
@@ -6375,10 +6466,14 @@ def cmd_show_update(args):
     store = _load_show_page_store()
     try:
         extra: dict = {}
+        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show update --help")
+        if session_default_notice:
+            extra["session_default_notice"] = session_default_notice
 
         if getattr(args, "rotate_share", False):
-            updated, previous_share_id = store.rotate_share(args.session_id)
+            updated, previous_share_id = store.rotate_share(session_id)
             extra = {
+                **extra,
                 "previous_public_url": public_url(previous_share_id),
                 "previous_share_id": previous_share_id,
                 "message_detail": "Previous public share URL was revoked.",
@@ -6388,8 +6483,9 @@ def cmd_show_update(args):
             # ``is not None`` so an explicit empty --share-id reaches
             # validate_share_id (a clear missing_share_id) instead of falling
             # through to a confusing visibility error.
-            updated, previous_share_id = store.set_share_id(args.session_id, args.share_id)
+            updated, previous_share_id = store.set_share_id(session_id, args.share_id)
             extra = {
+                **extra,
                 "previous_share_id": previous_share_id,
             }
             if previous_share_id and previous_share_id != updated.share_id:
@@ -6402,10 +6498,10 @@ def cmd_show_update(args):
             # an archived/terminal session is rejected before any row (and its
             # /show/ route) is materialized. rotate_share / set_share_id guard
             # themselves the same way, so neither needs a pre-ensure either.
-            existing = store.get(args.session_id)
+            existing = store.get(session_id)
             previous = show_page_payload(existing) if existing else None
             previous_visibility = existing.visibility if existing else "private"
-            updated = store.update_visibility(args.session_id, args.visibility)
+            updated = store.update_visibility(session_id, args.visibility)
             message = f"Show Page is now {updated.visibility}."
             if previous_visibility == "private" and updated.visibility == "public":
                 extra["previous_private_url"] = previous["private_url"] if previous else None
@@ -6672,7 +6768,8 @@ def cmd_show_mark(args):
     page_store = ShowPageStore()
     event_store = None
     try:
-        page = page_store.ensure(args.session_id)
+        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show mark --help")
+        page = page_store.ensure(session_id)
         target = _read_cli_text_argument(value=args.target, file_path=None, field_name="--target")
         body = _read_cli_text_argument(value=args.body, file_path=args.body_file, field_name="--body")
         payload = {
@@ -6687,14 +6784,15 @@ def cmd_show_mark(args):
             payload["anchor"] = {"selector": args.anchor_selector}
             if args.anchor_text:
                 payload["anchor"]["text"] = args.anchor_text
-        event = _post_show_mark_to_live_ui(args.session_id, payload)
+        event = _post_show_mark_to_live_ui(session_id, payload)
         if event is None:
             event_store = ShowSessionEventStore()
-            event = event_store.append(args.session_id, payload)
+            event = event_store.append(session_id, payload)
         result = _show_page_result(
             page,
             message="Assistant mark recorded.",
             extra={
+                **({"session_default_notice": session_default_notice} if session_default_notice else {}),
                 "event": event,
                 "event_id": event["id"],
                 "message_id": event.get("message_id"),
@@ -6726,25 +6824,27 @@ def cmd_show_event(args):
     page_store = ShowPageStore()
     event_store = None
     try:
-        page = page_store.ensure(args.session_id)
+        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show event --help")
+        page = page_store.ensure(session_id)
         payload = _read_event_json_argument(args.event_json, args.event_json_file)
         if args.type:
             payload = {**payload, "type": args.type}
         if args.dispatch:
             payload = _with_show_event_dispatch(payload)
-        event = _post_show_event_to_live_ui(args.session_id, payload)
+        event = _post_show_event_to_live_ui(session_id, payload)
         if event is None:
             if args.dispatch:
                 from vibe.ui_server import record_local_show_event
 
-                event = record_local_show_event(args.session_id, payload, dispatch_sync=True)
+                event = record_local_show_event(session_id, payload, dispatch_sync=True)
             else:
                 event_store = ShowSessionEventStore()
-                event = event_store.append(args.session_id, payload)
+                event = event_store.append(session_id, payload)
         result = _show_page_result(
             page,
             message="Show event recorded.",
             extra={
+                **({"session_default_notice": session_default_notice} if session_default_notice else {}),
                 "event": event,
                 "event_id": event["id"],
                 "message_id": event.get("message_id"),
@@ -7790,9 +7890,9 @@ def build_parser():
         epilog=_show_path_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe show path --help",
-        error_hint="Pass the current Agent Session ID explicitly.",
+        error_hint="Pass --session-id, or run from an Avibe Agent shell where AVIBE_SESSION_ID is injected.",
     )
-    show_path_parser.add_argument("--session-id", required=True, help="Agent Session ID for the Show Page.")
+    show_path_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
     show_path_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
 
     show_status_parser = show_subparsers.add_parser(
@@ -7802,9 +7902,9 @@ def build_parser():
         epilog=_show_status_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe show status --help",
-        error_hint="Pass the current Agent Session ID explicitly.",
+        error_hint="Pass --session-id, or run from an Avibe Agent shell where AVIBE_SESSION_ID is injected.",
     )
-    show_status_parser.add_argument("--session-id", required=True, help="Agent Session ID for the Show Page.")
+    show_status_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
     show_status_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
 
     show_update_parser = show_subparsers.add_parser(
@@ -7819,7 +7919,7 @@ def build_parser():
         error_help_command="vibe show update --help",
         error_hint="Pass --visibility private|public|offline, --share-id SLUG, or --rotate-share.",
     )
-    show_update_parser.add_argument("--session-id", required=True, help="Agent Session ID for the Show Page.")
+    show_update_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
     show_update_action = show_update_parser.add_mutually_exclusive_group(required=True)
     show_update_action.add_argument(
         "--visibility",
@@ -7849,9 +7949,9 @@ def build_parser():
         epilog=_show_mark_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe show mark --help",
-        error_hint="Pass --session-id, --target, and --body or --body-file.",
+        error_hint="Pass --target and --body or --body-file. Pass --session-id outside an Avibe Agent shell.",
     )
-    show_mark_parser.add_argument("--session-id", required=True, help="Agent Session ID for the Show Page.")
+    show_mark_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
     show_mark_parser.add_argument("--scope", default="default", help='Mark scope. Defaults to "default".')
     show_mark_parser.add_argument("--target", required=True, help="Target mark id or selector.")
     mark_body_group = show_mark_parser.add_mutually_exclusive_group(required=True)
@@ -7868,9 +7968,9 @@ def build_parser():
         epilog=_show_event_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe show event --help",
-        error_hint="Pass --session-id and either --event-json/--event-json-file or --type with JSON fields.",
+        error_hint="Pass either --event-json/--event-json-file or --type with JSON fields. Pass --session-id outside an Avibe Agent shell.",
     )
-    show_event_parser.add_argument("--session-id", required=True, help="Agent Session ID for the Show Page.")
+    show_event_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
     show_event_parser.add_argument("--type", help="Show event type, for example human.annotation.created.")
     event_json_group = show_event_parser.add_mutually_exclusive_group(required=True)
     event_json_group.add_argument("--event-json", help="Inline JSON object, or @path to read JSON from a file.")

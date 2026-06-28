@@ -647,6 +647,40 @@ def test_show_path_cli_keeps_page_when_prewarm_fails(monkeypatch, tmp_path, caps
     assert (tmp_path / "show" / "ses123" / "index.html").exists()
 
 
+def test_show_path_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "sesCaller")
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {})
+
+    args = cli.build_parser().parse_args(["show", "path", "--json"])
+    assert cli.cmd_show_path(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["session_id"] == "sesCaller"
+    assert payload["session_default_notice"] == {
+        "code": "session_defaulted_to_caller",
+        "message": "Show Page session defaulted to the caller Session from AVIBE_SESSION_ID.",
+        "session_id": "sesCaller",
+    }
+    assert (tmp_path / "show" / "sesCaller" / "index.html").exists()
+
+
+def test_show_path_requires_session_without_caller(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+    paths.ensure_data_dirs()
+    _save_config()
+
+    args = cli.build_parser().parse_args(["show", "path", "--json"])
+    assert cli.cmd_show_path(args) == 1
+
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["code"] == "missing_session_target"
+    assert payload["help_command"] == "vibe show path --help"
+
+
 def test_show_path_cli_prewarm_uses_verified_loopback_for_non_loopback_host(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
@@ -899,6 +933,29 @@ def test_show_update_cli_reports_transition_urls(monkeypatch, tmp_path, capsys):
     assert prewarmed[-1] == ("http://127.0.0.1:5123/api/show/sessions/ses123/prewarm", {})
 
 
+def test_show_status_and_update_default_to_caller_session(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "sesCaller")
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {})
+
+    parser = cli.build_parser()
+    assert cli.cmd_show_path(parser.parse_args(["show", "path", "--json"])) == 0
+    capsys.readouterr()
+
+    assert cli.cmd_show_status(parser.parse_args(["show", "status", "--json"])) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["session_id"] == "sesCaller"
+    assert status_payload["session_default_notice"]["session_id"] == "sesCaller"
+
+    assert cli.cmd_show_update(parser.parse_args(["show", "update", "--visibility", "public", "--json"])) == 0
+    update_payload = json.loads(capsys.readouterr().out)
+    assert update_payload["session_id"] == "sesCaller"
+    assert update_payload["visibility"] == "public"
+    assert update_payload["session_default_notice"]["session_id"] == "sesCaller"
+
+
 def test_show_update_rotate_share_fails_while_private(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
@@ -968,6 +1025,61 @@ def test_show_mark_cli_records_event_and_message(monkeypatch, tmp_path, capsys):
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.id)).scalar_one() == payload["event"]["id"]
         assert "Review this summary." in conn.execute(select(messages.c.content_text)).scalar_one()
+
+
+def test_show_mark_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
+    from sqlalchemy import select
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, show_session_events
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "sesCaller")
+    paths.ensure_data_dirs()
+    _save_config()
+    ensure_sqlite_state()
+
+    engine = create_sqlite_engine()
+    now = messages_service._utc_now_iso()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_show", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="sesCaller",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor_sesCaller",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "mark",
+            "--target",
+            "mark-default-summary",
+            "--body",
+            "Review this summary.",
+            "--json",
+        ]
+    )
+    assert cli.cmd_show(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["session_id"] == "sesCaller"
+    assert payload["session_default_notice"]["session_id"] == "sesCaller"
+    with engine.connect() as conn:
+        assert conn.execute(select(show_session_events.c.session_id)).scalar_one() == "sesCaller"
 
 
 def test_show_mark_cli_posts_to_live_ui_when_running(monkeypatch, tmp_path, capsys):
@@ -1104,6 +1216,61 @@ def test_show_event_cli_records_generic_event(monkeypatch, tmp_path, capsys):
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.id)).scalar_one() == payload["event"]["id"]
         assert "Clarify this." in conn.execute(select(messages.c.content_text)).scalar_one()
+
+
+def test_show_event_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
+    from sqlalchemy import select
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, show_session_events
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "sesCaller")
+    paths.ensure_data_dirs()
+    _save_config()
+    ensure_sqlite_state()
+
+    engine = create_sqlite_engine()
+    now = messages_service._utc_now_iso()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_show", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="sesCaller",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor_sesCaller",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "event",
+            "--type",
+            "assistant.page.updated",
+            "--event-json",
+            '{"summary":"Updated."}',
+            "--json",
+        ]
+    )
+    assert cli.cmd_show(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["session_id"] == "sesCaller"
+    assert payload["session_default_notice"]["session_id"] == "sesCaller"
+    with engine.connect() as conn:
+        assert conn.execute(select(show_session_events.c.session_id)).scalar_one() == "sesCaller"
 
 
 def test_show_event_cli_dispatch_flag_updates_annotation_payload(monkeypatch, tmp_path):
