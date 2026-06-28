@@ -1354,6 +1354,15 @@ def get_vault_agent_pubkey() -> dict:
         raise _vault_api_error_from_avault(exc, prefix="avault agent pubkey failed") from exc
 
 
+def get_vault_vmk() -> dict:
+    from storage import vault_service
+
+    engine = _vault_engine()
+    with engine.connect() as conn:
+        wrap_meta = vault_service.latest_protected_vmk_wrap_meta(conn)
+    return {"ok": True, "exists": wrap_meta is not None, "wrap_meta": wrap_meta}
+
+
 def _sealed_from_payload(payload: dict):
     from storage.vault_crypto import Sealed
 

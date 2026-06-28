@@ -629,6 +629,16 @@ def list_secrets(conn: Connection, *, group: str | None = None) -> list[dict[str
     return [_meta_payload(dict(row)) for row in conn.execute(query).mappings()]
 
 
+def latest_protected_vmk_wrap_meta(conn: Connection) -> str | None:
+    """Return the newest protected-tier VMK wrap metadata as opaque JSON text."""
+    return conn.execute(
+        select(vault_secrets.c.wrap_meta)
+        .where(vault_secrets.c.protection == "protected", vault_secrets.c.wrap_meta.is_not(None))
+        .order_by(vault_secrets.c.updated_at.desc(), vault_secrets.c.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
 def rotate_secret(
     conn: Connection,
     name: str,
