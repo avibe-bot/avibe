@@ -33,10 +33,12 @@ class _FakeHTTPResponse:
 
 
 def _fake_avault_archive(
-    content: bytes = b"#!/bin/sh\necho avault 0.1.2\n",
+    content: bytes | None = None,
     *,
     member_name: str = "avault",
 ) -> bytes:
+    if content is None:
+        content = f"#!/bin/sh\necho avault {api.AVAULT_VERSION}\n".encode()
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w:gz") as archive:
         info = tarfile.TarInfo(member_name)
@@ -51,8 +53,10 @@ def _installable_avault_release(
     *,
     target: str = "macos-arm64",
     sha256: str | None = None,
-    content: bytes = b"#!/bin/sh\necho avault 0.1.2\n",
+    content: bytes | None = None,
 ):
+    if content is None:
+        content = f"#!/bin/sh\necho avault {api.AVAULT_VERSION}\n".encode()
     member_name = api._avault_binary_name_for_target(target)
     archive = _fake_avault_archive(content=content, member_name=member_name)
     digest = sha256 or hashlib.sha256(archive).hexdigest()

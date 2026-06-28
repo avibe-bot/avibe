@@ -3733,7 +3733,7 @@ AVAULT_P2_MIN_VERSION = "0.1.3"
 # Installer pin must reference a published manifest-pinned release. It may lag
 # the P2 surface; standard sealing remains usable while P2-only entry points
 # gate on AVAULT_P2_MIN_VERSION below.
-AVAULT_VERSION = "0.1.2"
+AVAULT_VERSION = "0.1.3"
 _AVAULT_RELEASE_BASE_URL = f"https://github.com/avibe-bot/avault/releases/download/v{AVAULT_VERSION}/"
 
 
