@@ -408,8 +408,9 @@ export const AppShell: React.FC = () => {
 
           {/* Bottom (design.pen NbPMq): row 1 = [Apps | Settings] two equal
               buttons; row 2 = [version … run-dot]. Admin keeps its quick-toggles
-              + hostname between the rows. */}
-          <div className="flex flex-col gap-3">
+              + hostname between the rows. The cluster sits above the window layer (z-30)
+              so the Apps launcher / Dock stay reachable even under a maximized window. */}
+          <div className="relative z-30 flex flex-col gap-3">
             {/* Row 1 — Apps (Dock trigger, left) paired with the mode switch
                 (right). The Dock rises ABOVE the Apps button, clear of the
                 centered Chat composer. Workbench → Settings (control panel);

@@ -71,7 +71,10 @@ export const WindowLayer: React.FC = () => {
     <div
       ref={ref}
       aria-hidden={!anyShown}
-      className="pointer-events-none fixed inset-y-0 left-0 right-0 z-20 hidden md:left-[240px] md:block"
+      // Spans the FULL viewport (no longer offset past the sidebar): windows can move over
+      // the sidebar and maximize fills the whole screen. The sidebar's bottom Apps/Dock
+      // cluster sits above this layer (z-30) so it stays reachable under a maximized window.
+      className="pointer-events-none fixed inset-0 z-20 hidden md:block"
     >
       {windows.map((w) => (
         <AppWindow key={w.id} win={w} layerWidth={size.w} layerHeight={size.h} />
