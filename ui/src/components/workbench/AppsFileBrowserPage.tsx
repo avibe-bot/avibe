@@ -24,7 +24,7 @@ import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
-import { previewKind } from '../../lib/filePreview';
+import { isEditableFile } from '../../lib/filePreview';
 import {
   contentUrl,
   fileBrowserErrorMessage,
@@ -39,12 +39,8 @@ import {
   type Favorite,
   type FsEntry,
   type FsListing,
-  type FsMeta,
 } from '../../lib/filesApi';
 import { Button } from '../ui/button';
-
-// Above this size we don't open a file in the editor — offer the raw download instead.
-const MAX_EDIT_BYTES = 1024 * 1024;
 
 // A code-file extension → its accent + glyph (mirrors design nknn2's colored type icons).
 const EXT_ICON: Record<string, { Icon: LucideIcon; color: string }> = {
@@ -161,24 +157,25 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       navigate(full);
       return;
     }
-    // Resolve fresh metadata before deciding editability: the listing row can be stale, and a
-    // symlink's real kind/size differ from the link. Only a regular file is editable — the backend
-    // refuses to write through a symlink, so symlinks (and dirs) fall through to a download.
-    let meta: FsMeta | null = null;
-    try {
-      meta = await fileMeta(full);
-    } catch {
-      /* fall through to a plain download */
-    }
-    const editable = meta?.kind === 'file' && previewKind(meta.name) && (meta.size == null || meta.size <= MAX_EDIT_BYTES);
-    // The Editor is a desktop-only window (the window layer is hidden below md), so on a phone an
-    // openApp('editor') would create an invisible window. Fall back to a download there.
+    // Non-editable (symlink / binary / oversized — gated by the listing entry's kind+size) or
+    // mobile (the editor window layer is hidden below md): download. This branch MUST run
+    // synchronously, before any await, or the click's user activation is lost and Safari/iOS block
+    // the popup.
     const desktop = window.matchMedia('(min-width: 768px)').matches;
-    if (editable && desktop) {
-      wm.openApp('editor', { title: e.name, params: { path: full, filename: e.name, mtime: meta?.mtime ?? null } });
-    } else {
+    if (!isEditableFile(e) || !desktop) {
       window.open(contentUrl(full, true), '_blank', 'noopener');
+      return;
     }
+    // Editable + desktop → editor window. Fetch the CURRENT mtime so the save baseline isn't a
+    // stale listing value (an agent/terminal may have touched the file since it was listed). Safe
+    // to await — opening an internal window doesn't depend on user activation.
+    let mtime = e.mtime;
+    try {
+      mtime = (await fileMeta(full)).mtime;
+    } catch {
+      /* keep the listing mtime as the baseline */
+    }
+    wm.openApp('editor', { title: e.name, params: { path: full, filename: e.name, mtime } });
   };
 
   const createNamed = async (kind: 'file' | 'dir') => {

@@ -82,6 +82,14 @@ export function previewKind(name: string, mime?: string | null, serverExt?: stri
   return null;
 }
 
+// Whether a directory entry / file should open in the in-app editor rather than download: a
+// regular file (NOT a symlink — the backend refuses to write through one — or a directory), with a
+// previewable/text kind, within the size cap. Shared by the File Browser and the editor explorer
+// so both gate opens identically.
+export function isEditableFile(entry: { kind: string; size: number | null; name: string }): boolean {
+  return entry.kind === 'file' && previewKind(entry.name) != null && (entry.size == null || entry.size <= PREVIEW_MAX_BYTES);
+}
+
 // Shiki language id for the 'code'/'source' kinds; 'text' (no highlight) otherwise.
 export function codeLanguage(name: string, serverExt?: string | null): string {
   const b = baseName(name).toLowerCase();

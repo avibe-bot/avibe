@@ -553,11 +553,27 @@ def write_file(
                 raise FileBrowserError("is_symlink", "Refusing to write through a symlink", 400)
             if target.exists() and not target.is_file():
                 raise FileBrowserError("not_file", "Path is not a regular file", 400)
-            # create_only ("New File"): the existence check happens under the per-path write lock,
-            # so it is atomic with the replace below — a concurrent writer can't slip a file in
-            # between the check and the write and get clobbered.
-            if create_only and target.exists():
-                raise ConflictError("exists", "Path already exists")
+            # create_only ("New File"): create the final path atomically with O_EXCL — no temp +
+            # replace, so it can never overwrite a file another writer/move/external process slipped
+            # in. O_EXCL fails outright if the path already exists.
+            if create_only:
+                try:
+                    excl_fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                except FileExistsError as exc:
+                    raise ConflictError("exists", "Path already exists") from exc
+                except PermissionError as exc:
+                    raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
+                except OSError as exc:
+                    raise FileBrowserError("fs_error", str(exc), 400) from exc
+                try:
+                    with os.fdopen(excl_fd, "wb") as handle:
+                        handle.write(data)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                except OSError as exc:
+                    raise FileBrowserError("fs_error", str(exc), 400) from exc
+                _fsync_dir(parent)
+                return {"ok": True, "mtime": _mtime_seconds(target.stat())}
             fd = -1
             temp_name = ""
             try:

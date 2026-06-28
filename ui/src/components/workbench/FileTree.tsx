@@ -41,7 +41,7 @@ const Row: React.FC<{ depth: number; onClick: () => void; active?: boolean; chil
   </button>
 );
 
-const Dir: React.FC<{ path: string; name: string; depth: number; activePath: string | null; showHidden: boolean; onOpenFile: (path: string, name: string, mtime: number | null) => void }> = ({
+const Dir: React.FC<{ path: string; name: string; depth: number; activePath: string | null; showHidden: boolean; onOpenFile: (path: string, entry: FsEntry) => void }> = ({
   path,
   name,
   depth,
@@ -93,7 +93,7 @@ const Dir: React.FC<{ path: string; name: string; depth: number; activePath: str
                 const full = joinPath(path, e.name);
                 const { Icon, color } = fileIcon(e);
                 return (
-                  <Row key={e.name} depth={depth + 1} active={activePath === full} onClick={() => onOpenFile(full, e.name, e.mtime)}>
+                  <Row key={e.name} depth={depth + 1} active={activePath === full} onClick={() => onOpenFile(full, e)}>
                     <Icon className="size-3.5 shrink-0" style={{ color }} />
                     <span className="truncate">{e.name}</span>
                   </Row>
@@ -109,7 +109,7 @@ const Dir: React.FC<{ path: string; name: string; depth: number; activePath: str
 
 // The VS-Code-style explorer tree (design dnYPx): a root folder whose subfolders lazily
 // expand via listDir. Reused by the Editor IDE; emits file opens upward.
-export const FileTree: React.FC<{ rootPath: string; rootName: string; activePath: string | null; showHidden?: boolean; onOpenFile: (path: string, name: string, mtime: number | null) => void }> = ({
+export const FileTree: React.FC<{ rootPath: string; rootName: string; activePath: string | null; showHidden?: boolean; onOpenFile: (path: string, entry: FsEntry) => void }> = ({
   rootPath,
   rootName,
   activePath,

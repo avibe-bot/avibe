@@ -4,7 +4,8 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { useWindowCloseGuard, useWindowManager } from '../../context/WindowManagerContext';
-import { fileBrowserErrorMessage, isPlainEntryName, joinPath, listDir, parentDir, writeFile } from '../../lib/filesApi';
+import { contentUrl, fileBrowserErrorMessage, fileMeta, isPlainEntryName, joinPath, listDir, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
+import { isEditableFile } from '../../lib/filePreview';
 import { FileTree } from './FileTree';
 
 const FileEditorPane = lazy(() => import('./FileEditorPane').then((m) => ({ default: m.FileEditorPane })));
@@ -77,6 +78,28 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
     setActive(path);
   }, []);
 
+  // The explorer tree emits a clicked entry. Gate it like the File Browser: only a regular,
+  // supported, within-cap file opens in Monaco; a symlink (the backend refuses symlink writes),
+  // oversized, or unsupported/binary entry downloads instead. The download branch runs BEFORE any
+  // await so the click's user activation survives (Safari/iOS would block the popup otherwise).
+  const onTreeOpen = useCallback(
+    async (path: string, entry: FsEntry) => {
+      if (!isEditableFile(entry)) {
+        window.open(contentUrl(path, true), '_blank', 'noopener');
+        return;
+      }
+      // Fresh mtime so the save baseline isn't a stale listing value.
+      let mtime = entry.mtime;
+      try {
+        mtime = (await fileMeta(path)).mtime;
+      } catch {
+        /* keep the listing mtime */
+      }
+      openFile(path, entry.name, mtime);
+    },
+    [openFile],
+  );
+
   // Open the launch file (from the File Browser) once on mount.
   useEffect(() => {
     const p = typeof params?.path === 'string' ? params.path : null;
@@ -108,25 +131,29 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
     });
   };
 
-  const openFolder = async () => {
+  // Prompt for + validate a folder, set it as the explorer root, and RETURN it (or null) so
+  // callers like New File can continue the flow with the chosen folder.
+  const openFolder = async (): Promise<string | null> => {
     const p = window.prompt(t('apps.editor.openFolderPrompt'));
     const path = p?.trim();
-    if (!path) return;
+    if (!path) return null;
     // Validate it's a listable directory before swapping the explorer root, so a typo doesn't
     // leave the tree stuck on a bad/non-existent path.
     try {
       await listDir(path);
       setError(null);
       setRoot(path);
+      return path;
     } catch (e: unknown) {
       setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.listFailed')));
+      return null;
     }
   };
   const newFile = async () => {
-    if (!root) {
-      openFolder();
-      return;
-    }
+    // From the welcome state there's no folder yet: prompt for one and CONTINUE creating the file
+    // in it (rather than behaving like a bare "Open Folder").
+    const dir = root ?? (await openFolder());
+    if (!dir) return;
     const raw = window.prompt(t('apps.fileBrowser.newFilePrompt'));
     if (raw == null) return;
     const name = raw.trim();
@@ -135,7 +162,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
       setError(t('apps.fileBrowser.errors.invalid_name'));
       return;
     }
-    const full = joinPath(root, name);
+    const full = joinPath(dir, name);
     try {
       // create-only: the backend atomically refuses (errors.exists) if the name is taken, so a
       // typo can never truncate an existing file.
@@ -179,7 +206,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
             </div>
           ) : (
             <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">
-              <FileTree rootPath={root} rootName={root.split('/').filter(Boolean).pop() || root} activePath={active} onOpenFile={openFile} />
+              <FileTree rootPath={root} rootName={root.split('/').filter(Boolean).pop() || root} activePath={active} onOpenFile={onTreeOpen} />
             </div>
           )}
         </div>
