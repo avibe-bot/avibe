@@ -2120,10 +2120,12 @@
     "deleteConfirm": "Delete secret \"{{name}}\"? Agents will no longer be able to use it.",
     "deleted": "Deleted {{name}}",
     "created": "Saved {{name}}",
-    "protected": {
+    "protectedUnlock": {
       "checking": "Checking your protected vault…",
       "unlocked": "Protected vault unlocked for this session",
       "lock": "Lock",
+      "errorTitle": "Couldn't reach your protected vault",
+      "retry": "Retry",
       "setupTitle": "Set up your protected vault",
       "unlockTitle": "Unlock to add a protected secret",
       "setupHelp": "Choose how to unlock protected secrets in the browser. The machine alone can never decrypt them.",
@@ -2134,6 +2136,8 @@
       "setPasswordLabel": "Vault password",
       "passwordLabel": "Vault password",
       "passwordPlaceholder": "Enter a strong password",
+      "confirmLabel": "Confirm password",
+      "confirmPlaceholder": "Re-enter the password",
       "setupPasswordCta": "Set up",
       "unlockCta": "Unlock",
       "passwordLessSecure": "A password is less secure than a passkey — anyone who learns it can unlock this vault.",
@@ -2141,7 +2145,9 @@
         "prfUnavailable": "This passkey/browser doesn't support the PRF extension needed for encryption. Try a platform passkey (Touch ID / Windows Hello) or use a password.",
         "cancelled": "Passkey prompt was cancelled.",
         "noPasskey": "No passkey is configured for this vault. Use your password.",
-        "wrongFactor": "Couldn't unlock — wrong password or passkey."
+        "wrongFactor": "Couldn't unlock — wrong password or passkey.",
+        "discoveryFailed": "Couldn't load your protected vault. Check your connection and retry — don't set up a new one, or you'll split your vault keys.",
+        "mismatch": "The passwords don't match."
       }
     },
     "dialog": {
