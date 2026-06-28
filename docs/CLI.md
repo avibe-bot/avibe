@@ -166,12 +166,30 @@ vibe session list                       # active sessions, 10 per page, newest a
 vibe session list --type slack          # filter by platform (avibe = Web/Workbench)
 vibe session list --page 2              # next page (fixed 10 per page; there is no --limit)
 vibe session get sesk8m4q2p7x           # full detail for one session
+vibe session get                        # inside an Avibe Agent shell, show the caller Session
 vibe session update sesk8m4q2p7x --title 'Release review'   # pass "" to clear the title
+vibe session update --title 'Release review'                 # inside an Avibe Agent shell
 ```
 
 `--type` accepts a platform id: `avibe` (Web/Workbench), `slack`, `discord`,
 `telegram`, `lark`, `wechat`. For richer filtering — by agent, time range, message
 content, or cross-table joins — `list` and `get` point you to `vibe data query`.
+When `get` or `update` runs inside an Avibe-injected Agent shell, the session id
+may be omitted and defaults to the caller Session from `AVIBE_SESSION_ID`.
+
+### `vibe runs`
+
+List and inspect Agent run records.
+
+```bash
+vibe runs list --session-id sesk8m4q2p7x --brief
+vibe runs show run_abc123
+vibe runs show                         # inside an Avibe Agent shell, show the caller Run
+```
+
+`vibe runs list` keeps its global listing behavior unless a filter such as
+`--session-id` is provided. `vibe runs show` can omit the run id inside an
+Avibe-injected Agent run and defaults to `AVIBE_RUN_ID`.
 
 ### `vibe task`
 
