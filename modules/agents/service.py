@@ -253,6 +253,85 @@ class AgentService:
         gate = self._turn_gates.get(runtime_key)
         return bool(gate is not None and gate.token == runtime_token and gate.runtime_started)
 
+    @staticmethod
+    def _lock_has_live_waiters(lock: asyncio.Lock) -> bool:
+        """True when ``lock`` has at least one not-yet-cancelled queued waiter.
+
+        ``asyncio.Lock.locked()`` reports only whether the lock is HELD, not whether
+        coroutines are queued waiting for it — but acquiring a lock that is free yet
+        has waiters still suspends. ``begin_agent_initiated_turn`` needs this signal
+        to stay strictly non-blocking. ``_waiters`` is a CPython asyncio internal (a
+        deque or ``None``); guarded with ``getattr`` so a future runtime that drops
+        it degrades to "no waiters" instead of raising.
+        """
+        waiters = getattr(lock, "_waiters", None)
+        if not waiters:
+            return False
+        return any(not w.cancelled() for w in waiters)
+
+    async def begin_agent_initiated_turn(
+        self, agent_name: str, context: Any, runtime_key: str
+    ) -> Optional[str]:
+        """Open a runtime-gate turn for backend output Avibe did NOT initiate.
+
+        Claude Code (and any future backend that re-invokes its agent loop inside
+        a persistent process) can start a fresh turn when a background task
+        finishes or a ScheduleWakeup fires — WITHOUT Avibe sending a query. That
+        output reaches the long-lived receiver with no turn open, so the outbound
+        active-turn guard (``emit_matches_runtime_turn``) would drop every
+        assistant/tool/result emit as a stale straggler. Open a turn here so the
+        reply rides the same INBOUND chokepoint (session → ``running``) and
+        OUTBOUND chokepoint (terminal result → idle/failed + persist + deliver +
+        notify + gate release) as a user turn.
+
+        Returns the fresh turn token when the gate was free and a turn was opened,
+        else ``None`` when the gate is contended (a user turn holds OR is queued on
+        it) — let that turn own the output; the agent-initiated emit then adopts its
+        token instead.
+
+        STRICTLY NON-BLOCKING: this runs ON the long-lived Claude receiver, which is
+        the only reader of the SDK stream. An ``asyncio.Lock`` can be momentarily
+        unlocked while it still has QUEUED WAITERS (a user turn that blocked on this
+        gate while the previous turn held it, between that turn's release and the
+        waiter resuming). In that window ``locked()`` is False, yet
+        ``await acquire()`` would SUSPEND the receiver behind the queued user turn —
+        and the receiver is what reads that turn's terminal result to release the
+        gate, so the session would deadlock. So bail unless the gate is free AND has
+        no live waiters; the ``acquire()`` below then completes synchronously
+        without yielding, so no concurrent turn can slip in (Codex P1).
+        """
+        runtime_key = str(runtime_key or "").strip()
+        if not runtime_key:
+            return None
+        gate = self._get_turn_gate(runtime_key)
+        if gate.lock.locked() or self._lock_has_live_waiters(gate.lock):
+            return None
+        await gate.lock.acquire()
+        gate.token = uuid.uuid4().hex
+        gate.backend = agent_name
+        # The backend already produced output, so the turn is unambiguously
+        # running — there is no queued-startup window to distinguish (unlike a
+        # user turn waiting on the gate), so mark it started immediately.
+        gate.runtime_started = True
+        if context.platform_specific is None:
+            context.platform_specific = {}
+        context.platform_specific[AGENT_RUNTIME_TURN_KEY] = runtime_key
+        context.platform_specific[AGENT_RUNTIME_TURN_TOKEN] = gate.token
+        # Fresh streaming token too: the previous turn's SSE sink is already gone,
+        # and a leftover ``turn_token`` would only confuse ``mark_turn_complete``
+        # (which no-ops anyway with no live sink for this session).
+        context.platform_specific[AGENT_TURN_TOKEN] = gate.token
+        # INBOUND status chokepoint (mirrors ``handle_message``): mark the avibe
+        # session ``running`` so the sidebar dot reflects the agent-initiated work.
+        # Non-avibe contexts resolve to no session id and are skipped.
+        manager = getattr(self.controller, "session_turns", None)
+        if manager is not None:
+            try:
+                manager.on_running(context)
+            except Exception:
+                logger.debug("on_running failed for agent-initiated turn", exc_info=True)
+        return gate.token
+
     def release_runtime_turn(self, context: Any) -> None:
         payload = getattr(context, "platform_specific", None) or {}
         runtime_key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip()
