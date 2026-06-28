@@ -91,3 +91,27 @@ def _reset_oauth_runtime_state():
     yield
     for cache in caches:
         cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_show_runtime_manager():
+    """Stop and clear any global Show Runtime manager spawned during a test.
+
+    The Show Runtime manager is a process-global singleton. Serving-path tests
+    that do not install a fake manager cause ``get_show_runtime_manager()`` to
+    lazily create the real manager, which spawns a Node ``cli.js`` + ``esbuild``
+    subprocess tree whenever a runtime is installed on the machine. Without an
+    explicit teardown the reference can be overwritten by a later test's
+    ``set_show_runtime_manager_for_tests`` swap; the ``atexit`` cleanup at pytest
+    exit then no longer sees it, and the Node/esbuild tree leaks for the lifetime
+    of the machine. Reset after every test so no real subprocess can outlive it.
+    """
+    yield
+    try:
+        from core import show_runtime
+    except Exception:
+        return
+    try:
+        show_runtime.set_show_runtime_manager_for_tests(None)
+    except Exception:
+        pass

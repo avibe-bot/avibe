@@ -1019,6 +1019,18 @@ async def prewarm_show_page_session(session_id: str, *, base_path: str | None = 
 
 def set_show_runtime_manager_for_tests(manager: ShowRuntimeManager | None) -> None:
     global _manager
+    previous = _manager
+    # Stop the manager we are replacing before dropping the reference. Serving-path
+    # tests that never install a fake cause get_show_runtime_manager() to lazily
+    # create the real manager, which spawns a Node cli.js + esbuild subprocess tree
+    # when a runtime is installed locally. If a later test swaps the global without
+    # stopping it first, the reference is lost, the atexit cleanup at process exit
+    # can no longer reap it, and the subprocess tree leaks for the machine's lifetime.
+    if previous is not None and previous is not manager:
+        try:
+            previous.stop()
+        except Exception:  # pragma: no cover - defensive cleanup
+            logger.debug("failed to stop previous show runtime manager", exc_info=True)
     _manager = manager
 
 
