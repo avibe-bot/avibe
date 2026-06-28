@@ -30,6 +30,18 @@ function getSessionId(identity: string | null, key?: string): string {
 
 type Tab = { key: number; slot: number | null };
 
+// DELETE a slot-backed terminal session, then release its slot ONLY on a confirmed teardown
+// (HTTP ok or 404). If the delete failed (expired auth, CSRF/origin rejection, network error, 5xx)
+// the tmux session may still be alive, so the slot stays reserved — otherwise the next tab could
+// reuse the same `<base>-wN` id and reconnect to the previous shell, exposing its state.
+function deleteTerminalSession(sid: string, slot: number, keepalive = false): void {
+  apiFetch(`/api/terminal/${encodeURIComponent(sid)}`, { method: 'DELETE', credentials: 'same-origin', keepalive })
+    .then((res) => {
+      if (res.ok || res.status === 404) releaseTerminalSlot(slot);
+    })
+    .catch(() => undefined);
+}
+
 // A multi-tab terminal: a tab bar (each tab = its own backend session) over the lazy
 // xterm view. Reusable — the standalone Terminal app and (later) the editor's integrated
 // terminal both mount this. Design: design.pen `iwYIX`.
@@ -61,8 +73,10 @@ export const TerminalTabs: React.FC<{ windowed?: boolean }> = ({ windowed = fals
   const disposeTab = (tab: Tab, keepalive = false) => {
     if (tab.slot == null) return;
     const sid = sessionIdFor(tab);
-    if (sid) void apiFetch(`/api/terminal/${encodeURIComponent(sid)}`, { method: 'DELETE', credentials: 'same-origin', keepalive }).catch(() => undefined);
-    releaseTerminalSlot(tab.slot);
+    // No session id yet (identity unresolved → TerminalView never mounted) → no backend session
+    // exists, so the slot is safe to release now. Otherwise release only after DELETE confirms.
+    if (sid == null) releaseTerminalSlot(tab.slot);
+    else deleteTerminalSession(sid, tab.slot, keepalive);
   };
 
   const addTab = () => {
@@ -103,8 +117,8 @@ export const TerminalTabs: React.FC<{ windowed?: boolean }> = ({ windowed = fals
       for (const tab of liveRef.current.tabs) {
         if (tab.slot == null) continue;
         const sid = liveRef.current.resolve(tab);
-        if (sid) void apiFetch(`/api/terminal/${encodeURIComponent(sid)}`, { method: 'DELETE', credentials: 'same-origin' }).catch(() => undefined);
-        releaseTerminalSlot(tab.slot);
+        if (sid == null) releaseTerminalSlot(tab.slot);
+        else deleteTerminalSession(sid, tab.slot);
       }
     };
   }, []);

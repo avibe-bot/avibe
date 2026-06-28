@@ -27,7 +27,9 @@ import { useWindowManager } from '../../context/WindowManagerContext';
 import { previewKind } from '../../lib/filePreview';
 import {
   contentUrl,
+  FilesApiError,
   fileBrowserErrorMessage,
+  fileMeta,
   isPlainEntryName,
   joinPath,
   listDir,
@@ -83,9 +85,10 @@ function formatSize(n: number | null): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function formatMtime(ms: number | null): string {
-  if (ms == null) return '—';
-  const d = new Date(ms);
+function formatMtime(seconds: number | null): string {
+  if (seconds == null) return '—';
+  // The backend returns mtime in SECONDS (st_mtime_ns / 1e9); Date expects milliseconds.
+  const d = new Date(seconds * 1000);
   const now = Date.now();
   const sameYear = d.getFullYear() === new Date(now).getFullYear();
   const date = d.toLocaleDateString(undefined, sameYear ? { month: 'short', day: 'numeric' } : { year: 'numeric', month: 'short', day: 'numeric' });
@@ -159,7 +162,10 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       return;
     }
     const editable = previewKind(e.name) && (e.size == null || e.size <= MAX_EDIT_BYTES);
-    if (editable) {
+    // The Editor is a desktop-only window (the window layer is hidden below md), so on a phone an
+    // openApp('editor') would create an invisible window. Fall back to a download there.
+    const desktop = window.matchMedia('(min-width: 768px)').matches;
+    if (editable && desktop) {
       wm.openApp('editor', { title: e.name, params: { path: full, filename: e.name, mtime: e.mtime } });
     } else {
       window.open(contentUrl(full, true), '_blank', 'noopener');
@@ -175,9 +181,26 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       setError(t('apps.fileBrowser.errors.invalid_name'));
       return;
     }
+    const target = joinPath(cwd, name);
     try {
-      if (kind === 'dir') await makeDir(joinPath(cwd, name));
-      else await writeFile(joinPath(cwd, name), '', undefined);
+      if (kind === 'dir') {
+        await makeDir(target);
+      } else {
+        // Create-only: never overwrite an existing file on a name typo. A resolving fileMeta means
+        // the name is taken; only a not_found makes it safe to create.
+        let exists = true;
+        try {
+          await fileMeta(target);
+        } catch (err: unknown) {
+          if (err instanceof FilesApiError && err.code === 'not_found') exists = false;
+          else throw err;
+        }
+        if (exists) {
+          setError(t('apps.fileBrowser.errors.exists'));
+          return;
+        }
+        await writeFile(target, '', undefined);
+      }
       navigate(cwd);
     } catch (e: unknown) {
       setError(fileBrowserErrorMessage(e, t, t(kind === 'dir' ? 'apps.fileBrowser.errors.createFolderFailed' : 'apps.fileBrowser.errors.saveFailed')));
@@ -291,8 +314,19 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                   <button
                     key={e.name}
                     type="button"
-                    onClick={() => setSelected(full)}
+                    // Mouse: single-click selects, double-click opens. Touch (coarse pointer) has no
+                    // double-click, so a single tap opens. Keyboard: Enter/Space opens/navigates.
+                    onClick={() => {
+                      if (window.matchMedia('(pointer: coarse)').matches) open(e);
+                      else setSelected(full);
+                    }}
                     onDoubleClick={() => open(e)}
+                    onKeyDown={(ev) => {
+                      if (ev.key === 'Enter' || ev.key === ' ') {
+                        ev.preventDefault();
+                        open(e);
+                      }
+                    }}
                     className={clsx(
                       'flex w-full items-center px-3 py-1.5 text-left text-[12.5px] transition',
                       selected === full ? 'bg-cyan-soft text-foreground' : 'text-foreground hover:bg-foreground/[0.04]',

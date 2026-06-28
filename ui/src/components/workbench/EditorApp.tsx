@@ -1,21 +1,18 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
-import { Blocks, Bug, CircleCheck, Clock, CodeXml, FilePlus, Files, FolderOpen, GitBranch, Search, Settings, X } from 'lucide-react';
+import { Blocks, Bug, Clock, CodeXml, FilePlus, Files, FolderOpen, GitBranch, Search, Settings, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { useWindowCloseGuard, useWindowManager } from '../../context/WindowManagerContext';
-import { fileBrowserErrorMessage, isPlainEntryName, joinPath, writeFile } from '../../lib/filesApi';
+import { FilesApiError, fileBrowserErrorMessage, fileMeta, isPlainEntryName, joinPath, parentDir, writeFile } from '../../lib/filesApi';
 import { FileTree } from './FileTree';
 
 const FileEditorPane = lazy(() => import('./FileEditorPane').then((m) => ({ default: m.FileEditorPane })));
 
-type Tab = { path: string; name: string };
-
-function dirOf(path: string): string {
-  const parts = path.split('/').filter(Boolean);
-  parts.pop();
-  return '/' + parts.join('/');
-}
+// A tab carries the file's mtime captured at open time, so saving stays conditional on it
+// (writeFile's expected_mtime) and the backend can surface a conflict instead of silently
+// clobbering newer on-disk content.
+type Tab = { path: string; name: string; mtime: number | null };
 
 // Human language label for the status bar (design dnYPx shows e.g. "TypeScript React").
 const LANGUAGE_LABEL: Record<string, string> = {
@@ -73,9 +70,9 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   const [cursor, setCursor] = useState<{ line: number; col: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const openFile = useCallback((path: string, name: string) => {
-    setRoot((r) => r ?? dirOf(path));
-    setTabs((ts) => (ts.some((x) => x.path === path) ? ts : [...ts, { path, name }]));
+  const openFile = useCallback((path: string, name: string, mtime: number | null) => {
+    setRoot((r) => r ?? parentDir(path));
+    setTabs((ts) => (ts.some((x) => x.path === path) ? ts : [...ts, { path, name, mtime }]));
     setCursor(null);
     setActive(path);
   }, []);
@@ -83,7 +80,12 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   // Open the launch file (from the File Browser) once on mount.
   useEffect(() => {
     const p = typeof params?.path === 'string' ? params.path : null;
-    if (p) openFile(p, (typeof params?.filename === 'string' ? params.filename : p.split('/').filter(Boolean).pop()) || p);
+    if (p)
+      openFile(
+        p,
+        (typeof params?.filename === 'string' ? params.filename : p.split('/').filter(Boolean).pop()) || p,
+        typeof params?.mtime === 'number' ? params.mtime : null,
+      );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -91,6 +93,9 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   useWindowCloseGuard(windowId, anyDirty ? t('apps.editor.confirmDiscardClose') : null);
 
   const closeTab = (path: string) => {
+    // Closing a dirty tab drops its in-memory buffer (only the window-level guard existed before),
+    // so confirm first when there are unsaved edits.
+    if (dirty[path] && !window.confirm(t('apps.editor.confirmDiscardClose'))) return;
     setTabs((ts) => {
       const rest = ts.filter((x) => x.path !== path);
       setActive((cur) => (cur === path ? (rest.length ? rest[rest.length - 1].path : null) : cur));
@@ -122,8 +127,21 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
     }
     const full = joinPath(root, name);
     try {
-      await writeFile(full, '', undefined);
-      openFile(full, name);
+      // Create-only: never overwrite an existing file on a name typo. A resolving fileMeta means
+      // the name is taken; only a not_found makes it safe to create.
+      let exists = true;
+      try {
+        await fileMeta(full);
+      } catch (e: unknown) {
+        if (e instanceof FilesApiError && e.code === 'not_found') exists = false;
+        else throw e;
+      }
+      if (exists) {
+        setError(t('apps.fileBrowser.errors.exists'));
+        return;
+      }
+      const result = await writeFile(full, '', undefined);
+      openFile(full, name, result.mtime);
     } catch (e: unknown) {
       setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.saveFailed')));
     }
@@ -220,7 +238,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                         <FileEditorPane
                           path={tab.path}
                           filename={tab.name}
-                          mtime={null}
+                          mtime={tab.mtime}
                           chromeless
                           onDirtyChange={(d) => setDirty((prev) => (prev[tab.path] === d ? prev : { ...prev, [tab.path]: d }))}
                           onCursor={active === tab.path ? (line, col) => setCursor({ line, col }) : undefined}
@@ -235,14 +253,11 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
         </div>
       </div>
 
-      {/* Status bar (cyan, design dnYPx) */}
+      {/* Status bar (cyan, design dnYPx). The design mock shows a git branch + problem counts on
+          the left, but we have no real git/diagnostics data for an arbitrary folder — showing a
+          hardcoded "master · 0 ⚠ 0" would be misleading, so those are omitted until wired. The
+          right side (cursor / indentation / language) is real. */}
       <div className="flex items-center gap-3.5 bg-cyan px-3.5 py-1 font-mono text-[10.5px] font-semibold text-[#06222B]">
-        <span className="flex items-center gap-1.5">
-          <GitBranch className="size-3" /> master
-        </span>
-        <span className="flex items-center gap-1.5">
-          <CircleCheck className="size-3" /> 0 ⚠ 0
-        </span>
         {active ? (
           <>
             <span className="ml-auto tabular-nums">{t('apps.editor.lineCol', { line: cursor?.line ?? 1, col: cursor?.col ?? 1 })}</span>

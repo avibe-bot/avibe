@@ -122,6 +122,13 @@ export function pathCrumbs(path: string): { label: string; path: string }[] {
   return out;
 }
 
+// The parent directory of a path, Windows-aware (reuses pathCrumbs' separator handling) so the
+// editor opens its explorer on the right root for POSIX, Windows drive, and UNC paths alike.
+export function parentDir(path: string): string {
+  const crumbs = pathCrumbs(path);
+  return crumbs.length >= 2 ? crumbs[crumbs.length - 2].path : path;
+}
+
 export async function listDir(path: string, showHidden = false): Promise<FsListing> {
   const res = await apiFetch(
     `/api/files/list?path=${encodeURIComponent(path)}&show_hidden=${showHidden ? '1' : '0'}`,
