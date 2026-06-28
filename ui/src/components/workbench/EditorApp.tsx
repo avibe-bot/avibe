@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { useWindowCloseGuard, useWindowManager } from '../../context/WindowManagerContext';
-import { FilesApiError, fileBrowserErrorMessage, fileMeta, isPlainEntryName, joinPath, parentDir, writeFile } from '../../lib/filesApi';
+import { fileBrowserErrorMessage, isPlainEntryName, joinPath, listDir, parentDir, writeFile } from '../../lib/filesApi';
 import { FileTree } from './FileTree';
 
 const FileEditorPane = lazy(() => import('./FileEditorPane').then((m) => ({ default: m.FileEditorPane })));
@@ -108,9 +108,19 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
     });
   };
 
-  const openFolder = () => {
+  const openFolder = async () => {
     const p = window.prompt(t('apps.editor.openFolderPrompt'));
-    if (p && p.trim()) setRoot(p.trim());
+    const path = p?.trim();
+    if (!path) return;
+    // Validate it's a listable directory before swapping the explorer root, so a typo doesn't
+    // leave the tree stuck on a bad/non-existent path.
+    try {
+      await listDir(path);
+      setError(null);
+      setRoot(path);
+    } catch (e: unknown) {
+      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.listFailed')));
+    }
   };
   const newFile = async () => {
     if (!root) {
@@ -127,20 +137,9 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
     }
     const full = joinPath(root, name);
     try {
-      // Create-only: never overwrite an existing file on a name typo. A resolving fileMeta means
-      // the name is taken; only a not_found makes it safe to create.
-      let exists = true;
-      try {
-        await fileMeta(full);
-      } catch (e: unknown) {
-        if (e instanceof FilesApiError && e.code === 'not_found') exists = false;
-        else throw e;
-      }
-      if (exists) {
-        setError(t('apps.fileBrowser.errors.exists'));
-        return;
-      }
-      const result = await writeFile(full, '', undefined);
+      // create-only: the backend atomically refuses (errors.exists) if the name is taken, so a
+      // typo can never truncate an existing file.
+      const result = await writeFile(full, '', undefined, true);
       openFile(full, name, result.mtime);
     } catch (e: unknown) {
       setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.saveFailed')));

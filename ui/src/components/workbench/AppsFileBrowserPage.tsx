@@ -27,7 +27,6 @@ import { useWindowManager } from '../../context/WindowManagerContext';
 import { previewKind } from '../../lib/filePreview';
 import {
   contentUrl,
-  FilesApiError,
   fileBrowserErrorMessage,
   fileMeta,
   isPlainEntryName,
@@ -40,6 +39,7 @@ import {
   type Favorite,
   type FsEntry,
   type FsListing,
+  type FsMeta,
 } from '../../lib/filesApi';
 import { Button } from '../ui/button';
 
@@ -155,18 +155,27 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
 
   // Open: dir → navigate; editable text/code file (within the size cap) → Editor window;
   // anything else → raw download. (Richer per-type "default open" is a later design.)
-  const open = (e: FsEntry) => {
+  const open = async (e: FsEntry) => {
     const full = joinPath(cwd, e.name);
     if (e.kind === 'dir') {
       navigate(full);
       return;
     }
-    const editable = previewKind(e.name) && (e.size == null || e.size <= MAX_EDIT_BYTES);
+    // Resolve fresh metadata before deciding editability: the listing row can be stale, and a
+    // symlink's real kind/size differ from the link. Only a regular file is editable — the backend
+    // refuses to write through a symlink, so symlinks (and dirs) fall through to a download.
+    let meta: FsMeta | null = null;
+    try {
+      meta = await fileMeta(full);
+    } catch {
+      /* fall through to a plain download */
+    }
+    const editable = meta?.kind === 'file' && previewKind(meta.name) && (meta.size == null || meta.size <= MAX_EDIT_BYTES);
     // The Editor is a desktop-only window (the window layer is hidden below md), so on a phone an
     // openApp('editor') would create an invisible window. Fall back to a download there.
     const desktop = window.matchMedia('(min-width: 768px)').matches;
     if (editable && desktop) {
-      wm.openApp('editor', { title: e.name, params: { path: full, filename: e.name, mtime: e.mtime } });
+      wm.openApp('editor', { title: e.name, params: { path: full, filename: e.name, mtime: meta?.mtime ?? null } });
     } else {
       window.open(contentUrl(full, true), '_blank', 'noopener');
     }
@@ -183,24 +192,10 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     }
     const target = joinPath(cwd, name);
     try {
-      if (kind === 'dir') {
-        await makeDir(target);
-      } else {
-        // Create-only: never overwrite an existing file on a name typo. A resolving fileMeta means
-        // the name is taken; only a not_found makes it safe to create.
-        let exists = true;
-        try {
-          await fileMeta(target);
-        } catch (err: unknown) {
-          if (err instanceof FilesApiError && err.code === 'not_found') exists = false;
-          else throw err;
-        }
-        if (exists) {
-          setError(t('apps.fileBrowser.errors.exists'));
-          return;
-        }
-        await writeFile(target, '', undefined);
-      }
+      if (kind === 'dir') await makeDir(target);
+      // create-only: the backend atomically refuses (errors.exists) when the name is taken, so a
+      // typo can't truncate an existing file.
+      else await writeFile(target, '', undefined, true);
       navigate(cwd);
     } catch (e: unknown) {
       setError(fileBrowserErrorMessage(e, t, t(kind === 'dir' ? 'apps.fileBrowser.errors.createFolderFailed' : 'apps.fileBrowser.errors.saveFailed')));

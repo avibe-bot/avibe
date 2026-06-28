@@ -430,6 +430,21 @@ def test_write_normal_path_still_succeeds(tmp_path):
     assert path.read_text(encoding="utf-8") == "ok"
 
 
+def test_write_create_only_refuses_to_clobber_existing(tmp_path):
+    path = tmp_path / "new.txt"
+
+    # A brand-new file with create_only succeeds.
+    result = fs.write_file(str(path), "first", create_only=True)
+    assert result["ok"] is True
+    assert path.read_text(encoding="utf-8") == "first"
+
+    # A second create_only write for the same name is refused and must NOT truncate the file.
+    with pytest.raises(fs.ConflictError) as excinfo:
+        fs.write_file(str(path), "second", create_only=True)
+    assert excinfo.value.code == "exists"
+    assert path.read_text(encoding="utf-8") == "first"
+
+
 def test_write_long_legal_basename_uses_bounded_temp_name(tmp_path, monkeypatch):
     name = "a" * 250
     path = tmp_path / name

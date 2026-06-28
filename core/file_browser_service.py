@@ -517,7 +517,9 @@ def _write_lock_for(path: Path) -> threading.Lock:
         return lock
 
 
-def write_file(raw_path: str, content: str, *, expected_mtime: float | None = None) -> dict[str, Any]:
+def write_file(
+    raw_path: str, content: str, *, expected_mtime: float | None = None, create_only: bool = False
+) -> dict[str, Any]:
     if not isinstance(content, str):
         raise FileBrowserError("invalid_content", "Content must be UTF-8 text", 400)
     data = content.encode("utf-8")
@@ -551,6 +553,11 @@ def write_file(raw_path: str, content: str, *, expected_mtime: float | None = No
                 raise FileBrowserError("is_symlink", "Refusing to write through a symlink", 400)
             if target.exists() and not target.is_file():
                 raise FileBrowserError("not_file", "Path is not a regular file", 400)
+            # create_only ("New File"): the existence check happens under the per-path write lock,
+            # so it is atomic with the replace below — a concurrent writer can't slip a file in
+            # between the check and the write and get clobbered.
+            if create_only and target.exists():
+                raise ConflictError("exists", "Path already exists")
             fd = -1
             temp_name = ""
             try:

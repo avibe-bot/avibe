@@ -164,11 +164,14 @@ export async function writeFile(
   path: string,
   content: string,
   expectedMtime?: number | null,
+  // create_only: backend refuses (errors.exists) if the path already exists, checked atomically
+  // under its per-path write lock — used by "New File" so a name typo can never clobber a file.
+  createOnly = false,
 ): Promise<{ ok: true; mtime: number }> {
   const res = await apiFetch('/api/files/write', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, content, expected_mtime: expectedMtime ?? undefined }),
+    body: JSON.stringify({ path, content, expected_mtime: expectedMtime ?? undefined, create_only: createOnly || undefined }),
   });
   return parse<{ ok: true; mtime: number }>(res);
 }

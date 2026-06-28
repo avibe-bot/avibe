@@ -116,5 +116,7 @@ export const FileTree: React.FC<{ rootPath: string; rootName: string; activePath
   showHidden = false,
   onOpenFile,
 }) => (
-  <Dir path={rootPath} name={rootName} depth={0} activePath={activePath} showHidden={showHidden} onOpenFile={onOpenFile} />
+  // key on rootPath so changing the opened folder remounts the tree with fresh state instead of
+  // leaving the previous folder's expanded entries behind.
+  <Dir key={rootPath} path={rootPath} name={rootName} depth={0} activePath={activePath} showHidden={showHidden} onOpenFile={onOpenFile} />
 );
