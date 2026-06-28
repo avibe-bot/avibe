@@ -144,6 +144,20 @@ export function contentUrl(path: string, download = false): string {
   return `/api/files/content?path=${encodeURIComponent(path)}${download ? '&download=1' : ''}`;
 }
 
+// Trigger a file download via a programmatic anchor click rather than window.open. An anchor
+// download is not a popup, so — unlike window.open('_blank') — it isn't popup-blocked and survives
+// an awaited metadata recheck without losing the click's user activation (Safari/iOS). The backend's
+// Content-Disposition (download=1) names the file and forces the save in-place.
+export function downloadFile(path: string): void {
+  const a = document.createElement('a');
+  a.href = contentUrl(path, true);
+  a.rel = 'noopener';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 export async function readText(path: string): Promise<string> {
   const res = await apiFetch(contentUrl(path));
   if (!res.ok) {

@@ -565,16 +565,20 @@ def write_file(
                     raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
                 except OSError as exc:
                     raise FileBrowserError("fs_error", str(exc), 400) from exc
+                created_ino = os.fstat(excl_fd).st_ino
                 try:
                     with os.fdopen(excl_fd, "wb") as handle:
                         handle.write(data)
                         handle.flush()
                         os.fsync(handle.fileno())
                 except OSError as exc:
-                    # O_EXCL already created the file; remove the partial/empty leftover so a
-                    # retry isn't blocked by a stale `exists` (the temp+replace path self-cleans).
+                    # Remove the partial file we created so a retry isn't blocked by a stale
+                    # `exists` — but ONLY if the path still resolves to OUR inode, so we never delete
+                    # a file an external writer slipped in between the failure and here (mirrors the
+                    # hard-link rollback guard).
                     try:
-                        os.unlink(target)
+                        if os.stat(target).st_ino == created_ino:
+                            os.unlink(target)
                     except OSError:
                         pass
                     raise FileBrowserError("fs_error", str(exc), 400) from exc

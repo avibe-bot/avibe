@@ -26,7 +26,7 @@ import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { isEditableFile } from '../../lib/filePreview';
 import {
-  contentUrl,
+  downloadFile,
   fileBrowserErrorMessage,
   fileMeta,
   isPlainEntryName,
@@ -163,7 +163,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     // the popup.
     const desktop = window.matchMedia('(min-width: 768px)').matches;
     if (!isEditableFile(e) || !desktop) {
-      window.open(contentUrl(full, true), '_blank', 'noopener');
+      downloadFile(full);
       return;
     }
     // Editable + desktop → editor window. Fetch CURRENT metadata: it gives the save-baseline mtime
@@ -173,7 +173,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     try {
       const m = await fileMeta(full);
       if (!isEditableFile(m)) {
-        window.open(contentUrl(full, true), '_blank', 'noopener');
+        downloadFile(full);
         return;
       }
       wm.openApp('editor', { title: e.name, params: { path: full, filename: e.name, mtime: m.mtime } });

@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { useWindowCloseGuard, useWindowManager } from '../../context/WindowManagerContext';
-import { contentUrl, fileBrowserErrorMessage, fileMeta, isPlainEntryName, joinPath, listDir, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
+import { downloadFile, fileBrowserErrorMessage, fileMeta, isPlainEntryName, joinPath, listDir, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
 import { isEditableFile } from '../../lib/filePreview';
 import { FileTree } from './FileTree';
 
@@ -88,7 +88,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   const onTreeOpen = useCallback(
     async (path: string, entry: FsEntry) => {
       if (!isEditableFile(entry)) {
-        window.open(contentUrl(path, true), '_blank', 'noopener');
+        downloadFile(path);
         return;
       }
       // Fetch fresh metadata: gives the save-baseline mtime AND re-validates (the file may have
@@ -96,7 +96,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
       try {
         const m = await fileMeta(path);
         if (!isEditableFile(m)) {
-          window.open(contentUrl(path, true), '_blank', 'noopener');
+          downloadFile(path);
           return;
         }
         openFile(path, entry.name, m.mtime);
@@ -210,6 +210,13 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                 <FolderOpen className="size-3.5" />
                 {t('apps.editor.openFolder')}
               </button>
+              {/* Folder-validation errors (bad path / permission) must surface here too — the
+                  main-area error banner only renders once a folder is open. */}
+              {error && (
+                <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-2 py-1.5 text-[11.5px] text-destructive">
+                  {error}
+                </div>
+              )}
             </div>
           ) : (
             <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">

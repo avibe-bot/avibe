@@ -67,6 +67,12 @@ export const TerminalView: React.FC<{ sessionId: string; onPersistent?: (persist
     term.loadAddon(fit);
     termRef.current = term;
     const refit = () => {
+      const el = containerRef.current;
+      // Skip when the container is hidden (a background tab uses display:none → 0×0): fitting to
+      // zero would send a tiny {cols,rows} resize to the PTY and disrupt full-screen programs /
+      // shells running in inactive tabs. The ResizeObserver fires again with real dimensions when
+      // the tab is shown.
+      if (!el || el.clientWidth === 0 || el.clientHeight === 0) return;
       try {
         fit.fit();
       } catch {
@@ -105,7 +111,7 @@ export const TerminalView: React.FC<{ sessionId: string; onPersistent?: (persist
     wsRef.current = ws;
     ws.onopen = () => {
       try {
-        fit.fit();
+        refit();
       } catch {
         /* noop */
       }
@@ -147,13 +153,7 @@ export const TerminalView: React.FC<{ sessionId: string; onPersistent?: (persist
       );
     };
 
-    const ro = new ResizeObserver(() => {
-      try {
-        fit.fit();
-      } catch {
-        /* noop */
-      }
-    });
+    const ro = new ResizeObserver(() => refit());
     if (containerRef.current) ro.observe(containerRef.current);
 
     return () => {
