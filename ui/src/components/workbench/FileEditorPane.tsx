@@ -83,7 +83,9 @@ export const FileEditorPane: React.FC<{
   onPopOut?: (live: { mtime: number | null }) => void;
   /** The owning window id, when this editor lives in a window — enables the unsaved-close guard. */
   windowId?: string;
-}> = ({ path, filename, mtime, readOnly = false, onPopOut, windowId }) => {
+  /** Report dirty state up (used by the Editor IDE to aggregate one close guard over its tabs). */
+  onDirtyChange?: (dirty: boolean) => void;
+}> = ({ path, filename, mtime, readOnly = false, onPopOut, windowId, onDirtyChange }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [text, setText] = useState<string | null>(null);
@@ -117,6 +119,9 @@ export const FileEditorPane: React.FC<{
   }, [path, filename, mtime]);
 
   const dirty = !readOnly && text !== null && text !== original;
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
   const language = monacoLanguage(filename);
   // Monaco reuses models by `path`, so each editor INSTANCE needs a unique model URI.
   // Otherwise two panes on the same file share one model while keeping separate

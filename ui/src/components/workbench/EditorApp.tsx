@@ -1,46 +1,220 @@
-import { Suspense, lazy } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
+import { Blocks, Bug, CircleCheck, Clock, CodeXml, FilePlus, Files, FolderOpen, GitBranch, Search, Settings, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { FileCode2 } from 'lucide-react';
+import clsx from 'clsx';
 
-// The Editor window body. Reuses FileEditorPane (Monaco) so the standalone Editor
-// app and the in-Files edit pane share one editor. Files opens a file here via
-// `openApp('editor', { params: { path, filename, mtime } })`; with no file it
-// shows a tasteful empty state.
+import { useWindowCloseGuard, useWindowManager } from '../../context/WindowManagerContext';
+import { fileBrowserErrorMessage, isPlainEntryName, joinPath, writeFile } from '../../lib/filesApi';
+import { FileTree } from './FileTree';
+
 const FileEditorPane = lazy(() => import('./FileEditorPane').then((m) => ({ default: m.FileEditorPane })));
 
+type Tab = { path: string; name: string };
+
+function dirOf(path: string): string {
+  const parts = path.split('/').filter(Boolean);
+  parts.pop();
+  return '/' + parts.join('/');
+}
+
+// The Editor IDE (design dnYPx + welcome w0qoC): activity bar + collapsible explorer tree +
+// editor tabs + Monaco + cyan status bar; a VS-Code-style welcome when nothing is open.
+// Monaco is fully integrated here. Files opens a file via openApp('editor', { params: { path } }).
 export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, unknown> }> = ({ windowId, params }) => {
   const { t } = useTranslation();
-  const path = typeof params?.path === 'string' ? params.path : null;
-  const mtime = typeof params?.mtime === 'number' ? params.mtime : null;
-  const filename =
-    typeof params?.filename === 'string'
-      ? params.filename
-      : path
-        ? path.split('/').filter(Boolean).pop() ?? path
-        : '';
+  const wm = useWindowManager();
+  const [root, setRoot] = useState<string | null>(null);
+  const [tabs, setTabs] = useState<Tab[]>([]);
+  const [active, setActive] = useState<string | null>(null);
+  const [dirty, setDirty] = useState<Record<string, boolean>>({});
+  const [error, setError] = useState<string | null>(null);
 
-  if (!path) {
-    return (
-      <div className="grid h-full w-full place-items-center bg-surface-2 p-6 text-center">
-        <div className="flex max-w-xs flex-col items-center gap-3">
-          <div className="grid size-14 place-items-center rounded-2xl border border-border bg-foreground/[0.03]">
-            <FileCode2 className="size-7 text-violet" />
-          </div>
-          <div className="text-[14px] font-semibold text-foreground">{t('apps.editor.empty')}</div>
-          <p className="text-[12.5px] text-muted">{t('apps.editor.emptyHint')}</p>
-        </div>
-      </div>
-    );
-  }
+  const openFile = useCallback((path: string, name: string) => {
+    setRoot((r) => r ?? dirOf(path));
+    setTabs((ts) => (ts.some((x) => x.path === path) ? ts : [...ts, { path, name }]));
+    setActive(path);
+  }, []);
+
+  // Open the launch file (from the File Browser) once on mount.
+  useEffect(() => {
+    const p = typeof params?.path === 'string' ? params.path : null;
+    if (p) openFile(p, (typeof params?.filename === 'string' ? params.filename : p.split('/').filter(Boolean).pop()) || p);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const anyDirty = Object.values(dirty).some(Boolean);
+  useWindowCloseGuard(windowId, anyDirty ? t('apps.editor.confirmDiscardClose') : null);
+
+  const closeTab = (path: string) => {
+    setTabs((ts) => {
+      const rest = ts.filter((x) => x.path !== path);
+      setActive((cur) => (cur === path ? (rest.length ? rest[rest.length - 1].path : null) : cur));
+      return rest;
+    });
+    setDirty((d) => {
+      const n = { ...d };
+      delete n[path];
+      return n;
+    });
+  };
+
+  const openFolder = () => {
+    const p = window.prompt(t('apps.editor.openFolderPrompt'));
+    if (p && p.trim()) setRoot(p.trim());
+  };
+  const newFile = async () => {
+    if (!root) {
+      openFolder();
+      return;
+    }
+    const raw = window.prompt(t('apps.fileBrowser.newFilePrompt'));
+    if (raw == null) return;
+    const name = raw.trim();
+    if (name === '') return;
+    if (!isPlainEntryName(name)) {
+      setError(t('apps.fileBrowser.errors.invalid_name'));
+      return;
+    }
+    const full = joinPath(root, name);
+    try {
+      await writeFile(full, '', undefined);
+      openFile(full, name);
+    } catch (e: unknown) {
+      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.saveFailed')));
+    }
+  };
+
+  const ACTIVITY = [Files, Search, GitBranch, Bug, Blocks];
 
   return (
-    <div className="h-full w-full bg-surface-2">
-      <Suspense
-        fallback={<div className="grid h-full w-full place-items-center text-[12px] text-muted">{t('common.loading')}</div>}
-      >
-        {/* key by path: remount per file so a stale load/save can't apply to a different file. */}
-        <FileEditorPane key={path} path={path} filename={filename} mtime={mtime} windowId={windowId} />
-      </Suspense>
+    <div className="flex h-full min-h-0 w-full flex-col bg-surface">
+      <div className="flex min-h-0 flex-1">
+        {/* Activity bar */}
+        <div className="flex w-12 shrink-0 flex-col items-center justify-between border-r border-border bg-surface-3 py-3">
+          <div className="flex flex-col items-center gap-[18px]">
+            {ACTIVITY.map((Icon, i) => (
+              <Icon key={i} className={clsx('size-5', i === 0 ? 'text-foreground' : 'text-muted')} />
+            ))}
+          </div>
+          <Settings className="size-5 text-muted" />
+        </div>
+
+        {root == null ? (
+          <Welcome onOpenFolder={openFolder} onNewFile={newFile} onOpenFiles={() => wm.openApp('files')} />
+        ) : (
+          <>
+            {/* Explorer */}
+            <div className="flex w-[220px] shrink-0 flex-col overflow-hidden border-r border-border bg-surface-2">
+              <div className="px-3 pb-1 pt-2.5 font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">{t('apps.editor.explorer')}</div>
+              <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">
+                <FileTree rootPath={root} rootName={root.split('/').filter(Boolean).pop() || root} activePath={active} onOpenFile={openFile} />
+              </div>
+            </div>
+
+            {/* Editor area: tabs + the active file's Monaco pane */}
+            <div className="flex min-w-0 flex-1 flex-col bg-[#0b0b14]">
+              {tabs.length > 0 && (
+                <div className="flex items-center overflow-x-auto border-b border-border bg-surface-2">
+                  {tabs.map((tab) => (
+                    <div
+                      key={tab.path}
+                      className={clsx(
+                        'group/tab flex shrink-0 items-center gap-2 border-r border-border px-3 py-2 text-[12px] transition',
+                        active === tab.path ? 'bg-[#0b0b14] text-foreground shadow-[inset_0_2px_0_0_var(--cyan)]' : 'text-muted hover:bg-foreground/[0.04]',
+                      )}
+                    >
+                      <button type="button" onClick={() => setActive(tab.path)} className="flex items-center gap-1.5">
+                        <CodeXml className="size-3.5 text-cyan" />
+                        {tab.name}
+                        {dirty[tab.path] && <span className="size-1.5 rounded-full bg-mint" />}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => closeTab(tab.path)}
+                        aria-label={t('common.close')}
+                        className="grid size-4 place-items-center rounded text-muted opacity-0 transition hover:bg-foreground/10 hover:text-foreground group-hover/tab:opacity-100"
+                      >
+                        <X className="size-3" strokeWidth={2.5} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {error && <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive">{error}</div>}
+
+              <div className="relative min-h-0 flex-1">
+                {tabs.length === 0 ? (
+                  <div className="grid h-full place-items-center text-[12.5px] text-muted">{t('apps.editor.selectFileHint')}</div>
+                ) : (
+                  tabs.map((tab) => (
+                    <div key={tab.path} className={clsx('absolute inset-0', active === tab.path ? 'block' : 'hidden')}>
+                      <Suspense fallback={<div className="grid h-full place-items-center text-[12px] text-muted">{t('common.loading')}</div>}>
+                        <FileEditorPane
+                          path={tab.path}
+                          filename={tab.name}
+                          mtime={null}
+                          onDirtyChange={(d) => setDirty((prev) => (prev[tab.path] === d ? prev : { ...prev, [tab.path]: d }))}
+                        />
+                      </Suspense>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Status bar (cyan, design dnYPx) */}
+      <div className="flex items-center gap-3.5 bg-cyan px-3.5 py-1 font-mono text-[10.5px] font-semibold text-[#06222B]">
+        <span className="flex items-center gap-1.5">
+          <GitBranch className="size-3" /> master
+        </span>
+        <span className="flex items-center gap-1.5">
+          <CircleCheck className="size-3" /> 0 ⚠ 0
+        </span>
+        <span className="ml-auto truncate">{active ?? t('apps.editor.label')}</span>
+      </div>
+    </div>
+  );
+};
+
+const Welcome: React.FC<{ onOpenFolder: () => void; onNewFile: () => void; onOpenFiles: () => void }> = ({ onOpenFolder, onNewFile, onOpenFiles }) => {
+  const { t } = useTranslation();
+  const actions: { Icon: typeof FolderOpen; color: string; label: string; onClick: () => void; sc?: string }[] = [
+    { Icon: FolderOpen, color: 'text-cyan', label: t('apps.editor.openFolder'), onClick: onOpenFolder, sc: '⌘O' },
+    { Icon: FilePlus, color: 'text-mint', label: t('apps.fileBrowser.newFile'), onClick: onNewFile, sc: '⌘N' },
+    { Icon: Files, color: 'text-violet', label: t('apps.editor.browseFiles'), onClick: onOpenFiles },
+  ];
+  return (
+    <div className="grid min-w-0 flex-1 place-items-center bg-[#0b0b14] p-10">
+      <div className="flex w-[440px] max-w-full flex-col gap-6">
+        <div className="flex items-center gap-3.5">
+          <span className="grid size-14 place-items-center rounded-2xl border border-cyan/60 bg-cyan-soft">
+            <CodeXml className="size-7 text-cyan" />
+          </span>
+          <div className="flex flex-col gap-1">
+            <div className="text-[24px] font-bold text-foreground">{t('apps.editor.label')}</div>
+            <div className="text-[12.5px] text-muted">{t('apps.editor.welcomeSub')}</div>
+          </div>
+        </div>
+        <div className="font-mono text-[11px] font-bold uppercase tracking-[0.1em] text-muted">{t('apps.editor.start')}</div>
+        <div className="flex flex-col gap-1.5">
+          {actions.map((a) => (
+            <button key={a.label} type="button" onClick={a.onClick} className="flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-left transition hover:bg-foreground/[0.06]">
+              <a.Icon className={clsx('size-4', a.color)} />
+              <span className="text-[13.5px] font-semibold text-foreground">{a.label}</span>
+              <span className="flex-1" />
+              {a.sc && <span className="font-mono text-[11px] text-muted">{a.sc}</span>}
+            </button>
+          ))}
+        </div>
+        <div className="font-mono text-[11px] font-bold uppercase tracking-[0.1em] text-muted">{t('apps.editor.recent')}</div>
+        <div className="flex items-center gap-2 text-[12.5px] text-muted">
+          <Clock className="size-3.5" /> {t('apps.editor.noRecent')}
+        </div>
+      </div>
     </div>
   );
 };

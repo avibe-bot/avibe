@@ -1,0 +1,120 @@
+import { useCallback, useEffect, useState } from 'react';
+import { Braces, ChevronDown, ChevronRight, FileCode2, FileText, File as FileIcon, Hash, Image as ImageIcon, Loader2 } from 'lucide-react';
+import clsx from 'clsx';
+
+import { joinPath, listDir, type FsEntry } from '../../lib/filesApi';
+
+// Icon + accent per file extension (matches the explorer in design dnYPx).
+const EXT: Record<string, { Icon: typeof FileIcon; color: string }> = {
+  ts: { Icon: FileCode2, color: 'var(--cyan)' },
+  tsx: { Icon: FileCode2, color: 'var(--cyan)' },
+  js: { Icon: FileCode2, color: 'var(--gold)' },
+  jsx: { Icon: FileCode2, color: 'var(--gold)' },
+  json: { Icon: Braces, color: 'var(--gold)' },
+  css: { Icon: Hash, color: 'var(--violet)' },
+  scss: { Icon: Hash, color: 'var(--violet)' },
+  md: { Icon: FileText, color: 'var(--mint)' },
+  png: { Icon: ImageIcon, color: 'var(--muted)' },
+  jpg: { Icon: ImageIcon, color: 'var(--muted)' },
+  svg: { Icon: ImageIcon, color: 'var(--muted)' },
+};
+
+function fileIcon(e: FsEntry) {
+  return EXT[e.ext?.toLowerCase()] ?? { Icon: FileIcon, color: 'var(--muted)' };
+}
+
+function sortEntries(entries: FsEntry[]): FsEntry[] {
+  return [...entries].sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1));
+}
+
+const Row: React.FC<{ depth: number; onClick: () => void; active?: boolean; children: React.ReactNode }> = ({ depth, onClick, active, children }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    style={{ paddingLeft: 8 + depth * 14 }}
+    className={clsx(
+      'flex w-full items-center gap-1.5 rounded-md py-1 pr-2 text-left text-[12.5px] transition',
+      active ? 'bg-cyan-soft text-foreground' : 'text-foreground hover:bg-foreground/[0.05]',
+    )}
+  >
+    {children}
+  </button>
+);
+
+const Dir: React.FC<{ path: string; name: string; depth: number; activePath: string | null; showHidden: boolean; onOpenFile: (path: string, name: string) => void }> = ({
+  path,
+  name,
+  depth,
+  activePath,
+  showHidden,
+  onOpenFile,
+}) => {
+  const [open, setOpen] = useState(depth === 0);
+  const [entries, setEntries] = useState<FsEntry[] | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const load = useCallback(() => {
+    setLoading(true);
+    listDir(path, showHidden)
+      .then((r) => setEntries(sortEntries(r.entries)))
+      .catch(() => setEntries([]))
+      .finally(() => setLoading(false));
+  }, [path, showHidden]);
+
+  useEffect(() => {
+    if (open && entries === null) load();
+  }, [open, entries, load]);
+  // Re-list an open folder when the hidden toggle flips.
+  useEffect(() => {
+    if (open) load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showHidden]);
+
+  return (
+    <div>
+      {depth >= 0 && (
+        <Row depth={depth} onClick={() => setOpen((o) => !o)}>
+          {open ? <ChevronDown className="size-3.5 shrink-0 text-muted" /> : <ChevronRight className="size-3.5 shrink-0 text-muted" />}
+          <span className="truncate font-medium text-muted">{name}</span>
+        </Row>
+      )}
+      {open && (
+        <div>
+          {loading && entries === null && (
+            <div style={{ paddingLeft: 8 + (depth + 1) * 14 }} className="py-1">
+              <Loader2 className="size-3.5 animate-spin text-muted" />
+            </div>
+          )}
+          {entries?.map((e) =>
+            e.kind === 'dir' ? (
+              <Dir key={e.name} path={joinPath(path, e.name)} name={e.name} depth={depth + 1} activePath={activePath} showHidden={showHidden} onOpenFile={onOpenFile} />
+            ) : (
+              (() => {
+                const full = joinPath(path, e.name);
+                const { Icon, color } = fileIcon(e);
+                return (
+                  <Row key={e.name} depth={depth + 1} active={activePath === full} onClick={() => onOpenFile(full, e.name)}>
+                    <Icon className="size-3.5 shrink-0" style={{ color }} />
+                    <span className="truncate">{e.name}</span>
+                  </Row>
+                );
+              })()
+            ),
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// The VS-Code-style explorer tree (design dnYPx): a root folder whose subfolders lazily
+// expand via listDir. Reused by the Editor IDE; emits file opens upward.
+export const FileTree: React.FC<{ rootPath: string; rootName: string; activePath: string | null; showHidden?: boolean; onOpenFile: (path: string, name: string) => void }> = ({
+  rootPath,
+  rootName,
+  activePath,
+  showHidden = false,
+  onOpenFile,
+}) => (
+  <Dir path={rootPath} name={rootName} depth={0} activePath={activePath} showHidden={showHidden} onOpenFile={onOpenFile} />
+);
