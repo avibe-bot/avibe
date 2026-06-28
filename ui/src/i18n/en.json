@@ -613,7 +613,9 @@
       "copyAll": "Copy all"
     },
     "dock": {
-      "newInstanceHint": "⌘-click for a new window"
+      "newInstanceHint": "⌘-click for a new window",
+      "newWindow": "New Window",
+      "showAllWindows": "Show All Windows"
     },
     "window": {
       "minimize": "Minimize",

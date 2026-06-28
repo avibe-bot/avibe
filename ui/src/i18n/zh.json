@@ -613,7 +613,9 @@
       "copyAll": "全部复制"
     },
     "dock": {
-      "newInstanceHint": "⌘ 点击可新建窗口"
+      "newInstanceHint": "⌘ 点击可新建窗口",
+      "newWindow": "新建窗口",
+      "showAllWindows": "显示所有窗口"
     },
     "window": {
       "minimize": "最小化",
