@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
+import { Minus, Plus, X, type LucideIcon } from 'lucide-react';
 
 import { APP_REGISTRY } from '../../apps/registry';
 import { useWindowManager, type WindowInstance } from '../../context/WindowManagerContext';
@@ -102,11 +103,11 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
     ? { left: 0, top: 0, width: layerWidth, height: layerHeight, zIndex: win.z }
     : { left: win.bounds.x, top: win.bounds.y, width: win.bounds.width, height: win.bounds.height, zIndex: win.z };
 
-  const lights: { key: string; color: string; glyph: string; onClick: () => void; label: string }[] = [
+  const lights: { key: string; color: string; Glyph: LucideIcon; onClick: () => void; label: string }[] = [
     {
       key: 'close',
       color: '#ff5f57',
-      glyph: '×',
+      Glyph: X,
       // A dirty editor body can veto the close (confirm) before the exit animation.
       onClick: () => {
         if (wm.confirmClose(win.id)) setExitKind((k) => k ?? 'close');
@@ -115,8 +116,8 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
     },
     // Minimize is a mounted hide (no exit animation): the body keeps running and
     // `inert` on the root pulls focus out, so nothing is trapped in a hidden window.
-    { key: 'min', color: '#febc2e', glyph: '–', onClick: () => wm.minimize(win.id), label: t('apps.window.minimize') },
-    { key: 'max', color: '#28c840', glyph: '+', onClick: () => wm.toggleMaximize(win.id), label: t('apps.window.maximize') },
+    { key: 'min', color: '#febc2e', Glyph: Minus, onClick: () => wm.minimize(win.id), label: t('apps.window.minimize') },
+    { key: 'max', color: '#28c840', Glyph: Plus, onClick: () => wm.toggleMaximize(win.id), label: t('apps.window.maximize') },
   ];
 
   return (
@@ -181,7 +182,7 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
               className="grid size-3 place-items-center rounded-full text-[9px] font-bold leading-none text-black/55 opacity-100"
               style={{ backgroundColor: l.color }}
             >
-              <span className="opacity-0 transition-opacity group-hover/win:opacity-100">{l.glyph}</span>
+              <l.Glyph className="size-2 opacity-0 transition-opacity group-hover/win:opacity-100" strokeWidth={3.5} />
             </button>
           ))}
         </div>
