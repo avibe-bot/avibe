@@ -2692,6 +2692,13 @@ def vault_agent_pubkey_get():
         return _vault_error_response(exc)
 
 
+@app.route("/api/vault/vmk", methods=["GET"])
+def vault_vmk_get():
+    from vibe import api
+
+    return jsonify(api.get_vault_vmk())
+
+
 @app.route("/api/vault/secrets", methods=["POST"])
 def vault_secrets_post():
     from vibe import api
