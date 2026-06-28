@@ -1227,6 +1227,86 @@ class SessionTurnManager:
             return
         self.controller.set_agent_status(session_id, "failed" if is_error else "idle")
 
+    def register_agent_initiated_turn(self, context: "MessageContext") -> bool:
+        """Register a turn the BACKEND started on its own (agent-initiated:
+        background-task completion / ScheduleWakeup) as a first-class FSM citizen,
+        so the Workbench Stop button works and the browser sees ``turn.start`` /
+        ``turn.end``.
+
+        Unlike a user / scheduled turn there is NO dispatch task sending a query —
+        the backend already started — so this does NOT go through ``dispatch_turn`` /
+        ``_run``. The unsolicited output is ALREADY streaming on the long-lived
+        receiver, so the sink + ``in_flight`` are registered SYNCHRONOUSLY here
+        (before the receiver's next emit), and a small holder task keeps the turn
+        open until the terminal result's ``done_event``. Settling (pop sink +
+        ``in_flight`` + ``turn.end`` + flush) mirrors ``_run``'s finally. Stop works
+        because ``cancel`` interrupts the backend via ``handle_stop(turn.context)``
+        and cancels this holder.
+
+        avibe-only: a turn with no workbench session id (IM / CLI) has no Stop
+        control and no sink, so this is a no-op there — the gate + outbound
+        chokepoint still deliver the reply. Returns ``True`` when a turn was
+        registered.
+        """
+        if self.controller is None:
+            return False
+        session_id = self.controller._session_id_from_context(context)
+        if not session_id:
+            return False
+        get_key = getattr(self.controller, "_get_session_key", None)
+        if not callable(get_key):
+            return False
+        session_key = get_key(context)
+        # Defensive: ``begin_agent_initiated_turn`` only opens on a free gate, so a
+        # turn shouldn't already be tracked/streaming — but never clobber one.
+        if session_id in self.in_flight or self.get_turn_sink(session_key) is not None:
+            return False
+        from core.inbox_events import bus
+
+        turn_token = (getattr(context, "platform_specific", None) or {}).get("turn_token")
+        done = asyncio.Event()
+        self.register_turn_sink(
+            session_key,
+            on_chunk=self._noop_chunk,
+            done_event=done,
+            turn_token=turn_token,
+            context=context,
+        )
+
+        async def _holder() -> None:
+            cancelled = False
+            try:
+                await done.wait()
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            finally:
+                self.pop_turn_sink(session_key, done)
+                turn = self.in_flight.pop(session_id, None)
+                if turn is not None:
+                    bus.publish("turn.end", {"session_id": session_id})
+                # Flush the send-while-busy queue on NATURAL completion (mirrors
+                # ``_run``): a plain Stop keeps the queue, send_now opts back in.
+                should_flush = (not cancelled and not (turn is not None and turn.stop_no_flush)) or (
+                    turn is not None and turn.flush_on_cancel
+                )
+                if should_flush:
+                    try:
+                        await self.flush_queue(session_id)
+                    except Exception:
+                        logger.debug("agent-initiated turn: flush_queue failed", exc_info=True)
+
+        try:
+            task = asyncio.create_task(_holder(), name="agent-initiated-turn-holder")
+        except RuntimeError:
+            # No running loop (sync test/stub context): can't hold the turn open —
+            # roll the sink back so it doesn't leak, and skip FSM registration.
+            self.pop_turn_sink(session_key, done)
+            return False
+        self.in_flight[session_id] = Turn(task=task, context=context)
+        bus.publish("turn.start", {"session_id": session_id})
+        return True
+
     def is_active_emit(self, context: "MessageContext") -> bool:
         """Whether an emit belongs to the live turn (not a superseded one). Fail-open
         when there's no sink registry / no live sink (non-streaming turns still

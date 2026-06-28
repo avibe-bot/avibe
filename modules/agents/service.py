@@ -322,14 +322,22 @@ class AgentService:
         # (which no-ops anyway with no live sink for this session).
         context.platform_specific[AGENT_TURN_TOKEN] = gate.token
         # INBOUND status chokepoint (mirrors ``handle_message``): mark the avibe
-        # session ``running`` so the sidebar dot reflects the agent-initiated work.
-        # Non-avibe contexts resolve to no session id and are skipped.
+        # session ``running`` so the sidebar dot reflects the agent-initiated work,
+        # and register the turn with the FSM so the Workbench Stop button works and
+        # the browser sees turn.start/turn.end. Non-avibe contexts resolve to no
+        # session id and are skipped (no-op).
         manager = getattr(self.controller, "session_turns", None)
         if manager is not None:
             try:
                 manager.on_running(context)
             except Exception:
                 logger.debug("on_running failed for agent-initiated turn", exc_info=True)
+            register = getattr(manager, "register_agent_initiated_turn", None)
+            if callable(register):
+                try:
+                    register(context)
+                except Exception:
+                    logger.debug("register_agent_initiated_turn failed", exc_info=True)
         return gate.token
 
     def release_runtime_turn(self, context: Any) -> None:
