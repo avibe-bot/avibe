@@ -219,7 +219,13 @@ const FloatingApps: React.FC = () => {
   if (!anyMaximized) return null;
   return (
     // data-theme="dark" so the floating Dock popover matches the always-dark windows it sits over.
-    <div data-theme="dark" className="fixed bottom-5 left-4 z-30 hidden w-[184px] md:flex">
+    // A solid rounded backing + shadow makes it read as a clean floating Dock launcher (design
+    // If1Tt shows the pill clean) so the maximized app's content behind it — the editor activity
+    // bar, the file-browser rail — doesn't bleed through the translucent pill.
+    <div
+      data-theme="dark"
+      className="fixed bottom-5 left-4 z-30 hidden w-[184px] rounded-full bg-surface-3 shadow-[0_10px_34px_-8px_rgba(0,0,0,0.7)] md:flex"
+    >
       <AppsLauncher />
     </div>
   );
