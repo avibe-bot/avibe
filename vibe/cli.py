@@ -1334,6 +1334,49 @@ def _resolve_show_session_id(args, *, help_command: str) -> tuple[str, Optional[
     return session_id, notice
 
 
+def _resolve_caller_session_id(args, *, purpose: str, help_command: str) -> tuple[str, Optional[dict[str, str]]]:
+    caller_context = caller_context_from_env()
+    notice = _apply_caller_session_default(args, caller_context, purpose=purpose)
+    session_id = (getattr(args, "session_id", None) or "").strip()
+    if not session_id:
+        raise TaskCliError(
+            f"{purpose} id is required outside an Avibe Agent environment.",
+            code="missing_session_target",
+            hint="Pass the session id explicitly, or run this command from an Avibe Agent shell where AVIBE_SESSION_ID is injected.",
+            help_command=help_command,
+        )
+    return session_id, notice
+
+
+def _default_run_id_from_caller(caller_context) -> Optional[str]:
+    if caller_context is None:
+        return None
+    run_id = (getattr(caller_context, "run_id", None) or "").strip()
+    if not run_id:
+        return None
+    return run_id
+
+
+def _resolve_caller_run_id(args, *, purpose: str, help_command: str) -> tuple[str, Optional[dict[str, str]]]:
+    run_id = (getattr(args, "run_id", None) or "").strip()
+    if run_id:
+        return run_id, None
+    default_run_id = _default_run_id_from_caller(caller_context_from_env())
+    if not default_run_id:
+        raise TaskCliError(
+            f"{purpose} id is required outside an Avibe Agent run environment.",
+            code="missing_run_target",
+            hint="Pass the run id explicitly, or run this command from an Avibe Agent shell where AVIBE_RUN_ID is injected.",
+            help_command=help_command,
+        )
+    setattr(args, "run_id", default_run_id)
+    return default_run_id, {
+        "code": "run_defaulted_to_caller",
+        "message": f"{purpose} defaulted to the caller Run from AVIBE_RUN_ID.",
+        "run_id": default_run_id,
+    }
+
+
 def _validate_delivery_args(
     *,
     session_key: str,
@@ -3296,11 +3339,23 @@ def cmd_runs_list(args):
 
 
 def cmd_runs_show(args):
-    run = _task_request_store().get_run(args.run_id)
-    if run is None:
-        _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
+    try:
+        run_id, run_default_notice = _resolve_caller_run_id(
+            args,
+            purpose="Run",
+            help_command="vibe runs show --help",
+        )
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe runs show --help")
         return 1
-    _print_cli_payload("agent_run", run=_run_payload(run))
+    run = _task_request_store().get_run(run_id)
+    if run is None:
+        _print_task_error(TaskCliError(f"run '{run_id}' not found", code="run_not_found", details={"run_id": run_id}))
+        return 1
+    payload_fields = {"run": _run_payload(run)}
+    if run_default_notice:
+        payload_fields["run_default_notice"] = run_default_notice
+    _print_cli_payload("agent_run", **payload_fields)
     return 0
 
 
@@ -3458,15 +3513,20 @@ def cmd_session_get(args):
     from core.services import sessions as sessions_service
 
     try:
+        session_id, session_default_notice = _resolve_caller_session_id(
+            args,
+            purpose="Session",
+            help_command="vibe session get --help",
+        )
         engine = _open_session_engine()
         with engine.connect() as conn:
-            payload = sessions_service.get_active_session(conn, args.session_id)
+            payload = sessions_service.get_active_session(conn, session_id)
     except LookupError:
         _print_task_error(
             TaskCliError(
-                f"session '{args.session_id}' not found",
+                f"session '{session_id}' not found",
                 code="session_not_found",
-                details={"session_id": args.session_id},
+                details={"session_id": session_id},
             ),
             help_command="vibe session get --help",
         )
@@ -3477,7 +3537,8 @@ def cmd_session_get(args):
     _print_cli_payload(
         "agent_session",
         session=_session_row(payload, brief=False),
-        message=_session_get_hint(args.session_id),
+        message=_session_get_hint(session_id),
+        **({"session_default_notice": session_default_notice} if session_default_notice else {}),
     )
     return 0
 
@@ -3486,23 +3547,28 @@ def cmd_session_update(args):
     from core.services import sessions as sessions_service
 
     try:
+        session_id, session_default_notice = _resolve_caller_session_id(
+            args,
+            purpose="Session",
+            help_command="vibe session update --help",
+        )
         engine = _open_session_engine()
         with engine.begin() as conn:
             # Validate first so an archived/missing id is a clean not-found rather
             # than silently writing a title onto a soft-deleted row.
-            sessions_service.get_active_session(conn, args.session_id)
+            sessions_service.get_active_session(conn, session_id)
             # title_source="agent": this is the agent setting its own session title (vs
             # "user" for a human Web UI edit). Both are deliberate, so neither gets
             # auto-overwritten nor re-nudged — see DELIBERATE_TITLE_SOURCES.
             payload = sessions_service.update_session(
-                conn, args.session_id, title=args.title, title_source="agent"
+                conn, session_id, title=args.title, title_source="agent"
             )
     except LookupError:
         _print_task_error(
             TaskCliError(
-                f"session '{args.session_id}' not found",
+                f"session '{session_id}' not found",
                 code="session_not_found",
-                details={"session_id": args.session_id},
+                details={"session_id": session_id},
             ),
             help_command="vibe session update --help",
         )
@@ -3512,8 +3578,13 @@ def cmd_session_update(args):
         return 1
     # The DB write is committed above; ping a running UI so the rename shows live
     # (best-effort — never affects this command's result).
-    _post_session_activity_to_live_ui(args.session_id)
-    _print_cli_payload("agent_session", updated=True, session=_session_row(payload, brief=False))
+    _post_session_activity_to_live_ui(session_id)
+    _print_cli_payload(
+        "agent_session",
+        updated=True,
+        session=_session_row(payload, brief=False),
+        **({"session_default_notice": session_default_notice} if session_default_notice else {}),
+    )
     return 0
 
 
@@ -7593,7 +7664,7 @@ def build_parser():
     _add_pagination_args(runs_list_parser, help_command="vibe runs list --help")
     _add_json_noop(runs_list_parser)
     runs_show_parser = runs_subparsers.add_parser("show", help="Show one Agent run")
-    runs_show_parser.add_argument("run_id")
+    runs_show_parser.add_argument("run_id", nargs="?")
     _add_json_noop(runs_show_parser)
     runs_cancel_parser = runs_subparsers.add_parser("cancel", help="Request best-effort cancellation for one run")
     runs_cancel_parser.add_argument("run_id")
@@ -7633,7 +7704,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session get --help",
     )
-    session_get_parser.add_argument("session_id", help="Agent Session ID")
+    session_get_parser.add_argument("session_id", nargs="?", help="Agent Session ID")
     _add_json_noop(session_get_parser)
     session_update_parser = session_subparsers.add_parser(
         "update",
@@ -7642,7 +7713,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session update --help",
     )
-    session_update_parser.add_argument("session_id", help="Agent Session ID")
+    session_update_parser.add_argument("session_id", nargs="?", help="Agent Session ID")
     session_update_parser.add_argument(
         "--title", required=True, help="New title. Pass an empty string to clear it (reverts to id-based display)."
     )

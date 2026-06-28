@@ -143,6 +143,55 @@ def test_runs_list_cli_next_command_uses_absolute_time_filters(monkeypatch, tmp_
     assert payload["pagination"]["next_command"].endswith("--page 2 --limit 10")
 
 
+def test_runs_show_defaults_to_caller_run(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses-alpha")
+    monkeypatch.setenv("AVIBE_RUN_ID", "run-current")
+    paths.ensure_data_dirs()
+    store = SQLiteBackgroundTaskStore()
+    try:
+        store.enqueue_run(
+            {
+                "id": "run-current",
+                "request_type": "agent_run",
+                "status": "succeeded",
+                "agent_name": "helper",
+                "agent_backend": "codex",
+                "session_id": "ses-alpha",
+                "message": "current run",
+                "created_at": "2026-05-25T00:00:00+00:00",
+                "updated_at": "2026-05-25T00:00:00+00:00",
+            }
+        )
+    finally:
+        store.close()
+
+    args = cli.build_parser().parse_args(["runs", "show"])
+    assert cli.cmd_runs_show(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["run"]["id"] == "run-current"
+    assert payload["run_default_notice"] == {
+        "code": "run_defaulted_to_caller",
+        "message": "Run defaulted to the caller Run from AVIBE_RUN_ID.",
+        "run_id": "run-current",
+    }
+
+
+def test_runs_show_requires_run_without_caller(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+    monkeypatch.delenv("AVIBE_RUN_ID", raising=False)
+    paths.ensure_data_dirs()
+
+    args = cli.build_parser().parse_args(["runs", "show"])
+    assert cli.cmd_runs_show(args) == 1
+
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["code"] == "missing_run_target"
+    assert payload["help_command"] == "vibe runs show --help"
+
+
 def test_data_query_cli_runs_read_only_sql(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()

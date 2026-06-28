@@ -126,6 +126,33 @@ def test_get_returns_detail_without_status_agentid_anchor(monkeypatch, tmp_path,
     assert "vibe runs list --session-id sesaaa" in payload["message"]
 
 
+def test_get_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesaaa", platform="avibe", native="proj_a")
+    monkeypatch.setenv("AVIBE_SESSION_ID", "sesaaa")
+
+    code, payload = _run(cli.cmd_session_get, ["session", "get"], capsys)
+
+    assert code == 0
+    assert payload["session"]["id"] == "sesaaa"
+    assert payload["session_default_notice"] == {
+        "code": "session_defaulted_to_caller",
+        "message": "Session defaulted to the caller Session from AVIBE_SESSION_ID.",
+        "session_id": "sesaaa",
+    }
+
+
+def test_get_requires_session_without_caller(monkeypatch, tmp_path, capsys):
+    _setup(monkeypatch, tmp_path)
+    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+
+    code, payload = _run(cli.cmd_session_get, ["session", "get"], capsys)
+
+    assert code == 1
+    assert payload["code"] == "missing_session_target"
+    assert payload["help_command"] == "vibe session get --help"
+
+
 def test_get_archived_is_not_found(monkeypatch, tmp_path, capsys):
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesarch", status="archived")
@@ -154,6 +181,35 @@ def test_update_sets_title(monkeypatch, tmp_path, capsys):
     assert "status" not in payload["session"]
     # An agent-set title is sourced "agent" (vs "user" for a human Web UI edit).
     assert payload["session"]["metadata"]["title_source"] == "agent"
+
+
+def test_update_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesaaa", title="Old")
+    monkeypatch.setenv("AVIBE_SESSION_ID", "sesaaa")
+
+    code, payload = _run(cli.cmd_session_update, ["session", "update", "--title", "New name"], capsys)
+
+    assert code == 0
+    assert payload["updated"] is True
+    assert payload["session"]["id"] == "sesaaa"
+    assert payload["session"]["title"] == "New name"
+    assert payload["session_default_notice"] == {
+        "code": "session_defaulted_to_caller",
+        "message": "Session defaulted to the caller Session from AVIBE_SESSION_ID.",
+        "session_id": "sesaaa",
+    }
+
+
+def test_update_requires_session_without_caller(monkeypatch, tmp_path, capsys):
+    _setup(monkeypatch, tmp_path)
+    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+
+    code, payload = _run(cli.cmd_session_update, ["session", "update", "--title", "New name"], capsys)
+
+    assert code == 1
+    assert payload["code"] == "missing_session_target"
+    assert payload["help_command"] == "vibe session update --help"
 
 
 def test_update_empty_title_clears(monkeypatch, tmp_path, capsys):
