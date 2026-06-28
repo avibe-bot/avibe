@@ -184,6 +184,18 @@ separate, broader change (it also affects normal turns) left as a follow-up.
   with its own review/test surface, not a bugfix-PR add-on. Agent-initiated turns
   are typically short (report a result and end) and still settle themselves on
   their terminal result, so the gap is narrow. Tracked as a follow-up issue.
+- **Codex P2 — unsolicited output lost when a user turn is contended (DEFERRED,
+  follow-up).** The P1 fix makes the open strictly non-blocking, so when a user
+  turn holds/has-just-acquired the gate but hasn't appended its pending request
+  yet, an agent-initiated reply buffered behind the previous turn is dropped by
+  the outbound guard (it can't open its own turn without risking the deadlock).
+  This is an inherent tradeoff of the gate-based, deadlock-safe approach: the PR
+  is still a strict improvement (was 100% loss for agent-initiated output → now
+  loss only in this contended window), and the loss is now logged instead of
+  silent. Fully preserving the reply across a concurrent user turn needs a
+  non-gated persist fallback or an output re-queue — part of making
+  agent-initiated turns first-class FSM citizens. Tracked with the Stop-control
+  follow-up.
 
 ## Backend parity (Codex / OpenCode)
 

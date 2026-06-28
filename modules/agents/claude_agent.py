@@ -1135,7 +1135,18 @@ class ClaudeAgent(BaseAgent):
         runtime_key = str(payload.get(AGENT_RUNTIME_TURN_KEY) or "").strip() or composite_key
         token = await begin(self.name, context, runtime_key)
         if not token:
-            # A real turn already holds the gate; let its machinery own this emit.
+            # The gate is CONTENDED — a user turn holds it, or one is queued on it
+            # and we must not block the receiver behind that waiter (deadlock; see
+            # begin_agent_initiated_turn). If a turn actually holds the gate the
+            # output rides that turn's machinery; in the narrow free-but-queued
+            # window the outbound guard drops it. Log so that (rare, sub-tick) loss
+            # is visible instead of silent — full preservation across a queued user
+            # turn is a tracked follow-up.
+            logger.info(
+                "Agent-initiated output for %s not opened: runtime gate contended "
+                "(a user turn holds or is queued on it)",
+                composite_key,
+            )
             return
         # Mark the session ACTIVE so this in-flight agent-initiated turn gets the
         # SAME idle-eviction exemption a user turn gets in ``handle_message``.
