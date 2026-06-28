@@ -1,6 +1,22 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronRight, Download, File as FileIcon, Folder, FolderPlus, Loader2, RefreshCw, Star } from 'lucide-react';
+import {
+  Braces,
+  ChevronRight,
+  FileCode2,
+  FileText,
+  File as FileIcon,
+  Folder,
+  FolderPlus,
+  FilePlus,
+  Hash,
+  Image as ImageIcon,
+  Loader2,
+  RefreshCw,
+  Search,
+  Star,
+  type LucideIcon,
+} from 'lucide-react';
 import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
@@ -9,37 +25,68 @@ import { previewKind } from '../../lib/filePreview';
 import {
   contentUrl,
   fileBrowserErrorMessage,
-  fileMeta,
   isPlainEntryName,
   joinPath,
   listDir,
   makeDir,
   pathCrumbs,
   systemFavorites,
+  writeFile,
   type Favorite,
   type FsEntry,
   type FsListing,
 } from '../../lib/filesApi';
 import { Button } from '../ui/button';
 
-// Lazy-load the editor so Monaco stays out of the main bundle until a text file
-// is actually opened.
-const FileEditorPane = lazy(() => import('./FileEditorPane').then((m) => ({ default: m.FileEditorPane })));
-
-type Selected = { path: string; name: string; kind: string; mime: string | null; mtime: number | null; size: number | null };
-
-// Above this size, offer a download instead of loading the file into CodeMirror
-// (mirrors the in-page preview cap; the backend allows /api/files/content up to 25MB).
+// Above this size we don't open a file in the editor — offer the raw download instead.
 const MAX_EDIT_BYTES = 1024 * 1024;
 
-// Whole-machine Finder: favorites rail (pinned projects + OS defaults), a
-// breadcrumb + dir/file list (left), and a content pane (right) that views or
-// edits the selected file. Backend contract: src/lib/filesApi.ts → /api/files/*.
-export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: string }> = ({
-  windowed = false,
-  windowId,
-}) => {
+// A code-file extension → its accent + glyph (mirrors design nknn2's colored type icons).
+const EXT_ICON: Record<string, { Icon: LucideIcon; color: string }> = {
+  ts: { Icon: FileCode2, color: 'var(--cyan)' },
+  tsx: { Icon: FileCode2, color: 'var(--cyan)' },
+  js: { Icon: FileCode2, color: 'var(--gold)' },
+  jsx: { Icon: FileCode2, color: 'var(--gold)' },
+  json: { Icon: Braces, color: 'var(--gold)' },
+  css: { Icon: Hash, color: 'var(--violet)' },
+  scss: { Icon: Hash, color: 'var(--violet)' },
+  md: { Icon: FileText, color: 'var(--mint)' },
+  markdown: { Icon: FileText, color: 'var(--mint)' },
+  png: { Icon: ImageIcon, color: 'var(--muted)' },
+  jpg: { Icon: ImageIcon, color: 'var(--muted)' },
+  jpeg: { Icon: ImageIcon, color: 'var(--muted)' },
+  svg: { Icon: ImageIcon, color: 'var(--muted)' },
+};
+
+function entryIcon(e: FsEntry): { Icon: LucideIcon; color: string } {
+  if (e.kind === 'dir') return { Icon: Folder, color: 'var(--cyan)' };
+  return EXT_ICON[e.ext?.toLowerCase()] ?? { Icon: FileIcon, color: 'var(--muted)' };
+}
+
+function formatSize(n: number | null): string {
+  if (n == null) return '—';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatMtime(ms: number | null): string {
+  if (ms == null) return '—';
+  const d = new Date(ms);
+  const now = Date.now();
+  const sameYear = d.getFullYear() === new Date(now).getFullYear();
+  const date = d.toLocaleDateString(undefined, sameYear ? { month: 'short', day: 'numeric' } : { year: 'numeric', month: 'short', day: 'numeric' });
+  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  return `${date} ${time}`;
+}
+
+// Whole-machine Finder: favorites/projects rail + a Name/Size/Modified list + a toolbar
+// (breadcrumb, search, New File/Folder) + a status bar. A pure directory browser — it does
+// not edit files; double-clicking a text/code file opens it in the Editor window. Backend
+// contract: ui/src/lib/filesApi.ts → /api/files/*. Design: design.pen `nknn2`.
+export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: string }> = ({ windowed = false }) => {
   const { t } = useTranslation();
+  const wm = useWindowManager();
   const { projects } = useWorkbenchProjectsTree();
   const [cwd, setCwd] = useState('');
   const [listing, setListing] = useState<FsListing | null>(null);
@@ -47,23 +94,19 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   const [error, setError] = useState<string | null>(null);
   const [showHidden, setShowHidden] = useState(false);
   const [sysFavs, setSysFavs] = useState<Favorite[]>([]);
-  const [selected, setSelected] = useState<Selected | null>(null);
+  const [query, setQuery] = useState('');
+  const [selected, setSelected] = useState<string | null>(null);
 
-  // Tokens to drop stale async responses. navSeq guards directory listings; selSeq guards
-  // file-metadata selections. Every navigation bumps BOTH, so a slow earlier listDir() can't
-  // overwrite cwd/listing with a stale directory AND a pending fileMeta() can't repopulate the
-  // pane with a file after the user has moved to another directory (breadcrumb/favorite/toggle).
   const navSeq = useRef(0);
-  const selSeq = useRef(0);
   const navigate = useCallback(
     (path: string) => {
       const seq = ++navSeq.current;
-      selSeq.current += 1; // navigating away invalidates any in-flight file selection
       setLoading(true);
       setError(null);
+      setSelected(null);
       listDir(path, showHidden)
         .then((r) => {
-          if (seq !== navSeq.current) return; // a newer navigation superseded this response
+          if (seq !== navSeq.current) return;
           setCwd(r.path);
           setListing(r);
         })
@@ -74,14 +117,13 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
           if (seq === navSeq.current) setLoading(false);
         });
     },
-    [showHidden],
+    [showHidden, t],
   );
 
   useEffect(() => {
     systemFavorites().then(setSysFavs).catch(() => {});
   }, []);
 
-  // Pick an initial directory once: first pinned project, else the home favorite.
   useEffect(() => {
     if (cwd) return;
     if (projects === null) return;
@@ -90,66 +132,59 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects, sysFavs]);
 
-  // Re-list the current dir when the hidden toggle flips.
   useEffect(() => {
     if (cwd) navigate(cwd);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showHidden]);
 
-  const openEntry = (entry: FsEntry) => {
-    const seq = ++selSeq.current;
-    const full = joinPath(cwd, entry.name);
-    if (entry.kind === 'dir') {
-      setSelected(null);
+  // Open: dir → navigate; editable text/code file (within the size cap) → Editor window;
+  // anything else → raw download. (Richer per-type "default open" is a later design.)
+  const open = (e: FsEntry) => {
+    const full = joinPath(cwd, e.name);
+    if (e.kind === 'dir') {
       navigate(full);
+      return;
+    }
+    const editable = previewKind(e.name) && (e.size == null || e.size <= MAX_EDIT_BYTES);
+    if (editable) {
+      wm.openApp('editor', { title: e.name, params: { path: full, filename: e.name, mtime: e.mtime } });
     } else {
-      fileMeta(full)
-        .then((m) => {
-          if (seq !== selSeq.current) return; // a newer click superseded this metadata fetch
-          setSelected({ path: full, name: entry.name, kind: m.kind, mime: m.mime, mtime: m.mtime, size: m.size });
-        })
-        .catch((e: unknown) => {
-          if (seq === selSeq.current) setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.openFailed')));
-        });
+      window.open(contentUrl(full, true), '_blank', 'noopener');
     }
   };
 
-  const newFolder = async () => {
-    const raw = window.prompt(t('apps.fileBrowser.newFolderPrompt'));
+  const createNamed = async (kind: 'file' | 'dir') => {
+    const raw = window.prompt(t(kind === 'dir' ? 'apps.fileBrowser.newFolderPrompt' : 'apps.fileBrowser.newFilePrompt'));
     if (raw == null) return;
     const name = raw.trim();
     if (name === '') return;
-    // The prompt collects a name, not a path: reject separators / '.' / '..' before
-    // joining, so "New folder" can't silently create a dir outside the current folder.
     if (!isPlainEntryName(name)) {
       setError(t('apps.fileBrowser.errors.invalid_name'));
       return;
     }
     try {
-      await makeDir(joinPath(cwd, name));
+      if (kind === 'dir') await makeDir(joinPath(cwd, name));
+      else await writeFile(joinPath(cwd, name), '', undefined);
       navigate(cwd);
     } catch (e: unknown) {
-      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.createFolderFailed')));
+      setError(fileBrowserErrorMessage(e, t, t(kind === 'dir' ? 'apps.fileBrowser.errors.createFolderFailed' : 'apps.fileBrowser.errors.saveFailed')));
     }
   };
 
   const projectFavs = useMemo(
-    () =>
-      (projects || [])
-        .filter((p) => !!p.folder_path)
-        .map((p) => ({ label: p.display_name, path: p.folder_path as string })),
+    () => (projects || []).filter((p) => !!p.folder_path).map((p) => ({ label: p.display_name, path: p.folder_path as string })),
     [projects],
   );
   const crumbs = cwd ? pathCrumbs(cwd) : [];
+  const entries = useMemo(() => {
+    const all = listing?.entries ?? [];
+    const q = query.trim().toLowerCase();
+    const filtered = q ? all.filter((e) => e.name.toLowerCase().includes(q)) : all;
+    return [...filtered].sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1));
+  }, [listing, query]);
 
   return (
-    <div
-      className={
-        windowed
-          ? 'flex h-full w-full flex-col'
-          : 'flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]'
-      }
-    >
+    <div className={windowed ? 'flex h-full w-full flex-col bg-surface' : 'flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]'}>
       {!windowed && (
         <div>
           <h1 className="text-[18px] font-semibold text-foreground">{t('apps.fileBrowser.label')}</h1>
@@ -157,257 +192,135 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
         </div>
       )}
 
-      <div
-        className={
-          windowed
-            ? 'flex min-h-0 flex-1 overflow-hidden bg-surface'
-            : 'flex min-h-0 flex-1 overflow-hidden rounded-xl border border-border bg-surface'
-        }
-      >
-        {/* Left: breadcrumb toolbar + favorites + listing */}
-        <div className="flex w-full min-w-0 flex-col md:w-[320px] md:border-r md:border-border">
-          <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-2">
-            <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
-              {crumbs.map((c, i) => (
-                <span key={c.path} className="flex shrink-0 items-center">
-                  {i > 0 && <ChevronRight className="size-3 shrink-0 text-muted" />}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelected(null);
-                      navigate(c.path);
-                    }}
-                    className="max-w-[120px] truncate rounded px-1 py-0.5 text-[12px] text-muted transition hover:bg-foreground/[0.06] hover:text-foreground"
-                  >
-                    {c.label}
-                  </button>
-                </span>
-              ))}
-            </div>
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              className="size-7 shrink-0 text-muted"
-              aria-label={t('apps.fileBrowser.refresh')}
-              onClick={() => cwd && navigate(cwd)}
-            >
+      <div className={clsx('flex min-h-0 flex-1 flex-col overflow-hidden', !windowed && 'rounded-xl border border-border')}>
+        {/* Toolbar: breadcrumb (left) + search + New File / New Folder (right) */}
+        <div className="flex items-center gap-2 border-b border-border bg-surface-2/60 px-3 py-2">
+          <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
+            <Button type="button" size="icon" variant="ghost" className="size-7 shrink-0 text-muted" aria-label={t('apps.fileBrowser.refresh')} onClick={() => cwd && navigate(cwd)}>
               <RefreshCw className={clsx('size-3.5', loading && 'animate-spin')} />
             </Button>
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              className="size-7 shrink-0 text-muted"
-              aria-label={t('apps.fileBrowser.newFolder')}
-              disabled={!cwd}
-              onClick={() => void newFolder()}
-            >
-              <FolderPlus className="size-3.5" />
-            </Button>
-          </div>
-
-          <div className="min-h-0 flex-1 overflow-y-auto">
-            <div className="flex flex-col gap-0.5 border-b border-border p-2">
-              {projectFavs.length > 0 && (
-                <div className="px-1 pb-0.5 font-mono text-[9px] font-bold uppercase tracking-[0.16em] text-muted">
-                  {t('apps.fileBrowser.projects')}
-                </div>
-              )}
-              {projectFavs.map((f) => (
-                <FavRow
-                  key={f.path}
-                  icon={<Star className="size-3.5 text-mint" />}
-                  label={f.label}
-                  active={cwd === f.path}
-                  onClick={() => {
-                    setSelected(null);
-                    navigate(f.path);
-                  }}
-                />
-              ))}
-              {sysFavs.length > 0 && (
-                <div className="px-1 pb-0.5 pt-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.16em] text-muted">
-                  {t('apps.fileBrowser.system')}
-                </div>
-              )}
-              {sysFavs.map((f) => (
-                <FavRow
-                  key={f.path}
-                  icon={<Folder className="size-3.5 text-muted" />}
-                  label={f.path.split('/').filter(Boolean).pop() || f.path}
-                  active={cwd === f.path}
-                  onClick={() => {
-                    setSelected(null);
-                    navigate(f.path);
-                  }}
-                />
-              ))}
-            </div>
-
-            {error && (
-              <div className="m-2 rounded-md border border-destructive/40 bg-destructive/[0.06] px-2.5 py-1.5 text-[11.5px] text-destructive">
-                {error}
-              </div>
-            )}
-            {listing?.truncated && (
-              <div className="mx-2 mt-2 rounded-md border border-border bg-foreground/[0.03] px-2.5 py-1.5 text-[11.5px] text-muted">
-                {t('apps.fileBrowser.listTruncated', { count: listing.limit ?? listing.entries.length })}
-              </div>
-            )}
-            <div className="flex flex-col gap-0.5 p-2">
-              {loading && !listing && (
-                <div className="grid place-items-center py-6">
-                  <Loader2 className="size-4 animate-spin text-muted" />
-                </div>
-              )}
-              {listing?.entries.length === 0 && !loading && (
-                <div className="px-2 py-6 text-center text-[12px] text-muted">{t('apps.fileBrowser.empty')}</div>
-              )}
-              {listing?.entries.map((entry) => (
+            {crumbs.map((c, i) => (
+              <span key={c.path} className="flex shrink-0 items-center">
+                {i > 0 && <ChevronRight className="size-3 shrink-0 text-muted" />}
                 <button
-                  key={entry.name}
                   type="button"
-                  onClick={() => openEntry(entry)}
-                  className={clsx(
-                    'flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition',
-                    selected?.path === joinPath(cwd, entry.name)
-                      ? 'bg-mint/[0.08] text-foreground'
-                      : 'text-foreground hover:bg-foreground/[0.04]',
-                  )}
+                  onClick={() => navigate(c.path)}
+                  className="max-w-[140px] truncate rounded px-1.5 py-0.5 text-[12.5px] text-muted transition hover:bg-foreground/[0.06] hover:text-foreground"
                 >
-                  {entry.kind === 'dir' ? (
-                    <Folder className="size-4 shrink-0 text-muted" />
-                  ) : (
-                    <FileIcon className="size-4 shrink-0 text-muted" />
-                  )}
-                  <span className="flex-1 truncate">{entry.name}</span>
-                  {entry.kind === 'dir' && <ChevronRight className="size-3.5 shrink-0 text-muted" />}
+                  {c.label}
                 </button>
-              ))}
+              </span>
+            ))}
+          </div>
+          <label className="flex items-center gap-1.5 rounded-lg border border-border bg-surface px-2 py-1">
+            <Search className="size-3.5 shrink-0 text-muted" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={t('apps.fileBrowser.searchPlaceholder')}
+              className="w-28 bg-transparent text-[12px] text-foreground placeholder:text-muted focus:outline-none"
+            />
+          </label>
+          <Button type="button" size="sm" variant="brand" className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]" disabled={!cwd} onClick={() => void createNamed('file')}>
+            <FilePlus className="size-3.5" /> {t('apps.fileBrowser.newFile')}
+          </Button>
+          <Button type="button" size="sm" variant="outline" className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]" disabled={!cwd} onClick={() => void createNamed('dir')}>
+            <FolderPlus className="size-3.5" /> {t('apps.fileBrowser.newFolder')}
+          </Button>
+        </div>
+
+        {error && <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive">{error}</div>}
+
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          {/* Rail: favorites + projects */}
+          <aside className="hidden w-[196px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border bg-surface-2/40 p-2 md:flex">
+            {projectFavs.length > 0 && <RailTitle>{t('apps.fileBrowser.projects')}</RailTitle>}
+            {projectFavs.map((f) => (
+              <RailRow key={f.path} icon={<Star className="size-3.5 text-mint" />} label={f.label} active={cwd === f.path} onClick={() => navigate(f.path)} />
+            ))}
+            {sysFavs.length > 0 && <RailTitle>{t('apps.fileBrowser.favorites')}</RailTitle>}
+            {sysFavs.map((f) => (
+              <RailRow
+                key={f.path}
+                icon={<Folder className="size-3.5 text-muted" />}
+                label={f.path.split('/').filter(Boolean).pop() || f.path}
+                active={cwd === f.path}
+                onClick={() => navigate(f.path)}
+              />
+            ))}
+          </aside>
+
+          {/* Listing: Name / Size / Modified */}
+          <div className="flex min-w-0 flex-1 flex-col">
+            <div className="flex items-center border-b border-border px-3 py-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted">
+              <span className="min-w-0 flex-1">{t('apps.fileBrowser.colName')}</span>
+              <span className="w-20 shrink-0 text-right">{t('apps.fileBrowser.colSize')}</span>
+              <span className="w-36 shrink-0 pl-4">{t('apps.fileBrowser.colModified')}</span>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto py-1">
+              {loading && !listing && (
+                <div className="grid place-items-center py-8"><Loader2 className="size-4 animate-spin text-muted" /></div>
+              )}
+              {listing && entries.length === 0 && (
+                <div className="px-3 py-8 text-center text-[12px] text-muted">{query ? t('apps.fileBrowser.noMatches') : t('apps.fileBrowser.empty')}</div>
+              )}
+              {entries.map((e) => {
+                const { Icon, color } = entryIcon(e);
+                const full = joinPath(cwd, e.name);
+                return (
+                  <button
+                    key={e.name}
+                    type="button"
+                    onClick={() => setSelected(full)}
+                    onDoubleClick={() => open(e)}
+                    className={clsx(
+                      'flex w-full items-center px-3 py-1.5 text-left text-[12.5px] transition',
+                      selected === full ? 'bg-cyan-soft text-foreground' : 'text-foreground hover:bg-foreground/[0.04]',
+                    )}
+                  >
+                    <span className="flex min-w-0 flex-1 items-center gap-2">
+                      <Icon className="size-4 shrink-0" style={{ color }} />
+                      <span className="truncate">{e.name}</span>
+                    </span>
+                    <span className="w-20 shrink-0 text-right font-mono text-[11px] text-muted">{e.kind === 'dir' ? '—' : formatSize(e.size)}</span>
+                    <span className="w-36 shrink-0 pl-4 font-mono text-[11px] text-muted">{formatMtime(e.mtime)}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
+        </div>
 
-          <label className="flex items-center gap-2 border-t border-border px-3 py-2 text-[11.5px] text-muted">
-            <input
-              type="checkbox"
-              checked={showHidden}
-              onChange={(e) => setShowHidden(e.target.checked)}
-              className="size-3.5"
-            />
+        {/* Status bar: item count + selection, with the hidden-files toggle. */}
+        <div className="flex items-center gap-3 border-t border-border bg-surface-2/60 px-3 py-1.5 text-[11px] text-muted">
+          <label className="flex items-center gap-1.5">
+            <input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} className="size-3" />
             {t('apps.fileBrowser.showHidden')}
           </label>
-        </div>
-
-        {/* Right: content pane (desktop) */}
-        <div className="hidden min-w-0 flex-1 md:flex">
-          <ContentPane selected={selected} windowed={windowed} windowId={windowId} />
+          <span className="ml-auto truncate font-mono">
+            {selected ? selected.split('/').filter(Boolean).pop() : t('apps.fileBrowser.itemCount', { count: entries.length })}
+            {listing?.truncated && ` · ${t('apps.fileBrowser.listTruncated', { count: listing.limit ?? entries.length })}`}
+          </span>
         </div>
       </div>
-
-      {/* Mobile: content opens below the list when a file is selected. This pane is
-          md:hidden but still mounted on desktop — and windows only ever render on
-          desktop — so it must NOT take `windowId`, or its (clean) editor's close guard
-          would clobber the visible desktop editor's (dirty) guard for the same window. */}
-      {selected && (
-        <div className="flex min-h-[50vh] flex-col overflow-hidden rounded-xl border border-border bg-surface md:hidden">
-          <ContentPane selected={selected} windowed={windowed} />
-        </div>
-      )}
     </div>
   );
 };
 
-const FavRow: React.FC<{ icon: React.ReactNode; label: string; active: boolean; onClick: () => void }> = ({
-  icon,
-  label,
-  active,
-  onClick,
-}) => (
+const RailTitle: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <div className="px-1 pb-0.5 pt-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.16em] text-muted">{children}</div>
+);
+
+const RailRow: React.FC<{ icon: React.ReactNode; label: string; active: boolean; onClick: () => void }> = ({ icon, label, active, onClick }) => (
   <button
     type="button"
     onClick={onClick}
     className={clsx(
       'flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition',
-      active ? 'bg-mint/[0.08] text-foreground' : 'text-foreground hover:bg-foreground/[0.04]',
+      active ? 'bg-cyan-soft text-foreground' : 'text-muted hover:bg-foreground/[0.04] hover:text-foreground',
     )}
   >
     <span className="shrink-0">{icon}</span>
-    <span className="flex-1 truncate">{label}</span>
+    <span className="truncate">{label}</span>
   </button>
 );
-
-const ContentPane: React.FC<{ selected: Selected | null; windowed: boolean; windowId?: string }> = ({
-  selected,
-  windowed,
-  windowId,
-}) => {
-  const { t } = useTranslation();
-  const wm = useWindowManager();
-  if (!selected) {
-    return (
-      <div className="grid flex-1 place-items-center p-6 text-center text-[12.5px] text-muted">
-        {t('apps.fileBrowser.selectHint')}
-      </div>
-    );
-  }
-  const mime = selected.mime || '';
-  if (mime.startsWith('image/')) {
-    return (
-      <div className="grid min-h-0 flex-1 place-items-center overflow-auto bg-foreground/[0.02] p-4">
-        <img src={contentUrl(selected.path)} alt={selected.name} className="max-h-full max-w-full object-contain" />
-      </div>
-    );
-  }
-  // A symlink reports size:null (server lstat()s the link, not its target), but
-  // /api/files/content follows it — so a symlink pointing at a large file would slip past
-  // the size cap and load its whole target into CodeMirror. Treat symlinks and any
-  // unknown-size entry as non-editable; the download link below can still follow them.
-  const tooLargeToEdit =
-    selected.kind === 'symlink' || selected.size == null || selected.size > MAX_EDIT_BYTES;
-  if (previewKind(selected.name, selected.mime || undefined) && !tooLargeToEdit) {
-    return (
-      <Suspense
-        fallback={<div className="grid flex-1 place-items-center text-[12px] text-muted">{t('common.loading')}</div>}
-      >
-        {/* key by path: remount per file so an in-flight save/load can never apply its
-            result to a different file (stale clean/dirty baseline or wrong expected_mtime). */}
-        <FileEditorPane
-          key={selected.path}
-          path={selected.path}
-          filename={selected.name}
-          mtime={selected.mtime}
-          windowId={windowId}
-          // Inside a window, offer to pop the file out into its own Editor window.
-          // Carry the editor's live mtime (it may have saved since this row opened),
-          // not the row's stale metadata, so the new window won't false-conflict.
-          onPopOut={
-            windowed
-              ? (live) =>
-                  wm.openApp('editor', {
-                    title: selected.name,
-                    params: { path: selected.path, filename: selected.name, mtime: live.mtime },
-                  })
-              : undefined
-          }
-        />
-      </Suspense>
-    );
-  }
-  return (
-    <div className="grid flex-1 place-items-center p-6 text-center">
-      <div className="flex flex-col items-center gap-3">
-        <FileIcon className="size-8 text-muted" />
-        <div className="text-[12.5px] text-muted">
-          {tooLargeToEdit ? t('apps.fileBrowser.tooLarge') : t('apps.fileBrowser.noPreview')}
-        </div>
-        <a
-          href={contentUrl(selected.path, true)}
-          className="inline-flex items-center gap-1.5 rounded-md border border-border-strong px-3 py-1.5 text-[12px] text-foreground transition hover:bg-foreground/[0.04]"
-        >
-          <Download className="size-3.5" /> {t('apps.fileBrowser.download')}
-        </a>
-      </div>
-    </div>
-  );
-};
