@@ -374,7 +374,11 @@ export const AppShell: React.FC = () => {
     // Desktop: normal document flow.
     <WindowManagerProvider>
     <div className="flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground md:block md:h-auto md:min-h-screen md:overflow-visible">
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-[240px] flex-col border-r border-border bg-surface md:flex">
+      {/* No z-index on the aside itself: a maximized window (window layer, z-20) must be able to
+          cover the sidebar nav (design If1Tt). Keeping it un-stacked (z-auto, no stacking context)
+          lets the Apps launcher inside escape to its own z-30 and float on top while the rest of the
+          sidebar stays below the window layer. */}
+      <aside className="fixed inset-y-0 left-0 hidden w-[240px] flex-col border-r border-border bg-surface md:flex">
         <div className="flex h-full flex-col justify-between gap-6 px-4 py-5">
           {/* Top: Brand + Workspace label + Nav list */}
           {/* Workbench mounts a search field right under the brand, so use the
@@ -408,9 +412,10 @@ export const AppShell: React.FC = () => {
 
           {/* Bottom (design.pen NbPMq): row 1 = [Apps | Settings] two equal
               buttons; row 2 = [version … run-dot]. Admin keeps its quick-toggles
-              + hostname between the rows. The cluster sits above the window layer (z-30)
-              so the Apps launcher / Dock stay reachable even under a maximized window. */}
-          <div className="relative z-30 flex flex-col gap-3">
+              + hostname between the rows. Only the Apps launcher floats above a
+              maximized window (it carries its own z-30); Settings / version / run-dot
+              stay at the sidebar's level and are covered by a maximized window (If1Tt). */}
+          <div className="relative flex flex-col gap-3">
             {/* Row 1 — Apps (Dock trigger, left) paired with the mode switch
                 (right). The Dock rises ABOVE the Apps button, clear of the
                 centered Chat composer. Workbench → Settings (control panel);

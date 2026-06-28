@@ -600,6 +600,21 @@ def _tmux_launch_command(tmux_binary: str, session_id: str) -> list[str]:
         "-g",
         "status",
         "off",
+        # tmux drives the outer terminal's ALTERNATE screen, so the browser xterm keeps no
+        # scrollback of its own — without mouse mode the wheel does nothing and earlier output
+        # is unreachable. `mouse on` routes the wheel into tmux copy-mode (scroll history), and
+        # `set-clipboard on` lets a mouse selection reach the system clipboard via OSC 52 so
+        # copy still works once tmux owns the mouse.
+        ";",
+        "set-option",
+        "-g",
+        "mouse",
+        "on",
+        ";",
+        "set-option",
+        "-g",
+        "set-clipboard",
+        "on",
     ]
 
 

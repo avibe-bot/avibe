@@ -55,7 +55,10 @@ export const AppsLauncher: React.FC = () => {
   };
 
   return (
-    <div className="relative flex-1" onMouseEnter={openHover} onMouseLeave={queueClose}>
+    // z-30 keeps the Apps button (and its Dock popover) above the window layer (z-20) so it stays
+    // reachable even under a MAXIMIZED window (design If1Tt). The sidebar aside is intentionally
+    // un-stacked, so this z-30 composites at the root, above the window layer.
+    <div className="relative z-30 flex-1" onMouseEnter={openHover} onMouseLeave={queueClose}>
       <button
         type="button"
         onClick={onClick}
