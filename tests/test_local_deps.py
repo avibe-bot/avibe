@@ -490,6 +490,28 @@ def test_ensure_avault_force_does_not_downgrade_compatible_binary_when_pin_is_ol
     }
 
 
+def test_ensure_avault_force_does_not_downgrade_newer_binary(monkeypatch):
+    # A user/custom avault newer than the managed pin must survive `force` prepare,
+    # even though the managed pin now satisfies the P2 gate (Codex #686 P2 finding).
+    newer = "9.9.9"
+    assert api._version_at_least(newer, api.AVAULT_VERSION)
+    monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: True)
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: newer)
+    monkeypatch.setattr(api, "install_avault", lambda force=False: pytest.fail("should not downgrade a newer avault"))
+
+    out = api.ensure_avault_installed(force=True)
+
+    assert out == {
+        "ok": True,
+        "installed": True,
+        "changed": False,
+        "path": "/usr/local/bin/avault",
+        "version": newer,
+    }
+
+
 def test_ensure_avault_upgrades_existing_binary_below_p2_minimum(monkeypatch):
     monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: True)
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
