@@ -144,20 +144,35 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
           <Settings className="size-5 text-muted" />
         </div>
 
-        {root == null ? (
-          <Welcome onOpenFolder={openFolder} onNewFile={newFile} onOpenFiles={() => wm.openApp('files')} />
-        ) : (
-          <>
-            {/* Explorer */}
-            <div className="flex w-[220px] shrink-0 flex-col overflow-hidden border-r border-border bg-surface-2">
-              <div className="px-3 pb-1 pt-2.5 font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">{t('apps.editor.explorer')}</div>
-              <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">
-                <FileTree rootPath={root} rootName={root.split('/').filter(Boolean).pop() || root} activePath={active} onOpenFile={openFile} />
-              </div>
+        {/* Explorer — ALWAYS present (design w0qoC keeps it in the welcome state): an
+            empty "No folder opened + Open Folder" state when no folder, else the file tree. */}
+        <div className="flex w-[220px] shrink-0 flex-col overflow-hidden border-r border-border bg-surface-2">
+          <div className="px-3 pb-1 pt-2.5 font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">{t('apps.editor.explorer')}</div>
+          {root == null ? (
+            <div className="flex flex-col gap-2 px-3 py-2">
+              <div className="text-[12px] text-muted">{t('apps.editor.noFolder')}</div>
+              <button
+                type="button"
+                onClick={openFolder}
+                className="flex items-center justify-center gap-1.5 rounded-md border border-mint/40 bg-mint/[0.08] px-2.5 py-1.5 text-[12px] font-semibold text-mint transition hover:bg-mint/[0.14]"
+              >
+                <FolderOpen className="size-3.5" />
+                {t('apps.editor.openFolder')}
+              </button>
             </div>
+          ) : (
+            <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">
+              <FileTree rootPath={root} rootName={root.split('/').filter(Boolean).pop() || root} activePath={active} onOpenFile={openFile} />
+            </div>
+          )}
+        </div>
 
-            {/* Editor area: tabs + the active file's Monaco pane */}
-            <div className="flex min-w-0 flex-1 flex-col bg-[#0b0b14]">
+        {/* Main area: welcome (no folder) · tabs + Monaco (file open) · select-a-file hint (folder, no file). */}
+        <div className="flex min-w-0 flex-1 flex-col bg-[#0b0b14]">
+          {root == null ? (
+            <Welcome onOpenFolder={openFolder} onNewFile={newFile} onOpenFiles={() => wm.openApp('files')} />
+          ) : (
+            <>
               {tabs.length > 0 && (
                 <div className="flex items-center overflow-x-auto border-b border-border bg-surface-2">
                   {tabs.map((tab) => (
@@ -215,9 +230,9 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                   ))
                 )}
               </div>
-            </div>
-          </>
-        )}
+            </>
+          )}
+        </div>
       </div>
 
       {/* Status bar (cyan, design dnYPx) */}

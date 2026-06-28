@@ -605,6 +605,7 @@
       "label": "Editor",
       "desc": "A fast code editor for files on this machine.",
       "explorer": "Explorer",
+      "noFolder": "No folder opened",
       "welcomeSub": "A code editor for files on this machine · VS Code engine",
       "start": "Start",
       "recent": "Recent",

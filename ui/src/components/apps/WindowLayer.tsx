@@ -71,6 +71,12 @@ export const WindowLayer: React.FC = () => {
     <div
       ref={ref}
       aria-hidden={!anyShown}
+      // The windowed apps (Editor / Terminal / File Browser) are ALWAYS dark — they're
+      // dark-only in the design (dnYPx / iwYIX / nknn2) with hardcoded-dark content areas
+      // (Monaco, xterm), so a light global theme would otherwise paint light chrome around
+      // dark content (and make the welcome text unreadable). `data-theme="dark"` re-cascades
+      // the dark token set to this whole subtree regardless of the app theme.
+      data-theme="dark"
       // Spans the FULL viewport (no longer offset past the sidebar): windows can move over
       // the sidebar and maximize fills the whole screen. The sidebar's bottom Apps/Dock
       // cluster sits above this layer (z-30) so it stays reachable under a maximized window.

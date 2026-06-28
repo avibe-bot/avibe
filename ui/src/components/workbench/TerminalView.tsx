@@ -227,7 +227,9 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
       )}
 
       {status !== 'disabled' && (
-        <div className="flex gap-1 overflow-x-auto border-t border-border bg-surface px-2 py-1.5 md:hidden">
+        // The accessory key bar shows on desktop too (design iwYIX): quick esc/tab/ctrl/arrows
+        // without leaving the window. On phones it's essential (soft keyboards lack these keys).
+        <div className="flex gap-1 overflow-x-auto border-t border-border bg-surface px-2 py-1.5">
           {KEYS.map((k) => (
             <button
               key={k.labelKey}

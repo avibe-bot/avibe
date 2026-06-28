@@ -95,7 +95,10 @@ export const Dock: React.FC = () => {
               {menuApp === app.id && (
                 <div
                   role="menu"
-                  className="absolute bottom-full left-1/2 z-10 mb-2 w-44 -translate-x-1/2 rounded-xl border border-border bg-surface-3 p-1.5 shadow-[0_10px_28px_-8px_rgba(0,0,0,0.7)]"
+                  // Anchor to the tile's LEFT edge (opens rightward), not centered: the Dock sits at
+                  // the bottom-left, so a centered menu's left half spilled past the viewport edge and
+                  // got clipped (Codex). Left-anchored keeps the whole menu on-screen.
+                  className="absolute bottom-full left-0 z-10 mb-2 w-44 rounded-xl border border-border bg-surface-3 p-1.5 shadow-[0_10px_28px_-8px_rgba(0,0,0,0.7)]"
                 >
                   <button
                     type="button"

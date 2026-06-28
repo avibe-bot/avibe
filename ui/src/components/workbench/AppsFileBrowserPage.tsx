@@ -3,18 +3,21 @@ import { useTranslation } from 'react-i18next';
 import {
   Braces,
   ChevronRight,
+  Download,
   FileCode2,
   FileText,
   File as FileIcon,
   Folder,
   FolderPlus,
   FilePlus,
+  HardDrive,
   Hash,
+  Home,
   Image as ImageIcon,
   Loader2,
+  Monitor,
   RefreshCw,
   Search,
-  Star,
   type LucideIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -62,6 +65,16 @@ function entryIcon(e: FsEntry): { Icon: LucideIcon; color: string } {
   if (e.kind === 'dir') return { Icon: Folder, color: 'var(--cyan)' };
   return EXT_ICON[e.ext?.toLowerCase()] ?? { Icon: FileIcon, color: 'var(--muted)' };
 }
+
+// A favorite's key → a distinct icon (mirrors the Finder rail in design nknn2:
+// Home / Desktop / Downloads / Documents / drive). Unknown keys fall back to a folder.
+const FAV_ICON: Record<string, LucideIcon> = {
+  home: Home,
+  desktop: Monitor,
+  downloads: Download,
+  documents: FileText,
+  root: HardDrive,
+};
 
 function formatSize(n: number | null): string {
   if (n == null) return '—';
@@ -182,6 +195,10 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     const filtered = q ? all.filter((e) => e.name.toLowerCase().includes(q)) : all;
     return [...filtered].sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1));
   }, [listing, query]);
+  const selectedEntry = useMemo(
+    () => (selected ? entries.find((e) => joinPath(cwd, e.name) === selected) ?? null : null),
+    [entries, cwd, selected],
+  );
 
   return (
     <div className={windowed ? 'flex h-full w-full flex-col bg-surface' : 'flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]'}>
@@ -232,21 +249,24 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
         {error && <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive">{error}</div>}
 
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          {/* Rail: favorites + projects */}
+          {/* Rail: Favorites THEN Projects (design nknn2 order). */}
           <aside className="hidden w-[196px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border bg-surface-2/40 p-2 md:flex">
+            {sysFavs.length > 0 && <RailTitle>{t('apps.fileBrowser.favorites')}</RailTitle>}
+            {sysFavs.map((f) => {
+              const Icon = FAV_ICON[f.key] ?? Folder;
+              return (
+                <RailRow
+                  key={f.path}
+                  icon={<Icon className="size-3.5 text-muted" />}
+                  label={f.path.split('/').filter(Boolean).pop() || f.path}
+                  active={cwd === f.path}
+                  onClick={() => navigate(f.path)}
+                />
+              );
+            })}
             {projectFavs.length > 0 && <RailTitle>{t('apps.fileBrowser.projects')}</RailTitle>}
             {projectFavs.map((f) => (
-              <RailRow key={f.path} icon={<Star className="size-3.5 text-mint" />} label={f.label} active={cwd === f.path} onClick={() => navigate(f.path)} />
-            ))}
-            {sysFavs.length > 0 && <RailTitle>{t('apps.fileBrowser.favorites')}</RailTitle>}
-            {sysFavs.map((f) => (
-              <RailRow
-                key={f.path}
-                icon={<Folder className="size-3.5 text-muted" />}
-                label={f.path.split('/').filter(Boolean).pop() || f.path}
-                active={cwd === f.path}
-                onClick={() => navigate(f.path)}
-              />
+              <RailRow key={f.path} icon={<Folder className="size-3.5 text-cyan" />} label={f.label} active={cwd === f.path} onClick={() => navigate(f.path)} />
             ))}
           </aside>
 
@@ -297,9 +317,15 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
             <input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} className="size-3" />
             {t('apps.fileBrowser.showHidden')}
           </label>
-          <span className="ml-auto truncate font-mono">
-            {selected ? selected.split('/').filter(Boolean).pop() : t('apps.fileBrowser.itemCount', { count: entries.length })}
-            {listing?.truncated && ` · ${t('apps.fileBrowser.listTruncated', { count: listing.limit ?? entries.length })}`}
+          <span className="ml-auto flex min-w-0 items-center gap-2 font-mono">
+            {selectedEntry && (
+              <span className="truncate text-foreground/80">
+                {selectedEntry.name}
+                {selectedEntry.kind !== 'dir' && selectedEntry.size != null ? ` · ${formatSize(selectedEntry.size)}` : ''}
+              </span>
+            )}
+            <span className="shrink-0">{t('apps.fileBrowser.itemCount', { count: entries.length })}</span>
+            {listing?.truncated && <span className="shrink-0">· {t('apps.fileBrowser.listTruncated', { count: listing.limit ?? entries.length })}</span>}
           </span>
         </div>
       </div>

@@ -605,6 +605,7 @@
       "label": "编辑器",
       "desc": "本机文件的快速代码编辑器。",
       "explorer": "资源管理器",
+      "noFolder": "未打开文件夹",
       "welcomeSub": "本机文件的代码编辑器 · VS Code 内核",
       "start": "开始",
       "recent": "最近",

@@ -218,7 +218,8 @@ const FloatingApps: React.FC = () => {
   const anyMaximized = windows.some((w) => w.maximized && !w.minimized);
   if (!anyMaximized) return null;
   return (
-    <div className="fixed bottom-5 left-4 z-30 hidden w-[184px] md:flex">
+    // data-theme="dark" so the floating Dock popover matches the always-dark windows it sits over.
+    <div data-theme="dark" className="fixed bottom-5 left-4 z-30 hidden w-[184px] md:flex">
       <AppsLauncher />
     </div>
   );
@@ -477,18 +478,17 @@ export const AppShell: React.FC = () => {
               </div>
             )}
 
-            {/* Row 2 — version + a compact run-state dot at the very bottom. The
-                green/grey dot conveys running vs stopped (hover shows the text). */}
-            {/* Row 2 — run-state dot on the LEFT, version on the RIGHT. */}
+            {/* Row 2 (design bVke5) — run-state dot + label on the LEFT, version on the RIGHT. */}
             <div className="flex items-center justify-between gap-2">
-              <span
-                title={isRunning ? t('common.running') : t('common.stopped')}
-                aria-label={isRunning ? t('common.running') : t('common.stopped')}
-                className={clsx(
-                  'size-2.5 shrink-0 rounded-full',
-                  isRunning ? 'bg-mint shadow-[0_0_8px_rgba(91,255,160,0.9)]' : 'bg-muted'
-                )}
-              />
+              <span className="flex items-center gap-1.5 text-[11px] font-medium text-muted">
+                <span
+                  className={clsx(
+                    'size-2 shrink-0 rounded-full',
+                    isRunning ? 'bg-mint shadow-[0_0_8px_rgba(91,255,160,0.9)]' : 'bg-muted'
+                  )}
+                />
+                {isRunning ? t('common.running') : t('common.stopped')}
+              </span>
               <VersionBadge openUpward />
             </div>
           </div>
