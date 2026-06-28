@@ -419,10 +419,11 @@ export const AppShell: React.FC = () => {
               {shellMode === 'workbench' ? (
                 <Link
                   to="/admin/dashboard"
-                  className="group flex flex-1 items-center justify-center gap-2 rounded-lg border border-border-strong px-3 py-2.5 text-[13px] font-medium text-foreground transition-colors hover:bg-foreground/[0.04]"
+                  title={t('appShell.openControlPanel')}
+                  aria-label={t('appShell.openControlPanel')}
+                  className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"
                 >
-                  <Settings className="size-4 text-muted group-hover:text-foreground" />
-                  <span>{t('appShell.openControlPanel')}</span>
+                  <Settings className="size-[18px] text-muted group-hover:text-foreground" />
                 </Link>
               ) : (
                 <Link
@@ -455,16 +456,17 @@ export const AppShell: React.FC = () => {
 
             {/* Row 2 — version + a compact run-state dot at the very bottom. The
                 green/grey dot conveys running vs stopped (hover shows the text). */}
-            <div className="flex items-center gap-2">
-              <VersionBadge openUpward />
+            {/* Row 2 — run-state dot on the LEFT, version on the RIGHT. */}
+            <div className="flex items-center justify-between gap-2">
               <span
                 title={isRunning ? t('common.running') : t('common.stopped')}
                 aria-label={isRunning ? t('common.running') : t('common.stopped')}
                 className={clsx(
-                  'ml-auto size-2.5 shrink-0 rounded-full',
+                  'size-2.5 shrink-0 rounded-full',
                   isRunning ? 'bg-mint shadow-[0_0_8px_rgba(91,255,160,0.9)]' : 'bg-muted'
                 )}
               />
+              <VersionBadge openUpward />
             </div>
           </div>
         </div>
