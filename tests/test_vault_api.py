@@ -25,6 +25,31 @@ def _sealed(suffix: str = "1") -> Sealed:
     return Sealed(ciphertext=f"ct-{suffix}", nonce=f"n-{suffix}", wrap_meta=f"wm-{suffix}")
 
 
+def _browser_ecdsa_signature_for_digest(digest: str, *, key_value: int = 1) -> tuple[dict, dict]:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec, utils
+
+    private_key = ec.derive_private_key(key_value, ec.SECP256K1())
+    public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.X962,
+        serialization.PublicFormat.CompressedPoint,
+    )
+    der = private_key.sign(bytes.fromhex(digest), ec.ECDSA(utils.Prehashed(hashes.SHA256())))
+    r, s = utils.decode_dss_signature(der)
+    recovery_id = next(
+        index
+        for index in range(4)
+        if api._secp256k1_recover_ecdsa_public_key(r, s, bytes.fromhex(digest), index)
+        == api._secp256k1_decompress_public_key(public_key)
+    )
+    signature = {
+        "signature": r.to_bytes(32, "big").hex() + s.to_bytes(32, "big").hex(),
+        "recovery_id": recovery_id,
+    }
+    public_meta = {"signing_public_key": {"curve": "secp256k1", "public_key": public_key.hex()}}
+    return public_meta, signature
+
+
 def _assert_no_unlock_material(payload: object) -> None:
     encoded = json.dumps(payload)
     assert "secret_unlock_material" not in encoded
@@ -576,15 +601,16 @@ def test_get_vault_request_does_not_hydrate_protected_pending_unlock_material(mo
     _assert_no_unlock_material(fetched["request"]["card"])
 
 
-def test_agent_access_request_rejects_protected_next_version(monkeypatch):
+def test_agent_access_request_accepts_protected_static(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("protected")))
     api.create_vault_secret({"name": "PROTECTED_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
 
-    with pytest.raises(api.VaultApiError) as exc:
-        api.request_vault_access({"name": "PROTECTED_KEY", "session_id": "ses_1"})
+    requested = api.request_vault_access({"name": "PROTECTED_KEY", "session_id": "ses_1"})
 
-    assert exc.value.code == "protected_requires_browser_sandbox"
-    assert "browser sandbox" in str(exc.value)
+    assert requested["ok"] is True
+    assert requested["request"]["secret_name"] == "PROTECTED_KEY"
+    assert requested["request"]["card"]["protection"] == "protected"
+    _assert_no_unlock_material(requested["request"])
 
 
 def test_deny_vault_request_api(monkeypatch):
@@ -671,6 +697,52 @@ def test_agent_sign_claims_request_before_avault_sign(monkeypatch):
     )
 
     assert completed["request"]["status"] == "approved"
+
+
+def test_agent_sign_request_accepts_protected_browser_signature(monkeypatch):
+    sign = Mock()
+    monkeypatch.setattr(api, "avault_sign", sign)
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("key")))
+    digest = "00" * 32
+    public_meta, signature = _browser_ecdsa_signature_for_digest(digest)
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_ETH_KEY",
+            "protection": "protected",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "sealed": {"ciphertext": "ct-key", "nonce": "n-key", "wrap_meta": "wm-key"},
+            "public_meta": public_meta,
+        }
+    )
+    requested = api.request_vault_sign(
+        {
+            "name": "PROTECTED_ETH_KEY",
+            "digest": digest,
+            "scheme": "ecdsa-secp256k1-recoverable",
+            "session_id": "ses_1",
+        }
+    )
+
+    completed = api.vault_sign(
+        {
+            "name": "PROTECTED_ETH_KEY",
+            "digest": digest,
+            "scheme": "ecdsa-secp256k1-recoverable",
+            "request_id": requested["request"]["id"],
+            "signature": signature,
+        }
+    )
+
+    assert requested["ok"] is True
+    assert requested["request"]["card"]["protection"] == "protected"
+    assert completed["ok"] is True
+    assert completed["signature"] == signature
+    assert api.get_vault_request(requested["request"]["id"])["result"] == {"type": "signature", "signature": signature}
+    sign.assert_not_called()
+    with api._vault_engine().connect() as conn:
+        meta = vault_service.get_secret_meta(conn, "PROTECTED_ETH_KEY")
+    assert meta["use_count"] == 1
 
 
 def test_agent_sign_marks_claimed_request_failed_when_signature_validation_rejects(monkeypatch):
@@ -765,8 +837,6 @@ def test_create_and_revoke_grant_api(monkeypatch, avault_p2):
                     "name": "GRANT_KEY",
                     "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
                     "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
-                    "dek": "raw-dek-must-not-cross-python-agent-boundary",
-                    "value": "plaintext-must-not-cross-python-agent-boundary",
                 }
             ],
         }
@@ -786,6 +856,205 @@ def test_create_and_revoke_grant_api(monkeypatch, avault_p2):
     revoked = api.revoke_vault_grant(created["grant"]["id"])
     assert revoked["grant"]["status"] == "revoked"
     agent_release.assert_called_once_with(scope_type="secret", scope_ref="GRANT_KEY")
+
+
+def test_fulfill_access_request_relays_only_browser_dek_blindbox(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    validate_pubkey = Mock()
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    monkeypatch.setattr(api, "validate_avault_agent_pubkey", validate_pubkey)
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_KEY",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct-protected", "nonce": "n-protected", "wrap_meta": "wm-protected"},
+        }
+    )
+    requested = api.request_vault_access({"name": "PROTECTED_KEY", "session_id": "ses_1"})
+
+    fulfilled = api.fulfill_vault_access_request(
+        requested["request"]["id"],
+        {
+            "session_id": "ses_1",
+            "ttl_seconds": 300,
+            "agent_pubkey": {"public_key": "pk", "fingerprint": "fp"},
+            "deks": [
+                {
+                    "name": "PROTECTED_KEY",
+                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                }
+            ],
+        },
+    )
+
+    assert fulfilled["ok"] is True
+    assert fulfilled["result"]["type"] == "grant"
+    assert fulfilled["grant"]["delivery_ready"] is True
+    assert agent_grant.call_args.kwargs["deks"] == [
+        {
+            "name": "PROTECTED_KEY",
+            "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+        }
+    ]
+    with api._vault_engine().connect() as conn:
+        resolved = vault_service.resolve_secret_access(conn, "PROTECTED_KEY", session_id="ses_1", create_request=False)
+    assert resolved["status"] == "agent_delivery_ready"
+    validate_pubkey.assert_called_once_with({"public_key": "pk", "fingerprint": "fp"})
+    encoded = json.dumps({"fulfilled": fulfilled, "agent_deks": agent_grant.call_args.kwargs["deks"]})
+    assert "raw-dek-must-not-cross-python-agent-boundary" not in encoded
+    assert "plaintext-must-not-cross-python-agent-boundary" not in encoded
+
+
+def test_fulfill_access_request_rejects_dek_or_plaintext_material(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_KEY",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct-protected", "nonce": "n-protected", "wrap_meta": "wm-protected"},
+        }
+    )
+    requested = api.request_vault_access({"name": "PROTECTED_KEY", "session_id": "ses_1"})
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.fulfill_vault_access_request(
+            requested["request"]["id"],
+            {
+                "session_id": "ses_1",
+                "deks": [
+                    {
+                        "name": "PROTECTED_KEY",
+                        "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                        "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                        "dek": "raw-dek-must-not-cross-python-agent-boundary",
+                        "value": "plaintext-must-not-cross-python-agent-boundary",
+                    }
+                ],
+            },
+        )
+
+    assert exc.value.code == "invalid_grant"
+    assert "opaque blind-box metadata" in str(exc.value)
+    agent_grant.assert_not_called()
+    with api._vault_engine().connect() as conn:
+        status = conn.execute(
+            select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == requested["request"]["id"])
+        ).scalar_one()
+        grants = vault_service.list_grants(conn, status=None)
+    assert status == "pending"
+    assert grants == []
+
+
+def test_fulfill_access_request_rejects_raw_material_in_deks_by_secret(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_KEY",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct-protected", "nonce": "n-protected", "wrap_meta": "wm-protected"},
+        }
+    )
+    requested = api.request_vault_access({"name": "PROTECTED_KEY", "session_id": "ses_1"})
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.fulfill_vault_access_request(
+            requested["request"]["id"],
+            {
+                "session_id": "ses_1",
+                "deks_by_secret": {
+                    "PROTECTED_KEY": {
+                        "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                        "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                        "dek": "raw-dek-must-not-cross-python-agent-boundary",
+                        "value": "plaintext-must-not-cross-python-agent-boundary",
+                    }
+                },
+            },
+        )
+
+    assert exc.value.code == "invalid_grant"
+    assert "opaque blind-box metadata" in str(exc.value)
+    agent_grant.assert_not_called()
+    with api._vault_engine().connect() as conn:
+        status = conn.execute(
+            select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == requested["request"]["id"])
+        ).scalar_one()
+        grants = vault_service.list_grants(conn, status=None)
+    assert status == "pending"
+    assert grants == []
+
+
+def test_fulfill_access_request_rejects_raw_material_nested_in_dek_blindbox(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_KEY",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct-protected", "nonce": "n-protected", "wrap_meta": "wm-protected"},
+        }
+    )
+    requested = api.request_vault_access({"name": "PROTECTED_KEY", "session_id": "ses_1"})
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.fulfill_vault_access_request(
+            requested["request"]["id"],
+            {
+                "session_id": "ses_1",
+                "deks": [
+                    {
+                        "name": "PROTECTED_KEY",
+                        "dek_blindbox": {
+                            "scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1",
+                            "enc": "enc",
+                            "ct": "ct",
+                            "dek": "raw-dek-must-not-cross-python-agent-boundary",
+                        },
+                        "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                    }
+                ],
+            },
+        )
+
+    assert exc.value.code == "invalid_grant"
+    assert "opaque blind-box metadata" in str(exc.value)
+    agent_grant.assert_not_called()
+    with api._vault_engine().connect() as conn:
+        status = conn.execute(
+            select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == requested["request"]["id"])
+        ).scalar_one()
+        grants = vault_service.list_grants(conn, status=None)
+    assert status == "pending"
+    assert grants == []
+
+
+def test_fulfill_access_request_rejects_protected_keypair_value_delivery(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_ETH_KEY",
+            "protection": "protected",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+        }
+    )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.request_vault_access({"name": "PROTECTED_ETH_KEY", "session_id": "ses_1"})
+
+    assert exc.value.code == "not_grantable"
+    agent_grant.assert_not_called()
 
 
 def test_revoke_grant_keeps_agent_scope_when_other_active_grant_exists(monkeypatch):
@@ -1217,7 +1486,7 @@ def test_create_grant_api_expires_grant_when_agent_grant_fails(monkeypatch, avau
     with api._vault_engine().connect() as conn:
         status = conn.execute(select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == req["id"])).scalar_one()
         grants = vault_service.list_grants(conn, status=None)
-    assert status == "approved"
+    assert status == "pending"
     assert len(grants) == 1
     assert grants[0]["status"] == "expired"
     assert grants[0]["delivery_ready"] is False
@@ -1258,7 +1527,9 @@ def test_create_grant_api_rejects_partial_agent_cache(monkeypatch, avault_p2):
     assert exc.value.code == "avault_failed"
     assert "cached fewer DEKs" in str(exc.value)
     with api._vault_engine().connect() as conn:
+        status = conn.execute(select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == req["id"])).scalar_one()
         grants = vault_service.list_grants(conn, status=None)
+    assert status == "pending"
     assert len(grants) == 1
     assert grants[0]["status"] == "expired"
     assert grants[0]["delivery_ready"] is False
@@ -1312,7 +1583,9 @@ def test_create_grant_api_releases_scope_when_mark_ready_fails(monkeypatch, avau
     assert exc.value.code == "invalid_grant"
     agent_release.assert_called_once_with(scope_type="secret", scope_ref="GRANT_KEY")
     with api._vault_engine().connect() as conn:
+        status = conn.execute(select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == req["id"])).scalar_one()
         grants = vault_service.list_grants(conn, status=None)
+    assert status == "pending"
     assert len(grants) == 1
     assert grants[0]["status"] == "expired"
     assert grants[0]["delivery_ready"] is False
@@ -1409,6 +1682,7 @@ def test_protected_sign_requires_browser_signature(monkeypatch):
     from unittest.mock import Mock
 
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    public_meta, _signature = _browser_ecdsa_signature_for_digest("00" * 32)
     api.create_vault_secret(
         {
             "name": "ETH_KEY",
@@ -1416,6 +1690,7 @@ def test_protected_sign_requires_browser_signature(monkeypatch):
             "kind": "keypair",
             "signer_kind": "local",
             "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+            "public_meta": public_meta,
         }
     )
     result = api.vault_sign({"name": "ETH_KEY", "digest": "00" * 32, "scheme": "ecdsa-secp256k1-recoverable"})
@@ -1425,7 +1700,7 @@ def test_protected_sign_requires_browser_signature(monkeypatch):
     assert result["request"]["card"]["scope_options"] == []
 
 
-def test_protected_sign_rejects_unsupported_scheme_before_request(monkeypatch):
+def test_protected_sign_request_requires_pinned_signing_public_key(monkeypatch):
     from unittest.mock import Mock
 
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
@@ -1440,6 +1715,30 @@ def test_protected_sign_rejects_unsupported_scheme_before_request(monkeypatch):
     )
 
     with pytest.raises(api.VaultApiError) as exc:
+        api.vault_sign({"name": "ETH_KEY", "digest": "00" * 32, "scheme": "ecdsa-secp256k1-recoverable"})
+
+    assert exc.value.code == "invalid_request"
+    assert "per-use signable" in str(exc.value)
+    assert api.get_vault_requests()["requests"] == []
+
+
+def test_protected_sign_rejects_unsupported_scheme_before_request(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    public_meta, _signature = _browser_ecdsa_signature_for_digest("00" * 32)
+    api.create_vault_secret(
+        {
+            "name": "ETH_KEY",
+            "protection": "protected",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+            "public_meta": public_meta,
+        }
+    )
+
+    with pytest.raises(api.VaultApiError) as exc:
         api.vault_sign({"name": "ETH_KEY", "digest": "00" * 32, "scheme": "not-a-real-scheme"})
 
     assert exc.value.code == "invalid_request"
@@ -1450,6 +1749,8 @@ def test_protected_sign_completion_requires_matching_request(monkeypatch):
     from unittest.mock import Mock
 
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    digest = "00" * 32
+    public_meta, signature = _browser_ecdsa_signature_for_digest(digest)
     api.create_vault_secret(
         {
             "name": "ETH_KEY",
@@ -1457,9 +1758,9 @@ def test_protected_sign_completion_requires_matching_request(monkeypatch):
             "kind": "keypair",
             "signer_kind": "local",
             "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+            "public_meta": public_meta,
         }
     )
-    digest = "00" * 32
     with pytest.raises(api.VaultApiError) as exc:
         api.vault_sign({"name": "ETH_KEY", "digest": digest, "scheme": "ecdsa-secp256k1-recoverable", "signature": {"signature": "sig"}})
     assert exc.value.code == "missing_request_id"
@@ -1484,7 +1785,7 @@ def test_protected_sign_completion_requires_matching_request(monkeypatch):
             "digest": digest,
             "scheme": "ecdsa-secp256k1-recoverable",
             "request_id": request_id,
-            "signature": {"signature": "ab" * 64, "recovery_id": 1},
+            "signature": signature,
         }
     )
     assert result["ok"] is True
@@ -1495,6 +1796,7 @@ def test_protected_sign_completion_rejects_malformed_browser_signature(monkeypat
     from unittest.mock import Mock
 
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    public_meta, _signature = _browser_ecdsa_signature_for_digest("00" * 32)
     api.create_vault_secret(
         {
             "name": "ETH_KEY",
@@ -1502,6 +1804,7 @@ def test_protected_sign_completion_rejects_malformed_browser_signature(monkeypat
             "kind": "keypair",
             "signer_kind": "local",
             "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+            "public_meta": public_meta,
         }
     )
     digest = "00" * 32
@@ -1519,6 +1822,163 @@ def test_protected_sign_completion_rejects_malformed_browser_signature(monkeypat
         )
 
     assert exc.value.code == "invalid_request"
+
+
+def test_protected_sign_completion_rejects_signature_extra_fields(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    digest = "00" * 32
+    public_meta, signature = _browser_ecdsa_signature_for_digest(digest)
+    api.create_vault_secret(
+        {
+            "name": "ETH_KEY",
+            "protection": "protected",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+            "public_meta": public_meta,
+        }
+    )
+    pending = api.vault_sign({"name": "ETH_KEY", "digest": digest, "scheme": "ecdsa-secp256k1-recoverable"})
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.vault_sign(
+            {
+                "name": "ETH_KEY",
+                "digest": digest,
+                "scheme": "ecdsa-secp256k1-recoverable",
+                "request_id": pending["request"]["id"],
+                "signature": {**signature, "private_key": "raw", "dek": "raw"},
+            }
+        )
+
+    assert exc.value.code == "invalid_request"
+    assert "unsupported fields" in str(exc.value)
+    with api._vault_engine().connect() as conn:
+        row = conn.execute(
+            select(vault_service.vault_requests).where(vault_service.vault_requests.c.id == pending["request"]["id"])
+        ).mappings().one()
+    assert row["status"] == "pending"
+    assert "signature" not in json.loads(row["delivery"])
+
+
+def test_protected_sign_completion_rejects_signature_that_does_not_verify(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    digest = "00" * 32
+    public_meta, _valid_signature = _browser_ecdsa_signature_for_digest(digest, key_value=1)
+    _other_public_meta, invalid_signature = _browser_ecdsa_signature_for_digest(digest, key_value=2)
+    api.create_vault_secret(
+        {
+            "name": "ETH_KEY",
+            "protection": "protected",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+            "public_meta": public_meta,
+        }
+    )
+    pending = api.vault_sign({"name": "ETH_KEY", "digest": digest, "scheme": "ecdsa-secp256k1-recoverable"})
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.vault_sign(
+            {
+                "name": "ETH_KEY",
+                "digest": digest,
+                "scheme": "ecdsa-secp256k1-recoverable",
+                "request_id": pending["request"]["id"],
+                "signature": invalid_signature,
+            }
+        )
+
+    assert exc.value.code == "invalid_request"
+    assert "does not verify" in str(exc.value)
+    with api._vault_engine().connect() as conn:
+        status = conn.execute(
+            select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == pending["request"]["id"])
+        ).scalar_one()
+    assert status == "pending"
+
+
+def test_protected_sign_completion_rejects_wrong_recovery_id(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    digest = "00" * 32
+    public_meta, signature = _browser_ecdsa_signature_for_digest(digest, key_value=1)
+    bad_signature = dict(signature)
+    bad_signature["recovery_id"] = (int(signature["recovery_id"]) + 1) % 4
+    api.create_vault_secret(
+        {
+            "name": "ETH_KEY",
+            "protection": "protected",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+            "public_meta": public_meta,
+        }
+    )
+    pending = api.vault_sign({"name": "ETH_KEY", "digest": digest, "scheme": "ecdsa-secp256k1-recoverable"})
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.vault_sign(
+            {
+                "name": "ETH_KEY",
+                "digest": digest,
+                "scheme": "ecdsa-secp256k1-recoverable",
+                "request_id": pending["request"]["id"],
+                "signature": bad_signature,
+            }
+        )
+
+    assert exc.value.code == "invalid_request"
+    assert "recovery_id" in str(exc.value)
+    with api._vault_engine().connect() as conn:
+        status = conn.execute(
+            select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == pending["request"]["id"])
+        ).scalar_one()
+    assert status == "pending"
+
+
+def test_protected_sign_completion_verifies_schnorr_browser_signature(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    digest = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    signature = {
+        "signature": "931a3386e9ec69fe1471ba85933640948c0296a79ce2d3801ad5a4d9353550aeb0a5e80358b68088bda70b46e6b77a640c1216826f96292e5799ba2bb7bf1342",
+    }
+    api.create_vault_secret(
+        {
+            "name": "ETH_KEY",
+            "protection": "protected",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+            "public_meta": {
+                "signing_public_key": {
+                    "curve": "secp256k1",
+                    "public_key": "024e3b81af9c2234cad09d679ce6035ed1392347ce64ce405f5dcd36228a25de6e",
+                }
+            },
+        }
+    )
+    pending = api.vault_sign({"name": "ETH_KEY", "digest": digest, "scheme": "schnorr-secp256k1-bip340"})
+
+    result = api.vault_sign(
+        {
+            "name": "ETH_KEY",
+            "digest": digest,
+            "scheme": "schnorr-secp256k1-bip340",
+            "request_id": pending["request"]["id"],
+            "signature": signature,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["request"]["status"] == "approved"
 
 
 def test_vault_sign_rejects_malformed_digest_before_request_or_avault(monkeypatch):

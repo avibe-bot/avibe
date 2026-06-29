@@ -2736,9 +2736,10 @@ def vault_requests_get():
 @app.route("/api/vault/requests/<request_id>", methods=["GET"])
 def vault_request_get(request_id):
     from vibe import api
+    from storage import vault_service
 
     try:
-        return jsonify(api.get_vault_request(request_id))
+        return jsonify(api.get_vault_request(request_id, audience=vault_service.REQUEST_AUDIENCE_UI))
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -2769,6 +2770,16 @@ def vault_request_deny_post(request_id):
 
     try:
         return jsonify(api.deny_vault_request(request_id, request.json or {}))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/requests/<request_id>/fulfill-access", methods=["POST"])
+def vault_request_fulfill_access_post(request_id):
+    from vibe import api
+
+    try:
+        return jsonify(api.fulfill_vault_access_request(request_id, request.json or {}))
     except ValueError as exc:
         return _vault_error_response(exc)
 

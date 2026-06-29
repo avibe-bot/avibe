@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, Clock, Copy, History, KeyRound, Layers, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, ShieldOff, Trash2, Wallet } from 'lucide-react';
+import { Check, Clock, Copy, History, Inbox, KeyRound, Layers, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, ShieldOff, Trash2, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
-import { useApi, type VaultAuditEvent, type VaultGrant, type VaultSecret } from '../../context/ApiContext';
+import { useApi, type VaultAuditEvent, type VaultGrant, type VaultRequest, type VaultSecret } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
+import { VaultApprovalCard, type ApprovalOutcome } from '../ui/vault-approval-card';
 import { VaultSecretForm } from '../ui/vault-secret-form';
 
 const AddSecretDialog: React.FC<{
@@ -172,6 +173,132 @@ const GrantRow: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: Vau
   );
 };
 
+/** A compact pending-request row: who is asking, for what, with a Review action. */
+const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultRequest) => void }> = ({ request: r, onReview }) => {
+  const { t } = useTranslation();
+  const card = (r.card ?? {}) as { request_type?: string; kind?: string; protection?: string; session_id?: string };
+  const isSign = (card.request_type ?? r.request_type) === 'sign';
+  const isProtected = card.protection === 'protected';
+  const Icon = isSign || card.kind === 'keypair' ? Wallet : KeyRound;
+  return (
+    <div className="flex items-center gap-3.5 rounded-xl border border-gold/40 bg-gold/[0.06] px-4 py-3">
+      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-gold/10 text-gold">
+        <Icon className="size-4" />
+      </div>
+      <div className="flex min-w-0 flex-col gap-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="truncate font-mono text-sm font-semibold">{r.secret_name}</span>
+          <Badge variant="info">{isSign ? t('vaults.requests.sign') : t('vaults.requests.access')}</Badge>
+          {isProtected ? <Badge variant="warning">{t('vaults.protected')}</Badge> : null}
+        </div>
+        <span className="flex items-center gap-1.5 text-xs text-muted">
+          <Clock className="size-3" />
+          {t('vaults.requests.waiting')}
+          {card.session_id ? (
+            <>
+              <span aria-hidden>·</span>
+              <span className="truncate font-mono">{card.session_id}</span>
+            </>
+          ) : null}
+        </span>
+      </div>
+      <div className="ml-auto">
+        <Button size="sm" onClick={() => onReview(r)}>
+          {t('vaults.requests.review')}
+        </Button>
+      </div>
+    </div>
+  );
+};
+
+/**
+ * Pending approvals strip for the hub: lists requests an agent is waiting on, polls for
+ * new ones, and opens the full {@link VaultApprovalCard} in a dialog to approve or deny.
+ * Best-effort — a requests fetch failure (e.g. an older backend without the route) must
+ * not surface an error or blank the rest of the hub.
+ */
+const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolved }) => {
+  const { t } = useTranslation();
+  const api = useApi();
+  const { showToast } = useToast();
+  const [requests, setRequests] = useState<VaultRequest[]>([]);
+  const [reviewing, setReviewing] = useState<VaultRequest | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      // Best-effort with suppressed errors so an older backend without the route doesn't
+      // spam global toasts on every 5s poll. Only approval (access/sign) requests render
+      // here — a provision request ($NAME secure-input) has no grant scope and would show
+      // a broken Review row, so filter it out.
+      const res = await api.getVaultRequests({ status: 'pending' }, { handleError: false });
+      const pending = (res.requests ?? []).filter((r) => {
+        const type = (r.card as { request_type?: string } | null)?.request_type ?? r.request_type;
+        return type === 'access' || type === 'sign';
+      });
+      setRequests(pending);
+    } catch {
+      setRequests([]);
+    }
+  }, [api]);
+
+  // Poll so a request an agent raises while the hub is open appears without a manual refresh.
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 5000);
+    return () => clearInterval(id);
+  }, [load]);
+
+  const handleOutcome = useCallback(
+    (outcome: ApprovalOutcome) => {
+      // Drop the row immediately so it doesn't linger behind the poll; the next load
+      // reconciles against the server.
+      if (reviewing) setRequests((prev) => prev.filter((r) => r.id !== reviewing.id));
+      setReviewing(null);
+      const key =
+        outcome.kind === 'denied'
+          ? 'vaults.requests.denied'
+          : outcome.requestType === 'sign'
+            ? 'vaults.requests.signed'
+            : 'vaults.requests.approved';
+      showToast(t(key), outcome.kind === 'denied' ? 'warning' : 'success');
+      load();
+      onResolved();
+    },
+    [reviewing, showToast, t, load, onResolved],
+  );
+
+  if (requests.length === 0) return null;
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2 px-1">
+        <Inbox className="size-4 text-gold" />
+        <span className="text-sm font-semibold">{t('vaults.requests.title')}</span>
+        <Badge variant="warning">{requests.length}</Badge>
+        <span className="hidden text-xs text-muted sm:inline">{t('vaults.requests.subtitle')}</span>
+      </div>
+      {requests.map((r) => (
+        <RequestRow key={r.id} request={r} onReview={setReviewing} />
+      ))}
+      <Dialog
+        open={reviewing != null}
+        onOpenChange={(o) => {
+          if (!o) setReviewing(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t('vaults.requests.reviewTitle')}</DialogTitle>
+          </DialogHeader>
+          {reviewing != null ? (
+            <VaultApprovalCard key={reviewing.id} request={reviewing} onResolved={handleOutcome} onCancel={() => setReviewing(null)} />
+          ) : null}
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+};
+
 export const VaultsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
@@ -300,6 +427,7 @@ export const VaultsPage: React.FC = () => {
       {error && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
       )}
+      <PendingRequestsSection onResolved={refresh} />
       {grants.length > 0 && (
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-2 px-1">

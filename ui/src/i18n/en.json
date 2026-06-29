@@ -2236,7 +2236,7 @@
       "kindStaticHelp": "A token, password, or any text value.",
       "kindKeypair": "Signing key",
       "kindKeypairHelp": "A signing key generated in your browser.",
-      "signingKeyHelp": "A new secp256k1 signing key is created in your browser. The private key is sealed like any other standard secret and avault signs with it locally; only the public key is stored in the clear.",
+      "signingKeyHelp": "A new secp256k1 signing key is created in your browser. The private key is sealed in your browser — standard keys are signed by avault locally, protected keys are signed in your browser — and only the public key is stored in the clear.",
       "signingGenerate": "Generate",
       "signingImport": "Import",
       "signingGenerateCta": "Generate signing key",
@@ -2246,7 +2246,6 @@
       "copyPublicKey": "Copy public key",
       "signingPublicKeyHint": "Share this public key freely. The private key never leaves your vault, and the chain and signature scheme are chosen at signing time.",
       "signingNeedsAvault": "Signing keys need avault {{version}} or newer installed.",
-      "protectedKeypairNextVersion": "Protected signing keys arrive with the browser signing sandbox (next version).",
       "checkingAvault": "Checking avault…",
       "p2Unavailable": "Browser-side vault create requires avault {{version}} or newer. Installed: {{installed}}. Use the CLI stdin/file path until a compatible avault release is installed.",
       "p2UnavailableStandardFallback": "Browser-side sealing requires avault {{version}} or newer. Installed: {{installed}}. Standard secrets can still be saved through the local avault seal fallback.",
@@ -2279,6 +2278,53 @@
         "fingerprintMismatch": "The avault public key fingerprint changed. Verify the local avault install before saving this secret.",
         "pendingDraft": "Press Enter to add the value in the input, or clear it, before saving.",
         "secretExists": "A secret with this name already exists."
+      }
+    },
+    "requests": {
+      "title": "Pending requests",
+      "subtitle": "An agent is waiting — approve or deny from this device.",
+      "reviewTitle": "Review request",
+      "review": "Review",
+      "waiting": "Waiting for approval",
+      "access": "Use secret",
+      "sign": "Sign",
+      "approved": "Access approved",
+      "signed": "Signature returned",
+      "denied": "Request denied"
+    },
+    "approval": {
+      "accessTitle": "Agent wants to use a secret",
+      "accessSubtitle": "The value is never shown to the agent or the chat.",
+      "signTitle": "Agent wants to sign",
+      "signSubtitle": "Signing is always per-use — it can't be pre-approved.",
+      "secret": "Secret",
+      "key": "Key",
+      "session": "Session",
+      "command": "Command",
+      "egress": "Egress",
+      "digest": "Digest",
+      "scopeTitle": "Approval scope",
+      "scopeMembers": "Covers {{count}} secrets",
+      "scope": {
+        "secret": "This secret only",
+        "skill": "Skill · {{ref}}",
+        "group": "Group · {{ref}}"
+      },
+      "thisSessionOnly": "This session only",
+      "approve": "Approve",
+      "sign": "Sign",
+      "deny": "Deny",
+      "close": "Close",
+      "ttlMinutes": "{{count}} min",
+      "ttlHours": "{{count}} h",
+      "accessNote": "The secret is unlocked in your browser and delivered inside avault — Python never sees it.",
+      "signNote": "The private key never leaves your browser — only the signature is returned.",
+      "errors": {
+        "failed": "Couldn't complete the approval. Please try again.",
+        "loadFailed": "Couldn't load this request. It may have been handled already.",
+        "noScope": "This request has no grantable scope.",
+        "missingDigest": "This sign request is missing its digest.",
+        "missingMaterial": "Protected key material wasn't available to sign. Reload and try again."
       }
     },
     "request": {

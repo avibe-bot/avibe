@@ -9,7 +9,7 @@ Secret values and key material never live here. Standard-tier values are sealed 
 ``avault`` before this layer stores them. Protected-tier values arrive already
 encrypted by the browser; this layer only stores the opaque ciphertext + wrap
 metadata. Scope grants persist metadata only; protected delivery material is owned by
-the resident avault agent in the follow-on, not by Python.
+the resident avault agent, not by Python.
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ class InvalidRequestError(VaultServiceError):
 
 
 class UnsupportedProtectionError(VaultServiceError):
-    """A caller attempted a delivery path that still needs the resident agent."""
+    """A caller attempted the wrong delivery path for a protection tier."""
 
 
 class KeypairNotValueDeliverableError(VaultServiceError):
@@ -312,15 +312,11 @@ def _request_audience_from_requester(requester: Any) -> str:
     return REQUEST_AUDIENCE_UI
 
 
-def _card_hydration_policy(audience: str | None, requester: Any) -> CardHydrationPolicy:
+def _card_hydration_policy(audience: str | None) -> CardHydrationPolicy:
     normalized = _normalize_request_audience(audience)
-    requester_audience = _request_audience_from_requester(requester)
     return CardHydrationPolicy(
         audience=normalized,
-        include_protected_unlock_material=(
-            normalized == REQUEST_AUDIENCE_UI
-            and requester_audience != REQUEST_AUDIENCE_AGENT
-        ),
+        include_protected_unlock_material=normalized == REQUEST_AUDIENCE_UI,
     )
 
 
@@ -488,7 +484,7 @@ def _request_row_payload(
     requester = _loads(row.get("requester"))
     delivery = _loads(row.get("delivery"))
     card = delivery.get("card") if isinstance(delivery, dict) else None
-    policy = _card_hydration_policy(audience, requester)
+    policy = _card_hydration_policy(audience)
     if (
         policy.include_protected_unlock_material
         and row.get("status") == "pending"
@@ -624,15 +620,26 @@ def _secret_access_grantable(row: dict[str, Any]) -> bool:
 
 
 def _secret_agent_access_grantable(row: dict[str, Any]) -> bool:
-    return row.get("protection") == "standard" and _secret_access_grantable(row)
+    return _secret_access_grantable(row)
 
 
 def _secret_agent_per_use_signable(row: dict[str, Any]) -> bool:
+    if row.get("kind") != "keypair" or row.get("signer_kind") not in (None, "local"):
+        return False
+    if row.get("protection") != "protected":
+        return True
+    signing_public_key = _public_meta(row.get("public_meta")).get("signing_public_key")
     return (
-        row.get("kind") == "keypair"
-        and row.get("protection") == "standard"
-        and row.get("signer_kind") in (None, "local")
+        isinstance(signing_public_key, dict)
+        and signing_public_key.get("curve") == "secp256k1"
+        and isinstance(signing_public_key.get("public_key"), str)
+        and bool(signing_public_key.get("public_key"))
     )
+
+
+def _reject_unsignable_keypair(row: dict[str, Any], name: str) -> None:
+    if not _secret_agent_per_use_signable(row):
+        raise InvalidRequestError(f"{name} is not per-use signable")
 
 
 def _reject_keypair_value_delivery(row: dict[str, Any], name: str) -> None:
@@ -902,13 +909,12 @@ def get_envelope(conn: Connection, name: str) -> Sealed:
     client (which decrypts + delivers), then records its own ``record_proxy_use``.
     Validate any policy (e.g. host allowlist) *before* delivering.
 
-    Protected delivery is intentionally not routed through this helper until the
-    resident-agent/DEK-blindbox follow-on lands; callers should use
-    :func:`resolve_secret_access` to decide whether an approval/grant is needed.
+    Protected delivery must go through :func:`resolve_secret_access` and the
+    resident avault agent so Python never opens released DEKs or plaintext.
     """
     row = _require_row(conn, name)
     if row.get("protection") != "standard":
-        raise UnsupportedProtectionError(f"{name} is protected-tier (resident grant delivery is not wired yet)")
+        raise UnsupportedProtectionError(f"{name} is protected-tier; use resident-agent grant delivery")
     _reject_keypair_value_delivery(row, name)
     return _row_sealed(row)
 
@@ -963,7 +969,7 @@ def get_envelopes(conn: Connection, names: list[str]) -> dict[str, Sealed]:
     for name in names:
         row = _require_row(conn, name)
         if row.get("protection") != "standard":
-            raise UnsupportedProtectionError(f"{name} is protected-tier (resident grant delivery is not wired yet)")
+            raise UnsupportedProtectionError(f"{name} is protected-tier; use resident-agent grant delivery")
         _reject_keypair_value_delivery(row, name)
         out[name] = _row_sealed(row)
     return out
@@ -1319,6 +1325,7 @@ def create_sign_request(
         raise InvalidRequestError(f"{name} is not a signing key")
     if row.get("signer_kind") not in (None, "local"):
         raise InvalidRequestError(f"{name} is not locally signable")
+    _reject_unsignable_keypair(row, name)
     payload_audience = _request_audience_from_requester(requester)
     request_id = _id("vrq")
     delivery_payload = dict(delivery or {})
@@ -1903,6 +1910,59 @@ def _approve_sibling_access_requests_for_grant(
         )
         approved += 1
     return approved
+
+
+def restore_access_request_after_failed_grant(
+    conn: Connection,
+    *,
+    created_by_request_id: str,
+    member_names: list[str] | set[str] | tuple[str, ...],
+    session_id: str | None,
+) -> int:
+    """Make a protected grant approval retryable after resident-agent relay fails."""
+
+    members = {str(name) for name in member_names if str(name)}
+    if not created_by_request_id or not members:
+        return 0
+    approval_row = conn.execute(select(vault_requests).where(vault_requests.c.id == created_by_request_id)).mappings().first()
+    if approval_row is None or approval_row.get("status") != "approved":
+        return 0
+    decided_at = approval_row.get("decided_at")
+    target_session_id = session_id or _request_session_id(dict(approval_row))
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            select(vault_requests).where(
+                vault_requests.c.request_type == "access",
+                vault_requests.c.status == "approved",
+                vault_requests.c.secret_name.in_(members),
+            )
+        ).mappings()
+        if row["id"] == created_by_request_id
+        or (
+            target_session_id
+            and row.get("decided_at") == decided_at
+            and _request_session_id(dict(row)) == target_session_id
+        )
+    ]
+    restored = 0
+    for row in rows:
+        result = conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id == row["id"], vault_requests.c.status == "approved")
+            .values(status="pending", decided_at=None)
+        )
+        if result.rowcount != 1:
+            continue
+        audit(
+            conn,
+            "request-restored-after-grant-relay-failed",
+            secret_name=row.get("secret_name"),
+            delivery={"request_type": "access", "session_id": target_session_id},
+            request_id=row["id"],
+        )
+        restored += 1
+    return restored
 
 
 def create_grant(
