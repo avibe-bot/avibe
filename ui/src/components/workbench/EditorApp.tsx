@@ -3,7 +3,7 @@ import { Blocks, Bug, Clock, CodeXml, FilePlus, Files, FolderOpen, GitBranch, Se
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
-import { useWindowCloseGuard } from '../../context/WindowManagerContext';
+import { useWindowCloseGuard, useWindowManager } from '../../context/WindowManagerContext';
 import { downloadFile, fileMeta, joinPath, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
 import { isEditableFile } from '../../lib/filePreview';
 import { FileTree } from './FileTree';
@@ -79,6 +79,7 @@ function languageLabel(filename: string | undefined): string | undefined {
 // untitled buffer that picks its location only on first save.
 export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, unknown> }> = ({ windowId, params }) => {
   const { t } = useTranslation();
+  const wm = useWindowManager();
   const [root, setRoot] = useState<string | null>(null);
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [active, setActive] = useState<string | null>(null); // active tab id
@@ -209,16 +210,16 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
       if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
       const k = e.key.toLowerCase();
       if (k !== 'o' && k !== 'n') return;
-      if (picker) return; // a dialog is already open
-      const winEl = (document.activeElement as Element | null)?.closest('[data-window-id]');
-      if (winEl?.getAttribute('data-window-id') !== windowId) return;
+      // Only the frontmost editor window, and not while its own dialog is open. Scope by the window
+      // manager's focused id (not DOM focus) so the shortcut keeps working after a dialog closes.
+      if (picker || wm.focusedId !== windowId) return;
       e.preventDefault();
       if (k === 'o') openFolder();
       else newFile();
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [windowId, openFolder, newFile, picker]);
+  }, [windowId, openFolder, newFile, picker, wm.focusedId]);
 
   const ACTIVITY = [Files, Search, GitBranch, Bug, Blocks];
   const showWelcome = root == null && tabs.length === 0;
@@ -240,7 +241,27 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
         {/* Explorer — ALWAYS present (design w0qoC keeps it in the welcome state): an
             empty "No folder opened + Open Folder" state when no folder, else the file tree. */}
         <div className="flex w-[220px] shrink-0 flex-col overflow-hidden border-r border-border bg-surface-2">
-          <div className="px-3 pb-1 pt-2.5 font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">{t('apps.editor.explorer')}</div>
+          <div className="flex items-center gap-0.5 px-3 pb-1 pt-2.5">
+            <span className="flex-1 truncate font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">{t('apps.editor.explorer')}</span>
+            <button
+              type="button"
+              onClick={newFile}
+              title={`${t('apps.fileBrowser.newFile')} (⌘N)`}
+              aria-label={t('apps.fileBrowser.newFile')}
+              className="grid size-5 place-items-center rounded text-muted transition hover:bg-foreground/10 hover:text-foreground"
+            >
+              <FilePlus className="size-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={openFolder}
+              title={`${t('apps.editor.openFolder')} (⌘O)`}
+              aria-label={t('apps.editor.openFolder')}
+              className="grid size-5 place-items-center rounded text-muted transition hover:bg-foreground/10 hover:text-foreground"
+            >
+              <FolderOpen className="size-3.5" />
+            </button>
+          </div>
           {root == null ? (
             <div className="flex flex-col gap-2 px-3 py-2">
               <div className="text-[12px] text-muted">{t('apps.editor.noFolder')}</div>
