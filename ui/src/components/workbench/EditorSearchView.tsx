@@ -100,8 +100,8 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
   // Identity of the current query + options. Replace All is enabled only when the shown results
   // match this, so a replace can never run against stale results from a previous query.
   const searchKey = useMemo(
-    () => JSON.stringify({ query, regex, caseSensitive, wholeWord, include, exclude }),
-    [query, regex, caseSensitive, wholeWord, include, exclude],
+    () => JSON.stringify({ root, query, regex, caseSensitive, wholeWord, include, exclude }),
+    [root, query, regex, caseSensitive, wholeWord, include, exclude],
   );
   const resultsCurrent = resultKey === searchKey;
 
@@ -168,7 +168,11 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
       // Replace only the files currently shown — when a search is truncated this bounds the edit to
       // what the user actually previewed instead of rescanning the whole root.
       const paths = data.results.map((r) => r.path);
-      const res = await replaceInFiles(root, query, replacement, { regex, caseSensitive, wholeWord, include, exclude, paths });
+      // Carry the search-time mtime per file so the backend skips any file edited between the
+      // preview and this click instead of rewriting matches the user never saw.
+      const expectedMtimes: Record<string, number> = {};
+      for (const r of data.results) if (r.mtime != null) expectedMtimes[r.path] = r.mtime;
+      const res = await replaceInFiles(root, query, replacement, { regex, caseSensitive, wholeWord, include, exclude, paths, expectedMtimes });
       if (res.undo_token) {
         setUndo({ token: res.undo_token, files: res.files_changed, total: res.total_replacements, skipped: res.skipped?.length ?? 0 });
       } else {

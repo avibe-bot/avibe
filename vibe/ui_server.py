@@ -5527,6 +5527,7 @@ async def files_search_replace(starlette_request: FastAPIRequest):
                     include=payload.get("include") or "",
                     exclude=payload.get("exclude") or "",
                     paths=payload.get("paths"),
+                    expected_mtimes=payload.get("expected_mtimes"),
                 )
             )
         except Exception as exc:

@@ -922,6 +922,7 @@ SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024
 SEARCH_MAX_MATCHES = 1000
 SEARCH_MAX_FILES = 200
 SEARCH_LINE_PREVIEW_CHARS = 400
+SEARCH_PREVIEW_CONTEXT = 60
 _BINARY_SNIFF_BYTES = 8192
 
 # Directories never worth searching — VCS metadata, dependency/build output,
@@ -1023,18 +1024,36 @@ def _utf16_len(s: str) -> int:
     return len(s.encode("utf-16-le")) // 2
 
 
+def _preview_for_match(line: str, start: int, end: int) -> tuple[str, int, int]:
+    """Build a preview snippet that always contains the match, with UTF-16 col/end into it.
+
+    Short lines are returned whole. For a long line (e.g. minified code) the snippet is windowed
+    around the match — otherwise a hit past the first 400 chars would be sliced off and the row
+    would show no highlight. A leading '…' marks a left-truncated window.
+    """
+    if len(line) <= SEARCH_LINE_PREVIEW_CHARS:
+        col = _utf16_len(line[:start])
+        return line, col, col + _utf16_len(line[start:end])
+    win_start = max(0, start - SEARCH_PREVIEW_CONTEXT)
+    snippet = line[win_start : win_start + SEARCH_LINE_PREVIEW_CHARS]
+    prefix = "…" if win_start > 0 else ""
+    text = prefix + snippet
+    rel_start = len(prefix) + (start - win_start)
+    rel_end = len(prefix) + min(end - win_start, len(snippet))
+    return text, _utf16_len(text[:rel_start]), _utf16_len(text[:rel_end])
+
+
 def _scan_lines(text: str, matcher: "re.Pattern[str]", remaining: int) -> tuple[list[dict[str, Any]], bool]:
     matches: list[dict[str, Any]] = []
     for line_no, line in enumerate(text.split("\n"), start=1):
         for m in matcher.finditer(line):
-            col = _utf16_len(line[: m.start()])
-            end = col + _utf16_len(line[m.start() : m.end()])
+            preview, col, end = _preview_for_match(line, m.start(), m.end())
             matches.append(
                 {
                     "line": line_no,
                     "col": col,
                     "end": end,
-                    "text": line[:SEARCH_LINE_PREVIEW_CHARS],
+                    "text": preview,
                     "line_truncated": len(line) > SEARCH_LINE_PREVIEW_CHARS,
                 }
             )
@@ -1071,7 +1090,11 @@ def search(
         file_matches, hit_cap = _scan_lines(text, matcher, max_matches - total_matches)
         if not file_matches:
             continue
-        results.append({"path": str(fpath), "rel": rel, "match_count": len(file_matches), "matches": file_matches})
+        try:
+            file_mtime: float | None = _mtime_seconds(fpath.stat())
+        except OSError:
+            file_mtime = None
+        results.append({"path": str(fpath), "rel": rel, "mtime": file_mtime, "match_count": len(file_matches), "matches": file_matches})
         total_matches += len(file_matches)
         if hit_cap or total_matches >= max_matches:
             truncated = True
@@ -1131,6 +1154,7 @@ def replace(
     include: str = "",
     exclude: str = "",
     paths: list[str] | None = None,
+    expected_mtimes: dict[str, float] | None = None,
     max_files: int = SEARCH_MAX_FILES,
 ) -> dict[str, Any]:
     if not isinstance(replacement, str):
@@ -1138,10 +1162,17 @@ def replace(
     root = _require_directory(raw_root)
     matcher = _compile_search_matcher(query, regex=regex, case_sensitive=case_sensitive, whole_word=whole_word)
 
+    pre_skipped: list[dict[str, Any]] = []
     if paths:
         candidates: list[tuple[Path, str]] = []
         for raw in paths:
-            resolved = _require_regular_file(raw)
+            try:
+                resolved = _require_regular_file(raw)
+            except FileBrowserError as exc:
+                # A displayed file deleted/renamed/replaced since the search must be reported as
+                # skipped, not abort the whole batch (the other shown files should still apply).
+                pre_skipped.append({"path": raw, "rel": raw, "reason": exc.code})
+                continue
             if resolved != root and root not in resolved.parents:
                 raise FileBrowserError("invalid_path", "Path is outside the search root", 400)
             candidates.append((resolved, resolved.relative_to(root).as_posix()))
@@ -1154,7 +1185,7 @@ def replace(
     # means "not a candidate", so stay quiet.
     explicit = bool(paths)
     changed: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = list(pre_skipped)
     snapshots: dict[str, Any] = {}
     total = 0
     truncated = False
@@ -1174,6 +1205,13 @@ def replace(
             if explicit:
                 skipped.append({"path": str(fpath), "rel": rel, "reason": "missing"})
             continue
+        # Reject a file that changed between the search the user previewed and this replace, so the
+        # batch never rewrites matches they never saw (expected_mtimes carries the search-time mtime).
+        if explicit and expected_mtimes is not None:
+            expected = expected_mtimes.get(str(fpath))
+            if expected is not None and abs(before_mtime - float(expected)) > 1e-6:
+                skipped.append({"path": str(fpath), "rel": rel, "reason": "modified"})
+                continue
         text = _read_file_text(fpath, lossy=False)
         if text is None:
             if explicit:

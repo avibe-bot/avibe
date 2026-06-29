@@ -209,6 +209,44 @@ def test_replace_truncates_on_file_cap(tmp_path):
     assert res["truncated"] is True
 
 
+def test_search_windows_preview_around_long_line_match(tmp_path):
+    needle = "TARGET"
+    line = "x" * 1000 + needle + "y" * 50
+    _write(tmp_path, "long.txt", line + "\n")
+    m = fbs.search(str(tmp_path), needle)["results"][0]["matches"][0]
+    assert m["line_truncated"] is True
+    # The preview is windowed around the match, and the reported offsets still select the hit.
+    assert m["text"][m["col"] : m["end"]] == needle
+    assert len(m["text"]) <= fbs.SEARCH_LINE_PREVIEW_CHARS + 1  # +1 for the leading ellipsis
+
+
+def test_replace_skips_vanished_explicit_path(tmp_path):
+    a = _write(tmp_path, "a.txt", "hit\n")
+    gone = str(tmp_path / "gone.txt")  # never created
+    res = fbs.replace(str(tmp_path), "hit", "x", paths=[str(a), gone])
+    assert res["files_changed"] == 1
+    assert any(s["reason"] == "not_found" for s in res["skipped"])
+    assert a.read_text() == "x\n"
+
+
+def test_replace_skips_files_modified_since_search(tmp_path):
+    a = _write(tmp_path, "a.txt", "hit\n")
+    # A search-time mtime that no longer matches the file → treated as changed-since, left untouched.
+    res = fbs.replace(str(tmp_path), "hit", "x", paths=[str(a)], expected_mtimes={str(a): 1.0})
+    assert res["files_changed"] == 0
+    assert [s["reason"] for s in res["skipped"]] == ["modified"]
+    assert a.read_text() == "hit\n"
+
+
+def test_replace_applies_when_search_mtime_matches(tmp_path):
+    a = _write(tmp_path, "a.txt", "hit\n")
+    mt = fbs.search(str(tmp_path), "hit")["results"][0]["mtime"]
+    assert mt is not None
+    res = fbs.replace(str(tmp_path), "hit", "x", paths=[str(a)], expected_mtimes={str(a): mt})
+    assert res["files_changed"] == 1
+    assert a.read_text() == "x\n"
+
+
 def test_search_root_must_be_directory(tmp_path):
     f = _write(tmp_path, "a.txt", "x\n")
     with pytest.raises(FileBrowserError):

@@ -219,7 +219,7 @@ export async function deletePath(path: string, recursive = false): Promise<{ ok:
 
 // Cross-file search + replace (backend: file_browser_service.search/replace/undo_replace).
 export type SearchMatch = { line: number; col: number; end: number; text: string; line_truncated: boolean };
-export type SearchFileResult = { path: string; rel: string; match_count: number; matches: SearchMatch[] };
+export type SearchFileResult = { path: string; rel: string; mtime: number | null; match_count: number; matches: SearchMatch[] };
 export type SearchResponse = {
   root: string;
   query: string;
@@ -254,7 +254,7 @@ export async function replaceInFiles(
   root: string,
   query: string,
   replacement: string,
-  opts: SearchOptions & { paths?: string[] } = {},
+  opts: SearchOptions & { paths?: string[]; expectedMtimes?: Record<string, number> } = {},
 ): Promise<ReplaceResponse> {
   return parse<ReplaceResponse>(
     await apiFetch('/api/files/search/replace', {
@@ -270,6 +270,7 @@ export async function replaceInFiles(
         include: opts.include || undefined,
         exclude: opts.exclude || undefined,
         paths: opts.paths,
+        expected_mtimes: opts.expectedMtimes,
       }),
     }),
   );
