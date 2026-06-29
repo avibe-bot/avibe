@@ -2069,6 +2069,17 @@ def _signature_bytes_for_verification(signature: dict[str, Any]) -> bytes:
         raise _protected_sign_invalid("signature must be hex-encoded bytes") from exc
 
 
+def _normalized_protected_signature(signature: dict[str, Any]) -> dict[str, Any]:
+    allowed_keys = {"signature", "recovery_id"}
+    extra_keys = set(signature) - allowed_keys
+    if extra_keys:
+        raise _protected_sign_invalid(f"signature payload contains unsupported fields: {', '.join(sorted(extra_keys))}")
+    normalized = {"signature": signature.get("signature")}
+    if signature.get("recovery_id") is not None:
+        normalized["recovery_id"] = signature.get("recovery_id")
+    return normalized
+
+
 def _verify_protected_ecdsa_signature(
     *,
     public_key_bytes: bytes,
@@ -2361,6 +2372,7 @@ def vault_sign(payload: dict) -> dict:
                 if not request_id:
                     raise VaultApiError("request_id is required to complete protected signing", code="missing_request_id")
                 vault_service.validate_sign_request(conn, request_id, name=name, digest=digest, scheme=scheme)
+                signature = _normalized_protected_signature(signature)
                 _verify_protected_browser_signature(meta, digest=digest, scheme=scheme, signature=signature)
                 request = vault_service.complete_sign_request(
                     conn,

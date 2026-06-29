@@ -45,7 +45,6 @@ def _browser_ecdsa_signature_for_digest(digest: str, *, key_value: int = 1) -> t
     signature = {
         "signature": r.to_bytes(32, "big").hex() + s.to_bytes(32, "big").hex(),
         "recovery_id": recovery_id,
-        "browser_signed": True,
     }
     public_meta = {"signing_public_key": {"curve": "secp256k1", "public_key": public_key.hex()}}
     return public_meta, signature
@@ -1825,6 +1824,45 @@ def test_protected_sign_completion_rejects_malformed_browser_signature(monkeypat
     assert exc.value.code == "invalid_request"
 
 
+def test_protected_sign_completion_rejects_signature_extra_fields(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    digest = "00" * 32
+    public_meta, signature = _browser_ecdsa_signature_for_digest(digest)
+    api.create_vault_secret(
+        {
+            "name": "ETH_KEY",
+            "protection": "protected",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+            "public_meta": public_meta,
+        }
+    )
+    pending = api.vault_sign({"name": "ETH_KEY", "digest": digest, "scheme": "ecdsa-secp256k1-recoverable"})
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.vault_sign(
+            {
+                "name": "ETH_KEY",
+                "digest": digest,
+                "scheme": "ecdsa-secp256k1-recoverable",
+                "request_id": pending["request"]["id"],
+                "signature": {**signature, "private_key": "raw", "dek": "raw"},
+            }
+        )
+
+    assert exc.value.code == "invalid_request"
+    assert "unsupported fields" in str(exc.value)
+    with api._vault_engine().connect() as conn:
+        row = conn.execute(
+            select(vault_service.vault_requests).where(vault_service.vault_requests.c.id == pending["request"]["id"])
+        ).mappings().one()
+    assert row["status"] == "pending"
+    assert "signature" not in json.loads(row["delivery"])
+
+
 def test_protected_sign_completion_rejects_signature_that_does_not_verify(monkeypatch):
     from unittest.mock import Mock
 
@@ -1911,7 +1949,6 @@ def test_protected_sign_completion_verifies_schnorr_browser_signature(monkeypatc
     digest = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
     signature = {
         "signature": "931a3386e9ec69fe1471ba85933640948c0296a79ce2d3801ad5a4d9353550aeb0a5e80358b68088bda70b46e6b77a640c1216826f96292e5799ba2bb7bf1342",
-        "browser_signed": True,
     }
     api.create_vault_secret(
         {
