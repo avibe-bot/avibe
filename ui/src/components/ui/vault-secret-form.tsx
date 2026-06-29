@@ -40,11 +40,20 @@ const DEFAULT_GROUP = 'default';
 
 // Accept only what the brokered fetch matcher (`_host_allowed` in vibe/cli.py) can
 // actually match against `urlsplit(url).hostname`: a bare hostname (`api.example.com`,
-// `localhost`) or a leading-dot subdomain entry (`.example.com`). No port, scheme,
+// `localhost`), a leading-dot subdomain entry (`.example.com`), or an IPv6 literal
+// (`::1`, `2001:db8::1` — matched exactly, ::1 treated as loopback). No port, scheme,
 // path, or wildcard — those would persist a policy that never authorizes a request.
 function normalizeHost(raw: string): string | null {
   const host = raw.trim().toLowerCase();
   if (!host) return null;
+  if (host.includes(':')) {
+    // IPv6 literal (urlsplit().hostname form, no brackets) — validate via the URL parser.
+    try {
+      return new URL(`http://[${host}]/`).hostname ? host : null;
+    } catch {
+      return null;
+    }
+  }
   const core = host.startsWith('.') ? host.slice(1) : host;
   const label = '[a-z0-9](?:[a-z0-9-]*[a-z0-9])?';
   return new RegExp(`^${label}(?:\\.${label})*$`).test(core) ? host : null;
@@ -113,6 +122,8 @@ export const VaultSecretForm: React.FC<{
   const [description, setDescription] = useState('');
   const [allowHosts, setAllowHosts] = useState<string[]>([]);
   const [hostsOpen, setHostsOpen] = useState(false);
+  const [tagsPending, setTagsPending] = useState(false);
+  const [hostsPending, setHostsPending] = useState(false);
   const [protection, setProtection] = useState<VaultProtection>(defaultProtection);
   const [showValue, setShowValue] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -205,6 +216,11 @@ export const VaultSecretForm: React.FC<{
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
     if (!canSubmit) return;
+    // Don't silently drop a half-typed tag/host chip the user can still see.
+    if (tagsPending || (hostsOpen && hostsPending)) {
+      setError(t('vaults.dialog.errors.pendingDraft'));
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
@@ -295,6 +311,10 @@ export const VaultSecretForm: React.FC<{
           <Input value={name} onChange={(event) => setName(event.target.value)} autoFocus required />
         </label>
       )}
+      {/* Provision ($NAME) requests are for a specific value the agent asked for, so
+          the type selector is hidden there — a provision must stay a static secret,
+          not be fulfilled with a signing key. */}
+      {!fixedName && (
       <div className="flex flex-col gap-1.5 text-sm font-medium">
         <span>{t('vaults.dialog.kindLabel')}</span>
         <div className="grid grid-cols-2 gap-2.5">
@@ -336,6 +356,7 @@ export const VaultSecretForm: React.FC<{
           })}
         </div>
       </div>
+      )}
 
       {!isKeypair && (
         <label className="flex flex-col gap-1.5 text-sm font-medium">
@@ -494,13 +515,19 @@ export const VaultSecretForm: React.FC<{
           placeholder={t('vaults.dialog.tagsPlaceholder')}
           ariaLabel={t('vaults.dialog.tags')}
           removeLabel={(value) => t('vaults.dialog.removeChip', { value })}
+          onPendingChange={setTagsPending}
         />
         <span className="text-xs font-normal text-muted-foreground">{t('vaults.dialog.tagsHelp')}</span>
       </div>
       <div className="flex flex-col gap-1.5 text-sm font-medium">
         <button
           type="button"
-          onClick={() => setHostsOpen((open) => !open)}
+          onClick={() =>
+            setHostsOpen((open) => {
+              if (open) setHostsPending(false);
+              return !open;
+            })
+          }
           aria-expanded={hostsOpen}
           className="flex items-center gap-1.5 text-left text-sm font-medium text-muted-foreground hover:text-foreground"
         >
@@ -519,6 +546,7 @@ export const VaultSecretForm: React.FC<{
               placeholder={t('vaults.dialog.allowHostsPlaceholder')}
               ariaLabel={t('vaults.dialog.allowHosts')}
               removeLabel={(value) => t('vaults.dialog.removeChip', { value })}
+              onPendingChange={setHostsPending}
             />
             <span className="text-xs font-normal text-muted-foreground">{t('vaults.dialog.allowHostsHelp')}</span>
           </>

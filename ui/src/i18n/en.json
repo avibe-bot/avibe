@@ -2238,6 +2238,7 @@
         "invalidPublicKey": "avault returned an invalid public key. Repair the avault dependency and try again.",
         "invalidPrivateKey": "That isn't a valid secp256k1 private key. It must be 32 bytes (64 hex characters).",
         "fingerprintMismatch": "The avault public key fingerprint changed. Verify the local avault install before saving this secret.",
+        "pendingDraft": "Press Enter to add the value in the input, or clear it, before saving.",
         "secretExists": "A secret with this name already exists."
       }
     },

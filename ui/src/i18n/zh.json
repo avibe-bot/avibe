@@ -2237,6 +2237,7 @@
         "invalidPublicKey": "avault 返回了无效公钥。请修复 avault 依赖后重试。",
         "invalidPrivateKey": "这不是有效的 secp256k1 私钥,必须是 32 字节(64 个十六进制字符)。",
         "fingerprintMismatch": "avault 公钥指纹已变化。请先确认本机 avault 安装可信，再保存该密钥。",
+        "pendingDraft": "请先按回车把输入框里的内容加进去,或清空它,再保存。",
         "secretExists": "同名密钥已存在。"
       }
     },
