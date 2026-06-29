@@ -1,12 +1,13 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
-import { Blocks, Bug, Clock, CodeXml, FilePlus, Files, FolderOpen, GitBranch, Search, Settings, X } from 'lucide-react';
+import { Blocks, Bug, Clock, CodeXml, FilePlus, Files, FolderOpen, GitBranch, Image as ImageIcon, Search, Settings, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { useWindowCloseGuard, useWindowManager } from '../../context/WindowManagerContext';
-import { downloadFile, fileMeta, joinPath, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
-import { isEditableFile } from '../../lib/filePreview';
+import { contentUrl, downloadFile, fileMeta, joinPath, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
+import { imageKind, isEditableFile, isRenderOnlyImage } from '../../lib/filePreview';
 import { FileTree } from './FileTree';
+import { FilePreview } from './FilePreview';
 import { FilePicker, type FilePickerMode } from './FilePicker';
 import { EditorSearchView } from './EditorSearchView';
 
@@ -17,7 +18,9 @@ const FileEditorPane = lazy(() => import('./FileEditorPane').then((m) => ({ defa
 // clobbering newer on-disk content. `path` is null for an unsaved "untitled" buffer (a VS
 // Code-style new file): it lives only in memory until the first save picks a location. Tabs are
 // keyed by a synthetic `id` (not the path) so an untitled tab survives becoming a saved file.
-type Tab = { id: string; path: string | null; name: string; mtime: number | null; reload?: number };
+// `kind` defaults to 'edit' (a Monaco buffer). An 'image' tab renders a read-only FilePreview
+// instead — a raster image has no editable text form, so it's viewed, not edited.
+type Tab = { id: string; path: string | null; name: string; mtime: number | null; reload?: number; kind?: 'edit' | 'image' };
 
 // A pending file dialog, rendered as the in-window FilePicker overlay.
 type PickerState = {
@@ -92,9 +95,12 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   // repeat jump to the same spot re-fire even when the tab is already open.
   const [reveal, setReveal] = useState<{ tabId: string; line: number; column: number; endColumn: number; nonce: number } | null>(null);
   const [searchFocus, setSearchFocus] = useState(0);
+  // Bumped after a save-as writes a new file, so the explorer tree re-lists that folder.
+  const [treeRefresh, setTreeRefresh] = useState<{ path: string; nonce: number } | null>(null);
   const tabSeq = useRef(0);
   const untitledSeq = useRef(0);
   const revealSeq = useRef(0);
+  const treeRefreshSeq = useRef(0);
   // Latest tabs + dirty for async callbacks (reloadTabs) so a reload landing after an in-flight
   // replace never acts on a stale snapshot and clobbers a buffer the user just edited.
   const dirtyRef = useRef(dirty);
@@ -128,6 +134,19 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
     [],
   );
 
+  // Open (or focus) a raster image as a read-only preview tab (no Monaco). Dedups by path inside the
+  // updater so a fast double-open can't append two tabs.
+  const openImage = useCallback((path: string, name: string) => {
+    setTabs((ts) => {
+      const existing = ts.find((x) => x.path === path);
+      const id = existing ? existing.id : `t${++tabSeq.current}`;
+      setActive(id);
+      setCursor(null);
+      if (existing) return ts;
+      return [...ts, { id, path, name, mtime: null, kind: 'image' }];
+    });
+  }, []);
+
   // Open (or focus) a file at a search match and select the range in Monaco. Fetch fresh metadata
   // for the save baseline + re-validation, mirroring the explorer's open path.
   const onJump = useCallback(
@@ -150,6 +169,12 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   // await so the click's user activation survives (Safari/iOS would block the popup otherwise).
   const onTreeOpen = useCallback(
     async (path: string, entry: FsEntry) => {
+      // A raster image previews in an image tab (no Monaco); SVG/Markdown stay editable (with a
+      // preview toggle inside the pane).
+      if (isRenderOnlyImage(entry)) {
+        openImage(path, entry.name);
+        return;
+      }
       if (!isEditableFile(entry)) {
         downloadFile(path);
         return;
@@ -167,7 +192,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
         openFile(path, entry.name, entry.mtime);
       }
     },
-    [openFile],
+    [openFile, openImage],
   );
 
   // After a cross-file replace/undo rewrites files on disk, reload any open, non-dirty tab for a
@@ -199,11 +224,9 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   useEffect(() => {
     const p = typeof params?.path === 'string' ? params.path : null;
     if (p) {
-      openFile(
-        p,
-        (typeof params?.filename === 'string' ? params.filename : p.split('/').filter(Boolean).pop()) || p,
-        typeof params?.mtime === 'number' ? params.mtime : null,
-      );
+      const name = (typeof params?.filename === 'string' ? params.filename : p.split('/').filter(Boolean).pop()) || p;
+      if (imageKind(name) === 'raster') openImage(p, name);
+      else openFile(p, name, typeof params?.mtime === 'number' ? params.mtime : null);
       return;
     }
     const dir = typeof params?.newFileDir === 'string' ? params.newFileDir : null;
@@ -275,6 +298,8 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
           const result = await writeFile(full, text, undefined, true);
           setTabs((ts) => ts.map((x) => (x.id === tabId ? { ...x, path: full, name: name as string, mtime: result.mtime } : x)));
           setRoot((r) => r ?? path);
+          // Re-list the folder the new file landed in, so it appears in the explorer tree.
+          setTreeRefresh({ path, nonce: ++treeRefreshSeq.current });
           setPicker(null);
         },
       });
@@ -310,8 +335,33 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
     return () => window.removeEventListener('keydown', onKey, true);
   }, [windowId, openFolder, newFile, picker, wm.focusedId]);
 
+  // The left panel collapses (toggled by the active activity-bar icon) and resizes (drag its right
+  // border). Width persists for the window's lifetime (state, not navigation).
+  const [explorerCollapsed, setExplorerCollapsed] = useState(false);
+  const [explorerWidth, setExplorerWidth] = useState(240);
+  const startResize = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = explorerWidth;
+      const onMove = (ev: MouseEvent) => setExplorerWidth(Math.max(168, Math.min(520, startW + ev.clientX - startX)));
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    },
+    [explorerWidth],
+  );
+
   const showWelcome = root == null && tabs.length === 0;
-  const activeName = tabs.find((x) => x.id === active)?.name;
+  const activeTab = tabs.find((x) => x.id === active);
+  const activeName = activeTab?.name;
 
   return (
     <div className="relative flex h-full min-h-0 w-full flex-col bg-surface">
@@ -327,15 +377,25 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                 key={key}
                 type="button"
                 onClick={() => {
-                  setView(key);
-                  if (key === 'search') setSearchFocus((n) => n + 1);
+                  // Clicking the already-active view's icon toggles the panel collapsed (VS Code);
+                  // switching to the other view always re-opens the panel.
+                  if (view === key) {
+                    setExplorerCollapsed((c) => !c);
+                  } else {
+                    setView(key);
+                    setExplorerCollapsed(false);
+                    if (key === 'search') setSearchFocus((n) => n + 1);
+                  }
                 }}
                 aria-label={label}
-                aria-pressed={view === key}
+                aria-pressed={view === key && !explorerCollapsed}
                 title={label}
-                className={clsx('relative grid h-6 w-12 place-items-center transition', view === key ? 'text-foreground' : 'text-muted hover:text-foreground')}
+                className={clsx(
+                  'relative grid h-6 w-12 place-items-center transition',
+                  view === key && !explorerCollapsed ? 'text-foreground' : 'text-muted hover:text-foreground',
+                )}
               >
-                {view === key && <span className="absolute left-0 top-0 h-full w-0.5 bg-cyan" />}
+                {view === key && !explorerCollapsed && <span className="absolute left-0 top-0 h-full w-0.5 bg-cyan" />}
                 <Icon className="size-5" />
               </button>
             ))}
@@ -346,9 +406,11 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
           <Settings className="size-5 text-muted" />
         </div>
 
-        {/* Left panel — Explorer (Files view) or the cross-file Search view. Explorer is ALWAYS
-            present in Files view (design w0qoC keeps it in the welcome state). */}
-        <div className={clsx('flex shrink-0 flex-col overflow-hidden border-r border-border bg-surface-2', view === 'search' ? 'w-[300px]' : 'w-[220px]')}>
+        {/* Left panel — Explorer (Files view) or the cross-file Search view. Collapses via the
+            active activity-bar icon; drag its right border to resize. Explorer is ALWAYS present in
+            Files view (design w0qoC keeps it in the welcome state). */}
+        {!explorerCollapsed && (
+        <div className="relative flex shrink-0 flex-col overflow-hidden border-r border-border bg-surface-2" style={{ width: explorerWidth }}>
           {view === 'search' ? (
             <EditorSearchView root={root} focusNonce={searchFocus} onOpenFolder={openFolder} onJump={onJump} onFilesChanged={reloadTabs} />
           ) : (
@@ -388,12 +450,25 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                 </div>
               ) : (
                 <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">
-                  <FileTree rootPath={root} rootName={root.split('/').filter(Boolean).pop() || root} activePath={tabs.find((x) => x.id === active)?.path ?? null} onOpenFile={onTreeOpen} />
+                  <FileTree
+                    rootPath={root}
+                    rootName={root.split('/').filter(Boolean).pop() || root}
+                    activePath={tabs.find((x) => x.id === active)?.path ?? null}
+                    onOpenFile={onTreeOpen}
+                    refreshSignal={treeRefresh}
+                  />
                 </div>
               )}
             </>
           )}
+          {/* Drag handle on the right border to resize the panel (VS Code). */}
+          <div
+            onMouseDown={startResize}
+            className="absolute right-0 top-0 z-10 h-full w-1 cursor-col-resize bg-transparent transition hover:bg-cyan/40"
+            aria-hidden
+          />
         </div>
+        )}
 
         {/* Main area: welcome (nothing open) · tabs + Monaco (a file or untitled buffer open) ·
             select-a-file hint (folder open, no tab). */}
@@ -420,7 +495,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                         }}
                         className="flex items-center gap-1.5"
                       >
-                        <CodeXml className="size-3.5 text-cyan" />
+                        {tab.kind === 'image' ? <ImageIcon className="size-3.5 text-violet" /> : <CodeXml className="size-3.5 text-cyan" />}
                         {tab.name}
                         {dirty[tab.id] && <span className="size-1.5 rounded-full bg-mint" />}
                       </button>
@@ -443,19 +518,23 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                 ) : (
                   tabs.map((tab) => (
                     <div key={tab.id} className={clsx('absolute inset-0', active === tab.id ? 'block' : 'hidden')}>
-                      <Suspense fallback={<div className="grid h-full place-items-center text-[12px] text-muted">{t('common.loading')}</div>}>
-                        <FileEditorPane
-                          path={tab.path}
-                          filename={tab.name}
-                          mtime={tab.mtime}
-                          chromeless
-                          onDirtyChange={(d) => setDirty((prev) => (prev[tab.id] === d ? prev : { ...prev, [tab.id]: d }))}
-                          onCursor={active === tab.id ? (line, col) => setCursor({ line, col }) : undefined}
-                          onSaveAs={(textValue) => saveAs(tab.id, textValue)}
-                          reveal={reveal?.tabId === tab.id ? { line: reveal.line, column: reveal.column, endColumn: reveal.endColumn, nonce: reveal.nonce } : null}
-                          reloadNonce={tab.reload}
-                        />
-                      </Suspense>
+                      {tab.kind === 'image' && tab.path ? (
+                        <FilePreview kind="image" src={contentUrl(tab.path)} name={tab.name} />
+                      ) : (
+                        <Suspense fallback={<div className="grid h-full place-items-center text-[12px] text-muted">{t('common.loading')}</div>}>
+                          <FileEditorPane
+                            path={tab.path}
+                            filename={tab.name}
+                            mtime={tab.mtime}
+                            chromeless
+                            onDirtyChange={(d) => setDirty((prev) => (prev[tab.id] === d ? prev : { ...prev, [tab.id]: d }))}
+                            onCursor={active === tab.id ? (line, col) => setCursor({ line, col }) : undefined}
+                            onSaveAs={(textValue) => saveAs(tab.id, textValue)}
+                            reveal={reveal?.tabId === tab.id ? { line: reveal.line, column: reveal.column, endColumn: reveal.endColumn, nonce: reveal.nonce } : null}
+                            reloadNonce={tab.reload}
+                          />
+                        </Suspense>
+                      )}
                     </div>
                   ))
                 )}
@@ -470,7 +549,9 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
           hardcoded "master · 0 ⚠ 0" would be misleading, so those are omitted until wired. The
           right side (cursor / indentation / language) is real. */}
       <div className="flex items-center gap-3.5 bg-cyan px-3.5 py-1 font-mono text-[10.5px] font-semibold text-[#06222B]">
-        {active ? (
+        {active && activeTab?.kind === 'image' ? (
+          <span className="ml-auto truncate">{t('apps.editor.imagePreview')}</span>
+        ) : active ? (
           <>
             <span className="ml-auto tabular-nums">{t('apps.editor.lineCol', { line: cursor?.line ?? 1, col: cursor?.col ?? 1 })}</span>
             <span>{t('apps.editor.spaces', { n: 2 })}</span>

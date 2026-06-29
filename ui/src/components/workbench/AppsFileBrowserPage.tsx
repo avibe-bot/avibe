@@ -20,14 +20,16 @@ import {
   Monitor,
   RefreshCw,
   Search,
+  X,
   type LucideIcon,
 } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
-import { isEditableFile } from '../../lib/filePreview';
+import { isEditableFile, isRenderOnlyImage } from '../../lib/filePreview';
 import {
+  contentUrl,
   downloadFile,
   fileBrowserErrorMessage,
   fileMeta,
@@ -42,6 +44,7 @@ import {
   type FsListing,
 } from '../../lib/filesApi';
 import { Button } from '../ui/button';
+import { FilePreview } from './FilePreview';
 
 // A code-file extension → its accent + glyph (mirrors design nknn2's colored type icons).
 const EXT_ICON: Record<string, { Icon: LucideIcon; color: string }> = {
@@ -117,6 +120,21 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       setSort((s) => (s?.col !== col ? { col, dir: 'asc' } : s.dir === 'asc' ? { col, dir: 'desc' } : null)),
     [],
   );
+  // Quick-look image preview: a raster image opens in an in-window overlay (Finder-style) instead
+  // of downloading. Kept in-window (not a portaled Dialog) so it stays inside the window's dark
+  // data-theme scope and bounds.
+  const [preview, setPreview] = useState<{ path: string; name: string } | null>(null);
+  useEffect(() => {
+    if (!preview) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        setPreview(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [preview]);
 
   const navSeq = useRef(0);
   const navigate = useCallback(
@@ -158,12 +176,18 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showHidden]);
 
-  // Open: dir → navigate; editable text/code file (within the size cap) → Editor window;
-  // anything else → raw download. (Richer per-type "default open" is a later design.)
+  // Open: dir → navigate; raster image → in-window preview overlay; editable text/code file (within
+  // the size cap) → Editor window; anything else → raw download.
   const open = async (e: FsEntry) => {
     const full = joinPath(cwd, e.name);
     if (e.kind === 'dir') {
       navigate(full);
+      return;
+    }
+    // A raster image has no editable text form (it would otherwise just download) — preview it in an
+    // overlay instead. Works on mobile too (the overlay is in-window, unlike the desktop-only editor).
+    if (isRenderOnlyImage(e)) {
+      setPreview({ path: full, name: e.name });
       return;
     }
     // Non-editable (symlink / binary / oversized — gated by the listing entry's kind+size) or
@@ -255,7 +279,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   );
 
   return (
-    <div className={windowed ? 'flex h-full w-full flex-col bg-surface' : 'flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]'}>
+    <div className={windowed ? 'relative flex h-full w-full flex-col bg-surface' : 'relative flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]'}>
       {!windowed && (
         <div>
           <h1 className="text-[18px] font-semibold text-foreground">{t('apps.fileBrowser.label')}</h1>
@@ -427,6 +451,33 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
           </span>
         </div>
       </div>
+
+      {/* In-window image preview overlay (Finder-style quick look). In-window, not a portaled
+          Dialog, so it stays inside the window's dark data-theme scope and bounds. */}
+      {preview && (
+        <div className="absolute inset-0 z-20 flex flex-col bg-surface">
+          <div className="flex items-center gap-2 border-b border-border bg-surface-2/60 px-3 py-2">
+            <ImageIcon className="size-4 shrink-0 text-muted" />
+            <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">{preview.name}</span>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="size-7 shrink-0 text-mint"
+              aria-label={t('apps.fileBrowser.download')}
+              onClick={() => downloadFile(preview.path)}
+            >
+              <Download className="size-3.5" />
+            </Button>
+            <Button type="button" size="icon" variant="ghost" className="size-7 shrink-0 text-muted" aria-label={t('common.close')} onClick={() => setPreview(null)}>
+              <X className="size-4" strokeWidth={2.5} />
+            </Button>
+          </div>
+          <div className="min-h-0 flex-1">
+            <FilePreview kind="image" src={contentUrl(preview.path)} name={preview.name} />
+          </div>
+        </div>
+      )}
     </div>
   );
 };

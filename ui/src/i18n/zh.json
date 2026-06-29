@@ -620,6 +620,9 @@
       "lineCol": "行 {{line}}，列 {{col}}",
       "spaces": "空格：{{n}}",
       "plainText": "纯文本",
+      "imagePreview": "图片预览",
+      "source": "源码",
+      "preview": "预览",
       "empty": "未打开文件",
       "emptyHint": "从「文件」中打开一个文件，在这里编辑。",
       "openInWindow": "在编辑器窗口中打开",
@@ -683,6 +686,11 @@
       "newFile": "新建文件",
       "newFilePrompt": "新文件名称",
       "newFolderPlaceholder": "文件夹名称",
+      "open": "打开",
+      "rename": "重命名",
+      "delete": "删除",
+      "confirmDelete": "删除“{{name}}”？此操作无法撤销。",
+      "previewFailed": "无法加载此图片。",
       "searchPlaceholder": "搜索",
       "colName": "名称",
       "colSize": "大小",
@@ -714,7 +722,8 @@
         "openFailed": "无法打开这个项目。",
         "createFolderFailed": "无法创建文件夹。",
         "loadFailed": "无法加载这个文件。",
-        "saveFailed": "无法保存这个文件。"
+        "saveFailed": "无法保存这个文件。",
+        "deleteFailed": "无法删除这个项目。"
       }
     },
     "terminal": {
