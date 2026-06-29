@@ -1168,7 +1168,9 @@ def _apply_replacement(text: str, matcher: "re.Pattern[str]", replacement: str, 
         core = raw_line[: -len(cr)] if cr else raw_line
         try:
             new_core, count = matcher.subn(repl, core)
-        except re.error as exc:
+        except (re.error, IndexError) as exc:
+            # A bad replacement template (out-of-range \1 or unknown named group \g<x>) raises
+            # re.error or IndexError; surface a clean 400 instead of a 500.
             raise FileBrowserError("invalid_regex", f"Invalid replacement: {exc}", 400) from exc
         out.append(new_core + cr)
         total += count

@@ -258,6 +258,17 @@ def test_search_windows_preview_around_long_line_match(tmp_path):
     assert len(m["text"]) <= fbs.SEARCH_LINE_PREVIEW_CHARS + 1  # +1 for the leading ellipsis
 
 
+def test_replace_bad_regex_template_is_clean_error(tmp_path):
+    a = _write(tmp_path, "a.txt", "abc\n")
+    # An invalid replacement template (unknown named group / out-of-range backref) must surface a
+    # clean invalid_regex error, not leak IndexError/re.error as a 500.
+    for bad in (r"\g<nope>", r"\9"):
+        with pytest.raises(FileBrowserError) as exc:
+            fbs.replace(str(tmp_path), "(a)", bad, regex=True, paths=[str(a)])
+        assert exc.value.code == "invalid_regex"
+    assert a.read_text() == "abc\n"
+
+
 def test_replace_skips_vanished_explicit_path(tmp_path):
     a = _write(tmp_path, "a.txt", "hit\n")
     gone = str(tmp_path / "gone.txt")  # never created
