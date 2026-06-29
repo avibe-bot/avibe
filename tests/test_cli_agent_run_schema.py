@@ -330,7 +330,7 @@ def test_agent_run_async_defaults_callback_from_caller_env(tmp_path: Path, capsy
     assert stored["metadata"]["caller_context"]["session_id"] == caller_session["id"]
 
 
-def test_agent_run_async_allows_default_callback_when_target_is_caller_session(
+def test_agent_run_async_self_target_defaults_to_no_callback(
     tmp_path: Path, capsys
 ) -> None:
     from core.services import sessions as sessions_service
@@ -399,9 +399,12 @@ def test_agent_run_async_allows_default_callback_when_target_is_caller_session(
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["callback_session_id"] == caller_session["id"]
-    assert payload["callback_notice"]["code"] == "callback_defaulted_to_caller_session"
-    assert request_store.list_pending()
+    assert payload["callback_session_id"] is None
+    assert payload["callback_notice"]["code"] == "async_self_run_without_callback"
+    stored = request_store.get_run(payload["run_id"])
+    assert stored is not None
+    assert stored["callback_session_id"] is None
+    assert stored["callback_status"] is None
 
 
 def test_agent_run_callback_session_records_sync_route(tmp_path: Path, capsys) -> None:

@@ -1757,6 +1757,18 @@ def _resolve_agent_for_target(
         if session_id:
             target = resolve_session_id_target(session_id)
             session_agent = store.require_enabled(target.agent_name) if target.agent_name else None
+            if requested is not None and session_agent is not None and requested.name != session_agent.name:
+                raise TaskCliError(
+                    "agent does not match the existing session agent",
+                    code="agent_session_agent_mismatch",
+                    hint="Omit --agent when continuing an existing Session, or pass the same Agent name already bound to that Session.",
+                    details={
+                        "agent": requested.name,
+                        "session_id": session_id,
+                        "session_agent": session_agent.name,
+                    },
+                    help_command=help_command,
+                )
             if requested is not None and target.agent_backend and requested.backend != target.agent_backend:
                 raise TaskCliError(
                     "agent backend does not match the existing session backend",
@@ -2246,6 +2258,15 @@ def cmd_task_update(args):
             )
         caller_context = caller_context_from_env()
         scope_arg_present = (getattr(args, "scope_id", None) is not None) or bool(getattr(args, "same_scope", False))
+        if scope_arg_present and not (
+            bool(getattr(args, "create_session", False)) or bool(getattr(args, "create_session_per_run", False))
+        ):
+            raise TaskCliError(
+                "scope placement flags only apply when creating Sessions",
+                code="scope_without_session_creation",
+                hint="Use --create-session or --create-session-per-run with --scope-id/--same-scope, or omit the scope placement flag.",
+                help_command="vibe task update --help",
+            )
         requested_scope_key = _resolve_definition_scope_key(
             args,
             caller_context=caller_context,
@@ -2384,6 +2405,13 @@ def cmd_task_update(args):
             help_command="vibe task update --help",
         )
         explicit_cwd = getattr(args, "cwd", None)
+        _reject_inert_create_once_cwd_update(
+            explicit_cwd=explicit_cwd,
+            current_policy=task.session_policy,
+            current_session_id=task.session_id,
+            create_session=bool(getattr(args, "create_session", False)),
+            help_command="vibe task update --help",
+        )
         if session_policy == "existing":
             cwd = _resolve_definition_session_cwd(
                 explicit_cwd=explicit_cwd,
@@ -3119,6 +3147,13 @@ def _validate_definition_session_policy(
             hint="Use --create-session for a one-shot task because it only runs once.",
             help_command=help_command,
         )
+    if (scope_id or same_scope) and not (create_session or create_per_run):
+        raise TaskCliError(
+            "scope placement flags only apply when creating Sessions",
+            code="scope_without_session_creation",
+            hint="Use --create-session or --create-session-per-run with --scope-id/--same-scope, or omit the scope placement flag.",
+            help_command=help_command,
+        )
     if (create_session or create_per_run) and not (deliver_key or scope_id or same_scope):
         raise TaskCliError(
             "--scope-id or --same-scope is required when a stored definition creates sessions",
@@ -3157,6 +3192,8 @@ def _definition_session_policy_for_update(
     create_per_run = bool(getattr(args, "create_session_per_run", False))
     session_id = (getattr(args, "session_id", None) or "").strip()
     session_key = (getattr(args, "session_key", None) or "").strip()
+    scope_id = (getattr(args, "scope_id", None) or "").strip()
+    same_scope = bool(getattr(args, "same_scope", False))
     if create_session and create_per_run:
         raise TaskCliError(
             "use either --create-session or --create-session-per-run, not both",
@@ -3176,6 +3213,13 @@ def _definition_session_policy_for_update(
             hint="Use --create-session for a one-shot task because it only runs once.",
             help_command=help_command,
         )
+    if (scope_id or same_scope) and not (create_session or create_per_run):
+        raise TaskCliError(
+            "scope placement flags only apply when creating Sessions",
+            code="scope_without_session_creation",
+            hint="Use --create-session or --create-session-per-run with --scope-id/--same-scope, or omit the scope placement flag.",
+            help_command=help_command,
+        )
     if create_session:
         return "create_once"
     if create_per_run:
@@ -3190,6 +3234,25 @@ def _definition_session_policy_for_update(
             help_command=help_command,
         )
     return current_policy or "existing"
+
+
+def _reject_inert_create_once_cwd_update(
+    *,
+    explicit_cwd: Optional[str],
+    current_policy: Optional[str],
+    current_session_id: Optional[str],
+    create_session: bool,
+    help_command: str,
+) -> None:
+    if explicit_cwd is None or create_session:
+        return
+    if current_policy == "create_once" and current_session_id:
+        raise TaskCliError(
+            "--cwd cannot update an already-created reusable Session",
+            code="cwd_with_existing_session",
+            hint="Pass --create-session with --cwd to reserve a replacement Session, or omit --cwd because the existing Session keeps its own workdir.",
+            help_command=help_command,
+        )
 
 
 def _validate_definition_update_delivery_target(
@@ -3322,7 +3385,7 @@ def _agent_run_source_from_caller(caller_context) -> tuple[str, Optional[str], O
     return "agent", caller_context.session_id, caller_context.run_id, metadata
 
 
-def _resolve_callback_session_id(args, caller_context):
+def _resolve_callback_session_id(args, caller_context, *, target_session_id: Optional[str] = None):
     explicit_callback = (getattr(args, "callback_session_id", None) or "").strip() or None
     no_callback = bool(getattr(args, "no_callback", False))
     is_async = bool(getattr(args, "async_run", False))
@@ -3354,6 +3417,14 @@ def _resolve_callback_session_id(args, caller_context):
         }
     if caller_context is not None:
         caller_session_id = caller_context.session_id
+        if is_async and target_session_id and target_session_id == caller_session_id:
+            return None, {
+                "code": "async_self_run_without_callback",
+                "message": (
+                    "Started async Agent Run on the caller Session without a callback. "
+                    "The target Session will receive the run result directly, so Avibe did not create a duplicate callback turn."
+                ),
+            }
         return caller_context.session_id, {
             "code": "callback_defaulted_to_caller_session",
             "message": (
@@ -3395,7 +3466,7 @@ def _reserve_cli_session(
     if scope_key:
         target = _parse_validated_scope_id(scope_key, help_command="vibe agent run --help")
         anchor_target = session_anchor_target or target
-        session_anchor = f"{session_anchor_for_target(anchor_target)}:run_{uuid4().hex[:12]}"
+        session_anchor = _session_anchor_with_suffix(anchor_target, suffix="run")
         session_id = sessions_service.reserve_agent_session(
             scope_key=target.session_scope,
             agent_backend=agent.backend,
@@ -3428,6 +3499,10 @@ def _reserve_cli_session(
             help_command="vibe agent run --help",
         )
     return session_id
+
+
+def _session_anchor_with_suffix(target, *, suffix: str) -> str:
+    return f"{session_anchor_for_target(target)}:{suffix}_{uuid4().hex[:12]}"
 
 
 def _sync_run_detached(run_payload: dict) -> bool:
@@ -3493,7 +3568,7 @@ def _reserve_definition_session(
             help_command=help_command,
         )
     agent_backend = agent.backend
-    session_anchor = session_anchor_for_target(target)
+    session_anchor = _session_anchor_with_suffix(target, suffix="definition")
     session_id = sessions_service.reserve_agent_session(
         scope_key=target.session_scope,
         agent_backend=agent_backend,
@@ -3583,7 +3658,7 @@ def cmd_agent_run(args):
                 deliver_key=args.deliver_key,
                 help_command="vibe agent run --help",
             )
-        callback_session_id, callback_notice = _resolve_callback_session_id(args, caller_context)
+        callback_session_id, callback_notice = _resolve_callback_session_id(args, caller_context, target_session_id=session_id)
         if callback_session_id:
             _validate_callback_session_id(callback_session_id, help_command="vibe agent run --help")
         legacy_deliver_key = args.deliver_key
@@ -5805,6 +5880,15 @@ def cmd_watch_update(args):
             )
         caller_context = caller_context_from_env()
         scope_arg_present = (getattr(args, "scope_id", None) is not None) or bool(getattr(args, "same_scope", False))
+        if scope_arg_present and not (
+            bool(getattr(args, "create_session", False)) or bool(getattr(args, "create_session_per_run", False))
+        ):
+            raise TaskCliError(
+                "scope placement flags only apply when creating Sessions",
+                code="scope_without_session_creation",
+                hint="Use --create-session or --create-session-per-run with --scope-id/--same-scope, or omit the scope placement flag.",
+                help_command="vibe watch update --help",
+            )
         requested_scope_key = _resolve_definition_scope_key(
             args,
             caller_context=caller_context,
@@ -5932,6 +6016,13 @@ def cmd_watch_update(args):
             current_policy=watch.session_policy,
             current_schedule_type="watch",
             next_schedule_type="watch",
+            help_command="vibe watch update --help",
+        )
+        _reject_inert_create_once_cwd_update(
+            explicit_cwd=getattr(args, "cwd", None),
+            current_policy=watch.session_policy,
+            current_session_id=watch.session_id,
+            create_session=bool(getattr(args, "create_session", False)),
             help_command="vibe watch update --help",
         )
         scope_key = requested_scope_key or str(metadata.get("session_scope_id") or "").strip() or _legacy_scope_key_from_target(deliver_key)

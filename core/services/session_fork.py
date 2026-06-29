@@ -228,6 +228,8 @@ def reserve_forked_session(
             if target_scope_id != row["scope_id"]:
                 metadata["fork_target_scope_id"] = target_scope_id
                 metadata["legacy_scope_key"] = target_scope_id
+                metadata.pop("private_agent_run", None)
+                metadata.pop("no_delivery", None)
             session_id = create_agent_session_row(
                 conn,
                 scope_id=target_scope_id,

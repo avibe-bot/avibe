@@ -1976,7 +1976,7 @@ class ScheduledTaskService:
             session_id = service.reserve_agent_session(
                 scope_key=target.session_scope,
                 agent_backend=agent_backend,
-                session_anchor=session_anchor_for_target(target),
+                session_anchor=f"{session_anchor_for_target(target)}:runtime_{uuid4().hex[:12]}",
                 agent_id=agent.id if agent else None,
                 agent_name=agent.name if agent else None,
                 model=agent.model if agent else None,

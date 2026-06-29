@@ -730,7 +730,11 @@ def test_reserve_forked_session_reanchors_when_moved_to_new_im_scope(tmp_path: P
                 agent_name="worker",
                 workdir=str(tmp_path),
                 native_session_id="thread-source",
-                metadata={"legacy_scope_key": source_scope_id},
+                metadata={
+                    "legacy_scope_key": source_scope_id,
+                    "private_agent_run": True,
+                    "no_delivery": True,
+                },
             )
     finally:
         engine.dispose()
@@ -766,12 +770,15 @@ def test_reserve_forked_session_reanchors_when_moved_to_new_im_scope(tmp_path: P
     assert row["session_anchor"].startswith("slack_C999:fork_")
     assert metadata["fork_target_scope_id"] == target_scope_id
     assert metadata["legacy_scope_key"] == target_scope_id
+    assert "private_agent_run" not in metadata
+    assert "no_delivery" not in metadata
     assert rows[0]["session_anchor"] != rows[1]["session_anchor"]
 
     resolved = resolve_session_id_target(first_result.session_id, db_path=db_path)
     assert resolved.session_key.to_key() == "slack::channel::C999"
     assert resolved.session_key.thread_id is None
     assert resolved.session_anchor.startswith("slack_C999:fork_")
+    assert resolved.suppress_delivery is False
 
 
 def test_reserve_forked_session_rejects_backend_change(tmp_path: Path) -> None:

@@ -1022,6 +1022,71 @@ def test_watch_update_no_changes_returns_structured_error(tmp_path: Path) -> Non
     assert payload["code"] == "no_watch_changes"
 
 
+def test_watch_update_rejects_scope_without_session_creation(tmp_path: Path) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    watch = store.add_watch(
+        name="Watch CI",
+        session_id="sesExisting",
+        session_key="",
+        command=["python3", "wait.py"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="once",
+        timeout_seconds=600,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+    )
+    args = _parse_watch_update([watch.id, "--scope-id", "avibe::project::proj-ignored"])
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2(set())),
+        patch("vibe.cli._watch_store", return_value=store),
+    ):
+        result, payload = _capture_stderr_json(cli.cmd_watch_update, args)
+
+    assert result == 1
+    assert payload["code"] == "scope_without_session_creation"
+
+
+def test_watch_update_rejects_cwd_for_already_reserved_create_once_watch(tmp_path: Path) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    watch = store.add_watch(
+        name="Watch CI",
+        session_id="sesExisting",
+        session_key="",
+        command=["python3", "wait.py"],
+        shell_command=None,
+        prefix=None,
+        cwd=str(tmp_path / "old"),
+        mode="once",
+        timeout_seconds=600,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+        agent_name="worker",
+        session_policy="create_once",
+        metadata={"session_scope_id": "avibe::project::proj-existing"},
+    )
+    new_cwd = tmp_path / "new"
+    new_cwd.mkdir()
+    args = _parse_watch_update([watch.id, "--cwd", str(new_cwd)])
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2(set())),
+        patch("vibe.cli._watch_store", return_value=store),
+    ):
+        result, payload = _capture_stderr_json(cli.cmd_watch_update, args)
+
+    assert result == 1
+    assert payload["code"] == "cwd_with_existing_session"
+
+
 def test_watch_update_rejects_deprecated_prompt_argument(tmp_path: Path) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     watch = store.add_watch(
