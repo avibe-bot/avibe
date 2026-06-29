@@ -90,6 +90,24 @@ export const TerminalView: React.FC<{
     term.loadAddon(fit);
     termRef.current = term;
     const settleTimers: number[] = [];
+    let resizeSendTimer: number | null = null;
+    // Push the CURRENT terminal size to the PTY. The backend only learns the size from these
+    // messages, and xterm's onResize fires ONLY on a change — so a no-op fit (the size already
+    // settled before connect/reconnect) would otherwise never tell the PTY, leaving it at the
+    // default 24x80. A maximized window then shows the shell using only the top ~24 rows with a
+    // big blank area below (and the cursor stuck partway up).
+    const sendSize = () => {
+      const term = termRef.current;
+      const ws = wsRef.current;
+      if (term && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      }
+    };
+    // Debounced so a maximize/restore animation's flurry of fits sends just the final size.
+    const queueSendSize = () => {
+      if (resizeSendTimer != null) window.clearTimeout(resizeSendTimer);
+      resizeSendTimer = window.setTimeout(sendSize, 80);
+    };
     const refit = () => {
       const el = containerRef.current;
       // Skip when the container is hidden (a background tab uses display:none → 0×0): fitting to
@@ -102,6 +120,8 @@ export const TerminalView: React.FC<{
       } catch {
         /* container not measured yet */
       }
+      // Always (re)send the fitted size — covers the no-op fit at connect/reconnect that onResize misses.
+      queueSendSize();
     };
     // A single fit can land before BOTH the layout and xterm's own character-cell metrics have
     // settled. On some browsers (notably Safari) the cell size finalises a frame or two after
@@ -133,11 +153,6 @@ export const TerminalView: React.FC<{
       }
       ws.send(ENC.encode(out));
     });
-    const onResize = term.onResize(({ cols, rows }: { cols: number; rows: number }) => {
-      const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols, rows }));
-    });
-
     setStatus('connecting');
     setExitCode(null);
     const ws = new WebSocket(buildWsUrl(sessionId));
@@ -195,10 +210,10 @@ export const TerminalView: React.FC<{
 
     return () => {
       if (retryTimerRef.current != null) window.clearTimeout(retryTimerRef.current);
+      if (resizeSendTimer != null) window.clearTimeout(resizeSendTimer);
       for (const id of settleTimers) window.clearTimeout(id);
       ro.disconnect();
       onData.dispose();
-      onResize.dispose();
       // Detach handlers before closing. A closing socket's onclose can fire asynchronously
       // *after* its replacement has already reported 'ready' (reconnect / effect remount);
       // left attached, the stale onclose would mark the live terminal 'closed' or schedule a
