@@ -2733,6 +2733,46 @@ def vault_requests_get():
     return jsonify(api.get_vault_requests(status=status, request_type=req_type, limit=limit))
 
 
+@app.route("/api/vault/requests/<request_id>", methods=["GET"])
+def vault_request_get(request_id):
+    from vibe import api
+
+    try:
+        return jsonify(api.get_vault_request(request_id))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/requests/access", methods=["POST"])
+def vault_access_request_post():
+    from vibe import api
+
+    try:
+        return jsonify(api.request_vault_access(request.json or {}))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/requests/sign", methods=["POST"])
+def vault_sign_request_post():
+    from vibe import api
+
+    try:
+        return jsonify(api.request_vault_sign(request.json or {}))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/requests/<request_id>/deny", methods=["POST"])
+def vault_request_deny_post(request_id):
+    from vibe import api
+
+    try:
+        return jsonify(api.deny_vault_request(request_id, request.json or {}))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
 @app.route("/api/vault/grants", methods=["GET"])
 def vault_grants_get():
     from vibe import api

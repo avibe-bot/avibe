@@ -135,6 +135,183 @@ def test_set_seals_with_avault_without_value_derived_metadata(tmp_path, capfd, m
         assert vault_service.get_envelope(conn, "OPENAI_API_KEY") == _sealed("saved")
 
 
+def test_discover_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
+    _set_secret("STANDARD_KEY", "secret", tmp_path, monkeypatch, capfd)
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="ETH_KEY",
+            kind="keypair",
+            signer_kind="local",
+            sealed=_sealed("key"),
+        )
+        vault_service.create_secret(
+            conn,
+            name="PROTECTED_STATIC_KEY",
+            protection="protected",
+            sealed=_sealed("protected-static"),
+        )
+        vault_service.create_secret(
+            conn,
+            name="PROTECTED_ETH_KEY",
+            protection="protected",
+            kind="keypair",
+            signer_kind="local",
+            sealed=_sealed("protected-key"),
+        )
+        vault_service.create_secret(
+            conn,
+            name="REMOTE_ETH_KEY",
+            kind="keypair",
+            signer_kind="remote",
+            sealed=_sealed("remote-key"),
+        )
+
+    assert cli.cmd_vault_discover(_ns()) == 0
+    payload = json.loads(capfd.readouterr().out)
+
+    assert payload["kind"] == "vault_discovery"
+    secrets = {item["name"]: item for item in payload["secrets"]}
+    assert secrets["STANDARD_KEY"] == {
+        "name": "STANDARD_KEY",
+        "kind": "static",
+        "protection": "standard",
+        "access_grantable": True,
+        "per_use_sign": False,
+    }
+    assert secrets["ETH_KEY"]["per_use_sign"] is True
+    assert secrets["PROTECTED_STATIC_KEY"]["access_grantable"] is False
+    assert secrets["PROTECTED_ETH_KEY"]["per_use_sign"] is False
+    assert secrets["REMOTE_ETH_KEY"]["per_use_sign"] is False
+    assert "sk-" not in json.dumps(payload)
+
+
+def test_access_request_cli_uses_caller_session(tmp_path, capfd, monkeypatch):
+    _set_secret("STANDARD_KEY", "secret", tmp_path, monkeypatch, capfd)
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses_cli")
+
+    assert cli.cmd_vault_access(_ns(name="STANDARD_KEY", command="python sync.py")) == 0
+    payload = json.loads(capfd.readouterr().out)
+
+    assert payload["kind"] == "vault_access_request"
+    assert payload["request"]["requester"]["session_id"] == "ses_cli"
+    assert payload["request"]["delivery"]["command"] == "python sync.py"
+    assert payload["request"]["status"] == "pending"
+
+
+def test_access_request_cli_rejects_protected_next_version(capfd):
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))
+
+    assert cli.cmd_vault_access(_ns(name="PROTECTED_KEY")) == 1
+    payload = json.loads(capfd.readouterr().err)
+
+    assert payload["code"] == "protected_requires_browser_sandbox"
+    assert "browser sandbox" in payload["error"]
+
+
+def test_sign_request_and_await_cli_reads_approved_signature(capfd, monkeypatch):
+    from vibe import api
+
+    monkeypatch.setattr(api, "avault_sign", Mock(return_value={"signature": "ab" * 64, "recovery_id": 1}))
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="ETH_KEY",
+            kind="keypair",
+            signer_kind="local",
+            sealed=_sealed("key"),
+        )
+
+    assert cli.cmd_vault_sign(_ns(name="ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")) == 0
+    request_id = json.loads(capfd.readouterr().out)["request_id"]
+    api.vault_sign(
+        {
+            "name": "ETH_KEY",
+            "digest": "00" * 32,
+            "scheme": "ecdsa-secp256k1-recoverable",
+            "request_id": request_id,
+        }
+    )
+
+    assert cli.cmd_vault_await(_ns(request_id=request_id)) == 0
+    payload = json.loads(capfd.readouterr().out)
+
+    assert payload["kind"] == "vault_request_result"
+    assert payload["status"] == "approved"
+    assert payload["result"] == {"type": "signature", "signature": {"signature": "ab" * 64, "recovery_id": 1}}
+
+
+def test_vault_await_wait_treats_failed_request_as_terminal(capfd):
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="ETH_KEY",
+            kind="keypair",
+            signer_kind="local",
+            sealed=_sealed("key"),
+        )
+        req = vault_service.create_sign_request(
+            conn,
+            "ETH_KEY",
+            digest="00" * 32,
+            scheme="ecdsa-secp256k1-recoverable",
+        )
+        vault_service.claim_sign_request(
+            conn,
+            req["id"],
+            name="ETH_KEY",
+            digest="00" * 32,
+            scheme="ecdsa-secp256k1-recoverable",
+        )
+        vault_service.fail_sign_request(conn, req["id"], reason="avault_failed")
+
+    assert cli.cmd_vault_await(_ns(request_id=req["id"], wait=5)) == 1
+    payload = json.loads(capfd.readouterr().err)
+
+    assert payload["code"] == "request_failed"
+    assert payload["details"] == {"request_id": req["id"]}
+
+
+def test_vault_await_wait_keeps_waiting_from_signing_status(capfd, monkeypatch):
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="ETH_KEY",
+            kind="keypair",
+            signer_kind="local",
+            sealed=_sealed("key"),
+        )
+        req = vault_service.create_sign_request(
+            conn,
+            "ETH_KEY",
+            digest="00" * 32,
+            scheme="ecdsa-secp256k1-recoverable",
+        )
+        vault_service.claim_sign_request(
+            conn,
+            req["id"],
+            name="ETH_KEY",
+            digest="00" * 32,
+            scheme="ecdsa-secp256k1-recoverable",
+        )
+
+    wait_mock = Mock(
+        return_value={
+            "request": {"id": req["id"], "status": "approved"},
+            "result": {"type": "signature", "signature": {"signature": "ab" * 64, "recovery_id": 1}},
+        }
+    )
+    monkeypatch.setattr(cli, "_wait_for_vault_request", wait_mock)
+
+    assert cli.cmd_vault_await(_ns(request_id=req["id"], wait=5)) == 0
+    payload = json.loads(capfd.readouterr().out)
+
+    wait_mock.assert_called_once_with(req["id"], timeout=5.0)
+    assert payload["status"] == "approved"
+    assert payload["result"] == {"type": "signature", "signature": {"signature": "ab" * 64, "recovery_id": 1}}
+
+
 def test_set_rejects_invalid_name_before_avault(tmp_path, capfd, monkeypatch):
     from unittest.mock import Mock
 
