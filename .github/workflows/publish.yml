@@ -134,6 +134,7 @@ jobs:
         run: |
           npm ci
           npm run build
+          npm run build:sandbox
 
       - name: Download Show Runtime bundles
         uses: actions/download-artifact@v6
@@ -213,7 +214,7 @@ jobs:
             echo "Skipping legacy vibe-remote shim for $TAG"
           fi
 
-      - name: Verify package Show Runtime manifest
+      - name: Verify package UI assets and Show Runtime manifest
         run: |
           python - <<'PY'
           import zipfile
@@ -238,6 +239,10 @@ jobs:
               raise SystemExit("Wheel unexpectedly contains Show Runtime archives:\n" + "\n".join(sorted(archives)))
           if "vibe/show_runtime_manifest.json" not in names:
               raise SystemExit("Wheel is missing vibe/show_runtime_manifest.json")
+          if "vibe/ui/dist/index.html" not in names:
+              raise SystemExit("Wheel is missing vibe/ui/dist/index.html")
+          if "vibe/ui/dist-sandbox/index.html" not in names:
+              raise SystemExit("Wheel is missing vibe/ui/dist-sandbox/index.html")
           PY
 
       - name: Run release install and upgrade regressions

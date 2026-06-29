@@ -7,7 +7,7 @@ WORKDIR /app/ui
 COPY ui/package.json ui/package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY ui/ .
-RUN npm run build
+RUN npm run build && npm run build:sandbox
 
 
 # ============================================================
@@ -27,6 +27,7 @@ COPY . .
 
 # Copy built UI from stage 1
 COPY --from=ui-builder /app/ui/dist /app/ui/dist
+COPY --from=ui-builder /app/ui/dist-sandbox /app/ui/dist-sandbox
 
 # hatch-vcs needs git to determine version; .git is excluded by .dockerignore.
 # Use SETUPTOOLS_SCM_PRETEND_VERSION to provide a fake version for the build.

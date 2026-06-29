@@ -290,8 +290,9 @@ class AgentsConfig:
 
 @dataclass
 class UiConfig:
-    setup_host: str = "127.0.0.1"
+    setup_host: str = "localhost"
     setup_port: int = 5123
+    vault_sandbox_port: int = 5124
     open_browser: bool = True
     chat_message_font_size: int = DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX
 
@@ -552,6 +553,12 @@ class V2Config:
             )
         except (TypeError, ValueError):
             ui.chat_message_font_size = DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX
+        try:
+            ui.vault_sandbox_port = int(ui.vault_sandbox_port)
+            if ui.vault_sandbox_port <= 0 or ui.vault_sandbox_port > 65535:
+                ui.vault_sandbox_port = UiConfig.vault_sandbox_port
+        except (TypeError, ValueError):
+            ui.vault_sandbox_port = UiConfig.vault_sandbox_port
 
         remote_access_payload = payload.get("remote_access") or {}
         if not isinstance(remote_access_payload, dict):

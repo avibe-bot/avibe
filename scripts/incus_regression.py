@@ -56,12 +56,14 @@ DEFAULT_BASE_SOURCE_IMAGE = "images:ubuntu/24.04/cloud"
 DEFAULT_NETWORK = "incusbr0"
 DEFAULT_STORAGE_POOL = "default"
 DEFAULT_UI_PORT = 5123
+DEFAULT_VAULT_SANDBOX_PORT = 5124
 CONTAINER_UI_HOST = "127.0.0.1"
 DEFAULT_MASTER_HOST_PORT = 15130
 DEFAULT_WORKTREE_PORT_START = 15200
 DEFAULT_WORKTREE_PORT_END = 15399
 ENV_FILE_NAME = ".env.regression"
 ENV_PREFIX = "REGRESSION_"
+VAULT_SANDBOX_MAIN_ORIGIN_ENV = "VIBE_VAULT_SANDBOX_MAIN_ORIGIN"
 SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,38}[a-z0-9]$")
 
 
@@ -78,6 +80,8 @@ class RegressionTarget:
     host_port: int
     ui_host: str
     ui_port: int
+    vault_sandbox_host_port: int = DEFAULT_VAULT_SANDBOX_PORT
+    vault_sandbox_port: int = DEFAULT_VAULT_SANDBOX_PORT
 
 
 class Runner:
@@ -343,6 +347,15 @@ def tcp_endpoint(host: str, port: int) -> str:
     return f"tcp:[{unbracket_host(host)}]:{port}" if is_ipv6_host(host) else f"tcp:{host}:{port}"
 
 
+def url_host(host: str) -> str:
+    unbracketed = unbracket_host(host)
+    return f"[{unbracketed}]" if is_ipv6_host(host) else unbracketed
+
+
+def http_origin(host: str, port: int) -> str:
+    return f"http://{url_host(host)}:{port}"
+
+
 def ensure_host_port_available(host: str, port: int) -> None:
     family = socket.AF_INET6 if is_ipv6_host(host) else socket.AF_INET
     with socket.socket(family, socket.SOCK_STREAM) as sock:
@@ -385,30 +398,43 @@ def allocated_worktree_ports(repo_root: Path) -> set[int]:
     payload = load_worktree_mapping(repo_root)
     ports: set[int] = set()
     for item in (payload.get("worktrees") or {}).values():
-        if isinstance(item, dict) and isinstance(item.get("host_port"), int):
-            ports.add(item["host_port"])
+        if not isinstance(item, dict):
+            continue
+        host_port = item.get("host_port")
+        if isinstance(host_port, int):
+            ports.add(host_port)
+            if not isinstance(item.get("vault_sandbox_host_port"), int):
+                ports.add(host_port + 1)
+        if isinstance(item.get("vault_sandbox_host_port"), int):
+            ports.add(item["vault_sandbox_host_port"])
     return ports
 
 
 def allocate_worktree_port(repo_root: Path, ui_host: str, start: int, end: int, *, dry_run: bool, preflight: bool) -> int:
     used = allocated_worktree_ports(repo_root)
     for port in range(start, end + 1):
-        if port in used:
+        if port in used or port + 1 in used:
             continue
         if not dry_run and preflight:
             try:
                 ensure_host_port_available(ui_host, port)
+                ensure_host_port_available(ui_host, port + 1)
             except RegressionError:
                 continue
         return port
     raise RegressionError(f"No available worktree regression port in range {start}-{end}.")
 
 
-def mapped_worktree_port(repo_root: Path, slug: str) -> int | None:
+def mapped_worktree_ports(repo_root: Path, slug: str) -> tuple[int | None, int | None]:
     item = (load_worktree_mapping(repo_root).get("worktrees") or {}).get(slug)
-    if isinstance(item, dict) and isinstance(item.get("host_port"), int):
-        return item["host_port"]
-    return None
+    if not isinstance(item, dict):
+        return None, None
+    host_port = item.get("host_port")
+    sandbox_host_port = item.get("vault_sandbox_host_port")
+    return (
+        host_port if isinstance(host_port, int) else None,
+        sandbox_host_port if isinstance(sandbox_host_port, int) else None,
+    )
 
 
 def resolve_target(
@@ -426,9 +452,11 @@ def resolve_target(
     if args.target == MASTER_TARGET:
         slug = "master"
         host_port = args.host_port or env_int("REGRESSION_PORT") or DEFAULT_MASTER_HOST_PORT
+        mapped_vault_sandbox_host_port = None
     else:
         slug = worktree_slug(repo_root, args.slug)
-        host_port = args.host_port or mapped_worktree_port(repo_root, slug)
+        mapped_host_port, mapped_vault_sandbox_host_port = mapped_worktree_ports(repo_root, slug)
+        host_port = args.host_port or mapped_host_port
         if host_port is None and allocate_port:
             host_port = allocate_worktree_port(
                 repo_root,
@@ -440,14 +468,23 @@ def resolve_target(
             )
         if host_port is None:
             host_port = 0
+    vault_sandbox_host_port = (
+        getattr(args, "vault_sandbox_host_port", None)
+        or env_int("REGRESSION_VAULT_SANDBOX_PORT")
+        or mapped_vault_sandbox_host_port
+        or (host_port + 1 if host_port else DEFAULT_VAULT_SANDBOX_PORT)
+    )
+    vault_sandbox_port = getattr(args, "vault_sandbox_port", None) or vault_sandbox_host_port
     return RegressionTarget(
         target=args.target,
         slug=slug,
         project=project_name_for(args.target, slug),
         instance=instance_name_for(args.target, slug),
         host_port=host_port,
+        vault_sandbox_host_port=vault_sandbox_host_port,
         ui_host=ui_host,
         ui_port=ui_port,
+        vault_sandbox_port=vault_sandbox_port,
     )
 
 
@@ -464,6 +501,7 @@ def project_create_config(target: RegressionTarget) -> list[str]:
         f"user.avibe_regression.slug={target.slug}",
         f"user.avibe_regression.instance={target.instance}",
         f"user.avibe_regression.host_port={target.host_port}",
+        f"user.avibe_regression.vault_sandbox_host_port={target.vault_sandbox_host_port}",
     ]
 
 
@@ -588,10 +626,25 @@ def proxy_device_args(target: RegressionTarget, *, remote: str | None = None) ->
     ]
 
 
+def vault_sandbox_proxy_device_args(target: RegressionTarget, *, remote: str | None = None) -> list[str]:
+    return [
+        "config",
+        "device",
+        "add",
+        remote_ref(remote, target.instance),
+        "vault-sandbox",
+        "proxy",
+        f"listen={tcp_endpoint(target.ui_host, target.vault_sandbox_host_port)}",
+        f"connect=tcp:127.0.0.1:{target.vault_sandbox_port}",
+    ]
+
+
 def ensure_proxy_device(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
     instance_ref = remote_ref(remote, target.instance)
     runner.run(incus("config", "device", "remove", instance_ref, "ui", project=target.project), check=False)
+    runner.run(incus("config", "device", "remove", instance_ref, "vault-sandbox", project=target.project), check=False)
     runner.run(incus(*proxy_device_args(target, remote=remote), project=target.project))
+    runner.run(incus(*vault_sandbox_proxy_device_args(target, remote=remote), project=target.project))
 
 
 def ensure_project_and_instance(
@@ -692,6 +745,7 @@ def source_excludes(*, include_ui_dist: bool = False) -> tuple[str, ...]:
     ]
     if not include_ui_dist:
         excludes.append("ui/dist")
+        excludes.append("ui/dist-sandbox")
     return tuple(excludes)
 
 
@@ -763,11 +817,13 @@ def compute_fingerprints(repo_root: Path) -> dict:
     ui_source_parts = [
         tree_hash(repo_root / "ui" / "src"),
         tree_hash(repo_root / "ui" / "public"),
+        tree_hash(repo_root / "ui" / "sandbox"),
         file_hash(
             repo_root,
             [
                 "ui/index.html",
                 "ui/vite.config.ts",
+                "ui/vite.sandbox.config.ts",
                 "ui/tsconfig.json",
                 "ui/tsconfig.app.json",
                 "ui/tsconfig.node.json",
@@ -817,7 +873,7 @@ def write_metadata(runner: Runner, target: RegressionTarget, repo_root: Path, fi
     runner.run(root_exec(target, command, remote=remote))
 
 
-def runtime_env_payload(repo_root: Path | None = None) -> bytes:
+def runtime_env_payload(repo_root: Path | None = None, target: RegressionTarget | None = None) -> bytes:
     scm_version = "0.0.0.dev0"
     if repo_root is not None:
         sha = commit_sha(repo_root)
@@ -836,6 +892,8 @@ def runtime_env_payload(repo_root: Path | None = None) -> bytes:
         "OPENAI_BASE_URL": os.environ.get("OPENAI_BASE_URL", ""),
         "OPENAI_API_BASE": os.environ.get("OPENAI_API_BASE", ""),
     }
+    if target is not None:
+        mappings["VIBE_VAULT_SANDBOX_MAIN_ORIGIN"] = http_origin(target.ui_host, target.host_port)
     for key, value in os.environ.items():
         if key == "REGRESSION_UI_HOST":
             continue
@@ -880,8 +938,44 @@ def write_runtime_env(runner: Runner, target: RegressionTarget, *, repo_root: Pa
             f"cat > /etc/avibe-regression.env && chown root:{SERVICE_USER} /etc/avibe-regression.env && chmod 0640 /etc/avibe-regression.env",
             project=target.project,
         ),
-        input_bytes=b"" if runner.dry_run else runtime_env_payload(repo_root),
+        input_bytes=b"" if runner.dry_run else runtime_env_payload(repo_root, target),
     )
+
+
+def update_runtime_env_derived_values(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
+    sandbox_origin = http_origin(target.ui_host, target.host_port)
+    script = textwrap.dedent("""
+        import shlex
+        import sys
+        from pathlib import Path
+
+        path = Path(sys.argv[1])
+        key = sys.argv[2]
+        value = sys.argv[3]
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        prefix = key + "="
+        replacement = f"{key}={shlex.quote(value)}"
+        changed = False
+        output = []
+        for line in lines:
+            if line.startswith(prefix):
+                output.append(replacement)
+                changed = True
+            else:
+                output.append(line)
+        if not changed:
+            output.append(replacement)
+        path.write_text("\\n".join(output) + "\\n", encoding="utf-8")
+    """).strip()
+    command = textwrap.dedent(f"""
+        set -e
+        path=/etc/avibe-regression.env
+        touch "$path"
+        python3 - "$path" {shlex.quote(VAULT_SANDBOX_MAIN_ORIGIN_ENV)} {shlex.quote(sandbox_origin)}
+        chown root:{SERVICE_USER} "$path"
+        chmod 0640 "$path"
+    """).strip()
+    runner.run(root_exec(target, command, remote=remote), input_bytes=script.encode("utf-8"))
 
 
 def read_existing_fingerprints(runner: Runner, target: RegressionTarget, *, remote: str | None) -> dict:
@@ -1053,7 +1147,12 @@ def run_prepare_state(runner: Runner, target: RegressionTarget, *, reset_mode: s
 
 def instance_ui_dist_exists(runner: Runner, target: RegressionTarget, *, remote: str | None) -> bool:
     result = runner.run(
-        tenant_exec(target, "test -d ui/dist && test -f ui/dist/index.html", remote=remote),
+        tenant_exec(
+            target,
+            "test -d ui/dist && test -f ui/dist/index.html && "
+            "test -d ui/dist-sandbox && test -f ui/dist-sandbox/index.html",
+            remote=remote,
+        ),
         check=False,
     )
     return result.returncode == 0
@@ -1075,6 +1174,9 @@ def normalize_runtime_config(runner: Runner, target: RegressionTarget, *, remote
             changed = True
         if ui.get("setup_port") != {target.ui_port!r}:
             ui["setup_port"] = {target.ui_port!r}
+            changed = True
+        if ui.get("vault_sandbox_port") != {target.vault_sandbox_port!r}:
+            ui["vault_sandbox_port"] = {target.vault_sandbox_port!r}
             changed = True
         if not changed:
             raise SystemExit(0)
@@ -1127,7 +1229,7 @@ def update_dependencies_and_build(
             or ui_deps_changed
             or previous_fingerprints.get("ui_source") != next_fingerprints.get("ui_source")
         ):
-            runner.run(tenant_exec(target, "cd ui && npm run build", remote=remote))
+            runner.run(tenant_exec(target, "cd ui && npm run build && npm run build:sandbox", remote=remote))
         else:
             print("UI source fingerprint unchanged; skipping npm run build.")
     if python_changed:
@@ -1146,6 +1248,7 @@ def restart_and_verify(runner: Runner, target: RegressionTarget, *, remote: str 
                 f"systemctl is-active --quiet {SERVICE_NAME} && "
                 f"curl -fsS http://127.0.0.1:{target.ui_port}/health >/dev/null && "
                 f"curl -fsS http://127.0.0.1:{target.ui_port}/status | grep -q '\"state\":\"running\"' && "
+                f"curl -fsS http://127.0.0.1:{target.vault_sandbox_port}/ >/dev/null && "
                 "exit 0; "
                 "sleep 2; "
                 f"done; journalctl -u {SERVICE_NAME} --no-pager -n 120; exit 1"
@@ -1172,6 +1275,7 @@ def update_worktree_mapping(repo_root: Path, target: RegressionTarget) -> None:
         "project": target.project,
         "instance": target.instance,
         "host_port": target.host_port,
+        "vault_sandbox_host_port": target.vault_sandbox_host_port,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "branch": branch_name(repo_root),
         "commit": commit_sha(repo_root),
@@ -1190,6 +1294,7 @@ def reserve_worktree_mapping(repo_root: Path, target: RegressionTarget) -> None:
             "project": target.project,
             "instance": target.instance,
             "host_port": target.host_port,
+            "vault_sandbox_host_port": target.vault_sandbox_host_port,
             "reserved_at": datetime.now(timezone.utc).isoformat(),
             "branch": branch_name(repo_root),
         }
@@ -1340,6 +1445,7 @@ def cmd_up(args: argparse.Namespace) -> int:
         if not args.dry_run and not target_exists and args.remote is None:
             try:
                 ensure_host_port_available(target.ui_host, target.host_port)
+                ensure_host_port_available(target.ui_host, target.vault_sandbox_host_port)
             except RegressionError as exc:
                 # A reachable incus client would have reported the instance as existing
                 # above and skipped this preflight. The usual macOS cause is that `incus`
@@ -1384,6 +1490,7 @@ def cmd_up(args: argparse.Namespace) -> int:
             write_runtime_env(runner, target, repo_root=repo_root, remote=args.remote)
         else:
             print("No regression env file loaded; preserving existing runtime env file.")
+            update_runtime_env_derived_values(runner, target, remote=args.remote)
         sync_source(runner, target, repo_root, remote=args.remote, clean=args.clean, include_ui_dist=args.no_build_ui)
         fingerprints = compute_fingerprints(repo_root)
         previous_fingerprints = read_existing_fingerprints(runner, target, remote=args.remote)
@@ -1411,7 +1518,8 @@ def cmd_up(args: argparse.Namespace) -> int:
 def print_summary(target: RegressionTarget) -> None:
     print("")
     print("Incus regression environment is ready:")
-    print(f"  URL: http://{target.ui_host}:{target.host_port}")
+    print(f"  URL: {http_origin(target.ui_host, target.host_port)}")
+    print(f"  Vault sandbox URL: {http_origin(target.ui_host, target.vault_sandbox_host_port)}")
     print(f"  Target: {target.target}")
     print(f"  Project: {target.project}")
     print(f"  Instance: {target.instance}")
@@ -1527,8 +1635,10 @@ def add_target_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--slug", help="Explicit worktree slug for --target worktree.")
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--host-port", type=int, help="Host port for the Web UI proxy.")
+    parser.add_argument("--vault-sandbox-host-port", type=int, help="Host port for the Vault signing sandbox proxy.")
     parser.add_argument("--ui-host", help="Host/interface for the Incus UI proxy. Defaults to REGRESSION_PORT_BIND_HOST or 127.0.0.1 after env loading.")
     parser.add_argument("--ui-port", type=int, default=DEFAULT_UI_PORT)
+    parser.add_argument("--vault-sandbox-port", type=int, default=DEFAULT_VAULT_SANDBOX_PORT)
     parser.add_argument("--worktree-port-start", type=int, default=DEFAULT_WORKTREE_PORT_START)
     parser.add_argument("--worktree-port-end", type=int, default=DEFAULT_WORKTREE_PORT_END)
 

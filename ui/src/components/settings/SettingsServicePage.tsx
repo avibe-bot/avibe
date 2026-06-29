@@ -54,7 +54,7 @@ export const SettingsServicePage: React.FC = () => {
     setUiMessage(null);
     try {
       const uiPayload = {
-        setup_host: config.ui?.setup_host || '127.0.0.1',
+        setup_host: config.ui?.setup_host || 'localhost',
         setup_port: config.ui?.setup_port || 5123,
       };
       await api.saveConfig({ ui: { ...(config.ui || {}), ...uiPayload } });
@@ -209,9 +209,9 @@ export const SettingsServicePage: React.FC = () => {
             <div className="grid grid-cols-[120px_96px_auto] items-center gap-2">
               <CompactField
                 aria-label={t('dashboard.host')}
-                value={config?.ui?.setup_host || '127.0.0.1'}
+                value={config?.ui?.setup_host || 'localhost'}
                 onChange={(event) => {
-                  const host = event.target.value || '127.0.0.1';
+                  const host = event.target.value || 'localhost';
                   setUiMessage(null);
                   setConfig((prev: any) => ({
                     ...(prev || {}),

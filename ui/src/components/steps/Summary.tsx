@@ -457,7 +457,7 @@ const buildConfigPayload = (data: any) => {
     gateway: data.gateway,
     ui: {
       ...data.ui,
-      setup_host: data.ui?.setup_host || '127.0.0.1',
+      setup_host: data.ui?.setup_host || 'localhost',
       setup_port: data.ui?.setup_port || 5123,
     },
     update: data.update
