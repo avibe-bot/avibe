@@ -649,6 +649,8 @@
         "truncatedFiles": "Showing the first 200 files — narrow your search to see the rest.",
         "replaced": "Replaced {{total}} occurrences in {{files}} files.",
         "replaceSkipped": "({{n}} files skipped)",
+        "allSkipped": "No files changed — {{n}} skipped (conflicts or write-protected).",
+        "undoSkipped": "Undo left {{n}} file(s) unchanged (modified since the replace).",
         "undo": "Undo",
         "failed": "Search failed",
         "replaceFailed": "Replace failed",

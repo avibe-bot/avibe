@@ -95,6 +95,14 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   const tabSeq = useRef(0);
   const untitledSeq = useRef(0);
   const revealSeq = useRef(0);
+  // Latest tabs + dirty for async callbacks (reloadTabs) so a reload landing after an in-flight
+  // replace never acts on a stale snapshot and clobbers a buffer the user just edited.
+  const dirtyRef = useRef(dirty);
+  const tabsRef = useRef(tabs);
+  useEffect(() => {
+    dirtyRef.current = dirty;
+    tabsRef.current = tabs;
+  });
 
   const openFile = useCallback(
     (path: string, name: string, mtime: number | null, target?: { line: number; column: number; endColumn: number }) => {
@@ -159,25 +167,24 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   // changed file so it shows the new content with a fresh save baseline (a dirty tab keeps its
   // buffer — the mtime guard still catches a stale save). Refetch the mtime so the tab saves
   // against the post-replace revision, and bump `reload` to re-run the pane's read effect.
-  const reloadTabs = useCallback(
-    async (paths: string[]) => {
-      const set = new Set(paths);
-      const targets = tabs.filter((tb) => tb.path && set.has(tb.path) && !dirty[tb.id]);
-      if (!targets.length) return;
-      const metas = await Promise.all(
-        targets.map(async (tb) => {
-          try {
-            return { id: tb.id, mtime: (await fileMeta(tb.path as string)).mtime };
-          } catch {
-            return { id: tb.id, mtime: null as number | null };
-          }
-        }),
-      );
-      const byId = new Map(metas.map((m) => [m.id, m.mtime]));
-      setTabs((ts) => ts.map((tb) => (byId.has(tb.id) ? { ...tb, mtime: byId.get(tb.id) ?? tb.mtime, reload: (tb.reload ?? 0) + 1 } : tb)));
-    },
-    [tabs, dirty],
-  );
+  const reloadTabs = useCallback(async (paths: string[]) => {
+    const set = new Set(paths);
+    const targets = tabsRef.current.filter((tb) => tb.path && set.has(tb.path));
+    if (!targets.length) return;
+    const metas = await Promise.all(
+      targets.map(async (tb) => {
+        try {
+          return { id: tb.id, mtime: (await fileMeta(tb.path as string)).mtime };
+        } catch {
+          return { id: tb.id, mtime: null as number | null };
+        }
+      }),
+    );
+    const byId = new Map(metas.map((m) => [m.id, m.mtime]));
+    // Re-check dirty at apply time (via ref): a tab the user edited while the request was in flight
+    // must keep its unsaved buffer rather than be re-read from disk.
+    setTabs((ts) => ts.map((tb) => (byId.has(tb.id) && !dirtyRef.current[tb.id] ? { ...tb, mtime: byId.get(tb.id) ?? tb.mtime, reload: (tb.reload ?? 0) + 1 } : tb)));
+  }, []);
 
   // Open the launch file (from the File Browser) once on mount.
   useEffect(() => {

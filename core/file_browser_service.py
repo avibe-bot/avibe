@@ -1148,6 +1148,11 @@ def replace(
     else:
         candidates = list(_iter_search_files(root, _split_globs(include), _split_globs(exclude)))
 
+    # In paths mode the caller is replacing the exact files shown in the search results, so a file
+    # we now can't process (vanished, or not strict-UTF-8 while search saw it via a lossy decode of
+    # an ASCII match) is reported as skipped rather than silently dropped. In walk mode a None just
+    # means "not a candidate", so stay quiet.
+    explicit = bool(paths)
     changed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     snapshots: dict[str, Any] = {}
@@ -1166,9 +1171,13 @@ def replace(
         try:
             before_mtime = _mtime_seconds(fpath.stat())
         except OSError:
+            if explicit:
+                skipped.append({"path": str(fpath), "rel": rel, "reason": "missing"})
             continue
         text = _read_file_text(fpath, lossy=False)
         if text is None:
+            if explicit:
+                skipped.append({"path": str(fpath), "rel": rel, "reason": "unreadable"})
             continue
         new_text, count = _apply_replacement(text, matcher, replacement, regex=regex)
         if count == 0 or new_text == text:

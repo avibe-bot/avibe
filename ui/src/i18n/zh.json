@@ -649,6 +649,8 @@
         "truncatedFiles": "仅显示前 200 个文件 —— 缩小搜索范围以查看其余结果。",
         "replaced": "已在 {{files}} 个文件中替换 {{total}} 处。",
         "replaceSkipped": "(跳过 {{n}} 个文件)",
+        "allSkipped": "未改动任何文件 —— 跳过 {{n}} 个(冲突或只读)。",
+        "undoSkipped": "撤销时有 {{n}} 个文件未还原(替换后又被改动)。",
         "undo": "撤销",
         "failed": "搜索失败",
         "replaceFailed": "替换失败",

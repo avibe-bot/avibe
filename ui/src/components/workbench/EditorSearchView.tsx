@@ -91,7 +91,19 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
   const [undo, setUndo] = useState<{ token: string; files: number; total: number; skipped: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [refresh, setRefresh] = useState(0);
+  // `resultKey` records which inputs the displayed `data` belongs to. `notice` reports an outcome
+  // that isn't an undo bar (e.g. everything skipped, or a partial/no-op undo).
+  const [resultKey, setResultKey] = useState('');
+  const [notice, setNotice] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Identity of the current query + options. Replace All is enabled only when the shown results
+  // match this, so a replace can never run against stale results from a previous query.
+  const searchKey = useMemo(
+    () => JSON.stringify({ query, regex, caseSensitive, wholeWord, include, exclude }),
+    [query, regex, caseSensitive, wholeWord, include, exclude],
+  );
+  const resultsCurrent = resultKey === searchKey;
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -105,6 +117,7 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
       setData(null);
       setError(null);
       setLoading(false);
+      setResultKey('');
       return;
     }
     setLoading(true);
@@ -113,6 +126,7 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
       searchFiles(root, query, { regex, caseSensitive, wholeWord, include, exclude }, ctrl.signal)
         .then((res) => {
           setData(res);
+          setResultKey(searchKey);
           setError(null);
         })
         .catch((e: unknown) => {
@@ -126,7 +140,13 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
       window.clearTimeout(handle);
       ctrl.abort();
     };
-  }, [root, query, regex, caseSensitive, wholeWord, include, exclude, refresh, t]);
+  }, [root, query, regex, caseSensitive, wholeWord, include, exclude, refresh, searchKey, t]);
+
+  // Drop a stale outcome notice when the query/options change (but NOT on the post-replace refresh,
+  // which keeps searchKey the same — so a "skipped" notice survives the results refresh).
+  useEffect(() => {
+    setNotice(null);
+  }, [searchKey]);
 
   const toggleCollapse = useCallback((path: string) => {
     setCollapsed((prev) => {
@@ -138,17 +158,25 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
   }, []);
 
   const doReplace = useCallback(async () => {
-    // Bail while a search is still loading: `data` would describe the previous query, so a replace
-    // could touch matches the user hasn't seen yet.
-    if (!root || !query || busy || loading || !data?.results.length) return;
+    // Only act when the shown results match the current query (resultsCurrent) and aren't loading —
+    // otherwise a replace could touch matches the user hasn't previewed.
+    if (!root || !query || busy || loading || !data?.results.length || !resultsCurrent) return;
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       // Replace only the files currently shown — when a search is truncated this bounds the edit to
       // what the user actually previewed instead of rescanning the whole root.
       const paths = data.results.map((r) => r.path);
       const res = await replaceInFiles(root, query, replacement, { regex, caseSensitive, wholeWord, include, exclude, paths });
-      setUndo(res.undo_token ? { token: res.undo_token, files: res.files_changed, total: res.total_replacements, skipped: res.skipped?.length ?? 0 } : null);
+      if (res.undo_token) {
+        setUndo({ token: res.undo_token, files: res.files_changed, total: res.total_replacements, skipped: res.skipped?.length ?? 0 });
+      } else {
+        // Nothing was written. If every shown file was skipped (conflicts / write-protected), say so
+        // instead of silently looking like a success.
+        setUndo(null);
+        if (res.skipped?.length) setNotice(t('apps.editor.search.allSkipped', { n: res.skipped.length }));
+      }
       onFilesChanged?.(res.changed.map((c) => c.path));
       setRefresh((n) => n + 1);
     } catch (e: unknown) {
@@ -156,16 +184,20 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
     } finally {
       setBusy(false);
     }
-  }, [root, query, replacement, regex, caseSensitive, wholeWord, include, exclude, busy, loading, data, onFilesChanged, t]);
+  }, [root, query, replacement, regex, caseSensitive, wholeWord, include, exclude, busy, loading, data, resultsCurrent, onFilesChanged, t]);
 
   const doUndo = useCallback(async () => {
     if (!undo || busy) return;
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       const res = await undoReplace(undo.token);
       onFilesChanged?.(res.restored);
       setUndo(null);
+      // A partial/no-op undo (files modified or removed since the replace) must be surfaced, not
+      // silently dismissed with the banner.
+      if (res.skipped?.length) setNotice(t('apps.editor.search.undoSkipped', { n: res.skipped.length }));
       setRefresh((n) => n + 1);
     } catch (e: unknown) {
       setError(fileBrowserErrorMessage(e, t, t('apps.editor.search.undoFailed')));
@@ -247,7 +279,7 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
                   <button
                     type="button"
                     onClick={() => void doReplace()}
-                    disabled={busy || loading || !data?.results.length}
+                    disabled={busy || loading || !data?.results.length || !resultsCurrent}
                     aria-label={t('apps.editor.search.replaceAll')}
                     title={t('apps.editor.search.replaceAll')}
                     className="grid size-5 place-items-center rounded text-muted transition hover:bg-foreground/10 hover:text-foreground disabled:opacity-40"
@@ -318,6 +350,8 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
           </button>
         </div>
       )}
+
+      {notice && <div className="mx-3 mb-1 rounded border border-gold/30 bg-gold/[0.08] px-2 py-1 text-[11px] text-gold">{notice}</div>}
 
       {/* Results tree */}
       <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">

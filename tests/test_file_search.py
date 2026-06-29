@@ -189,6 +189,18 @@ def test_replace_partial_failure_preserves_undo(tmp_path, monkeypatch):
     assert a.read_text() == "x\n"
 
 
+def test_replace_reports_undecodable_shown_file_as_skipped(tmp_path):
+    good = _write(tmp_path, "good.txt", "hit\n")
+    bad = tmp_path / "bad.txt"
+    # ASCII 'hit' (so lossy search would surface it) but invalid UTF-8, so strict replace can't read it.
+    bad.write_bytes(b"hit \xff\xfe nope\n")
+    res = fbs.replace(str(tmp_path), "hit", "x", paths=[str(good), str(bad)])
+    assert res["files_changed"] == 1
+    assert [s["reason"] for s in res["skipped"]] == ["unreadable"]
+    assert good.read_text() == "x\n"
+    assert bad.read_bytes() == b"hit \xff\xfe nope\n"
+
+
 def test_replace_truncates_on_file_cap(tmp_path):
     for i in range(4):
         _write(tmp_path, f"f{i}.txt", "hit\n")
