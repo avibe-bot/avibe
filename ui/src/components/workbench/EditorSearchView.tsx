@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   CaseSensitive,
@@ -32,7 +32,32 @@ type Props = {
   focusNonce: number;
   onOpenFolder: () => void;
   onJump: (path: string, line: number, col: number, endCol: number) => void;
+  /** Paths whose on-disk content just changed (replace / undo), so open tabs can reload. */
+  onFilesChanged?: (paths: string[]) => void;
 };
+
+// Build a per-match replacement preview that mirrors what the backend will write. Literal mode is
+// exact (the whole match becomes the replacement; an empty replacement is a deletion). Regex mode
+// is best-effort: it re-applies the pattern to the matched text in JS, translating Python-style
+// backrefs (\1) to JS ($1); if the pattern isn't JS-compatible it falls back to the raw string.
+function makePreviewer(query: string, replacement: string, regex: boolean, caseSensitive: boolean): (hit: string) => string {
+  if (!regex) return () => replacement;
+  let re: RegExp | null = null;
+  try {
+    re = new RegExp(query, caseSensitive ? '' : 'i');
+  } catch {
+    re = null;
+  }
+  const jsRepl = replacement.replace(/\$/g, '$$$$').replace(/\\(\d)/g, '$$$1');
+  return (hit: string) => {
+    if (!re) return replacement;
+    try {
+      return hit.replace(new RegExp(re.source, re.flags), jsRepl);
+    } catch {
+      return replacement;
+    }
+  };
+}
 
 // A small toggle button (Aa / whole-word / regex) inside the search field.
 const Toggle: React.FC<{ on: boolean; label: string; onClick: () => void; children: React.ReactNode }> = ({ on, label, onClick, children }) => (
@@ -48,7 +73,7 @@ const Toggle: React.FC<{ on: boolean; label: string; onClick: () => void; childr
   </button>
 );
 
-export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFolder, onJump }) => {
+export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFolder, onJump, onFilesChanged }) => {
   const { t } = useTranslation();
   const [query, setQuery] = useState('');
   const [replacement, setReplacement] = useState('');
@@ -63,7 +88,7 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-  const [undo, setUndo] = useState<{ token: string; files: number; total: number } | null>(null);
+  const [undo, setUndo] = useState<{ token: string; files: number; total: number; skipped: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -113,26 +138,33 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
   }, []);
 
   const doReplace = useCallback(async () => {
-    if (!root || !query || busy || !data?.results.length) return;
+    // Bail while a search is still loading: `data` would describe the previous query, so a replace
+    // could touch matches the user hasn't seen yet.
+    if (!root || !query || busy || loading || !data?.results.length) return;
     setBusy(true);
     setError(null);
     try {
-      const res = await replaceInFiles(root, query, replacement, { regex, caseSensitive, wholeWord, include, exclude });
-      setUndo(res.undo_token ? { token: res.undo_token, files: res.files_changed, total: res.total_replacements } : null);
+      // Replace only the files currently shown — when a search is truncated this bounds the edit to
+      // what the user actually previewed instead of rescanning the whole root.
+      const paths = data.results.map((r) => r.path);
+      const res = await replaceInFiles(root, query, replacement, { regex, caseSensitive, wholeWord, include, exclude, paths });
+      setUndo(res.undo_token ? { token: res.undo_token, files: res.files_changed, total: res.total_replacements, skipped: res.skipped?.length ?? 0 } : null);
+      onFilesChanged?.(res.changed.map((c) => c.path));
       setRefresh((n) => n + 1);
     } catch (e: unknown) {
       setError(fileBrowserErrorMessage(e, t, t('apps.editor.search.replaceFailed')));
     } finally {
       setBusy(false);
     }
-  }, [root, query, replacement, regex, caseSensitive, wholeWord, include, exclude, busy, data, t]);
+  }, [root, query, replacement, regex, caseSensitive, wholeWord, include, exclude, busy, loading, data, onFilesChanged, t]);
 
   const doUndo = useCallback(async () => {
     if (!undo || busy) return;
     setBusy(true);
     setError(null);
     try {
-      await undoReplace(undo.token);
+      const res = await undoReplace(undo.token);
+      onFilesChanged?.(res.restored);
       setUndo(null);
       setRefresh((n) => n + 1);
     } catch (e: unknown) {
@@ -140,7 +172,14 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
     } finally {
       setBusy(false);
     }
-  }, [undo, busy, t]);
+  }, [undo, busy, onFilesChanged, t]);
+
+  // Preview replacement closure shared by every match row (rebuilt only when the query/replacement
+  // or matching options change).
+  const previewer = useMemo(
+    () => (showReplace ? makePreviewer(query, replacement, regex, caseSensitive) : null),
+    [showReplace, query, replacement, regex, caseSensitive],
+  );
 
   if (root == null) {
     return (
@@ -208,7 +247,7 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
                   <button
                     type="button"
                     onClick={() => void doReplace()}
-                    disabled={busy || !data?.results.length}
+                    disabled={busy || loading || !data?.results.length}
                     aria-label={t('apps.editor.search.replaceAll')}
                     title={t('apps.editor.search.replaceAll')}
                     className="grid size-5 place-items-center rounded text-muted transition hover:bg-foreground/10 hover:text-foreground disabled:opacity-40"
@@ -270,7 +309,10 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
 
       {undo && (
         <div className="mx-3 mb-1 flex items-center gap-2 rounded border border-mint/30 bg-mint/[0.08] px-2 py-1 text-[11px] text-mint">
-          <span className="flex-1">{t('apps.editor.search.replaced', { total: undo.total, files: undo.files })}</span>
+          <span className="flex-1">
+            {t('apps.editor.search.replaced', { total: undo.total, files: undo.files })}
+            {undo.skipped > 0 ? ` ${t('apps.editor.search.replaceSkipped', { n: undo.skipped })}` : ''}
+          </span>
           <button type="button" onClick={() => void doUndo()} disabled={busy} className="flex items-center gap-1 font-semibold transition hover:underline disabled:opacity-40">
             <Undo2 className="size-3" /> {t('apps.editor.search.undo')}
           </button>
@@ -284,7 +326,7 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
             key={file.path}
             file={file}
             collapsed={collapsed.has(file.path)}
-            replacePreview={showReplace && replacement ? replacement : null}
+            previewer={previewer}
             onToggle={() => toggleCollapse(file.path)}
             onJump={onJump}
           />
@@ -297,10 +339,10 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
 const FileGroup: React.FC<{
   file: SearchFileResult;
   collapsed: boolean;
-  replacePreview: string | null;
+  previewer: ((hit: string) => string) | null;
   onToggle: () => void;
   onJump: (path: string, line: number, col: number, endCol: number) => void;
-}> = ({ file, collapsed, replacePreview, onToggle, onJump }) => {
+}> = ({ file, collapsed, previewer, onToggle, onJump }) => {
   const dir = file.rel.includes('/') ? file.rel.slice(0, file.rel.lastIndexOf('/')) : '';
   const name = file.rel.slice(file.rel.lastIndexOf('/') + 1);
   return (
@@ -319,7 +361,7 @@ const FileGroup: React.FC<{
       {!collapsed && (
         <div className="flex flex-col gap-px pl-2.5">
           {file.matches.map((m, i) => (
-            <MatchRow key={`${m.line}:${m.col}:${i}`} match={m} replacePreview={replacePreview} onClick={() => onJump(file.path, m.line, m.col, m.end)} />
+            <MatchRow key={`${m.line}:${m.col}:${i}`} match={m} previewer={previewer} onClick={() => onJump(file.path, m.line, m.col, m.end)} />
           ))}
         </div>
       )}
@@ -327,19 +369,20 @@ const FileGroup: React.FC<{
   );
 };
 
-const MatchRow: React.FC<{ match: SearchMatch; replacePreview: string | null; onClick: () => void }> = ({ match, replacePreview, onClick }) => {
+const MatchRow: React.FC<{ match: SearchMatch; previewer: ((hit: string) => string) | null; onClick: () => void }> = ({ match, previewer, onClick }) => {
   const pre = match.text.slice(0, match.col);
   const hit = match.text.slice(match.col, match.end);
   const post = match.text.slice(match.end);
+  const replaced = previewer ? previewer(hit) : null;
   return (
     <button type="button" onClick={onClick} className="flex items-center gap-2 rounded px-1.5 py-0.5 text-left transition hover:bg-cyan-soft">
       <span className="w-7 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted">{match.line}</span>
       <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted">
         {pre}
-        {replacePreview != null ? (
+        {replaced != null ? (
           <>
             <span className="rounded-sm bg-destructive/20 text-destructive line-through">{hit}</span>
-            <span className="rounded-sm bg-mint/20 text-mint">{replacePreview}</span>
+            {replaced && <span className="rounded-sm bg-mint/20 text-mint">{replaced}</span>}
           </>
         ) : (
           <span className="rounded-sm bg-gold/25 font-semibold text-foreground">{hit}</span>

@@ -971,6 +971,11 @@ def _read_file_text(path: Path, *, lossy: bool) -> str | None:
     ``lossy`` controls undecodable bytes: search previews tolerate replacement
     characters; replace must not, so it returns None and leaves the file alone.
     """
+    # The rest of the file browser treats symlinks as no-follow / non-editable; mirror that here so
+    # search/replace can't follow a link out of the opened root (e.g. a planted
+    # ``secret -> ~/.ssh/id_rsa``) and surface or rewrite content outside the tree.
+    if path.is_symlink():
+        return None
     try:
         st = path.stat()
     except OSError:
@@ -1011,15 +1016,24 @@ def _iter_search_files(root: Path, include: list[str], exclude: list[str]):
             yield fpath, rel
 
 
+def _utf16_len(s: str) -> int:
+    # Python indexes strings by code point; the React preview (String.slice) and Monaco columns
+    # count UTF-16 code units. Convert so a non-BMP char (emoji, etc.) before a match doesn't shift
+    # the highlight / jump selection.
+    return len(s.encode("utf-16-le")) // 2
+
+
 def _scan_lines(text: str, matcher: "re.Pattern[str]", remaining: int) -> tuple[list[dict[str, Any]], bool]:
     matches: list[dict[str, Any]] = []
     for line_no, line in enumerate(text.split("\n"), start=1):
         for m in matcher.finditer(line):
+            col = _utf16_len(line[: m.start()])
+            end = col + _utf16_len(line[m.start() : m.end()])
             matches.append(
                 {
                     "line": line_no,
-                    "col": m.start(),
-                    "end": m.end(),
+                    "col": col,
+                    "end": end,
                     "text": line[:SEARCH_LINE_PREVIEW_CHARS],
                     "line_truncated": len(line) > SEARCH_LINE_PREVIEW_CHARS,
                 }
@@ -1135,30 +1149,57 @@ def replace(
         candidates = list(_iter_search_files(root, _split_globs(include), _split_globs(exclude)))
 
     changed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
     snapshots: dict[str, Any] = {}
     total = 0
+    truncated = False
     for fpath, rel in candidates:
+        if len(changed) >= max_files:
+            # Stop after the file cap, but tell the caller the batch was bounded so the UI doesn't
+            # claim the whole root was rewritten.
+            truncated = True
+            break
+        # Capture the mtime BEFORE reading, and hand it to write_file as expected_mtime. A
+        # concurrent edit landing after this read makes the on-disk mtime diverge, so write_file
+        # raises a conflict instead of overwriting the other writer with a replacement computed
+        # from stale bytes.
+        try:
+            before_mtime = _mtime_seconds(fpath.stat())
+        except OSError:
+            continue
         text = _read_file_text(fpath, lossy=False)
         if text is None:
             continue
         new_text, count = _apply_replacement(text, matcher, replacement, regex=regex)
         if count == 0 or new_text == text:
             continue
-        write_file(str(fpath), new_text, expected_mtime=_mtime_seconds(fpath.stat()))
+        try:
+            write_file(str(fpath), new_text, expected_mtime=before_mtime)
+        except FileBrowserError as exc:
+            # One file failing (read-only, vanished, concurrent edit) must NOT abort the whole batch
+            # and strip undo from the files already replaced. Record it and keep going; the token
+            # below still covers every file that did change.
+            skipped.append({"path": str(fpath), "rel": rel, "reason": exc.code})
+            continue
         snapshots[str(fpath)] = {
             "original": text,
             "after_sha": hashlib.sha256(new_text.encode("utf-8")).hexdigest(),
         }
         changed.append({"path": str(fpath), "rel": rel, "replacements": count})
         total += count
-        if len(changed) >= max_files:
-            break
 
     token: str | None = None
     if snapshots:
         token = uuid.uuid4().hex
         _store_undo(token, snapshots)
-    return {"changed": changed, "total_replacements": total, "files_changed": len(changed), "undo_token": token}
+    return {
+        "changed": changed,
+        "skipped": skipped,
+        "total_replacements": total,
+        "files_changed": len(changed),
+        "truncated": truncated,
+        "undo_token": token,
+    }
 
 
 def undo_replace(token: str) -> dict[str, Any]:
@@ -1171,7 +1212,11 @@ def undo_replace(token: str) -> dict[str, Any]:
     skipped: list[dict[str, str]] = []
     for path, snap in entry["files"].items():
         target = Path(path)
+        # Read the mtime from the SAME window as the bytes we verify, and hand it to write_file as
+        # expected_mtime. Otherwise a re-stat after hashing opens a race where an edit landing
+        # between the hash check and the write would be silently clobbered by the restore.
         try:
+            before_mtime = _mtime_seconds(target.stat())
             current = target.read_bytes()
         except FileNotFoundError:
             skipped.append({"path": path, "reason": "missing"})
@@ -1185,7 +1230,7 @@ def undo_replace(token: str) -> dict[str, Any]:
             skipped.append({"path": path, "reason": "modified"})
             continue
         try:
-            write_file(path, snap["original"], expected_mtime=_mtime_seconds(target.stat()))
+            write_file(path, snap["original"], expected_mtime=before_mtime)
         except FileBrowserError:
             skipped.append({"path": path, "reason": "write_failed"})
             continue

@@ -147,6 +147,56 @@ def test_undo_skips_files_modified_after_replace(tmp_path):
     assert a.read_text() == "user edited this after replace\n"
 
 
+def test_search_skips_symlink_files(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "real.txt").write_text("needle here\n", encoding="utf-8")
+    outside = tmp_path / "secret.txt"
+    outside.write_text("needle secret\n", encoding="utf-8")
+    (root / "link.txt").symlink_to(outside)
+    # The symlink must not be followed — only the real in-root file surfaces, and the outside
+    # target's contents are never exposed under the root.
+    assert _rels(fbs.search(str(root), "needle")) == {"real.txt"}
+
+
+def test_search_returns_utf16_offsets(tmp_path):
+    # 😀 is one code point but two UTF-16 code units; col/end must be UTF-16 so the JS preview
+    # slice and Monaco selection line up.
+    _write(tmp_path, "e.txt", "😀 onResize\n")
+    m = fbs.search(str(tmp_path), "onResize")["results"][0]["matches"][0]
+    assert (m["col"], m["end"]) == (3, 11)
+
+
+def test_replace_partial_failure_preserves_undo(tmp_path, monkeypatch):
+    a = _write(tmp_path, "a.txt", "x\n")
+    b = _write(tmp_path, "b.txt", "x\n")
+    real_write = fbs.write_file
+
+    def flaky(path, content, **kwargs):
+        if path.endswith("b.txt"):
+            raise FileBrowserError("permission_denied", "denied", 403)
+        return real_write(path, content, **kwargs)
+
+    monkeypatch.setattr(fbs, "write_file", flaky)
+    res = fbs.replace(str(tmp_path), "x", "y")
+    # b.txt failing must not abort the batch or strip undo from a.txt.
+    assert res["files_changed"] == 1
+    assert [s["reason"] for s in res["skipped"]] == ["permission_denied"]
+    assert res["undo_token"]
+    assert a.read_text() == "y\n"
+    assert b.read_text() == "x\n"
+    fbs.undo_replace(res["undo_token"])
+    assert a.read_text() == "x\n"
+
+
+def test_replace_truncates_on_file_cap(tmp_path):
+    for i in range(4):
+        _write(tmp_path, f"f{i}.txt", "hit\n")
+    res = fbs.replace(str(tmp_path), "hit", "x", max_files=2)
+    assert res["files_changed"] == 2
+    assert res["truncated"] is True
+
+
 def test_search_root_must_be_directory(tmp_path):
     f = _write(tmp_path, "a.txt", "x\n")
     with pytest.raises(FileBrowserError):

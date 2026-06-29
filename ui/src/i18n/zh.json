@@ -648,6 +648,7 @@
         "truncatedMatches": "仅显示前 1000 处匹配 —— 缩小搜索范围以查看其余结果。",
         "truncatedFiles": "仅显示前 200 个文件 —— 缩小搜索范围以查看其余结果。",
         "replaced": "已在 {{files}} 个文件中替换 {{total}} 处。",
+        "replaceSkipped": "(跳过 {{n}} 个文件)",
         "undo": "撤销",
         "failed": "搜索失败",
         "replaceFailed": "替换失败",

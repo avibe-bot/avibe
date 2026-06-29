@@ -17,7 +17,7 @@ const FileEditorPane = lazy(() => import('./FileEditorPane').then((m) => ({ defa
 // clobbering newer on-disk content. `path` is null for an unsaved "untitled" buffer (a VS
 // Code-style new file): it lives only in memory until the first save picks a location. Tabs are
 // keyed by a synthetic `id` (not the path) so an untitled tab survives becoming a saved file.
-type Tab = { id: string; path: string | null; name: string; mtime: number | null };
+type Tab = { id: string; path: string | null; name: string; mtime: number | null; reload?: number };
 
 // A pending file dialog, rendered as the in-window FilePicker overlay.
 type PickerState = {
@@ -153,6 +153,30 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
       }
     },
     [openFile],
+  );
+
+  // After a cross-file replace/undo rewrites files on disk, reload any open, non-dirty tab for a
+  // changed file so it shows the new content with a fresh save baseline (a dirty tab keeps its
+  // buffer — the mtime guard still catches a stale save). Refetch the mtime so the tab saves
+  // against the post-replace revision, and bump `reload` to re-run the pane's read effect.
+  const reloadTabs = useCallback(
+    async (paths: string[]) => {
+      const set = new Set(paths);
+      const targets = tabs.filter((tb) => tb.path && set.has(tb.path) && !dirty[tb.id]);
+      if (!targets.length) return;
+      const metas = await Promise.all(
+        targets.map(async (tb) => {
+          try {
+            return { id: tb.id, mtime: (await fileMeta(tb.path as string)).mtime };
+          } catch {
+            return { id: tb.id, mtime: null as number | null };
+          }
+        }),
+      );
+      const byId = new Map(metas.map((m) => [m.id, m.mtime]));
+      setTabs((ts) => ts.map((tb) => (byId.has(tb.id) ? { ...tb, mtime: byId.get(tb.id) ?? tb.mtime, reload: (tb.reload ?? 0) + 1 } : tb)));
+    },
+    [tabs, dirty],
   );
 
   // Open the launch file (from the File Browser) once on mount.
@@ -303,7 +327,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
             present in Files view (design w0qoC keeps it in the welcome state). */}
         <div className={clsx('flex shrink-0 flex-col overflow-hidden border-r border-border bg-surface-2', view === 'search' ? 'w-[300px]' : 'w-[220px]')}>
           {view === 'search' ? (
-            <EditorSearchView root={root} focusNonce={searchFocus} onOpenFolder={openFolder} onJump={onJump} />
+            <EditorSearchView root={root} focusNonce={searchFocus} onOpenFolder={openFolder} onJump={onJump} onFilesChanged={reloadTabs} />
           ) : (
             <>
               <div className="flex items-center gap-0.5 px-3 pb-1 pt-2.5">
@@ -406,6 +430,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                           onCursor={active === tab.id ? (line, col) => setCursor({ line, col }) : undefined}
                           onSaveAs={(textValue) => saveAs(tab.id, textValue)}
                           reveal={reveal?.tabId === tab.id ? { line: reveal.line, column: reveal.column, endColumn: reveal.endColumn, nonce: reveal.nonce } : null}
+                          reloadNonce={tab.reload}
                         />
                       </Suspense>
                     </div>

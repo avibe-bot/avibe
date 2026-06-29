@@ -232,8 +232,10 @@ export type SearchResponse = {
 export type SearchOptions = { regex?: boolean; caseSensitive?: boolean; wholeWord?: boolean; include?: string; exclude?: string };
 export type ReplaceResponse = {
   changed: { path: string; rel: string; replacements: number }[];
+  skipped: { path: string; rel: string; reason: string }[];
   total_replacements: number;
   files_changed: number;
+  truncated: boolean;
   undo_token: string | null;
 };
 export type UndoResponse = { restored: string[]; skipped: { path: string; reason: string }[] };
