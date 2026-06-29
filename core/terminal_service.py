@@ -444,6 +444,16 @@ class TerminalService:
         cols = max(1, min(int(cols), 1000))
         payload = struct.pack("HHHH", rows, cols, 0, 0)
         await asyncio.to_thread(fcntl.ioctl, connection.master_fd, termios.TIOCSWINSZ, payload)
+        # TIOCSWINSZ updates the PTY winsize, but the kernel only raises SIGWINCH on the
+        # slave's foreground process group — and our child has none. open() spawns it with
+        # start_new_session=True and the slave dup'd onto its std fds (never opened by the
+        # session leader), so the slave is not the child's controlling terminal. Without
+        # SIGWINCH the tmux client (and any SIGWINCH-driven TUI) never re-reads the new size,
+        # so the pane stays pinned at tmux's 80x24 default no matter how large the browser
+        # window grows — the "output only fills the top of the window" bug. Deliver the signal
+        # to the child's process group ourselves. (A controlling terminal would make this
+        # native, but that needs a preexec_fn we deliberately avoid; see open() for why.)
+        _signal_winch(connection.process.pid)
         connection.touch()
 
     async def _write_all(self, fd: int, data: bytes) -> None:
@@ -755,4 +765,18 @@ def _close_fd(fd: int) -> None:
     try:
         os.close(fd)
     except OSError:
+        pass
+
+
+def _signal_winch(pid: int) -> None:
+    """Send SIGWINCH to a terminal child's process group so it re-reads the PTY size.
+
+    The child is its own session/group leader (start_new_session=True), so its pgid equals
+    its pid and the group holds the tmux client (or fallback shell and, with job control
+    disabled for want of a controlling terminal, its foreground job). A child that has
+    already exited is a no-op, not an error.
+    """
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGWINCH)
+    except (ProcessLookupError, PermissionError, OSError):
         pass
