@@ -201,6 +201,21 @@ def test_replace_reports_undecodable_shown_file_as_skipped(tmp_path):
     assert bad.read_bytes() == b"hit \xff\xfe nope\n"
 
 
+def test_search_not_truncated_at_exact_match_cap(tmp_path):
+    _write(tmp_path, "a.txt", "hit\n" * 5)
+    res = fbs.search(str(tmp_path), "hit", max_matches=5)
+    assert res["total_matches"] == 5
+    assert res["truncated"] is False  # exactly the cap, no hidden 6th match
+
+
+def test_search_not_truncated_at_exact_file_cap(tmp_path):
+    for i in range(2):
+        _write(tmp_path, f"f{i}.txt", "hit\n")
+    res = fbs.search(str(tmp_path), "hit", max_files=2)
+    assert res["total_files"] == 2
+    assert res["truncated"] is False  # exactly the cap, no hidden 3rd file
+
+
 def test_replace_truncates_on_file_cap(tmp_path):
     for i in range(4):
         _write(tmp_path, f"f{i}.txt", "hit\n")

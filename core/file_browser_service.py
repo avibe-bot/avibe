@@ -1057,6 +1057,11 @@ def _scan_lines(text: str, matcher: "re.Pattern[str]", remaining: int) -> tuple[
         # sits after any match, so offsets are unaffected.
         line = raw_line[:-1] if raw_line.endswith("\r") else raw_line
         for m in matcher.finditer(line):
+            # Check the cap BEFORE recording: returning True only once we see a match BEYOND the
+            # limit means a result set with exactly `remaining` matches isn't falsely flagged
+            # truncated (which would needlessly disable Replace All).
+            if len(matches) >= remaining:
+                return matches, True
             # col/end are FULL-LINE UTF-16 offsets — the editor jump selects against the whole line.
             # preview_col/preview_end index into the (possibly windowed) preview `text` for the row
             # highlight; the two differ once a long line is truncated.
@@ -1074,8 +1079,6 @@ def _scan_lines(text: str, matcher: "re.Pattern[str]", remaining: int) -> tuple[
                     "line_truncated": len(line) > SEARCH_LINE_PREVIEW_CHARS,
                 }
             )
-            if len(matches) >= remaining:
-                return matches, True
     return matches, False
 
 
@@ -1104,18 +1107,24 @@ def search(
         text, file_mtime = _read_file_text(fpath, lossy=True)
         if text is None:
             continue
-        file_matches, hit_cap = _scan_lines(text, matcher, max_matches - total_matches)
+        file_matches, overflowed = _scan_lines(text, matcher, max_matches - total_matches)
         if not file_matches:
+            # `remaining` was already 0 and this file still holds a match → a genuine hidden match.
+            if overflowed:
+                truncated = True
+                reason = "matches"
+                break
             continue
-        results.append({"path": str(fpath), "rel": rel, "mtime": file_mtime, "match_count": len(file_matches), "matches": file_matches})
-        total_matches += len(file_matches)
-        if hit_cap or total_matches >= max_matches:
-            truncated = True
-            reason = "matches"
-            break
         if len(results) >= max_files:
+            # This matching file is the (max_files + 1)th — more files match than we display.
             truncated = True
             reason = "files"
+            break
+        results.append({"path": str(fpath), "rel": rel, "mtime": file_mtime, "match_count": len(file_matches), "matches": file_matches})
+        total_matches += len(file_matches)
+        if overflowed:
+            truncated = True
+            reason = "matches"
             break
     return {
         "root": str(root),
@@ -1210,7 +1219,9 @@ def replace(
                 raise FileBrowserError("invalid_path", "Path is outside the search root", 400)
             candidates.append((resolved, resolved.relative_to(root).as_posix()))
     else:
-        candidates = list(_iter_search_files(root, _split_globs(include), _split_globs(exclude)))
+        # Lazy: iterate the walk and stop at the file cap (the loop breaks) rather than
+        # materializing every candidate under the root up front.
+        candidates = _iter_search_files(root, _split_globs(include), _split_globs(exclude))
 
     # In paths mode the caller is replacing the exact files shown in the search results, so a file
     # we now can't process (vanished, or not strict-UTF-8 while search saw it via a lossy decode of
