@@ -23,6 +23,9 @@ export type VaultSecret = {
   kind: string;
   protection: string;
   signer_kind: string | null;
+  /** Pinned public key for keypair secrets (non-secret); surfaced so the saved
+   *  signing key's public key is recoverable after the create dialog closes. */
+  signing_public_key?: { curve?: string; public_key: string } | null;
   source: string;
   description?: string | null;
   policy: Record<string, unknown>;

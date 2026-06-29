@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Clock, History, KeyRound, Layers, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, ShieldOff, Trash2, Wallet } from 'lucide-react';
+import { Check, Clock, Copy, History, KeyRound, Layers, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, ShieldOff, Trash2, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
@@ -45,6 +45,8 @@ const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => voi
   const { t } = useTranslation();
   const isKeypair = s.kind === 'keypair';
   const isProtected = s.protection === 'protected';
+  const [copied, setCopied] = useState(false);
+  const publicKey = s.signing_public_key?.public_key;
   return (
     <div className="flex items-center gap-3.5 rounded-xl border border-border bg-surface px-4 py-3">
       <div
@@ -79,6 +81,23 @@ const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => voi
           {s.description ? `${s.description} · ` : ''}
           {s.last_used_at ? t('vaults.used', { count: s.use_count }) : t('vaults.neverUsed')}
         </span>
+        {isKeypair && publicKey && (
+          <button
+            type="button"
+            onClick={() => {
+              void navigator.clipboard?.writeText(publicKey).then(() => {
+                setCopied(true);
+                window.setTimeout(() => setCopied(false), 1500);
+              });
+            }}
+            className="flex max-w-full items-center gap-1 text-xs text-muted hover:text-foreground"
+            aria-label={t('vaults.dialog.copyPublicKey')}
+            title={publicKey}
+          >
+            <span className="truncate font-mono">{publicKey}</span>
+            {copied ? <Check className="size-3 shrink-0 text-mint" /> : <Copy className="size-3 shrink-0" />}
+          </button>
+        )}
       </div>
       <div className="ml-auto">
         <Button variant="ghost" size="icon" onClick={() => onDelete(s.name)} aria-label={t('vaults.delete')}>
