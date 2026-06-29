@@ -117,7 +117,7 @@ export type VaultAccessFulfillmentPayload = {
   agent_pubkey?: { public_key?: string; fingerprint?: string };
   deks?: Array<{ name: string; dek_blindbox: VaultBlindBox; approval: Record<string, unknown> }>;
   agent_deks?: Array<{ name: string; dek_blindbox: VaultBlindBox; approval: Record<string, unknown> }>;
-  deks_by_secret?: Record<string, { dek_blindbox: VaultBlindBox; approval: Record<string, unknown> } | VaultBlindBox>;
+  deks_by_secret?: Record<string, { dek_blindbox: VaultBlindBox; approval: Record<string, unknown> }>;
 };
 
 export type ApiContextType = {

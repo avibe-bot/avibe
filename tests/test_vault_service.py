@@ -29,6 +29,14 @@ def _sealed(suffix: str = "1") -> Sealed:
     return Sealed(ciphertext=f"ct-{suffix}", nonce=f"n-{suffix}", wrap_meta=f"wm-{suffix}")
 
 
+PROTECTED_SIGNING_PUBLIC_META = {
+    "signing_public_key": {
+        "curve": "secp256k1",
+        "public_key": "02" + "cd" * 32,
+    }
+}
+
+
 def _create(engine, **kw):
     with engine.begin() as conn:
         return vs.create_secret(conn, sealed=_sealed(), **kw)
@@ -240,6 +248,45 @@ def test_keypair_signing_public_key_surfaces_in_masked_meta(vault):
     listed_meta = next(item for item in listed if item["name"] == "ETH_KEY")
     assert listed_meta["signing_public_key"] == {"curve": "secp256k1", "public_key": public_key}
     assert "ignored" not in listed_meta["signing_public_key"]
+
+
+def test_protected_keypair_requires_signing_public_key_for_per_use_sign(vault):
+    _create(
+        vault,
+        name="UNPINNED_KEY",
+        kind="keypair",
+        protection="protected",
+        signer_kind="local",
+    )
+
+    with vault.connect() as conn:
+        meta = vs.get_secret_meta(conn, "UNPINNED_KEY")
+        listed = vs.list_secrets(conn)
+    listed_meta = next(item for item in listed if item["name"] == "UNPINNED_KEY")
+
+    assert meta["per_use_sign"] is False
+    assert listed_meta["per_use_sign"] is False
+    assert "signing_public_key" not in meta
+    with vault.begin() as conn:
+        with pytest.raises(vs.InvalidRequestError):
+            vs.create_sign_request(conn, "UNPINNED_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")
+
+
+def test_protected_keypair_with_signing_public_key_is_per_use_signable(vault):
+    public_key = "02" + "cd" * 32
+    _create(
+        vault,
+        name="PINNED_KEY",
+        kind="keypair",
+        protection="protected",
+        signer_kind="local",
+        public_meta={"signing_public_key": {"curve": "secp256k1", "public_key": public_key}},
+    )
+
+    with vault.connect() as conn:
+        meta = vs.get_secret_meta(conn, "PINNED_KEY")
+
+    assert meta["per_use_sign"] is True
 
 
 def test_pubkey_pin_does_not_change_secret_version(vault):
@@ -1246,7 +1293,14 @@ def test_grant_can_be_intentionally_unbound_from_request_session(vault):
 
 
 def test_keypair_and_always_ask_are_not_grantable(vault):
-    _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
+    _create(
+        vault,
+        name="ETH_KEY",
+        protection="protected",
+        kind="keypair",
+        signer_kind="local",
+        public_meta=PROTECTED_SIGNING_PUBLIC_META,
+    )
     _create(vault, name="STATIC_KEY", protection="protected", policy={"always_ask": True})
     with vault.begin() as conn:
         with pytest.raises(vs.NotGrantableError):
@@ -1317,7 +1371,14 @@ def test_grant_creation_rejects_expected_member_mismatch_without_claiming_reques
 def test_grant_creation_must_match_pending_access_request(vault):
     _create(vault, name="A_KEY", protection="protected")
     _create(vault, name="B_KEY", protection="protected")
-    _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
+    _create(
+        vault,
+        name="ETH_KEY",
+        protection="protected",
+        kind="keypair",
+        signer_kind="local",
+        public_meta=PROTECTED_SIGNING_PUBLIC_META,
+    )
     with vault.begin() as conn:
         access_req = _access_request(conn, "A_KEY", session_id="ses_1")
         sign_req = vs.create_sign_request(conn, "ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")
@@ -1377,7 +1438,14 @@ def test_grant_creation_rejects_expired_access_request(vault):
 
 def test_rotating_protected_secret_expires_pending_access_and_sign_requests(vault):
     _create(vault, name="A_KEY", protection="protected")
-    _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
+    _create(
+        vault,
+        name="ETH_KEY",
+        protection="protected",
+        kind="keypair",
+        signer_kind="local",
+        public_meta=PROTECTED_SIGNING_PUBLIC_META,
+    )
     with vault.begin() as conn:
         access_req = _access_request(conn, "A_KEY", session_id="ses_1")
         vs.rotate_secret(conn, "A_KEY", _sealed("rotated"))
@@ -1478,7 +1546,14 @@ def test_deleting_standard_secret_expires_pending_access_and_sign_requests(vault
 
 
 def test_sign_request_completion_can_only_claim_pending_once(vault):
-    _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
+    _create(
+        vault,
+        name="ETH_KEY",
+        protection="protected",
+        kind="keypair",
+        signer_kind="local",
+        public_meta=PROTECTED_SIGNING_PUBLIC_META,
+    )
     digest = "00" * 32
     with vault.begin() as conn:
         sign_req = vs.create_sign_request(conn, "ETH_KEY", digest=digest, scheme="ecdsa-secp256k1-recoverable")
@@ -1560,7 +1635,14 @@ def test_claim_sign_request_prevents_concurrent_deny_before_completion(vault):
 
 
 def test_sign_request_completion_rejects_malformed_signatures(vault):
-    _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
+    _create(
+        vault,
+        name="ETH_KEY",
+        protection="protected",
+        kind="keypair",
+        signer_kind="local",
+        public_meta=PROTECTED_SIGNING_PUBLIC_META,
+    )
     digest = "00" * 32
     with vault.begin() as conn:
         req = vs.create_sign_request(conn, "ETH_KEY", digest=digest, scheme="ecdsa-secp256k1-recoverable")

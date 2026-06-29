@@ -51,6 +51,14 @@ def _sealed(suffix: str = "1") -> Sealed:
     return Sealed(ciphertext=f"ct-{suffix}", nonce=f"n-{suffix}", wrap_meta=f"wm-{suffix}")
 
 
+PROTECTED_SIGNING_PUBLIC_META = {
+    "signing_public_key": {
+        "curve": "secp256k1",
+        "public_key": "02" + "cd" * 32,
+    }
+}
+
+
 def _set_secret(name: str, value: str, tmp_path, monkeypatch, capfd, *, sealed: Sealed | None = None):
     from vibe import api
 
@@ -158,6 +166,7 @@ def test_discover_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
             kind="keypair",
             signer_kind="local",
             sealed=_sealed("protected-key"),
+            public_meta=PROTECTED_SIGNING_PUBLIC_META,
         )
         vault_service.create_secret(
             conn,
@@ -252,6 +261,7 @@ def test_sign_request_cli_accepts_protected_keypair(capfd):
             kind="keypair",
             signer_kind="local",
             sealed=_sealed("protected-key"),
+            public_meta=PROTECTED_SIGNING_PUBLIC_META,
         )
 
     assert cli.cmd_vault_sign(_ns(name="PROTECTED_ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")) == 0

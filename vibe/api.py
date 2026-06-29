@@ -1702,6 +1702,24 @@ def _agent_grant_cached_all(result: dict, expected_count: int) -> bool:
         return False
 
 
+def _restore_access_request_after_failed_agent_grant(
+    *,
+    engine: Any,
+    request_id: str,
+    member_names: list[str] | set[str] | tuple[str, ...] | None,
+    session_id: str | None,
+) -> None:
+    from storage import vault_service
+
+    with contextlib.suppress(Exception), engine.begin() as conn:
+        vault_service.restore_access_request_after_failed_grant(
+            conn,
+            created_by_request_id=str(request_id),
+            member_names=list(member_names or []),
+            session_id=session_id,
+        )
+
+
 def _grant_dek_entries_from_payload(payload: dict) -> object:
     deks = payload.get("deks")
     if deks is None:
@@ -1948,6 +1966,12 @@ def create_vault_grant(payload: dict) -> dict:
                 force_release_on_cleanup_failure=True,
                 force_release_scope=True,
             )
+            _restore_access_request_after_failed_agent_grant(
+                engine=engine,
+                request_id=str(request_id),
+                member_names=expected_member_names,
+                session_id=str(grant.get("session_id") or "") or None,
+            )
         raise VaultApiError(str(exc), code="invalid_grant") from exc
     except AvaultError as exc:
         _cleanup_failed_agent_grant(
@@ -1957,13 +1981,12 @@ def create_vault_grant(payload: dict) -> dict:
             force_release_on_cleanup_failure=True,
             force_release_scope=True,
         )
-        with contextlib.suppress(Exception), engine.begin() as conn:
-            vault_service.restore_access_request_after_failed_grant(
-                conn,
-                created_by_request_id=str(request_id),
-                member_names=list(expected_member_names or []),
-                session_id=str(grant.get("session_id") or "") or None,
-            )
+        _restore_access_request_after_failed_agent_grant(
+            engine=engine,
+            request_id=str(request_id),
+            member_names=expected_member_names,
+            session_id=str(grant.get("session_id") or "") or None,
+        )
         raise _vault_api_error_from_avault(exc, prefix="avault agent grant failed") from exc
     except Exception:
         if agent_relayed:
@@ -2080,6 +2103,14 @@ def _verify_protected_ecdsa_signature(
         public_key.verify(sig_bytes, digest_bytes, ec.ECDSA(utils.Prehashed(hashes.SHA256())))
     except InvalidSignature as exc:
         raise _protected_sign_invalid("browser signature does not verify against signing_public_key") from exc
+    if scheme == "ecdsa-secp256k1-recoverable":
+        _verify_recoverable_signature_recovery_id(
+            public_key_bytes=public_key_bytes,
+            digest_bytes=digest_bytes,
+            r=r,
+            s=s,
+            recovery_id=recovery_id,
+        )
 
 
 _SECP256K1_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
@@ -2091,12 +2122,37 @@ _SECP256K1_G = (
 _Secp256k1Point = tuple[int, int] | None
 
 
+def _secp256k1_mod_sqrt(value: int) -> int | None:
+    root = pow(value, (_SECP256K1_P + 1) // 4, _SECP256K1_P)
+    return root if pow(root, 2, _SECP256K1_P) == value % _SECP256K1_P else None
+
+
+def _secp256k1_decompress_public_key(public_key_bytes: bytes) -> _Secp256k1Point:
+    if len(public_key_bytes) == 33 and public_key_bytes[0] in {2, 3}:
+        x = int.from_bytes(public_key_bytes[1:], "big")
+        if x >= _SECP256K1_P:
+            return None
+        y = _secp256k1_mod_sqrt((pow(x, 3, _SECP256K1_P) + 7) % _SECP256K1_P)
+        if y is None:
+            return None
+        if (y % 2) != (public_key_bytes[0] & 1):
+            y = _SECP256K1_P - y
+        return (x, y)
+    if len(public_key_bytes) == 65 and public_key_bytes[0] == 4:
+        x = int.from_bytes(public_key_bytes[1:33], "big")
+        y = int.from_bytes(public_key_bytes[33:], "big")
+        if x >= _SECP256K1_P or y >= _SECP256K1_P or (pow(y, 2, _SECP256K1_P) - pow(x, 3, _SECP256K1_P) - 7) % _SECP256K1_P:
+            return None
+        return (x, y)
+    return None
+
+
 def _secp256k1_lift_x(x: int) -> _Secp256k1Point:
     if x >= _SECP256K1_P:
         return None
     y_sq = (pow(x, 3, _SECP256K1_P) + 7) % _SECP256K1_P
-    y = pow(y_sq, (_SECP256K1_P + 1) // 4, _SECP256K1_P)
-    if pow(y, 2, _SECP256K1_P) != y_sq:
+    y = _secp256k1_mod_sqrt(y_sq)
+    if y is None:
         return None
     return (x, y if y % 2 == 0 else _SECP256K1_P - y)
 
@@ -2128,6 +2184,47 @@ def _secp256k1_mul(scalar: int, point: _Secp256k1Point) -> _Secp256k1Point:
         addend = _secp256k1_add(addend, addend)
         scalar >>= 1
     return result
+
+
+def _secp256k1_recover_ecdsa_public_key(r: int, s: int, digest_bytes: bytes, recovery_id: int) -> _Secp256k1Point:
+    if not (1 <= r < _SECP256K1_N and 1 <= s < _SECP256K1_N):
+        return None
+    x = r + (recovery_id >> 1) * _SECP256K1_N
+    if x >= _SECP256K1_P:
+        return None
+    y = _secp256k1_mod_sqrt((pow(x, 3, _SECP256K1_P) + 7) % _SECP256K1_P)
+    if y is None:
+        return None
+    if (y % 2) != (recovery_id & 1):
+        y = _SECP256K1_P - y
+    point_r = (x, y)
+    if _secp256k1_mul(_SECP256K1_N, point_r) is not None:
+        return None
+    z = int.from_bytes(digest_bytes, "big") % _SECP256K1_N
+    r_inv = pow(r, -1, _SECP256K1_N)
+    return _secp256k1_mul(
+        r_inv,
+        _secp256k1_add(
+            _secp256k1_mul(s, point_r),
+            _secp256k1_mul(z, (_SECP256K1_G[0], (-_SECP256K1_G[1]) % _SECP256K1_P)),
+        ),
+    )
+
+
+def _verify_recoverable_signature_recovery_id(
+    *,
+    public_key_bytes: bytes,
+    digest_bytes: bytes,
+    r: int,
+    s: int,
+    recovery_id: int,
+) -> None:
+    expected = _secp256k1_decompress_public_key(public_key_bytes)
+    if expected is None:
+        raise _protected_sign_invalid("protected signing public key is not a valid secp256k1 point")
+    recovered = _secp256k1_recover_ecdsa_public_key(r, s, digest_bytes, recovery_id)
+    if recovered != expected:
+        raise _protected_sign_invalid("recoverable signature recovery_id does not match signing_public_key")
 
 
 def _bip340_tagged_hash(tag: str, payload: bytes) -> bytes:

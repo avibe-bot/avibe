@@ -624,10 +624,22 @@ def _secret_agent_access_grantable(row: dict[str, Any]) -> bool:
 
 
 def _secret_agent_per_use_signable(row: dict[str, Any]) -> bool:
+    if row.get("kind") != "keypair" or row.get("signer_kind") not in (None, "local"):
+        return False
+    if row.get("protection") != "protected":
+        return True
+    signing_public_key = _public_meta(row.get("public_meta")).get("signing_public_key")
     return (
-        row.get("kind") == "keypair"
-        and row.get("signer_kind") in (None, "local")
+        isinstance(signing_public_key, dict)
+        and signing_public_key.get("curve") == "secp256k1"
+        and isinstance(signing_public_key.get("public_key"), str)
+        and bool(signing_public_key.get("public_key"))
     )
+
+
+def _reject_unsignable_keypair(row: dict[str, Any], name: str) -> None:
+    if not _secret_agent_per_use_signable(row):
+        raise InvalidRequestError(f"{name} is not per-use signable")
 
 
 def _reject_keypair_value_delivery(row: dict[str, Any], name: str) -> None:
@@ -1313,6 +1325,7 @@ def create_sign_request(
         raise InvalidRequestError(f"{name} is not a signing key")
     if row.get("signer_kind") not in (None, "local"):
         raise InvalidRequestError(f"{name} is not locally signable")
+    _reject_unsignable_keypair(row, name)
     payload_audience = _request_audience_from_requester(requester)
     request_id = _id("vrq")
     delivery_payload = dict(delivery or {})
