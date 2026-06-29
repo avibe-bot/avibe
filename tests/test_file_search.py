@@ -268,6 +268,19 @@ def test_search_and_replace_handle_crlf_line_end(tmp_path):
     assert p.read_bytes() == b"FOO\r\nbar\r\n"
 
 
+def test_undo_store_bounded_by_bytes(tmp_path, monkeypatch):
+    monkeypatch.setattr(fbs, "_UNDO_MAX_BYTES", 10)
+    a = _write(tmp_path, "a.txt", "hit hit\n")
+    r1 = fbs.replace(str(tmp_path), "hit", "x", paths=[str(a)])
+    b = _write(tmp_path, "b.txt", "hit\n")
+    r2 = fbs.replace(str(tmp_path), "hit", "y", paths=[str(b)])
+    # Storing r2 pushes total snapshot bytes over the budget, so r1's snapshot is evicted.
+    with pytest.raises(FileBrowserError) as exc:
+        fbs.undo_replace(r1["undo_token"])
+    assert exc.value.code == "undo_unavailable"
+    assert fbs.undo_replace(r2["undo_token"])["restored"] == [str(b)]
+
+
 def test_search_root_must_be_directory(tmp_path):
     f = _write(tmp_path, "a.txt", "x\n")
     with pytest.raises(FileBrowserError):

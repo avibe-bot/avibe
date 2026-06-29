@@ -937,6 +937,7 @@ SEARCH_SKIP_DIRS = frozenset(
 
 _UNDO_TTL_SECONDS = 600.0
 _UNDO_MAX_TOKENS = 32
+_UNDO_MAX_BYTES = 64 * 1024 * 1024
 _UNDO_STORE: dict[str, dict[str, Any]] = {}
 _UNDO_LOCK = threading.Lock()
 
@@ -1147,13 +1148,21 @@ def _apply_replacement(text: str, matcher: "re.Pattern[str]", replacement: str, 
 
 def _store_undo(token: str, files: dict[str, Any]) -> None:
     now = time.monotonic()
+    size = sum(len(snap["original"].encode("utf-8")) for snap in files.values())
     with _UNDO_LOCK:
         for stale in [key for key, value in _UNDO_STORE.items() if now - value["created"] > _UNDO_TTL_SECONDS]:
             _UNDO_STORE.pop(stale, None)
-        while len(_UNDO_STORE) >= _UNDO_MAX_TOKENS:
+        # Bound the store by BOTH token count and total snapshot bytes so a few large Replace All
+        # batches can't pin unbounded memory. Evict oldest-first until the new entry fits; a single
+        # batch larger than the budget still gets stored (it's the user's latest, undoable action)
+        # but evicts everything else.
+        def total_bytes() -> int:
+            return sum(value["bytes"] for value in _UNDO_STORE.values())
+
+        while _UNDO_STORE and (len(_UNDO_STORE) >= _UNDO_MAX_TOKENS or total_bytes() + size > _UNDO_MAX_BYTES):
             oldest = min(_UNDO_STORE, key=lambda key: _UNDO_STORE[key]["created"])
             _UNDO_STORE.pop(oldest, None)
-        _UNDO_STORE[token] = {"created": now, "files": files}
+        _UNDO_STORE[token] = {"created": now, "files": files, "bytes": size}
 
 
 def replace(
