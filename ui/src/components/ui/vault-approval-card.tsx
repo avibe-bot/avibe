@@ -107,6 +107,10 @@ export const VaultApprovalCard: React.FC<{
       .getVaultRequest(requestId, { handleError: false })
       .then((res) => {
         if (!alive) return;
+        // handleError:false makes HTTP errors resolve to the error payload rather than
+        // reject, so a stale/expired/already-handled request comes back as {ok:false}
+        // with no `request`. Surface that as a load error instead of spinning forever.
+        if (!res.ok || !res.request) throw new Error(res.message || res.code || 'request-unavailable');
         setRequest(res.request);
         const options = ((res.request.card as ApprovalCard | null)?.scope_options ?? []) as ScopeOption[];
         if (options.length > 0) setThisSessionOnly(options[0].session_binding_default !== false);
@@ -160,6 +164,10 @@ export const VaultApprovalCard: React.FC<{
       if (!option) throw new Error(t('vaults.approval.errors.noScope'));
       const ttlSeconds = option.default_ttl_seconds;
       const materials = option.unlock_material ?? [];
+      // A protected secret with no hydrated unlock material means the request was read
+      // without UI-audience hydration — fail clearly instead of taking the standard path
+      // (which the daemon rejects for a protected secret anyway).
+      if (isProtected && materials.length === 0) throw new Error(t('vaults.approval.errors.missingMaterial'));
       if (materials.length === 0) {
         // Standard members only — a metadata-only scope grant, no DEK release.
         failIfNotOk(

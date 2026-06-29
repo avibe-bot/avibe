@@ -342,8 +342,8 @@ export type ApiContextType = {
   getVaultAgentPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
-  getVaultRequests: (params?: { status?: string; type?: string; limit?: number }) => Promise<{ ok: boolean; requests: VaultRequest[] }>;
-  getVaultRequest: (requestId: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; request: VaultRequest; result?: VaultRequestResult | null }>;
+  getVaultRequests: (params?: { status?: string; type?: string; limit?: number }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; requests: VaultRequest[] }>;
+  getVaultRequest: (requestId: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; request?: VaultRequest; result?: VaultRequestResult | null; code?: string; message?: string }>;
   denyVaultRequest: (requestId: string) => Promise<{ ok: boolean; request?: VaultRequest; code?: string; message?: string }>;
   fulfillVaultAccessRequest: (requestId: string, payload: VaultAccessFulfillmentPayload) => Promise<{ ok: boolean; request_id?: string; grant?: VaultGrant; result?: { type: string; grant?: VaultGrant }; code?: string; message?: string }>;
   getVaultGrants: (params?: { status?: string; sessionId?: string }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; grants: VaultGrant[] }>;
@@ -2055,13 +2055,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getVaultAgentPubkey: () => getCachedJson('/api/vault/agent/pubkey', 1500),
     createVaultSecret: (payload, opts) => postJson('/api/vault/secrets', payload, opts),
     deleteVaultSecret: (name) => deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}`),
-    getVaultRequests: (params) => {
+    getVaultRequests: (params, opts) => {
       const search = new URLSearchParams();
       if (params?.status) search.set('status', params.status);
       if (params?.type) search.set('type', params.type);
       if (params?.limit) search.set('limit', String(params.limit));
       const qs = search.toString();
-      return getCachedJson(qs ? `/api/vault/requests?${qs}` : '/api/vault/requests', 1500);
+      return getCachedJson(qs ? `/api/vault/requests?${qs}` : '/api/vault/requests', 1500, opts);
     },
     // Uncached: the single request carries the protected unlock material the browser
     // releases against, and its result flips once approved — always read it fresh.

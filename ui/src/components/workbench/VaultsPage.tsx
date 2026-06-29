@@ -226,8 +226,16 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
 
   const load = useCallback(async () => {
     try {
-      const res = await api.getVaultRequests({ status: 'pending' });
-      setRequests(res.requests ?? []);
+      // Best-effort with suppressed errors so an older backend without the route doesn't
+      // spam global toasts on every 5s poll. Only approval (access/sign) requests render
+      // here — a provision request ($NAME secure-input) has no grant scope and would show
+      // a broken Review row, so filter it out.
+      const res = await api.getVaultRequests({ status: 'pending' }, { handleError: false });
+      const pending = (res.requests ?? []).filter((r) => {
+        const type = (r.card as { request_type?: string } | null)?.request_type ?? r.request_type;
+        return type === 'access' || type === 'sign';
+      });
+      setRequests(pending);
     } catch {
       setRequests([]);
     }
