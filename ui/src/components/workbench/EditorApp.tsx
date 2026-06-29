@@ -8,6 +8,7 @@ import { downloadFile, fileMeta, joinPath, parentDir, writeFile, type FsEntry } 
 import { isEditableFile } from '../../lib/filePreview';
 import { FileTree } from './FileTree';
 import { FilePicker, type FilePickerMode } from './FilePicker';
+import { EditorSearchView } from './EditorSearchView';
 
 const FileEditorPane = lazy(() => import('./FileEditorPane').then((m) => ({ default: m.FileEditorPane })));
 
@@ -16,7 +17,7 @@ const FileEditorPane = lazy(() => import('./FileEditorPane').then((m) => ({ defa
 // clobbering newer on-disk content. `path` is null for an unsaved "untitled" buffer (a VS
 // Code-style new file): it lives only in memory until the first save picks a location. Tabs are
 // keyed by a synthetic `id` (not the path) so an untitled tab survives becoming a saved file.
-type Tab = { id: string; path: string | null; name: string; mtime: number | null };
+type Tab = { id: string; path: string | null; name: string; mtime: number | null; reload?: number };
 
 // A pending file dialog, rendered as the in-window FilePicker overlay.
 type PickerState = {
@@ -86,25 +87,62 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   const [dirty, setDirty] = useState<Record<string, boolean>>({}); // keyed by tab id
   const [cursor, setCursor] = useState<{ line: number; col: number } | null>(null);
   const [picker, setPicker] = useState<PickerState | null>(null);
+  const [view, setView] = useState<'files' | 'search'>('files');
+  // A pending Monaco jump (from a cross-file search result), scoped to one tab. The nonce makes a
+  // repeat jump to the same spot re-fire even when the tab is already open.
+  const [reveal, setReveal] = useState<{ tabId: string; line: number; column: number; endColumn: number; nonce: number } | null>(null);
+  const [searchFocus, setSearchFocus] = useState(0);
   const tabSeq = useRef(0);
   const untitledSeq = useRef(0);
+  const revealSeq = useRef(0);
+  // Latest tabs + dirty for async callbacks (reloadTabs) so a reload landing after an in-flight
+  // replace never acts on a stale snapshot and clobbers a buffer the user just edited.
+  const dirtyRef = useRef(dirty);
+  const tabsRef = useRef(tabs);
+  useEffect(() => {
+    dirtyRef.current = dirty;
+    tabsRef.current = tabs;
+  });
 
-  const openFile = useCallback((path: string, name: string, mtime: number | null) => {
-    setRoot((r) => r ?? parentDir(path));
-    setCursor(null);
-    setTabs((ts) => {
-      // Dedup inside the updater so two concurrent opens of the same file (e.g. a fast double-click
-      // firing two fileMeta requests) can't both append a tab — both see the same current `ts`.
-      const existing = ts.find((x) => x.path === path);
-      if (existing) {
-        setActive(existing.id);
+  const openFile = useCallback(
+    (path: string, name: string, mtime: number | null, target?: { line: number; column: number; endColumn: number }) => {
+      setRoot((r) => r ?? parentDir(path));
+      if (!target) setCursor(null);
+      setTabs((ts) => {
+        // Dedup inside the updater so two concurrent opens of the same file (e.g. a fast double-click
+        // firing two fileMeta requests) can't both append a tab — both see the same current `ts`.
+        const existing = ts.find((x) => x.path === path);
+        const id = existing ? existing.id : `t${++tabSeq.current}`;
+        setActive(id);
+        if (target) setReveal({ tabId: id, line: target.line, column: target.column, endColumn: target.endColumn, nonce: ++revealSeq.current });
+        if (!existing) return [...ts, { id, path, name, mtime }];
+        // Jumping to an already-open tab whose file changed on disk since it was opened (e.g. a
+        // search hit in newer content): reload the clean buffer first so the revealed line matches
+        // what the search showed. A dirty tab keeps its edits.
+        if (mtime != null && existing.mtime !== mtime && !dirtyRef.current[existing.id]) {
+          return ts.map((x) => (x.id === id ? { ...x, mtime, reload: (x.reload ?? 0) + 1 } : x));
+        }
         return ts;
+      });
+    },
+    [],
+  );
+
+  // Open (or focus) a file at a search match and select the range in Monaco. Fetch fresh metadata
+  // for the save baseline + re-validation, mirroring the explorer's open path.
+  const onJump = useCallback(
+    async (path: string, line: number, col: number, endCol: number) => {
+      const name = path.split('/').filter(Boolean).pop() || path;
+      const target = { line, column: col, endColumn: endCol };
+      try {
+        const m = await fileMeta(path);
+        openFile(path, name, m.mtime, target);
+      } catch {
+        openFile(path, name, null, target);
       }
-      const id = `t${++tabSeq.current}`;
-      setActive(id);
-      return [...ts, { id, path, name, mtime }];
-    });
-  }, []);
+    },
+    [openFile],
+  );
 
   // The explorer tree emits a clicked entry. Gate it like the File Browser: only a regular,
   // supported, within-cap file opens in Monaco; a symlink (the backend refuses symlink writes),
@@ -131,6 +169,29 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
     },
     [openFile],
   );
+
+  // After a cross-file replace/undo rewrites files on disk, reload any open, non-dirty tab for a
+  // changed file so it shows the new content with a fresh save baseline (a dirty tab keeps its
+  // buffer — the mtime guard still catches a stale save). Refetch the mtime so the tab saves
+  // against the post-replace revision, and bump `reload` to re-run the pane's read effect.
+  const reloadTabs = useCallback(async (paths: string[]) => {
+    const set = new Set(paths);
+    const targets = tabsRef.current.filter((tb) => tb.path && set.has(tb.path));
+    if (!targets.length) return;
+    const metas = await Promise.all(
+      targets.map(async (tb) => {
+        try {
+          return { id: tb.id, mtime: (await fileMeta(tb.path as string)).mtime };
+        } catch {
+          return { id: tb.id, mtime: null as number | null };
+        }
+      }),
+    );
+    const byId = new Map(metas.map((m) => [m.id, m.mtime]));
+    // Re-check dirty at apply time (via ref): a tab the user edited while the request was in flight
+    // must keep its unsaved buffer rather than be re-read from disk.
+    setTabs((ts) => ts.map((tb) => (byId.has(tb.id) && !dirtyRef.current[tb.id] ? { ...tb, mtime: byId.get(tb.id) ?? tb.mtime, reload: (tb.reload ?? 0) + 1 } : tb)));
+  }, []);
 
   // Open the launch file (from the File Browser) once on mount.
   useEffect(() => {
@@ -217,12 +278,21 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   useEffect(() => {
     if (!windowId) return;
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
-      const k = e.key.toLowerCase();
-      if (k !== 'o' && k !== 'n') return;
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
       // Only the frontmost editor window, and not while its own dialog is open. Scope by the window
       // manager's focused id (not DOM focus) so the shortcut keeps working after a dialog closes.
       if (picker || wm.focusedId !== windowId) return;
+      const k = e.key.toLowerCase();
+      // ⇧⌘F opens the cross-file Search view and focuses its query input. (Plain ⌘F is left to
+      // Monaco's built-in in-file find widget when the editor has focus.)
+      if (e.shiftKey) {
+        if (k !== 'f') return;
+        e.preventDefault();
+        setView('search');
+        setSearchFocus((n) => n + 1);
+        return;
+      }
+      if (k !== 'o' && k !== 'n') return;
       e.preventDefault();
       if (k === 'o') openFolder();
       else newFile();
@@ -231,63 +301,88 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
     return () => window.removeEventListener('keydown', onKey, true);
   }, [windowId, openFolder, newFile, picker, wm.focusedId]);
 
-  const ACTIVITY = [Files, Search, GitBranch, Bug, Blocks];
   const showWelcome = root == null && tabs.length === 0;
   const activeName = tabs.find((x) => x.id === active)?.name;
 
   return (
     <div className="relative flex h-full min-h-0 w-full flex-col bg-surface">
       <div className="flex min-h-0 flex-1">
-        {/* Activity bar */}
+        {/* Activity bar — Files / Search switch the left panel; the rest are inert placeholders. */}
         <div className="flex w-12 shrink-0 flex-col items-center justify-between border-r border-border bg-surface-3 py-3">
           <div className="flex flex-col items-center gap-[18px]">
-            {ACTIVITY.map((Icon, i) => (
-              <Icon key={i} className={clsx('size-5', i === 0 ? 'text-foreground' : 'text-muted')} />
+            {([
+              { Icon: Files, key: 'files' as const, label: t('apps.editor.explorer') },
+              { Icon: Search, key: 'search' as const, label: t('apps.editor.search.title') },
+            ]).map(({ Icon, key, label }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => {
+                  setView(key);
+                  if (key === 'search') setSearchFocus((n) => n + 1);
+                }}
+                aria-label={label}
+                aria-pressed={view === key}
+                title={label}
+                className={clsx('relative grid h-6 w-12 place-items-center transition', view === key ? 'text-foreground' : 'text-muted hover:text-foreground')}
+              >
+                {view === key && <span className="absolute left-0 top-0 h-full w-0.5 bg-cyan" />}
+                <Icon className="size-5" />
+              </button>
+            ))}
+            {[GitBranch, Bug, Blocks].map((Icon, i) => (
+              <Icon key={i} className="size-5 text-muted" />
             ))}
           </div>
           <Settings className="size-5 text-muted" />
         </div>
 
-        {/* Explorer — ALWAYS present (design w0qoC keeps it in the welcome state): an
-            empty "No folder opened + Open Folder" state when no folder, else the file tree. */}
-        <div className="flex w-[220px] shrink-0 flex-col overflow-hidden border-r border-border bg-surface-2">
-          <div className="flex items-center gap-0.5 px-3 pb-1 pt-2.5">
-            <span className="flex-1 truncate font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">{t('apps.editor.explorer')}</span>
-            <button
-              type="button"
-              onClick={newFile}
-              title={`${t('apps.fileBrowser.newFile')} (⌘N)`}
-              aria-label={t('apps.fileBrowser.newFile')}
-              className="grid size-5 place-items-center rounded text-muted transition hover:bg-foreground/10 hover:text-foreground"
-            >
-              <FilePlus className="size-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={openFolder}
-              title={`${t('apps.editor.openFolder')} (⌘O)`}
-              aria-label={t('apps.editor.openFolder')}
-              className="grid size-5 place-items-center rounded text-muted transition hover:bg-foreground/10 hover:text-foreground"
-            >
-              <FolderOpen className="size-3.5" />
-            </button>
-          </div>
-          {root == null ? (
-            <div className="flex flex-col gap-2 px-3 py-2">
-              <div className="text-[12px] text-muted">{t('apps.editor.noFolder')}</div>
-              <button
-                type="button"
-                onClick={openFolder}
-                className="flex items-center justify-center gap-1.5 rounded-md border border-mint/40 bg-mint/[0.08] px-2.5 py-1.5 text-[12px] font-semibold text-mint transition hover:bg-mint/[0.14]"
-              >
-                <FolderOpen className="size-3.5" />
-                {t('apps.editor.openFolder')}
-              </button>
-            </div>
+        {/* Left panel — Explorer (Files view) or the cross-file Search view. Explorer is ALWAYS
+            present in Files view (design w0qoC keeps it in the welcome state). */}
+        <div className={clsx('flex shrink-0 flex-col overflow-hidden border-r border-border bg-surface-2', view === 'search' ? 'w-[300px]' : 'w-[220px]')}>
+          {view === 'search' ? (
+            <EditorSearchView root={root} focusNonce={searchFocus} onOpenFolder={openFolder} onJump={onJump} onFilesChanged={reloadTabs} />
           ) : (
-            <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">
-              <FileTree rootPath={root} rootName={root.split('/').filter(Boolean).pop() || root} activePath={tabs.find((x) => x.id === active)?.path ?? null} onOpenFile={onTreeOpen} />
-            </div>
+            <>
+              <div className="flex items-center gap-0.5 px-3 pb-1 pt-2.5">
+                <span className="flex-1 truncate font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">{t('apps.editor.explorer')}</span>
+                <button
+                  type="button"
+                  onClick={newFile}
+                  title={`${t('apps.fileBrowser.newFile')} (⌘N)`}
+                  aria-label={t('apps.fileBrowser.newFile')}
+                  className="grid size-5 place-items-center rounded text-muted transition hover:bg-foreground/10 hover:text-foreground"
+                >
+                  <FilePlus className="size-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={openFolder}
+                  title={`${t('apps.editor.openFolder')} (⌘O)`}
+                  aria-label={t('apps.editor.openFolder')}
+                  className="grid size-5 place-items-center rounded text-muted transition hover:bg-foreground/10 hover:text-foreground"
+                >
+                  <FolderOpen className="size-3.5" />
+                </button>
+              </div>
+              {root == null ? (
+                <div className="flex flex-col gap-2 px-3 py-2">
+                  <div className="text-[12px] text-muted">{t('apps.editor.noFolder')}</div>
+                  <button
+                    type="button"
+                    onClick={openFolder}
+                    className="flex items-center justify-center gap-1.5 rounded-md border border-mint/40 bg-mint/[0.08] px-2.5 py-1.5 text-[12px] font-semibold text-mint transition hover:bg-mint/[0.14]"
+                  >
+                    <FolderOpen className="size-3.5" />
+                    {t('apps.editor.openFolder')}
+                  </button>
+                </div>
+              ) : (
+                <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">
+                  <FileTree rootPath={root} rootName={root.split('/').filter(Boolean).pop() || root} activePath={tabs.find((x) => x.id === active)?.path ?? null} onOpenFile={onTreeOpen} />
+                </div>
+              )}
+            </>
           )}
         </div>
 
@@ -348,6 +443,8 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                           onDirtyChange={(d) => setDirty((prev) => (prev[tab.id] === d ? prev : { ...prev, [tab.id]: d }))}
                           onCursor={active === tab.id ? (line, col) => setCursor({ line, col }) : undefined}
                           onSaveAs={(textValue) => saveAs(tab.id, textValue)}
+                          reveal={reveal?.tabId === tab.id ? { line: reveal.line, column: reveal.column, endColumn: reveal.endColumn, nonce: reveal.nonce } : null}
+                          reloadNonce={tab.reload}
                         />
                       </Suspense>
                     </div>

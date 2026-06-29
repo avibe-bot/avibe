@@ -217,6 +217,77 @@ export async function deletePath(path: string, recursive = false): Promise<{ ok:
   );
 }
 
+// Cross-file search + replace (backend: file_browser_service.search/replace/undo_replace).
+// col/end are full-line UTF-16 offsets (the editor jump target); preview_col/preview_end index
+// into `text` (the possibly windowed preview) for the row highlight.
+export type SearchMatch = { line: number; col: number; end: number; preview_col: number; preview_end: number; text: string; line_truncated: boolean };
+export type SearchFileResult = { path: string; rel: string; mtime: number | null; match_count: number; matches: SearchMatch[] };
+export type SearchResponse = {
+  root: string;
+  query: string;
+  results: SearchFileResult[];
+  total_matches: number;
+  total_files: number;
+  truncated: boolean;
+  truncated_reason: 'matches' | 'files' | null;
+};
+export type SearchOptions = { regex?: boolean; caseSensitive?: boolean; wholeWord?: boolean; include?: string; exclude?: string };
+export type ReplaceResponse = {
+  changed: { path: string; rel: string; replacements: number }[];
+  skipped: { path: string; rel: string; reason: string }[];
+  total_replacements: number;
+  files_changed: number;
+  truncated: boolean;
+  undo_token: string | null;
+};
+export type UndoResponse = { restored: string[]; skipped: { path: string; reason: string }[] };
+
+export async function searchFiles(root: string, query: string, opts: SearchOptions = {}, signal?: AbortSignal): Promise<SearchResponse> {
+  const params = new URLSearchParams({ root, query });
+  if (opts.regex) params.set('regex', '1');
+  if (opts.caseSensitive) params.set('case', '1');
+  if (opts.wholeWord) params.set('word', '1');
+  if (opts.include) params.set('include', opts.include);
+  if (opts.exclude) params.set('exclude', opts.exclude);
+  return parse<SearchResponse>(await apiFetch(`/api/files/search?${params.toString()}`, { signal }));
+}
+
+export async function replaceInFiles(
+  root: string,
+  query: string,
+  replacement: string,
+  opts: SearchOptions & { paths?: string[]; expectedMtimes?: Record<string, number> } = {},
+): Promise<ReplaceResponse> {
+  return parse<ReplaceResponse>(
+    await apiFetch('/api/files/search/replace', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        root,
+        query,
+        replacement,
+        regex: opts.regex || undefined,
+        case: opts.caseSensitive || undefined,
+        word: opts.wholeWord || undefined,
+        include: opts.include || undefined,
+        exclude: opts.exclude || undefined,
+        paths: opts.paths,
+        expected_mtimes: opts.expectedMtimes,
+      }),
+    }),
+  );
+}
+
+export async function undoReplace(token: string): Promise<UndoResponse> {
+  return parse<UndoResponse>(
+    await apiFetch('/api/files/search/undo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    }),
+  );
+}
+
 export async function systemFavorites(): Promise<Favorite[]> {
   const data = await parse<{ ok: true; favorites: Favorite[] }>(await apiFetch('/api/browse/favorites'));
   return data.favorites || [];

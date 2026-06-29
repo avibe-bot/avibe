@@ -99,7 +99,11 @@ export const FileEditorPane: React.FC<{
    * save-as picker + write, then re-points this pane at the chosen path.
    */
   onSaveAs?: (text: string) => void;
-}> = ({ path, filename, mtime, readOnly = false, onPopOut, windowId, onDirtyChange, chromeless = false, onCursor, onSaveAs }) => {
+  /** Jump to + select a match (cross-file search result click). Forwarded to Monaco. */
+  reveal?: { line: number; column: number; endColumn: number; nonce: number } | null;
+  /** Bumped to force a re-read from disk (e.g. after a cross-file replace rewrote this file). */
+  reloadNonce?: number;
+}> = ({ path, filename, mtime, readOnly = false, onPopOut, windowId, onDirtyChange, chromeless = false, onCursor, onSaveAs, reveal, reloadNonce }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [text, setText] = useState<string | null>(null);
@@ -138,7 +142,7 @@ export const FileEditorPane: React.FC<{
     return () => {
       cancelled = true;
     };
-  }, [path, filename, mtime]);
+  }, [path, filename, mtime, reloadNonce]);
 
   const dirty = !readOnly && text !== null && text !== original;
   useEffect(() => {
@@ -243,6 +247,7 @@ export const FileEditorPane: React.FC<{
               onChange={(value) => setText(value)}
               onSave={() => void save()}
               onCursorChange={onCursor}
+              reveal={reveal}
             />
           </Suspense>
         )}

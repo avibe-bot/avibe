@@ -102,9 +102,25 @@ export interface MonacoEditorProps {
   onSave?: () => void;
   /** Live 1-based cursor position, for an IDE status bar (`Ln x, Col y`). */
   onCursorChange?: (line: number, column: number) => void;
+  /**
+   * Jump to + select a match (from cross-file search). `line` is 1-based; `column`/`endColumn`
+   * are 0-based offsets within the line (the search backend's convention). `nonce` makes a
+   * repeated jump to the same spot re-fire.
+   */
+  reveal?: { line: number; column: number; endColumn: number; nonce: number } | null;
 }
 
-export default function MonacoEditor({ value, language, path, readOnly, dark = true, onChange, onSave, onCursorChange }: MonacoEditorProps) {
+function applyReveal(editor: monaco.editor.IStandaloneCodeEditor, reveal: { line: number; column: number; endColumn: number }) {
+  const line = Math.max(1, reveal.line);
+  const startColumn = Math.max(1, reveal.column + 1);
+  const endColumn = Math.max(startColumn, reveal.endColumn + 1);
+  const range = { startLineNumber: line, startColumn, endLineNumber: line, endColumn };
+  editor.revealRangeInCenter(range);
+  editor.setSelection(range);
+  editor.focus();
+}
+
+export default function MonacoEditor({ value, language, path, readOnly, dark = true, onChange, onSave, onCursorChange, reveal }: MonacoEditorProps) {
   const { t } = useTranslation();
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   // Keep the latest callbacks in refs: the ⌘S command + cursor listener are bound
@@ -112,9 +128,13 @@ export default function MonacoEditor({ value, language, path, readOnly, dark = t
   // closures rather than capture the first render's.
   const onSaveRef = useRef(onSave);
   const onCursorRef = useRef(onCursorChange);
+  // Hold the latest reveal so handleMount can apply one that arrived before the editor existed
+  // (opening a not-yet-open file from a search result mounts the editor with reveal already set).
+  const revealRef = useRef(reveal);
   useEffect(() => {
     onSaveRef.current = onSave;
     onCursorRef.current = onCursorChange;
+    revealRef.current = reveal;
   });
 
   const handleMount: OnMount = (editor) => {
@@ -123,7 +143,14 @@ export default function MonacoEditor({ value, language, path, readOnly, dark = t
     const pos = editor.getPosition();
     if (pos) onCursorRef.current?.(pos.lineNumber, pos.column);
     editor.onDidChangeCursorPosition((e) => onCursorRef.current?.(e.position.lineNumber, e.position.column));
+    if (revealRef.current) applyReveal(editor, revealRef.current);
   };
+
+  // Already-open file: a new reveal (its nonce changes) jumps + selects the match in place.
+  useEffect(() => {
+    if (editorRef.current && reveal) applyReveal(editorRef.current, reveal);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reveal?.nonce]);
   const handleChange: OnChange = (next) => onChange?.(next ?? '');
 
   // Accessory actions operate on the live editor instance.
