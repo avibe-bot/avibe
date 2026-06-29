@@ -509,8 +509,9 @@ export const AppShell: React.FC = () => {
       >
         <div className="mx-auto w-full px-4 py-5 md:px-10 md:py-8">
           {/* A crashing page only replaces the content area — the sidebar + chrome stay usable, and
-              navigating elsewhere (resetKeys on the path) clears the error without a manual retry. */}
-          <ErrorBoundary variant="page" resetKeys={[location.pathname]}>
+              navigating elsewhere clears the error without a manual retry. Key on location.key (not
+              just pathname) so a query-only navigation (e.g. /search?q=…) also resets. */}
+          <ErrorBoundary variant="page" resetKeys={[location.key]}>
             <Outlet />
           </ErrorBoundary>
         </div>

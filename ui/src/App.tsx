@@ -385,15 +385,15 @@ function App() {
             <WorkbenchInboxProvider>
               <WorkbenchProjectsProvider>
                 <ComposerBridgeProvider>
-                  <BrowserRouter>
-                    {/* Top-level backstop: catches a crash in the shell/providers themselves (the
-                        per-page and per-window boundaries handle the rest) so the app can never go
-                        to a blank white screen. */}
-                    <ErrorBoundary variant="page">
+                  {/* Top-level backstop: wraps the whole router subtree AND the agentation overlay
+                      (the per-page and per-window boundaries handle the rest) so a crash anywhere
+                      below the providers can never reach a blank white screen. */}
+                  <ErrorBoundary variant="page">
+                    <BrowserRouter>
                       <AppRoutes />
-                    </ErrorBoundary>
-                  </BrowserRouter>
-                  <AgentationToggle />
+                    </BrowserRouter>
+                    <AgentationToggle />
+                  </ErrorBoundary>
                 </ComposerBridgeProvider>
               </WorkbenchProjectsProvider>
             </WorkbenchInboxProvider>
