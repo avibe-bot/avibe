@@ -219,6 +219,20 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
     setTabs((ts) => ts.map((tb) => (byId.has(tb.id) && !dirtyRef.current[tb.id] ? { ...tb, mtime: byId.get(tb.id) ?? tb.mtime, reload: (tb.reload ?? 0) + 1 } : tb)));
   }, []);
 
+  // A tree rename moved a file (or a folder containing open files) on disk. Repoint any matching tab
+  // — the renamed file itself (path + display name) and every descendant (path prefix only) — so
+  // edits keep saving against the live path instead of failing as a deleted-file conflict.
+  const onEntryRenamed = useCallback((from: string, to: string) => {
+    setTabs((ts) =>
+      ts.map((tb) => {
+        if (!tb.path) return tb;
+        if (tb.path === from) return { ...tb, path: to, name: to.split('/').filter(Boolean).pop() || tb.name };
+        if (tb.path.startsWith(`${from}/`)) return { ...tb, path: `${to}${tb.path.slice(from.length)}` };
+        return tb;
+      }),
+    );
+  }, []);
+
   // Open the launch file (from the File Browser) once on mount, OR — when the File Browser's
   // "New File" launched us with a target dir — root the explorer there and start a fresh untitled
   // buffer (its first save lands in that dir).
@@ -324,6 +338,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
         if (k !== 'f') return;
         e.preventDefault();
         setView('search');
+        setExplorerCollapsed(false); // ⇧⌘F must reveal the panel even when it's collapsed
         setSearchFocus((n) => n + 1);
         return;
       }
@@ -463,6 +478,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                     activePath={tabs.find((x) => x.id === active)?.path ?? null}
                     onOpenFile={onTreeOpen}
                     refreshSignal={treeRefresh}
+                    onEntryRenamed={onEntryRenamed}
                   />
                 </div>
               )}
@@ -539,6 +555,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                             onSaveAs={(textValue) => saveAs(tab.id, textValue)}
                             reveal={reveal?.tabId === tab.id ? { line: reveal.line, column: reveal.column, endColumn: reveal.endColumn, nonce: reveal.nonce } : null}
                             reloadNonce={tab.reload}
+                            saveHotkey={active === tab.id && wm.focusedId === windowId}
                           />
                         </Suspense>
                       )}

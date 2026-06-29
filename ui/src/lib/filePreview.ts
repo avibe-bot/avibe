@@ -94,6 +94,10 @@ export function isEditableFile(entry: { kind: string; size: number | null; name:
 // ALSO editable text (it keeps its 'source' previewKind), so it can be both edited and rendered.
 const RASTER_IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'ico', 'apng']);
 
+// Mirrors the backend content cap (core/file_browser_service.MAX_FILE_BYTES): `/api/files/content`
+// refuses anything larger with 413, so an oversized image can't be rendered — it must download.
+export const IMAGE_PREVIEW_MAX_BYTES = 25 * 1024 * 1024;
+
 export type ImageKind = 'raster' | 'svg';
 
 // Whether a file can be rendered as an image preview, and how. Deliberately separate from
@@ -109,10 +113,11 @@ export function imageKind(name: string, mime?: string | null): ImageKind | null 
 }
 
 // Whether a file should preview as RENDERED (not edited) when opened from the File Browser: a raster
-// image (no editable text form) is the only such case. SVG/Markdown stay editable, gaining a
-// preview TOGGLE inside the editor instead. A directory or symlink is never previewed here.
-export function isRenderOnlyImage(entry: { kind: string; name: string }): boolean {
-  return entry.kind === 'file' && imageKind(entry.name) === 'raster';
+// image (no editable text form) within the content cap is the only such case. SVG/Markdown stay
+// editable, gaining a preview TOGGLE inside the editor instead. A directory, symlink, or oversized
+// image (which `/api/files/content` would reject) is never previewed here — it falls to download.
+export function isRenderOnlyImage(entry: { kind: string; name: string; size: number | null }): boolean {
+  return entry.kind === 'file' && imageKind(entry.name) === 'raster' && (entry.size == null || entry.size <= IMAGE_PREVIEW_MAX_BYTES);
 }
 
 // Shiki language id for the 'code'/'source' kinds; 'text' (no highlight) otherwise.

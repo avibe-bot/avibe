@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useId, useMemo, useState } from 'react';
+import { Suspense, lazy, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Code2, Eye, Loader2, PanelRightOpen, Save } from 'lucide-react';
 import clsx from 'clsx';
@@ -105,7 +105,13 @@ export const FileEditorPane: React.FC<{
   reveal?: { line: number; column: number; endColumn: number; nonce: number } | null;
   /** Bumped to force a re-read from disk (e.g. after a cross-file replace rewrote this file). */
   reloadNonce?: number;
-}> = ({ path, filename, mtime, readOnly = false, onPopOut, windowId, onDirtyChange, chromeless = false, onCursor, onSaveAs, reveal, reloadNonce }) => {
+  /**
+   * True when this pane is the focused window's active tab. While previewing Markdown/SVG, Monaco
+   * (the usual ⌘S owner) is unmounted and the IDE has no Save button, so the pane registers a
+   * window-level ⌘S itself — scoped by this flag so only the foreground tab saves.
+   */
+  saveHotkey?: boolean;
+}> = ({ path, filename, mtime, readOnly = false, onPopOut, windowId, onDirtyChange, chromeless = false, onCursor, onSaveAs, reveal, reloadNonce, saveHotkey = false }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [text, setText] = useState<string | null>(null);
@@ -127,6 +133,20 @@ export const FileEditorPane: React.FC<{
   useEffect(() => {
     if (!previewable) setMode('source');
   }, [previewable]);
+  // While previewing, Monaco (the usual ⌘S owner) is unmounted, so the foreground tab registers a
+  // window-level ⌘S. `saveRef` holds the latest save() so the listener never saves a stale buffer.
+  const saveRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    if (!(saveHotkey && previewable && mode === 'preview')) return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        void saveRef.current();
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [saveHotkey, previewable, mode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -200,6 +220,7 @@ export const FileEditorPane: React.FC<{
       setSaving(false);
     }
   }
+  saveRef.current = save;
 
   return (
     <div className="flex h-full min-h-0 flex-col">

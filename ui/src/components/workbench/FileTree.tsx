@@ -294,7 +294,10 @@ export const FileTree: React.FC<{
   onOpenFile: (path: string, entry: FsEntry) => void;
   /** Bumped by the editor after a save-as creates a file, so the tree re-lists that folder. */
   refreshSignal?: { path: string; nonce: number } | null;
-}> = ({ rootPath, rootName, activePath, showHidden = false, onOpenFile, refreshSignal }) => {
+  /** A rename happened in the tree (old → new absolute path); the editor repoints any open tab for
+   *  that file or its descendants so saves don't fail against the removed path. */
+  onEntryRenamed?: (from: string, to: string) => void;
+}> = ({ rootPath, rootName, activePath, showHidden = false, onOpenFile, refreshSignal, onEntryRenamed }) => {
   const { t } = useTranslation();
   const [versions, setVersions] = useState<Record<string, number>>({});
   const [edit, setEdit] = useState<EditSession | null>(null);
@@ -337,7 +340,9 @@ export const FileTree: React.FC<{
             setEdit(null);
             return;
           }
-          await renamePath(joinPath(session.dir, session.target as string), name);
+          const from = joinPath(session.dir, session.target as string);
+          const res = await renamePath(from, name);
+          onEntryRenamed?.(from, res.path);
         } else if (session.mode === 'new-folder') {
           await makeDir(joinPath(session.dir, name));
         } else {
@@ -351,7 +356,7 @@ export const FileTree: React.FC<{
         setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.saveFailed')));
       }
     },
-    [t, bump],
+    [t, bump, onEntryRenamed],
   );
 
   const openMenu = useCallback((ev: React.MouseEvent, dir: string, entry: FsEntry | null) => {
