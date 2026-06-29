@@ -292,6 +292,12 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         _, request = controller.agent_service.requests[0]
         self.assertFalse(request.typing_indicator_active)
+        # Reaction is selected but deferred to the runtime gate (not added eagerly).
+        self.assertTrue(request.processing_indicator.reaction_indicator_selected)
+        self.assertIsNone(request.ack_reaction_message_id)
+        self.assertEqual(controller.im_client.reactions, [])
+        # Turn start (gate acquired) promotes to the running 👀 on the message.
+        await controller.processing_indicator.promote_reaction_to_running(request)
         self.assertEqual(request.ack_reaction_message_id, "m1")
         self.assertEqual(request.ack_reaction_emoji, "👀")
         self.assertEqual(controller.im_client.reactions, [("C1", "m1", "👀")])
@@ -589,6 +595,10 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         _, request = controller.agent_service.requests[0]
         self.assertFalse(request.typing_indicator_active)
+        self.assertTrue(request.processing_indicator.reaction_indicator_selected)
+        self.assertIsNone(request.ack_reaction_message_id)
+        self.assertEqual(controller.im_client.reactions, [])
+        await controller.processing_indicator.promote_reaction_to_running(request)
         self.assertEqual(request.ack_reaction_message_id, "m1")
         self.assertEqual(request.ack_reaction_emoji, "👀")
         self.assertEqual(controller.im_client.reactions, [("tg-chat", "m1", "👀")])
@@ -687,6 +697,10 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         _, request = controller.agent_service.requests[0]
         self.assertFalse(request.typing_indicator_active)
         self.assertEqual(controller.im_client.typing_calls, [])
+        self.assertTrue(request.processing_indicator.reaction_indicator_selected)
+        self.assertIsNone(request.ack_reaction_message_id)
+        self.assertEqual(controller.im_client.reactions, [])
+        await controller.processing_indicator.promote_reaction_to_running(request)
         self.assertEqual(request.ack_reaction_message_id, "om_1")
         self.assertEqual(controller.im_client.reactions, [("lark-chat", "om_1", "👀")])
 
@@ -839,7 +853,11 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.subagent_name, "reviewer")
         self.assertEqual(request.subagent_key, "reviewer")
         self.assertEqual(request.message, "check this")
-        self.assertEqual(controller.im_client.reactions, [("C1", "m1", "👀"), ("C1", "m1", "🤖")])
+        # 🤖 is added eagerly in the handler; the ack reaction is deferred to the
+        # gate, so only 🤖 is present until the turn starts and promotes to 👀.
+        self.assertEqual(controller.im_client.reactions, [("C1", "m1", "🤖")])
+        await controller.processing_indicator.promote_reaction_to_running(request)
+        self.assertEqual(controller.im_client.reactions, [("C1", "m1", "🤖"), ("C1", "m1", "👀")])
 
     async def test_scheduled_turn_returns_error_string_after_notifying_im(self):
         controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
@@ -936,12 +954,17 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(controller.im_client.removed_keyboards, [("chat1", "slack", "prompt-msg")])
         self.assertEqual(controller.im_client.sent_messages, [("chat1", "Reply: 按钮 1")])
-        self.assertEqual(controller.im_client.reactions, [("chat1", "msg-1", "👀")])
+        # Reaction deferred to the gate; the echo message id is still the target.
+        self.assertEqual(controller.im_client.reactions, [])
         _, request = controller.agent_service.requests[0]
         self.assertIsNone(request.context.message_id)
-        self.assertEqual(request.ack_reaction_message_id, "msg-1")
+        self.assertTrue(request.processing_indicator.reaction_indicator_selected)
+        self.assertIsNone(request.ack_reaction_message_id)
         self.assertIsNone(request.ack_message_id)
         self.assertFalse(request.typing_indicator_active)
+        await controller.processing_indicator.promote_reaction_to_running(request)
+        self.assertEqual(controller.im_client.reactions, [("chat1", "msg-1", "👀")])
+        self.assertEqual(request.ack_reaction_message_id, "msg-1")
 
     async def test_quick_reply_callback_typing_uses_global_indicator_strategy(self):
         controller = _StubController(platform="telegram", ack_mode="typing", typing_result=True)

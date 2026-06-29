@@ -43,6 +43,8 @@ _EMOJI_MAP: Dict[str, str] = {
     "👀": "OnIt",
     "robot_face": "SMART",
     "🤖": "SMART",
+    "ok_hand": "OK",
+    "👌": "OK",
     "thumbsup": "THUMBSUP",
     "👍": "THUMBSUP",
     "+1": "THUMBSUP",
@@ -823,6 +825,16 @@ class FeishuBot(BaseIMClient):
     async def add_reaction(self, context: MessageContext, message_id: str, emoji: str) -> bool:
         self._ensure_client()
         emoji_type = _normalize_emoji(emoji)
+        if not emoji_type.isascii():
+            # Feishu emoji_type values are ASCII keys (e.g. ``OK``, ``SMART``). A
+            # non-ASCII value means the raw unicode emoji has no mapping and the API
+            # will reject it — surface it instead of failing silently. Add the
+            # mapping to ``_EMOJI_MAP``.
+            logger.warning(
+                "Feishu reaction %r has no emoji_type mapping; the API will reject it. "
+                "Add it to feishu._EMOJI_MAP.",
+                emoji,
+            )
         try:
             from lark_oapi.api.im.v1 import (
                 CreateMessageReactionRequest,

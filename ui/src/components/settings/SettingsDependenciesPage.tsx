@@ -10,6 +10,7 @@ import {
   Loader2,
   RefreshCw,
   ShieldCheck,
+  SquareTerminal,
   Terminal,
   WandSparkles,
 } from 'lucide-react';
@@ -36,6 +37,7 @@ const DEP_META: Record<string, DepMeta> = {
   askill: { icon: WandSparkles, tileCls: 'bg-mint-soft', iconCls: 'text-mint' },
   avault: { icon: KeyRound, tileCls: 'bg-gold-soft', iconCls: 'text-gold' },
   'show-runtime': { icon: LayoutDashboard, tileCls: 'bg-cyan-soft', iconCls: 'text-cyan' },
+  tmux: { icon: SquareTerminal, tileCls: 'bg-surface-3', iconCls: 'text-foreground' },
   node: { icon: Hexagon, tileCls: 'bg-violet-soft', iconCls: 'text-violet' },
 };
 
@@ -80,6 +82,7 @@ export const SettingsDependenciesPage: React.FC = () => {
 
   const statusText = (d: DependencyItem) => {
     if (!d.installed) return t('settings.dependencies.statusMissing');
+    if (d.status === 'upgrade_required') return t('settings.dependencies.statusUpgradeRequired');
     const word = d.kind === 'node' ? t('settings.dependencies.statusDetected') : t('settings.dependencies.statusReady');
     return d.version ? `${word} · v${String(d.version).replace(/^v/i, '')}` : word;
   };
@@ -108,7 +111,8 @@ export const SettingsDependenciesPage: React.FC = () => {
           {deps.map((d) => {
             const meta = DEP_META[d.id] ?? DEP_META.node;
             const installing = busy === d.id;
-            const showAction = d.id === 'askill' || d.id === 'avault' || d.id === 'show-runtime';
+            const showAction =
+              d.id === 'askill' || d.id === 'avault' || d.id === 'show-runtime' || d.id === 'tmux';
             return (
               <SettingsResourceRow
                 key={d.id}
@@ -126,7 +130,7 @@ export const SettingsDependenciesPage: React.FC = () => {
                 detail={t(`settings.dependencies.items.${d.id}.detail`)}
                 actions={
                   <>
-                    <Badge variant={d.installed ? 'success' : 'destructive'} className="font-mono">
+                    <Badge variant={d.status === 'upgrade_required' ? 'warning' : d.installed ? 'success' : 'destructive'} className="font-mono">
                       {statusText(d)}
                     </Badge>
                     {showAction && (

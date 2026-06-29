@@ -1,6 +1,8 @@
 import json
 from dataclasses import dataclass
 
+import pytest
+
 from config import paths
 from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, UiConfig, V2Config
 from core.show_pages import ShowPageError, ShowPageStore, ensure_show_page_dir, show_cli_event_token, show_page_payload
@@ -12,6 +14,27 @@ from vibe import cli
 class _FakeShowRuntimeResult:
     available: bool
     reason: str | None = None
+
+
+def _stub_runtime_prepare_dependencies(monkeypatch, *, askill_result=None, avault_result=None, tmux_result=None):
+    calls = {"askill": [], "avault": [], "tmux": []}
+
+    def fake_askill(offline=False):
+        calls["askill"].append({"offline": offline})
+        return askill_result or {"ok": True, "installed": True}
+
+    def fake_avault(offline=False):
+        calls["avault"].append({"offline": offline})
+        return avault_result or {"ok": True, "installed": True}
+
+    def fake_tmux(offline=False, force=False):
+        calls["tmux"].append({"offline": offline, "force": force})
+        return tmux_result or {"ok": True, "installed": True}
+
+    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", fake_askill)
+    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", fake_avault)
+    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", fake_tmux)
+    return calls
 
 
 def test_show_without_subcommand_prints_help(capsys):
@@ -40,8 +63,7 @@ def test_runtime_prepare_cli_reports_warning_only_failure(monkeypatch, capsys):
             return {"ok": False, "reason": "runtime_node_missing"}
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
-    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda offline=False: {"ok": True, "installed": True})
-    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda offline=False: {"ok": True, "installed": True})
+    calls = _stub_runtime_prepare_dependencies(monkeypatch)
 
     assert cli.cmd_runtime(args) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -49,6 +71,8 @@ def test_runtime_prepare_cli_reports_warning_only_failure(monkeypatch, capsys):
     assert payload["reason"] == "runtime_node_missing"
     assert payload["askill"] == {"ok": True, "installed": True}
     assert payload["avault"] == {"ok": True, "installed": True}
+    assert payload["tmux"] == {"ok": True, "installed": True}
+    assert calls["tmux"] == [{"offline": False, "force": False}]
 
 
 def test_runtime_prepare_cli_preserves_offline_environment(monkeypatch):
@@ -62,10 +86,10 @@ def test_runtime_prepare_cli_preserves_offline_environment(monkeypatch):
             return {"ok": True}
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
-    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda offline=False: {"ok": True, "installed": True})
-    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda offline=False: {"ok": True, "installed": True})
+    calls = _stub_runtime_prepare_dependencies(monkeypatch)
 
     assert cli.cmd_runtime(args) == 0
+    assert calls["tmux"] == [{"offline": False, "force": False}]
 
 
 def test_runtime_manager_from_args_preserves_offline_environment(monkeypatch, tmp_path):
@@ -88,17 +112,17 @@ def test_runtime_prepare_cli_strict_fails_when_prepare_fails(monkeypatch, capsys
             return {"ok": False, "reason": "runtime_archive_download_failed"}
 
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
-    monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda offline=False: {"ok": True, "installed": True})
-    monkeypatch.setattr(cli, "_ensure_avault_during_prepare", lambda offline=False: {"ok": True, "installed": True})
+    calls = _stub_runtime_prepare_dependencies(monkeypatch)
 
     assert cli.cmd_runtime(args) == 1
     assert "runtime_archive_download_failed" in capsys.readouterr().err
+    assert calls["tmux"] == [{"offline": False, "force": False}]
 
 
 def test_runtime_prepare_cli_skips_avault_offline(monkeypatch, capsys):
     parser = cli.build_parser()
     args = parser.parse_args(["runtime", "prepare", "--offline", "--json"])
-    seen = {"askill": None, "avault": None}
+    seen = {"askill": None, "avault": None, "tmux": None}
 
     class FakeRuntimeManager:
         def prepare(self, *, force=False, offline=None):
@@ -113,14 +137,58 @@ def test_runtime_prepare_cli_skips_avault_offline(monkeypatch, capsys):
         seen["avault"] = offline
         return {"ok": True, "skipped": True, "reason": "offline"}
 
+    def fake_tmux(offline=False, force=False):
+        seen["tmux"] = {"offline": offline, "force": force}
+        return {"ok": True, "skipped": True, "reason": "offline"}
+
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
     monkeypatch.setattr(cli, "_ensure_askill_during_prepare", fake_askill)
     monkeypatch.setattr(cli, "_ensure_avault_during_prepare", fake_avault)
+    monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", fake_tmux)
 
     assert cli.cmd_runtime(args) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert seen == {"askill": True, "avault": True}
+    assert seen == {"askill": True, "avault": True, "tmux": {"offline": True, "force": False}}
     assert payload["avault"] == {"ok": True, "skipped": True, "reason": "offline"}
+    assert payload["tmux"] == {"ok": True, "skipped": True, "reason": "offline"}
+
+
+def test_runtime_prepare_cli_prints_status_skipped_tmux_as_skipped(monkeypatch, capsys):
+    parser = cli.build_parser()
+    args = parser.parse_args(["runtime", "prepare"])
+
+    class FakeRuntimeManager:
+        def prepare(self, *, force=False, offline=None):
+            return {"ok": True}
+
+    monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+    _stub_runtime_prepare_dependencies(
+        monkeypatch,
+        tmux_result={"ok": True, "status": "skipped", "reason": "terminal_disabled"},
+    )
+
+    assert cli.cmd_runtime(args) == 0
+    captured = capsys.readouterr()
+    assert "tmux: skipped (terminal_disabled)." in captured.out
+    assert "tmux ready." not in captured.out
+
+
+def test_runtime_prepare_tmux_respects_terminal_disabled(monkeypatch):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "0")
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_TMUX", raising=False)
+    monkeypatch.setattr("core.tmux_runtime.ensure_tmux_installed", lambda force=False: pytest.fail("tmux install should be skipped"))
+
+    assert cli._ensure_tmux_during_prepare() == {"ok": True, "status": "skipped", "reason": "terminal_disabled"}
+
+
+def test_runtime_prepare_tmux_runs_when_terminal_enabled(monkeypatch):
+    calls = []
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.delenv("VIBE_INSTALL_SKIP_TMUX", raising=False)
+    monkeypatch.setattr("core.tmux_runtime.ensure_tmux_installed", lambda force=False: calls.append(force) or {"ok": True})
+
+    assert cli._ensure_tmux_during_prepare(force=True) == {"ok": True}
+    assert calls == [True]
 
 
 def _save_config() -> V2Config:
@@ -579,6 +647,40 @@ def test_show_path_cli_keeps_page_when_prewarm_fails(monkeypatch, tmp_path, caps
     assert (tmp_path / "show" / "ses123" / "index.html").exists()
 
 
+def test_show_path_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "sesCaller")
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {})
+
+    args = cli.build_parser().parse_args(["show", "path", "--json"])
+    assert cli.cmd_show_path(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["session_id"] == "sesCaller"
+    assert payload["session_default_notice"] == {
+        "code": "session_defaulted_to_caller",
+        "message": "Show Page session defaulted to the caller Session from AVIBE_SESSION_ID.",
+        "session_id": "sesCaller",
+    }
+    assert (tmp_path / "show" / "sesCaller" / "index.html").exists()
+
+
+def test_show_path_requires_session_without_caller(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+    paths.ensure_data_dirs()
+    _save_config()
+
+    args = cli.build_parser().parse_args(["show", "path", "--json"])
+    assert cli.cmd_show_path(args) == 1
+
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["code"] == "missing_session_target"
+    assert payload["help_command"] == "vibe show path --help"
+
+
 def test_show_path_cli_prewarm_uses_verified_loopback_for_non_loopback_host(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
@@ -831,6 +933,29 @@ def test_show_update_cli_reports_transition_urls(monkeypatch, tmp_path, capsys):
     assert prewarmed[-1] == ("http://127.0.0.1:5123/api/show/sessions/ses123/prewarm", {})
 
 
+def test_show_status_and_update_default_to_caller_session(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "sesCaller")
+    paths.ensure_data_dirs()
+    _save_config()
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {})
+
+    parser = cli.build_parser()
+    assert cli.cmd_show_path(parser.parse_args(["show", "path", "--json"])) == 0
+    capsys.readouterr()
+
+    assert cli.cmd_show_status(parser.parse_args(["show", "status", "--json"])) == 0
+    status_payload = json.loads(capsys.readouterr().out)
+    assert status_payload["session_id"] == "sesCaller"
+    assert status_payload["session_default_notice"]["session_id"] == "sesCaller"
+
+    assert cli.cmd_show_update(parser.parse_args(["show", "update", "--visibility", "public", "--json"])) == 0
+    update_payload = json.loads(capsys.readouterr().out)
+    assert update_payload["session_id"] == "sesCaller"
+    assert update_payload["visibility"] == "public"
+    assert update_payload["session_default_notice"]["session_id"] == "sesCaller"
+
+
 def test_show_update_rotate_share_fails_while_private(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
@@ -900,6 +1025,61 @@ def test_show_mark_cli_records_event_and_message(monkeypatch, tmp_path, capsys):
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.id)).scalar_one() == payload["event"]["id"]
         assert "Review this summary." in conn.execute(select(messages.c.content_text)).scalar_one()
+
+
+def test_show_mark_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
+    from sqlalchemy import select
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, show_session_events
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "sesCaller")
+    paths.ensure_data_dirs()
+    _save_config()
+    ensure_sqlite_state()
+
+    engine = create_sqlite_engine()
+    now = messages_service._utc_now_iso()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_show", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="sesCaller",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor_sesCaller",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "mark",
+            "--target",
+            "mark-default-summary",
+            "--body",
+            "Review this summary.",
+            "--json",
+        ]
+    )
+    assert cli.cmd_show(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["session_id"] == "sesCaller"
+    assert payload["session_default_notice"]["session_id"] == "sesCaller"
+    with engine.connect() as conn:
+        assert conn.execute(select(show_session_events.c.session_id)).scalar_one() == "sesCaller"
 
 
 def test_show_mark_cli_posts_to_live_ui_when_running(monkeypatch, tmp_path, capsys):
@@ -1036,6 +1216,61 @@ def test_show_event_cli_records_generic_event(monkeypatch, tmp_path, capsys):
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.id)).scalar_one() == payload["event"]["id"]
         assert "Clarify this." in conn.execute(select(messages.c.content_text)).scalar_one()
+
+
+def test_show_event_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
+    from sqlalchemy import select
+
+    from storage import messages_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, show_session_events
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "sesCaller")
+    paths.ensure_data_dirs()
+    _save_config()
+    ensure_sqlite_state()
+
+    engine = create_sqlite_engine()
+    now = messages_service._utc_now_iso()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_show", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="sesCaller",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="anchor_sesCaller",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+
+    args = cli.build_parser().parse_args(
+        [
+            "show",
+            "event",
+            "--type",
+            "assistant.page.updated",
+            "--event-json",
+            '{"summary":"Updated."}',
+            "--json",
+        ]
+    )
+    assert cli.cmd_show(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["session_id"] == "sesCaller"
+    assert payload["session_default_notice"]["session_id"] == "sesCaller"
+    with engine.connect() as conn:
+        assert conn.execute(select(show_session_events.c.session_id)).scalar_one() == "sesCaller"
 
 
 def test_show_event_cli_dispatch_flag_updates_annotation_payload(monkeypatch, tmp_path):

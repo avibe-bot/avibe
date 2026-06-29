@@ -14,6 +14,7 @@ from config.v2_config import (
     DEFAULT_CODEX_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
 )
 from core.avibe_cloud import avibe_cloud_url_available
+from core.caller_context import caller_env_for_platform_payload
 from core.services.session_fork import fork_source_state, pending_native_fork
 from core.system_prompt_injection import (
     build_forked_session_correction_prompt,
@@ -83,6 +84,8 @@ class CodexAgent(BaseAgent):
         self._session_locks: Dict[str, asyncio.Lock] = {}
         # base_session_id → (thread_id, developer_instructions)
         self._thread_developer_instructions: Dict[str, tuple[str, str]] = {}
+        # base_session_id → (thread_id, AVIBE_* caller env)
+        self._thread_caller_env_configs: Dict[str, tuple[str, dict[str, str]]] = {}
         self._fork_correction_pending_base_sessions: set[str] = set()
 
     # ------------------------------------------------------------------
@@ -725,6 +728,22 @@ class CodexAgent(BaseAgent):
     # Thread management
     # ------------------------------------------------------------------
 
+    def _caller_env_for_request(self, request: AgentRequest) -> dict[str, str]:
+        context = getattr(request, "context", None)
+        return caller_env_for_platform_payload(getattr(context, "platform_specific", None))
+
+    def _inject_caller_env_config(self, params: Dict[str, Any], request: AgentRequest) -> None:
+        env = self._caller_env_for_request(request)
+        if not env:
+            return
+        config = dict(params.get("config") or {})
+        shell_policy = dict(config.get("shell_environment_policy") or {})
+        set_env = dict(shell_policy.get("set") or {})
+        set_env.update(env)
+        shell_policy["set"] = set_env
+        config["shell_environment_policy"] = shell_policy
+        params["config"] = config
+
     async def _start_thread(
         self,
         transport: CodexTransport,
@@ -740,6 +759,7 @@ class CodexAgent(BaseAgent):
         developer_instructions = self._build_thread_developer_instructions(request)
         if developer_instructions:
             params["developerInstructions"] = developer_instructions
+        self._inject_caller_env_config(params, request)
 
         resp = await transport.send_request("thread/start", params)
         # thread/start returns Thread directly OR may nest under "thread"
@@ -755,6 +775,11 @@ class CodexAgent(BaseAgent):
         # Also persist for resume support
         self.bind_agent_session_id(request, thread_id)
         self._remember_thread_developer_instructions(request.base_session_id, thread_id, developer_instructions)
+        self._remember_thread_caller_env_config(
+            request.base_session_id,
+            thread_id,
+            self._caller_env_for_request(request),
+        )
         return thread_id
 
     async def _fork_thread(
@@ -778,6 +803,7 @@ class CodexAgent(BaseAgent):
             params["developerInstructions"] = developer_instructions
         if effective_model:
             params["model"] = effective_model
+        self._inject_caller_env_config(params, request)
 
         self._mark_fork_correction_pending(request.base_session_id)
         try:
@@ -799,6 +825,11 @@ class CodexAgent(BaseAgent):
         self._session_mgr.set_thread_id(request.base_session_id, thread_id)
         self.bind_agent_session_id(request, thread_id)
         self._remember_thread_developer_instructions(request.base_session_id, thread_id, developer_instructions)
+        self._remember_thread_caller_env_config(
+            request.base_session_id,
+            thread_id,
+            self._caller_env_for_request(request),
+        )
         logger.info("Forked Codex thread %s from %s for session %s", thread_id, source_thread_id, request.base_session_id)
         return thread_id
 
@@ -932,6 +963,7 @@ class CodexAgent(BaseAgent):
                     "threadId": persisted,
                     "developerInstructions": self._build_thread_developer_instructions(request),
                 }
+                self._inject_caller_env_config(resume_params, request)
                 model_provider = await self._resolve_resume_model_provider_override(transport, request, persisted)
                 if model_provider:
                     resume_params["modelProvider"] = model_provider
@@ -1128,21 +1160,30 @@ class CodexAgent(BaseAgent):
     ) -> None:
         """Refresh thread-level instructions for already-cached Codex threads."""
         self.ensure_agent_session_id(request)
+        caller_env = self._caller_env_for_request(request)
         developer_instructions = self._build_thread_developer_instructions(request)
-        if not developer_instructions:
+        if not developer_instructions and not caller_env:
             return
 
         if not hasattr(self, "_thread_developer_instructions"):
             self._thread_developer_instructions = {}
+        if not hasattr(self, "_thread_caller_env_configs"):
+            self._thread_caller_env_configs = {}
 
         cached = self._thread_developer_instructions.get(request.base_session_id)
-        if cached == (thread_id, developer_instructions):
+        cached_caller_env = self._thread_caller_env_configs.get(request.base_session_id)
+        if cached == (thread_id, developer_instructions) and (
+            not caller_env or cached_caller_env == (thread_id, caller_env)
+        ):
             return
 
         resume_params: Dict[str, Any] = {
             "threadId": thread_id,
-            "developerInstructions": developer_instructions,
         }
+        if cached != (thread_id, developer_instructions):
+            resume_params["developerInstructions"] = developer_instructions
+        if caller_env:
+            self._inject_caller_env_config(resume_params, request)
         model_provider = await self._resolve_resume_model_provider_override(transport, request, thread_id)
         if model_provider:
             resume_params["modelProvider"] = model_provider
@@ -1156,6 +1197,7 @@ class CodexAgent(BaseAgent):
             thread_id,
             developer_instructions,
         )
+        self._remember_thread_caller_env_config(request.base_session_id, thread_id, caller_env)
 
     def _remember_thread_developer_instructions(
         self,
@@ -1169,9 +1211,23 @@ class CodexAgent(BaseAgent):
             self._thread_developer_instructions = {}
         self._thread_developer_instructions[base_session_id] = (thread_id, developer_instructions)
 
+    def _remember_thread_caller_env_config(
+        self,
+        base_session_id: str,
+        thread_id: str,
+        caller_env: dict[str, str],
+    ) -> None:
+        if not caller_env:
+            return
+        if not hasattr(self, "_thread_caller_env_configs"):
+            self._thread_caller_env_configs = {}
+        self._thread_caller_env_configs[base_session_id] = (thread_id, dict(caller_env))
+
     def _clear_thread_developer_instructions(self, base_session_id: str) -> None:
         if hasattr(self, "_thread_developer_instructions"):
             self._thread_developer_instructions.pop(base_session_id, None)
+        if hasattr(self, "_thread_caller_env_configs"):
+            self._thread_caller_env_configs.pop(base_session_id, None)
 
     def _fork_correction_pending_sessions(self) -> set[str]:
         if not hasattr(self, "_fork_correction_pending_base_sessions"):

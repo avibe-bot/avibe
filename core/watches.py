@@ -70,6 +70,7 @@ class ManagedWatch:
     last_event_at: Optional[str] = None
     last_error: Optional[str] = None
     last_exit_code: Optional[int] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -103,6 +104,7 @@ class ManagedWatch:
             last_event_at=payload.get("last_event_at"),
             last_error=payload.get("last_error"),
             last_exit_code=(int(payload["last_exit_code"]) if payload.get("last_exit_code") is not None else None),
+            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
         )
 
 
@@ -207,6 +209,7 @@ class ManagedWatchStore:
         agent_name: Optional[str] = None,
         session_policy: Optional[str] = None,
         message: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> ManagedWatch:
         watch = ManagedWatch(
             id=uuid4().hex[:12],
@@ -227,6 +230,7 @@ class ManagedWatchStore:
             retry_delay_seconds=retry_delay_seconds,
             post_to=post_to,
             deliver_key=deliver_key,
+            metadata=dict(metadata or {}),
         )
         return self.upsert_watch(watch)
 

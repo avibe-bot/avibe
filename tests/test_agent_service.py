@@ -224,6 +224,357 @@ def test_agent_service_serializes_same_runtime_until_terminal_release() -> None:
     asyncio.run(_run())
 
 
+class _RecordingIndicator:
+    """Records the queued/promote/finish reaction calls the gate drives."""
+
+    def __init__(self, log: list[str]):
+        self._log = log
+
+    async def show_queued_reaction(self, _request):
+        self._log.append("show_queued")
+        return True
+
+    async def promote_reaction_to_running(self, _request, *, agent_name=None):
+        self._log.append("promote")
+
+    async def finish(self, _request_or_handle):
+        self._log.append("finish")
+
+
+class _IndicatorController(_Controller):
+    def __init__(self, log: list[str]):
+        super().__init__()
+        self.processing_indicator = _RecordingIndicator(log)
+
+
+def test_agent_service_shows_queued_reaction_then_promotes_on_start() -> None:
+    async def _run():
+        log: list[str] = []
+        controller = _IndicatorController(log)
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        release_first = asyncio.Event()
+        agent = _RuntimeAgent(release_first)
+        service.register(agent)
+
+        first_request = _request("first")
+        first = asyncio.create_task(service.handle_message("claude", first_request))
+        await asyncio.sleep(0)
+        assert agent.started == ["first"]
+
+        second = asyncio.create_task(service.handle_message("claude", _request("second")))
+        await asyncio.sleep(0.05)
+        # Only the SECOND message is queued (the first holds the gate): it shows the
+        # queued 👌 and is blocked on acquire(). The first ran uncontended, so it
+        # never showed 👌 and has already promoted to 👀.
+        assert "show_queued" in log
+        assert log.count("promote") == 1
+
+        service.release_runtime_turn(first_request.context)
+        release_first.set()
+        await asyncio.wait_for(first, timeout=3)
+        await asyncio.wait_for(second, timeout=3)
+
+        assert log.count("show_queued") == 1  # only the genuinely-queued turn shows 👌
+        assert log.count("promote") == 2  # both turns promoted when they started
+        assert "finish" not in log  # no cancellation occurred
+
+    asyncio.run(_run())
+
+
+def test_agent_service_cleans_queued_reaction_when_cancelled_while_waiting() -> None:
+    async def _run():
+        log: list[str] = []
+        controller = _IndicatorController(log)
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        release_first = asyncio.Event()
+        agent = _RuntimeAgent(release_first)
+        service.register(agent)
+
+        first_request = _request("first")
+        first = asyncio.create_task(service.handle_message("claude", first_request))
+        await asyncio.sleep(0)
+        assert agent.started == ["first"]
+
+        second = asyncio.create_task(service.handle_message("claude", _request("second")))
+        await asyncio.sleep(0.05)
+        assert "show_queued" in log
+
+        # Cancel the queued message while it is still blocked on gate.acquire():
+        # its queued 👌 must be cleaned up (P0.1), and it must never promote.
+        second.cancel()
+        try:
+            await second
+        except asyncio.CancelledError:
+            pass
+
+        assert "finish" in log
+        assert log.count("promote") == 1
+
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+
+    asyncio.run(_run())
+
+
+class _ReactionIM:
+    """Records the real reaction add/remove calls per message id."""
+
+    def __init__(self):
+        self.events: list[tuple[str, str, str]] = []
+
+    async def add_reaction(self, context, message_id, emoji):
+        self.events.append(("add", message_id, emoji))
+        return True
+
+    async def remove_reaction(self, context, message_id, emoji):
+        self.events.append(("remove", message_id, emoji))
+        return True
+
+
+class _RealIndicatorController(_Controller):
+    """Wires the REAL ProcessingIndicatorService so the gate exercises the actual
+    show_queued/promote path (not a recording stub)."""
+
+    def __init__(self, im: _ReactionIM):
+        super().__init__()
+        from core.processing_indicator import ProcessingIndicatorService
+
+        self.config = SimpleNamespace(ack_mode="reaction", language="en")
+        self._im = im
+        self.processing_indicator = ProcessingIndicatorService(self)
+
+    def get_im_client_for_context(self, _context):
+        return self._im
+
+
+def _reaction_request(message: str, message_id: str, runtime_key: str = "session:/repo"):
+    from core.processing_indicator import ProcessingIndicatorHandle
+
+    context = SimpleNamespace(
+        platform_specific={},
+        message_id=message_id,
+        platform="slack",
+        channel_id="C1",
+    )
+    handle = ProcessingIndicatorHandle(context=context, reaction_indicator_selected=True)
+    return SimpleNamespace(
+        context=context,
+        message=message,
+        composite_session_id=runtime_key,
+        processing_indicator=handle,
+        ack_reaction_message_id=None,
+        ack_reaction_emoji=None,
+        ack_message_id=None,
+        typing_indicator_active=False,
+        typing_indicator_task=None,
+    )
+
+
+def test_real_indicator_shows_queued_reaction_on_second_message_while_first_holds_gate() -> None:
+    """High-fidelity: the REAL ProcessingIndicatorService must put 👌 on the SECOND
+    message while the FIRST still holds the runtime gate, then promote it to 👀."""
+
+    async def _run():
+        from core.processing_indicator import ACK_REACTION_EMOJI, QUEUED_REACTION_EMOJI
+
+        im = _ReactionIM()
+        controller = _RealIndicatorController(im)
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        release_first = asyncio.Event()
+        agent = _RuntimeAgent(release_first)
+        service.register(agent)
+
+        req1 = _reaction_request("first", "m1")
+        first = asyncio.create_task(service.handle_message("claude", req1))
+        for _ in range(200):
+            if ("add", "m1", ACK_REACTION_EMOJI) in im.events:
+                break
+            await asyncio.sleep(0)
+        # First (uncontended) has started and shows the running 👀 directly — it must
+        # NOT have shown the queued 👌 (no 👌→👀 flash for a non-queued message).
+        assert ("add", "m1", ACK_REACTION_EMOJI) in im.events, im.events
+        assert ("add", "m1", QUEUED_REACTION_EMOJI) not in im.events, im.events
+
+        req2 = _reaction_request("second", "m2")
+        second = asyncio.create_task(service.handle_message("claude", req2))
+        for _ in range(200):
+            if ("add", "m2", QUEUED_REACTION_EMOJI) in im.events:
+                break
+            await asyncio.sleep(0)
+
+        # THE KEY ASSERTION: the queued 👌 is on m2 while m1's turn still holds the
+        # gate (m2 has not been promoted to 👀 yet).
+        assert ("add", "m2", QUEUED_REACTION_EMOJI) in im.events, im.events
+        assert ("add", "m2", ACK_REACTION_EMOJI) not in im.events, im.events
+
+        release_first.set()
+        service.release_runtime_turn(req1.context)
+        await asyncio.wait_for(first, timeout=3)
+        await asyncio.wait_for(second, timeout=3)
+
+        # Once m2's turn starts, 👌 is removed and 👀 added on m2.
+        assert ("remove", "m2", QUEUED_REACTION_EMOJI) in im.events, im.events
+        assert ("add", "m2", ACK_REACTION_EMOJI) in im.events, im.events
+
+    asyncio.run(_run())
+
+
+def test_processing_indicator_tracked_before_promote() -> None:
+    """Regression (Codex P2): the indicator handle must be tracked (registered for
+    terminal/cancel cleanup) BEFORE the promote await, so a cancel during promote
+    can still find and finish it instead of leaking the queued/fallback indicator."""
+
+    async def _run():
+        log: list[str] = []
+
+        class _Indicator:
+            def track_turn(self, _context, _request):
+                log.append("track")
+
+            async def show_queued_reaction(self, _request):
+                return False
+
+            async def promote_reaction_to_running(self, _request, *, agent_name=None):
+                log.append("promote")
+
+            async def finish(self, _request_or_handle):
+                log.append("finish")
+
+        controller = _Controller()
+        controller.processing_indicator = _Indicator()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        service.register(_RuntimeAgent())
+
+        request = _request("first")
+        request.processing_indicator = object()  # truthy so _track_processing_indicator_turn runs
+        await service.handle_message("claude", request)
+
+        assert log[:2] == ["track", "promote"], log
+
+    asyncio.run(_run())
+
+
+def test_gate_released_when_cancelled_during_promote() -> None:
+    """Regression (Codex P1): a cancel after acquire() but during the
+    settle/promote awaits must still release the runtime gate, or the token + lock
+    leak and later prompts for the same runtime key block forever."""
+
+    async def _run():
+        promote_started = asyncio.Event()
+        block = asyncio.Event()
+
+        class _BlockingIndicator:
+            async def show_queued_reaction(self, _request):
+                return False
+
+            async def promote_reaction_to_running(self, _request, *, agent_name=None):
+                promote_started.set()
+                await block.wait()  # cancel hits here, inside the managed try
+
+            async def finish(self, _request_or_handle):
+                return None
+
+        controller = _Controller()
+        controller.processing_indicator = _BlockingIndicator()
+        controller.emit_agent_message = AsyncMock()  # used by the cancel tidy
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        service.register(_RuntimeAgent())
+
+        request = _request("first")
+        task = asyncio.create_task(service.handle_message("claude", request))
+        await asyncio.wait_for(promote_started.wait(), timeout=2)
+        gate = service._get_turn_gate("session:/repo")
+        assert gate.lock.locked()  # acquired, currently in promote
+
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=2)
+        except BaseException:
+            pass
+
+        # The CancelledError handler schedules a tidy task that releases the gate.
+        released = False
+        for _ in range(200):
+            await asyncio.sleep(0)
+            if not gate.lock.locked() and gate.token == "":
+                released = True
+                break
+        assert released  # gate token + lock released despite cancel during promote
+
+    asyncio.run(_run())
+
+
+def test_queued_reaction_does_not_delay_gate_acquire_fifo() -> None:
+    """Regression (Codex P1): a contended turn must reserve its FIFO place on the
+    runtime gate WITHOUT waiting for the (network) queued-reaction call. If the 👌
+    add were awaited before acquire(), a later same-runtime message could acquire
+    first and reorder prompts."""
+
+    async def _run():
+        log: list[str] = []
+        block = asyncio.Event()
+
+        class _SlowIndicator:
+            async def show_queued_reaction(self, _request):
+                log.append("show_queued_start")
+                await block.wait()  # simulate slow Slack/Feishu reaction API
+                return True
+
+            async def promote_reaction_to_running(self, _request, *, agent_name=None):
+                log.append("promote")
+
+            async def finish(self, _request_or_handle):
+                log.append("finish")
+
+        controller = _Controller()
+        controller.processing_indicator = _SlowIndicator()
+        service = AgentService(controller=controller)
+        controller.agent_service = service
+        release_first = asyncio.Event()
+        agent = _RuntimeAgent(release_first)
+        service.register(agent)
+
+        first_request = _request("first")
+        first = asyncio.create_task(service.handle_message("claude", first_request))
+        await asyncio.sleep(0)
+        assert agent.started == ["first"]
+        gate = service._get_turn_gate("session:/repo")
+
+        second = asyncio.create_task(service.handle_message("claude", _request("second")))
+        # Let the second turn run far enough to fire the queued-reaction task and
+        # reach acquire(). Its show_queued is blocked forever, so if acquire() were
+        # gated behind it the gate would have NO waiter.
+        entered_queue = False
+        for _ in range(200):
+            await asyncio.sleep(0)
+            if not entered_queue and gate.lock._waiters and len(gate.lock._waiters) >= 1:
+                entered_queue = True
+            if entered_queue and "show_queued_start" in log:
+                break
+        # The turn reserved its FIFO place on the gate (it is a waiter) even though
+        # its queued reaction is still blocked — proving acquire() was NOT gated
+        # behind the reaction network call.
+        assert entered_queue
+        assert "show_queued_start" in log  # the queued reaction was kicked off concurrently
+
+        # Cleanup: unblock everything and let the tasks settle.
+        block.set()
+        release_first.set()
+        service.release_runtime_turn(first_request.context)
+        for task in (first, second):
+            try:
+                await asyncio.wait_for(task, timeout=3)
+            except Exception:
+                pass
+
+    asyncio.run(_run())
+
+
 def test_agent_service_allows_distinct_runtime_keys_in_parallel() -> None:
     async def _run():
         service = AgentService(controller=_Controller())

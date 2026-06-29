@@ -958,9 +958,13 @@ class Controller:
         # Owned by the turn owner (FSM); exposed here for back-compat readers.
         return self.session_turns.active_turn_sinks
 
-    def register_turn_sink(self, session_key: str, *, on_chunk, done_event, turn_token=None) -> None:
+    def register_turn_sink(self, session_key: str, *, on_chunk, done_event, turn_token=None, context=None) -> None:
         self.session_turns.register_turn_sink(
-            session_key, on_chunk=on_chunk, done_event=done_event, turn_token=turn_token
+            session_key,
+            on_chunk=on_chunk,
+            done_event=done_event,
+            turn_token=turn_token,
+            context=context,
         )
 
     def pop_turn_sink(self, session_key: str, done_event=None) -> None:
@@ -968,6 +972,22 @@ class Controller:
 
     def get_turn_sink(self, session_key: str) -> Optional[Dict[str, Any]]:
         return self.session_turns.get_turn_sink(session_key)
+
+    def bind_context_to_turn_sink(
+        self,
+        context: MessageContext,
+        *,
+        agent_session_id: Optional[str] = None,
+        backend_base_session_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        return self.session_turns.bind_context_to_turn_sink(
+            context,
+            agent_session_id=agent_session_id,
+            backend_base_session_id=backend_base_session_id,
+        )
+
+    def settle_bound_turn_sink(self, binding: Optional[Dict[str, Any]]) -> bool:
+        return self.session_turns.settle_bound_turn_sink(binding)
 
     def mark_turn_complete(self, context: Optional[MessageContext] = None) -> None:
         """Release a streaming turn sink whose turn finished WITHOUT emitting a

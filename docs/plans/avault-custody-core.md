@@ -1,6 +1,6 @@
 # avault — Rust custody core for Avibe Vaults (Avibe-side integration)
 
-**Status:** Approved · implementation started. The custody core lives in its own repo:
+**Status:** P0→P2 implemented & merged (2026-06-28); agent-consumer integration + protected-tier browser sandbox remain — see §15. The custody core lives in its own repo:
 [`avibe-bot/avault`](https://github.com/avibe-bot/avault) (Rust). The **authoritative full
 design** is `avault/docs/DESIGN.md` (mirrored from this document). **This doc now tracks the
 Avibe side** — how the Python daemon integrates avault — and stays in sync with the repo.
@@ -206,7 +206,7 @@ Through-line legend: 🔓 plaintext · 📦 blind box (sealed to `avault`) · �
 2. Browser **seals the value to `avault`'s pubkey** → 📦; `POST /api/vault/secrets` carries the blind box.
 3. Daemon relays 📦 to `avault` (it cannot open it).
 4. `avault`: open 📦 → read master key from store → fresh DEK → AES-256-GCM encrypt (random nonce, **AAD = `name + scheme + version`**) → wrap DEK under master key → zeroize plaintext + DEK → return 🔒 `{ciphertext, nonce, wrap_meta}`.
-5. Daemon writes the row to `vault_secrets` (ciphertext, wrap_meta, preview `…last4`, `protection=standard`, audit `created`). 🔒 only; no plaintext, no key persists in Python.
+5. Daemon writes the row to `vault_secrets` (ciphertext, wrap_meta, `protection=standard`, audit `created`). 🔒 only; no plaintext, no key, and no value-derived data is stored or surfaced in metadata.
 
 **Protected tier:** step 2 is the **browser encrypting under the VMK** (it unlocks the VMK with the passkey/password first, or uses an existing VMK session) and the POST body is already 🔒. Python never sees plaintext at all.
 
@@ -387,14 +387,29 @@ This is an internal store selection inside `avault`, not an Avibe-level plugin l
 
 ## 15. Roadmap
 
+> **Implementation status — 2026-06-28.** P0→P2 are implemented and merged. What
+> remains is the *consumer-facing* surface (how an agent asks for and receives a
+> secret in a normal turn) and the protected tier's browser sandbox — see §15.1.
+
 | Phase | Scope | State |
 |---|---|---|
-| **P0** | Python standard tier: DB + envelope + delivery + `$<NAME>` (#631) | **done — keep & merge; not replaced before P1** |
-| **P1** | `avault-core` + CLI + `file+mlock` store; Rust takes standard-tier seal/open; blind-box create; `vibe runtime prepare` ensure + Dependencies card. Closes the memory-hygiene gap. | next |
-| **P2** | Resident agent + `SO_PEERCRED` + scope-grant DEK cache + signer (secp256k1; approval-card context in the sign prompt). Protected-tier non-browser factors via hardware stores. | after P1 |
-| **P3** | Multi-factor (passkey-PRF copies, TPM, KMS KEK); external `SignerProvider` (hardware wallet / WalletConnect). | later |
+| **P0** | Python standard tier: DB + envelope + delivery + `$<NAME>` (#631) | **superseded** — Python value-crypto removed; all paths route through avault |
+| **P1** | `avault-core` + CLI + `file+mlock` store; Rust takes standard-tier seal/open; blind-box create; `vibe runtime prepare` ensure + Dependencies card | **merged** |
+| **P1.1** | complete the deliver surface (`deliver fetch` / `inject`) | **merged** |
+| **P2** | resident agent (`SO_PEERCRED`/`LOCAL_PEERCRED` socket) + scope-grant DEK cache + secp256k1 signer (ECDSA-recoverable + DER + Schnorr-BIP340) + `file+passphrase` store + operation-bound blind-box AAD; protected delivery through the agent; browser crypto library; Vaults UI (hub, create form, active-access control center) | **merged** — avault #10, browser #674, Python #673, delivery #677, UI #678 + #685 |
 
-**Recommendation:** make P1 **CLI-only** — push the agent, grants, and signing to P2 — so the first step is small and headlessly verifiable.
+### 15.1 Remaining after P2 (open items for the owner)
+
+Established by an audit of merged code on 2026-06-28 — deliberately *not* in P2:
+
+1. **Agent-facing consumer surface — the real usability gap.** The deliver primitives exist in Python (`deliver run`/`fetch`/`inject` via the avault CLI + resident agent), but there is no routed/agent-facing surface to *discover* vaults/scopes and *request* a secret within a normal turn, and the request→approval→grant flow has no in-chat producer yet. Net effect: the grant/request management UI is in place but stays empty until this lands. **Open decision:** the consumer-surface shape — an askill-shaped CLI the agent calls (recommended), vs HTTP endpoints, vs the resident-agent socket directly.
+2. **In-chat approval card (design ①②).** The approve flow is multi-branch — access→grant (scope picker; standard tier works today) vs per-use sign (`grantable=False`) vs protected (browser sandbox, next version). Needs a UX pass on where the card lives (chat vs hub) before building.
+3. **Keypair creation in the UI.** `create_secret` takes a caller-sealed envelope; generating a signing key needs a browser keygen+seal flow (the crypto lib exists).
+4. **Deny-request endpoint.** None yet; pending requests only auto-expire via `expires_at`.
+5. **Protected tier end-to-end → next version.** Browser signing sandbox (cross-origin iframe isolation), WalletConnect-first + local iframe fallback, with all protected-tier crypto (sign *and* non-sign) unified in the sandbox.
+6. **Tags as loadable bundles** (group stays single-select) → next increment: `--env-tag` + `tag:` grant scope.
+
+**Dropped (decided 2026-06-28):** a per-secret **ETH/BTC chain badge** — keypairs are chain-agnostic secp256k1; the chain is fixed by the signature *scheme* at sign time, not a secret attribute. The "Signing" badge is the correct representation.
 
 ---
 
@@ -536,13 +551,34 @@ These are starting recommendations, not frozen choices — items #2 (envelope) a
 
 | Verb | Input | Output | Purpose |
 |---|---|---|---|
-| `pubkey` | — | X25519 public key + fingerprint | the browser fetches this before sealing a blind box (protected tier must pin / attest it) |
+| `pubkey` | — | X25519 public key + fingerprint | one-shot `pubkey` supports blind-box create; protected DEK release uses the resident agent's ephemeral `pubkey` frame |
 | `seal` | blind box (the value) + name/scheme | envelope `{ciphertext, nonce, wrap_meta}` | standard-tier create: open box → wrap DEK under master → return ciphertext (never plaintext) |
-| `deliver` | envelope + mode (`run` / `fetch` / `inject`) + *optional* DEK blind box | exit code / response body | decrypt and deliver. No DEK ⇒ standard tier (master key); with DEK ⇒ protected tier (browser-released DEK) |
-| `sign` | key envelope + digest/tx + *optional* DEK blind box | signature (public) | standard-tier signing (secp256k1); the private key never leaves `avault` |
+| `deliver` | envelope + mode (`run` / `fetch` / `inject`) | exit code / response body | one-shot standard-tier delivery uses the master key; protected delivery uses resident-agent grants, never inline DEK boxes |
+| `sign` | key envelope + digest/tx | signature (public) | one-shot standard-tier signing; protected signing uses resident-agent grants or browser-local signing |
 | `key export` / `key import` | passphrase (stdin) | encrypted backup / ok | back up, migrate, restore the master key |
 
 The resident agent (P2) adds `grant` / `release`: cache a scope's DEK-set for a TTL so repeated uses in-window skip re-unlock. Standard-tier signing of an ETH key is `sign`; protected-tier ETH signing happens entirely in the browser and never reaches this interface.
+
+### Blind-box AAD contract
+
+Browser blind boxes use HPKE Base mode with DHKEM-X25519-HKDF-SHA256, HKDF-SHA256, AES-256-GCM. The JSON scheme is `hpke-x25519-hkdfsha256-aes256gcm-v1`; HPKE `info` is `avault:blind-box:v1`. The HPKE AAD is operation-bound bytes:
+
+```text
+"avault:blind-box:aad:v1"
+  || field(purpose)
+  || field(name)
+  || field("machine-aesgcm-v1")
+  || field(0x01)
+  || field(scope_type or "")
+  || field(scope_ref or "")
+  || field(sign_scheme or "")
+  || field(digest or "")
+  || field(approval_nonce or "")
+  || field(approval_expires_at_unix_be or "")
+  || field(operation_hash or "")
+```
+
+`field(x)` is `uint32_be(len(x)) || x`; strings are UTF-8; signing digests and operation hashes are raw 32-byte values. Protected DEK blind boxes require approval metadata and are accepted only by the resident agent; one-shot CLI paths reject inline `dek_blindbox` / `approval` fields. Agent grants authenticate `scope_type` and `scope_ref` directly in AAD and bind the grant TTL in `operation_hash`: agent delivery uses `"agent-deliver"`, name, `ttl_secs_u64_be`; agent signing uses `"agent-sign"`, scheme, raw digest, `ttl_secs_u64_be`. The shared byte vectors live in `tests/vectors/p2_core_crypto.json` in the avault repo and are mirrored into the browser tests.
 
 ### Transport
 

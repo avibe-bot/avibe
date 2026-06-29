@@ -1227,6 +1227,86 @@ class SessionTurnManager:
             return
         self.controller.set_agent_status(session_id, "failed" if is_error else "idle")
 
+    def register_agent_initiated_turn(self, context: "MessageContext") -> bool:
+        """Register a turn the BACKEND started on its own (agent-initiated:
+        background-task completion / ScheduleWakeup) as a first-class FSM citizen,
+        so the Workbench Stop button works and the browser sees ``turn.start`` /
+        ``turn.end``.
+
+        Unlike a user / scheduled turn there is NO dispatch task sending a query —
+        the backend already started — so this does NOT go through ``dispatch_turn`` /
+        ``_run``. The unsolicited output is ALREADY streaming on the long-lived
+        receiver, so the sink + ``in_flight`` are registered SYNCHRONOUSLY here
+        (before the receiver's next emit), and a small holder task keeps the turn
+        open until the terminal result's ``done_event``. Settling (pop sink +
+        ``in_flight`` + ``turn.end`` + flush) mirrors ``_run``'s finally. Stop works
+        because ``cancel`` interrupts the backend via ``handle_stop(turn.context)``
+        and cancels this holder.
+
+        avibe-only: a turn with no workbench session id (IM / CLI) has no Stop
+        control and no sink, so this is a no-op there — the gate + outbound
+        chokepoint still deliver the reply. Returns ``True`` when a turn was
+        registered.
+        """
+        if self.controller is None:
+            return False
+        session_id = self.controller._session_id_from_context(context)
+        if not session_id:
+            return False
+        get_key = getattr(self.controller, "_get_session_key", None)
+        if not callable(get_key):
+            return False
+        session_key = get_key(context)
+        # Defensive: ``begin_agent_initiated_turn`` only opens on a free gate, so a
+        # turn shouldn't already be tracked/streaming — but never clobber one.
+        if session_id in self.in_flight or self.get_turn_sink(session_key) is not None:
+            return False
+        from core.inbox_events import bus
+
+        turn_token = (getattr(context, "platform_specific", None) or {}).get("turn_token")
+        done = asyncio.Event()
+        self.register_turn_sink(
+            session_key,
+            on_chunk=self._noop_chunk,
+            done_event=done,
+            turn_token=turn_token,
+            context=context,
+        )
+
+        async def _holder() -> None:
+            cancelled = False
+            try:
+                await done.wait()
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            finally:
+                self.pop_turn_sink(session_key, done)
+                turn = self.in_flight.pop(session_id, None)
+                if turn is not None:
+                    bus.publish("turn.end", {"session_id": session_id})
+                # Flush the send-while-busy queue on NATURAL completion (mirrors
+                # ``_run``): a plain Stop keeps the queue, send_now opts back in.
+                should_flush = (not cancelled and not (turn is not None and turn.stop_no_flush)) or (
+                    turn is not None and turn.flush_on_cancel
+                )
+                if should_flush:
+                    try:
+                        await self.flush_queue(session_id)
+                    except Exception:
+                        logger.debug("agent-initiated turn: flush_queue failed", exc_info=True)
+
+        try:
+            task = asyncio.create_task(_holder(), name="agent-initiated-turn-holder")
+        except RuntimeError:
+            # No running loop (sync test/stub context): can't hold the turn open —
+            # roll the sink back so it doesn't leak, and skip FSM registration.
+            self.pop_turn_sink(session_key, done)
+            return False
+        self.in_flight[session_id] = Turn(task=task, context=context)
+        bus.publish("turn.start", {"session_id": session_id})
+        return True
+
     def is_active_emit(self, context: "MessageContext") -> bool:
         """Whether an emit belongs to the live turn (not a superseded one). Fail-open
         when there's no sink registry / no live sink (non-streaming turns still
@@ -1246,7 +1326,40 @@ class SessionTurnManager:
 
     # --- the live streaming turn sink (owned here; Controller delegates) ----------
 
-    def register_turn_sink(self, session_key: str, *, on_chunk, done_event, turn_token=None) -> None:
+    @staticmethod
+    def _turn_sink_identity(context: Optional["MessageContext"]) -> dict[str, Any]:
+        raw_spec = getattr(context, "platform_specific", None) or {}
+        spec = raw_spec if isinstance(raw_spec, dict) else {}
+        target = spec.get("agent_session_target")
+        target = target if isinstance(target, dict) else {}
+        agent_session_id = str(spec.get("agent_session_id") or target.get("id") or "").strip()
+        backend_base_session_id = str(
+            spec.get("backend_base_session_id")
+            or target.get("session_anchor")
+            or ""
+        ).strip()
+        identity: dict[str, Any] = {
+            "agent_session_id": agent_session_id,
+            "backend_base_session_id": backend_base_session_id,
+        }
+        task_trigger_kind = str(spec.get("task_trigger_kind") or "").strip()
+        if task_trigger_kind:
+            identity["task_trigger_kind"] = task_trigger_kind
+        task_execution_id = str(spec.get("task_execution_id") or "").strip()
+        if task_execution_id:
+            identity["task_execution_id"] = task_execution_id
+        coalesced_queue = spec.get("coalesced_queue")
+        if isinstance(coalesced_queue, dict):
+            copied_queue = dict(coalesced_queue)
+            execution_ids = copied_queue.get("execution_ids")
+            if isinstance(execution_ids, list):
+                copied_queue["execution_ids"] = list(execution_ids)
+            identity["coalesced_queue"] = copied_queue
+        elif coalesced_queue is not None:
+            identity["coalesced_queue"] = coalesced_queue
+        return identity
+
+    def register_turn_sink(self, session_key: str, *, on_chunk, done_event, turn_token=None, context=None) -> None:
         if session_key in self.active_turn_sinks:
             # dispatch_turn serializes streaming turns per session, so this should not
             # happen; if it does, keep the in-flight turn's sink rather than clobbering
@@ -1255,10 +1368,12 @@ class SessionTurnManager:
             return
         # turn_token correlates emits to this exact turn so a late straggler from a
         # superseded turn (same session key) is dropped in _stream_chunk.
+        identity = self._turn_sink_identity(context)
         self.active_turn_sinks[session_key] = {
             "on_chunk": on_chunk,
             "done_event": done_event,
             "turn_token": turn_token,
+            **identity,
         }
 
     def pop_turn_sink(self, session_key: str, done_event=None) -> None:
@@ -1275,6 +1390,111 @@ class SessionTurnManager:
 
     def get_turn_sink(self, session_key: str) -> Optional[dict]:
         return self.active_turn_sinks.get(session_key)
+
+    @staticmethod
+    def _sink_identity_matches(
+        sink: dict,
+        *,
+        agent_session_id: Optional[str],
+        backend_base_session_id: Optional[str],
+    ) -> bool:
+        expected_session = str(agent_session_id or "").strip()
+        expected_base = str(backend_base_session_id or "").strip()
+        if expected_session and sink.get("agent_session_id") != expected_session:
+            return False
+        if expected_base and sink.get("backend_base_session_id") != expected_base:
+            return False
+        return True
+
+    def bind_context_to_turn_sink(
+        self,
+        context: "MessageContext",
+        *,
+        agent_session_id: Optional[str] = None,
+        backend_base_session_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Stamp the live sink's token onto an external stop context.
+
+        Running-tab End may stop an agent-run turn from outside the original
+        dispatch context. Rebuild the context to the same session key, require the
+        registered sink's session/base identity to match the clicked row, then copy
+        that sink's token so the backend's silent terminal result satisfies the
+        normal active-turn guard. The returned binding can be used as an
+        identity-guarded fallback if the backend stops without emitting.
+        """
+        if self.controller is None:
+            return None
+        get_key = getattr(self.controller, "_get_session_key", None)
+        if not callable(get_key):
+            return None
+        try:
+            session_key = get_key(context)
+        except Exception:
+            logger.debug("turn sink bind: failed to derive session key", exc_info=True)
+            return None
+        sink = self.active_turn_sinks.get(session_key)
+        if sink is None:
+            return None
+        if not self._sink_identity_matches(
+            sink,
+            agent_session_id=agent_session_id,
+            backend_base_session_id=backend_base_session_id,
+        ):
+            return None
+        token = sink.get("turn_token")
+        attribution_keys = ("task_trigger_kind", "task_execution_id", "coalesced_queue")
+        if token or any(key in sink for key in attribution_keys):
+            if context.platform_specific is None:
+                context.platform_specific = {}
+        if token:
+            context.platform_specific["turn_token"] = token
+        for key in attribution_keys:
+            if key not in sink:
+                continue
+            value = sink[key]
+            if isinstance(value, dict):
+                copied_value = dict(value)
+                execution_ids = copied_value.get("execution_ids")
+                if isinstance(execution_ids, list):
+                    copied_value["execution_ids"] = list(execution_ids)
+                value = copied_value
+            context.platform_specific[key] = value
+        return {
+            "session_key": session_key,
+            "sink": sink,
+            "done_event": sink.get("done_event"),
+            "turn_token": token,
+        }
+
+    def settle_bound_turn_sink(self, binding: Optional[dict]) -> bool:
+        """Settle the same sink returned by ``bind_context_to_turn_sink``.
+
+        This is a fallback for stop paths that successfully interrupt a backend
+        but do not emit a terminal result. It only releases the dispatch waiter;
+        run completion is still owned by the backend's terminal emit. Current
+        live backends emit that terminal before ``handle_stop`` returns, and the
+        bound stop context carries the original agent-run attribution so the emit
+        records the run terminal. The identity guard is intentionally object-based
+        so a late stop cannot complete a newer sink registered under the same
+        session key.
+        """
+        if not isinstance(binding, dict):
+            return False
+        session_key = binding.get("session_key")
+        sink = binding.get("sink")
+        if not session_key or self.active_turn_sinks.get(session_key) is not sink:
+            return False
+        done = sink.get("done_event") if isinstance(sink, dict) else None
+        if done is None or done is not binding.get("done_event"):
+            return False
+        token = binding.get("turn_token")
+        if token is not None and sink.get("turn_token") != token:
+            return False
+        is_set = getattr(done, "is_set", None)
+        if callable(is_set) and is_set():
+            return False
+        done.set()
+        return True
 
     # --- boot / restore edge transitions -----------------------------------------
 

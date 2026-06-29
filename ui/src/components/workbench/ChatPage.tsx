@@ -365,20 +365,23 @@ export const ChatPage: React.FC = () => {
     }
   }, [api, sessionId]);
 
-  const loadOlderMessages = useCallback(async () => {
-    if (!sessionId || !olderCursor || loadingOlderRef.current) return;
+  // Returns false only when the fetch itself failed, so the transcript scroller can
+  // re-arm and let a later scroll retry; true for success / no-op / stale session.
+  const loadOlderMessages = useCallback(async (): Promise<boolean> => {
+    if (!sessionId || !olderCursor || loadingOlderRef.current) return true;
     loadingOlderRef.current = true;
     setLoadingOlder(true);
     try {
       const res = await api.listSessionMessages(sessionId, { limit: 50, beforeId: olderCursor });
-      if (sessionId !== sessionIdRef.current) return; // switched chats mid-fetch
+      if (sessionId !== sessionIdRef.current) return true; // switched chats mid-fetch
       const older = res.messages.filter(isTranscriptMessage);
       if (older.length) {
         setMessages((prev) => mergeById(prev, older));
       }
       setOlderCursor(res.next_before_id ?? null);
+      return true;
     } catch {
-      /* keep the current transcript; another scroll can retry */
+      return false; // keep the transcript; caller re-arms so a later scroll retries
     } finally {
       if (sessionId === sessionIdRef.current) {
         loadingOlderRef.current = false;
@@ -1731,7 +1734,7 @@ interface TranscriptProps {
   working: boolean;
   hasOlder: boolean;
   loadingOlder: boolean;
-  onLoadOlder: () => void;
+  onLoadOlder: () => void | Promise<boolean>;
   needsLatestReload: boolean;
   onReloadLatest: () => Promise<boolean>;
   // Deep-link jump (P5): the message id to scroll to once it's in the DOM, a
@@ -1803,6 +1806,25 @@ const Transcript: React.FC<TranscriptProps> = ({
   const [showJump, setShowJump] = useState(false);
   const loadOlderRef = useRef(onLoadOlder);
   const reloadLatestRef = useRef(onReloadLatest);
+  // Load ONE older page per scroll gesture, not a cascade. The top threshold can
+  // stay satisfied across many scroll events — momentum/inertial scrolling (iOS
+  // touch AND macOS trackpad in Chrome) keeps firing while the post-load anchor
+  // restore + overshoot ride through the trigger zone — which fired older-page
+  // loads back-to-back all the way to the first message. So disarm on trigger and
+  // re-arm only once scrolling has SETTLED (a continuous fling keeps resetting the
+  // timer; a new deliberate scroll after the pause re-arms). Settle-based re-arm
+  // also recovers a failed load (it re-arms regardless of outcome).
+  const canLoadOlderRef = useRef(true);
+  const settleTimerRef = useRef<number | null>(null);
+  // Mirror loadingOlder so the settle timer (which closes over a stale value)
+  // can avoid re-arming while a page load is still in flight.
+  const loadingOlderPropRef = useRef(loadingOlder);
+  loadingOlderPropRef.current = loadingOlder;
+  // A failed load adds no content → no anchor restore → the viewport stays at the
+  // top, where the position gate below would never re-arm. Mark it so the settle
+  // re-arms regardless of position and a later scroll can retry. Re-arming at
+  // settle (not immediately) avoids a retry storm within the same fling.
+  const loadFailedRef = useRef(false);
 
   useEffect(() => {
     loadOlderRef.current = onLoadOlder;
@@ -1872,6 +1894,25 @@ const Transcript: React.FC<TranscriptProps> = ({
     });
   }, [needsLatestReload, scrollToBottom]);
 
+  // Re-arm the older-page loader once scrolling has settled (~150ms idle) AND the
+  // viewport is at rest out of the trigger band (scrollTop > 300, i.e. down in
+  // loaded content) — or a load just failed (no content/restore was added, so the
+  // position gate can never re-arm and we must recover anyway). Evaluating at rest
+  // is what stops a single fling from "crossing" the threshold; the in-flight guard
+  // keeps it disarmed until the load resolves. Called from the scroll handler AND
+  // from a failed load (a slow failure parked at the top emits no further scroll,
+  // so it has to schedule its own re-arm here).
+  const scheduleReArm = useCallback(() => {
+    if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
+    settleTimerRef.current = window.setTimeout(() => {
+      const node = scrollRef.current;
+      if (node && !loadingOlderPropRef.current && (node.scrollTop > 300 || loadFailedRef.current)) {
+        canLoadOlderRef.current = true;
+        loadFailedRef.current = false;
+      }
+    }, 150);
+  }, []);
+
   const handleScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
@@ -1886,8 +1927,22 @@ const Transcript: React.FC<TranscriptProps> = ({
     // is free to grow). Re-capturing here keeps it current as the user scrolls.
     if (pinned) anchorRef.current = null;
     else captureAnchor();
-    if (hasOlder && !loadingOlder && el.scrollTop < 120) {
-      loadOlderRef.current();
+    // One older page per scroll gesture: re-arm only on settle, at rest, out of the
+    // top zone (see scheduleReArm) — a continuous fling keeps resetting it, so the
+    // anchor-restore scroll + momentum can't cascade more pages.
+    scheduleReArm();
+    if (hasOlder && !loadingOlder && canLoadOlderRef.current && el.scrollTop < 120) {
+      canLoadOlderRef.current = false;
+      loadFailedRef.current = false;
+      void Promise.resolve(loadOlderRef.current()).then((ok) => {
+        if (ok === false) {
+          // Fetch failed: no content/restore, viewport parked at top. A slow failure
+          // already missed the in-flight-skipped settle and won't get another scroll,
+          // so schedule the re-arm here too (it ignores position when loadFailedRef).
+          loadFailedRef.current = true;
+          scheduleReArm();
+        }
+      });
     }
   };
 

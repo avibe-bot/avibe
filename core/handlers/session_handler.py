@@ -30,6 +30,7 @@ from config.v2_config import (
     DEFAULT_STUCK_ACTIVE_IDLE_EVICTION_MULTIPLIER,
 )
 from core.avibe_cloud import avibe_cloud_url_available
+from core.caller_context import caller_env_for_platform_payload
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 
@@ -175,6 +176,15 @@ class SessionHandler(BaseHandler):
             await self.cleanup_session(composite_key)
             return None
 
+        caller_env = caller_env_for_platform_payload(getattr(context, "platform_specific", None))
+        if getattr(client, "_vibe_caller_env", {}) != caller_env:
+            logger.info(
+                "Recreating cached Claude SDK client for %s because caller context env changed",
+                composite_key,
+            )
+            await self.cleanup_session(composite_key)
+            return None
+
         try:
             await self._set_claude_model_if_needed(client, current_model)
         except Exception as e:
@@ -197,11 +207,27 @@ class SessionHandler(BaseHandler):
         composite_key: str,
         base_session_id: str,
         working_path: str,
+        context: MessageContext,
+        session_key: str,
         native_session_id: Optional[str],
         explicit_model: Optional[str],
     ) -> ClaudeSDKClient | None:
         client = self.claude_sessions.get(composite_key)
         if client is None:
+            return None
+        self.ensure_agent_session_id(
+            context,
+            session_key=session_key,
+            agent_name="claude",
+            session_anchor=base_session_id,
+        )
+        caller_env = caller_env_for_platform_payload(getattr(context, "platform_specific", None))
+        if getattr(client, "_vibe_caller_env", {}) != caller_env:
+            logger.info(
+                "Recreating cached Claude subagent SDK client for %s because caller context env changed",
+                composite_key,
+            )
+            await self.cleanup_session(composite_key)
             return None
         if explicit_model:
             try:
@@ -662,6 +688,8 @@ class SessionHandler(BaseHandler):
                 composite_key=cached_key,
                 base_session_id=cached_base,
                 working_path=working_path,
+                context=context,
+                session_key=session_key,
                 native_session_id=cached_session_id,
                 explicit_model=explicit_model,
             )
@@ -683,6 +711,8 @@ class SessionHandler(BaseHandler):
                     composite_key=composite_key,
                     base_session_id=base_session_id,
                     working_path=working_path,
+                    context=context,
+                    session_key=session_key,
                     native_session_id=stored_claude_session_id,
                     explicit_model=explicit_model,
                 )
@@ -817,6 +847,7 @@ class SessionHandler(BaseHandler):
         from vibe.claude_config import build_claude_subprocess_env
 
         claude_env = build_claude_subprocess_env(getattr(self.config, "claude", None))
+        claude_env.update(caller_env_for_platform_payload(getattr(context, "platform_specific", None)))
         claude_env[AVIBE_CLAUDE_PROCESS_OWNER_ENV] = AVIBE_CLAUDE_SESSION_OWNER
         if self._should_mark_claude_isolated_env():
             claude_env["IS_SANDBOX"] = "1"
@@ -872,6 +903,7 @@ class SessionHandler(BaseHandler):
 
         # Create new Claude client
         client = ClaudeSDKClient(options=options)
+        setattr(client, "_vibe_caller_env", caller_env_for_platform_payload(getattr(context, "platform_specific", None)))
 
         # Log the actual options being used
         logger.info("ClaudeAgentOptions details:")

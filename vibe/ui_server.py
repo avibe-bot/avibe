@@ -20,6 +20,7 @@ from collections import OrderedDict
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlsplit, urlunsplit
 
@@ -40,6 +41,7 @@ from core.show_pages import (
     show_event_write_token,
 )
 from core.show_session_events import show_event_payload_session_mismatch
+from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
 from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
 from vibe.i18n import get_supported_languages, t
 from vibe.runtime import get_ui_dist_path, get_working_dir
@@ -106,6 +108,10 @@ _SHOW_RUNTIME_PUBLIC_REACT_REFRESH_SHIM_PATH = (
     f"/_show-runtime/react-refresh-shim-{_SHOW_RUNTIME_PUBLIC_SHIM_VERSION}.js"
 )
 _SHOW_RUNTIME_COMPRESSIBLE_MIN_BYTES = 1024
+TERMINAL_ENABLED_ENV = "VIBE_UI_ENABLE_TERMINAL"
+TERMINAL_IDLE_TIMEOUT_ENV = "VIBE_UI_TERMINAL_IDLE_TIMEOUT_SECONDS"
+TERMINAL_MAX_SESSIONS_ENV = "VIBE_UI_TERMINAL_MAX_SESSIONS"
+_TRUE_BOOL_STRINGS = {"1", "true", "yes", "on"}
 
 STRUCTURED_LOG_PATTERN = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\s+-\s+([\w.]+)\s+-\s+(\w+)\s+-\s+(.*)$")
 LEVEL_HINT_PATTERN = re.compile(r"\b(DEBUG|INFO|WARNING|ERROR|CRITICAL)\b")
@@ -138,6 +144,22 @@ LOG_SOURCES = (
     ("ui_stdout", "ui_stdout.log", lambda: paths.get_runtime_dir() / "ui_stdout.log"),
     ("ui_stderr", "ui_stderr.log", lambda: paths.get_runtime_dir() / "ui_stderr.log"),
 )
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid integer env var %s", name)
+        return default
+
+
+def _parse_explicit_bool(value: Any) -> bool:
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in _TRUE_BOOL_STRINGS
+    return False
 
 
 def _recover_stale_session_status(session_id: str) -> bool:
@@ -639,6 +661,16 @@ def _env_flag_enabled(name: str) -> bool:
     return os.environ.get(name, "").lower() in {"1", "true", "yes", "on"}
 
 
+def _terminal_enabled() -> bool:
+    # The Web Terminal is ON by default; set VIBE_UI_ENABLE_TERMINAL to a falsy
+    # value (0/false/no/off) to turn it off. The WebSocket auth gate still
+    # authorizes every connection regardless of this flag.
+    raw = os.environ.get(TERMINAL_ENABLED_ENV)
+    if raw is None or raw.strip() == "":
+        return True
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _has_loopback_only_docker_port_binding() -> bool:
     bind_host = os.environ.get("VIBE_REMOTE_DOCKER_LOOPBACK_BIND_HOST")
     if not bind_host:
@@ -1003,9 +1035,33 @@ def _remote_access_public_host(config: V2Config) -> str | None:
     return _normalized_host(parsed.hostname)
 
 
+def _remote_access_public_origin(config: V2Config) -> str | None:
+    public_url = (config.remote_access.vibe_cloud.public_url or "").strip()
+    if not public_url:
+        return ""
+    parsed = urlparse(public_url)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc.lower().rstrip('.')}"
+
+
+def _origin_identity(value: str) -> tuple[str, str, int | None] | None:
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.hostname or parsed.username or parsed.password:
+        return None
+    return (parsed.scheme.lower(), _normalized_host(parsed.hostname), _origin_port(parsed.netloc, parsed.scheme))
+
+
+def _remote_access_public_origin_matches(origin: str, config: V2Config) -> bool:
+    trusted_origin = _remote_access_public_origin(config)
+    if not trusted_origin:
+        return False
+    return _origin_identity(origin) == _origin_identity(trusted_origin)
+
+
 def _remote_access_public_url_invalid(config: V2Config) -> bool:
     cloud = config.remote_access.vibe_cloud
-    return bool(cloud.enabled and not _remote_access_public_host(config))
+    return bool(cloud.enabled and not _remote_access_public_origin(config))
 
 
 def _remote_access_snapshot(config: V2Config) -> dict[str, Any]:
@@ -2043,7 +2099,87 @@ async def public_show_runtime_hmr_websocket(websocket: WebSocket, share_id: str)
         await websocket.close(code=1011)
 
 
-def _show_runtime_websocket_authorized(websocket: WebSocket) -> bool:
+@app.websocket("/api/terminal/{session_id}")
+async def terminal_websocket(websocket: WebSocket, session_id: str):
+    if not _terminal_enabled():
+        await websocket.accept()
+        await websocket.close(code=1008)
+        return
+    if not TERMINAL_SUPPORTED:
+        # POSIX-only — no PTY/tmux on native Windows.
+        await websocket.accept()
+        await websocket.close(code=1008)
+        return
+    # CSWSH guard. Local trusted terminal sockets have no cookie gate, so the
+    # Origin must match the exact socket. Remote terminals are cookie-authenticated,
+    # so pin them to the configured public origin as well.
+    if not _terminal_origin_allowed(websocket):
+        await websocket.close(code=1008)
+        return
+    if not _show_runtime_websocket_authorized(websocket):
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    remote_addr = _websocket_client_host(websocket) or "unknown"
+    remote_subject = _remote_access_websocket_subject(websocket)
+    effective_session_id = _terminal_effective_session_id(session_id, remote_subject)
+    session_ref = _terminal_session_log_ref(effective_session_id)
+    logger.info("terminal.session_open session_ref=%s remote_addr=%s", session_ref, remote_addr)
+    try:
+        service = get_terminal_service()
+        service.start_reaper()
+        await service.handle_websocket(websocket, effective_session_id)
+    except TerminalServiceError as exc:
+        # Transient "try again shortly" conditions (not server faults): too_many_sessions (cap
+        # full) and session_opening (the id is mid-open or mid-teardown). Close with 1013 so
+        # the client can auto-retry instead of surfacing a hard error.
+        transient = str(exc) in {"too_many_sessions", "session_opening"}
+        await websocket.close(code=1013 if transient else 1011)
+    except WebSocketDisconnect:
+        return
+    except Exception:
+        logger.debug("Terminal websocket failed", exc_info=True)
+        await websocket.close(code=1011)
+    finally:
+        logger.info("terminal.session_close session_ref=%s remote_addr=%s", session_ref, remote_addr)
+
+
+@app.route("/api/terminal/<session_id>", methods=["DELETE"])
+async def terminal_session_delete(session_id: str):
+    if not _terminal_enabled():
+        return jsonify({"ok": False, "error": "terminal_disabled"}), 403
+    if not TERMINAL_SUPPORTED:
+        return jsonify({"ok": False, "error": "terminal_unsupported"}), 403
+
+    terminal_request = _terminal_http_request_adapter()
+    if not _terminal_origin_allowed(terminal_request):
+        return jsonify({"ok": False, "error": "terminal_origin_forbidden"}), 403
+    if not _show_runtime_websocket_authorized(terminal_request):
+        return jsonify({"ok": False, "error": "terminal_unauthorized"}), 403
+
+    remote_subject = _remote_access_websocket_subject(terminal_request)
+    effective_session_id = _terminal_effective_session_id(session_id, remote_subject)
+    session_ref = _terminal_session_log_ref(effective_session_id)
+    terminated = await get_terminal_service().terminate(effective_session_id)
+    if not terminated:
+        logger.info("terminal.session_delete_absent session_ref=%s", session_ref)
+        return jsonify({"ok": False, "error": "terminal_session_not_found"}), 404
+    logger.info("terminal.session_delete session_ref=%s", session_ref)
+    return Response(status=204)
+
+
+def _terminal_http_request_adapter() -> SimpleNamespace:
+    scheme = "wss" if request.is_secure else "ws"
+    return SimpleNamespace(
+        headers=request.headers,
+        cookies=request.cookies,
+        client=SimpleNamespace(host=request.remote_addr or ""),
+        url=SimpleNamespace(scheme=scheme),
+    )
+
+
+def _show_runtime_websocket_authorized(websocket: Any) -> bool:
     config = _load_remote_access_config()
     if config is None:
         return _websocket_is_local_request(websocket)
@@ -2051,17 +2187,97 @@ def _show_runtime_websocket_authorized(websocket: WebSocket) -> bool:
         return True
     if _websocket_normalized_host(websocket) != _remote_access_public_host(config):
         return False
+    return _remote_access_websocket_session_payload(websocket, config) is not None
+
+
+def _remote_access_websocket_session_payload(websocket: Any, config: V2Config | None) -> dict[str, Any] | None:
+    if config is None or _websocket_is_local_request(websocket, config):
+        return None
+    if _websocket_normalized_host(websocket) != _remote_access_public_host(config):
+        return None
     from vibe import remote_access
 
     if not config.remote_access.vibe_cloud.enabled or not config.remote_access.vibe_cloud.session_secret:
-        return False
+        return None
     return remote_access.parse_session_cookie(
         config,
         websocket.cookies.get(remote_access.SESSION_COOKIE_NAME),
-    ) is not None
+    )
 
 
-def _websocket_is_local_request(websocket: WebSocket, config: V2Config | None = None) -> bool:
+def _remote_access_websocket_subject(websocket: Any) -> str | None:
+    payload = _remote_access_websocket_session_payload(websocket, _load_remote_access_config())
+    if not payload:
+        return None
+    subject = str(payload.get("sub") or "").strip()
+    email = str(payload.get("email") or "").strip()
+    return subject or email or None
+
+
+def _terminal_effective_session_id(client_session_id: str, remote_subject: str | None) -> str:
+    safe_client_id = sanitize_session_id(client_session_id)
+    if not remote_subject:
+        return safe_client_id
+    subject_hash = hashlib.sha256(remote_subject.encode("utf-8")).hexdigest()[:16]
+    return f"{subject_hash}-{safe_client_id[:63]}"
+
+
+def _terminal_session_log_ref(effective_session_id: str) -> str:
+    return hashlib.sha256(effective_session_id.encode("utf-8")).hexdigest()[:16]
+
+
+def _terminal_origin_allowed(websocket: Any) -> bool:
+    origin = _request_origin(websocket.headers.get("origin"))
+    if not origin:
+        return False
+    parsed_origin = urlparse(origin)
+    if _normalized_host(parsed_origin.netloc) != _websocket_normalized_host(websocket):
+        return False
+    # Mirror _show_runtime_websocket_authorized's local classification: loopback AND
+    # private setup-host requests are both accepted without a cookie, so both must clear
+    # the exact scheme+port check below. Without the config, _websocket_is_local_request
+    # cannot recognize a setup-host request as local and we would fall through to the
+    # remote host-only relaxation, letting a same-host page on a different scheme/port
+    # open a cross-origin terminal socket. Remote (public-host + cookie) requests only
+    # need the host match already verified above.
+    config = _load_remote_access_config()
+    if not _websocket_is_local_request(websocket, config):
+        if config is None:
+            return False
+        return _remote_access_public_origin_matches(origin, config)
+    origin_port = _origin_port(parsed_origin.netloc, parsed_origin.scheme)
+    request_port = _origin_port(websocket.headers.get("host"), websocket.url.scheme)
+    return origin_port == request_port and _terminal_origin_scheme_matches_socket(
+        parsed_origin.scheme,
+        websocket.url.scheme,
+    )
+
+
+def _origin_port(netloc: str | None, scheme: str | None) -> int | None:
+    if not netloc:
+        return None
+    parsed = urlparse(f"//{netloc}")
+    try:
+        explicit_port = parsed.port
+    except ValueError:
+        return None
+    if explicit_port is not None:
+        return explicit_port
+    normalized_scheme = (scheme or "").lower()
+    if normalized_scheme in {"https", "wss"}:
+        return 443
+    if normalized_scheme in {"http", "ws"}:
+        return 80
+    return None
+
+
+def _terminal_origin_scheme_matches_socket(origin_scheme: str | None, socket_scheme: str | None) -> bool:
+    origin_secure = (origin_scheme or "").lower() == "https"
+    socket_secure = (socket_scheme or "").lower() == "wss"
+    return origin_secure == socket_secure
+
+
+def _websocket_is_local_request(websocket: Any, config: V2Config | None = None) -> bool:
     if _websocket_has_forwarded_metadata(websocket):
         return False
     client_host = _websocket_client_host(websocket)
@@ -2078,7 +2294,7 @@ def _websocket_is_local_request(websocket: WebSocket, config: V2Config | None = 
     return _websocket_is_setup_host_request(websocket, config)
 
 
-def _websocket_has_forwarded_metadata(websocket: WebSocket) -> bool:
+def _websocket_has_forwarded_metadata(websocket: Any) -> bool:
     forwarded_headers = (
         "Forwarded",
         "X-Forwarded-For",
@@ -2096,14 +2312,14 @@ def _websocket_has_forwarded_metadata(websocket: WebSocket) -> bool:
     return any(websocket.headers.get(header) for header in forwarded_headers)
 
 
-def _websocket_client_host(websocket: WebSocket) -> str:
+def _websocket_client_host(websocket: Any) -> str:
     client_host = websocket.client.host if websocket.client else ""
     if client_host == "testclient":
         return websocket.headers.get(TEST_REMOTE_ADDR_HEADER) or client_host
     return client_host
 
 
-def _websocket_peer_address(websocket: WebSocket) -> ipaddress._BaseAddress | None:
+def _websocket_peer_address(websocket: Any) -> ipaddress._BaseAddress | None:
     client_host = _websocket_client_host(websocket).strip()
     if not client_host or client_host in {"localhost", "testclient"}:
         return None
@@ -2115,7 +2331,7 @@ def _websocket_peer_address(websocket: WebSocket) -> ipaddress._BaseAddress | No
     return mapped or address
 
 
-def _websocket_is_trusted_docker_peer(websocket: WebSocket) -> bool:
+def _websocket_is_trusted_docker_peer(websocket: Any) -> bool:
     if not _env_flag_enabled("VIBE_REMOTE_ALLOW_DOCKER_LOOPBACK_PEERS"):
         return False
     if not _has_loopback_only_docker_port_binding():
@@ -2127,7 +2343,7 @@ def _websocket_is_trusted_docker_peer(websocket: WebSocket) -> bool:
     return address in _trusted_docker_loopback_peer_addresses()
 
 
-def _websocket_is_trusted_docker_loopback_request(websocket: WebSocket) -> bool:
+def _websocket_is_trusted_docker_loopback_request(websocket: Any) -> bool:
     if _websocket_has_forwarded_metadata(websocket):
         return False
     if not _is_loopback_host(websocket.headers.get("host")):
@@ -2135,12 +2351,12 @@ def _websocket_is_trusted_docker_loopback_request(websocket: WebSocket) -> bool:
     return _websocket_is_trusted_docker_peer(websocket)
 
 
-def _websocket_is_private_peer(websocket: WebSocket) -> bool:
+def _websocket_is_private_peer(websocket: Any) -> bool:
     address = _websocket_peer_address(websocket)
     return address is not None and _is_private_address(address)
 
 
-def _websocket_peer_shares_setup_host_network(websocket: WebSocket, setup_address: ipaddress._BaseAddress) -> bool:
+def _websocket_peer_shares_setup_host_network(websocket: Any, setup_address: ipaddress._BaseAddress) -> bool:
     peer = _websocket_peer_address(websocket)
     if peer is None:
         return False
@@ -2155,7 +2371,7 @@ def _websocket_peer_shares_setup_host_network(websocket: WebSocket, setup_addres
     return peer in network
 
 
-def _websocket_is_wildcard_setup_host_request(websocket: WebSocket, config: V2Config | None) -> bool:
+def _websocket_is_wildcard_setup_host_request(websocket: Any, config: V2Config | None) -> bool:
     if config is None:
         return False
     setup_host = _normalized_host(getattr(config.ui, "setup_host", ""))
@@ -2182,7 +2398,7 @@ def _websocket_is_wildcard_setup_host_request(websocket: WebSocket, config: V2Co
     return _websocket_peer_shares_setup_host_network(websocket, host_address)
 
 
-def _websocket_is_setup_host_request(websocket: WebSocket, config: V2Config | None) -> bool:
+def _websocket_is_setup_host_request(websocket: Any, config: V2Config | None) -> bool:
     if config is None:
         return False
     setup_host = _normalized_host(getattr(config.ui, "setup_host", ""))
@@ -2209,7 +2425,7 @@ def _websocket_is_setup_host_request(websocket: WebSocket, config: V2Config | No
     return True
 
 
-def _websocket_normalized_host(websocket: WebSocket) -> str:
+def _websocket_normalized_host(websocket: Any) -> str:
     return _normalized_host(websocket.headers.get("x-forwarded-host") or websocket.headers.get("host"))
 
 
@@ -2456,6 +2672,33 @@ def vault_secrets_get():
     return jsonify(api.get_vault_secrets(group=request.args.get("group") or None))
 
 
+@app.route("/api/vault/pubkey", methods=["GET"])
+def vault_pubkey_get():
+    from vibe import api
+
+    try:
+        return jsonify(api.get_vault_pubkey())
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/agent/pubkey", methods=["GET"])
+def vault_agent_pubkey_get():
+    from vibe import api
+
+    try:
+        return jsonify(api.get_vault_agent_pubkey())
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/vmk", methods=["GET"])
+def vault_vmk_get():
+    from vibe import api
+
+    return jsonify(api.get_vault_vmk())
+
+
 @app.route("/api/vault/secrets", methods=["POST"])
 def vault_secrets_post():
     from vibe import api
@@ -2472,6 +2715,69 @@ def vault_secret_delete(name):
 
     try:
         return jsonify(api.delete_vault_secret(name))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/requests", methods=["GET"])
+def vault_requests_get():
+    from vibe import api
+
+    raw_status = request.args.get("status")
+    status = None if raw_status == "all" else raw_status or "pending"
+    req_type = request.args.get("type") or None
+    try:
+        limit = int(request.args.get("limit") or 100)
+    except ValueError:
+        limit = 100
+    return jsonify(api.get_vault_requests(status=status, request_type=req_type, limit=limit))
+
+
+@app.route("/api/vault/grants", methods=["GET"])
+def vault_grants_get():
+    from vibe import api
+
+    raw_status = request.args.get("status")
+    status = None if raw_status == "all" else raw_status or "active"
+    return jsonify(api.get_vault_grants(status=status, session_id=request.args.get("session_id") or None))
+
+
+@app.route("/api/vault/grants", methods=["POST"])
+def vault_grants_post():
+    from vibe import api
+
+    try:
+        return jsonify(api.create_vault_grant(request.json or {}))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/grants/<grant_id>", methods=["DELETE"])
+def vault_grant_delete(grant_id):
+    from vibe import api
+
+    try:
+        return jsonify(api.revoke_vault_grant(grant_id))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/sign", methods=["POST"])
+def vault_sign_post():
+    from vibe import api
+
+    try:
+        return jsonify(api.vault_sign(request.json or {}))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/pubkey-pin", methods=["POST"])
+def vault_pubkey_pin_post():
+    from vibe import api
+
+    try:
+        return jsonify(api.store_vault_pubkey_pin(request.json or {}))
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -3105,6 +3411,7 @@ def api_session():
                     "remote": True,
                     "authenticated": True,
                     "email": str(payload.get("email", "")),
+                    "sub": str(payload.get("sub", "")),
                 }
             )
     # Identity payload must never be cached by intermediaries (Cloudflare etc.).
@@ -3692,7 +3999,7 @@ def backend_restart(name):
     return jsonify(api.restart_backend(name, metadata=metadata))
 
 
-_ALLOWED_DEPENDENCIES = {"askill", "show-runtime"}
+_ALLOWED_DEPENDENCIES = {"askill", "avault", "show-runtime", "tmux"}
 
 
 @app.route("/api/dependencies")
@@ -4839,6 +5146,19 @@ async def _archive_cancel_turn(session_id: str) -> None:
         logger.debug("archive: cancel in-flight turn failed for %s", session_id, exc_info=True)
 
 
+async def _archive_release_vault_scopes(session_id: str, revoked_vault_scopes: list[dict[str, str]]) -> None:
+    from vibe import api
+
+    try:
+        await asyncio.to_thread(
+            api.release_vault_agent_scopes,
+            revoked_vault_scopes,
+            reason=f"archive_session:{session_id}",
+        )
+    except Exception:
+        logger.debug("archive: resident-agent grant release failed for %s", session_id, exc_info=True)
+
+
 @app.route("/api/sessions/<session_id>", methods=["DELETE"])
 async def sessions_archive(session_id: str):
     """Permanently archive a session and reclaim its bound resources.
@@ -4859,6 +5179,8 @@ async def sessions_archive(session_id: str):
     except LookupError as err:
         return jsonify({"error": str(err)}), 404
 
+    revoked_vault_scopes = session.pop("revoked_vault_grant_scopes", [])
+
     # Broadcast + return immediately — the archive is already committed. Other
     # mounted clients (sidebars, tabs) drop the row live and leave the chat if
     # they're viewing it (mirrors the rename 'updated' event).
@@ -4870,7 +5192,10 @@ async def sessions_archive(session_id: str):
     # Fire-and-forget the in-flight-turn cancel: the cancel client waits up to 30s
     # for the backend interrupt, so awaiting it here would hang the confirm dialog
     # and delay the broadcast for a teardown that has already committed.
-    asyncio.get_running_loop().create_task(_archive_cancel_turn(session_id))
+    loop = asyncio.get_running_loop()
+    if revoked_vault_scopes:
+        loop.create_task(_archive_release_vault_scopes(session_id, revoked_vault_scopes))
+    loop.create_task(_archive_cancel_turn(session_id))
 
     return jsonify(session)
 
@@ -4942,6 +5267,179 @@ def search_messages_list():
     with engine.connect() as conn:
         result = messages_service.search_messages(conn, query=query, limit=limit)
     return jsonify(result)
+
+
+# =============================================================================
+# Workbench: File Browser
+# =============================================================================
+
+
+def _file_browser_error_response(exc: Exception):
+    from core.file_browser_service import FileBrowserError
+
+    if isinstance(exc, FileBrowserError):
+        return jsonify({"ok": False, "error": {"code": exc.code, "message": exc.message}}), exc.status_code
+    logger.exception("file browser request failed")
+    return jsonify({"ok": False, "error": {"code": "internal_error", "message": "Internal server error"}}), 500
+
+
+async def _dispatch_native_ui_request(starlette_request: FastAPIRequest, handler: Callable[[], Any]):
+    return await app.dispatch_native_request(starlette_request, handler)
+
+
+@app.get("/api/files/list", include_in_schema=False)
+async def files_list(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.list_directory,
+                    request.args.get("path") or "",
+                    show_hidden=request.args.get("show_hidden") == "1",
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.get("/api/files/meta", include_in_schema=False)
+async def files_meta(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        try:
+            return jsonify(await asyncio.to_thread(file_browser_service.metadata, request.args.get("path") or ""))
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.get("/api/files/content", include_in_schema=False)
+async def files_content(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        try:
+            content = await asyncio.to_thread(
+                file_browser_service.file_content,
+                request.args.get("path") or "",
+                download=request.args.get("download") == "1",
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+        return FastAPIResponse(
+            content=content.data,
+            media_type=content.mime,
+            headers={
+                "X-Content-Type-Options": "nosniff",
+                "Referrer-Policy": "no-referrer",
+                "Cache-Control": "private, no-store",
+                "Content-Disposition": f"{content.disposition}; filename*=UTF-8''{quote(content.path.name)}",
+            },
+        )
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.put("/api/files/write", include_in_schema=False)
+async def files_write(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.write_file,
+                    payload.get("path") or "",
+                    payload.get("content"),
+                    expected_mtime=payload.get("expected_mtime"),
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/files/mkdir", include_in_schema=False)
+async def files_mkdir(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(await asyncio.to_thread(file_browser_service.make_directory, payload.get("path") or ""))
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/files/rename", include_in_schema=False)
+async def files_rename(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.rename_path,
+                    payload.get("path") or "",
+                    payload.get("new_name") or "",
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/files/move", include_in_schema=False)
+async def files_move(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.move_path,
+                    payload.get("src") or "",
+                    payload.get("dst") or "",
+                    overwrite=_parse_explicit_bool(payload.get("overwrite")),
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/files/delete", include_in_schema=False)
+async def files_delete(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.delete_path,
+                    payload.get("path") or "",
+                    recursive=_parse_explicit_bool(payload.get("recursive")),
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
 
 
 # Content types the media proxy is willing to serve ``inline``. Anything else —
@@ -7372,6 +7870,7 @@ def _reconcile_remote_access_for_ui_start(config: V2Config | None) -> None:
 
 _inbox_bridge_task: "asyncio.Task | None" = None
 _startup_dependency_reconcile_task: "asyncio.Task | None" = None
+_terminal_service: TerminalService | None = None
 
 
 async def _start_inbox_bridge() -> None:
@@ -7397,6 +7896,32 @@ async def _stop_inbox_bridge() -> None:
 
 app.add_event_handler("startup", _start_inbox_bridge)
 app.add_event_handler("shutdown", _stop_inbox_bridge)
+
+
+def get_terminal_service() -> TerminalService:
+    global _terminal_service
+    if _terminal_service is None:
+        _terminal_service = TerminalService(
+            idle_timeout_seconds=_env_int(TERMINAL_IDLE_TIMEOUT_ENV, 3600),
+            max_sessions=_env_int(TERMINAL_MAX_SESSIONS_ENV, 8),
+        )
+    return _terminal_service
+
+
+async def _start_terminal_service() -> None:
+    if _terminal_enabled():
+        get_terminal_service().start_reaper()
+
+
+async def _stop_terminal_service() -> None:
+    global _terminal_service
+    service, _terminal_service = _terminal_service, None
+    if service is not None:
+        await service.shutdown()
+
+
+app.add_event_handler("startup", _start_terminal_service)
+app.add_event_handler("shutdown", _stop_terminal_service)
 
 
 async def _reconcile_startup_dependencies_task() -> None:

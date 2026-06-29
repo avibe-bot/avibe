@@ -17,8 +17,10 @@ import {
   $createParagraphNode,
   $createTextNode,
   $getRoot,
+  $getSelection,
   $isElementNode,
   $isLineBreakNode,
+  $isRangeSelection,
   $isTextNode,
   COMMAND_PRIORITY_HIGH,
   KEY_ENTER_COMMAND,
@@ -333,6 +335,53 @@ function MentionCaretFixPlugin() {
   return null;
 }
 
+// Voice/dictation IMEs (e.g. Typeless) "replace" a selection by deleting it and
+// re-inserting the full multi-paragraph result as ONE `insertText` whose `data`
+// carries newlines. In PlainText Lexical, when the editor isn't cleanly empty
+// Lexical can decline to control that insert and let the browser perform it — the
+// browser splits the text into block elements, and PlainText's DOM→state
+// reconciliation then keeps only the FIRST block, silently dropping every later
+// paragraph (intermittently, depending on the IME's delete/re-insert race).
+// Capture the multi-line `insertText` before Lexical/the browser handle it and
+// insert it ourselves via insertRawText (proper LineBreakNodes), which is
+// lossless. Registered on the document in the capture phase so it runs ahead of
+// Lexical's own root beforeinput listener; stopPropagation prevents a double
+// insert.
+//
+// Three guards keep us from ever swallowing input we wouldn't faithfully re-insert:
+//   • only `insertText` — NOT `insertReplacementText`, whose getTargetRanges() may
+//     differ from the selection (autocorrect/spellcheck), which would land the
+//     text at the wrong spot;
+//   • only when `event.cancelable` — a non-cancelable beforeinput ignores
+//     preventDefault, so taking over would double-insert alongside the native edit;
+//   • only when a RangeSelection can receive it — otherwise (e.g. a node-selected
+//     mention chip) defer to the normal path so the text is never dropped.
+function MultilineInsertFixPlugin() {
+  const [editor] = useLexicalComposerContext();
+  useEffect(() => {
+    const onBeforeInput = (event: InputEvent) => {
+      if (event.inputType !== 'insertText' || !event.cancelable) return;
+      const text = event.data ?? '';
+      if (!text.includes('\n')) return;
+      const root = editor.getRootElement();
+      const target = event.target as Node | null;
+      if (!root || !target || !(root === target || root.contains(target))) return;
+      // Confirm a range selection can take the insert BEFORE cancelling the default,
+      // so non-range selections fall through to the normal path instead of dropping.
+      if (!editor.getEditorState().read(() => $isRangeSelection($getSelection()))) return;
+      event.preventDefault();
+      event.stopPropagation();
+      editor.update(() => {
+        const selection = $getSelection();
+        if ($isRangeSelection(selection)) selection.insertRawText(text);
+      });
+    };
+    document.addEventListener('beforeinput', onBeforeInput, true);
+    return () => document.removeEventListener('beforeinput', onBeforeInput, true);
+  }, [editor]);
+  return null;
+}
+
 const MentionMenu = forwardRef<HTMLUListElement, BeautifulMentionsMenuProps>(
   ({ loading: _loading, children, ...props }, ref) => (
     // Always open ABOVE the caret as an out-of-flow overlay — the chat composer is
@@ -487,6 +536,7 @@ export const MentionEditor = forwardRef<MentionEditorHandle, MentionEditorProps>
         <EnterSubmitPlugin onSubmit={onSubmit} menuOpenRef={menuOpenRef} />
         <EditablePlugin disabled={disabled} />
         <PasteFilesPlugin onPasteFiles={onPasteFiles} />
+        <MultilineInsertFixPlugin />
         <BootstrapPlugin autoFocus={autoFocus} initialText={initialText} bridgeRef={ref} />
         <MentionCaretFixPlugin />
       </LexicalComposer>

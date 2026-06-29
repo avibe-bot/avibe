@@ -49,6 +49,24 @@ def _set(name, value, tmp_path, monkeypatch, capfd, *, sealed: Sealed | None = N
     capfd.readouterr()
 
 
+def _set_protected_grant(name: str, *, session_id: str | None = None) -> dict:
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name=name, protection="protected", sealed=_sealed(name.lower()))
+        req = vault_service.create_access_request(
+            conn,
+            name,
+            requester={"source": "cli", "session_id": session_id} if session_id else {"source": "cli"},
+            delivery={"session_id": session_id, "mode": "inject"} if session_id else {"mode": "inject"},
+        )
+        return vault_service.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref=name,
+            session_id=session_id,
+            created_by_request_id=req["id"],
+        )
+
+
 def test_export_is_deprecated_and_does_not_touch_db(capfd):
     code = cli.cmd_vault_export(_ns(env=["OPENAI_API_KEY"]))
     captured = capfd.readouterr()
@@ -86,6 +104,86 @@ def test_inject_calls_avault_and_records_delivery(tmp_path, capfd, monkeypatch, 
     secrets = {s["name"]: s for s in json.loads(capfd.readouterr().out)["secrets"]}
     assert secrets["A_KEY"]["use_count"] == 1
     assert secrets["B_KEY"]["use_count"] == 1
+
+
+def test_inject_uses_agent_delivery_for_protected_grant(tmp_path, capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    grant = _set_protected_grant("PROTECTED_KEY")
+    inject = Mock(return_value=None)
+    monkeypatch.setattr(api, "avault_agent_deliver_inject", inject)
+    monkeypatch.setattr(api, "avault_deliver_inject", Mock())
+    out = tmp_path / "secrets.env"
+
+    assert cli.cmd_vault_inject(_ns(keys="PROTECTED_KEY", out=str(out), format="dotenv")) == 0
+
+    inject.assert_called_once_with(
+        scope_type=grant["scope_type"],
+        scope_ref=grant["scope_ref"],
+        path=str(out),
+        fmt="dotenv",
+        secrets=[{"name": "PROTECTED_KEY", "key": "PROTECTED_KEY", "envelope": _sealed("protected_key")}],
+    )
+    assert "value" not in repr(inject.call_args.kwargs)
+
+
+def test_inject_resolves_protected_relative_output_in_caller_cwd(tmp_path, capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    monkeypatch.chdir(tmp_path)
+    grant = _set_protected_grant("PROTECTED_KEY")
+    inject = Mock(return_value=None)
+    monkeypatch.setattr(api, "avault_agent_deliver_inject", inject)
+    monkeypatch.setattr(api, "avault_deliver_inject", Mock())
+    expected = str(tmp_path / ".env")
+
+    assert cli.cmd_vault_inject(_ns(keys="PROTECTED_KEY", out=".env", format="dotenv")) == 0
+    payload = json.loads(capfd.readouterr().out)
+
+    inject.assert_called_once_with(
+        scope_type=grant["scope_type"],
+        scope_ref=grant["scope_ref"],
+        path=expected,
+        fmt="dotenv",
+        secrets=[{"name": "PROTECTED_KEY", "key": "PROTECTED_KEY", "envelope": _sealed("protected_key")}],
+    )
+    assert payload["path"] == expected
+
+
+def test_inject_persists_protected_approval_request_without_grant(tmp_path, capfd):
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected_key"))
+    out = tmp_path / "secrets.env"
+
+    code = cli.cmd_vault_inject(_ns(keys="PROTECTED_KEY", out=str(out), format="dotenv"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        requests = vault_service.list_requests(conn, status="pending")
+    assert len(requests) == 1
+    assert requests[0]["secret_name"] == "PROTECTED_KEY"
+    assert requests[0]["delivery"]["mode"] == "inject"
+    assert requests[0]["delivery"]["path"] == str(out)
+
+
+def test_inject_rejects_missing_later_secret_before_creating_approval(tmp_path, capfd):
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected_key"))
+    out = tmp_path / "secrets.env"
+
+    code = cli.cmd_vault_inject(_ns(keys="PROTECTED_KEY,MISSING_KEY", out=str(out), format="dotenv"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "secret_not_found"
+    with cli._open_vault_engine().connect() as conn:
+        assert vault_service.list_requests(conn, status="pending") == []
 
 
 @pytest.mark.parametrize("fmt", ["yaml", "toml"])

@@ -25,6 +25,7 @@ import aiohttp
 
 from config import paths
 from core.process_isolation import isolated_subprocess_kwargs, terminate_process_tree
+from modules.agents.opencode.caller_context import ensure_plugin_installed, server_environment
 from modules.agents.opencode.config_reconciler import OpenCodeConfigReconciler
 from vibe import runtime
 from vibe.opencode_config import (
@@ -39,6 +40,8 @@ DEFAULT_OPENCODE_PORT = 4096
 DEFAULT_OPENCODE_HOST = "127.0.0.1"
 SERVER_START_TIMEOUT = 15
 OPENCODE_LOG_TAIL_BYTES = 2_000_000
+_USE_CURRENT_CALLER_CONTEXT_PATH = object()
+_CURRENT_OWNER_PID = os.getpid()
 
 
 def _percent_encode_path(path: str) -> str:
@@ -89,8 +92,12 @@ class OpenCodeServerManager:
         self._active_run_sessions: set[str] = set()
         self._auth_refresh_pending = False
         self._auth_refresh_pending_port: Optional[int] = None
+        self._caller_context_plugin_refresh_pending = False
         self._pending_runtime_config: Optional[tuple[str, int, int]] = None
         self._last_prompt_started_at: dict[str, float] = {}
+
+    def _caller_context_path(self) -> str:
+        return server_environment()["AVIBE_OPENCODE_CALLER_CONTEXT_PATH"]
 
     def _get_lock(self) -> asyncio.Lock:
         """Get or create an asyncio.Lock bound to the current event loop."""
@@ -332,10 +339,12 @@ class OpenCodeServerManager:
     async def mark_run_active(self, session_id: str) -> None:
         async with self._get_lock():
             self._active_run_sessions.add(session_id)
+            self._write_active_run_sessions_to_pid_file()
 
     async def mark_run_inactive(self, session_id: str) -> None:
         async with self._get_lock():
             self._active_run_sessions.discard(session_id)
+            self._write_active_run_sessions_to_pid_file()
 
     @asynccontextmanager
     async def _request_scope(self):
@@ -366,7 +375,13 @@ class OpenCodeServerManager:
 
         return data if isinstance(data, dict) else None
 
-    def _write_pid_file(self, pid: int) -> None:
+    def _write_pid_file(
+        self,
+        pid: int,
+        *,
+        caller_context_path: object = _USE_CURRENT_CALLER_CONTEXT_PATH,
+        owner_pid: Optional[int] = _CURRENT_OWNER_PID,
+    ) -> None:
         try:
             self._pid_file.parent.mkdir(parents=True, exist_ok=True)
             payload = {
@@ -374,10 +389,28 @@ class OpenCodeServerManager:
                 "port": self.port,
                 "host": self.host,
                 "started_at": time.time(),
+                "active_run_sessions": sorted(self._active_run_sessions),
             }
+            if owner_pid is not None:
+                payload["owner_pid"] = owner_pid
+            if caller_context_path is _USE_CURRENT_CALLER_CONTEXT_PATH:
+                caller_context_path = self._caller_context_path()
+            if isinstance(caller_context_path, str) and caller_context_path:
+                payload["caller_context_path"] = caller_context_path
             self._pid_file.write_text(json.dumps(payload))
         except Exception as e:
             logger.debug(f"Failed to write OpenCode pid file: {e}")
+
+    def _write_active_run_sessions_to_pid_file(self) -> None:
+        info = self._read_pid_file()
+        if not self._pid_file_references_current_server(info):
+            return
+        assert isinstance(info, dict)
+        info["active_run_sessions"] = sorted(self._active_run_sessions)
+        try:
+            self._pid_file.write_text(json.dumps(info))
+        except Exception as e:
+            logger.debug(f"Failed to update OpenCode pid active sessions: {e}")
 
     def _clear_pid_file(self) -> None:
         try:
@@ -385,6 +418,30 @@ class OpenCodeServerManager:
                 self._pid_file.unlink()
         except Exception as e:
             logger.debug(f"Failed to clear OpenCode pid file: {e}")
+
+    def _pid_file_references_current_server(self, info: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(info, dict):
+            return False
+        pid = info.get("pid")
+        if not isinstance(pid, int):
+            return False
+        if info.get("port") == self.port:
+            return True
+        cmd = self._get_pid_command(pid)
+        return bool(cmd and self._is_opencode_serve_cmd(cmd, self.port))
+
+    def _pid_file_has_caller_context_binding(self, info: Optional[Dict[str, Any]]) -> bool:
+        if not self._pid_file_references_current_server(info):
+            return False
+        return bool(isinstance(info, dict) and info.get("caller_context_path") == self._caller_context_path())
+
+    def _pid_file_was_started_by_current_process(self, info: Optional[Dict[str, Any]]) -> bool:
+        return bool(isinstance(info, dict) and info.get("owner_pid") == _CURRENT_OWNER_PID)
+
+    @staticmethod
+    def _pid_file_has_known_no_active_runs(info: Optional[Dict[str, Any]]) -> bool:
+        active = info.get("active_run_sessions") if isinstance(info, dict) else None
+        return isinstance(active, list) and not active
 
     @staticmethod
     def _extract_json_object(text: str, start: int) -> Optional[str]:
@@ -869,7 +926,7 @@ class OpenCodeServerManager:
                 actual_pid = actual_pids[0]
                 if actual_pid != pid:
                     logger.info(f"Adopting healthy OpenCode server (updating stale PID {pid} -> {actual_pid})")
-                    self._write_pid_file(actual_pid)
+                    self._write_pid_file(actual_pid, caller_context_path=None, owner_pid=None)
                 else:
                     logger.info(f"Adopting healthy OpenCode server pid={pid} from previous run")
             else:
@@ -893,11 +950,46 @@ class OpenCodeServerManager:
 
     async def ensure_running(self) -> str:
         async with self._get_lock():
+            plugin_install = ensure_plugin_installed()
+            if plugin_install.changed:
+                self._caller_context_plugin_refresh_pending = True
             if self._auth_refresh_pending and self._active_requests == 0 and not self._has_active_run_sessions():
                 await self._restart_for_auth_refresh_locked()
             await self._cleanup_orphaned_managed_server()
 
             if await self._is_healthy():
+                pid_info = self._read_pid_file()
+                if not self._pid_file_references_current_server(pid_info):
+                    raise RuntimeError(
+                        f"OpenCode server is already healthy on port {self.port}, but it is not managed by Avibe. "
+                        "Stop that server or configure Avibe to use another OPENCODE_PORT so caller context "
+                        "environment variables can be injected safely."
+                    )
+                if not self._pid_file_has_caller_context_binding(pid_info):
+                    self._caller_context_plugin_refresh_pending = True
+                if (
+                    self._caller_context_plugin_refresh_pending
+                    and self._active_requests == 0
+                    and not self._has_active_run_sessions()
+                    and (
+                        self._pid_file_was_started_by_current_process(pid_info)
+                        or self._pid_file_has_known_no_active_runs(pid_info)
+                    )
+                ):
+                    logger.info(
+                        "Restarting OpenCode server to load updated Avibe caller-context plugin at %s",
+                        plugin_install.path,
+                    )
+                    await self._restart_for_auth_refresh_locked()
+                    await self._start_server()
+                    self._caller_context_plugin_refresh_pending = False
+                    return self.base_url
+                if self._caller_context_plugin_refresh_pending:
+                    raise RuntimeError(
+                        "OpenCode caller-context plugin refresh is pending for an adopted or active server; "
+                        "retry after the existing OpenCode turn finishes so Avibe can restart the server "
+                        "with AVIBE_* env injection."
+                    )
                 # If the server is already running (e.g., started by a previous run),
                 # record its PID so shutdown can clean it up.
                 if not self._read_pid_file():
@@ -923,6 +1015,7 @@ class OpenCodeServerManager:
                 )
 
             await self._start_server()
+            self._caller_context_plugin_refresh_pending = False
             return self.base_url
 
     async def _is_healthy(self) -> bool:
@@ -988,6 +1081,7 @@ class OpenCodeServerManager:
 
         env = os.environ.copy()
         env["OPENCODE_ENABLE_EXA"] = "1"
+        env.update(server_environment())
 
         try:
             self._process = await asyncio.create_subprocess_exec(

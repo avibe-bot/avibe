@@ -8,12 +8,15 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import shutil
+import threading
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
 
 from storage import vault_service
-from storage.models import vault_audit
+from storage.models import vault_audit, vault_grants
 from storage.vault_crypto import Sealed
 from vibe import cli
 
@@ -60,6 +63,43 @@ def _set_secret(name: str, value: str, tmp_path, monkeypatch, capfd, *, sealed: 
     return seal_mock
 
 
+def _set_protected_grant(name: str, *, session_id: str | None = None) -> dict:
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name=name, protection="protected", sealed=_sealed("protected"))
+        req = vault_service.create_access_request(
+            conn,
+            name,
+            requester={"source": "cli", "session_id": session_id} if session_id else {"source": "cli"},
+            delivery={"session_id": session_id, "mode": "run"} if session_id else {"mode": "run"},
+        )
+        return vault_service.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref=name,
+            session_id=session_id,
+            created_by_request_id=req["id"],
+        )
+
+
+def _set_group_grant(names: list[str], *, group: str = "crypto", session_id: str | None = None) -> dict:
+    with cli._open_vault_engine().begin() as conn:
+        for name in names:
+            vault_service.create_secret(conn, name=name, protection="protected", group=group, sealed=_sealed(name.lower()))
+        req = vault_service.create_access_request(
+            conn,
+            names[0],
+            requester={"source": "cli", "session_id": session_id} if session_id else {"source": "cli"},
+            delivery={"session_id": session_id, "mode": "run"} if session_id else {"mode": "run"},
+        )
+        return vault_service.create_grant(
+            conn,
+            scope_type="group",
+            scope_ref=group,
+            session_id=session_id,
+            created_by_request_id=req["id"],
+        )
+
+
 @pytest.mark.parametrize(
     "specs,expected",
     [
@@ -73,7 +113,7 @@ def test_parse_env_specs(specs, expected):
     assert cli._parse_env_specs(specs) == expected
 
 
-def test_set_seals_with_avault_and_stores_preview(tmp_path, capfd, monkeypatch):
+def test_set_seals_with_avault_without_value_derived_metadata(tmp_path, capfd, monkeypatch):
     from unittest.mock import Mock
 
     from vibe import api
@@ -87,8 +127,9 @@ def test_set_seals_with_avault_and_stores_preview(tmp_path, capfd, monkeypatch):
     payload = json.loads(capfd.readouterr().out)
     secret = payload["secret"]
     assert secret["name"] == "OPENAI_API_KEY"
-    assert secret["preview"] == "…1234"
+    assert "preview" not in secret
     assert "sk-ant-abcd1234" not in json.dumps(payload)
+    assert "1234" not in json.dumps(payload)
     seal.assert_called_once_with("OPENAI_API_KEY", b"sk-ant-abcd1234")
     with cli._open_vault_engine().connect() as conn:
         assert vault_service.get_envelope(conn, "OPENAI_API_KEY") == _sealed("saved")
@@ -152,6 +193,278 @@ def test_run_calls_avault_with_env_mapping_and_records_delivery(tmp_path, capfd,
     secret = json.loads(capfd.readouterr().out)["secrets"][0]
     assert secret["use_count"] == 1
     assert secret["last_used_at"] is not None
+
+
+def test_run_delivers_protected_secret_under_agent_grant(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", "caller-pythonpath")
+    monkeypatch.setenv("AWS_PROFILE", "caller-profile")
+    monkeypatch.setenv("LOCAL_NAME", "stale-caller-secret")
+    monkeypatch.setattr(cli.sys, "stdin", type("FakeStdin", (), {"buffer": io.BytesIO(b"caller stdin\n")})())
+    grant = _set_protected_grant("PROTECTED_KEY")
+
+    def _deliver(**kwargs):
+        command = kwargs["command"]
+        stdout_path = command[4]
+        stderr_path = command[5]
+        stdin_path = command[6]
+        env_path = command[7]
+        keep_env_path = command[8]
+        env_script = Path(env_path).read_text()
+        assert "export PYTHONPATH=caller-pythonpath\n" in env_script
+        assert "export AWS_PROFILE=caller-profile\n" in env_script
+        assert "export LOCAL_NAME=" not in env_script
+        assert Path(keep_env_path).read_text() == "LOCAL_NAME\n"
+        assert Path(stdin_path).read_bytes() == b"caller stdin\n"
+        with open(stdout_path, "wb", buffering=0) as stdout:
+            stdout.write(b"protected out\n")
+        with open(stderr_path, "wb", buffering=0) as stderr:
+            stderr.write(b"protected err\n")
+        return {"exit_code": 0}
+
+    deliver = Mock(side_effect=_deliver)
+    monkeypatch.setattr(api, "avault_agent_deliver_run", deliver)
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(_ns(env=["LOCAL_NAME=PROTECTED_KEY"], command_argv=["python3", "-c", "pass"]))
+    captured = capfd.readouterr()
+
+    assert code == 0
+    assert "protected out\n" in captured.out
+    assert "protected err\n" in captured.err
+    deliver.assert_called_once()
+    assert deliver.call_args.kwargs["scope_type"] == grant["scope_type"]
+    assert deliver.call_args.kwargs["scope_ref"] == grant["scope_ref"]
+    assert deliver.call_args.kwargs["secrets"] == [{"name": "PROTECTED_KEY", "env": "LOCAL_NAME", "envelope": _sealed("protected")}]
+    command = deliver.call_args.kwargs["command"]
+    shell = shutil.which("sh") or "/bin/sh"
+    assert command[:2] == [shell, "-c"]
+    assert command[3] == "avibe-vault-run"
+    assert "env -i" not in command[2]
+    assert 'grep' in command[2]
+    assert 'unset "$name"' in command[2]
+    assert '. "$env_file"; cd "$cwd" || exit 125; exec "$@"' in command[2]
+    assert command[9:] == [
+        str(tmp_path),
+        shutil.which("python3") or "python3",
+        "-c",
+        "pass",
+    ]
+    assert "value" not in repr(deliver.call_args.kwargs)
+    with cli._open_vault_engine().connect() as conn:
+        assert vault_service.get_secret_meta(conn, "PROTECTED_KEY")["use_count"] == 1
+
+
+def test_run_reports_fifo_bridge_errors(capfd, monkeypatch):
+    from vibe import api
+
+    _set_protected_grant("PROTECTED_KEY")
+    monkeypatch.setattr(
+        cli,
+        "_AgentRunOutputBridge",
+        Mock(side_effect=cli.TaskCliError("protected run FIFOs are unsupported", code="unsupported_platform")),
+    )
+    deliver = Mock()
+    monkeypatch.setattr(api, "avault_agent_deliver_run", deliver)
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"]))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "unsupported_platform"
+    deliver.assert_not_called()
+
+
+def test_run_allows_tty_stdio_for_protected_delivery(tmp_path, monkeypatch):
+    from vibe import api
+
+    monkeypatch.chdir(tmp_path)
+
+    class TtyBytes(io.BytesIO):
+        def isatty(self):
+            return True
+
+    fake_stdin = type("FakeStdin", (), {"buffer": TtyBytes(), "isatty": lambda self: True})()
+    fake_stdout = type("FakeStdout", (), {"buffer": TtyBytes(), "isatty": lambda self: True})()
+    fake_stderr = type("FakeStderr", (), {"buffer": TtyBytes(), "isatty": lambda self: True})()
+    monkeypatch.setattr(cli.sys, "stdin", fake_stdin)
+    monkeypatch.setattr(cli.sys, "stdout", fake_stdout)
+    monkeypatch.setattr(cli.sys, "stderr", fake_stderr)
+    _set_protected_grant("PROTECTED_KEY")
+    deliver = Mock(return_value={"exit_code": 0})
+    monkeypatch.setattr(api, "avault_agent_deliver_run", deliver)
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    assert cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"])) == 0
+    deliver.assert_called_once()
+
+
+def test_agent_run_trampoline_clears_agent_environment(tmp_path):
+    env_file = tmp_path / "env.sh"
+    env_file.write_text("export KEEP=value\n")
+    stdout = tmp_path / "stdout"
+    stderr = tmp_path / "stderr"
+    stdin = tmp_path / "stdin"
+    keep_env = tmp_path / "keep-env"
+    keep_env.write_text("SECRET\n")
+    command = cli._agent_run_command(
+        ["python3", "-c", "pass"],
+        stdout_path=str(stdout),
+        stderr_path=str(stderr),
+        stdin_path=str(stdin),
+        env_path=str(env_file),
+        keep_env_path=str(keep_env),
+    )
+
+    assert "exec " in command[2]
+    assert "env -i " not in command[2]
+    assert 'grep' in command[2]
+    assert 'unset "$name"' in command[2]
+    assert '. "$env_file"; cd "$cwd" || exit 125; exec "$@"' in command[2]
+
+
+def test_agent_run_stdin_polling_uses_stdlib_select(monkeypatch):
+    source = type("FdSource", (), {"fileno": lambda self: 10})()
+    called = Mock(return_value=([10], [], []))
+    monkeypatch.setattr(cli.select_module, "select", called)
+    read = Mock(return_value=b"stdin chunk")
+    monkeypatch.setattr(cli.os, "read", read)
+
+    chunk = cli._AgentRunOutputBridge._read_stdin_chunk(source, threading.Event())
+
+    assert chunk == b"stdin chunk"
+    called.assert_called_once()
+    read.assert_called_once_with(10, 8192)
+
+
+def test_shell_env_exports_can_use_explicit_env():
+    exports = cli._shell_env_exports({"KEEP": "ok", "BAD-NAME": "no", "SECRET": "old"}, exclude={"SECRET"})
+
+    assert "export KEEP=ok\n" in exports
+    assert "BAD-NAME" not in exports
+    assert "SECRET" not in exports
+
+
+def test_run_prefers_common_grant_for_protected_batch(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    monkeypatch.chdir(tmp_path)
+    group_grant = _set_group_grant(["A_KEY", "B_KEY"])
+    with cli._open_vault_engine().begin() as conn:
+        req = vault_service.create_access_request(
+            conn,
+            "A_KEY",
+            requester={"source": "cli"},
+            delivery={"mode": "run"},
+        )
+        vault_service.create_grant(conn, scope_type="secret", scope_ref="A_KEY", created_by_request_id=req["id"])
+    deliver = Mock(return_value={"exit_code": 0, "stdout": b"", "stderr": b""})
+    monkeypatch.setattr(api, "avault_agent_deliver_run", deliver)
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(_ns(env=["A_KEY", "B_KEY"], command_argv=["python3", "-c", "pass"]))
+
+    assert code == 0
+    deliver.assert_called_once()
+    assert deliver.call_args.kwargs["scope_type"] == group_grant["scope_type"]
+    assert deliver.call_args.kwargs["scope_ref"] == group_grant["scope_ref"]
+    assert [secret["name"] for secret in deliver.call_args.kwargs["secrets"]] == ["A_KEY", "B_KEY"]
+
+
+def test_run_rejects_mixed_tiers_before_creating_approval(tmp_path, capfd, monkeypatch):
+    _set_secret("STANDARD_KEY", "standard", tmp_path, monkeypatch, capfd)
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))
+
+    code = cli.cmd_vault_run(_ns(env=["STANDARD_KEY", "PROTECTED_KEY"], command_argv=["python3", "-c", "pass"]))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "mixed_protection_tiers"
+    with cli._open_vault_engine().connect() as conn:
+        assert vault_service.list_requests(conn, status="pending") == []
+
+
+def test_run_rejects_missing_later_secret_before_creating_approval(capfd):
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))
+
+    code = cli.cmd_vault_run(_ns(env=["PROTECTED_KEY", "MISSING_KEY"], command_argv=["python3", "-c", "pass"]))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "secret_not_found"
+    with cli._open_vault_engine().connect() as conn:
+        assert vault_service.list_requests(conn, status="pending") == []
+
+
+def test_run_expires_grant_when_agent_cache_is_missing(capfd, monkeypatch):
+    from vibe import api
+
+    grant = _set_protected_grant("PROTECTED_KEY")
+    monkeypatch.setattr(api, "avault_agent_deliver_run", Mock(side_effect=api.AvaultError("grant is missing or expired")))
+
+    code = cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"]))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
+        requests = vault_service.list_requests(conn, status="pending")
+    assert status == "expired"
+    assert requests[0]["secret_name"] == "PROTECTED_KEY"
+
+
+def test_run_reopens_only_one_approval_when_group_agent_cache_is_missing(capfd, monkeypatch):
+    from vibe import api
+
+    grant = _set_group_grant(["A_KEY", "B_KEY"])
+    monkeypatch.setattr(api, "avault_agent_deliver_run", Mock(side_effect=api.AvaultError("grant is missing or expired")))
+
+    code = cli.cmd_vault_run(_ns(env=["A_KEY", "B_KEY"], command_argv=["python3", "-c", "pass"]))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
+        requests = vault_service.list_requests(conn, status="pending")
+    assert status == "expired"
+    assert len(requests) == 1
+    assert requests[0]["secret_name"] == "A_KEY"
+
+
+def test_run_persists_protected_approval_request_without_grant(capfd):
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))
+
+    code = cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"]))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        requests = vault_service.list_requests(conn, status="pending")
+    assert len(requests) == 1
+    assert requests[0]["secret_name"] == "PROTECTED_KEY"
+    assert requests[0]["delivery"]["mode"] == "run"
+
+
+def test_run_records_protected_delivery_when_child_exits_70(capfd, monkeypatch):
+    from vibe import api
+
+    _set_protected_grant("PROTECTED_KEY")
+    monkeypatch.setattr(api, "avault_agent_deliver_run", Mock(return_value={"exit_code": 70}))
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    assert cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"])) == 70
+    cli.cmd_vault_list(_ns())
+    secret = json.loads(capfd.readouterr().out)["secrets"][0]
+    assert secret["use_count"] == 1
 
 
 def test_run_skips_delivery_audit_when_avault_returns_70(tmp_path, capfd, monkeypatch):

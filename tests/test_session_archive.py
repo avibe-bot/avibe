@@ -3,8 +3,10 @@ row becomes inert (never re-bound by inbound routing or task resolution)."""
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import select
@@ -16,10 +18,12 @@ from core.scheduled_tasks import resolve_session_id_target
 from core.show_pages import ShowPageError, ShowPageStore
 from core.show_session_events import ShowSessionEventError, ShowSessionEventStore
 from storage import messages_service
+from storage import vault_service as vs
 from storage import workbench_sessions_service as wss
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_runs, messages, run_definitions, show_pages
+from storage.models import agent_runs, messages, run_definitions, show_pages, vault_grants, vault_requests
+from storage.vault_crypto import Sealed
 from storage.sessions_service import SQLiteSessionsService
 
 NOW = "2026-06-08T00:00:00Z"
@@ -89,6 +93,53 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
                 session_id=sid, visibility="public", share_id="shareX", created_at=NOW, updated_at=NOW
             )
         )
+        vs.create_secret(conn, name="ARCHIVE_KEY", protection="protected", sealed=Sealed("ct", "nonce", "wrap"))
+        vs.create_secret(conn, name="ARCHIVE_OTHER_KEY", protection="protected", sealed=Sealed("ct-other", "nonce-other", "wrap-other"))
+        vs.create_secret(
+            conn,
+            name="ARCHIVE_SIGNING_KEY",
+            protection="protected",
+            kind="keypair",
+            signer_kind="local",
+            sealed=Sealed("ct-key", "nonce-key", "wrap-key"),
+        )
+        req = vs.create_access_request(conn, "ARCHIVE_KEY", requester={"session_id": sid}, delivery={"session_id": sid})
+        pending_req = vs.create_access_request(
+            conn,
+            "ARCHIVE_KEY",
+            requester={"session_id": sid},
+            delivery={"session_id": sid, "command": "python sync.py"},
+        )
+        pending_uncovered_req = vs.create_access_request(
+            conn,
+            "ARCHIVE_OTHER_KEY",
+            requester={"session_id": sid},
+            delivery={"session_id": sid, "command": "python other.py"},
+        )
+        sign_req = vs.create_sign_request(
+            conn,
+            "ARCHIVE_SIGNING_KEY",
+            digest="00" * 32,
+            scheme="ecdsa-secp256k1-recoverable",
+            requester={"session_id": sid},
+            delivery={"session_id": sid},
+        )
+        other_req = vs.create_access_request(
+            conn,
+            "ARCHIVE_KEY",
+            requester={"session_id": "ses_other"},
+            delivery={"session_id": "ses_other"},
+        )
+        cache = vs.GRANT_RUNTIME_CACHE
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ARCHIVE_KEY",
+            session_id=sid,
+            created_by_request_id=req["id"],
+            cache=cache,
+        )
+        assert cache.has(grant["id"], "ARCHIVE_KEY")
 
     with engine.begin() as conn:
         result = wss.archive_session(conn, sid)
@@ -96,6 +147,7 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
     assert result["status"] == "archived"
     assert result["agent_status"] == "idle"
     assert result["reclaimed"] == {"tasks": 1, "watches": 1, "runs": 2, "queued": 0}
+    assert result["revoked_vault_grant_scopes"] == [{"scope_type": "secret", "scope_ref": "ARCHIVE_KEY"}]
 
     with engine.connect() as conn:
         live_defs = (
@@ -120,6 +172,51 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
         page = conn.execute(select(show_pages).where(show_pages.c.session_id == sid)).mappings().first()
         assert page["visibility"] == "offline"
         assert page["offline_at"] is not None
+        grant_row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant["id"])).mappings().one()
+        assert grant_row["status"] == "revoked"
+        assert not cache.has(grant["id"], "ARCHIVE_KEY")
+        request_statuses = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                select(vault_requests.c.id, vault_requests.c.status).where(
+                    vault_requests.c.id.in_(
+                        [req["id"], pending_req["id"], pending_uncovered_req["id"], sign_req["id"], other_req["id"]]
+                    )
+                )
+            ).mappings()
+        }
+        assert request_statuses[req["id"]] == "approved"
+        assert request_statuses[pending_req["id"]] == "approved"
+        assert request_statuses[pending_uncovered_req["id"]] == "expired"
+        assert request_statuses[sign_req["id"]] == "expired"
+        assert request_statuses[other_req["id"]] == "pending"
+
+
+def test_archive_release_vault_scopes_runs_in_threadpool(monkeypatch) -> None:
+    from vibe import api, ui_server
+
+    calls = []
+
+    async def fake_to_thread(func, *args, **kwargs):
+        calls.append((func, args, kwargs))
+        return func(*args, **kwargs)
+
+    release = Mock(side_effect=api.AvaultError("agent release failed"))
+    monkeypatch.setattr(ui_server.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(api, "release_vault_agent_scopes", release)
+
+    asyncio.run(
+        ui_server._archive_release_vault_scopes(
+            "ses_archive",
+            [{"scope_type": "secret", "scope_ref": "ARCHIVE_KEY"}],
+        )
+    )
+
+    assert calls
+    release.assert_called_once_with(
+        [{"scope_type": "secret", "scope_ref": "ARCHIVE_KEY"}],
+        reason="archive_session:ses_archive",
+    )
 
 
 def test_archived_session_not_reused_for_anchor(monkeypatch, tmp_path: Path) -> None:

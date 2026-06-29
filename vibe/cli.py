@@ -1,24 +1,28 @@
 import argparse
 import asyncio
+import errno
 import getpass
 import json
 import logging
 import math
 import os
 import platform
+import select as select_module
 import shlex
 import shutil
 import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from textwrap import dedent
-from typing import NamedTuple, Optional
+from typing import Mapping, NamedTuple, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -35,6 +39,7 @@ from core.scheduled_tasks import (
     resolve_session_id_target,
     session_anchor_for_target,
 )
+from core.caller_context import caller_context_from_env
 from core.vibe_agents import VibeAgent, VibeAgentStore, iter_global_agent_files, parse_agent_file, validate_agent_backend
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
@@ -63,6 +68,8 @@ from storage.settings_service import make_scope_id
 
 logger = logging.getLogger(__name__)
 UV_TOOL_PACKAGE_NAMES = (PACKAGE_NAME, LEGACY_PACKAGE_NAME)
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+_FALSY_ENV_VALUES = {"0", "false", "no", "off"}
 
 WATCH_STARTUP_STABLE_RUNNING_SECONDS = 1.5
 WATCH_STARTUP_JITTER_BUFFER_SECONDS = 1.0
@@ -264,13 +271,13 @@ def _task_add_examples_text() -> str:
     return dedent(
         """\
         Session target:
-          Use --session-id with the current Agent Session ID, for example sesk8m4q2p7x.
+          Use --session-id with the target Agent Session ID, for example sesk8m4q2p7x.
+          Inside an Avibe Agent shell, omit --session-id to default to the caller Session from AVIBE_SESSION_ID.
 
         Guidance:
           If this is your first time using this command, read this whole help entry before creating a task.
           `--session-id` chooses which Agent Session Avibe will continue using when the task runs.
-          Keep the current session id when future runs should stay in the same session.
-          If no session id is available, trigger this from an active Avibe conversation instead of guessing.
+          Omit --session-id only when this task should follow the current caller Session.
           `--post-to channel` changes where the message is posted, not which session is continued.
           Use --deliver-key only when delivery must go to a different explicit target.
           `--message` and `--message-file` provide the stored user message that will be sent each time the task runs.
@@ -317,7 +324,7 @@ def _hook_send_examples_text() -> str:
           New automation should use `vibe agent run --async`.
 
         Session target:
-          Use --session-id with the current Agent Session ID, for example sesk8m4q2p7x.
+          Use --session-id with the target Agent Session ID, for example sesk8m4q2p7x.
 
         Guidance:
           If this is your first time creating an async one-shot run, use `vibe agent run --async --help`.
@@ -330,8 +337,8 @@ def _hook_send_examples_text() -> str:
           `--message` and `--message-file` provide the one-shot async user message that will be queued immediately.
 
         Examples:
-          vibe agent run --async --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
-          vibe agent run --async --session-id sesk8m4q2p7x --message 'Share the benchmark result.'
+          vibe agent run --async --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
+          vibe agent run --async --session-id sesk8m4q2p7x --callback-session-id sescaller123 --message 'Share the benchmark result.'
         """
     )
 
@@ -520,7 +527,7 @@ def _show_path_examples_text() -> str:
         src/styles.css, index.html, and a sample api/health.ts handler.
 
         First-run workflow:
-          1. Run: vibe show path --session-id sesk8m4q2p7x
+          1. Run: vibe show path
           2. Write or update src/App.tsx in the returned path.
           3. Share the active URL if the command output includes one.
           4. Run `vibe show update --visibility public` only when the user asks for a shareable public link.
@@ -600,14 +607,14 @@ def _watch_add_examples_text() -> str:
     return dedent(
         """\
         Session target:
-          Use --session-id with the current Agent Session ID, for example sesk8m4q2p7x.
+          Use --session-id with the target Agent Session ID, for example sesk8m4q2p7x.
+          Inside an Avibe Agent shell, omit --session-id to default to the caller Session from AVIBE_SESSION_ID.
 
         Guidance:
           If this is your first time using this command, read this whole help entry before creating a watch.
           Use a watch when a script should wait in the background and send a follow-up when it detects an event or reaches a terminal failure.
           `--session-id` chooses which Agent Session Avibe will continue using for follow-up messages from the watch.
-          Keep the current session id when follow-up should continue in the same session.
-          If no session id is available, trigger this from an active Avibe conversation instead of guessing.
+          Omit --session-id only when this watch should follow up in the current caller Session.
           `--post-to channel` changes where the follow-up is posted, not which session is continued.
           Use --deliver-key only when delivery must go to a different explicit target.
           `--prefix` becomes the instruction text of the follow-up hook. On a successful cycle, Avibe prepends `--prefix` before waiter stdout and joins them with a blank line when both exist.
@@ -640,8 +647,8 @@ def _agent_run_examples_text() -> str:
 
         Examples:
           vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
-          vibe agent run --async --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
-          vibe agent run --async --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
+          vibe agent run --async --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
+          vibe agent run --async --fork-session sesk8m4q2p7x --callback-session-id sescaller123 --message 'Explore this alternate fix from the current context.'
           vibe agent run --fork-session sesk8m4q2p7x --agent reviewer --model gpt-5.4 --reasoning-effort high --message 'Review the forked context.'
         """
     )
@@ -1284,6 +1291,92 @@ def _resolve_session_target_args(
     return session_id or None, session_key
 
 
+def _default_session_id_from_caller(caller_context) -> Optional[str]:
+    if caller_context is None:
+        return None
+    session_id = (getattr(caller_context, "session_id", None) or "").strip()
+    if not session_id:
+        return None
+    return session_id
+
+
+def _apply_caller_session_default(args, caller_context, *, purpose: str) -> Optional[dict[str, str]]:
+    if (getattr(args, "session_id", None) or "").strip():
+        return None
+    if (getattr(args, "session_key", None) or "").strip():
+        return None
+    if bool(getattr(args, "create_session", False)) or bool(getattr(args, "create_session_per_run", False)):
+        return None
+    if (getattr(args, "fork_session", None) or "").strip():
+        return None
+    default_session_id = _default_session_id_from_caller(caller_context)
+    if not default_session_id:
+        return None
+    setattr(args, "session_id", default_session_id)
+    return {
+        "code": "session_defaulted_to_caller",
+        "message": f"{purpose} defaulted to the caller Session from AVIBE_SESSION_ID.",
+        "session_id": default_session_id,
+    }
+
+
+def _resolve_show_session_id(args, *, help_command: str) -> tuple[str, Optional[dict[str, str]]]:
+    caller_context = caller_context_from_env()
+    notice = _apply_caller_session_default(args, caller_context, purpose="Show Page session")
+    session_id = (getattr(args, "session_id", None) or "").strip()
+    if not session_id:
+        raise TaskCliError(
+            "Show Page session id is required outside an Avibe Agent environment.",
+            code="missing_session_target",
+            hint="Pass --session-id, or run this command from an Avibe Agent shell where AVIBE_SESSION_ID is injected.",
+            help_command=help_command,
+        )
+    return session_id, notice
+
+
+def _resolve_caller_session_id(args, *, purpose: str, help_command: str) -> tuple[str, Optional[dict[str, str]]]:
+    caller_context = caller_context_from_env()
+    notice = _apply_caller_session_default(args, caller_context, purpose=purpose)
+    session_id = (getattr(args, "session_id", None) or "").strip()
+    if not session_id:
+        raise TaskCliError(
+            f"{purpose} id is required outside an Avibe Agent environment.",
+            code="missing_session_target",
+            hint="Pass the session id explicitly, or run this command from an Avibe Agent shell where AVIBE_SESSION_ID is injected.",
+            help_command=help_command,
+        )
+    return session_id, notice
+
+
+def _default_run_id_from_caller(caller_context) -> Optional[str]:
+    if caller_context is None:
+        return None
+    run_id = (getattr(caller_context, "run_id", None) or "").strip()
+    if not run_id:
+        return None
+    return run_id
+
+
+def _resolve_caller_run_id(args, *, purpose: str, help_command: str) -> tuple[str, Optional[dict[str, str]]]:
+    run_id = (getattr(args, "run_id", None) or "").strip()
+    if run_id:
+        return run_id, None
+    default_run_id = _default_run_id_from_caller(caller_context_from_env())
+    if not default_run_id:
+        raise TaskCliError(
+            f"{purpose} id is required outside an Avibe Agent run environment.",
+            code="missing_run_target",
+            hint="Pass the run id explicitly, or run this command from an Avibe Agent shell where AVIBE_RUN_ID is injected.",
+            help_command=help_command,
+        )
+    setattr(args, "run_id", default_run_id)
+    return default_run_id, {
+        "code": "run_defaulted_to_caller",
+        "message": f"{purpose} defaulted to the caller Run from AVIBE_RUN_ID.",
+        "run_id": default_run_id,
+    }
+
+
 def _validate_delivery_args(
     *,
     session_key: str,
@@ -1672,11 +1765,18 @@ def _wait_for_watch_startup(
 
 def cmd_task_add(args):
     try:
+        caller_context = caller_context_from_env()
+        session_default_notice = _apply_caller_session_default(
+            args,
+            caller_context,
+            purpose="Task target Session",
+        )
         schedule_type = "cron" if args.cron else "at"
         session_policy = _validate_definition_session_policy(
             args,
             schedule_type=schedule_type,
             help_command="vibe task add --help",
+            allow_caller_session_default=caller_context is not None,
         )
         message = _resolve_prompt_input(
             args,
@@ -1747,6 +1847,7 @@ def cmd_task_add(args):
                 session_policy=session_policy,
                 cron=args.cron,
                 timezone_name=timezone_name,
+                metadata=_definition_creation_metadata_from_caller(caller_context),
             )
         else:
             try:
@@ -1772,14 +1873,20 @@ def cmd_task_add(args):
                 session_policy=session_policy,
                 run_at=run_at,
                 timezone_name=timezone_name,
+                metadata=_definition_creation_metadata_from_caller(caller_context),
             )
         warnings = _collect_target_warnings(session_target, delivery_target)
         task_payload = _task_payload(task)
+        payload_fields = {
+            "definition": task_payload,
+            "task": task_payload,
+            "warnings": warnings,
+        }
+        if session_default_notice:
+            payload_fields["session_default_notice"] = session_default_notice
         _print_cli_payload(
             "run_definition",
-            definition=task_payload,
-            task=task_payload,
-            warnings=warnings,
+            **payload_fields,
         )
         return 0
     except Exception as exc:
@@ -2588,11 +2695,25 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="--async returns immediately. Remove --wait-timeout, or run synchronously without --async.",
             help_command=help_command,
         )
+    if (getattr(args, "callback_session_id", None) or "").strip() and bool(getattr(args, "no_callback", False)):
+        raise TaskCliError(
+            "use either --callback-session-id or --no-callback, not both",
+            code="conflicting_callback_policy",
+            hint="Pass --callback-session-id to receive a follow-up, or --no-callback to intentionally inspect the run later.",
+            help_command=help_command,
+        )
     if (getattr(args, "callback_session_id", None) or "").strip() and not bool(getattr(args, "async_run", False)):
         raise TaskCliError(
             "--callback-session-id requires --async",
             code="callback_requires_async",
             hint="Callback delivery happens after an asynchronous run completes.",
+            help_command=help_command,
+        )
+    if bool(getattr(args, "no_callback", False)) and not bool(getattr(args, "async_run", False)):
+        raise TaskCliError(
+            "--no-callback requires --async",
+            code="no_callback_requires_async",
+            hint="Only asynchronous runs need an explicit callback or no-callback policy.",
             help_command=help_command,
         )
     if fork_session and (session_id or create_session or create_per_run):
@@ -2640,7 +2761,13 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
     return "none"
 
 
-def _validate_definition_session_policy(args, *, schedule_type: str | None, help_command: str) -> str:
+def _validate_definition_session_policy(
+    args,
+    *,
+    schedule_type: str | None,
+    help_command: str,
+    allow_caller_session_default: bool = False,
+) -> str:
     session_id = (getattr(args, "session_id", None) or "").strip()
     session_key = (getattr(args, "session_key", None) or "").strip()
     create_session = bool(getattr(args, "create_session", False))
@@ -2674,10 +2801,15 @@ def _validate_definition_session_policy(args, *, schedule_type: str | None, help
         return "create_per_run"
     if session_id or session_key:
         return "existing"
+    if allow_caller_session_default:
+        return "existing"
     raise TaskCliError(
         "one session policy is required",
         code="missing_session_policy",
-        hint="Use --session-id to continue a Session, or --create-session with --deliver-key to create one.",
+        hint=(
+            "Use --session-id to continue a Session, or --create-session with --deliver-key to create one. "
+            "Inside an Avibe Agent shell, Avibe can default this to the caller Session from AVIBE_SESSION_ID."
+        ),
         help_command=help_command,
     )
 
@@ -2785,7 +2917,84 @@ def _resolve_run_cwd(args, *, session_policy: str, help_command: str) -> Optiona
     return os.getcwd()
 
 
-def _reserve_cli_session(*, agent, deliver_key: Optional[str], workdir: Optional[str] = None) -> str:
+def _session_creation_metadata_from_caller(caller_context) -> dict:
+    if caller_context is None:
+        return {}
+    return {
+        "created_by": {
+            "kind": "caller_context",
+            "caller": caller_context.to_metadata(),
+        }
+    }
+
+
+def _definition_creation_metadata_from_caller(caller_context) -> dict:
+    return _session_creation_metadata_from_caller(caller_context)
+
+
+def _agent_run_source_from_caller(caller_context) -> tuple[str, Optional[str], Optional[str], dict]:
+    if caller_context is None:
+        return "cli", None, None, {}
+    metadata = {"caller_context": caller_context.to_metadata()}
+    return "agent", caller_context.session_id, caller_context.run_id, metadata
+
+
+def _resolve_async_callback_session_id(args, caller_context, *, target_session_id: Optional[str] = None):
+    explicit_callback = (getattr(args, "callback_session_id", None) or "").strip() or None
+    no_callback = bool(getattr(args, "no_callback", False))
+    if not bool(getattr(args, "async_run", False)):
+        return explicit_callback, None
+    if explicit_callback:
+        return explicit_callback, None
+    if no_callback:
+        return None, {
+            "code": "async_run_without_callback",
+            "message": (
+                "Started async Agent Run without a callback. This run will not post its final result back into a "
+                "Session automatically. Track it with `vibe runs show <run-id>` or by polling/listing runs for the "
+                "target Session. To receive a follow-up message next time, use `--callback-session-id <session-id>` "
+                "or run from a resolved caller context so Avibe can default the callback to the current Session."
+            ),
+        }
+    if caller_context is not None:
+        caller_session_id = caller_context.session_id
+        if target_session_id and target_session_id == caller_session_id:
+            raise TaskCliError(
+                "This async Agent Run targets the caller Session itself, so Avibe cannot safely default a callback.",
+                code="self_callback_requires_explicit_policy",
+                hint=(
+                    "Pass --no-callback when continuing the same Session asynchronously, or pass "
+                    "--callback-session-id <session-id> to send the final result to a different caller Session. "
+                    "Default callbacks are only inferred when the delegated run targets a different Session."
+                ),
+                help_command="vibe agent run --help",
+            )
+        return caller_context.session_id, {
+            "code": "callback_defaulted_to_caller_session",
+            "message": "Async callback defaulted to the caller Session from AVIBE_SESSION_ID.",
+            "callback_session_id": caller_session_id,
+        }
+    raise TaskCliError(
+        "This async Agent Run has no callback target.",
+        code="missing_async_callback",
+        hint=(
+            "Pass --callback-session-id <session-id> to send the final result back to a specific Agent Session, "
+            "or pass --no-callback to run without an automatic follow-up and inspect the result later with "
+            "`vibe runs show <run-id>` or by polling/listing runs for the target Session. "
+            "`--callback-session-id` identifies the Session that should receive the delegated run's final result; "
+            "when Avibe can resolve the caller context, this defaults to the current caller Session."
+        ),
+        help_command="vibe agent run --help",
+    )
+
+
+def _reserve_cli_session(
+    *,
+    agent,
+    deliver_key: Optional[str],
+    workdir: Optional[str] = None,
+    metadata: Optional[dict] = None,
+) -> str:
     # Route through ``core.services.sessions`` so the CLI shares the same
     # business API as the UI server and the future N3 internal endpoint;
     # see docs/plans/workbench-dispatch-architecture.md §6 (C2).
@@ -2803,6 +3012,7 @@ def _reserve_cli_session(*, agent, deliver_key: Optional[str], workdir: Optional
             model=agent.model,
             reasoning_effort=agent.reasoning_effort,
             workdir=workdir,
+            metadata=metadata,
         )
     else:
         platform = _primary_platform()
@@ -2816,6 +3026,7 @@ def _reserve_cli_session(*, agent, deliver_key: Optional[str], workdir: Optional
             model=agent.model,
             reasoning_effort=agent.reasoning_effort,
             workdir=workdir,
+            metadata=metadata,
         )
     if not session_id:
         raise TaskCliError(
@@ -2891,6 +3102,7 @@ def _reserve_definition_session(*, agent_name: Optional[str], deliver_key: str, 
 
 def cmd_agent_run(args):
     try:
+        caller_context = caller_context_from_env()
         message = _resolve_message_input(
             args,
             help_command="vibe agent run --help",
@@ -2924,10 +3136,42 @@ def cmd_agent_run(args):
         run_cwd = _resolve_run_cwd(args, session_policy=session_policy, help_command="vibe agent run --help")
         agent = _agent_store().require_enabled(agent_name) if agent_name else None
         fork_result = None
+        session_metadata = _session_creation_metadata_from_caller(caller_context)
+        if session_policy in {"existing", "fork"} and session_id:
+            target = resolve_session_id_target(session_id)
+            session_key = target.session_key.to_key()
+            agent = _resolve_agent_for_target(
+                agent_name=agent_name or None,
+                session_id=session_id,
+                session_key=session_key,
+                help_command="vibe agent run --help",
+            )
+        if session_policy == "existing" and (args.post_to or args.deliver_key):
+            _validate_delivery_args(
+                session_id=session_id,
+                session_key=session_key,
+                post_to=args.post_to,
+                deliver_key=args.deliver_key,
+                help_command="vibe agent run --help",
+            )
+        elif session_policy == "create" and args.deliver_key:
+            _parse_validated_session_key(args.deliver_key, help_command="vibe agent run --help")
+        callback_session_id, callback_notice = _resolve_async_callback_session_id(
+            args,
+            caller_context,
+            target_session_id=session_id,
+        )
+        if callback_session_id:
+            resolve_session_id_target(callback_session_id)
         if session_policy == "create":
-            session_id = _reserve_cli_session(agent=agent, deliver_key=args.deliver_key, workdir=run_cwd)
+            session_id = _reserve_cli_session(
+                agent=agent,
+                deliver_key=args.deliver_key,
+                workdir=run_cwd,
+                metadata=session_metadata,
+            )
         elif session_policy == "none":
-            session_id = _reserve_cli_session(agent=agent, deliver_key=None, workdir=run_cwd)
+            session_id = _reserve_cli_session(agent=agent, deliver_key=None, workdir=run_cwd, metadata=session_metadata)
         elif session_policy == "fork":
             fork_result = _reserve_forked_cli_session(
                 source_session_id=(args.fork_session or "").strip(),
@@ -2938,7 +3182,7 @@ def cmd_agent_run(args):
             session_id = fork_result.session_id
             if agent_name:
                 agent = _agent_store().require_enabled(agent_name)
-        if session_id:
+        if session_id and not session_key:
             target = resolve_session_id_target(session_id)
             session_key = target.session_key.to_key()
             agent = _resolve_agent_for_target(
@@ -2947,7 +3191,9 @@ def cmd_agent_run(args):
                 session_key=session_key,
                 help_command="vibe agent run --help",
             )
-        if session_policy != "none" or args.post_to or args.deliver_key:
+        if (session_policy in {"create", "none"} or fork_result) and (
+            session_policy != "none" or args.post_to or args.deliver_key
+        ):
             _validate_delivery_args(
                 session_id=session_id,
                 session_key=session_key,
@@ -2955,9 +3201,12 @@ def cmd_agent_run(args):
                 deliver_key=args.deliver_key,
                 help_command="vibe agent run --help",
             )
-        callback_session_id = (getattr(args, "callback_session_id", None) or "").strip() or None
-        if callback_session_id:
-            resolve_session_id_target(callback_session_id)
+        source_kind, source_actor, parent_run_id, provenance_metadata = _agent_run_source_from_caller(caller_context)
+        if fork_result:
+            provenance_metadata = {
+                **provenance_metadata,
+                "session_fork": fork_result.fork.to_metadata(),
+            }
         request_store = _task_request_store()
         request = request_store.enqueue_agent_run(
             agent_name=agent.name if agent else None,
@@ -2973,12 +3222,11 @@ def cmd_agent_run(args):
             post_to=args.post_to,
             deliver_key=args.deliver_key,
             message=message,
+            source_kind=source_kind,
+            source_actor=source_actor,
+            parent_run_id=parent_run_id,
             callback_session_id=callback_session_id,
-            metadata={
-                "session_fork": fork_result.fork.to_metadata(),
-            }
-            if fork_result
-            else None,
+            metadata=provenance_metadata or None,
         )
         payload = {
             "accepted": True,
@@ -2991,6 +3239,8 @@ def cmd_agent_run(args):
             "deliver_key": args.deliver_key,
             "callback_session_id": callback_session_id,
             "async": bool(args.async_run),
+            "caller_context": caller_context.to_metadata() if caller_context else None,
+            "callback_notice": callback_notice,
             "run": {
                 "id": request.id,
                 "status": "queued",
@@ -2998,6 +3248,9 @@ def cmd_agent_run(args):
                 "agent_name": agent.name if agent else None,
                 "session_id": session_id,
                 "callback_session_id": callback_session_id,
+                "source_kind": source_kind,
+                "source_actor": source_actor,
+                "parent_run_id": parent_run_id,
             },
         }
         if fork_result:
@@ -3086,11 +3339,23 @@ def cmd_runs_list(args):
 
 
 def cmd_runs_show(args):
-    run = _task_request_store().get_run(args.run_id)
-    if run is None:
-        _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
+    try:
+        run_id, run_default_notice = _resolve_caller_run_id(
+            args,
+            purpose="Run",
+            help_command="vibe runs show --help",
+        )
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe runs show --help")
         return 1
-    _print_cli_payload("agent_run", run=_run_payload(run))
+    run = _task_request_store().get_run(run_id)
+    if run is None:
+        _print_task_error(TaskCliError(f"run '{run_id}' not found", code="run_not_found", details={"run_id": run_id}))
+        return 1
+    payload_fields = {"run": _run_payload(run)}
+    if run_default_notice:
+        payload_fields["run_default_notice"] = run_default_notice
+    _print_cli_payload("agent_run", **payload_fields)
     return 0
 
 
@@ -3248,15 +3513,20 @@ def cmd_session_get(args):
     from core.services import sessions as sessions_service
 
     try:
+        session_id, session_default_notice = _resolve_caller_session_id(
+            args,
+            purpose="Session",
+            help_command="vibe session get --help",
+        )
         engine = _open_session_engine()
         with engine.connect() as conn:
-            payload = sessions_service.get_active_session(conn, args.session_id)
+            payload = sessions_service.get_active_session(conn, session_id)
     except LookupError:
         _print_task_error(
             TaskCliError(
-                f"session '{args.session_id}' not found",
+                f"session '{session_id}' not found",
                 code="session_not_found",
-                details={"session_id": args.session_id},
+                details={"session_id": session_id},
             ),
             help_command="vibe session get --help",
         )
@@ -3267,7 +3537,8 @@ def cmd_session_get(args):
     _print_cli_payload(
         "agent_session",
         session=_session_row(payload, brief=False),
-        message=_session_get_hint(args.session_id),
+        message=_session_get_hint(session_id),
+        **({"session_default_notice": session_default_notice} if session_default_notice else {}),
     )
     return 0
 
@@ -3276,23 +3547,28 @@ def cmd_session_update(args):
     from core.services import sessions as sessions_service
 
     try:
+        session_id, session_default_notice = _resolve_caller_session_id(
+            args,
+            purpose="Session",
+            help_command="vibe session update --help",
+        )
         engine = _open_session_engine()
         with engine.begin() as conn:
             # Validate first so an archived/missing id is a clean not-found rather
             # than silently writing a title onto a soft-deleted row.
-            sessions_service.get_active_session(conn, args.session_id)
+            sessions_service.get_active_session(conn, session_id)
             # title_source="agent": this is the agent setting its own session title (vs
             # "user" for a human Web UI edit). Both are deliberate, so neither gets
             # auto-overwritten nor re-nudged — see DELIBERATE_TITLE_SOURCES.
             payload = sessions_service.update_session(
-                conn, args.session_id, title=args.title, title_source="agent"
+                conn, session_id, title=args.title, title_source="agent"
             )
     except LookupError:
         _print_task_error(
             TaskCliError(
-                f"session '{args.session_id}' not found",
+                f"session '{session_id}' not found",
                 code="session_not_found",
-                details={"session_id": args.session_id},
+                details={"session_id": session_id},
             ),
             help_command="vibe session update --help",
         )
@@ -3302,8 +3578,13 @@ def cmd_session_update(args):
         return 1
     # The DB write is committed above; ping a running UI so the rename shows live
     # (best-effort — never affects this command's result).
-    _post_session_activity_to_live_ui(args.session_id)
-    _print_cli_payload("agent_session", updated=True, session=_session_row(payload, brief=False))
+    _post_session_activity_to_live_ui(session_id)
+    _print_cli_payload(
+        "agent_session",
+        updated=True,
+        session=_session_row(payload, brief=False),
+        **({"session_default_notice": session_default_notice} if session_default_notice else {}),
+    )
     return 0
 
 
@@ -3398,17 +3679,15 @@ def cmd_vault_set(args):
         tags = list(getattr(args, "tag", None) or []) or None
         policy = _build_secret_policy(args)
         # Seal via avault BEFORE opening a DB transaction (never hold a txn across a subprocess).
-        # The plaintext goes only to avault's stdin; we keep just the ciphertext envelope + a
-        # non-secret last-4 preview.
+        # The plaintext goes only to avault's stdin; Avibe keeps only the ciphertext envelope
+        # and non-value-derived metadata.
         sealed = api.avault_seal(args.name, value.encode("utf-8"))
-        preview = vault_service.value_preview(value)
         engine = _open_vault_engine()
         with engine.begin() as conn:
             meta = vault_service.create_secret(
                 conn,
                 name=args.name,
                 sealed=sealed,
-                preview=preview,
                 group=getattr(args, "group", None) or vault_service.DEFAULT_GROUP,
                 tags=tags,
                 description=getattr(args, "description", None),
@@ -3446,12 +3725,17 @@ def cmd_vault_list(args):
 
 def cmd_vault_rm(args):
     from storage import vault_service
+    from vibe import api
 
     help_command = "vibe vault rm --help"
     try:
         engine = _open_vault_engine()
+        release_scopes: list[dict[str, str]] = []
         with engine.begin() as conn:
+            grant_rows = vault_service.active_grant_rows_for_secret(conn, args.name)
             vault_service.delete_secret(conn, args.name)
+            release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
+        api.release_vault_agent_scopes(release_scopes, reason="vault_rm")
         _print_cli_payload("vault_secret", removed=True, name=args.name)
         return 0
     except vault_service.SecretNotFoundError:
@@ -3460,6 +3744,481 @@ def cmd_vault_rm(args):
     except Exception as exc:
         _print_task_error(exc, help_command=help_command)
         return 1
+
+
+def _expire_agent_grant_after_missing(
+    engine,
+    grant_id: str,
+    names: list[str],
+    *,
+    delivery: dict | None = None,
+) -> dict | None:
+    from storage import vault_service
+
+    first_request = None
+    try:
+        with engine.begin() as conn:
+            vault_service.expire_grant(conn, grant_id, reason="grant-expired-agent-cache-missing")
+            for name in names:
+                resolved = vault_service.resolve_secret_access(
+                    conn,
+                    name,
+                    requester={"source": "cli", "pid": os.getpid()},
+                    delivery=delivery or {},
+                )
+                if first_request is None and isinstance(resolved.get("request"), dict):
+                    first_request = resolved["request"]
+                    break
+    except Exception:
+        pass
+    return first_request
+
+
+def _agent_missing_grant(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "grant is missing or expired" in text or "grant does not cover" in text
+
+
+def _preflight_vault_names(engine, names: list[str], *, mixed_message: str, mixed_code: str = "mixed_protection_tiers") -> dict[str, dict]:
+    from storage import vault_service
+
+    metas: dict[str, dict] = {}
+    with engine.connect() as conn:
+        for name in dict.fromkeys(names):
+            metas[name] = vault_service.get_secret_meta(conn, name)
+    tiers = {str(meta.get("protection") or "standard") for meta in metas.values()}
+    if len(tiers) > 1:
+        raise TaskCliError(mixed_message, code=mixed_code)
+    return metas
+
+
+def _preflight_vault_run_batch(engine, mapping: dict[str, str]) -> dict[str, dict]:
+    return _preflight_vault_names(
+        engine,
+        list(mapping.values()),
+        mixed_message="mixing protected and standard secrets in one vault run is not wired yet",
+    )
+
+
+def _preflight_vault_inject_batch(engine, names: list[str]) -> dict[str, dict]:
+    return _preflight_vault_names(
+        engine,
+        names,
+        mixed_message="mixing protected and standard secrets in one vault inject is not wired yet",
+    )
+
+
+class _AgentRunOutputBridge:
+    """Stream protected child stdio through temporary FIFOs owned by this CLI."""
+
+    def __init__(
+        self,
+        stdout,
+        stderr,
+        *,
+        stdin=None,
+        env_exclude: set[str] | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> None:
+        if not hasattr(os, "mkfifo"):
+            raise TaskCliError("protected vault run output streaming requires Unix FIFOs", code="unsupported_platform")
+        runtime_dir = paths.get_runtime_dir()
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        self._tmpdir = Path(tempfile.mkdtemp(prefix="vault-run-", dir=str(runtime_dir)))
+        self._tmpdir.chmod(0o700)
+        self.stdout_path = self._tmpdir / "stdout"
+        self.stderr_path = self._tmpdir / "stderr"
+        self.stdin_path = self._tmpdir / "stdin"
+        self.env_path = self._tmpdir / "env.sh"
+        self.keep_env_path = self._tmpdir / "keep-env"
+        self._keeper_fds: list[int] = []
+        try:
+            os.mkfifo(self.stdout_path, 0o600)
+            os.mkfifo(self.stderr_path, 0o600)
+            os.mkfifo(self.stdin_path, 0o600)
+            os.mkfifo(self.env_path, 0o600)
+            keep_env_names = sorted(name for name in (env_exclude or set()) if _is_shell_env_name(name))
+            self.keep_env_path.write_text("".join(f"{name}\n" for name in keep_env_names), encoding="utf-8")
+            self.keep_env_path.chmod(0o600)
+            self._keeper_fds = [
+                os.open(self.stdout_path, os.O_RDWR | os.O_NONBLOCK),
+                os.open(self.stderr_path, os.O_RDWR | os.O_NONBLOCK),
+            ]
+        except OSError as exc:
+            shutil.rmtree(self._tmpdir, ignore_errors=True)
+            raise TaskCliError("protected vault run stdio streaming requires Unix FIFOs", code="unsupported_platform") from exc
+        stdin = stdin if stdin is not None else getattr(sys.stdin, "buffer", sys.stdin)
+        self._stdin_stop = threading.Event()
+        self._env_stop = threading.Event()
+        env = os.environ if env is None else env
+        self._env_thread = threading.Thread(
+            target=self._write_env_fifo,
+            args=(self.env_path, _shell_env_exports(env, exclude=env_exclude).encode("utf-8"), self._env_stop),
+            daemon=True,
+        )
+        self._env_thread.start()
+        self._stdin_thread = threading.Thread(
+            target=self._copy_stdin_fifo,
+            args=(self.stdin_path, stdin, self._stdin_stop),
+            daemon=True,
+        )
+        self._stdin_thread.start()
+        self._threads = [
+            threading.Thread(target=self._copy_fifo, args=(self.stdout_path, stdout), daemon=True),
+            threading.Thread(target=self._copy_fifo, args=(self.stderr_path, stderr), daemon=True),
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+
+    def close(self) -> None:
+        for fd in self._keeper_fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self._keeper_fds.clear()
+        for thread in self._threads:
+            thread.join(timeout=2)
+        self._stdin_stop.set()
+        self._env_stop.set()
+        self._stdin_thread.join(timeout=2)
+        self._env_thread.join(timeout=2)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    @staticmethod
+    def _copy_fifo(path: Path, target) -> None:
+        try:
+            with path.open("rb", buffering=0) as source:
+                while True:
+                    chunk = source.read(8192)
+                    if not chunk:
+                        break
+                    target.write(chunk)
+                    target.flush()
+        except OSError:
+            return
+
+    @staticmethod
+    def _write_env_fifo(path: Path, script: bytes, stop_event: threading.Event) -> None:
+        fd = _AgentRunOutputBridge._open_fifo_writer(path, stop_event)
+        if fd is None:
+            return
+        try:
+            _AgentRunOutputBridge._write_all(fd, script, stop_event)
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _copy_stdin_fifo(path: Path, source, stop_event: threading.Event) -> None:
+        fd = _AgentRunOutputBridge._open_fifo_writer(path, stop_event)
+        if fd is None:
+            return
+        try:
+            while not stop_event.is_set():
+                chunk = _AgentRunOutputBridge._read_stdin_chunk(source, stop_event)
+                if not chunk:
+                    return
+                if isinstance(chunk, str):
+                    chunk = chunk.encode()
+                _AgentRunOutputBridge._write_all(fd, chunk, stop_event)
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _open_fifo_writer(path: Path, stop_event: threading.Event) -> int | None:
+        while not stop_event.is_set():
+            try:
+                return os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError as exc:
+                if exc.errno in {errno.ENXIO, errno.ENOENT}:
+                    time.sleep(0.01)
+                    continue
+                return
+        return None
+
+    @staticmethod
+    def _write_all(fd: int, data: bytes, stop_event: threading.Event) -> None:
+        view = memoryview(data)
+        offset = 0
+        while offset < len(view) and not stop_event.is_set():
+            try:
+                written = os.write(fd, view[offset:])
+            except BlockingIOError:
+                time.sleep(0.01)
+                continue
+            except OSError:
+                return
+            if written <= 0:
+                return
+            offset += written
+
+    @staticmethod
+    def _read_stdin_chunk(source, stop_event: threading.Event):
+        try:
+            fileno = source.fileno()
+        except (AttributeError, OSError, ValueError):
+            try:
+                return source.read(8192)
+            except (OSError, ValueError):
+                return b""
+        while not stop_event.is_set():
+            try:
+                ready, _, _ = select_module.select([fileno], [], [], 0.05)
+            except (OSError, ValueError):
+                try:
+                    return source.read(8192)
+                except (OSError, ValueError):
+                    return b""
+            if ready:
+                try:
+                    return os.read(fileno, 8192)
+                except OSError:
+                    return b""
+        return b""
+
+
+def _is_shell_env_name(name: str) -> bool:
+    if not name or not (name[0] == "_" or "A" <= name[0] <= "Z" or "a" <= name[0] <= "z"):
+        return False
+    return all(ch == "_" or "A" <= ch <= "Z" or "a" <= ch <= "z" or "0" <= ch <= "9" for ch in name)
+
+
+def _shell_env_exports(env: Mapping[str, str], *, exclude: set[str] | None = None) -> str:
+    excluded = exclude or set()
+    lines: list[str] = []
+    for name, value in env.items():
+        if name in excluded:
+            continue
+        if not _is_shell_env_name(name) or "\x00" in value:
+            continue
+        lines.append(f"export {name}={shlex.quote(value)}\n")
+    return "".join(lines)
+
+
+def _agent_run_command(
+    command_argv: list[str],
+    *,
+    cwd: str | None = None,
+    stdout_path: str | None = None,
+    stderr_path: str | None = None,
+    stdin_path: str | None = None,
+    env_path: str | None = None,
+    keep_env_path: str | None = None,
+) -> list[str]:
+    """Preserve the invoking cwd when a resident agent executes the child.
+
+    The current avault agent frame has no cwd field. Wrap the command in a tiny
+    shell trampoline so the long-lived agent executes the requested argv from
+    the CLI's working directory without shell-interpolating any user argument.
+    """
+
+    shell = shutil.which("sh") or "/bin/sh"
+    env_binary = shlex.quote(shutil.which("env") or "/usr/bin/env")
+    grep_binary = shlex.quote(shutil.which("grep") or "/usr/bin/grep")
+    sed_binary = shlex.quote(shutil.which("sed") or "/usr/bin/sed")
+    child_argv = list(command_argv)
+    if child_argv:
+        executable = child_argv[0]
+        has_path_separator = os.sep in executable or (os.altsep is not None and os.altsep in executable)
+        if not has_path_separator and (resolved := shutil.which(executable)):
+            child_argv[0] = resolved
+    if stdout_path and stderr_path and stdin_path and env_path and keep_env_path:
+        return [
+            shell,
+            "-c",
+            (
+                'stdout_fifo=$1; stderr_fifo=$2; stdin_fifo=$3; env_file=$4; keep_env_file=$5; cwd=$6; shift 6; '
+                'exec <"$stdin_fifo" >"$stdout_fifo" 2>"$stderr_fifo"; '
+                f'for name in $({env_binary} | {sed_binary} "s/=.*//"); do '
+                'case "$name" in ""|*[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*|[0123456789]*) continue;; esac; '
+                f'if ! {grep_binary} -Fqx "$name" "$keep_env_file"; then unset "$name"; fi; '
+                'done; '
+                '. "$env_file"; cd "$cwd" || exit 125; exec "$@"'
+            ),
+            "avibe-vault-run",
+            stdout_path,
+            stderr_path,
+            stdin_path,
+            env_path,
+            keep_env_path,
+            cwd or os.getcwd(),
+            *child_argv,
+        ]
+    return [
+        shell,
+        "-c",
+        'cd "$1" || exit 125; shift; exec "$@"',
+        "avibe-vault-run",
+        cwd or os.getcwd(),
+        *child_argv,
+    ]
+
+
+def _resolve_cli_output_path(path: str) -> str:
+    output_path = Path(path).expanduser()
+    if not output_path.is_absolute():
+        output_path = Path.cwd() / output_path
+    return str(output_path)
+
+
+def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: list[str]):
+    from storage import vault_service
+
+    metas = _preflight_vault_run_batch(engine, mapping)
+    if metas and {str(meta.get("protection") or "standard") for meta in metas.values()} == {"protected"}:
+        with engine.begin() as conn:
+            common_grant = vault_service.find_active_grant_for_secrets(conn, list(mapping.values()))
+            if common_grant is not None:
+                return common_grant, [
+                    {"name": vault_name, "env": env_name, "envelope": vault_service.get_protected_envelope(conn, vault_name)}
+                    for env_name, vault_name in mapping.items()
+                ]
+    secrets = []
+    grant: dict | None = None
+    approval_error: TaskCliError | None = None
+    with engine.begin() as conn:
+        for env_name, vault_name in mapping.items():
+            resolved = vault_service.resolve_secret_access(
+                conn,
+                vault_name,
+                requester={"source": "cli", "pid": os.getpid()},
+                delivery={"mode": "run", "command": command_argv},
+            )
+            if resolved["status"] == "approval_required":
+                req = resolved.get("request") or {}
+                approval_error = TaskCliError(
+                    f"secret '{vault_name}' needs approval before protected delivery",
+                    code="approval_required",
+                    details={"request_id": req.get("id")},
+                )
+                break
+            if resolved["status"] == "standard":
+                secrets.append({"name": vault_name, "env": env_name, "envelope": resolved["envelope"], "protected": False})
+                continue
+            if resolved["status"] == "agent_delivery_ready":
+                current_grant = resolved["grant"]
+                if grant is None:
+                    grant = current_grant
+                elif grant["scope_type"] != current_grant["scope_type"] or grant["scope_ref"] != current_grant["scope_ref"]:
+                    raise TaskCliError(
+                        "protected vault run currently requires all protected secrets to share one active grant",
+                        code="mixed_grants",
+                    )
+                secrets.append({"name": vault_name, "env": env_name, "envelope": resolved["envelope"], "protected": True})
+                continue
+            raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
+    if approval_error is not None:
+        raise approval_error
+    protected = [item for item in secrets if item["protected"]]
+    standard = [item for item in secrets if not item["protected"]]
+    if protected and standard:
+        raise TaskCliError(
+            "mixing protected and standard secrets in one vault run is not wired yet",
+            code="mixed_protection_tiers",
+        )
+    selected = protected or standard
+    return grant, [{key: value for key, value in item.items() if key != "protected"} for item in selected]
+
+
+def _resolve_single_vault_delivery(
+    engine,
+    name: str,
+    *,
+    requester: dict,
+    delivery: dict,
+) -> tuple[dict | None, object]:
+    from storage import vault_service
+
+    with engine.begin() as conn:
+        resolved = vault_service.resolve_secret_access(
+            conn,
+            name,
+            requester=requester,
+            delivery=delivery,
+        )
+    if resolved["status"] == "approval_required":
+        req = resolved.get("request") or {}
+        raise TaskCliError(
+            f"secret '{name}' needs approval before protected delivery",
+            code="approval_required",
+            details={"request_id": req.get("id")},
+        )
+    if resolved["status"] == "standard":
+        return None, resolved["envelope"]
+    if resolved["status"] == "agent_delivery_ready":
+        return resolved["grant"], resolved["envelope"]
+    raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
+
+
+def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: str):
+    from storage import vault_service
+
+    metas = _preflight_vault_inject_batch(engine, names)
+    if metas and {str(meta.get("protection") or "standard") for meta in metas.values()} == {"protected"}:
+        with engine.begin() as conn:
+            common_grant = vault_service.find_active_grant_for_secrets(conn, names)
+            if common_grant is not None:
+                return common_grant, [
+                    {"name": name, "key": name, "envelope": vault_service.get_protected_envelope(conn, name)}
+                    for name in names
+                ]
+    secrets = []
+    grant: dict | None = None
+    approval_error: TaskCliError | None = None
+    with engine.begin() as conn:
+        for name in names:
+            resolved = vault_service.resolve_secret_access(
+                conn,
+                name,
+                requester={"source": "cli", "pid": os.getpid()},
+                delivery={"mode": "inject", "path": path, "format": fmt},
+            )
+            if resolved["status"] == "approval_required":
+                req = resolved.get("request") or {}
+                approval_error = TaskCliError(
+                    f"secret '{name}' needs approval before protected delivery",
+                    code="approval_required",
+                    details={"request_id": req.get("id")},
+                )
+                break
+            if resolved["status"] == "standard":
+                secrets.append({"name": name, "key": name, "envelope": resolved["envelope"], "protected": False})
+                continue
+            if resolved["status"] == "agent_delivery_ready":
+                current_grant = resolved["grant"]
+                if grant is None:
+                    grant = current_grant
+                elif grant["scope_type"] != current_grant["scope_type"] or grant["scope_ref"] != current_grant["scope_ref"]:
+                    raise TaskCliError(
+                        "protected vault inject currently requires all protected secrets to share one active grant",
+                        code="mixed_grants",
+                    )
+                secrets.append({"name": name, "key": name, "envelope": resolved["envelope"], "protected": True})
+                continue
+            raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
+    if approval_error is not None:
+        raise approval_error
+    protected = [item for item in secrets if item["protected"]]
+    standard = [item for item in secrets if not item["protected"]]
+    if protected and standard:
+        raise TaskCliError(
+            "mixing protected and standard secrets in one vault inject is not wired yet",
+            code="mixed_protection_tiers",
+        )
+    selected = protected or standard
+    return grant, [{key: value for key, value in item.items() if key != "protected"} for item in selected]
 
 
 def cmd_vault_run(args):
@@ -3491,8 +4250,7 @@ def cmd_vault_run(args):
                 example="vibe vault run --env OPENAI_API_KEY -- python sync.py",
             )
         engine = _open_vault_engine()
-        with engine.connect() as conn:
-            envelopes = vault_service.get_envelopes(conn, sorted(set(mapping.values())))
+        grant, secrets = _resolve_vault_run_delivery(engine, mapping, command_argv)
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
         return 1
@@ -3506,24 +4264,55 @@ def cmd_vault_run(args):
         _print_task_error(exc, help_command=help_command)
         return 1
     # Hand the envelopes + command to avault: it decrypts, spawns the child with the secret
-    # env, waits, and zeroizes. The plaintext never returns here; the child inherits our stdio
-    # so its output passes through. Envelopes (no plaintext) go on avault's stdin.
+    # env, waits, and zeroizes. The plaintext never returns here. Protected agent runs stream
+    # child stdout/stderr through temporary FIFOs because the resident-agent JSON protocol only
+    # returns the exit code.
     from vibe import api
 
-    secrets = [
-        {"name": vault_name, "env": env_name, "envelope": envelopes[vault_name]}
-        for env_name, vault_name in mapping.items()
-    ]
     try:
-        exit_code = api.avault_deliver_run(secrets, command_argv)
+        if grant is not None:
+            secret_env_names = {str(secret["env"]) for secret in secrets if secret.get("env")}
+            with _AgentRunOutputBridge(
+                sys.stdout.buffer,
+                sys.stderr.buffer,
+                env_exclude=secret_env_names,
+            ) as output_bridge:
+                result = api.avault_agent_deliver_run(
+                    scope_type=grant["scope_type"],
+                    scope_ref=grant["scope_ref"],
+                    secrets=secrets,
+                    command=_agent_run_command(
+                        command_argv,
+                        stdout_path=str(output_bridge.stdout_path),
+                        stderr_path=str(output_bridge.stderr_path),
+                        stdin_path=str(output_bridge.stdin_path),
+                        env_path=str(output_bridge.env_path),
+                        keep_env_path=str(output_bridge.keep_env_path),
+                    ),
+                )
+            exit_code = int(result["exit_code"])
+        else:
+            exit_code = api.avault_deliver_run(secrets, command_argv)
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
     except api.AvaultError as exc:
+        if grant is not None and _agent_missing_grant(exc):
+            _expire_agent_grant_after_missing(
+                engine,
+                grant["id"],
+                sorted(set(mapping.values())),
+                delivery={"mode": "run", "command": command_argv},
+            )
+            _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
+            return 1
         _print_task_error(TaskCliError(f"avault deliver failed: {exc}", code="avault_failed", help_command=help_command))
         return 1
-    # avault exits 70 only on an internal failure BEFORE spawning the child (bad envelope /
-    # decrypt / store) — no delivery happened, so skip the audit. Any other code means the child
-    # ran with the secret in its env → record the delivery now. A bookkeeping failure must not
-    # crash or change the child's real exit code.
-    if exit_code != 70:
+    # One-shot avault exits 70 only on an internal failure before spawning the child, so no
+    # delivery happened there. Resident-agent protected runs raise AvaultError for agent-side
+    # failures; a returned 70 is the child's real exit code and must still be audited.
+    delivered = grant is not None or exit_code != 70
+    if delivered:
         try:
             with engine.begin() as conn:
                 vault_service.record_deliveries(
@@ -3711,8 +4500,12 @@ def cmd_vault_fetch(args):
     from vibe import api
 
     help_command = "vibe vault fetch --help"
+    engine = None
+    grant = None
+    name = getattr(args, "auth", "")
+    host = ""
+    method = "GET"
     try:
-        name = args.auth
         url = args.url
         method = (getattr(args, "method", None) or "GET").upper()
         headers = _parse_headers(getattr(args, "header", None))
@@ -3786,7 +4579,8 @@ def cmd_vault_fetch(args):
                 # legacy / hand-edited policies. Reject BEFORE handing off so a bad policy never
                 # even unwraps the secret.
                 _reject_forbidden_header(auth.get("name", ""), help_command=help_command)
-            sealed = vault_service.get_envelope(conn, name)
+            # Envelope resolution happens below through resolve_secret_access so
+            # protected-tier secrets can use an active resident-agent grant.
 
         # Hand the envelope + request to avault: it injects the credential at egress, performs
         # the request, and returns ONLY the response (status/headers/body) — the value never
@@ -3806,7 +4600,22 @@ def cmd_vault_fetch(args):
             "body": body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else body,
             "inject": inject,
         }
-        result = api.avault_deliver_fetch(name, sealed, request)
+        grant, sealed = _resolve_single_vault_delivery(
+            engine,
+            name,
+            requester={"source": "cli", "pid": os.getpid()},
+            delivery={"mode": "fetch", "host": host, "method": method},
+        )
+        if grant is not None:
+            result = api.avault_agent_deliver_fetch(
+                scope_type=grant["scope_type"],
+                scope_ref=grant["scope_ref"],
+                name=name,
+                sealed=sealed,
+                request=request,
+            )
+        else:
+            result = api.avault_deliver_fetch(name, sealed, request)
         status = int(result.get("status") or 0)
         resp_body = result.get("body") or ""
 
@@ -3833,6 +4642,17 @@ def cmd_vault_fetch(args):
         _print_task_error(exc)
         return 1
     except api.AvaultError as exc:
+        if engine is not None and isinstance(grant, dict) and _agent_missing_grant(exc):
+            grant_id = grant.get("id")
+            if grant_id:
+                _expire_agent_grant_after_missing(
+                    engine,
+                    grant_id,
+                    [name],
+                    delivery={"mode": "fetch", "host": host, "method": method},
+                )
+                _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
+                return 1
         _print_task_error(TaskCliError(f"request failed: {exc}", code="request_failed", help_command=help_command))
         return 1
     except Exception as exc:
@@ -3908,6 +4728,9 @@ def cmd_vault_inject(args):
     from vibe import api
 
     help_command = "vibe vault inject --help"
+    engine = None
+    grant = None
+    keys: list[str] = []
     try:
         keys = [k.strip() for k in (getattr(args, "keys", None) or "").split(",") if k.strip()]
         keys = list(dict.fromkeys(keys))  # dedupe, preserve order: A,A is one entry + one audit
@@ -3927,12 +4750,20 @@ def cmd_vault_inject(args):
         if fmt not in ("dotenv", "json"):
             raise TaskCliError(f"unknown --format: {fmt!r} (dotenv|json)", code="invalid_format", help_command=help_command)
         engine = _open_vault_engine()
-        with engine.connect() as conn:
-            envelopes = vault_service.get_envelopes(conn, keys)
-        secrets = [{"name": k, "key": k, "envelope": envelopes[k]} for k in keys]
+        resolved_out = _resolve_cli_output_path(str(out))
+        grant, secrets = _resolve_vault_inject_delivery(engine, keys, path=resolved_out, fmt=fmt)
         # avault writes the 0600 file atomically; if the path is unwritable it raises and no
         # delivery is recorded.
-        api.avault_deliver_inject(out, fmt, secrets)
+        if grant is not None:
+            api.avault_agent_deliver_inject(
+                scope_type=grant["scope_type"],
+                scope_ref=grant["scope_ref"],
+                path=resolved_out,
+                fmt=fmt,
+                secrets=secrets,
+            )
+        else:
+            api.avault_deliver_inject(out, fmt, secrets)
         # The file is on disk → delivered. A bookkeeping failure must not report a failed command
         # (callers would retry though the secrets are already written), so record best-effort.
         try:
@@ -3940,7 +4771,7 @@ def cmd_vault_inject(args):
                 vault_service.record_deliveries(conn, keys, requester={"source": "cli", "pid": os.getpid()}, mode=f"inject:{fmt}")
         except Exception:
             pass
-        _print_cli_payload("vault_inject", written=True, path=str(out), format=fmt, keys=keys)
+        _print_cli_payload("vault_inject", written=True, path=resolved_out if grant is not None else str(out), format=fmt, keys=keys)
         return 0
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
@@ -3952,6 +4783,15 @@ def cmd_vault_inject(args):
         _print_task_error(exc)
         return 1
     except api.AvaultError as exc:
+        if engine is not None and isinstance(grant, dict) and _agent_missing_grant(exc):
+            _expire_agent_grant_after_missing(
+                engine,
+                grant["id"],
+                keys,
+                delivery={"mode": "inject", "path": _resolve_cli_output_path(str(out)), "format": fmt},
+            )
+            _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
+            return 1
         _print_task_error(TaskCliError(f"avault inject failed: {exc}", code="avault_failed", help_command=help_command))
         return 1
     except Exception as exc:
@@ -4053,10 +4893,17 @@ def cmd_vault_key_import(args):
 
 def cmd_watch_add(args):
     try:
+        caller_context = caller_context_from_env()
+        session_default_notice = _apply_caller_session_default(
+            args,
+            caller_context,
+            purpose="Watch target Session",
+        )
         session_policy = _validate_definition_session_policy(
             args,
             schedule_type="watch",
             help_command="vibe watch add --help",
+            allow_caller_session_default=caller_context is not None,
         )
         command, shell_command = _resolve_watch_command(args, help_command="vibe watch add --help")
         session_id, session_key = _resolve_session_target_args(
@@ -4123,16 +4970,22 @@ def cmd_watch_add(args):
             deliver_key=args.deliver_key,
             agent_name=agent_name,
             session_policy=session_policy,
+            metadata=_definition_creation_metadata_from_caller(caller_context),
         )
         runtime_store = _watch_runtime_store()
         watch, runtime_entry = _wait_for_watch_startup(store, runtime_store, watch.id)
         warnings = _collect_target_warnings(session_target, delivery_target)
         watch_payload = _watch_payload(watch, runtime_entry)
+        payload_fields = {
+            "definition": watch_payload,
+            "watch": watch_payload,
+            "warnings": warnings,
+        }
+        if session_default_notice:
+            payload_fields["session_default_notice"] = session_default_notice
         _print_cli_payload(
             "run_definition",
-            definition=watch_payload,
-            watch=watch_payload,
-            warnings=warnings,
+            **payload_fields,
         )
         return 0
     except Exception as exc:
@@ -5539,8 +6392,11 @@ def _print_show_page_error(exc: Exception) -> None:
         "ok": False,
         "code": code,
         "error": str(exc),
-        "help_command": "vibe show --help",
+        "help_command": getattr(exc, "help_command", None) or "vibe show --help",
     }
+    hint = getattr(exc, "hint", None)
+    if hint:
+        payload["hint"] = hint
     print(json.dumps(payload, indent=2), file=sys.stderr)
 
 
@@ -5611,10 +6467,15 @@ def cmd_show_path(args):
 
     store = _load_show_page_store()
     try:
-        page = store.ensure(args.session_id)
-        page_dir = ensure_show_page_dir(args.session_id)
-        _prewarm_show_page_session_best_effort(args.session_id)
-        payload = _show_page_result(page, message=f"Show Page workspace is ready at {page_dir}.")
+        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show path --help")
+        page = store.ensure(session_id)
+        page_dir = ensure_show_page_dir(session_id)
+        _prewarm_show_page_session_best_effort(session_id)
+        payload = _show_page_result(
+            page,
+            message=f"Show Page workspace is ready at {page_dir}.",
+            extra={"session_default_notice": session_default_notice} if session_default_notice else None,
+        )
         if getattr(args, "json", False):
             _print_json(payload)
         else:
@@ -5635,22 +6496,29 @@ def _prewarm_show_page_session_best_effort(session_id: str, *, base_path: str | 
 def cmd_show_status(args):
     store = _load_show_page_store()
     try:
-        page = store.get(args.session_id)
+        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show status --help")
+        page = store.get(session_id)
         if page is None:
             payload = {
                 "ok": False,
                 "code": "show_page_not_found",
-                "session_id": args.session_id,
+                "session_id": session_id,
                 "message": "No Show Page exists for this session.",
-                "next_actions": [f"Run `vibe show path --session-id {args.session_id}` to create the workspace."],
+                "next_actions": [f"Run `vibe show path --session-id {session_id}` to create the workspace."],
             }
+            if session_default_notice:
+                payload["session_default_notice"] = session_default_notice
             if getattr(args, "json", False):
                 _print_json(payload)
             else:
                 print("No Show Page exists for this session.")
-                print(f"Run: vibe show path --session-id {args.session_id}")
+                print(f"Run: vibe show path --session-id {session_id}")
             return 1
-        payload = _show_page_result(page, message=f"Show Page is {page.visibility}.")
+        payload = _show_page_result(
+            page,
+            message=f"Show Page is {page.visibility}.",
+            extra={"session_default_notice": session_default_notice} if session_default_notice else None,
+        )
         if getattr(args, "json", False):
             _print_json(payload)
         else:
@@ -5669,10 +6537,14 @@ def cmd_show_update(args):
     store = _load_show_page_store()
     try:
         extra: dict = {}
+        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show update --help")
+        if session_default_notice:
+            extra["session_default_notice"] = session_default_notice
 
         if getattr(args, "rotate_share", False):
-            updated, previous_share_id = store.rotate_share(args.session_id)
+            updated, previous_share_id = store.rotate_share(session_id)
             extra = {
+                **extra,
                 "previous_public_url": public_url(previous_share_id),
                 "previous_share_id": previous_share_id,
                 "message_detail": "Previous public share URL was revoked.",
@@ -5682,8 +6554,9 @@ def cmd_show_update(args):
             # ``is not None`` so an explicit empty --share-id reaches
             # validate_share_id (a clear missing_share_id) instead of falling
             # through to a confusing visibility error.
-            updated, previous_share_id = store.set_share_id(args.session_id, args.share_id)
+            updated, previous_share_id = store.set_share_id(session_id, args.share_id)
             extra = {
+                **extra,
                 "previous_share_id": previous_share_id,
             }
             if previous_share_id and previous_share_id != updated.share_id:
@@ -5696,10 +6569,10 @@ def cmd_show_update(args):
             # an archived/terminal session is rejected before any row (and its
             # /show/ route) is materialized. rotate_share / set_share_id guard
             # themselves the same way, so neither needs a pre-ensure either.
-            existing = store.get(args.session_id)
+            existing = store.get(session_id)
             previous = show_page_payload(existing) if existing else None
             previous_visibility = existing.visibility if existing else "private"
-            updated = store.update_visibility(args.session_id, args.visibility)
+            updated = store.update_visibility(session_id, args.visibility)
             message = f"Show Page is now {updated.visibility}."
             if previous_visibility == "private" and updated.visibility == "public":
                 extra["previous_private_url"] = previous["private_url"] if previous else None
@@ -5966,7 +6839,8 @@ def cmd_show_mark(args):
     page_store = ShowPageStore()
     event_store = None
     try:
-        page = page_store.ensure(args.session_id)
+        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show mark --help")
+        page = page_store.ensure(session_id)
         target = _read_cli_text_argument(value=args.target, file_path=None, field_name="--target")
         body = _read_cli_text_argument(value=args.body, file_path=args.body_file, field_name="--body")
         payload = {
@@ -5981,14 +6855,15 @@ def cmd_show_mark(args):
             payload["anchor"] = {"selector": args.anchor_selector}
             if args.anchor_text:
                 payload["anchor"]["text"] = args.anchor_text
-        event = _post_show_mark_to_live_ui(args.session_id, payload)
+        event = _post_show_mark_to_live_ui(session_id, payload)
         if event is None:
             event_store = ShowSessionEventStore()
-            event = event_store.append(args.session_id, payload)
+            event = event_store.append(session_id, payload)
         result = _show_page_result(
             page,
             message="Assistant mark recorded.",
             extra={
+                **({"session_default_notice": session_default_notice} if session_default_notice else {}),
                 "event": event,
                 "event_id": event["id"],
                 "message_id": event.get("message_id"),
@@ -6020,25 +6895,27 @@ def cmd_show_event(args):
     page_store = ShowPageStore()
     event_store = None
     try:
-        page = page_store.ensure(args.session_id)
+        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show event --help")
+        page = page_store.ensure(session_id)
         payload = _read_event_json_argument(args.event_json, args.event_json_file)
         if args.type:
             payload = {**payload, "type": args.type}
         if args.dispatch:
             payload = _with_show_event_dispatch(payload)
-        event = _post_show_event_to_live_ui(args.session_id, payload)
+        event = _post_show_event_to_live_ui(session_id, payload)
         if event is None:
             if args.dispatch:
                 from vibe.ui_server import record_local_show_event
 
-                event = record_local_show_event(args.session_id, payload, dispatch_sync=True)
+                event = record_local_show_event(session_id, payload, dispatch_sync=True)
             else:
                 event_store = ShowSessionEventStore()
-                event = event_store.append(args.session_id, payload)
+                event = event_store.append(session_id, payload)
         result = _show_page_result(
             page,
             message="Show event recorded.",
             extra={
+                **({"session_default_notice": session_default_notice} if session_default_notice else {}),
                 "event": event,
                 "event_id": event["id"],
                 "message_id": event.get("message_id"),
@@ -6295,9 +7172,11 @@ def cmd_runtime(args) -> int:
         offline = True if getattr(args, "offline", False) else None
         payload = manager.prepare(force=getattr(args, "force", False), offline=offline)
         askill = _ensure_askill_during_prepare(offline=bool(offline))
+        tmux = _ensure_tmux_during_prepare(offline=bool(offline), force=getattr(args, "force", False))
         avault = _ensure_avault_during_prepare(offline=bool(offline))
         payload["askill"] = askill
         payload["avault"] = avault
+        payload["tmux"] = tmux
         if getattr(args, "json", False):
             print(json.dumps(payload, indent=2))
         else:
@@ -6321,6 +7200,12 @@ def cmd_runtime(args) -> int:
                 print("avault installed." if avault.get("changed") else "avault ready.")
             else:
                 print(f"avault not ready: {avault.get('message') or 'install failed'}", file=sys.stderr)
+            if tmux.get("skipped") or tmux.get("status") == "skipped":
+                print(f"tmux: skipped ({tmux.get('reason') or 'skipped'}).")
+            elif tmux.get("ok"):
+                print("tmux installed." if tmux.get("changed") else "tmux ready.")
+            else:
+                print(f"tmux not ready: {tmux.get('message') or tmux.get('reason') or 'install failed'}", file=sys.stderr)
         return 1 if getattr(args, "strict", False) and not payload.get("ok") else 0
     if command == "clean":
         payload = manager.clean(keep_previous=getattr(args, "keep_previous", 1))
@@ -6378,10 +7263,30 @@ def _ensure_askill_during_prepare(offline: bool = False) -> dict:
     """
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
-    if os.environ.get("VIBE_INSTALL_SKIP_ASKILL", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if os.environ.get("VIBE_INSTALL_SKIP_ASKILL", "").strip().lower() in _TRUTHY_ENV_VALUES:
         return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_ASKILL"}
     try:
         return api.ensure_askill_installed(force=True)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)}
+
+
+def _ensure_tmux_during_prepare(offline: bool = False, force: bool = False) -> dict:
+    """Ensure optional tmux alongside managed runtimes.
+
+    tmux powers persistent Web Terminal sessions, but absence must never block
+    prepare or upgrades: the terminal backend will fall back to ephemeral PTY.
+    """
+    if offline:
+        return {"ok": True, "skipped": True, "reason": "offline"}
+    if os.environ.get("VIBE_UI_ENABLE_TERMINAL", "").strip().lower() in _FALSY_ENV_VALUES:
+        return {"ok": True, "status": "skipped", "reason": "terminal_disabled"}
+    if os.environ.get("VIBE_INSTALL_SKIP_TMUX", "").strip().lower() in _TRUTHY_ENV_VALUES:
+        return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_TMUX"}
+    try:
+        from core.tmux_runtime import ensure_tmux_installed
+
+        return ensure_tmux_installed(force=force)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "message": str(exc)}
 
@@ -6390,7 +7295,7 @@ def _ensure_avault_during_prepare(offline: bool = False) -> dict:
     """Ensure avault (the Vault custody core) alongside other local deps."""
     if offline:
         return {"ok": True, "skipped": True, "reason": "offline"}
-    if os.environ.get("VIBE_INSTALL_SKIP_AVAULT", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if os.environ.get("VIBE_INSTALL_SKIP_AVAULT", "").strip().lower() in _TRUTHY_ENV_VALUES:
         return {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_AVAULT"}
     try:
         return api.ensure_avault_installed(force=True)
@@ -6722,6 +7627,11 @@ def build_parser():
     )
     agent_run_parser.add_argument("--post-to", choices=("thread", "channel"))
     agent_run_parser.add_argument("--callback-session-id", help="Caller Session ID to receive the completed async run result")
+    agent_run_parser.add_argument(
+        "--no-callback",
+        action="store_true",
+        help="For async runs, intentionally skip automatic callback delivery and inspect the run later.",
+    )
     agent_run_parser.add_argument("--async", dest="async_run", action="store_true", help="Queue the run and return immediately")
     agent_run_parser.add_argument("--wait-timeout", type=float, help="Maximum seconds the CLI waits for a synchronous run result")
     agent_message_group = agent_run_parser.add_mutually_exclusive_group(required=True)
@@ -6754,7 +7664,7 @@ def build_parser():
     _add_pagination_args(runs_list_parser, help_command="vibe runs list --help")
     _add_json_noop(runs_list_parser)
     runs_show_parser = runs_subparsers.add_parser("show", help="Show one Agent run")
-    runs_show_parser.add_argument("run_id")
+    runs_show_parser.add_argument("run_id", nargs="?")
     _add_json_noop(runs_show_parser)
     runs_cancel_parser = runs_subparsers.add_parser("cancel", help="Request best-effort cancellation for one run")
     runs_cancel_parser.add_argument("run_id")
@@ -6794,7 +7704,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session get --help",
     )
-    session_get_parser.add_argument("session_id", help="Agent Session ID")
+    session_get_parser.add_argument("session_id", nargs="?", help="Agent Session ID")
     _add_json_noop(session_get_parser)
     session_update_parser = session_subparsers.add_parser(
         "update",
@@ -6803,7 +7713,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session update --help",
     )
-    session_update_parser.add_argument("session_id", help="Agent Session ID")
+    session_update_parser.add_argument("session_id", nargs="?", help="Agent Session ID")
     session_update_parser.add_argument(
         "--title", required=True, help="New title. Pass an empty string to clear it (reverts to id-based display)."
     )
@@ -7051,9 +7961,9 @@ def build_parser():
         epilog=_show_path_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe show path --help",
-        error_hint="Pass the current Agent Session ID explicitly.",
+        error_hint="Pass --session-id, or run from an Avibe Agent shell where AVIBE_SESSION_ID is injected.",
     )
-    show_path_parser.add_argument("--session-id", required=True, help="Agent Session ID for the Show Page.")
+    show_path_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
     show_path_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
 
     show_status_parser = show_subparsers.add_parser(
@@ -7063,9 +7973,9 @@ def build_parser():
         epilog=_show_status_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe show status --help",
-        error_hint="Pass the current Agent Session ID explicitly.",
+        error_hint="Pass --session-id, or run from an Avibe Agent shell where AVIBE_SESSION_ID is injected.",
     )
-    show_status_parser.add_argument("--session-id", required=True, help="Agent Session ID for the Show Page.")
+    show_status_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
     show_status_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
 
     show_update_parser = show_subparsers.add_parser(
@@ -7080,7 +7990,7 @@ def build_parser():
         error_help_command="vibe show update --help",
         error_hint="Pass --visibility private|public|offline, --share-id SLUG, or --rotate-share.",
     )
-    show_update_parser.add_argument("--session-id", required=True, help="Agent Session ID for the Show Page.")
+    show_update_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
     show_update_action = show_update_parser.add_mutually_exclusive_group(required=True)
     show_update_action.add_argument(
         "--visibility",
@@ -7110,9 +8020,9 @@ def build_parser():
         epilog=_show_mark_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe show mark --help",
-        error_hint="Pass --session-id, --target, and --body or --body-file.",
+        error_hint="Pass --target and --body or --body-file. Pass --session-id outside an Avibe Agent shell.",
     )
-    show_mark_parser.add_argument("--session-id", required=True, help="Agent Session ID for the Show Page.")
+    show_mark_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
     show_mark_parser.add_argument("--scope", default="default", help='Mark scope. Defaults to "default".')
     show_mark_parser.add_argument("--target", required=True, help="Target mark id or selector.")
     mark_body_group = show_mark_parser.add_mutually_exclusive_group(required=True)
@@ -7129,9 +8039,9 @@ def build_parser():
         epilog=_show_event_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe show event --help",
-        error_hint="Pass --session-id and either --event-json/--event-json-file or --type with JSON fields.",
+        error_hint="Pass either --event-json/--event-json-file or --type with JSON fields. Pass --session-id outside an Avibe Agent shell.",
     )
-    show_event_parser.add_argument("--session-id", required=True, help="Agent Session ID for the Show Page.")
+    show_event_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
     show_event_parser.add_argument("--type", help="Show event type, for example human.annotation.created.")
     event_json_group = show_event_parser.add_mutually_exclusive_group(required=True)
     event_json_group.add_argument("--event-json", help="Inline JSON object, or @path to read JSON from a file.")

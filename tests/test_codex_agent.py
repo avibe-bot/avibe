@@ -1084,6 +1084,33 @@ class CodexAgentHandleMessageTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
+    def test_inject_caller_env_config_merges_shell_environment_policy(self):
+        agent = object.__new__(CodexAgent)
+        params = {"config": {"shell_environment_policy": {"set": {"KEEP": "1"}}}}
+        request = SimpleNamespace(
+            context=SimpleNamespace(
+                platform_specific={
+                    "task_execution_id": "run-parent",
+                    "task_trigger_kind": "agent_run",
+                    "agent_session_target": {
+                        "id": "ses-parent",
+                        "agent_backend": "codex",
+                        "native_session_id": "thread-parent",
+                    },
+                }
+            )
+        )
+
+        agent._inject_caller_env_config(params, request)
+
+        set_env = params["config"]["shell_environment_policy"]["set"]
+        self.assertEqual(set_env["KEEP"], "1")
+        self.assertEqual(set_env["AVIBE_SESSION_ID"], "ses-parent")
+        self.assertEqual(set_env["AVIBE_RUN_ID"], "run-parent")
+        self.assertEqual(set_env["AVIBE_CALLER_SOURCE"], "agent_run")
+        self.assertEqual(set_env["AVIBE_CALLER_BACKEND"], "codex")
+        self.assertEqual(set_env["AVIBE_NATIVE_SESSION_ID"], "thread-parent")
+
     async def test_start_thread_requests_danger_full_access(self):
         agent = object.__new__(CodexAgent)
         agent.controller = SimpleNamespace(config=SimpleNamespace(platform="slack", reply_enhancements=False))
@@ -1262,7 +1289,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             working_path="/tmp/work",
             context=SimpleNamespace(
                 platform="slack",
-                platform_specific={"is_dm": False},
+                platform_specific={},
                 user_id="U1",
                 channel_id="C1",
                 thread_id="171717.123",
@@ -2471,6 +2498,53 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("modelProvider", params)
         self.assertIn("Current session id: `sesk8m4q2p7x`", params["developerInstructions"])
         self.assertIn("# Avibe", params["developerInstructions"])
+
+    async def test_refresh_thread_developer_instructions_refreshes_caller_env_when_prompt_cached(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(config=SimpleNamespace(platform="slack", reply_enhancements=True))
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.sessions = SimpleNamespace(ensure_agent_session_id=Mock(return_value="sesk8m4q2p7x"))
+        agent._resolve_resume_model_provider_override = AsyncMock(return_value=None)
+        agent._thread_developer_instructions = {}
+        request = SimpleNamespace(
+            working_path="/tmp/work",
+            session_key="slack::channel::C1::thread::171717.123",
+            base_session_id="session-1",
+            context=SimpleNamespace(
+                platform="slack",
+                platform_specific={
+                    "task_execution_id": "run-one",
+                    "task_trigger_kind": "agent_run",
+                    "agent_session_target": {
+                        "id": "sesk8m4q2p7x",
+                        "agent_backend": "codex",
+                        "native_session_id": "thread-existing",
+                    },
+                },
+                user_id="U1",
+                channel_id="C1",
+                thread_id="171717.123",
+            ),
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+        )
+        transport = SimpleNamespace(send_request=AsyncMock(return_value={"thread": {"id": "thread-existing"}}))
+
+        await agent._refresh_thread_developer_instructions_if_needed(transport, request, "thread-existing")
+        request.context.platform_specific["task_execution_id"] = "run-two"
+        await agent._refresh_thread_developer_instructions_if_needed(transport, request, "thread-existing")
+
+        self.assertEqual(transport.send_request.await_count, 2)
+        first_params = transport.send_request.await_args_list[0].args[1]
+        second_params = transport.send_request.await_args_list[1].args[1]
+        self.assertIn("developerInstructions", first_params)
+        self.assertNotIn("developerInstructions", second_params)
+        self.assertEqual(
+            second_params["config"]["shell_environment_policy"]["set"]["AVIBE_RUN_ID"],
+            "run-two",
+        )
+        self.assertEqual(second_params["threadId"], "thread-existing")
 
     async def test_refresh_thread_developer_instructions_preserves_resume_model_provider_override(self):
         agent = object.__new__(CodexAgent)

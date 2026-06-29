@@ -512,6 +512,45 @@ def test_session_handler_marks_claude_sdk_session_process_owner(monkeypatch, tmp
     assert registered == [{"client": client, "native_session_id": None, "owner": "session"}]
 
 
+def test_session_handler_injects_caller_context_env(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            captured["options"] = options
+
+        async def connect(self) -> None:
+            captured["connected"] = True
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform_specific={
+            "task_execution_id": "run-parent",
+            "task_trigger_kind": "agent_run",
+            "agent_session_target": {
+                "id": "ses-parent",
+                "agent_backend": "claude",
+                "native_session_id": "claude-native",
+            },
+        },
+    )
+
+    _run_session(handler, context)
+
+    env = captured["options"].env
+    assert env["AVIBE_SESSION_ID"] == "ses-parent"
+    assert env["AVIBE_RUN_ID"] == "run-parent"
+    assert env["AVIBE_CALLER_SOURCE"] == "agent_run"
+    assert env["AVIBE_CALLER_BACKEND"] == "claude"
+    assert env["AVIBE_NATIVE_SESSION_ID"] == "claude-native"
+
+
 def test_session_handler_coalesces_concurrent_claude_client_creates(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -753,6 +792,167 @@ def test_session_handler_does_not_repeat_claude_model_control_request(monkeypatc
     assert len(captured["clients"]) == 1
     assert captured["options"].extra_args == {"model": "claude-sonnet-4-5"}
     assert first_client.model_calls == []
+
+
+def test_session_handler_recreates_cached_claude_client_when_caller_env_changes(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict[str, Any] = {"clients": []}
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+            self.disconnects = 0
+            captured["clients"].append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform_specific={
+            "task_execution_id": "run-one",
+            "task_trigger_kind": "agent_run",
+            "agent_session_target": {"id": "ses-parent", "agent_backend": "claude"},
+        },
+    )
+
+    first_client = _run_session(handler, context)
+    context.platform_specific["task_execution_id"] = "run-two"
+    second_client = _run_session(handler, context)
+
+    assert first_client is not second_client
+    assert first_client.disconnects == 1
+    assert len(captured["clients"]) == 2
+    assert first_client.options.env["AVIBE_RUN_ID"] == "run-one"
+    assert second_client.options.env["AVIBE_RUN_ID"] == "run-two"
+
+
+def test_session_handler_recreates_cached_claude_subagent_when_caller_env_changes(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict[str, Any] = {"clients": []}
+
+    class _RoutingSettingsManager(_SettingsManager):
+        @staticmethod
+        def get_channel_routing(settings_key):
+            return type("Routing", (), {"claude_agent": "reviewer", "model": None, "reasoning_effort": None})()
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+            self.disconnects = 0
+            captured["clients"].append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    controller.settings_manager = _RoutingSettingsManager()
+    controller.platform_settings_managers = {"slack": controller.settings_manager}
+    handler = SessionHandler(controller)
+    context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform_specific={
+            "routing_subagent": "reviewer",
+            "task_execution_id": "run-one",
+            "task_trigger_kind": "agent_run",
+            "agent_session_target": {"id": "ses-parent", "agent_backend": "claude"},
+        },
+    )
+
+    first_client = _run_session(handler, context)
+    context.platform_specific["task_execution_id"] = "run-two"
+    second_client = _run_session(handler, context)
+
+    assert first_client is not second_client
+    assert first_client.disconnects == 1
+    assert len(captured["clients"]) == 2
+    assert first_client.options.env["AVIBE_RUN_ID"] == "run-one"
+    assert second_client.options.env["AVIBE_RUN_ID"] == "run-two"
+
+
+def test_session_handler_reuses_cached_claude_subagent_after_ensuring_caller_env(
+    monkeypatch, tmp_path: Path
+) -> None:
+    captured: dict[str, Any] = {"clients": []}
+
+    class _RoutingSessions(_Sessions):
+        ensured: list[tuple[str, str, str]] = []
+
+        @staticmethod
+        def get_agent_session_id(settings_key, base_session_id, agent_name):
+            return None
+
+        @classmethod
+        def ensure_agent_session_id(cls, settings_key, agent_name, base_session_id):
+            cls.ensured.append((settings_key, agent_name, base_session_id))
+            return "ses-subagent"
+
+    class _RoutingSettingsManager(_SettingsManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sessions = _RoutingSessions()
+
+        @staticmethod
+        def get_channel_routing(settings_key):
+            return type("Routing", (), {"claude_agent": "reviewer", "model": None, "reasoning_effort": None})()
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self.options = options
+            self.disconnects = 0
+            captured["clients"].append(self)
+
+        async def connect(self) -> None:
+            return None
+
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    controller.settings_manager = _RoutingSettingsManager()
+    controller.platform_settings_managers = {"slack": controller.settings_manager}
+    handler = SessionHandler(controller)
+
+    first_context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform_specific={"routing_subagent": "reviewer", "task_trigger_kind": "agent_run"},
+    )
+    first_client = _run_session(handler, first_context)
+
+    second_context = MessageContext(
+        user_id="U123",
+        channel_id="C123",
+        platform_specific={"routing_subagent": "reviewer", "task_trigger_kind": "agent_run"},
+    )
+    second_client = _run_session(handler, second_context)
+
+    assert first_client is second_client
+    assert first_client.disconnects == 0
+    assert len(captured["clients"]) == 1
+    assert first_client.options.env["AVIBE_SESSION_ID"] == "ses-subagent"
+    assert second_context.platform_specific["agent_session_id"] == "ses-subagent"
 
 
 def test_session_handler_updates_cached_claude_model_only_when_changed(monkeypatch, tmp_path: Path) -> None:

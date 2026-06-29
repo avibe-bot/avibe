@@ -166,12 +166,30 @@ vibe session list                       # active sessions, 10 per page, newest a
 vibe session list --type slack          # filter by platform (avibe = Web/Workbench)
 vibe session list --page 2              # next page (fixed 10 per page; there is no --limit)
 vibe session get sesk8m4q2p7x           # full detail for one session
+vibe session get                        # inside an Avibe Agent shell, show the caller Session
 vibe session update sesk8m4q2p7x --title 'Release review'   # pass "" to clear the title
+vibe session update --title 'Release review'                 # inside an Avibe Agent shell
 ```
 
 `--type` accepts a platform id: `avibe` (Web/Workbench), `slack`, `discord`,
 `telegram`, `lark`, `wechat`. For richer filtering — by agent, time range, message
 content, or cross-table joins — `list` and `get` point you to `vibe data query`.
+When `get` or `update` runs inside an Avibe-injected Agent shell, the session id
+may be omitted and defaults to the caller Session from `AVIBE_SESSION_ID`.
+
+### `vibe runs`
+
+List and inspect Agent run records.
+
+```bash
+vibe runs list --session-id sesk8m4q2p7x --brief
+vibe runs show run_abc123
+vibe runs show                         # inside an Avibe Agent shell, show the caller Run
+```
+
+`vibe runs list` keeps its global listing behavior unless a filter such as
+`--session-id` is provided. `vibe runs show` can omit the run id inside an
+Avibe-injected Agent run and defaults to `AVIBE_RUN_ID`.
 
 ### `vibe task`
 
@@ -179,6 +197,7 @@ Create, inspect, update, run, pause, resume, or remove scheduled tasks.
 
 ```bash
 vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
+vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'   # inside an Avibe Agent shell
 vibe task list --brief
 vibe task update <task-id> --cron '*/30 * * * *'
 vibe task run <task-id>
@@ -193,6 +212,11 @@ Use `vibe task add --help` and `vibe task update --help` for the full command su
 - `--cron` and `--at` scheduling
 - `--name`, `--timezone`, and message file support
 
+When `vibe task add` runs inside an Avibe-injected Agent shell, `--session-id`
+may be omitted. Avibe defaults the task target to the caller Session from
+`AVIBE_SESSION_ID` and reports that default in the command output. Explicit
+`--session-id`, session creation flags, and delivery flags still win.
+
 `--session-key` remains accepted for older scripts, but new tasks should use
 the Agent Session ID shown in the active Avibe prompt.
 
@@ -203,10 +227,10 @@ a scheduled task definition.
 
 ```bash
 vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
-vibe agent run --async --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
-vibe agent run --async --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
+vibe agent run --async --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
+vibe agent run --async --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --async --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
-vibe agent run --async --create-session --deliver-key slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
+vibe agent run --async --no-callback --create-session --deliver-key slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
 ```
 
 Use `--fork-session <session-id>` when a new Agent Session should branch from
@@ -217,11 +241,15 @@ stays the same; a cross-backend fork is rejected. Do not combine
 `--fork-session` with `--session-id`, `--create-session`, `--deliver-key`, or
 `--post-to`.
 
-Use `--callback-session-id` when an async run should send its final result text
-back into a caller Session as a follow-up Agent message. The callback is
-independent from ordinary delivery: if the target run also posts to its IM scope,
-the caller Session still receives the result. Process messages such as system
-notes, tool calls, and intermediate assistant updates are not included.
+Async runs need an explicit callback policy unless the command is running inside
+an Avibe-injected Agent environment. Use `--callback-session-id` when the final
+result text should return to a caller Session as a follow-up Agent message; use
+`--no-callback` when you intentionally want to inspect the run later with
+`vibe runs show` or by listing/polling runs. Agent-initiated Harness calls
+default the callback to the current caller Session. The callback is independent
+from ordinary delivery: if the target run also posts to its IM scope, the caller
+Session still receives the result. Process messages such as system notes, tool
+calls, and intermediate assistant updates are not included.
 
 `vibe hook send` is kept only as a deprecated compatibility entrypoint. New
 automation should use `vibe agent run`.
@@ -238,6 +266,10 @@ vibe watch add \
   --session-id sesk8m4q2p7x \
   --message 'Test run finished. Summarize the failures and propose next steps.' \
   -- ./scripts/run_tests.sh
+
+vibe watch add \
+  --message 'Test run finished. Summarize the failures and propose next steps.' \
+  -- ./scripts/run_tests.sh     # inside an Avibe Agent shell
 
 # Alternative: pass the command through a shell with --shell
 vibe watch add \

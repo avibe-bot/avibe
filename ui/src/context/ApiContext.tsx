@@ -25,7 +25,6 @@ export type VaultSecret = {
   signer_kind: string | null;
   source: string;
   description?: string | null;
-  preview: string;
   policy: Record<string, unknown>;
   last_used_at: string | null;
   use_count: number;
@@ -40,6 +39,68 @@ export type VaultAuditEvent = {
   secret_name: string | null;
   request_id: string | null;
   grant_id: string | null;
+};
+
+export type VaultRequest = {
+  id: string;
+  request_type: string;
+  secret_name: string | null;
+  requester: unknown;
+  delivery: unknown;
+  status: string;
+  message_id: string | null;
+  created_at: string;
+  decided_at: string | null;
+  expires_at: string | null;
+  card?: Record<string, unknown> | null;
+};
+
+export type VaultGrant = {
+  id: string;
+  scope_type: 'secret' | 'skill' | 'group';
+  scope_ref: string;
+  session_id: string | null;
+  status: string;
+  created_by_request_id: string | null;
+  created_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+  member_snapshot: string[];
+  member_count: number;
+  runtime_member_count: number;
+};
+
+type VaultBlindBox = {
+  scheme: string;
+  enc: string;
+  ct: string;
+};
+
+type VaultSealedEnvelope = {
+  ciphertext: string;
+  nonce: string;
+  wrap_meta: string | Record<string, unknown>;
+};
+
+export type VaultVmkResult = {
+  ok: boolean;
+  exists: boolean;
+  wrap_meta: string | null;
+};
+
+export type VaultCreatePayload = {
+  name: string;
+  protection?: 'standard' | 'protected';
+  blind_box?: VaultBlindBox;
+  sealed?: VaultSealedEnvelope;
+  envelope?: VaultSealedEnvelope;
+  group?: string;
+  description?: string;
+  tags?: string[];
+  kind?: string;
+  signer_kind?: string | null;
+  policy?: Record<string, unknown>;
+  public_meta?: Record<string, unknown>;
 };
 
 export type ApiContextType = {
@@ -246,8 +307,17 @@ export type ApiContextType = {
   setDefaultVibeAgent: (name: string) => Promise<{ ok: boolean; default_agent_name: string; agent: VibeAgentBrief }>;
   removeVibeAgent: (name: string) => Promise<{ ok: boolean; code?: string; message?: string; references?: Record<string, number>; removed_agent?: string }>;
   listVaultSecrets: (params?: { group?: string }) => Promise<{ ok: boolean; secrets: VaultSecret[] }>;
-  createVaultSecret: (payload: { name: string; value: string; group?: string; description?: string; tags?: string[]; policy?: Record<string, unknown> }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
+  getVaultVmk: () => Promise<VaultVmkResult>;
+  getVaultPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
+  getVaultAgentPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
+  createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
+  getVaultRequests: (params?: { status?: string; type?: string; limit?: number }) => Promise<{ ok: boolean; requests: VaultRequest[] }>;
+  getVaultGrants: (params?: { status?: string; sessionId?: string }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; grants: VaultGrant[] }>;
+  createVaultGrant: (payload: Record<string, unknown>) => Promise<{ ok: boolean; grant: VaultGrant; code?: string; message?: string }>;
+  revokeVaultGrant: (grantId: string) => Promise<{ ok: boolean; grant?: VaultGrant; code?: string; message?: string }>;
+  signVaultDigest: (payload: Record<string, unknown>) => Promise<{ ok: boolean; signature?: Record<string, unknown>; request?: VaultRequest; code?: string; message?: string }>;
+  pinVaultPubkey: (payload: Record<string, unknown>) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   getVaultAudit: (params?: { secret?: string; limit?: number }) => Promise<{ ok: boolean; events: VaultAuditEvent[] }>;
   importVibeAgents: (payload: { from?: 'claude' | 'codex' | 'opencode'; name?: string; all?: boolean; file?: string; backend?: string }) => Promise<{ ok: boolean; imported?: any[]; skipped?: any[]; error?: string; code?: string; message?: string }>;
   // Agent Skills — thin shells over the askill CLI (see /api/skills*).
@@ -887,7 +957,9 @@ export type RunningAgentsResult =
 export type SessionInfo =
   | { remote: false }
   | { remote: true; authenticated: false }
-  | { remote: true; authenticated: true; email: string };
+  // sub is the stable OIDC subject; prefer it over email for per-account scoping (email can
+  // be absent or shared across subjects).
+  | { remote: true; authenticated: true; email: string; sub?: string };
 
 export type LogEntry = {
   timestamp: string;
@@ -935,7 +1007,7 @@ export type DependencyItem = {
   required: boolean;
   installed: boolean;
   version: string | null;
-  status: 'ready' | 'missing';
+  status: 'ready' | 'missing' | 'upgrade_required';
 };
 
 export type DependenciesResult = { ok: boolean; deps: DependencyItem[] };
@@ -1324,15 +1396,21 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     throw new ApiError(errorMessage, res.status, errorCode);
   };
 
-  const getJson = async (path: string) => {
+  const getJson = async (path: string, { handleError = true }: { handleError?: boolean } = {}) => {
     const res = await apiFetch(path);
-    if (!res.ok) {
+    if (!res.ok && handleError) {
       await handleApiError(res, path);
     }
     return res.json();
   };
 
-  const getCachedJson = (path: string, ttlMs = 1500) => {
+  const getCachedJson = (path: string, ttlMs = 1500, opts?: { handleError?: boolean }) => {
+    // Best-effort callers (handleError: false) bypass the shared read cache so a
+    // silently-failing request can't hand its suppressed-error promise to a
+    // toast-enabled caller hitting the same path.
+    if (opts?.handleError === false) {
+      return getJson(path, opts);
+    }
     const now = Date.now();
     const cached = readCacheRef.current.get(path);
     if (cached && cached.expiresAt > now) {
@@ -1939,8 +2017,30 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const qs = search.toString();
       return getCachedJson(qs ? `/api/vault/secrets?${qs}` : '/api/vault/secrets', 1500);
     },
+    getVaultVmk: () => getJson('/api/vault/vmk'),
+    getVaultPubkey: () => getCachedJson('/api/vault/pubkey', 1500),
+    getVaultAgentPubkey: () => getCachedJson('/api/vault/agent/pubkey', 1500),
     createVaultSecret: (payload, opts) => postJson('/api/vault/secrets', payload, opts),
     deleteVaultSecret: (name) => deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}`),
+    getVaultRequests: (params) => {
+      const search = new URLSearchParams();
+      if (params?.status) search.set('status', params.status);
+      if (params?.type) search.set('type', params.type);
+      if (params?.limit) search.set('limit', String(params.limit));
+      const qs = search.toString();
+      return getCachedJson(qs ? `/api/vault/requests?${qs}` : '/api/vault/requests', 1500);
+    },
+    getVaultGrants: (params, opts) => {
+      const search = new URLSearchParams();
+      if (params?.status) search.set('status', params.status);
+      if (params?.sessionId) search.set('session_id', params.sessionId);
+      const qs = search.toString();
+      return getCachedJson(qs ? `/api/vault/grants?${qs}` : '/api/vault/grants', 1500, opts);
+    },
+    createVaultGrant: (payload) => postJson('/api/vault/grants', payload),
+    revokeVaultGrant: (grantId) => deleteJson(`/api/vault/grants/${encodeURIComponent(grantId)}`),
+    signVaultDigest: (payload) => postJson('/api/vault/sign', payload),
+    pinVaultPubkey: (payload) => postJson('/api/vault/pubkey-pin', payload),
     getVaultAudit: (params) => {
       const search = new URLSearchParams();
       if (params?.secret) search.set('secret', params.secret);

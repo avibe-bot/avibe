@@ -2,6 +2,8 @@ import * as React from 'react';
 import ReactMarkdown, { type Components, defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
+import { useTranslation } from 'react-i18next';
+import { Check, Copy } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
 import { ChatImage, LinkedImageProvider } from '@/components/ui/chat-image';
@@ -14,7 +16,7 @@ import {
   parseMentionHref,
   type MentionReference,
 } from '@/lib/mentions';
-import { cn } from '@/lib/utils';
+import { cn, copyTextToClipboard } from '@/lib/utils';
 
 // Shared markdown renderer. react-markdown + remark-gfm (tables, strikethrough,
 // task lists, autolinks); the element styling lives in index.css under
@@ -73,6 +75,38 @@ function mentionUrlTransform(url: string): string {
   if (url.startsWith(`${MENTION_LINK_SCHEME}:`) || url.startsWith(`${SECRET_LINK_SCHEME}:`)) return url;
   return defaultUrlTransform(url);
 }
+
+// A fenced code block with a hover/tap copy button. The button lives on a
+// relatively-positioned wrapper (not the <pre>, which scrolls horizontally) so
+// it stays pinned top-right while the code scrolls. The code text is read from
+// the rendered <pre> (textContent) rather than re-derived from the markdown AST.
+const CodeBlock: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
+  const { t } = useTranslation();
+  const preRef = React.useRef<HTMLPreElement>(null);
+  const [copied, setCopied] = React.useState(false);
+  const onCopy = React.useCallback(async () => {
+    const text = preRef.current?.textContent ?? '';
+    if (!text) return;
+    if (!(await copyTextToClipboard(text))) return;
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  }, []);
+  const label = copied ? t('common.copied') : t('common.copy');
+  return (
+    <div className="vr-code-block">
+      <pre ref={preRef}>{children}</pre>
+      <button
+        type="button"
+        className={cn('vr-code-copy', copied && 'is-copied')}
+        onClick={onCopy}
+        aria-label={label}
+        title={label}
+      >
+        {copied ? <Check size={14} /> : <Copy size={14} />}
+      </button>
+    </div>
+  );
+};
 
 export const Markdown: React.FC<{
   content: string;
@@ -169,8 +203,21 @@ export const Markdown: React.FC<{
           </a>
         );
       },
+      // Wrap tables in a horizontal-scroll viewport so a wide table scrolls within
+      // the bubble instead of squeezing its columns to fit (see index.css). A plain
+      // <div> is valid in both interactive and preview (clickable-row) surfaces.
+      table: ({ children }) => (
+        <div className="vr-table-scroll">
+          <table>{children}</table>
+        </div>
+      ),
       ...(interactive
-        ? {}
+        ? {
+            // Fenced code blocks get a hover/tap copy button. Only on the
+            // interactive surface — a <button> nested in a clickable preview row
+            // would be invalid interactive content.
+            pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+          }
         : {
             // GFM task lists render a checkbox <input>; even disabled, an
             // <input> nested in the sidebar row <button> is invalid interactive

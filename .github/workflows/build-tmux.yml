@@ -1,0 +1,164 @@
+name: Build tmux runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      tmux_version:
+        description: "tmux version to build"
+        required: true
+        default: "3.6b"
+      release_tag:
+        description: "Optional release tag to upload assets to"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: linux-${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-linux-musl
+          - arch: arm64
+            target: aarch64-linux-musl
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build static tmux
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cat > "dist/README-linux-${{ matrix.arch }}.txt" <<'EOF'
+          Scaffold placeholder for the Avibe-owned tmux runtime build.
+
+          The final implementation must cross-build tmux with static libevent,
+          ncurses, and utf8proc for this musl target, then package:
+
+            tmux-${TMUX_VERSION}-linux-${ARCH}.tar.gz
+
+          Required properties:
+          - tmux built WITH utf8proc for CJK width correctness
+          - terminfo available to terminal sessions
+          - only the tmux binary and required metadata in the archive
+          EOF
+          tar -czf "dist/tmux-${{ inputs.tmux_version }}-linux-${{ matrix.arch }}.tar.gz" -C dist "README-linux-${{ matrix.arch }}.txt"
+
+      - name: Generate checksum
+        shell: bash
+        run: |
+          (cd dist && shasum -a 256 "tmux-${{ inputs.tmux_version }}-linux-${{ matrix.arch }}.tar.gz" > "tmux-${{ inputs.tmux_version }}-linux-${{ matrix.arch }}.sha256")
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: tmux-linux-${{ matrix.arch }}
+          path: dist/tmux-${{ inputs.tmux_version }}-linux-${{ matrix.arch }}.*
+
+  build-macos:
+    name: macos-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: macos-13
+          - arch: arm64
+            runner: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build relocatable tmux
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cat > "dist/README-macos-${{ matrix.arch }}.txt" <<'EOF'
+          Scaffold placeholder for the Avibe-owned tmux runtime build.
+
+          The final implementation must build tmux with libevent, ncurses, and
+          utf8proc vendored or otherwise relocatable, leaving only system macOS
+          libraries dynamic. The dependency manager ad-hoc signs downloaded
+          binaries before execution.
+          EOF
+          tar -czf "dist/tmux-${{ inputs.tmux_version }}-darwin-${{ matrix.arch }}.tar.gz" -C dist "README-macos-${{ matrix.arch }}.txt"
+
+      - name: Generate checksum
+        shell: bash
+        run: |
+          (cd dist && shasum -a 256 "tmux-${{ inputs.tmux_version }}-darwin-${{ matrix.arch }}.tar.gz" > "tmux-${{ inputs.tmux_version }}-darwin-${{ matrix.arch }}.sha256")
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: tmux-darwin-${{ matrix.arch }}
+          path: dist/tmux-${{ inputs.tmux_version }}-darwin-${{ matrix.arch }}.*
+
+  manifest:
+    name: manifest
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: tmux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate manifest scaffold
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          version = os.environ["TMUX_VERSION"]
+          archives = {}
+          for platform in ("darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"):
+              path = next(Path("dist").glob(f"tmux-{version}-{platform}.tar.gz"), None)
+              if path is None:
+                  raise SystemExit(f"missing archive for {platform}")
+              archives[platform] = {
+                  "name": path.name,
+                  "url": f"https://github.com/avibe-bot/avibe/releases/download/${{ inputs.release_tag || '<tag>' }}/{path.name}",
+                  "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                  "size": path.stat().st_size,
+                  "bin_path": "tmux",
+              }
+          manifest = {
+              "schema_version": 1,
+              "tmux_version": version,
+              "source": "avibe-build-tmux",
+              "source_url": "https://github.com/avibe-bot/avibe/actions/workflows/build-tmux.yml",
+              "requires_utf8proc": True,
+              "terminfo": "bundled-or-system",
+              "archives": archives,
+          }
+          Path("dist/tmux-runtime-manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+          PY
+        env:
+          TMUX_VERSION: ${{ inputs.tmux_version }}
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: tmux-runtime-manifest
+          path: dist/tmux-runtime-manifest.json
+
+      # The build jobs above currently package scaffold placeholders (a README, not a real
+      # tmux binary), so the archives would install as a broken/missing binary. Refuse to
+      # publish them as release assets and fail loudly instead of silently shipping. Once
+      # the cross-build produces a real relocatable tmux, replace this guard with the
+      # softprops/action-gh-release@v2 upload of dist/tmux-*.tar.gz, *.sha256, and the
+      # manifest.
+      - name: Refuse to publish placeholder release assets
+        if: inputs.release_tag != ''
+        shell: bash
+        run: |
+          echo "::error::build-tmux still packages scaffold placeholders; refusing to publish release assets for tag '${{ inputs.release_tag }}'. Implement the real tmux cross-build before enabling the release upload." >&2
+          exit 1

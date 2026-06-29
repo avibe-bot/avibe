@@ -1393,7 +1393,7 @@ def test_agent_run_stays_running_until_terminal_result(tmp_path: Path, monkeypat
         def get_turn_sink(self, session_key):
             return self.active_turn_sinks.get(session_key)
 
-        def register_turn_sink(self, session_key, *, on_chunk, done_event, turn_token=None):
+        def register_turn_sink(self, session_key, *, on_chunk, done_event, turn_token=None, context=None):
             self.active_turn_sinks[session_key] = {
                 "on_chunk": on_chunk,
                 "done_event": done_event,
@@ -1485,7 +1485,7 @@ def test_agent_run_preserves_failed_terminal_status(tmp_path: Path, monkeypatch)
         def get_turn_sink(self, session_key):
             return self.active_turn_sinks.get(session_key)
 
-        def register_turn_sink(self, session_key, *, on_chunk, done_event, turn_token=None):
+        def register_turn_sink(self, session_key, *, on_chunk, done_event, turn_token=None, context=None):
             self.active_turn_sinks[session_key] = {
                 "on_chunk": on_chunk,
                 "done_event": done_event,
@@ -1855,7 +1855,7 @@ def test_agent_run_synchronous_dispatch_error_marks_failed(tmp_path: Path, monke
         def get_turn_sink(self, session_key):
             return self.active_turn_sinks.get(session_key)
 
-        def register_turn_sink(self, session_key, *, on_chunk, done_event, turn_token=None):
+        def register_turn_sink(self, session_key, *, on_chunk, done_event, turn_token=None, context=None):
             self.active_turn_sinks[session_key] = {
                 "on_chunk": on_chunk,
                 "done_event": done_event,
@@ -2310,7 +2310,7 @@ def test_drain_requests_agent_run_passes_agent_name(tmp_path: Path) -> None:
         def get_turn_sink(self, session_key):
             return self.active_turn_sinks.get(session_key)
 
-        def register_turn_sink(self, session_key, *, on_chunk, done_event, turn_token=None):
+        def register_turn_sink(self, session_key, *, on_chunk, done_event, turn_token=None, context=None):
             self.active_turn_sinks[session_key] = {
                 "on_chunk": on_chunk,
                 "done_event": done_event,

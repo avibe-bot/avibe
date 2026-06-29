@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { ArrowLeft, ArrowRight, Bot, ChevronDown, FolderTree, Globe, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, MonitorPlay, PlugZap, Plus, Settings, SlidersHorizontal, Sparkles, X } from 'lucide-react';
+import { ArrowLeft, Bot, ChevronDown, FolderTree, Globe, Hash, Inbox, LayoutDashboard, LayoutGrid, Link as LinkIcon, Menu, MessageCircle, MonitorPlay, PlugZap, Plus, Settings, Sparkles, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -12,6 +12,9 @@ import { LanguageSwitcher } from './LanguageSwitcher';
 import { ThemeToggle } from './ThemeToggle';
 import { VersionBadge } from './VersionBadge';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
+import { AppsLauncher } from './AppsLauncher';
+import { WindowManagerProvider } from '../context/WindowManagerContext';
+import { WindowLayer } from './apps/WindowLayer';
 import { NewSessionSheet } from './workbench/NewSessionSheet';
 import { SearchPalette } from './workbench/search/SearchPalette';
 import { Button } from './ui/button';
@@ -369,6 +372,7 @@ export const AppShell: React.FC = () => {
     // fought iOS's own scroll-into-view and threw the input off-screen. iOS instead
     // pans the locked page to lift the focused composer above the keyboard.
     // Desktop: normal document flow.
+    <WindowManagerProvider>
     <div className="flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground md:block md:h-auto md:min-h-screen md:overflow-visible">
       <aside className="fixed inset-y-0 left-0 z-30 hidden w-[240px] flex-col border-r border-border bg-surface md:flex">
         <div className="flex h-full flex-col justify-between gap-6 px-4 py-5">
@@ -402,29 +406,33 @@ export const AppShell: React.FC = () => {
             {shellMode === 'workbench' && <WorkbenchSidebar onOpenSearch={() => setSearchOpen(true)} />}
           </div>
 
-          {/* Bottom: Status (with embedded version badge) + toggles + hostname */}
+          {/* Bottom (design.pen NbPMq): row 1 = [Apps | Settings] two equal
+              buttons; row 2 = [version … run-dot]. Admin keeps its quick-toggles
+              + hostname between the rows. */}
           <div className="flex flex-col gap-3">
-            <div
-              className={clsx(
-                'flex items-center gap-2.5 rounded-lg border px-3 py-2.5',
-                isRunning
-                  ? 'border-mint/30 bg-mint/[0.08]'
-                  : 'border-border bg-foreground/[0.02]'
+            {/* Row 1 — Apps (Dock trigger, left) paired with the mode switch
+                (right). The Dock rises ABOVE the Apps button, clear of the
+                centered Chat composer. Workbench → Settings (control panel);
+                Control Panel → Back to Workbench, the mint counterpart. */}
+            <div className="flex items-stretch gap-2">
+              <AppsLauncher />
+              {shellMode === 'workbench' ? (
+                <Link
+                  to="/admin/dashboard"
+                  className="group flex flex-1 items-center justify-center gap-2 rounded-lg border border-border-strong px-3 py-2.5 text-[13px] font-medium text-foreground transition-colors hover:bg-foreground/[0.04]"
+                >
+                  <Settings className="size-4 text-muted group-hover:text-foreground" />
+                  <span>{t('appShell.openControlPanel')}</span>
+                </Link>
+              ) : (
+                <Link
+                  to="/"
+                  className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-mint/30 bg-mint/[0.06] px-3 py-2.5 text-[13px] font-semibold text-mint transition hover:bg-mint/[0.12]"
+                >
+                  <ArrowLeft className="size-3.5" />
+                  <span>{t('appShell.backToWorkbench')}</span>
+                </Link>
               )}
-            >
-              <span
-                className={clsx(
-                  'size-2 shrink-0 rounded-full',
-                  isRunning ? 'bg-mint shadow-[0_0_8px_rgba(91,255,160,0.9)]' : 'bg-muted'
-                )}
-              />
-              <div className="min-w-0 flex-1">
-                <div className="text-[12px] font-medium text-foreground">
-                  {isRunning ? t('common.running') : t('common.stopped')}
-                </div>
-                <div className="text-[10px] text-muted">{t('appShell.statusLabel')}</div>
-              </div>
-              <VersionBadge openUpward />
             </div>
 
             {/* Language / theme / account quick-toggles only show in the
@@ -445,27 +453,19 @@ export const AppShell: React.FC = () => {
               </div>
             )}
 
-            {/* Mode switch — flips between Workbench (`/`) and Control Panel
-                (`/admin/*`). Distinct visual hierarchy from the toggle row
-                above so users notice it as a destination, not a quick toggle. */}
-            {shellMode === 'workbench' ? (
-              <Link
-                to="/admin/dashboard"
-                className="flex items-center justify-center gap-2 rounded-lg border border-border-strong px-3 py-2.5 text-[12px] font-medium text-foreground transition hover:bg-foreground/[0.04]"
-              >
-                <SlidersHorizontal className="size-3.5" />
-                <span>{t('appShell.openControlPanel')}</span>
-                <ArrowRight className="size-3 text-muted" />
-              </Link>
-            ) : (
-              <Link
-                to="/"
-                className="flex items-center justify-center gap-2 rounded-lg border border-mint/30 bg-mint/[0.06] px-3 py-2.5 text-[12px] font-semibold text-mint transition hover:bg-mint/[0.12]"
-              >
-                <ArrowLeft className="size-3.5" />
-                <span>{t('appShell.backToWorkbench')}</span>
-              </Link>
-            )}
+            {/* Row 2 — version + a compact run-state dot at the very bottom. The
+                green/grey dot conveys running vs stopped (hover shows the text). */}
+            <div className="flex items-center gap-2">
+              <VersionBadge openUpward />
+              <span
+                title={isRunning ? t('common.running') : t('common.stopped')}
+                aria-label={isRunning ? t('common.running') : t('common.stopped')}
+                className={clsx(
+                  'ml-auto size-2.5 shrink-0 rounded-full',
+                  isRunning ? 'bg-mint shadow-[0_0_8px_rgba(91,255,160,0.9)]' : 'bg-muted'
+                )}
+              />
+            </div>
           </div>
         </div>
       </aside>
@@ -559,6 +559,11 @@ export const AppShell: React.FC = () => {
           both Workbench and Control Panel; the sidebar field is the workbench
           entry point. */}
       <SearchPalette open={searchOpen} onClose={() => setSearchOpen(false)} />
+
+      {/* App windows float over the workbench main area (desktop). The Dock (P2)
+          and the AppsLauncher bridge open windows via the WindowManager. */}
+      <WindowLayer />
     </div>
+    </WindowManagerProvider>
   );
 };

@@ -537,10 +537,10 @@ vault_requests = Table(
     Index("ix_vault_requests_status_created", "status", "created_at"),
 )
 
-# Metadata + audit of active scope-typed unlock grants (P1). The key material — the
-# cached DEK set — is NEVER stored here; it lives only in daemon memory. This row
-# records the scope + bounds for the UI and audit; the member set is frozen at grant
-# time. Created in P0, exercised in P1.
+# Metadata + audit of active scope-typed unlock grants. Key material is NEVER stored
+# here; resident avault agent delivery material wires in later as process-local opaque
+# state. This row records the scope + bounds for the UI and audit; the member set is
+# frozen at grant time.
 vault_grants = Table(
     "vault_grants",
     metadata,
@@ -554,6 +554,8 @@ vault_grants = Table(
     Column("created_at", String, nullable=False),
     Column("expires_at", String, nullable=False),
     Column("revoked_at", String, nullable=True),
+    Column("agent_ready", Integer, nullable=False, server_default=text("0")),
+    Column("agent_ready_at", String, nullable=True),
     Index("ix_vault_grants_status_expires", "status", "expires_at"),
 )
 

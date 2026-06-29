@@ -69,6 +69,25 @@ def _show_runtime_node_version(monkeypatch):
     monkeypatch.setattr("core.show_runtime._node_version", lambda node: (22, 16, 0))
 
 
+def test_set_show_runtime_manager_stops_previous_manager():
+    # Swapping the global manager must stop the one it replaces so a real
+    # Node/esbuild subprocess tree can never be orphaned (and then leak past the
+    # atexit cleanup) when a later test installs a fake or resets the global.
+    import core.show_runtime as srt
+
+    first = _FakeShowRuntimeManager()
+    second = _FakeShowRuntimeManager()
+    srt.set_show_runtime_manager_for_tests(first)
+    try:
+        srt.set_show_runtime_manager_for_tests(second)
+        assert first.stopped is True
+        assert second.stopped is False
+    finally:
+        srt.set_show_runtime_manager_for_tests(None)
+    # Resetting to None also stops the manager being dropped.
+    assert second.stopped is True
+
+
 def _create_show_page(session_id: str, visibility: str) -> str | None:
     page_dir = ensure_show_page_dir(session_id)
     (page_dir / "index.html").write_text("<!doctype html><title>Show</title><h1>Show Page</h1>", encoding="utf-8")

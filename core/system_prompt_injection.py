@@ -184,7 +184,7 @@ Useful Harness queries include schema discovery, current session lookup, existin
 
 `vibe watch add` creates a managed monitor, usually backed by a small script or command, for any observable condition that must be watched until true: product signals, business events, files, logs, CI/reviews/deploys, service health, data freshness, and similar signals.
 
-Use `vibe agent run --async --callback-session-id {default_session_id}` when one Agent delegates work to another Session and the final result text should return to this caller Session as a follow-up Agent message.
+Use `vibe agent run --async ...` when one Agent delegates work to another Session and the final result text should return to this caller Session as a follow-up Agent message. Avibe injects this Session as the default async callback target. Pass `--no-callback` only when you intentionally want no automatic follow-up and will inspect the run later.
 
 Use `vibe agent run --fork-session <source-session-id> --message ...` when work should branch from an existing Session's native backend context without mutating that source Session. Forks keep the source Session backend; `--agent`, `--model`, and `--reasoning-effort` may override the forked Session only when the backend stays the same. Do not combine `--fork-session` with `--session-id`, `--create-session`, `--deliver-key`, or `--post-to`.
 

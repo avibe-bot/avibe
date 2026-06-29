@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { ArrowRight, CheckCheck, Filter, Inbox, Loader2, MessageSquareReply, RefreshCw, Search } from 'lucide-react';
@@ -10,8 +10,13 @@ import { formatRelativeTime } from '../../lib/relativeTime';
 import { Markdown } from '../ui/markdown';
 import { Button } from '../ui/button';
 import { WebPushControl } from './WebPushControl';
-
-type FilterMode = 'unread' | 'all';
+import {
+  readInboxFilter,
+  writeInboxFilter,
+  resolveInboxFilter,
+  INBOX_REVERT_AFTER_MS,
+  type InboxFilter as FilterMode,
+} from '../../lib/inboxFilterMemory';
 
 export const InboxPage: React.FC = () => {
   const { t } = useTranslation();
@@ -28,7 +33,52 @@ export const InboxPage: React.FC = () => {
     loadMore,
     markRead,
   } = useWorkbenchInbox();
-  const [filter, setFilter] = useState<FilterMode>('unread');
+  // Remember the tab across visits instead of always snapping back to Unread.
+  // On (re)entry resume the last tab, unless the user has been away long enough
+  // that defaulting to Unread is more useful (see resolveInboxFilter).
+  const [filter, setFilterState] = useState<FilterMode>(() => resolveInboxFilter(readInboxFilter(), Date.now()));
+
+  const setFilter = useCallback((next: FilterMode) => {
+    setFilterState(next);
+    // Persist the choice immediately; keep leftAt (it's stamped on leave below).
+    writeInboxFilter(next, readInboxFilter().leftAt);
+  }, []);
+
+  // Stamp when the user leaves the inbox (route change → unmount, app/tab
+  // backgrounded, reload/close) so the next entry can measure the absence. If
+  // they background the page itself for a long time, revert to Unread on return.
+  useEffect(() => {
+    // On entry, align storage with the tab actually shown (persists a
+    // revert-to-Unread) and clear leftAt — the user is present, not away, so a
+    // brief background-and-return isn't measured against a stale pre-entry stamp.
+    writeInboxFilter(filter, 0);
+    const markLeft = () => writeInboxFilter(readInboxFilter().tab, Date.now());
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        markLeft();
+      } else if (document.visibilityState === 'visible') {
+        const { tab, leftAt } = readInboxFilter();
+        if (leftAt === 0) return; // already marked present
+        if (Date.now() - leftAt > INBOX_REVERT_AFTER_MS) {
+          setFilterState('unread');
+          writeInboxFilter('unread', 0);
+        } else {
+          // Returned within the window → present again; clear the stale stamp so a
+          // later kill-without-pagehide can't measure against this old background time.
+          writeInboxFilter(tab, 0);
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', markLeft);
+    return () => {
+      markLeft();
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', markLeft);
+    };
+    // Mount/unmount only: listeners are stable and `filter` is read once on entry.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // The unread map is the single source of truth (loaded pagination-independent
   // and kept in sync by realtime upserts + mark-read). A session drops out of

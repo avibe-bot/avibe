@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sqlite3
 import sys
 from contextlib import redirect_stderr
@@ -245,6 +246,108 @@ def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:
     assert payload["watch"]["command"] == []
     assert payload["watch"]["mode"] == "once"
     assert payload["watch"]["retry_exit_codes"] == [75]
+
+
+def test_watch_add_records_caller_context_metadata(tmp_path: Path, capsys) -> None:
+    store_path = tmp_path / "watches.json"
+    runtime_path = tmp_path / "watch_runtime.json"
+    store = ManagedWatchStore(store_path)
+    runtime_store = WatchRuntimeStateStore(runtime_path)
+    args = _parse_watch_add(
+        [
+            "--session-key",
+            "slack::channel::C123",
+            "--shell",
+            "python3 scripts/wait.py",
+        ]
+    )
+    caller_env = {
+        "AVIBE_SESSION_ID": "sesCaller",
+        "AVIBE_RUN_ID": "runCaller",
+        "AVIBE_CALLER_SOURCE": "agent_turn",
+        "AVIBE_CALLER_BACKEND": "opencode",
+        "AVIBE_NATIVE_SESSION_ID": "native-opencode-1",
+    }
+
+    with (
+        patch.dict(os.environ, caller_env, clear=False),
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch("vibe.cli._wait_for_watch_startup", side_effect=lambda *args, **kwargs: _startup_ok(store, runtime_store, args[2])),
+    ):
+        result = cli.cmd_watch_add(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    expected = {
+        "kind": "caller_context",
+        "caller": {
+            "session_id": "sesCaller",
+            "run_id": "runCaller",
+            "source": "agent_turn",
+            "backend": "opencode",
+            "native_session_id": "native-opencode-1",
+        },
+    }
+    assert payload["watch"]["metadata"]["created_by"] == expected
+    stored = ManagedWatchStore(store_path).get_watch(payload["watch"]["id"])
+    assert stored is not None
+    assert stored.metadata["created_by"] == expected
+
+
+def test_watch_add_defaults_target_to_caller_session(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="codex", backend="codex")
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+    with cli.create_sqlite_engine(db_path).begin() as conn:
+        now = "2026-06-28T00:00:00+00:00"
+        scope_id = upsert_scope(conn, "avibe", "project", "proj-watch-defaults", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="sesCaller",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_name="codex",
+                agent_variant="default",
+                session_anchor="anchor_sesCaller",
+                native_session_id="native-caller",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    args = _parse_watch_add(["--shell", "python3 scripts/wait.py"])
+
+    with (
+        patch.dict(os.environ, {"AVIBE_SESSION_ID": "sesCaller"}, clear=False),
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+        patch("vibe.cli._wait_for_watch_startup", side_effect=lambda *args, **kwargs: _startup_ok(store, runtime_store, args[2])),
+    ):
+        result = cli.cmd_watch_add(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["watch"]["session_id"] == "sesCaller"
+    assert payload["watch"]["session_policy"] == "existing"
+    assert payload["session_default_notice"] == {
+        "code": "session_defaulted_to_caller",
+        "message": "Watch target Session defaulted to the caller Session from AVIBE_SESSION_ID.",
+        "session_id": "sesCaller",
+    }
 
 
 def test_watch_add_accepts_message_template(tmp_path: Path, capsys) -> None:

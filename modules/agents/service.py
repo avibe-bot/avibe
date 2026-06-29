@@ -43,12 +43,75 @@ class AgentService:
         agent = self.get(agent_name)
         runtime_key = self._runtime_turn_key(agent, request)
         gate = self._get_turn_gate(runtime_key)
-        await gate.lock.acquire()
+        # Only a message that is ACTUALLY queued behind a running turn shows the
+        # queued 👌. The gate is held for the whole turn (released only on the
+        # terminal result via the outbound dispatcher), so gate.lock.locked() here
+        # means another turn for this runtime key is in flight and this message will
+        # block on acquire() below — surface that wait with 👌, then promote it to
+        # the running 👀 once the gate is acquired. A non-contended message skips 👌
+        # entirely and goes straight to 👀 at promote_reaction_to_running, so it does
+        # NOT flash 👌→👀. Reaction add/remove is owned by the processing indicator
+        # and is a no-op on platforms / modes without a reaction indicator (e.g.
+        # WeChat, typing-only, avibe Web).
+        indicator = getattr(self.controller, "processing_indicator", None)
+        queued_reaction_task: Optional[asyncio.Task] = None
+        if indicator is not None and gate.lock.locked():
+            # Contended: show the queued 👌. Fire it as a CONCURRENT task instead of
+            # awaiting it here — awaiting a network reaction call before acquire()
+            # would leave this turn OUT of the lock's FIFO waiter queue, so a later
+            # same-runtime message could reach acquire() first and reorder prompts
+            # within the session (Codex P1). Calling acquire() immediately reserves
+            # this turn's place in the queue; the task adds 👌 concurrently while we
+            # block, and we join it after acquiring (before promoting to 👀).
+            queued_reaction_task = asyncio.create_task(indicator.show_queued_reaction(request))
+        try:
+            await gate.lock.acquire()
+        except BaseException:
+            # Cancellation (e.g. SIGTERM / shutdown) while still waiting in the
+            # queue is raised by acquire() OUTSIDE the main try block below, so its
+            # CancelledError handler never runs. Let the queued-reaction task settle,
+            # then clean up the 👌 (and any eager typing) so it does not leak.
+            if queued_reaction_task is not None:
+                try:
+                    await queued_reaction_task
+                except BaseException:
+                    pass
+                if indicator is not None:
+                    try:
+                        # Pass the request (not the handle) so finish() clears BOTH
+                        # the handle and the flat request.ack_reaction_* fields.
+                        await indicator.finish(request)
+                    except Exception:
+                        logger.debug("Failed to clean up queued reaction on cancel", exc_info=True)
+            raise
         gate.token = uuid.uuid4().hex
         gate.backend = agent.name
         gate.runtime_started = False
         self._stamp_runtime_turn(request, runtime_key, gate.token)
         try:
+            # Register the indicator handle for terminal/cancel cleanup BEFORE the
+            # reaction awaits below. If the turn is cancelled (shutdown / supersede)
+            # while promote is awaiting the reaction API, the scheduled terminal tidy
+            # resolves the handle by turn token from this registry — tracking it first
+            # ensures a queued 👌 or fallback typing/message indicator is still
+            # finished instead of leaking on the message (Codex P2).
+            self._track_processing_indicator_turn(request)
+            # Settle the concurrently-added queued 👌 and promote it to the running
+            # 👀 INSIDE this cancellation-managed try. A cancel (shutdown / supersede)
+            # during these awaits must reach the CancelledError handler below so the
+            # runtime turn is released; otherwise the gate token + lock would leak and
+            # later prompts for this runtime key would block forever (Codex P1). Each
+            # is individually guarded so a reaction failure can't break the turn.
+            if queued_reaction_task is not None:
+                try:
+                    await queued_reaction_task
+                except Exception:
+                    logger.debug("Failed to settle queued reaction", exc_info=True)
+            if indicator is not None:
+                try:
+                    await indicator.promote_reaction_to_running(request, agent_name=agent_name)
+                except Exception:
+                    logger.debug("Failed to promote reaction to running", exc_info=True)
             # INBOUND status chokepoint (one of exactly two — the other is the outbound
             # MessageDispatcher.emit_agent_message). Every turn, every source (chat /
             # scheduled / Show Page), every backend funnels through here, so this is the
@@ -66,7 +129,6 @@ class AgentService:
             # are optional and guarded so a missing hook or a bubble failure can
             # never break the turn.
             await self._begin_turn_status(request.context)
-            self._track_processing_indicator_turn(request)
             await agent.handle_message(request)
         except asyncio.CancelledError:
             # Shutdown / SIGTERM / supersede cancels the turn mid-flight. Without a
@@ -190,6 +252,93 @@ class AgentService:
             return False
         gate = self._turn_gates.get(runtime_key)
         return bool(gate is not None and gate.token == runtime_token and gate.runtime_started)
+
+    @staticmethod
+    def _lock_has_live_waiters(lock: asyncio.Lock) -> bool:
+        """True when ``lock`` has at least one not-yet-cancelled queued waiter.
+
+        ``asyncio.Lock.locked()`` reports only whether the lock is HELD, not whether
+        coroutines are queued waiting for it — but acquiring a lock that is free yet
+        has waiters still suspends. ``begin_agent_initiated_turn`` needs this signal
+        to stay strictly non-blocking. ``_waiters`` is a CPython asyncio internal (a
+        deque or ``None``); guarded with ``getattr`` so a future runtime that drops
+        it degrades to "no waiters" instead of raising.
+        """
+        waiters = getattr(lock, "_waiters", None)
+        if not waiters:
+            return False
+        return any(not w.cancelled() for w in waiters)
+
+    async def begin_agent_initiated_turn(
+        self, agent_name: str, context: Any, runtime_key: str
+    ) -> Optional[str]:
+        """Open a runtime-gate turn for backend output Avibe did NOT initiate.
+
+        Claude Code (and any future backend that re-invokes its agent loop inside
+        a persistent process) can start a fresh turn when a background task
+        finishes or a ScheduleWakeup fires — WITHOUT Avibe sending a query. That
+        output reaches the long-lived receiver with no turn open, so the outbound
+        active-turn guard (``emit_matches_runtime_turn``) would drop every
+        assistant/tool/result emit as a stale straggler. Open a turn here so the
+        reply rides the same INBOUND chokepoint (session → ``running``) and
+        OUTBOUND chokepoint (terminal result → idle/failed + persist + deliver +
+        notify + gate release) as a user turn.
+
+        Returns the fresh turn token when the gate was free and a turn was opened,
+        else ``None`` when the gate is contended (a user turn holds OR is queued on
+        it) — let that turn own the output; the agent-initiated emit then adopts its
+        token instead.
+
+        STRICTLY NON-BLOCKING: this runs ON the long-lived Claude receiver, which is
+        the only reader of the SDK stream. An ``asyncio.Lock`` can be momentarily
+        unlocked while it still has QUEUED WAITERS (a user turn that blocked on this
+        gate while the previous turn held it, between that turn's release and the
+        waiter resuming). In that window ``locked()`` is False, yet
+        ``await acquire()`` would SUSPEND the receiver behind the queued user turn —
+        and the receiver is what reads that turn's terminal result to release the
+        gate, so the session would deadlock. So bail unless the gate is free AND has
+        no live waiters; the ``acquire()`` below then completes synchronously
+        without yielding, so no concurrent turn can slip in (Codex P1).
+        """
+        runtime_key = str(runtime_key or "").strip()
+        if not runtime_key:
+            return None
+        gate = self._get_turn_gate(runtime_key)
+        if gate.lock.locked() or self._lock_has_live_waiters(gate.lock):
+            return None
+        await gate.lock.acquire()
+        gate.token = uuid.uuid4().hex
+        gate.backend = agent_name
+        # The backend already produced output, so the turn is unambiguously
+        # running — there is no queued-startup window to distinguish (unlike a
+        # user turn waiting on the gate), so mark it started immediately.
+        gate.runtime_started = True
+        if context.platform_specific is None:
+            context.platform_specific = {}
+        context.platform_specific[AGENT_RUNTIME_TURN_KEY] = runtime_key
+        context.platform_specific[AGENT_RUNTIME_TURN_TOKEN] = gate.token
+        # Fresh streaming token too: the previous turn's SSE sink is already gone,
+        # and a leftover ``turn_token`` would only confuse ``mark_turn_complete``
+        # (which no-ops anyway with no live sink for this session).
+        context.platform_specific[AGENT_TURN_TOKEN] = gate.token
+        # INBOUND status chokepoint (mirrors ``handle_message``): mark the avibe
+        # session ``running`` so the sidebar dot reflects the agent-initiated work,
+        # and register the turn with the FSM so the Workbench Stop button works and
+        # the browser sees turn.start/turn.end. Non-avibe contexts resolve to no
+        # session id and are skipped (no-op).
+        manager = getattr(self.controller, "session_turns", None)
+        if manager is not None:
+            try:
+                manager.on_running(context)
+            except Exception:
+                logger.debug("on_running failed for agent-initiated turn", exc_info=True)
+            register = getattr(manager, "register_agent_initiated_turn", None)
+            if callable(register):
+                try:
+                    register(context)
+                except Exception:
+                    logger.debug("register_agent_initiated_turn failed", exc_info=True)
+        return gate.token
 
     def release_runtime_turn(self, context: Any) -> None:
         payload = getattr(context, "platform_specific", None) or {}

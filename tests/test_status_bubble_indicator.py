@@ -69,8 +69,9 @@ class ProcessingModeSuppressionTests(unittest.TestCase):
 
 
 class StartConciseTests(unittest.IsolatedAsyncioTestCase):
-    """In concise mode start() keeps the 👀 received-ack reaction AND typing
-    keepalive (both best-effort), but never the ack message."""
+    """In concise mode start() SELECTS the reaction (added later at the runtime
+    gate as queued 👌 → running 👀) and keeps typing keepalive eager, but never
+    the ack message. The reaction is no longer added eagerly here."""
 
     def _svc(self, *, concise, reaction_supported=True, typing_supported=True):
         svc = ProcessingIndicatorService.__new__(ProcessingIndicatorService)
@@ -101,20 +102,32 @@ class StartConciseTests(unittest.IsolatedAsyncioTestCase):
         svc._start_message_indicator = _message
         return svc
 
-    async def test_concise_adds_reaction_and_typing_no_message(self):
+    async def test_concise_selects_reaction_and_keeps_typing_no_message(self):
         svc = self._svc(concise=True)
-        await svc.start(_ctx(), "claude")
-        self.assertEqual(svc.calls, ["reaction", "typing"])  # 👀 kept + typing; no ack message
+        handle = await svc.start(_ctx(), "claude")
+        # Reaction is deferred to the gate (not added here); typing stays eager.
+        self.assertEqual(svc.calls, ["typing"])
+        self.assertTrue(handle.reaction_indicator_selected)
 
     async def test_concise_skips_reaction_when_unsupported(self):
         svc = self._svc(concise=True, reaction_supported=False)
-        await svc.start(_ctx(), "claude")
+        handle = await svc.start(_ctx(), "claude")
         self.assertEqual(svc.calls, ["typing"])
+        self.assertFalse(handle.reaction_indicator_selected)
 
     async def test_non_concise_uses_first_wins(self):
         svc = self._svc(concise=False)
-        await svc.start(_ctx(), "claude")
+        handle = await svc.start(_ctx(), "claude")
         self.assertEqual(svc.calls, ["message"])  # first candidate wins, unchanged
+        self.assertFalse(handle.reaction_indicator_selected)
+
+    async def test_non_concise_reaction_mode_is_selected_but_deferred(self):
+        svc = self._svc(concise=False)
+        svc._processing_modes = lambda ctx: ["reaction"]
+        handle = await svc.start(_ctx(), "claude")
+        # Reaction selected but NOT added eagerly (added at the gate).
+        self.assertEqual(svc.calls, [])
+        self.assertTrue(handle.reaction_indicator_selected)
 
 
 if __name__ == "__main__":

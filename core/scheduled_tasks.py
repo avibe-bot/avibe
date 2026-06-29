@@ -325,6 +325,7 @@ class ScheduledTask:
     updated_at: str = field(default_factory=_utc_now_iso)
     last_run_at: Optional[str] = None
     last_error: Optional[str] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -350,6 +351,7 @@ class ScheduledTask:
             updated_at=str(payload.get("updated_at") or _utc_now_iso()),
             last_run_at=payload.get("last_run_at"),
             last_error=payload.get("last_error"),
+            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
         )
 
 
@@ -623,6 +625,7 @@ class ScheduledTaskStore:
         cron: Optional[str] = None,
         run_at: Optional[str] = None,
         timezone_name: str,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> ScheduledTask:
         task = ScheduledTask(
             id=uuid4().hex[:12],
@@ -638,6 +641,7 @@ class ScheduledTaskStore:
             cron=cron,
             run_at=run_at,
             timezone=timezone_name,
+            metadata=dict(metadata or {}),
         )
         return self.upsert_task(task)
 

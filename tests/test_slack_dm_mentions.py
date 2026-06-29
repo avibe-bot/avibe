@@ -145,6 +145,57 @@ class SlackDmMentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         self.assertEqual(calls[0]["name"], "robot_face")
 
+    async def test_add_reaction_maps_queued_ok_hand_to_slack_name(self):
+        # Regression: the queued 👌 reaction must map to the Slack short name
+        # "ok_hand"; sending the raw unicode returns invalid_name and the queued
+        # indicator silently never appears.
+        slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
+        calls = []
+
+        class _WebClient:
+            async def reactions_add(self, **kwargs):
+                calls.append(kwargs)
+
+            async def reactions_remove(self, **kwargs):
+                calls.append(kwargs)
+
+        slack.web_client = _WebClient()
+        context = MessageContext(user_id="U123", channel_id="C123")
+
+        self.assertTrue(await slack.add_reaction(context, "1710000000.000010", "👌"))
+        self.assertTrue(await slack.remove_reaction(context, "1710000000.000010", "👌"))
+        self.assertEqual([c["name"] for c in calls], ["ok_hand", "ok_hand"])
+
+    async def test_add_reaction_warns_on_unmapped_unicode_emoji(self):
+        # Safeguard: an unmapped raw-unicode reaction emoji must log a WARNING so a
+        # future emoji that Slack would reject (invalid_name) is not lost silently.
+        slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
+
+        class _WebClient:
+            async def reactions_add(self, **kwargs):
+                return None
+
+        slack.web_client = _WebClient()
+        context = MessageContext(user_id="U123", channel_id="C123")
+
+        with self.assertLogs("modules.im.slack", level="WARNING") as captured:
+            await slack.add_reaction(context, "1710000000.000010", "🎉")
+        self.assertTrue(any("no short-name mapping" in m for m in captured.output))
+
+    async def test_add_reaction_maps_eyes_to_slack_name(self):
+        slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
+        calls = []
+
+        class _WebClient:
+            async def reactions_add(self, **kwargs):
+                calls.append(kwargs)
+
+        slack.web_client = _WebClient()
+        context = MessageContext(user_id="U123", channel_id="C123")
+
+        self.assertTrue(await slack.add_reaction(context, "1710000000.000010", "👀"))
+        self.assertEqual(calls[0]["name"], "eyes")
+
     async def test_send_message_does_not_set_unfurl_params_by_default(self):
         slack = SlackBot(SlackConfig(bot_token="xoxb-test"))
         sent_payloads = []

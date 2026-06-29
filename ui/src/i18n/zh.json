@@ -54,6 +54,7 @@
     "submit": "提交",
     "submitting": "提交中…",
     "copy": "复制",
+    "copied": "已复制",
     "copyFailed": "复制失败，请手动复制",
     "remove": "移除",
     "removing": "移除中…",
@@ -221,6 +222,7 @@
       "statusReady": "就绪",
       "statusDetected": "已检测",
       "statusMissing": "未安装",
+      "statusUpgradeRequired": "需要升级",
       "install": "安装",
       "reinstall": "重新安装",
       "repair": "修复",
@@ -242,6 +244,10 @@
         "show-runtime": {
           "label": "Show Page 运行时",
           "detail": "在你本机渲染可视化 Show 页面。"
+        },
+        "tmux": {
+          "label": "tmux",
+          "detail": "持久终端运行时，用于可重连的 Web Terminal 会话。"
         },
         "node": {
           "label": "Node.js",
@@ -591,6 +597,97 @@
     "cloudflared_exited": "连接器启动后立即退出。通常是 Tunnel 凭证无效或 Cloudflare 配置未生效，请重新配对后再试。",
     "cloudflared_stop_failed": "连接器暂时无法停止。请稍后重试，或在系统进程里手动结束 cloudflared。",
     "cloudflared_process_unknown": "检测到一个无法确认归属的连接器进程。为避免误杀其它进程，Avibe 没有自动处理。请手动检查 cloudflared 进程后再启动。"
+  },
+  "apps": {
+    "title": "应用",
+    "soon": "即将上线",
+    "editor": {
+      "label": "编辑器",
+      "desc": "本机文件的快速代码编辑器。",
+      "empty": "未打开文件",
+      "emptyHint": "从「文件」中打开一个文件，在这里编辑。",
+      "openInWindow": "在编辑器窗口中打开",
+      "saveBeforePopOut": "请先保存，再在新窗口中打开",
+      "confirmDiscardClose": "放弃未保存的更改并关闭此窗口？",
+      "selectAll": "全选",
+      "copyAll": "全部复制"
+    },
+    "dock": {
+      "newInstanceHint": "⌘ 点击可新建窗口"
+    },
+    "window": {
+      "minimize": "最小化",
+      "maximize": "最大化",
+      "restore": "还原"
+    },
+    "fileBrowser": {
+      "label": "文件浏览器",
+      "desc": "浏览、查看、编辑这台机器上的文件。",
+      "placeholder": "文件浏览器正在搭建中。很快你就能在这里浏览整机文件、打开文件、直接编辑并保存。",
+      "tagline": "整机 · 查看与编辑",
+      "selectHint": "选择一个文件来查看或编辑。",
+      "empty": "这个文件夹是空的。",
+      "noPreview": "这种文件类型暂不支持应用内预览。",
+      "download": "下载",
+      "tooLarge": "文件太大,无法在浏览器里编辑。请下载后查看。",
+      "refresh": "刷新",
+      "newFolder": "新建文件夹",
+      "newFolderPrompt": "新文件夹名称",
+      "projects": "项目",
+      "system": "系统",
+      "showHidden": "显示隐藏文件",
+      "save": "保存",
+      "unsaved": "有未保存的修改",
+      "conflict": "打开后该文件在磁盘上已被改动。请先重新加载再保存,以免覆盖。",
+      "listTruncated": "当前只显示前 {{count}} 个条目。",
+      "errors": {
+        "conflict": "打开后该文件在磁盘上已被改动。请先重新加载再保存,以免覆盖。",
+        "not_found": "找不到这个路径。",
+        "permission_denied": "没有权限访问。",
+        "too_large": "这个文件太大。",
+        "file_not_utf8": "该文件不是有效的 UTF-8 文本，无法安全编辑，请改为下载。",
+        "not_dir": "这个路径不是文件夹。",
+        "not_file": "这个路径不是普通文件。",
+        "is_symlink": "这里不能编辑符号链接。",
+        "invalid_path": "请输入有效的绝对路径。",
+        "invalid_name": "请输入有效名称。",
+        "exists": "这个路径已存在。",
+        "fs_error": "文件系统操作失败。",
+        "listFailed": "无法列出这个文件夹。",
+        "openFailed": "无法打开这个项目。",
+        "createFolderFailed": "无法创建文件夹。",
+        "loadFailed": "无法加载这个文件。",
+        "saveFailed": "无法保存这个文件。"
+      }
+    },
+    "terminal": {
+      "label": "终端",
+      "desc": "在浏览器里跑真实 shell。",
+      "placeholder": "终端将在第二阶段上线:真实 shell,配 tmux 持久化会话。",
+      "tagline": "在浏览器里跑真实 shell。",
+      "persistent": "持久会话",
+      "reconnect": "重新连接",
+      "exitCode": "退出码 {{code}}",
+      "disabled": "终端不可用:可能在服务端被关掉(VIBE_UI_ENABLE_TERMINAL=0),或当前会话未获授权。",
+      "status": {
+        "connecting": "连接中…",
+        "ready": "已连接",
+        "closed": "会话已结束",
+        "disabled": "未开启",
+        "error": "已断开"
+      },
+      "keys": {
+        "esc": "Esc",
+        "tab": "Tab",
+        "ctrl": "Ctrl",
+        "up": "↑",
+        "down": "↓",
+        "left": "←",
+        "right": "→",
+        "interrupt": "^C",
+        "pipe": "|"
+      }
+    }
   },
   "appShell": {
     "title": "Avibe OS",
@@ -1962,6 +2059,8 @@
       "close": "关闭",
       "previous": "上一张",
       "next": "下一张",
+      "zoomIn": "放大",
+      "zoomOut": "缩小",
       "loading": "加载中…",
       "error": "无法加载该文件。",
       "tooLarge": "文件过大，无法预览，请直接下载。",
@@ -1986,6 +2085,36 @@
     "proxyBound": "已绑定代理",
     "used": "已使用 {{count}} 次",
     "neverUsed": "从未使用",
+    "standard": "标准档",
+    "signing": "签名",
+    "secretCount": "{{count}} 个密钥",
+    "grants": {
+      "title": "活跃授权",
+      "subtitle": "Agent 当前可用的授权——吊销即刻断开访问。",
+      "expiresIn": "{{time}} 后过期",
+      "expired": "已过期",
+      "revoke": "吊销",
+      "revokeConfirm": "立即吊销对「{{scope}}」的访问?Agent 将即刻失去访问权。",
+      "revoked": "已吊销对「{{scope}}」的访问",
+      "scope": {
+        "secret": "密钥",
+        "skill": "技能",
+        "group": "分组"
+      },
+      "dur": {
+        "hm": "{{h}} 时 {{m}} 分",
+        "ms": "{{m}} 分 {{s}} 秒",
+        "s": "{{s}} 秒"
+      },
+      "session": {
+        "bound": "限单会话",
+        "any": "全部会话"
+      }
+    },
+    "view": {
+      "all": "全部",
+      "byGroup": "按分组"
+    },
     "delete": "删除",
     "deleteConfirm": "删除密钥「{{name}}」？Agent 将无法再使用它。",
     "deleted": "已删除 {{name}}",
@@ -1994,16 +2123,39 @@
       "title": "添加密钥",
       "name": "名称",
       "value": "值",
-      "valuePlaceholder": "粘贴于此，加密存储，永不回显",
+      "valuePlaceholder": "保存前需要浏览器侧封箱",
+      "showValue": "显示值",
+      "hideValue": "隐藏值",
+      "checkingAvault": "正在检查 avault…",
+      "p2Unavailable": "浏览器侧保险库创建需要 avault {{version}} 或更新版本。当前安装：{{installed}}。在兼容的 avault 发布版安装前，请使用 CLI stdin/file 路径。",
+      "p2UnavailableStandardFallback": "浏览器侧封装需要 avault {{version}} 或更新版本。当前安装：{{installed}}。标准密钥仍可通过本机 avault seal fallback 保存。",
+      "browserSealingPending": "浏览器侧封箱需要兼容的 avault 发布版。这个 UI 永远不会把明文值发送给 Python。",
       "group": "分组",
+      "groupPlaceholder": "选择或新建分组",
+      "groupSearch": "搜索或输入新分组",
+      "groupCreate": "使用「{{name}}」",
+      "groupCreateHeading": "新建分组",
       "description": "描述",
       "allowHosts": "允许的域名（用于 vault fetch）",
       "allowHostsHelp": "逗号分隔。通过认证代理使用该密钥时必填；'.example.com' 匹配子域。",
+      "protection": "保护级别",
+      "protectedProtection": "受保护",
+      "standardProtection": "标准",
+      "protectedHelp": "Agent 使用前需要浏览器解锁和批准。",
+      "standardHelp": "可通过 avault 标准交付路径无头使用。",
+      "protectedCreatePending": "当前构建尚不支持受保护的 Web 创建。只有可被无头使用的密钥才选择标准。",
       "save": "保存",
-      "cancel": "取消"
+      "cancel": "取消",
+      "errors": {
+        "aadFieldTooLarge": "这次保险库封箱请求过大。",
+        "invalidPublicKey": "avault 返回了无效公钥。请修复 avault 依赖后重试。",
+        "fingerprintMismatch": "avault 公钥指纹已变化。请先确认本机 avault 安装可信，再保存该密钥。",
+        "secretExists": "同名密钥已存在。"
+      }
     },
     "request": {
       "provide": "填写",
+      "fulfilled": "已提供",
       "title": "提供 {{name}}",
       "help": "Agent 请求了这个密钥。它会直接存入保险库，不会再进入聊天。",
       "saveFailed": "保存失败，请重试。"

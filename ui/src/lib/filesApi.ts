@@ -1,0 +1,192 @@
+// Client for the whole-machine File Browser backend (`/api/files/*`). Reuses the
+// shared `apiFetch`, which attaches the CSRF header to mutating verbs and routes
+// remote-auth-expiry redirects. Backend contract: `core/file_browser_service.py`.
+import { apiFetch } from './apiFetch';
+
+export type FsEntry = {
+  name: string;
+  kind: 'dir' | 'file' | 'symlink';
+  size: number | null;
+  mtime: number | null;
+  ext: string;
+};
+
+export type FsListing = {
+  ok: true;
+  path: string;
+  parent: string | null;
+  entries: FsEntry[];
+  truncated?: boolean;
+  limit?: number;
+};
+
+export type FsMeta = {
+  ok: true;
+  name: string;
+  ext: string;
+  kind: 'dir' | 'file' | 'symlink';
+  size: number | null;
+  mtime: number | null;
+  mime: string | null;
+};
+
+export type Favorite = { key: string; path: string };
+
+export class FilesApiError extends Error {
+  code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+    this.name = 'FilesApiError';
+  }
+}
+
+export function fileBrowserErrorMessage(error: unknown, t: (key: string) => string, fallback: string): string {
+  if (error instanceof FilesApiError) {
+    // Every error code (backend not_found/permission_denied/... and the client-side
+    // file_not_utf8) maps 1:1 to apps.fileBrowser.errors.<code>; fall back to the raw
+    // message when no localized string exists.
+    const key = `apps.fileBrowser.errors.${error.code}`;
+    const translated = t(key);
+    return translated === key ? error.message : translated;
+  }
+  return error instanceof Error ? error.message : fallback;
+}
+
+async function parse<T>(res: Response): Promise<T> {
+  const data = await res.json().catch(() => ({}) as Record<string, unknown>);
+  if (!res.ok || (data as { ok?: boolean }).ok === false) {
+    const err = (data as { error?: { code?: string; message?: string } }).error || {};
+    throw new FilesApiError(err.code || String(res.status), err.message || 'Request failed');
+  }
+  return data as T;
+}
+
+function isWindowsPath(p: string): boolean {
+  // Windows iff a drive root (C:\ or C:/) or a UNC path (\\server). A lone backslash is a
+  // legal POSIX filename character (e.g. /tmp/a\b), so its mere presence must NOT flip us to
+  // Windows mode — that would make joinPath build /tmp/a\b\child and break descendant access.
+  return /^[A-Za-z]:[\\/]/.test(p) || /^\\\\/.test(p);
+}
+
+export function joinPath(base: string, name: string): string {
+  const sep = isWindowsPath(base) ? '\\' : '/';
+  return base.endsWith('/') || base.endsWith('\\') ? `${base}${name}` : `${base}${sep}${name}`;
+}
+
+// A user-entered entry name must be a single path component, so joinPath(base, name)
+// can only ever address a child of `base`. Reject separators and '.'/'..'/empty —
+// otherwise input like '../scratch' or 'sub/new' would mutate a sibling/nested folder.
+// Mirrors the backend rename_path name validator.
+export function isPlainEntryName(name: string): boolean {
+  const trimmed = name.trim();
+  return trimmed !== '' && trimmed !== '.' && trimmed !== '..' && !trimmed.includes('/') && !trimmed.includes('\\');
+}
+
+export function pathCrumbs(path: string): { label: string; path: string }[] {
+  // Windows: split on either separator and keep the root intact.
+  if (isWindowsPath(path)) {
+    const normalized = path.replace(/\//g, '\\');
+    if (/^\\\\/.test(normalized)) {
+      // UNC: the root is the share (\\server\share) — you can't navigate above it, and the
+      // leading \\ must be preserved or breadcrumb targets become invalid (server\, server\share).
+      const parts = normalized.replace(/^\\+/, '').split('\\').filter(Boolean); // [server, share, dir, ...]
+      const server = parts.shift() ?? '';
+      const share = parts.shift();
+      const root = share ? `\\\\${server}\\${share}` : `\\\\${server}`;
+      const out: { label: string; path: string }[] = [{ label: root, path: root }];
+      let cur = root;
+      for (const part of parts) {
+        cur = `${cur}\\${part}`;
+        out.push({ label: part, path: cur });
+      }
+      return out;
+    }
+    const parts = normalized.split('\\').filter(Boolean);
+    const drive = parts.shift() ?? '';
+    const out: { label: string; path: string }[] = [{ label: `${drive}\\`, path: `${drive}\\` }];
+    let cur = `${drive}\\`;
+    for (const part of parts) {
+      cur = cur.endsWith('\\') ? `${cur}${part}` : `${cur}\\${part}`;
+      out.push({ label: part, path: cur });
+    }
+    return out;
+  }
+  const parts = path.split('/').filter(Boolean);
+  const out: { label: string; path: string }[] = [{ label: '/', path: '/' }];
+  let cur = '';
+  for (const part of parts) {
+    cur += `/${part}`;
+    out.push({ label: part, path: cur });
+  }
+  return out;
+}
+
+export async function listDir(path: string, showHidden = false): Promise<FsListing> {
+  const res = await apiFetch(
+    `/api/files/list?path=${encodeURIComponent(path)}&show_hidden=${showHidden ? '1' : '0'}`,
+  );
+  return parse<FsListing>(res);
+}
+
+export async function fileMeta(path: string): Promise<FsMeta> {
+  return parse<FsMeta>(await apiFetch(`/api/files/meta?path=${encodeURIComponent(path)}`));
+}
+
+export function contentUrl(path: string, download = false): string {
+  return `/api/files/content?path=${encodeURIComponent(path)}${download ? '&download=1' : ''}`;
+}
+
+export async function readText(path: string): Promise<string> {
+  const res = await apiFetch(contentUrl(path));
+  if (!res.ok) {
+    await parse(res); // throws a FilesApiError
+  }
+  const body = await res.arrayBuffer();
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(body);
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new FilesApiError('file_not_utf8', "This file isn't valid UTF-8 text.");
+    }
+    throw error;
+  }
+}
+
+export async function writeFile(
+  path: string,
+  content: string,
+  expectedMtime?: number | null,
+): Promise<{ ok: true; mtime: number }> {
+  const res = await apiFetch('/api/files/write', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, content, expected_mtime: expectedMtime ?? undefined }),
+  });
+  return parse<{ ok: true; mtime: number }>(res);
+}
+
+export async function makeDir(path: string): Promise<{ ok: true }> {
+  return parse(
+    await apiFetch('/api/files/mkdir', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    }),
+  );
+}
+
+export async function deletePath(path: string, recursive = false): Promise<{ ok: true }> {
+  return parse(
+    await apiFetch('/api/files/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, recursive }),
+    }),
+  );
+}
+
+export async function systemFavorites(): Promise<Favorite[]> {
+  const data = await parse<{ ok: true; favorites: Favorite[] }>(await apiFetch('/api/browse/favorites'));
+  return data.favorites || [];
+}

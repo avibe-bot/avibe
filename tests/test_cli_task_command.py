@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sqlite3
 import sys
 from contextlib import redirect_stderr
@@ -86,7 +87,7 @@ def test_disabled_agent_cannot_run(tmp_path: Path) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     agent_store = cli.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex", enabled=False)
-    args = _parse_agent_run(["--agent", "worker", "--async", "--message", "hello"])
+    args = _parse_agent_run(["--agent", "worker", "--async", "--no-callback", "--message", "hello"])
 
     with patch("vibe.cli._agent_store", return_value=agent_store):
         result, payload = _capture_stderr_json(cli.cmd_agent_run, args)
@@ -217,7 +218,8 @@ def test_hook_send_help_describes_runtime_effects(capsys) -> None:
     assert "`--post-to channel` changes where the message is posted, not which session is continued." in captured.out
     assert "`--message` and `--message-file` provide the one-shot async user message that will be queued immediately." in captured.out
     assert "--session-id" in captured.out
-    assert "vibe agent run --async --session-id sesk8m4q2p7x" in captured.out
+    assert "vibe agent run --async --session-id sesk8m4q2p7x --no-callback" in captured.out
+    assert "--callback-session-id sescaller123" in captured.out
 
 
 def test_task_list_help_mentions_completed_one_shots_hidden_by_default(capsys) -> None:
@@ -260,7 +262,7 @@ def test_hook_send_help_includes_examples_and_threadless_guidance(capsys) -> Non
     assert "--post-to" in captured.out
     assert "--deliver-key" in captured.out
     assert "--session-id" in captured.out
-    assert "vibe agent run --async --session-id sesk8m4q2p7x" in captured.out
+    assert "vibe agent run --async --session-id sesk8m4q2p7x --no-callback" in captured.out
 
 
 def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
@@ -274,7 +276,7 @@ def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
     assert "--fork-session FORK_SESSION" in captured.out
     assert "Use --fork-session to create a new Session by forking an existing Session's native backend context." in captured.out
     assert "Forks keep the same backend as the source Session." in captured.out
-    assert "vibe agent run --async --fork-session sesk8m4q2p7x" in captured.out
+    assert "vibe agent run --async --fork-session sesk8m4q2p7x --callback-session-id sescaller123" in captured.out
     assert "Do not combine --fork-session with --session-id, --create-session, --create-session-per-run, --deliver-key, or --post-to." in captured.out
 
 
@@ -449,6 +451,104 @@ def test_task_show_missing_id_returns_guidance(tmp_path: Path) -> None:
     assert result == 1
     assert payload["code"] == "task_not_found"
     assert payload["help_command"] == "vibe task list"
+
+
+def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys) -> None:
+    store_path = tmp_path / "scheduled_tasks.json"
+    store = cli.ScheduledTaskStore(store_path)
+    args = _parse_task_add(
+        [
+            "--session-key",
+            "slack::channel::C123",
+            "--cron",
+            "0 * * * *",
+            "--message",
+            "hello",
+        ]
+    )
+    caller_env = {
+        "AVIBE_SESSION_ID": "sesCaller",
+        "AVIBE_RUN_ID": "runCaller",
+        "AVIBE_CALLER_SOURCE": "agent_turn",
+        "AVIBE_CALLER_BACKEND": "codex",
+        "AVIBE_NATIVE_SESSION_ID": "native-codex-1",
+    }
+
+    with (
+        patch.dict(os.environ, caller_env, clear=False),
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    expected = {
+        "kind": "caller_context",
+        "caller": {
+            "session_id": "sesCaller",
+            "run_id": "runCaller",
+            "source": "agent_turn",
+            "backend": "codex",
+            "native_session_id": "native-codex-1",
+        },
+    }
+    assert payload["task"]["metadata"]["created_by"] == expected
+    stored = cli.ScheduledTaskStore(store_path).get_task(payload["task"]["id"])
+    assert stored is not None
+    assert stored.metadata["created_by"] == expected
+
+
+def test_task_add_defaults_target_to_caller_session(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="codex", backend="codex")
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+    with cli.create_sqlite_engine(db_path).begin() as conn:
+        now = "2026-06-28T00:00:00+00:00"
+        scope_id = upsert_scope(conn, "avibe", "project", "proj-cli-defaults", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="sesCaller",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_name="codex",
+                agent_variant="default",
+                session_anchor="anchor_sesCaller",
+                native_session_id="native-caller",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+    store_path = tmp_path / "scheduled_tasks.json"
+    store = cli.ScheduledTaskStore(store_path)
+    args = _parse_task_add(["--cron", "0 * * * *", "--message", "hello"])
+
+    with (
+        patch.dict(os.environ, {"AVIBE_SESSION_ID": "sesCaller"}, clear=False),
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["task"]["session_id"] == "sesCaller"
+    assert payload["task"]["session_policy"] == "existing"
+    assert payload["session_default_notice"] == {
+        "code": "session_defaulted_to_caller",
+        "message": "Task target Session defaulted to the caller Session from AVIBE_SESSION_ID.",
+        "session_id": "sesCaller",
+    }
 
 
 def test_task_update_missing_id_returns_guidance(tmp_path: Path) -> None:
@@ -925,7 +1025,7 @@ def test_agent_run_private_async_reserves_session_and_queues_request(tmp_path: P
     agent_store = cli.VibeAgentStore(db_path)
     agent = agent_store.create(name="worker", backend="codex")
     request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-    args = _parse_agent_run(["--agent", "worker", "--async", "--message", "hello"])
+    args = _parse_agent_run(["--agent", "worker", "--async", "--no-callback", "--message", "hello"])
 
     with (
         patch("vibe.cli._agent_store", return_value=agent_store),
@@ -956,6 +1056,7 @@ def test_agent_run_create_session_uses_scope_anchor_for_channel_deliver_key(tmp_
             "--agent",
             "worker",
             "--async",
+            "--no-callback",
             "--create-session",
             "--deliver-key",
             "slack::channel::C123",
@@ -985,7 +1086,7 @@ def test_agent_run_private_async_uses_no_delivery_channel_scope_for_lark(tmp_pat
     agent_store = cli.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
     request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-    args = _parse_agent_run(["--agent", "worker", "--async", "--message", "hello"])
+    args = _parse_agent_run(["--agent", "worker", "--async", "--no-callback", "--message", "hello"])
 
     with (
         patch("vibe.cli._agent_store", return_value=agent_store),
@@ -1169,7 +1270,7 @@ def test_agent_run_existing_session_uses_session_agent_when_agent_omitted(tmp_pa
         )
     finally:
         service.close()
-    args = _parse_agent_run(["--async", "--session-id", session_id, "--message", "hello"])
+    args = _parse_agent_run(["--async", "--no-callback", "--session-id", session_id, "--message", "hello"])
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),

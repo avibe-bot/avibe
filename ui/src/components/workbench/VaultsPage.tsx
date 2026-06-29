@@ -1,49 +1,21 @@
-import { useCallback, useEffect, useState } from 'react';
-import { History, KeyRound, Loader2, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Clock, History, KeyRound, Layers, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, ShieldOff, Trash2, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
-import { Input } from '../ui/input';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
-import { useApi, type VaultAuditEvent, type VaultSecret } from '../../context/ApiContext';
+import { useApi, type VaultAuditEvent, type VaultGrant, type VaultSecret } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
+import { VaultSecretForm } from '../ui/vault-secret-form';
 
-const AddSecretDialog: React.FC<{ onClose: () => void; onSaved: () => void }> = ({ onClose, onSaved }) => {
+const AddSecretDialog: React.FC<{
+  onClose: () => void;
+  onCreated: (name: string, reason?: 'created' | 'already_exists') => void;
+  groups: string[];
+}> = ({ onClose, onCreated, groups }) => {
   const { t } = useTranslation();
-  const api = useApi();
-  const { showToast } = useToast();
-  const [name, setName] = useState('');
-  const [value, setValue] = useState('');
-  const [group, setGroup] = useState('');
-  const [description, setDescription] = useState('');
-  const [allowHosts, setAllowHosts] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const submit = async () => {
-    setSaving(true);
-    setErr(null);
-    try {
-      const policy: Record<string, unknown> = {};
-      const hosts = allowHosts.split(',').map((h) => h.trim()).filter(Boolean);
-      if (hosts.length) policy.allowed_hosts = hosts;
-      await api.createVaultSecret({
-        name: name.trim(),
-        value,
-        group: group.trim() || undefined,
-        description: description.trim() || undefined,
-        policy: Object.keys(policy).length ? policy : undefined,
-      });
-      showToast(t('vaults.created', { name: name.trim() }), 'success');
-      onSaved();
-    } catch (e: any) {
-      setErr(e?.message ?? String(e));
-    } finally {
-      setSaving(false);
-    }
-  };
 
   return (
     <Dialog
@@ -56,43 +28,123 @@ const AddSecretDialog: React.FC<{ onClose: () => void; onSaved: () => void }> = 
         <DialogHeader>
           <DialogTitle>{t('vaults.dialog.title')}</DialogTitle>
         </DialogHeader>
-        <div className="flex flex-col gap-3">
-          {err && (
-            <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">{err}</div>
-          )}
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="text-xs font-medium text-muted">{t('vaults.dialog.name')}</span>
-            <Input value={name} onChange={(e) => setName(e.target.value.toUpperCase())} placeholder="OPENAI_API_KEY" autoFocus />
-          </label>
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="text-xs font-medium text-muted">{t('vaults.dialog.value')}</span>
-            <Input type="password" value={value} onChange={(e) => setValue(e.target.value)} placeholder={t('vaults.dialog.valuePlaceholder')} />
-          </label>
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="text-xs font-medium text-muted">{t('vaults.dialog.group')}</span>
-            <Input value={group} onChange={(e) => setGroup(e.target.value)} placeholder="default" />
-          </label>
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="text-xs font-medium text-muted">{t('vaults.dialog.description')}</span>
-            <Input value={description} onChange={(e) => setDescription(e.target.value)} />
-          </label>
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="text-xs font-medium text-muted">{t('vaults.dialog.allowHosts')}</span>
-            <Input value={allowHosts} onChange={(e) => setAllowHosts(e.target.value)} placeholder="api.github.com, .example.com" />
-            <span className="text-xs text-muted">{t('vaults.dialog.allowHostsHelp')}</span>
-          </label>
-          <div className="mt-2 flex justify-end gap-2">
-            <Button variant="ghost" onClick={onClose}>
-              {t('vaults.dialog.cancel')}
-            </Button>
-            <Button onClick={submit} disabled={saving || !name.trim() || !value}>
-              {saving ? <Loader2 className="size-4 animate-spin" /> : null}
-              {t('vaults.dialog.save')}
-            </Button>
-          </div>
-        </div>
+        <VaultSecretForm onCancel={onClose} onCreated={onCreated} groups={groups} />
       </DialogContent>
     </Dialog>
+  );
+};
+
+type ViewMode = 'all' | 'group';
+
+const hasProxy = (s: VaultSecret): boolean => {
+  const hosts = (s.policy as { allowed_hosts?: string[] })?.allowed_hosts;
+  return Array.isArray(hosts) && hosts.length > 0;
+};
+
+const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => void }> = ({ secret: s, onDelete }) => {
+  const { t } = useTranslation();
+  const isKeypair = s.kind === 'keypair';
+  const isProtected = s.protection === 'protected';
+  return (
+    <div className="flex items-center gap-3.5 rounded-xl border border-border bg-surface px-4 py-3">
+      <div
+        className={`flex size-9 shrink-0 items-center justify-center rounded-lg ${
+          isKeypair ? 'bg-violet/10 text-violet' : 'bg-accent/10 text-accent'
+        }`}
+      >
+        {isKeypair ? <Wallet className="size-4" /> : <KeyRound className="size-4" />}
+      </div>
+      <div className="flex min-w-0 flex-col gap-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="truncate font-mono text-sm font-semibold">{s.name}</span>
+          {isProtected ? (
+            <Badge variant="warning">{t('vaults.protected')}</Badge>
+          ) : (
+            <Badge variant="secondary">{t('vaults.standard')}</Badge>
+          )}
+          {isKeypair ? (
+            <Badge variant="outline" className="border-violet/40 bg-violet-soft text-violet">
+              <Wallet className="size-3" />
+              {t('vaults.signing')}
+            </Badge>
+          ) : null}
+          {hasProxy(s) ? <Badge variant="info">{t('vaults.proxyBound')}</Badge> : null}
+        </div>
+        <span className="truncate text-xs text-muted">
+          {s.description ? `${s.description} · ` : ''}
+          {s.last_used_at ? t('vaults.used', { count: s.use_count }) : t('vaults.neverUsed')}
+        </span>
+      </div>
+      <div className="ml-auto">
+        <Button variant="ghost" size="icon" onClick={() => onDelete(s.name)} aria-label={t('vaults.delete')}>
+          <Trash2 className="size-4" />
+        </Button>
+      </div>
+    </div>
+  );
+};
+
+const SCOPE_ICON: Record<VaultGrant['scope_type'], typeof KeyRound> = {
+  secret: KeyRound,
+  skill: Puzzle,
+  group: Layers,
+};
+
+/** Break a grant's time-to-expiry into parts; the units are localized in the row. */
+function remaining(expiresAt: string, now: number): { h: number; m: number; s: number; expired: boolean; urgent: boolean } {
+  const end = Date.parse(expiresAt);
+  const secs = Math.floor((end - now) / 1000);
+  if (Number.isNaN(end) || secs <= 0) return { h: 0, m: 0, s: 0, expired: true, urgent: true };
+  return { h: Math.floor(secs / 3600), m: Math.floor((secs % 3600) / 60), s: secs % 60, expired: false, urgent: secs <= 60 };
+}
+
+function isExpired(expiresAt: string, now: number): boolean {
+  const end = Date.parse(expiresAt);
+  return !Number.isNaN(end) && end <= now;
+}
+
+const GrantRow: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: VaultGrant) => void }> = ({
+  grant: g,
+  now,
+  onRevoke,
+}) => {
+  const { t } = useTranslation();
+  const Icon = SCOPE_ICON[g.scope_type] ?? KeyRound;
+  const rem = remaining(g.expires_at, now);
+  const time =
+    rem.h > 0
+      ? t('vaults.grants.dur.hm', { h: rem.h, m: rem.m })
+      : rem.m > 0
+        ? t('vaults.grants.dur.ms', { m: rem.m, s: rem.s })
+        : t('vaults.grants.dur.s', { s: rem.s });
+  return (
+    <div className="flex items-center gap-3.5 rounded-xl border border-border bg-surface px-4 py-3">
+      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-mint/10 text-mint">
+        <Icon className="size-4" />
+      </div>
+      <div className="flex min-w-0 flex-col gap-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="truncate font-mono text-sm font-semibold">{g.scope_ref}</span>
+          <Badge variant="secondary">{t(`vaults.grants.scope.${g.scope_type}`)}</Badge>
+          <Badge variant="outline">
+            {g.session_id ? t('vaults.grants.session.bound') : t('vaults.grants.session.any')}
+          </Badge>
+        </div>
+        <span className="flex items-center gap-1.5 text-xs text-muted">
+          <span>{t('vaults.secretCount', { count: g.runtime_member_count })}</span>
+          <span aria-hidden>·</span>
+          <Clock className="size-3" />
+          <span className={rem.urgent ? 'text-warning' : undefined}>
+            {rem.expired ? t('vaults.grants.expired') : t('vaults.grants.expiresIn', { time })}
+          </span>
+        </span>
+      </div>
+      <div className="ml-auto">
+        <Button variant="ghost" size="icon" onClick={() => onRevoke(g)} aria-label={t('vaults.grants.revoke')}>
+          <ShieldOff className="size-4" />
+        </Button>
+      </div>
+    </div>
   );
 };
 
@@ -101,11 +153,14 @@ export const VaultsPage: React.FC = () => {
   const api = useApi();
   const { showToast } = useToast();
   const [secrets, setSecrets] = useState<VaultSecret[]>([]);
+  const [grants, setGrants] = useState<VaultGrant[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
   const [audit, setAudit] = useState<VaultAuditEvent[]>([]);
+  const [view, setView] = useState<ViewMode>('all');
+  const [now, setNow] = useState(() => Date.now());
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -118,11 +173,48 @@ export const VaultsPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
+    // Active grants are a best-effort control strip; a grants failure (e.g. an
+    // older backend without the route) must neither blank out the secret
+    // inventory nor surface an error toast, so suppress error handling here.
+    try {
+      const res = await api.getVaultGrants({ status: 'active' }, { handleError: false });
+      setGrants(res.grants ?? []);
+    } catch {
+      setGrants([]);
+    }
   }, [api]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Tick once a second while there are live grants: advance the countdown and
+  // drop any grant that has reached its expiry. The backend's status=active
+  // filter only applies at fetch time, so without this the "Active access"
+  // strip and its count would linger on a dead grant and the timer would run
+  // forever; when the last grant expires the interval tears down on its own.
+  const hasGrants = grants.length > 0;
+  useEffect(() => {
+    if (!hasGrants) return;
+    const id = setInterval(() => {
+      const t = Date.now();
+      setNow(t);
+      setGrants((prev) => {
+        const live = prev.filter((g) => !isExpired(g.expires_at, t));
+        return live.length === prev.length ? prev : live;
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, [hasGrants]);
+
+  const groups = useMemo(() => {
+    const byGroup = new Map<string, VaultSecret[]>();
+    for (const s of secrets) {
+      const key = s.group || 'default';
+      (byGroup.get(key) ?? byGroup.set(key, []).get(key)!).push(s);
+    }
+    return [...byGroup.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [secrets]);
 
   const toggleAudit = useCallback(async () => {
     const next = !showAudit;
@@ -142,6 +234,17 @@ export const VaultsPage: React.FC = () => {
     try {
       await api.deleteVaultSecret(name);
       showToast(t('vaults.deleted', { name }), 'success');
+      refresh();
+    } catch (err: any) {
+      setError(err?.message ?? String(err));
+    }
+  };
+
+  const onRevokeGrant = async (g: VaultGrant) => {
+    if (!window.confirm(t('vaults.grants.revokeConfirm', { scope: g.scope_ref }))) return;
+    try {
+      await api.revokeVaultGrant(g.id);
+      showToast(t('vaults.grants.revoked', { scope: g.scope_ref }), 'success');
       refresh();
     } catch (err: any) {
       setError(err?.message ?? String(err));
@@ -173,6 +276,29 @@ export const VaultsPage: React.FC = () => {
       {error && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
       )}
+      {grants.length > 0 && (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-2 px-1">
+            <ShieldCheck className="size-4 text-mint" />
+            <span className="text-sm font-semibold">{t('vaults.grants.title')}</span>
+            <Badge variant="secondary">{grants.length}</Badge>
+            <span className="hidden text-xs text-muted sm:inline">{t('vaults.grants.subtitle')}</span>
+          </div>
+          {grants.map((g) => (
+            <GrantRow key={g.id} grant={g} now={now} onRevoke={onRevokeGrant} />
+          ))}
+        </div>
+      )}
+      {secrets.length > 0 ? (
+        <div className="flex items-center gap-1 self-start rounded-lg border border-border bg-surface p-1">
+          <Button variant={view === 'all' ? 'secondary' : 'ghost'} size="sm" onClick={() => setView('all')}>
+            {t('vaults.view.all')}
+          </Button>
+          <Button variant={view === 'group' ? 'secondary' : 'ghost'} size="sm" onClick={() => setView('group')}>
+            {t('vaults.view.byGroup')}
+          </Button>
+        </div>
+      ) : null}
       {loading && secrets.length === 0 ? (
         <div className="flex items-center gap-2 px-1 text-sm text-muted">
           <Loader2 className="size-4 animate-spin" />
@@ -180,32 +306,24 @@ export const VaultsPage: React.FC = () => {
         </div>
       ) : secrets.length === 0 ? (
         <div className="rounded-2xl border border-border bg-surface p-8 text-center text-sm text-muted">{t('vaults.empty')}</div>
+      ) : view === 'group' ? (
+        <div className="flex flex-col gap-4">
+          {groups.map(([group, items]) => (
+            <div key={group} className="flex flex-col gap-2">
+              <div className="flex items-center gap-2 px-1 text-xs font-semibold text-muted">
+                <span>{group}</span>
+                <span className="font-normal">{t('vaults.secretCount', { count: items.length })}</span>
+              </div>
+              {items.map((s) => (
+                <SecretRow key={s.name} secret={s} onDelete={onDelete} />
+              ))}
+            </div>
+          ))}
+        </div>
       ) : (
         <div className="flex flex-col gap-2">
           {secrets.map((s) => (
-            <div key={s.name} className="flex items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3">
-              <KeyRound className="size-4 shrink-0 text-muted" />
-              <div className="flex min-w-0 flex-col">
-                <div className="flex items-center gap-2">
-                  <span className="truncate font-mono text-sm font-semibold">{s.name}</span>
-                  <Badge variant="secondary">{s.group}</Badge>
-                  {s.protection === 'protected' && <Badge variant="warning">{t('vaults.protected')}</Badge>}
-                  {Array.isArray((s.policy as { allowed_hosts?: string[] })?.allowed_hosts) &&
-                  ((s.policy as { allowed_hosts?: string[] }).allowed_hosts?.length ?? 0) > 0 ? (
-                    <Badge variant="info">{t('vaults.proxyBound')}</Badge>
-                  ) : null}
-                </div>
-                <span className="text-xs text-muted">
-                  {s.preview ? <span className="font-mono">{s.preview}</span> : null}
-                  {s.last_used_at ? ` · ${t('vaults.used', { count: s.use_count })}` : ` · ${t('vaults.neverUsed')}`}
-                </span>
-              </div>
-              <div className="ml-auto">
-                <Button variant="ghost" size="icon" onClick={() => onDelete(s.name)} aria-label={t('vaults.delete')}>
-                  <Trash2 className="size-4" />
-                </Button>
-              </div>
-            </div>
+            <SecretRow key={s.name} secret={s} onDelete={onDelete} />
           ))}
         </div>
       )}
@@ -229,9 +347,12 @@ export const VaultsPage: React.FC = () => {
       )}
       {adding && (
         <AddSecretDialog
+          groups={groups.map(([g]) => g)}
           onClose={() => setAdding(false)}
-          onSaved={() => {
+          onCreated={(name, reason) => {
+            if (reason === 'already_exists') return;
             setAdding(false);
+            showToast(t('vaults.created', { name }), 'success');
             refresh();
           }}
         />

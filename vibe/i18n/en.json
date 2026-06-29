@@ -44,7 +44,9 @@
       "checksumMismatch": "avault download checksum verification failed.",
       "installFailed": "avault install failed: {error}",
       "installedNotFound": "avault installed but was not found on PATH; restart the service or check PATH.",
-      "alreadyRunning": "avault install or update is already running; try again shortly."
+      "alreadyRunning": "avault install or update is already running; try again shortly.",
+      "versionTooOld": "avault {version} is installed, but Vaults requires >= {required}.",
+      "p2ReleaseUnavailable": "Avibe's managed avault installer is pinned to {pinned}, but Vaults requires >= {required}. Install a compatible avault manually or wait for the P2 avault release."
     }
   },
   "error": {
