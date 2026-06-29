@@ -85,6 +85,50 @@ def test_create_persists_no_value_derived_public_meta(vault):
     assert value_tail not in json.dumps(listed)
 
 
+def test_standard_static_secret_is_agent_access_grantable(vault):
+    _create(vault, name="STANDARD_KEY", protection="standard", group="default")
+    with vault.begin() as conn:
+        request = vs.create_access_request(conn, "STANDARD_KEY", requester={"session_id": "ses_1"})
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="STANDARD_KEY",
+            session_id="ses_1",
+            created_by_request_id=request["id"],
+        )
+        listed = vs.list_secrets(conn)
+
+    assert listed[0]["access_grantable"] is True
+    assert listed[0]["per_use_sign"] is False
+    assert request["status"] == "pending"
+    assert request["card"]["scope_options"][0]["scope_ref"] == "STANDARD_KEY"
+    assert grant["delivery_ready"] is True
+    assert grant["delivery_status"] == "agent_cache_ready"
+
+
+def test_deny_request_marks_pending_denied_and_audits(vault):
+    _create(vault, name="STANDARD_KEY", protection="standard")
+    with vault.begin() as conn:
+        request = vs.create_access_request(conn, "STANDARD_KEY", requester={"session_id": "ses_1"})
+        denied = vs.deny_request(conn, request["id"], requester={"source": "gatekeeper"}, reason="no")
+        event = conn.execute(
+            select(vault_audit).where(vault_audit.c.request_id == request["id"], vault_audit.c.event == "request-denied")
+        ).mappings().one()
+
+    assert denied["status"] == "denied"
+    assert denied["decided_at"] is not None
+    assert json.loads(event["delivery"]) == {"request_type": "access", "reason": "no"}
+
+
+def test_deny_request_rejects_non_pending(vault):
+    _create(vault, name="STANDARD_KEY", protection="standard")
+    with vault.begin() as conn:
+        request = vs.create_access_request(conn, "STANDARD_KEY")
+        vs.deny_request(conn, request["id"])
+        with pytest.raises(vs.InvalidRequestError):
+            vs.deny_request(conn, request["id"])
+
+
 def test_pubkey_pin_metadata_round_trips_through_masked_meta(vault):
     _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
     pin = {
