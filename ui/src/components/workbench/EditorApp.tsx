@@ -226,11 +226,34 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
     setTabs((ts) =>
       ts.map((tb) => {
         if (!tb.path) return tb;
-        if (tb.path === from) return { ...tb, path: to, name: to.split('/').filter(Boolean).pop() || tb.name };
-        if (tb.path.startsWith(`${from}/`)) return { ...tb, path: `${to}${tb.path.slice(from.length)}` };
+        if (tb.path === from) return { ...tb, path: to, name: to.split(/[\\/]/).filter(Boolean).pop() || tb.name };
+        // Descendant of a renamed folder — reprefix the path, keeping its own name. Match either
+        // separator so Windows child paths (C:\dir\file.txt) reconcile too.
+        if (tb.path.startsWith(`${from}/`) || tb.path.startsWith(`${from}\\`)) {
+          return { ...tb, path: `${to}${tb.path.slice(from.length)}` };
+        }
         return tb;
       }),
     );
+  }, []);
+
+  // A tree delete removed a file (or a folder containing open files). Auto-close only the CLEAN
+  // matching tabs (the file itself + any descendant) — a dirty tab keeps its unsaved buffer rather
+  // than be silently dropped; its stale-path save then fails loudly, prompting a save-as.
+  const onEntryDeleted = useCallback((deleted: string) => {
+    setTabs((ts) => {
+      const isGone = (p: string | null) => !!p && (p === deleted || p.startsWith(`${deleted}/`) || p.startsWith(`${deleted}\\`));
+      const closeIds = new Set(ts.filter((tb) => isGone(tb.path) && !dirtyRef.current[tb.id]).map((tb) => tb.id));
+      if (!closeIds.size) return ts;
+      const rest = ts.filter((tb) => !closeIds.has(tb.id));
+      setActive((cur) => (cur && closeIds.has(cur) ? (rest.length ? rest[rest.length - 1].id : null) : cur));
+      setDirty((d) => {
+        const n = { ...d };
+        closeIds.forEach((id) => delete n[id]);
+        return n;
+      });
+      return rest;
+    });
   }, []);
 
   // Open the launch file (from the File Browser) once on mount, OR — when the File Browser's
@@ -479,6 +502,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                     onOpenFile={onTreeOpen}
                     refreshSignal={treeRefresh}
                     onEntryRenamed={onEntryRenamed}
+                    onEntryDeleted={onEntryDeleted}
                   />
                 </div>
               )}

@@ -148,7 +148,12 @@ export const FileEditorPane: React.FC<{
     return () => window.removeEventListener('keydown', onKey, true);
   }, [saveHotkey, previewable, mode]);
 
+  // Tracks the path the last read targeted, so a rename (path changing from one real file to another)
+  // can be told apart from an initial open or a forced reload.
+  const prevPathRef = useRef<string | null>(path);
   useEffect(() => {
+    const prev = prevPathRef.current;
+    prevPathRef.current = path;
     let cancelled = false;
     setError(null);
     setSavedMtime(mtime);
@@ -157,6 +162,14 @@ export const FileEditorPane: React.FC<{
     if (path === null) {
       setText('');
       setOriginal('');
+      setLoading(false);
+      return;
+    }
+    // A tab's path only changes from one real file to another when the explorer renamed it (this tab
+    // was repointed) — the bytes on disk are unchanged. Re-reading would silently replace an unsaved
+    // buffer with the last-saved contents, so adopt the new save target WITHOUT reloading. (Initial
+    // open and reloadNonce-forced reloads — where the path is unchanged — still read below.)
+    if (prev !== null && prev !== path) {
       setLoading(false);
       return;
     }
