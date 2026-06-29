@@ -378,6 +378,10 @@ function AppRoutes() {
 
 function App() {
   return (
+    // Outermost backstop — OUTSIDE every provider, so a crash in a provider itself is contained too
+    // (the per-page and per-window boundaries handle granular containment inside). ThemeProvider sets
+    // data-theme on <html>, so the fallback still picks up the theme even from out here.
+    <ErrorBoundary variant="page">
     <ThemeProvider>
       <StatusProvider>
         <ToastProvider>
@@ -385,15 +389,10 @@ function App() {
             <WorkbenchInboxProvider>
               <WorkbenchProjectsProvider>
                 <ComposerBridgeProvider>
-                  {/* Top-level backstop: wraps the whole router subtree AND the agentation overlay
-                      (the per-page and per-window boundaries handle the rest) so a crash anywhere
-                      below the providers can never reach a blank white screen. */}
-                  <ErrorBoundary variant="page">
-                    <BrowserRouter>
-                      <AppRoutes />
-                    </BrowserRouter>
-                    <AgentationToggle />
-                  </ErrorBoundary>
+                  <BrowserRouter>
+                    <AppRoutes />
+                  </BrowserRouter>
+                  <AgentationToggle />
                 </ComposerBridgeProvider>
               </WorkbenchProjectsProvider>
             </WorkbenchInboxProvider>
@@ -401,6 +400,7 @@ function App() {
         </ToastProvider>
       </StatusProvider>
     </ThemeProvider>
+    </ErrorBoundary>
   );
 }
 
