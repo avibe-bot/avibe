@@ -13,7 +13,6 @@ import {
   unwrapVmk,
   webAuthnPrfExtensionInput,
   type ProtectedRecordEnvelope,
-  type VmkWrapFactor,
 } from './vaultCrypto';
 
 /**
@@ -77,6 +76,14 @@ function baseVmkWrapMeta(wrapMeta: string): string {
   delete parsed.dek_nonce;
   delete parsed.wrapped_dek;
   return JSON.stringify(parsed);
+}
+
+/** Record the WebAuthn RP ID (host) a passkey was bound to, so unlock only offers it on
+ *  the same site (the credential can't be asserted from a different host). */
+function withRpId(wrapMeta: string, rpId: string): string {
+  const meta = JSON.parse(wrapMeta) as Record<string, unknown>;
+  meta.rp_id = rpId;
+  return JSON.stringify(meta);
 }
 
 function toUint8(buffer: ArrayBuffer | ArrayBufferView): Uint8Array {
@@ -184,22 +191,20 @@ export function useProtectedVault() {
     setError(null);
   };
 
-  // First-time setup always includes a password (recovery root); a passkey is layered
-  // on top when available so device loss never strands protected secrets.
+  // First-time setup uses ONE factor. Passkey-only is the most secure option (no
+  // phishable/leakable password) but is unrecoverable if the device/passkey is lost —
+  // the UI requires an explicit acknowledgement. Password is the recoverable alternative.
   const setupPassword = useCallback(async (password: string) => {
     const vmk = newVmk();
     commit(vmk, await buildWrapMeta(vmk, [{ kind: 'password', password }]), true);
   }, []);
 
-  const setupPasskey = useCallback(async (recoveryPassword: string) => {
+  const setupPasskey = useCallback(async () => {
     const prfSalt = newPasskeyPrfSalt();
     const { prfOutput, credentialId } = await setupPasskeyFactor(prfSalt);
     const vmk = newVmk();
-    const factors: VmkWrapFactor[] = [
-      { kind: 'password', password: recoveryPassword },
-      { kind: 'passkey', prfOutput, prfSalt, credentialId },
-    ];
-    commit(vmk, await buildWrapMeta(vmk, factors), true);
+    const wrapMeta = await buildWrapMeta(vmk, [{ kind: 'passkey', prfOutput, prfSalt, credentialId }]);
+    commit(vmk, withRpId(wrapMeta, window.location.hostname), true);
   }, []);
 
   const unlockPassword = useCallback(async (password: string) => {
@@ -271,5 +276,30 @@ export function useProtectedVault() {
     }
   }, []);
 
-  return { status, error, setError, refresh, setupPassword, setupPasskey, unlockPassword, unlockPasskey, sealValue, afterCreated, lock, discardAndRefresh, hasPasskey };
+  const hasPassword = useCallback(() => {
+    const wrapMeta = sessionVault.wrapMeta;
+    if (!wrapMeta) return false;
+    try {
+      const meta = JSON.parse(wrapMeta) as { copies?: Array<{ kind?: string }> };
+      return Array.isArray(meta.copies) && meta.copies.some((copy) => copy.kind === 'password');
+    } catch {
+      return false;
+    }
+  }, []);
+
+  // A passkey can only be asserted on the host (RP ID) it was created on. Offer passkey
+  // unlock only when the current host matches the stored one (legacy vaults without a
+  // recorded rp_id are not blocked).
+  const passkeyUsableHere = useCallback(() => {
+    const wrapMeta = sessionVault.wrapMeta;
+    if (!wrapMeta) return false;
+    try {
+      const meta = JSON.parse(wrapMeta) as { rp_id?: string };
+      return !meta.rp_id || meta.rp_id === window.location.hostname;
+    } catch {
+      return true;
+    }
+  }, []);
+
+  return { status, error, setError, refresh, setupPassword, setupPasskey, unlockPassword, unlockPasskey, sealValue, afterCreated, lock, discardAndRefresh, hasPasskey, hasPassword, passkeyUsableHere };
 }
