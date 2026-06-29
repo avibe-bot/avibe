@@ -226,7 +226,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
         </div>
 
         {/* Main area: welcome (no folder) · tabs + Monaco (file open) · select-a-file hint (folder, no file). */}
-        <div className="flex min-w-0 flex-1 flex-col bg-[#0b0b14]">
+        <div className="flex min-w-0 flex-1 flex-col bg-surface">
           {root == null ? (
             <Welcome onOpenFolder={openFolder} onNewFile={newFile} onOpenFiles={() => wm.openApp('files')} />
           ) : (
@@ -238,7 +238,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                       key={tab.path}
                       className={clsx(
                         'group/tab flex shrink-0 items-center gap-2 border-r border-border px-3 py-2 text-[12px] transition',
-                        active === tab.path ? 'bg-[#0b0b14] text-foreground shadow-[inset_0_2px_0_0_var(--cyan)]' : 'text-muted hover:bg-foreground/[0.04]',
+                        active === tab.path ? 'bg-surface text-foreground shadow-[inset_0_2px_0_0_var(--cyan)]' : 'text-muted hover:bg-foreground/[0.04]',
                       )}
                     >
                       <button
@@ -320,7 +320,7 @@ const Welcome: React.FC<{ onOpenFolder: () => void; onNewFile: () => void; onOpe
     { Icon: Files, color: 'text-violet', label: t('apps.editor.browseFiles'), onClick: onOpenFiles },
   ];
   return (
-    <div className="grid min-w-0 flex-1 place-items-center bg-[#0b0b14] p-10">
+    <div className="grid min-w-0 flex-1 place-items-center bg-surface p-10">
       <div className="flex w-[440px] max-w-full flex-col gap-6">
         <div className="flex items-center gap-3.5">
           <span className="grid size-14 place-items-center rounded-2xl border border-cyan/60 bg-cyan-soft">
