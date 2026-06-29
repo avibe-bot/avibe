@@ -69,6 +69,11 @@ const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => voi
             </Badge>
           ) : null}
           {hasProxy(s) ? <Badge variant="info">{t('vaults.proxyBound')}</Badge> : null}
+          {s.tags?.map((tag) => (
+            <Badge key={tag} variant="outline" className="text-muted">
+              {tag}
+            </Badge>
+          ))}
         </div>
         <span className="truncate text-xs text-muted">
           {s.description ? `${s.description} · ` : ''}
