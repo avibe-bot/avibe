@@ -145,6 +145,27 @@ def test_discover_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
             signer_kind="local",
             sealed=_sealed("key"),
         )
+        vault_service.create_secret(
+            conn,
+            name="PROTECTED_STATIC_KEY",
+            protection="protected",
+            sealed=_sealed("protected-static"),
+        )
+        vault_service.create_secret(
+            conn,
+            name="PROTECTED_ETH_KEY",
+            protection="protected",
+            kind="keypair",
+            signer_kind="local",
+            sealed=_sealed("protected-key"),
+        )
+        vault_service.create_secret(
+            conn,
+            name="REMOTE_ETH_KEY",
+            kind="keypair",
+            signer_kind="remote",
+            sealed=_sealed("remote-key"),
+        )
 
     assert cli.cmd_vault_discover(_ns()) == 0
     payload = json.loads(capfd.readouterr().out)
@@ -159,6 +180,9 @@ def test_discover_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
         "per_use_sign": False,
     }
     assert secrets["ETH_KEY"]["per_use_sign"] is True
+    assert secrets["PROTECTED_STATIC_KEY"]["access_grantable"] is False
+    assert secrets["PROTECTED_ETH_KEY"]["per_use_sign"] is False
+    assert secrets["REMOTE_ETH_KEY"]["per_use_sign"] is False
     assert "sk-" not in json.dumps(payload)
 
 

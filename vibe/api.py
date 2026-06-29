@@ -1497,6 +1497,15 @@ def _vault_request_result(conn, request: dict) -> dict | None:
     if request_type == "access":
         grant = vault_service.get_grant_created_by_request(conn, str(request["id"]))
         if grant is None:
+            requester = request.get("requester") if isinstance(request.get("requester"), dict) else {}
+            delivery = request.get("delivery") if isinstance(request.get("delivery"), dict) else {}
+            session_id = str(requester.get("session_id") or delivery.get("session_id") or "").strip() or None
+            grant = vault_service.find_active_grant_for_secret(
+                conn,
+                str(request["secret_name"]),
+                session_id=session_id,
+            )
+        if grant is None:
             return None
         return {"type": "grant", "grant": grant}
     if request_type == "sign":
@@ -1512,7 +1521,7 @@ def get_vault_request(request_id: str) -> dict:
 
     engine = _vault_engine()
     try:
-        with engine.connect() as conn:
+        with engine.begin() as conn:
             request = vault_service.get_request(conn, request_id)
             result = _vault_request_result(conn, request)
     except vault_service.RequestNotFoundError as exc:
@@ -1974,7 +1983,7 @@ def vault_sign(payload: dict) -> dict:
                 return {"ok": True, "signature": signature, "request": request}
             request_id = str(payload.get("request_id") or "")
             if request_id:
-                vault_service.validate_sign_request(conn, request_id, name=name, digest=digest, scheme=scheme)
+                vault_service.claim_sign_request(conn, request_id, name=name, digest=digest, scheme=scheme)
             key_envelope = vault_service.get_key_envelope(conn, name)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
@@ -1987,6 +1996,11 @@ def vault_sign(payload: dict) -> dict:
     try:
         signature = avault_sign(key_envelope, digest, scheme, name=name)
     except AvaultError as exc:
+        request_id = str(payload.get("request_id") or "")
+        if request_id:
+            with contextlib.suppress(Exception):
+                with engine.begin() as conn:
+                    vault_service.fail_sign_request(conn, request_id, reason="avault_failed")
         raise VaultApiError(f"avault sign failed: {exc}", code="avault_failed") from exc
     request_id = str(payload.get("request_id") or "")
     if request_id:

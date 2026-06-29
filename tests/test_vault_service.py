@@ -1286,6 +1286,54 @@ def test_sign_request_completion_can_only_claim_pending_once(vault):
     assert meta["last_used_at"] is not None
 
 
+def test_get_request_expires_timed_out_pending_request(vault):
+    _create(vault, name="A_KEY")
+    expired_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    with vault.begin() as conn:
+        req = vs.create_access_request(conn, "A_KEY", expires_at=expired_at)
+        fetched = vs.get_request(conn, req["id"])
+        audit_events = [
+            row["event"]
+            for row in conn.execute(select(vault_audit.c.event).where(vault_audit.c.request_id == req["id"])).mappings()
+        ]
+
+    assert fetched["status"] == "expired"
+    assert "request-expired" in audit_events
+
+
+def test_list_requests_expires_timed_out_pending_requests(vault):
+    _create(vault, name="A_KEY")
+    expired_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    with vault.begin() as conn:
+        req = vs.create_access_request(conn, "A_KEY", expires_at=expired_at)
+        pending = vs.list_requests(conn, status="pending")
+        expired = vs.get_request(conn, req["id"])
+
+    assert pending == []
+    assert expired["status"] == "expired"
+
+
+def test_claim_sign_request_prevents_concurrent_deny_before_completion(vault):
+    _create(vault, name="ETH_KEY", kind="keypair", signer_kind="local")
+    digest = "00" * 32
+    with vault.begin() as conn:
+        req = vs.create_sign_request(conn, "ETH_KEY", digest=digest, scheme="ecdsa-secp256k1-recoverable")
+        claimed = vs.claim_sign_request(conn, req["id"], name="ETH_KEY", digest=digest, scheme="ecdsa-secp256k1-recoverable")
+        with pytest.raises(vs.InvalidRequestError):
+            vs.deny_request(conn, req["id"])
+        completed = vs.complete_sign_request(
+            conn,
+            req["id"],
+            name="ETH_KEY",
+            digest=digest,
+            scheme="ecdsa-secp256k1-recoverable",
+            signature={"signature": "ab" * 64, "recovery_id": 1},
+        )
+
+    assert claimed["status"] == "signing"
+    assert completed["status"] == "approved"
+
+
 def test_sign_request_completion_rejects_malformed_signatures(vault):
     _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
     digest = "00" * 32

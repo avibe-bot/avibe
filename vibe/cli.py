@@ -4641,6 +4641,13 @@ def cmd_vault_await(args):
                 help_command=help_command,
                 details={"request_id": request_id},
             )
+        if request.get("status") == "failed":
+            raise TaskCliError(
+                f"request '{request_id}' failed",
+                code="request_failed",
+                help_command=help_command,
+                details={"request_id": request_id},
+            )
         if request.get("status") != "approved":
             _print_cli_payload("vault_request_status", request_id=request_id, status=request.get("status"), request=request)
             return 0
