@@ -220,6 +220,44 @@ def test_worktree_target_reuses_mapped_port_without_allocation(tmp_path: Path, m
     assert target.host_port == 15234
 
 
+def test_worktree_target_reuses_mapped_sandbox_port(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = tmp_path / ".runtime" / "incus-regression"
+    runtime.mkdir(parents=True)
+    (runtime / "worktrees.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "worktrees": {
+                    "demo-branch": {
+                        "host_port": 15234,
+                        "vault_sandbox_host_port": 15390,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
+    monkeypatch.setattr(incus_regression, "allocate_worktree_port", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should reuse mapped ports")))
+
+    target = incus_regression.resolve_target(
+        argparse.Namespace(
+            target="worktree",
+            slug="demo-branch",
+            host_port=None,
+            ui_host="127.0.0.1",
+            ui_port=5123,
+            worktree_port_start=15200,
+            worktree_port_end=15399,
+        ),
+        tmp_path,
+        dry_run=False,
+    )
+
+    assert target.host_port == 15234
+    assert target.vault_sandbox_host_port == 15390
+
+
 def test_worktree_allocation_reserves_legacy_implicit_sandbox_port(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = tmp_path / ".runtime" / "incus-regression"
     runtime.mkdir(parents=True)

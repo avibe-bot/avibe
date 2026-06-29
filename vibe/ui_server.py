@@ -7897,23 +7897,14 @@ def _vault_sandbox_main_origin(config: V2Config | None, fallback_host: str, fall
         return override
     ui = getattr(config, "ui", None)
     host = getattr(ui, "setup_host", None) or fallback_host
-    port = getattr(ui, "setup_port", None) or fallback_port
-    try:
-        port = int(port)
-    except (TypeError, ValueError):
-        port = fallback_port
-    return _origin_for_host_port(host, port)
+    return _origin_for_host_port(host, fallback_port)
 
 
 def _vault_sandbox_bind_host(ui_host: str) -> str:
     normalized = (ui_host or "").strip()
     if normalized.startswith("[") and normalized.endswith("]"):
         normalized = normalized[1:-1]
-    if normalized in {"", "0.0.0.0", "*"}:
-        return "0.0.0.0"
-    if normalized == "::":
-        return "::"
-    if ":" in normalized and normalized not in {"0.0.0.0", "*"}:
+    if normalized == "::" or ":" in normalized:
         return "::1"
     return "127.0.0.1"
 
@@ -8213,6 +8204,23 @@ def _configured_vault_sandbox_port(config: V2Config | None) -> int:
     return port
 
 
+def _vault_sandbox_port_for_ui(config: V2Config | None, ui_port: int) -> int:
+    sandbox_port = _configured_vault_sandbox_port(config)
+    if sandbox_port != ui_port:
+        return sandbox_port
+    fallback_port = ui_port + 1
+    if fallback_port > 65535:
+        fallback_port = ui_port - 1
+    if fallback_port <= 0:
+        return sandbox_port
+    logger.warning(
+        "Vault signing sandbox port %s matches the UI port; using adjacent port %s",
+        sandbox_port,
+        fallback_port,
+    )
+    return fallback_port
+
+
 def _start_vault_sandbox_server(config: V2Config | None, *, ui_host: str, ui_port: int) -> None:
     global VAULT_SANDBOX_MAIN_ORIGIN, _vault_sandbox_server, _vault_sandbox_thread
     if _vault_sandbox_thread is not None and _vault_sandbox_thread.is_alive():
@@ -8220,11 +8228,7 @@ def _start_vault_sandbox_server(config: V2Config | None, *, ui_host: str, ui_por
 
     import uvicorn
 
-    sandbox_port = _configured_vault_sandbox_port(config)
-    if sandbox_port == ui_port:
-        logger.warning("Vault signing sandbox disabled because ui.vault_sandbox_port matches setup_port=%s", ui_port)
-        return
-
+    sandbox_port = _vault_sandbox_port_for_ui(config, ui_port)
     VAULT_SANDBOX_MAIN_ORIGIN = _vault_sandbox_main_origin(config, ui_host, ui_port)
     sandbox_host = _vault_sandbox_bind_host(ui_host)
     bound_socket: socket.socket | None = None

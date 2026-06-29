@@ -416,11 +416,16 @@ def allocate_worktree_port(repo_root: Path, ui_host: str, start: int, end: int, 
     raise RegressionError(f"No available worktree regression port in range {start}-{end}.")
 
 
-def mapped_worktree_port(repo_root: Path, slug: str) -> int | None:
+def mapped_worktree_ports(repo_root: Path, slug: str) -> tuple[int | None, int | None]:
     item = (load_worktree_mapping(repo_root).get("worktrees") or {}).get(slug)
-    if isinstance(item, dict) and isinstance(item.get("host_port"), int):
-        return item["host_port"]
-    return None
+    if not isinstance(item, dict):
+        return None, None
+    host_port = item.get("host_port")
+    sandbox_host_port = item.get("vault_sandbox_host_port")
+    return (
+        host_port if isinstance(host_port, int) else None,
+        sandbox_host_port if isinstance(sandbox_host_port, int) else None,
+    )
 
 
 def resolve_target(
@@ -438,9 +443,11 @@ def resolve_target(
     if args.target == MASTER_TARGET:
         slug = "master"
         host_port = args.host_port or env_int("REGRESSION_PORT") or DEFAULT_MASTER_HOST_PORT
+        mapped_vault_sandbox_host_port = None
     else:
         slug = worktree_slug(repo_root, args.slug)
-        host_port = args.host_port or mapped_worktree_port(repo_root, slug)
+        mapped_host_port, mapped_vault_sandbox_host_port = mapped_worktree_ports(repo_root, slug)
+        host_port = args.host_port or mapped_host_port
         if host_port is None and allocate_port:
             host_port = allocate_worktree_port(
                 repo_root,
@@ -455,6 +462,7 @@ def resolve_target(
     vault_sandbox_host_port = (
         getattr(args, "vault_sandbox_host_port", None)
         or env_int("REGRESSION_VAULT_SANDBOX_PORT")
+        or mapped_vault_sandbox_host_port
         or (host_port + 1 if host_port else DEFAULT_VAULT_SANDBOX_PORT)
     )
     vault_sandbox_port = getattr(args, "vault_sandbox_port", None) or vault_sandbox_host_port

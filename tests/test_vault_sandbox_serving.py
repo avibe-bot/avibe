@@ -102,6 +102,12 @@ def test_vault_sandbox_main_origin_uses_configured_loopback_host():
     assert ui_server._vault_sandbox_main_origin(None, "bad host", 5123) == "http://localhost:5123"
 
 
+def test_vault_sandbox_main_origin_uses_running_ui_port():
+    config = type("Config", (), {"ui": UiConfig(setup_host="localhost", setup_port=5123)})()
+
+    assert ui_server._vault_sandbox_main_origin(config, "127.0.0.1", 6000) == "http://localhost:6000"
+
+
 def test_vault_sandbox_main_origin_can_be_overridden_for_regression_proxy(monkeypatch):
     monkeypatch.setenv(ui_server.VAULT_SANDBOX_MAIN_ORIGIN_ENV, "http://localhost:15130")
 
@@ -111,12 +117,20 @@ def test_vault_sandbox_main_origin_can_be_overridden_for_regression_proxy(monkey
     assert ui_server._vault_sandbox_main_origin(None, "localhost", 5123) == "http://localhost:5123"
 
 
-def test_vault_sandbox_bind_host_follows_wildcard_ui_host():
-    assert ui_server._vault_sandbox_bind_host("0.0.0.0") == "0.0.0.0"
-    assert ui_server._vault_sandbox_bind_host("*") == "0.0.0.0"
-    assert ui_server._vault_sandbox_bind_host("::") == "::"
+def test_vault_sandbox_bind_host_stays_loopback_only():
+    assert ui_server._vault_sandbox_bind_host("0.0.0.0") == "127.0.0.1"
+    assert ui_server._vault_sandbox_bind_host("*") == "127.0.0.1"
+    assert ui_server._vault_sandbox_bind_host("::") == "::1"
+    assert ui_server._vault_sandbox_bind_host("2001:db8::1") == "::1"
     assert ui_server._vault_sandbox_bind_host("localhost") == "127.0.0.1"
     assert ui_server._vault_sandbox_bind_host("127.0.0.1") == "127.0.0.1"
+
+
+def test_vault_sandbox_port_moves_when_default_conflicts_with_ui_port():
+    config = type("Config", (), {"ui": UiConfig(vault_sandbox_port=5124)})()
+
+    assert ui_server._vault_sandbox_port_for_ui(config, 5124) == 5125
+    assert ui_server._vault_sandbox_port_for_ui(config, 5123) == 5124
 
 
 def test_vault_sandbox_lifespan_starts_second_listener(monkeypatch):
