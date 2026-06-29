@@ -3861,6 +3861,7 @@ def _expire_agent_grant_after_missing(
     grant_id: str,
     names: list[str],
     *,
+    requester: dict | None = None,
     delivery: dict | None = None,
 ) -> dict | None:
     from storage import vault_service
@@ -3873,7 +3874,7 @@ def _expire_agent_grant_after_missing(
                 resolved = vault_service.resolve_secret_access(
                     conn,
                     name,
-                    requester={"source": "cli", "pid": os.getpid()},
+                    requester=requester or {"source": "cli", "pid": os.getpid()},
                     delivery=delivery or {},
                 )
                 if first_request is None and isinstance(resolved.get("request"), dict):
@@ -4423,11 +4424,13 @@ def cmd_vault_run(args):
         return 1
     except api.AvaultError as exc:
         if grant is not None and _agent_missing_grant(exc):
+            requester, delivery, _session_id = _vault_cli_delivery_context(args, mode="run", command=command_argv)
             _expire_agent_grant_after_missing(
                 engine,
                 grant["id"],
                 sorted(set(mapping.values())),
-                delivery={"mode": "run", "command": command_argv},
+                requester=requester,
+                delivery=delivery,
             )
             _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
             return 1
@@ -4924,7 +4927,8 @@ def cmd_vault_fetch(args):
                     engine,
                     grant_id,
                     [name],
-                    delivery={"mode": "fetch", "host": host, "method": method},
+                    requester=requester,
+                    delivery=delivery,
                 )
                 _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
                 return 1
@@ -5062,11 +5066,18 @@ def cmd_vault_inject(args):
         return 1
     except api.AvaultError as exc:
         if engine is not None and isinstance(grant, dict) and _agent_missing_grant(exc):
+            requester, delivery, _session_id = _vault_cli_delivery_context(
+                args,
+                mode="inject",
+                path=_resolve_cli_output_path(str(out)),
+                format=fmt,
+            )
             _expire_agent_grant_after_missing(
                 engine,
                 grant["id"],
                 keys,
-                delivery={"mode": "inject", "path": _resolve_cli_output_path(str(out)), "format": fmt},
+                requester=requester,
+                delivery=delivery,
             )
             _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
             return 1

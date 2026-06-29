@@ -676,10 +676,10 @@ def test_run_rejects_missing_later_secret_before_creating_approval(capfd):
 def test_run_expires_grant_when_agent_cache_is_missing(capfd, monkeypatch):
     from vibe import api
 
-    grant = _set_protected_grant("PROTECTED_KEY")
+    grant = _set_protected_grant("PROTECTED_KEY", session_id="ses_cli")
     monkeypatch.setattr(api, "avault_agent_deliver_run", Mock(side_effect=api.AvaultError("grant is missing or expired")))
 
-    code = cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"]))
+    code = cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
     captured = capfd.readouterr()
 
     assert code == 1
@@ -689,6 +689,8 @@ def test_run_expires_grant_when_agent_cache_is_missing(capfd, monkeypatch):
         requests = vault_service.list_requests(conn, status="pending")
     assert status == "expired"
     assert requests[0]["secret_name"] == "PROTECTED_KEY"
+    assert requests[0]["requester"]["session_id"] == "ses_cli"
+    assert requests[0]["delivery"]["session_id"] == "ses_cli"
 
 
 def test_run_reopens_only_one_approval_when_group_agent_cache_is_missing(capfd, monkeypatch):
@@ -708,6 +710,53 @@ def test_run_reopens_only_one_approval_when_group_agent_cache_is_missing(capfd, 
     assert status == "expired"
     assert len(requests) == 1
     assert requests[0]["secret_name"] == "A_KEY"
+
+
+def test_fetch_reopens_session_bound_approval_when_agent_cache_is_missing(capfd, monkeypatch):
+    from vibe import api
+
+    grant = _set_protected_grant("PROTECTED_KEY", session_id="ses_cli")
+    with cli._open_vault_engine().begin() as conn:
+        conn.execute(
+            vault_service.vault_secrets.update()
+            .where(vault_service.vault_secrets.c.name == "PROTECTED_KEY")
+            .values(policy=json.dumps({"allowed_hosts": ["example.com"], "auth": {"type": "bearer"}}))
+        )
+    monkeypatch.setattr(api, "avault_agent_deliver_fetch", Mock(side_effect=api.AvaultError("grant is missing or expired")))
+
+    code = cli.cmd_vault_fetch(_ns(auth="PROTECTED_KEY", url="https://example.com/api", method="GET", output=None, session_id="ses_cli"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
+        requests = vault_service.list_requests(conn, status="pending")
+    assert status == "expired"
+    assert requests[0]["secret_name"] == "PROTECTED_KEY"
+    assert requests[0]["requester"]["session_id"] == "ses_cli"
+    assert requests[0]["delivery"]["session_id"] == "ses_cli"
+
+
+def test_inject_reopens_session_bound_approval_when_agent_cache_is_missing(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    grant = _set_protected_grant("PROTECTED_KEY", session_id="ses_cli")
+    monkeypatch.setattr(api, "avault_agent_deliver_inject", Mock(side_effect=api.AvaultError("grant is missing or expired")))
+    out = tmp_path / "out.env"
+
+    code = cli.cmd_vault_inject(_ns(keys="PROTECTED_KEY", out=str(out), format="dotenv", session_id="ses_cli"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
+        requests = vault_service.list_requests(conn, status="pending")
+    assert status == "expired"
+    assert requests[0]["secret_name"] == "PROTECTED_KEY"
+    assert requests[0]["requester"]["session_id"] == "ses_cli"
+    assert requests[0]["delivery"]["session_id"] == "ses_cli"
 
 
 def test_run_persists_protected_approval_request_without_grant(capfd):

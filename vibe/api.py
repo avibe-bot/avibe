@@ -1716,6 +1716,32 @@ def _grant_dek_entries_from_payload(payload: dict) -> object:
     return deks
 
 
+def _validate_resident_agent_dek_blindbox(blindbox: dict[str, Any]) -> dict[str, str]:
+    allowed_keys = {"scheme", "enc", "ct"}
+    if set(blindbox) != allowed_keys:
+        raise VaultApiError("resident agent grant DEKs must contain only opaque blind-box metadata", code="invalid_grant")
+    normalized: dict[str, str] = {}
+    for key in allowed_keys:
+        value = blindbox.get(key)
+        if not isinstance(value, str) or not value:
+            raise VaultApiError("resident agent grant DEK blind boxes require non-empty scheme, enc, and ct", code="invalid_grant")
+        normalized[key] = value
+    return normalized
+
+
+def _validate_resident_agent_dek_approval(approval: dict[str, Any]) -> dict[str, Any]:
+    allowed_keys = {"nonce", "expires_at_unix"}
+    if set(approval) != allowed_keys:
+        raise VaultApiError("resident agent grant DEKs must contain only opaque blind-box metadata", code="invalid_grant")
+    nonce = approval.get("nonce")
+    expires_at_unix = approval.get("expires_at_unix")
+    if not isinstance(nonce, str) or not nonce:
+        raise VaultApiError("resident agent grant DEK approvals require a non-empty nonce", code="invalid_grant")
+    if type(expires_at_unix) is not int:
+        raise VaultApiError("resident agent grant DEK approvals require expires_at_unix", code="invalid_grant")
+    return {"nonce": nonce, "expires_at_unix": expires_at_unix}
+
+
 def _resident_agent_deks_from_payload(payload: dict, *, needs_agent_deks: bool) -> list[dict[str, Any]]:
     deks = _grant_dek_entries_from_payload(payload)
     if deks is None and not needs_agent_deks:
@@ -1735,7 +1761,13 @@ def _resident_agent_deks_from_payload(payload: dict, *, needs_agent_deks: bool) 
         approval = item.get("approval")
         if not isinstance(name, str) or not name or not isinstance(dek_blindbox, dict) or not isinstance(approval, dict):
             raise VaultApiError("resident agent grant DEKs require name, dek_blindbox, and approval", code="invalid_grant")
-        agent_deks.append({"name": name, "dek_blindbox": dek_blindbox, "approval": approval})
+        agent_deks.append(
+            {
+                "name": name,
+                "dek_blindbox": _validate_resident_agent_dek_blindbox(dek_blindbox),
+                "approval": _validate_resident_agent_dek_approval(approval),
+            }
+        )
     return agent_deks
 
 
@@ -1984,6 +2016,190 @@ def _sign_digest_from_payload(value: object) -> str:
     return digest.lower()
 
 
+def _protected_sign_invalid(message: str) -> VaultApiError:
+    return VaultApiError(message, code="invalid_request", status=409)
+
+
+def _protected_signing_public_key_bytes(meta: dict) -> bytes:
+    signing_key = meta.get("signing_public_key")
+    if not isinstance(signing_key, dict):
+        raise _protected_sign_invalid("protected signing key is missing signing_public_key")
+    if signing_key.get("curve") != "secp256k1":
+        raise _protected_sign_invalid("protected signing key must use secp256k1")
+    public_key = signing_key.get("public_key")
+    if not isinstance(public_key, str) or not public_key:
+        raise _protected_sign_invalid("protected signing key is missing a public key")
+    try:
+        public_key_bytes = bytes.fromhex(public_key)
+    except ValueError as exc:
+        raise _protected_sign_invalid("protected signing public key must be hex-encoded") from exc
+    return public_key_bytes
+
+
+def _signature_bytes_for_verification(signature: dict[str, Any]) -> bytes:
+    raw_signature = signature.get("signature")
+    if not isinstance(raw_signature, str) or not raw_signature:
+        raise _protected_sign_invalid("signature payload requires a non-empty signature")
+    try:
+        return bytes.fromhex(raw_signature)
+    except ValueError as exc:
+        raise _protected_sign_invalid("signature must be hex-encoded bytes") from exc
+
+
+def _verify_protected_ecdsa_signature(
+    *,
+    public_key_bytes: bytes,
+    digest_bytes: bytes,
+    scheme: str,
+    signature: dict[str, Any],
+) -> None:
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec, utils
+
+    sig_bytes = _signature_bytes_for_verification(signature)
+    recovery_id = signature.get("recovery_id")
+    try:
+        public_key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256K1(), public_key_bytes)
+    except ValueError as exc:
+        raise _protected_sign_invalid("protected signing public key is not a valid secp256k1 point") from exc
+    if scheme == "ecdsa-secp256k1-recoverable":
+        if len(sig_bytes) != 64:
+            raise _protected_sign_invalid("recoverable secp256k1 signatures must be 64 bytes")
+        if type(recovery_id) is not int or recovery_id not in {0, 1, 2, 3}:
+            raise _protected_sign_invalid("recoverable secp256k1 signatures require recovery_id 0..3")
+        r = int.from_bytes(sig_bytes[:32], "big")
+        s = int.from_bytes(sig_bytes[32:], "big")
+        sig_bytes = utils.encode_dss_signature(r, s)
+    else:
+        if len(sig_bytes) < 8 or sig_bytes[0] != 0x30:
+            raise _protected_sign_invalid("DER secp256k1 signatures must be DER-encoded")
+        if recovery_id is not None:
+            raise _protected_sign_invalid("DER secp256k1 signatures must not include recovery_id")
+    try:
+        public_key.verify(sig_bytes, digest_bytes, ec.ECDSA(utils.Prehashed(hashes.SHA256())))
+    except InvalidSignature as exc:
+        raise _protected_sign_invalid("browser signature does not verify against signing_public_key") from exc
+
+
+_SECP256K1_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+_SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+_SECP256K1_G = (
+    0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+    0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8,
+)
+_Secp256k1Point = tuple[int, int] | None
+
+
+def _secp256k1_lift_x(x: int) -> _Secp256k1Point:
+    if x >= _SECP256K1_P:
+        return None
+    y_sq = (pow(x, 3, _SECP256K1_P) + 7) % _SECP256K1_P
+    y = pow(y_sq, (_SECP256K1_P + 1) // 4, _SECP256K1_P)
+    if pow(y, 2, _SECP256K1_P) != y_sq:
+        return None
+    return (x, y if y % 2 == 0 else _SECP256K1_P - y)
+
+
+def _secp256k1_add(point_a: _Secp256k1Point, point_b: _Secp256k1Point) -> _Secp256k1Point:
+    if point_a is None:
+        return point_b
+    if point_b is None:
+        return point_a
+    x1, y1 = point_a
+    x2, y2 = point_b
+    if x1 == x2 and (y1 + y2) % _SECP256K1_P == 0:
+        return None
+    if point_a == point_b:
+        slope = (3 * x1 * x1 * pow(2 * y1, -1, _SECP256K1_P)) % _SECP256K1_P
+    else:
+        slope = ((y2 - y1) * pow(x2 - x1, -1, _SECP256K1_P)) % _SECP256K1_P
+    x3 = (slope * slope - x1 - x2) % _SECP256K1_P
+    y3 = (slope * (x1 - x3) - y1) % _SECP256K1_P
+    return (x3, y3)
+
+
+def _secp256k1_mul(scalar: int, point: _Secp256k1Point) -> _Secp256k1Point:
+    result: _Secp256k1Point = None
+    addend = point
+    while scalar:
+        if scalar & 1:
+            result = _secp256k1_add(result, addend)
+        addend = _secp256k1_add(addend, addend)
+        scalar >>= 1
+    return result
+
+
+def _bip340_tagged_hash(tag: str, payload: bytes) -> bytes:
+    import hashlib
+
+    tag_hash = hashlib.sha256(tag.encode("utf-8")).digest()
+    return hashlib.sha256(tag_hash + tag_hash + payload).digest()
+
+
+def _xonly_public_key(public_key_bytes: bytes) -> bytes:
+    if len(public_key_bytes) == 32:
+        x_only = public_key_bytes
+    elif len(public_key_bytes) == 33 and public_key_bytes[0] in {2, 3}:
+        x_only = public_key_bytes[1:]
+    elif len(public_key_bytes) == 65 and public_key_bytes[0] == 4:
+        x_only = public_key_bytes[1:33]
+        x = int.from_bytes(x_only, "big")
+        y = int.from_bytes(public_key_bytes[33:], "big")
+        if x >= _SECP256K1_P or y >= _SECP256K1_P or (pow(y, 2, _SECP256K1_P) - pow(x, 3, _SECP256K1_P) - 7) % _SECP256K1_P:
+            raise _protected_sign_invalid("protected signing public key is not a valid secp256k1 point")
+    else:
+        raise _protected_sign_invalid("protected signing public key must be compressed, uncompressed, or x-only secp256k1")
+    if _secp256k1_lift_x(int.from_bytes(x_only, "big")) is None:
+        raise _protected_sign_invalid("protected signing public key is not a valid secp256k1 point")
+    return x_only
+
+
+def _verify_protected_schnorr_signature(
+    *,
+    public_key_bytes: bytes,
+    digest_bytes: bytes,
+    signature: dict[str, Any],
+) -> None:
+    sig_bytes = _signature_bytes_for_verification(signature)
+    if len(sig_bytes) != 64:
+        raise _protected_sign_invalid("BIP340 Schnorr signatures must be 64 bytes")
+    if signature.get("recovery_id") is not None:
+        raise _protected_sign_invalid("BIP340 Schnorr signatures must not include recovery_id")
+    public_key_xonly = _xonly_public_key(public_key_bytes)
+    r = int.from_bytes(sig_bytes[:32], "big")
+    s = int.from_bytes(sig_bytes[32:], "big")
+    if r >= _SECP256K1_P or s >= _SECP256K1_N:
+        raise _protected_sign_invalid("browser signature does not verify against signing_public_key")
+    point_p = _secp256k1_lift_x(int.from_bytes(public_key_xonly, "big"))
+    if point_p is None:
+        raise _protected_sign_invalid("protected signing public key is not a valid secp256k1 point")
+    challenge = int.from_bytes(_bip340_tagged_hash("BIP0340/challenge", sig_bytes[:32] + public_key_xonly + digest_bytes), "big") % _SECP256K1_N
+    point_r = _secp256k1_add(
+        _secp256k1_mul(s, _SECP256K1_G),
+        _secp256k1_mul(challenge, (point_p[0], (-point_p[1]) % _SECP256K1_P)),
+    )
+    if point_r is None or point_r[1] % 2 != 0 or point_r[0] != r:
+        raise _protected_sign_invalid("browser signature does not verify against signing_public_key")
+
+
+def _verify_protected_browser_signature(meta: dict, *, digest: str, scheme: str, signature: dict[str, Any]) -> None:
+    public_key_bytes = _protected_signing_public_key_bytes(meta)
+    digest_bytes = bytes.fromhex(digest)
+    if scheme in {"ecdsa-secp256k1-recoverable", "ecdsa-secp256k1-der"}:
+        _verify_protected_ecdsa_signature(
+            public_key_bytes=public_key_bytes,
+            digest_bytes=digest_bytes,
+            scheme=scheme,
+            signature=signature,
+        )
+        return
+    if scheme == "schnorr-secp256k1-bip340":
+        _verify_protected_schnorr_signature(public_key_bytes=public_key_bytes, digest_bytes=digest_bytes, signature=signature)
+        return
+    raise _protected_sign_invalid(f"unsupported signature scheme: {scheme}")
+
+
 def revoke_vault_grant(grant_id: str) -> dict:
     from storage import vault_service
 
@@ -2047,6 +2263,8 @@ def vault_sign(payload: dict) -> dict:
                 request_id = str(payload.get("request_id") or "")
                 if not request_id:
                     raise VaultApiError("request_id is required to complete protected signing", code="missing_request_id")
+                vault_service.validate_sign_request(conn, request_id, name=name, digest=digest, scheme=scheme)
+                _verify_protected_browser_signature(meta, digest=digest, scheme=scheme, signature=signature)
                 request = vault_service.complete_sign_request(
                     conn,
                     request_id,
