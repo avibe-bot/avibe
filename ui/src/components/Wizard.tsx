@@ -107,7 +107,7 @@ const buildConfigPayload = (data: any, enabledPlatformOverride?: string[]) => {
   ui: {
     // Preserve existing ui config
     ...data.ui,
-    setup_host: data.ui?.setup_host || '127.0.0.1',
+    setup_host: data.ui?.setup_host || 'localhost',
     setup_port: data.ui?.setup_port || 5123,
   },
   // Preserve existing update config entirely

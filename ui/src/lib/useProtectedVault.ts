@@ -41,8 +41,8 @@ const WEBAUTHN_USER_HANDLE = new TextEncoder().encode('avibe-vault');
 
 /**
  * WebAuthn needs a secure context and a domain RP ID. Browsers reject raw IP RP IDs
- * (the default local `http://127.0.0.1:5123` workflow), so the passkey path is only
- * offered on `localhost` or an HTTPS domain (e.g. the tunnel); elsewhere we fall back
+ * so the passkey path is only offered on `localhost` or an HTTPS domain
+ * (e.g. the tunnel); elsewhere we fall back
  * to the password, which is the recovery root anyway.
  */
 export function webauthnAvailable(): boolean {

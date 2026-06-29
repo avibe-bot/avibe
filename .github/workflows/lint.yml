@@ -47,6 +47,7 @@ jobs:
           npm ci
           npm run validate:theme
           npm run build
+          npm run build:sandbox
 
       - uses: actions/setup-python@v6
         with:
@@ -61,10 +62,30 @@ jobs:
           pip install build
           python -m build --wheel
 
+      - name: Verify bundled UI assets
+        run: |
+          python - <<'PY'
+          import zipfile
+          from pathlib import Path
+
+          wheels = sorted(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"Expected exactly one wheel, found {len(wheels)}")
+
+          with zipfile.ZipFile(wheels[0]) as wheel:
+              names = set(wheel.namelist())
+          for path in ("vibe/ui/dist/index.html", "vibe/ui/dist-sandbox/index.html"):
+              if path not in names:
+                  raise SystemExit(f"Wheel is missing {path}")
+              print(path)
+          PY
+
       - uses: actions/upload-artifact@v5
         with:
           name: ui-dist-linux
-          path: ui/dist
+          path: |
+            ui/dist
+            ui/dist-sandbox
           if-no-files-found: error
           retention-days: 1
 
@@ -87,12 +108,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # hatchling force-includes ui/dist into the (editable) install, so it must
-      # exist before `pip install -e .`.
+      # hatchling force-includes UI build outputs into the (editable) install,
+      # so they must exist before `pip install -e .`.
       - uses: actions/download-artifact@v5
         with:
           name: ui-dist-linux
-          path: ui/dist
+          path: ui
 
       - uses: actions/setup-python@v6
         with:
@@ -151,7 +172,7 @@ jobs:
       - uses: actions/download-artifact@v5
         with:
           name: ui-dist-linux
-          path: ui/dist
+          path: ui
 
       - uses: actions/download-artifact@v5
         with:

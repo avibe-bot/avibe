@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import threading
 
 from config.v2_config import (
@@ -12,6 +13,7 @@ from config.v2_config import (
     V2Config,
 )
 from vibe import runtime
+from vibe import ui_server
 from vibe.ui_server import app
 
 from tests.ui_server_test_helpers import csrf_headers
@@ -43,6 +45,12 @@ class _NoopThread:
         # Skip the actual subprocess respawn; the unit test only asserts
         # the bind host computed before the thread is started.
         return None
+
+
+class _ImmediateThread(_NoopThread):
+    def start(self) -> None:
+        if self._target is not None:
+            self._target(*self._args, **self._kwargs)
 
 
 def test_ui_reload_overrides_bind_host_when_tunnel_enabled(monkeypatch):
@@ -128,3 +136,44 @@ def test_ui_reload_uses_requested_host_when_tunnel_disabled(monkeypatch):
     assert response.status_code == 200
     assert captured["requested_host"] == "192.168.1.5"
     assert captured["enabled"] is False
+
+
+def test_ui_reload_stops_old_vault_sandbox_before_old_ui_shutdown(monkeypatch, tmp_path):
+    events: list[str] = []
+
+    class FakeProcess:
+        pid = 4242
+
+    class FakeServer:
+        should_exit = False
+
+    def fake_popen(*args, **kwargs):
+        events.append("spawn")
+        return FakeProcess()
+
+    def fake_stop_sandbox():
+        events.append("stop_sandbox")
+
+    monkeypatch.setattr("core.services.settings.load_config", lambda *a, **k: _config_with_tunnel(enabled=False))
+    monkeypatch.setattr(threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(ui_server, "_stop_vault_sandbox_server", fake_stop_sandbox)
+    monkeypatch.setattr(ui_server, "_server", FakeServer())
+    monkeypatch.setattr("config.paths.get_runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr("config.paths.get_runtime_ui_pid_path", lambda: tmp_path / "ui.pid")
+    monkeypatch.setattr(runtime, "read_status", lambda: {"state": "running", "service_pid": 1111})
+    monkeypatch.setattr(runtime, "write_status", lambda *args, **kwargs: events.append("status"))
+    monkeypatch.setattr("time.sleep", lambda *_args, **_kwargs: events.append("sleep"))
+
+    client = app.test_client()
+    response = client.post(
+        "/api/ui/reload",
+        json={"host": "localhost", "port": 5123},
+        headers=csrf_headers(client, "http://localhost:5123"),
+        base_url="http://localhost:5123",
+    )
+
+    assert response.status_code == 200
+    assert events[:3] == ["stop_sandbox", "spawn", "status"]
+    assert events[-1] == "sleep"
+    assert ui_server._server.should_exit is True

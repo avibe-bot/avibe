@@ -571,7 +571,7 @@
   "accessBlocked": {
     "title": "Can't open the control panel here",
     "body": "Avibe is running, but it refused to open the control panel at this address.",
-    "hint": "Open Avibe from your https://<your-slug>.avibe.bot link, or use http://127.0.0.1:5123 on the machine running Avibe. A raw LAN or Tailscale IP is blocked while remote access is on.",
+    "hint": "Open Avibe from your https://<your-slug>.avibe.bot link, or use http://localhost:5123 on the machine running Avibe. A raw LAN or Tailscale IP is blocked while remote access is on.",
     "codeLabel": "Reason",
     "retry": "Retry"
   },
@@ -583,7 +583,7 @@
     "session_archived": "This session is archived, so its Show Page can't be changed.",
     "project_no_folder": "This project has no local folder configured.",
     "project_not_found": "Project not found.",
-    "remote_access_host_mismatch": "This address can't open the Avibe control panel. Open it from your https://<your-slug>.avibe.bot link, or http://127.0.0.1:5123 on the machine running Avibe.",
+    "remote_access_host_mismatch": "This address can't open the Avibe control panel. Open it from your https://<your-slug>.avibe.bot link, or http://localhost:5123 on the machine running Avibe.",
     "remote_access_config_unavailable": "Avibe couldn't read its configuration. Check that the service is healthy and try again.",
     "remote_access_public_url_invalid": "Remote access is misconfigured (the public URL is invalid). Re-pair this device or fix the remote-access settings.",
     "remote_access_session_secret_missing": "Remote access is misconfigured (missing session secret). Re-pair this device to restore access.",

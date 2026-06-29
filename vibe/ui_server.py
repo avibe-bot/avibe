@@ -26,7 +26,7 @@ from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlspli
 
 import psutil
 from aiohttp import ClientSession, WSMsgType
-from fastapi import Request as FastAPIRequest, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request as FastAPIRequest, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response as FastAPIResponse
 
 from vibe.ui_compat import CompatApp, Response, TEST_REMOTE_ADDR_HEADER, g, jsonify, redirect, request, send_file
@@ -44,7 +44,7 @@ from core.show_session_events import show_event_payload_session_mismatch
 from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
 from modules.agents.catalog import AGENT_BACKENDS, supports_runtime_refresh
 from vibe.i18n import get_supported_languages, t
-from vibe.runtime import get_ui_dist_path, get_working_dir
+from vibe.runtime import get_ui_dist_path, get_ui_sandbox_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
 
 logger = logging.getLogger(__name__)
@@ -54,9 +54,15 @@ logger = logging.getLogger(__name__)
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
 app = CompatApp(title="avibe UI", docs_url=None, redoc_url=None, openapi_url=None)
+vault_sandbox_app = FastAPI(title="avibe Vault signing sandbox", docs_url=None, redoc_url=None, openapi_url=None)
 
 # Global server instance for graceful shutdown on reload
 _server = None
+_vault_sandbox_server = None
+_vault_sandbox_thread: threading.Thread | None = None
+_vault_sandbox_config: V2Config | None = None
+_vault_sandbox_ui_host = "127.0.0.1"
+_vault_sandbox_ui_port = 5123
 SLOW_API_REQUEST_MS = float(os.environ.get("VIBE_UI_SLOW_API_MS", "2000"))
 SHOW_RUNTIME_SLOW_REQUEST_MS = float(os.environ.get("VIBE_SHOW_RUNTIME_SLOW_REQUEST_MS", "1000"))
 _SHOW_RUNTIME_REQUEST_HEADER_ALLOWLIST = {
@@ -144,6 +150,14 @@ LOG_SOURCES = (
     ("ui_stdout", "ui_stdout.log", lambda: paths.get_runtime_dir() / "ui_stdout.log"),
     ("ui_stderr", "ui_stderr.log", lambda: paths.get_runtime_dir() / "ui_stderr.log"),
 )
+
+VAULT_SANDBOX_DEFAULT_PORT = 5124
+VAULT_SANDBOX_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
+VAULT_SANDBOX_INDEX_CACHE_CONTROL = "no-store, private"
+VAULT_SANDBOX_STATIC_CACHE_CONTROL = "public, max-age=3600"
+VAULT_SANDBOX_MAIN_ORIGIN = f"http://localhost:{VAULT_SANDBOX_DEFAULT_PORT - 1}"
+VAULT_SANDBOX_MAIN_ORIGIN_ENV = "VIBE_VAULT_SANDBOX_MAIN_ORIGIN"
+VAULT_SANDBOX_HOST_RE = re.compile(r"^[A-Za-z0-9.-]+$")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -3506,6 +3520,7 @@ def ui_reload():
         stderr_path = config_paths.get_runtime_dir() / "ui_stderr.log"
         stdout = stdout_path.open("ab")
         stderr = stderr_path.open("ab")
+        _stop_vault_sandbox_server()
         process = subprocess.Popen(
             [sys.executable, "-c", command],
             stdout=stdout,
@@ -7845,6 +7860,160 @@ def serve_static(path):
     return jsonify({"error": "not_found"}), 404
 
 
+def _origin_host_for_header(host: str | None) -> str:
+    normalized = (host or "").strip()
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    if normalized in {"", "0.0.0.0", "::", "*"}:
+        return "localhost"
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return normalized if VAULT_SANDBOX_HOST_RE.fullmatch(normalized) else "localhost"
+    return f"[{address.compressed}]" if address.version == 6 else address.compressed
+
+
+def _origin_for_host_port(host: str | None, port: int) -> str:
+    return f"http://{_origin_host_for_header(host)}:{port}"
+
+
+def _sanitize_vault_sandbox_main_origin(value: str) -> str | None:
+    normalized = value.strip().rstrip("/")
+    if not normalized:
+        return None
+    parsed = urlsplit(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    if parsed.path or parsed.query or parsed.fragment:
+        return None
+    if any(ord(char) < 32 or ord(char) == 127 for char in normalized):
+        return None
+    return normalized
+
+
+def _vault_sandbox_main_origin(config: V2Config | None, fallback_host: str, fallback_port: int) -> str:
+    override = _sanitize_vault_sandbox_main_origin(os.environ.get(VAULT_SANDBOX_MAIN_ORIGIN_ENV, ""))
+    if override:
+        return override
+    ui = getattr(config, "ui", None)
+    host = getattr(ui, "setup_host", None) or fallback_host
+    port = getattr(ui, "setup_port", None) or fallback_port
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = fallback_port
+    return _origin_for_host_port(host, port)
+
+
+def _vault_sandbox_bind_host(ui_host: str) -> str:
+    normalized = (ui_host or "").strip()
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    if ":" in normalized and normalized not in {"0.0.0.0", "*"}:
+        return "::1"
+    return "127.0.0.1"
+
+
+def _vault_sandbox_csp() -> str:
+    return (
+        "default-src 'none'; "
+        "script-src 'self' 'wasm-unsafe-eval'; "
+        "style-src 'self'; "
+        "img-src 'self' data:; "
+        "font-src 'self'; "
+        "media-src 'none'; "
+        "connect-src 'none'; "
+        "worker-src 'self'; "
+        "child-src 'none'; "
+        "frame-src 'none'; "
+        "manifest-src 'none'; "
+        "object-src 'none'; "
+        "base-uri 'none'; "
+        "form-action 'none'; "
+        "navigate-to 'none'; "
+        f"frame-ancestors {VAULT_SANDBOX_MAIN_ORIGIN}"
+    )
+
+
+def _with_vault_sandbox_headers(response: FastAPIResponse) -> FastAPIResponse:
+    response.headers["Content-Security-Policy"] = _vault_sandbox_csp()
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    response.headers["Permissions-Policy"] = (
+        "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), "
+        "payment=(), usb=(), publickey-credentials-create=(self), publickey-credentials-get=(self)"
+    )
+    return response
+
+
+@vault_sandbox_app.middleware("http")
+async def add_vault_sandbox_security_headers(starlette_request: FastAPIRequest, call_next: Callable[..., Any]):
+    response = await call_next(starlette_request)
+    return _with_vault_sandbox_headers(response)
+
+
+def _vault_sandbox_not_found() -> FastAPIResponse:
+    return FastAPIResponse("Not Found", status_code=404, media_type="text/plain; charset=utf-8")
+
+
+def _vault_sandbox_missing_bundle() -> FastAPIResponse:
+    response = FastAPIResponse(
+        "Vault signing sandbox bundle is not built.",
+        status_code=503,
+        media_type="text/plain; charset=utf-8",
+    )
+    response.headers["Cache-Control"] = "no-store, private"
+    return response
+
+
+@vault_sandbox_app.api_route(
+    "/api",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+)
+@vault_sandbox_app.api_route(
+    "/api/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+)
+async def vault_sandbox_api_not_found(path: str = "") -> FastAPIResponse:
+    return _vault_sandbox_not_found()
+
+
+@vault_sandbox_app.get("/")
+@vault_sandbox_app.get("/{path:path}")
+async def serve_vault_sandbox_static(path: str = "") -> FastAPIResponse:
+    """Serve only the protected Vault signing sandbox bundle."""
+    if path.startswith("api/") or path == "api":
+        return _vault_sandbox_not_found()
+
+    sandbox_dist = get_ui_sandbox_dist_path()
+    if not (sandbox_dist / "index.html").is_file():
+        return _vault_sandbox_missing_bundle()
+
+    relative_path = path.strip("/")
+    if not relative_path or relative_path == "index.html":
+        file_path = sandbox_dist / "index.html"
+    else:
+        file_path = sandbox_dist / relative_path
+
+    resolved_dist = sandbox_dist.resolve()
+    resolved_path = file_path.resolve()
+    if resolved_path != resolved_dist and resolved_dist not in resolved_path.parents:
+        return _vault_sandbox_not_found()
+    if not resolved_path.is_file():
+        return _vault_sandbox_not_found()
+
+    mime_type, _ = mimetypes.guess_type(str(resolved_path))
+    response = send_file(resolved_path, mimetype=mime_type or "application/octet-stream")
+    if resolved_path.name == "index.html":
+        response.headers["Cache-Control"] = VAULT_SANDBOX_INDEX_CACHE_CONTROL
+    elif relative_path.startswith("assets/"):
+        response.headers["Cache-Control"] = VAULT_SANDBOX_IMMUTABLE_CACHE_CONTROL
+    else:
+        response.headers["Cache-Control"] = VAULT_SANDBOX_STATIC_CACHE_CONTROL
+    return response
+
+
 # =============================================================================
 # Server Entry Point
 # =============================================================================
@@ -8026,9 +8195,107 @@ def _bind_ui_socket(host: str, port: int) -> socket.socket:
     return sock
 
 
+def _configured_vault_sandbox_port(config: V2Config | None) -> int:
+    ui = getattr(config, "ui", None)
+    raw_port = getattr(ui, "vault_sandbox_port", VAULT_SANDBOX_DEFAULT_PORT)
+    try:
+        port = int(raw_port)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid ui.vault_sandbox_port=%r", raw_port)
+        return VAULT_SANDBOX_DEFAULT_PORT
+    if port <= 0 or port > 65535:
+        logger.warning("Ignoring out-of-range ui.vault_sandbox_port=%r", raw_port)
+        return VAULT_SANDBOX_DEFAULT_PORT
+    return port
+
+
+def _start_vault_sandbox_server(config: V2Config | None, *, ui_host: str, ui_port: int) -> None:
+    global VAULT_SANDBOX_MAIN_ORIGIN, _vault_sandbox_server, _vault_sandbox_thread
+    if _vault_sandbox_thread is not None and _vault_sandbox_thread.is_alive():
+        return
+
+    import uvicorn
+
+    sandbox_port = _configured_vault_sandbox_port(config)
+    if sandbox_port == ui_port:
+        logger.warning("Vault signing sandbox disabled because ui.vault_sandbox_port matches setup_port=%s", ui_port)
+        return
+
+    VAULT_SANDBOX_MAIN_ORIGIN = _vault_sandbox_main_origin(config, ui_host, ui_port)
+    sandbox_host = _vault_sandbox_bind_host(ui_host)
+    bound_socket: socket.socket | None = None
+    try:
+        bound_socket = _bind_ui_socket(sandbox_host, sandbox_port)
+    except OSError as exc:
+        logger.warning(
+            "Vault signing sandbox unavailable at http://%s:%s: %s",
+            sandbox_host,
+            sandbox_port,
+            exc,
+        )
+        return
+
+    uvicorn_config = uvicorn.Config(
+        vault_sandbox_app,
+        host=sandbox_host,
+        port=sandbox_port,
+        log_config=None,
+        access_log=False,
+        loop="asyncio",
+        lifespan="on",
+        workers=1,
+    )
+    server = uvicorn.Server(uvicorn_config)
+
+    def _run() -> None:
+        try:
+            server.run(sockets=[bound_socket])
+        except Exception:
+            logger.warning("Vault signing sandbox server exited unexpectedly", exc_info=True)
+
+    _vault_sandbox_server = server
+    _vault_sandbox_thread = threading.Thread(target=_run, daemon=True, name="vault-signing-sandbox")
+    _vault_sandbox_thread.start()
+    logger.info(
+        "Vault signing sandbox serving at http://%s:%s with frame-ancestors %s",
+        sandbox_host,
+        sandbox_port,
+        VAULT_SANDBOX_MAIN_ORIGIN,
+    )
+
+
+def _stop_vault_sandbox_server() -> None:
+    global _vault_sandbox_server, _vault_sandbox_thread
+    server, thread = _vault_sandbox_server, _vault_sandbox_thread
+    _vault_sandbox_server = None
+    _vault_sandbox_thread = None
+    if server is not None:
+        server.should_exit = True
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=5)
+        if thread.is_alive():
+            logger.warning("Vault signing sandbox server did not stop within timeout")
+
+
+async def _start_vault_sandbox_from_lifespan() -> None:
+    _start_vault_sandbox_server(
+        _vault_sandbox_config,
+        ui_host=_vault_sandbox_ui_host,
+        ui_port=_vault_sandbox_ui_port,
+    )
+
+
+async def _stop_vault_sandbox_from_lifespan() -> None:
+    _stop_vault_sandbox_server()
+
+
+app.add_event_handler("startup", _start_vault_sandbox_from_lifespan)
+app.add_event_handler("shutdown", _stop_vault_sandbox_from_lifespan)
+
+
 def run_ui_server(host: str, port: int) -> None:
     """Start the FastAPI UI server."""
-    global _server
+    global _server, _vault_sandbox_config, _vault_sandbox_ui_host, _vault_sandbox_ui_port
     import time
     import uvicorn
 
@@ -8068,6 +8335,9 @@ def run_ui_server(host: str, port: int) -> None:
             )
             bound_socket = _bind_ui_socket(host, port)
             _server = uvicorn.Server(uvicorn_config)
+            _vault_sandbox_config = config
+            _vault_sandbox_ui_host = host
+            _vault_sandbox_ui_port = port
             # Reconcile remote_access in the background so cloudflared download/
             # connector start does not block /health and the rest of the UI
             # from coming up after restart/reload.
@@ -8082,6 +8352,7 @@ def run_ui_server(host: str, port: int) -> None:
         except OSError as e:
             if bound_socket is not None:
                 bound_socket.close()
+            _stop_vault_sandbox_server()
             if e.errno == 48 and attempt < 9:  # Address already in use (macOS)
                 print(f"Port {port} in use, retrying in 1s... (attempt {attempt + 1})")
                 time.sleep(1)

@@ -623,7 +623,7 @@ def test_show_path_cli_json_creates_page(monkeypatch, tmp_path, capsys):
         in payload["next_actions"]
     )
     assert (tmp_path / "show" / "ses123" / "index.html").exists()
-    assert captured["url"] == "http://127.0.0.1:5123/api/show/sessions/ses123/prewarm"
+    assert captured["url"] == "http://localhost:5123/api/show/sessions/ses123/prewarm"
     assert captured["payload"] == {}
     assert captured["timeout"] == 3
 
@@ -920,7 +920,7 @@ def test_show_update_cli_reports_transition_urls(monkeypatch, tmp_path, capsys):
     assert public_payload["previous_private_url"] == "https://alex.avibe.bot/show/ses123/"
     share_path = "/" + public_payload["public_url"].split("https://alex.avibe.bot/", 1)[1]
     assert prewarmed[-1] == (
-        "http://127.0.0.1:5123/api/show/sessions/ses123/prewarm",
+        "http://localhost:5123/api/show/sessions/ses123/prewarm",
         {"base_path": share_path},
     )
 
@@ -930,7 +930,7 @@ def test_show_update_cli_reports_transition_urls(monkeypatch, tmp_path, capsys):
     assert private_payload["visibility"] == "private"
     assert private_payload["active_url"] == "https://alex.avibe.bot/show/ses123/"
     assert private_payload["previous_public_url"] == public_payload["public_url"]
-    assert prewarmed[-1] == ("http://127.0.0.1:5123/api/show/sessions/ses123/prewarm", {})
+    assert prewarmed[-1] == ("http://localhost:5123/api/show/sessions/ses123/prewarm", {})
 
 
 def test_show_status_and_update_default_to_caller_session(monkeypatch, tmp_path, capsys):
@@ -1145,7 +1145,7 @@ def test_show_mark_cli_posts_to_live_ui_when_running(monkeypatch, tmp_path, caps
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["event"]["id"] == "show_evt_live"
-    assert captured["url"] == "http://127.0.0.1:5123/api/show/sessions/ses123/events"
+    assert captured["url"] == "http://localhost:5123/api/show/sessions/ses123/events"
     assert captured["client"] == "cli"
     assert captured["cli_token"] == show_cli_event_token()
     assert captured["payload"]["type"] == "assistant.mark.created"

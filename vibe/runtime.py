@@ -62,6 +62,20 @@ def get_ui_dist_path() -> Path:
     return dev_ui_path
 
 
+def get_ui_sandbox_dist_path() -> Path:
+    """Get the path to the protected Vault signing sandbox dist directory."""
+    project_root = get_project_root()
+    dev_sandbox_path = project_root / "ui" / "dist-sandbox"
+    if dev_sandbox_path.exists():
+        return dev_sandbox_path
+
+    package_sandbox_path = get_package_root() / "ui" / "dist-sandbox"
+    if package_sandbox_path.exists():
+        return package_sandbox_path
+
+    return dev_sandbox_path
+
+
 def get_service_main_path() -> Path:
     """Get the path to the main service entry point."""
     # First check if we're in development mode (main.py exists at project root)
@@ -972,18 +986,14 @@ def effective_ui_bind_host(config: V2Config, requested_host: str | None = None) 
     propagate the host from the inbound request without persisting it first;
     when omitted we fall back to ``config.ui.setup_host``.
     """
-    setup_host = (requested_host if requested_host is not None else config.ui.setup_host) or "127.0.0.1"
+    setup_host = (requested_host if requested_host is not None else config.ui.setup_host) or "localhost"
+    normalized = setup_host.strip()
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    if normalized.lower() == "localhost":
+        return "::1" if resolve_localhost_family() == "inet6" else "127.0.0.1"
     cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None)
     if cloud is not None and cloud.enabled:
-        normalized = setup_host.strip()
-        if normalized.startswith("[") and normalized.endswith("]"):
-            normalized = normalized[1:-1]
-        # "localhost" is ambiguous on dual-stack hosts and may even be
-        # exclusively IPv6. Resolve once and bind to a literal loopback that
-        # matches the family _origin_host_for_pairing will hand cloudflared,
-        # so the two sides cannot disagree without widening the local socket.
-        if normalized.lower() == "localhost":
-            return "::1" if resolve_localhost_family() == "inet6" else "127.0.0.1"
         try:
             address = ipaddress.ip_address(normalized)
         except ValueError:

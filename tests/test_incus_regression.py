@@ -40,6 +40,8 @@ def test_master_target_uses_stable_project_instance_and_port(monkeypatch: pytest
     assert target.project == "avr-master"
     assert target.instance == "avibe-master"
     assert target.host_port == 15130
+    assert target.vault_sandbox_host_port == 15131
+    assert target.vault_sandbox_port == 15131
 
 
 def test_master_target_uses_env_host_port(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -60,6 +62,7 @@ def test_master_target_uses_env_host_port(monkeypatch: pytest.MonkeyPatch) -> No
     )
 
     assert target.host_port == 15131
+    assert target.vault_sandbox_host_port == 15132
 
 
 def test_master_target_ignores_legacy_env_host_port(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -164,6 +167,7 @@ def test_worktree_target_slug_includes_path_hash(monkeypatch: pytest.MonkeyPatch
     assert target.project.startswith("avr-wt-feature-show-runtime-")
     assert target.instance.startswith("avibe-wt-feature-show-runtime-")
     assert target.host_port == 15234
+    assert target.vault_sandbox_host_port == 15235
 
 
 def test_remote_worktree_target_skips_local_port_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -186,6 +190,7 @@ def test_remote_worktree_target_skips_local_port_preflight(monkeypatch: pytest.M
     )
 
     assert target.host_port == 15200
+    assert target.vault_sandbox_host_port == 15201
 
 
 def test_worktree_target_reuses_mapped_port_without_allocation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -267,6 +272,7 @@ def test_project_config_marks_regression_target() -> None:
     assert "restricted.devices.proxy=allow" in config
     assert "user.avibe_regression.target=worktree" in config
     assert "user.avibe_regression.host_port=15200" in config
+    assert "user.avibe_regression.vault_sandbox_host_port=5124" in config
 
 
 def test_remote_ref_prefixes_resource_names_only() -> None:
@@ -356,7 +362,13 @@ def test_existing_instance_proxy_device_is_refreshed() -> None:
 
     rendered = [" ".join(command) for command, _ in commands]
     assert "incus --project avr-master config device remove avibe-master ui" in rendered
+    assert "incus --project avr-master config device remove avibe-master vault-sandbox" in rendered
     assert any("incus --project avr-master config device add avibe-master ui proxy listen=tcp:127.0.0.1:15131" in command for command in rendered)
+    assert any(
+        "incus --project avr-master config device add avibe-master vault-sandbox proxy listen=tcp:127.0.0.1:5124"
+        in command
+        for command in rendered
+    )
 
 
 def test_build_base_uses_publishable_temp_instance() -> None:
@@ -408,7 +420,9 @@ def test_source_exclude_drops_runtime_and_dependency_dirs() -> None:
     assert incus_regression.should_exclude(".runtime/state.json")
     assert incus_regression.should_exclude("ui/node_modules/pkg/index.js")
     assert incus_regression.should_exclude("ui/dist/assets/app.js")
+    assert incus_regression.should_exclude("ui/dist-sandbox/assets/app.js")
     assert not incus_regression.should_exclude("ui/dist/assets/app.js", include_ui_dist=True)
+    assert not incus_regression.should_exclude("ui/dist-sandbox/assets/app.js", include_ui_dist=True)
     assert incus_regression.should_exclude("pkg/__pycache__/x.pyc")
     assert incus_regression.should_exclude(".env")
     assert incus_regression.should_exclude(".env.regression")
@@ -456,6 +470,9 @@ def test_source_tar_can_include_existing_ui_dist_when_build_is_skipped(tmp_path:
     (tmp_path / "ui" / "dist" / "assets").mkdir(parents=True)
     (tmp_path / "ui" / "dist" / "index.html").write_text("<html></html>\n", encoding="utf-8")
     (tmp_path / "ui" / "dist" / "assets" / "app.js").write_text("console.log('ok')\n", encoding="utf-8")
+    (tmp_path / "ui" / "dist-sandbox" / "assets").mkdir(parents=True)
+    (tmp_path / "ui" / "dist-sandbox" / "index.html").write_text("<html></html>\n", encoding="utf-8")
+    (tmp_path / "ui" / "dist-sandbox" / "assets" / "sandbox.js").write_text("console.log('ok')\n", encoding="utf-8")
 
     payload = incus_regression.build_source_tar(tmp_path, include_ui_dist=True)
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r") as archive:
@@ -463,6 +480,8 @@ def test_source_tar_can_include_existing_ui_dist_when_build_is_skipped(tmp_path:
 
     assert "ui/dist/index.html" in names
     assert "ui/dist/assets/app.js" in names
+    assert "ui/dist-sandbox/index.html" in names
+    assert "ui/dist-sandbox/assets/sandbox.js" in names
 
 
 def test_sync_source_clears_stale_files_even_without_clean(tmp_path: Path) -> None:
@@ -540,6 +559,22 @@ def test_runtime_env_payload_forces_container_ui_host(monkeypatch: pytest.Monkey
     assert "REGRESSION_UI_HOST=127.0.0.1" in payload
     assert "REGRESSION_UI_HOST=192.168.2.3" not in payload
     assert "REGRESSION_UI_HOST=10.1.2.3" not in payload
+
+
+def test_runtime_env_payload_maps_vault_sandbox_main_origin() -> None:
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15130,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+
+    payload = incus_regression.runtime_env_payload(target=target).decode()
+
+    assert "VIBE_VAULT_SANDBOX_MAIN_ORIGIN=http://localhost:15130" in payload
 
 
 def test_load_env_file_accepts_export_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1210,7 +1245,7 @@ def test_up_checks_host_port_preflight_for_new_local_instance(tmp_path: Path, mo
     )
 
     assert incus_regression.cmd_up(args) == 0
-    assert preflight_calls == [("127.0.0.1", 15130)]
+    assert preflight_calls == [("127.0.0.1", 15130), ("127.0.0.1", 15131)]
 
 
 def test_up_checks_seed_env_before_target_mutation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1707,6 +1742,7 @@ def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatc
     monkeypatch.setattr(incus_regression, "load_env_file", lambda repo_root, env_file: None)
     monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
     monkeypatch.setattr(incus_regression, "Runner", ExistingRunner)
+    monkeypatch.setattr(incus_regression, "ensure_host_port_available", lambda *args, **kwargs: None)
     monkeypatch.setattr(incus_regression, "worktree_mapping_lock", mapping_lock)
     original_reserve_worktree_mapping = incus_regression.reserve_worktree_mapping
 
@@ -1760,6 +1796,7 @@ def test_up_reserves_worktree_port_under_mapping_lock(tmp_path: Path, monkeypatc
     payload = json.loads((tmp_path / ".runtime" / "incus-regression" / "worktrees.json").read_text(encoding="utf-8"))
     mapping = payload["worktrees"]["demo-branch"]
     assert mapping["host_port"] == 15200
+    assert mapping["vault_sandbox_host_port"] == 15201
     assert mapping["project"] == "avr-wt-demo-branch"
     assert "updated_at" in mapping
 
@@ -1788,6 +1825,8 @@ def test_normalize_runtime_config_updates_host_and_port() -> None:
     assert "ui.get(\"setup_host\") != '127.0.0.1'" in joined
     assert 'ui.get("setup_port") != 6123' in joined
     assert 'ui["setup_port"] = 6123' in joined
+    assert 'ui.get("vault_sandbox_port") != 5124' in joined
+    assert 'ui["vault_sandbox_port"] = 5124' in joined
 
 
 def test_stop_service_for_update_ignores_missing_service() -> None:
@@ -1880,7 +1919,7 @@ def test_force_ui_rebuilds_even_when_fingerprints_match() -> None:
 
     joined = "\n".join(commands)
     assert "cd ui && npm ci" in joined
-    assert "cd ui && npm run build" in joined
+    assert "cd ui && npm run build && npm run build:sandbox" in joined
     assert "pip install -e ." not in joined
 
 
@@ -1890,7 +1929,7 @@ def test_missing_ui_dist_overrides_no_build_ui_before_editable_install() -> None
     class RecordingRunner:
         def run(self, command, **kwargs):
             commands.append(" ".join(command))
-            if "test -d ui/dist" in commands[-1]:
+            if "test -d ui/dist && test -f ui/dist/index.html" in commands[-1]:
                 return subprocess.CompletedProcess(command, 1)
             return subprocess.CompletedProcess(command, 0)
 
@@ -1919,7 +1958,9 @@ def test_missing_ui_dist_overrides_no_build_ui_before_editable_install() -> None
     install_index = next(i for i, command in enumerate(commands) if "pip install -e ." in command)
     build_index = next(i for i, command in enumerate(commands) if "npm run build" in command)
     assert "test -d ui/dist && test -f ui/dist/index.html" in joined
+    assert "test -d ui/dist-sandbox && test -f ui/dist-sandbox/index.html" in joined
     assert "cd ui && npm ci" in joined
+    assert "npm run build && npm run build:sandbox" in joined
     assert build_index < install_index
 
 
@@ -1929,7 +1970,7 @@ def test_missing_ui_dist_rebuilds_even_when_python_is_unchanged() -> None:
     class RecordingRunner:
         def run(self, command, **kwargs):
             commands.append(" ".join(command))
-            if "test -d ui/dist" in commands[-1]:
+            if "test -d ui/dist && test -f ui/dist/index.html" in commands[-1]:
                 return subprocess.CompletedProcess(command, 1)
             return subprocess.CompletedProcess(command, 0)
 
@@ -1956,7 +1997,8 @@ def test_missing_ui_dist_rebuilds_even_when_python_is_unchanged() -> None:
 
     joined = "\n".join(commands)
     assert "test -d ui/dist && test -f ui/dist/index.html" in joined
-    assert "cd ui && npm run build" in joined
+    assert "test -d ui/dist-sandbox && test -f ui/dist-sandbox/index.html" in joined
+    assert "cd ui && npm run build && npm run build:sandbox" in joined
     assert "pip install -e ." not in joined
 
 
