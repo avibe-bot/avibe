@@ -1899,6 +1899,59 @@ def _approve_sibling_access_requests_for_grant(
     return approved
 
 
+def restore_access_request_after_failed_grant(
+    conn: Connection,
+    *,
+    created_by_request_id: str,
+    member_names: list[str] | set[str] | tuple[str, ...],
+    session_id: str | None,
+) -> int:
+    """Make a protected grant approval retryable after resident-agent relay fails."""
+
+    members = {str(name) for name in member_names if str(name)}
+    if not created_by_request_id or not members:
+        return 0
+    approval_row = conn.execute(select(vault_requests).where(vault_requests.c.id == created_by_request_id)).mappings().first()
+    if approval_row is None or approval_row.get("status") != "approved":
+        return 0
+    decided_at = approval_row.get("decided_at")
+    target_session_id = session_id or _request_session_id(dict(approval_row))
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            select(vault_requests).where(
+                vault_requests.c.request_type == "access",
+                vault_requests.c.status == "approved",
+                vault_requests.c.secret_name.in_(members),
+            )
+        ).mappings()
+        if row["id"] == created_by_request_id
+        or (
+            target_session_id
+            and row.get("decided_at") == decided_at
+            and _request_session_id(dict(row)) == target_session_id
+        )
+    ]
+    restored = 0
+    for row in rows:
+        result = conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id == row["id"], vault_requests.c.status == "approved")
+            .values(status="pending", decided_at=None)
+        )
+        if result.rowcount != 1:
+            continue
+        audit(
+            conn,
+            "request-restored-after-grant-relay-failed",
+            secret_name=row.get("secret_name"),
+            delivery={"request_type": "access", "session_id": target_session_id},
+            request_id=row["id"],
+        )
+        restored += 1
+    return restored
+
+
 def create_grant(
     conn: Connection,
     *,

@@ -588,6 +588,64 @@ def test_run_prefers_common_grant_for_protected_batch(tmp_path, capfd, monkeypat
     assert [secret["name"] for secret in deliver.call_args.kwargs["secrets"]] == ["A_KEY", "B_KEY"]
 
 
+def test_run_uses_session_bound_protected_grant(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    monkeypatch.chdir(tmp_path)
+    _set_protected_grant("PROTECTED_KEY", session_id="ses_cli")
+    deliver = Mock(return_value={"exit_code": 0, "stdout": b"", "stderr": b""})
+    monkeypatch.setattr(api, "avault_agent_deliver_run", deliver)
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
+
+    assert code == 0
+    deliver.assert_called_once()
+    assert deliver.call_args.kwargs["secrets"][0]["name"] == "PROTECTED_KEY"
+    assert deliver.call_args.kwargs["scope_ref"] == "PROTECTED_KEY"
+
+
+def test_fetch_uses_session_bound_protected_grant(capfd, monkeypatch):
+    from vibe import api
+
+    grant = _set_protected_grant("PROTECTED_KEY", session_id="ses_cli")
+    with cli._open_vault_engine().begin() as conn:
+        row = conn.execute(vault_service.vault_secrets.select().where(vault_service.vault_secrets.c.name == "PROTECTED_KEY")).mappings().one()
+        conn.execute(
+            vault_service.vault_secrets.update()
+            .where(vault_service.vault_secrets.c.name == "PROTECTED_KEY")
+            .values(policy=json.dumps({"allowed_hosts": ["example.com"], "auth": {"type": "bearer"}}))
+        )
+    assert row["name"] == "PROTECTED_KEY"
+    deliver = Mock(return_value={"status": 200, "headers": {}, "body": "ok"})
+    monkeypatch.setattr(api, "avault_agent_deliver_fetch", deliver)
+
+    code = cli.cmd_vault_fetch(_ns(auth="PROTECTED_KEY", url="https://example.com/api", method="GET", output=None, session_id="ses_cli"))
+    captured = capfd.readouterr()
+
+    assert code == 0
+    assert captured.out == "ok"
+    deliver.assert_called_once()
+    assert deliver.call_args.kwargs["scope_ref"] == grant["scope_ref"]
+    assert deliver.call_args.kwargs["sealed"] == _sealed("protected")
+
+
+def test_inject_resolver_uses_session_bound_protected_grant(tmp_path):
+    grant = _set_protected_grant("PROTECTED_KEY", session_id="ses_cli")
+    engine = cli._open_vault_engine()
+
+    resolved_grant, secrets = cli._resolve_vault_inject_delivery(
+        engine,
+        ["PROTECTED_KEY"],
+        path=str(tmp_path / "out.env"),
+        fmt="dotenv",
+        args=_ns(session_id="ses_cli"),
+    )
+
+    assert resolved_grant["id"] == grant["id"]
+    assert secrets == [{"name": "PROTECTED_KEY", "key": "PROTECTED_KEY", "envelope": _sealed("protected")}]
+
+
 def test_run_rejects_mixed_tiers_before_creating_approval(tmp_path, capfd, monkeypatch):
     _set_secret("STANDARD_KEY", "standard", tmp_path, monkeypatch, capfd)
     with cli._open_vault_engine().begin() as conn:

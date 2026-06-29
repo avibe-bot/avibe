@@ -1709,14 +1709,8 @@ def _grant_dek_entries_from_payload(payload: dict) -> object:
     if deks is None and isinstance(payload.get("deks_by_secret"), dict):
         deks = []
         for name, dek in payload["deks_by_secret"].items():
-            if isinstance(dek, dict) and "dek_blindbox" in dek:
-                deks.append(
-                    {
-                        "name": name,
-                        "dek_blindbox": dek.get("dek_blindbox"),
-                        "approval": dek.get("approval"),
-                    }
-                )
+            if isinstance(dek, dict):
+                deks.append({"name": name, **dek})
             else:
                 deks.append({"name": name, "dek_blindbox": dek, "approval": None})
     return deks
@@ -1749,8 +1743,11 @@ def _access_request_secret_name(request_id: str) -> str:
     from storage import vault_service
 
     engine = _vault_engine()
-    with engine.begin() as conn:
-        request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+    try:
+        with engine.begin() as conn:
+            request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+    except vault_service.RequestNotFoundError as exc:
+        raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
     if request.get("request_type") != "access":
         raise VaultApiError("access fulfillment must target an access request", code="invalid_request", status=409)
     name = str(request.get("secret_name") or "").strip()
@@ -1928,6 +1925,13 @@ def create_vault_grant(payload: dict) -> dict:
             force_release_on_cleanup_failure=True,
             force_release_scope=True,
         )
+        with contextlib.suppress(Exception), engine.begin() as conn:
+            vault_service.restore_access_request_after_failed_grant(
+                conn,
+                created_by_request_id=str(request_id),
+                member_names=list(expected_member_names or []),
+                session_id=str(grant.get("session_id") or "") or None,
+            )
         raise _vault_api_error_from_avault(exc, prefix="avault agent grant failed") from exc
     except Exception:
         if agent_relayed:

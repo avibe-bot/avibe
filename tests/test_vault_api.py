@@ -923,6 +923,47 @@ def test_fulfill_access_request_rejects_dek_or_plaintext_material(monkeypatch, a
     assert grants == []
 
 
+def test_fulfill_access_request_rejects_raw_material_in_deks_by_secret(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_KEY",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct-protected", "nonce": "n-protected", "wrap_meta": "wm-protected"},
+        }
+    )
+    requested = api.request_vault_access({"name": "PROTECTED_KEY", "session_id": "ses_1"})
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.fulfill_vault_access_request(
+            requested["request"]["id"],
+            {
+                "session_id": "ses_1",
+                "deks_by_secret": {
+                    "PROTECTED_KEY": {
+                        "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                        "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                        "dek": "raw-dek-must-not-cross-python-agent-boundary",
+                        "value": "plaintext-must-not-cross-python-agent-boundary",
+                    }
+                },
+            },
+        )
+
+    assert exc.value.code == "invalid_grant"
+    assert "opaque blind-box metadata" in str(exc.value)
+    agent_grant.assert_not_called()
+    with api._vault_engine().connect() as conn:
+        status = conn.execute(
+            select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == requested["request"]["id"])
+        ).scalar_one()
+        grants = vault_service.list_grants(conn, status=None)
+    assert status == "pending"
+    assert grants == []
+
+
 def test_fulfill_access_request_rejects_protected_keypair_value_delivery(monkeypatch, avault_p2):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
@@ -1373,7 +1414,7 @@ def test_create_grant_api_expires_grant_when_agent_grant_fails(monkeypatch, avau
     with api._vault_engine().connect() as conn:
         status = conn.execute(select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == req["id"])).scalar_one()
         grants = vault_service.list_grants(conn, status=None)
-    assert status == "approved"
+    assert status == "pending"
     assert len(grants) == 1
     assert grants[0]["status"] == "expired"
     assert grants[0]["delivery_ready"] is False
@@ -1414,7 +1455,9 @@ def test_create_grant_api_rejects_partial_agent_cache(monkeypatch, avault_p2):
     assert exc.value.code == "avault_failed"
     assert "cached fewer DEKs" in str(exc.value)
     with api._vault_engine().connect() as conn:
+        status = conn.execute(select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == req["id"])).scalar_one()
         grants = vault_service.list_grants(conn, status=None)
+    assert status == "pending"
     assert len(grants) == 1
     assert grants[0]["status"] == "expired"
     assert grants[0]["delivery_ready"] is False

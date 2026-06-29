@@ -237,6 +237,28 @@ def test_rest_fulfill_access_request_route(monkeypatch):
     assert agent_grant.call_count == 1
 
 
+def test_rest_fulfill_access_request_unknown_default_scope_returns_vault_error(monkeypatch):
+    _mock_avault_p2(monkeypatch)
+    client = app.test_client()
+
+    response = client.post(
+        "/api/vault/requests/vrq_missing/fulfill-access",
+        json={
+            "deks": [
+                {
+                    "name": "PROTECTED_REST",
+                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                }
+            ],
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 404
+    assert response.get_json()["code"] == "request_not_found"
+
+
 def test_rest_sign_errors_are_stable(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     client = app.test_client()
