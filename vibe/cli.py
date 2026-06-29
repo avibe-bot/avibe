@@ -4824,6 +4824,11 @@ def cmd_vault_fetch(args):
         # envelope to avault, so a disallowed target never even unwraps the secret.
         with engine.connect() as conn:
             policy = vault_service.get_secret_policy(conn, name)
+            meta = vault_service.get_secret_meta(conn, name)
+            if meta.get("kind") == "keypair":
+                raise vault_service.KeypairNotValueDeliverableError(
+                    f"{name} is a signing key; use vault_sign instead of value delivery"
+                )
             allowed = policy.get("allowed_hosts") or []
             if not allowed:
                 raise TaskCliError(

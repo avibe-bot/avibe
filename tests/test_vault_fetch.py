@@ -120,7 +120,6 @@ def test_fetch_rejects_keypair_before_avault_delivery(capfd, monkeypatch):
             sealed=_sealed("eth"),
             kind="keypair",
             signer_kind="local",
-            policy={"allowed_hosts": ["api.example.com"]},
         )
     fetch = Mock()
     monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
