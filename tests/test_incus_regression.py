@@ -676,6 +676,22 @@ def test_runtime_env_payload_maps_vault_sandbox_main_origin() -> None:
     assert "VIBE_VAULT_SANDBOX_MAIN_ORIGIN=http://127.0.0.1:15130" in payload
 
 
+def test_runtime_env_payload_brackets_ipv6_sandbox_main_origin() -> None:
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15130,
+        ui_host="::1",
+        ui_port=5123,
+    )
+
+    payload = incus_regression.runtime_env_payload(target=target).decode()
+
+    assert "VIBE_VAULT_SANDBOX_MAIN_ORIGIN='http://[::1]:15130'" in payload
+
+
 def test_load_env_file_accepts_export_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     env_file = tmp_path / ".env.regression"
     env_file.write_text("export REGRESSION_SLACK_CHANNEL=C123\n", encoding="utf-8")
@@ -1145,6 +1161,32 @@ def test_update_runtime_env_derived_values_preserves_existing_env() -> None:
     assert 'chown root:avibe "$path"' in joined_command
     assert 'chmod 0640 "$path"' in joined_command
     assert b"shlex.quote(value)" in inputs[0]
+
+
+def test_update_runtime_env_derived_values_brackets_ipv6_origin() -> None:
+    commands = []
+
+    class RecordingRunner:
+        dry_run = True
+
+        def run(self, command, *, input_bytes=None, **kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15130,
+        ui_host="::1",
+        ui_port=5123,
+    )
+
+    incus_regression.update_runtime_env_derived_values(RecordingRunner(), target, remote=None)
+
+    joined_command = " ".join(commands[0])
+    assert "'http://[::1]:15130'" in joined_command
 
 
 def test_cleanup_stale_deletes_missing_worktree_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

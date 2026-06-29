@@ -347,6 +347,15 @@ def tcp_endpoint(host: str, port: int) -> str:
     return f"tcp:[{unbracket_host(host)}]:{port}" if is_ipv6_host(host) else f"tcp:{host}:{port}"
 
 
+def url_host(host: str) -> str:
+    unbracketed = unbracket_host(host)
+    return f"[{unbracketed}]" if is_ipv6_host(host) else unbracketed
+
+
+def http_origin(host: str, port: int) -> str:
+    return f"http://{url_host(host)}:{port}"
+
+
 def ensure_host_port_available(host: str, port: int) -> None:
     family = socket.AF_INET6 if is_ipv6_host(host) else socket.AF_INET
     with socket.socket(family, socket.SOCK_STREAM) as sock:
@@ -884,7 +893,7 @@ def runtime_env_payload(repo_root: Path | None = None, target: RegressionTarget 
         "OPENAI_API_BASE": os.environ.get("OPENAI_API_BASE", ""),
     }
     if target is not None:
-        mappings["VIBE_VAULT_SANDBOX_MAIN_ORIGIN"] = f"http://{target.ui_host}:{target.host_port}"
+        mappings["VIBE_VAULT_SANDBOX_MAIN_ORIGIN"] = http_origin(target.ui_host, target.host_port)
     for key, value in os.environ.items():
         if key == "REGRESSION_UI_HOST":
             continue
@@ -934,7 +943,7 @@ def write_runtime_env(runner: Runner, target: RegressionTarget, *, repo_root: Pa
 
 
 def update_runtime_env_derived_values(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
-    sandbox_origin = f"http://{target.ui_host}:{target.host_port}"
+    sandbox_origin = http_origin(target.ui_host, target.host_port)
     script = textwrap.dedent("""
         import shlex
         import sys
@@ -1509,8 +1518,8 @@ def cmd_up(args: argparse.Namespace) -> int:
 def print_summary(target: RegressionTarget) -> None:
     print("")
     print("Incus regression environment is ready:")
-    print(f"  URL: http://{target.ui_host}:{target.host_port}")
-    print(f"  Vault sandbox URL: http://{target.ui_host}:{target.vault_sandbox_host_port}")
+    print(f"  URL: {http_origin(target.ui_host, target.host_port)}")
+    print(f"  Vault sandbox URL: {http_origin(target.ui_host, target.vault_sandbox_host_port)}")
     print(f"  Target: {target.target}")
     print(f"  Project: {target.project}")
     print(f"  Instance: {target.instance}")
