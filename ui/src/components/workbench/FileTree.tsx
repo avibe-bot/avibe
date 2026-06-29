@@ -172,18 +172,28 @@ const Dir: React.FC<{ path: string; name: string; depth: number }> = ({ path, na
   const parent = parentDir(path);
   const renamingSelf = !isRoot && tree.edit?.mode === 'rename' && tree.edit.dir === parent && tree.edit.target === name;
 
+  // Drop out-of-order responses: a post-mutation reload (bump) can race an in-flight pre-mutation
+  // listDir for the same folder, and the stale one landing last would hide a just-created item or
+  // resurrect a renamed/deleted row. Only the latest request's result is applied.
+  const loadSeq = useRef(0);
   const load = useCallback(() => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     setError(null);
     listDir(path, tree.showHidden)
-      .then((r) => setEntries(sortEntries(r.entries)))
+      .then((r) => {
+        if (seq === loadSeq.current) setEntries(sortEntries(r.entries));
+      })
       .catch((e: unknown) => {
+        if (seq !== loadSeq.current) return;
         // Don't render an unlistable folder as an empty one — surface the failure so the user knows
         // entries are hidden by an error (permission/deletion/transient), not absent.
         setEntries([]);
         setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.listFailed')));
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (seq === loadSeq.current) setLoading(false);
+      });
   }, [path, tree.showHidden, t]);
 
   // Load when opened, when the hidden toggle flips (load identity changes), and when this dir's

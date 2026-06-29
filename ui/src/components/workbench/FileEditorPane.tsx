@@ -167,9 +167,11 @@ export const FileEditorPane: React.FC<{
     }
     // A tab's path only changes from one real file to another when the explorer renamed it (this tab
     // was repointed) — the bytes on disk are unchanged. Re-reading would silently replace an unsaved
-    // buffer with the last-saved contents, so adopt the new save target WITHOUT reloading. (Initial
-    // open and reloadNonce-forced reloads — where the path is unchanged — still read below.)
-    if (prev !== null && prev !== path) {
+    // buffer with the last-saved contents, so adopt the new save target WITHOUT reloading — BUT only
+    // once a buffer actually exists to preserve. If the rename lands before the initial read finished
+    // (text still null), fall through and read the new path so the pane doesn't go blank. (Initial
+    // open and reloadNonce-forced reloads — where the path is unchanged — also read below.)
+    if (prev !== null && prev !== path && text !== null) {
       setLoading(false);
       return;
     }
