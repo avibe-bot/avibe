@@ -111,6 +111,14 @@ def test_vault_sandbox_main_origin_can_be_overridden_for_regression_proxy(monkey
     assert ui_server._vault_sandbox_main_origin(None, "localhost", 5123) == "http://localhost:5123"
 
 
+def test_vault_sandbox_bind_host_follows_wildcard_ui_host():
+    assert ui_server._vault_sandbox_bind_host("0.0.0.0") == "0.0.0.0"
+    assert ui_server._vault_sandbox_bind_host("*") == "0.0.0.0"
+    assert ui_server._vault_sandbox_bind_host("::") == "::"
+    assert ui_server._vault_sandbox_bind_host("localhost") == "127.0.0.1"
+    assert ui_server._vault_sandbox_bind_host("127.0.0.1") == "127.0.0.1"
+
+
 def test_vault_sandbox_lifespan_starts_second_listener(monkeypatch):
     calls = []
     config = type("Config", (), {"ui": UiConfig(vault_sandbox_port=6124)})()

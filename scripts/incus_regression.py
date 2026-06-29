@@ -63,6 +63,7 @@ DEFAULT_WORKTREE_PORT_START = 15200
 DEFAULT_WORKTREE_PORT_END = 15399
 ENV_FILE_NAME = ".env.regression"
 ENV_PREFIX = "REGRESSION_"
+VAULT_SANDBOX_MAIN_ORIGIN_ENV = "VIBE_VAULT_SANDBOX_MAIN_ORIGIN"
 SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,38}[a-z0-9]$")
 
 
@@ -799,11 +800,13 @@ def compute_fingerprints(repo_root: Path) -> dict:
     ui_source_parts = [
         tree_hash(repo_root / "ui" / "src"),
         tree_hash(repo_root / "ui" / "public"),
+        tree_hash(repo_root / "ui" / "sandbox"),
         file_hash(
             repo_root,
             [
                 "ui/index.html",
                 "ui/vite.config.ts",
+                "ui/vite.sandbox.config.ts",
                 "ui/tsconfig.json",
                 "ui/tsconfig.app.json",
                 "ui/tsconfig.node.json",
@@ -920,6 +923,42 @@ def write_runtime_env(runner: Runner, target: RegressionTarget, *, repo_root: Pa
         ),
         input_bytes=b"" if runner.dry_run else runtime_env_payload(repo_root, target),
     )
+
+
+def update_runtime_env_derived_values(runner: Runner, target: RegressionTarget, *, remote: str | None) -> None:
+    sandbox_origin = f"http://{target.ui_host}:{target.host_port}"
+    script = textwrap.dedent("""
+        import shlex
+        import sys
+        from pathlib import Path
+
+        path = Path(sys.argv[1])
+        key = sys.argv[2]
+        value = sys.argv[3]
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        prefix = key + "="
+        replacement = f"{key}={shlex.quote(value)}"
+        changed = False
+        output = []
+        for line in lines:
+            if line.startswith(prefix):
+                output.append(replacement)
+                changed = True
+            else:
+                output.append(line)
+        if not changed:
+            output.append(replacement)
+        path.write_text("\\n".join(output) + "\\n", encoding="utf-8")
+    """).strip()
+    command = textwrap.dedent(f"""
+        set -e
+        path=/etc/avibe-regression.env
+        touch "$path"
+        python3 - "$path" {shlex.quote(VAULT_SANDBOX_MAIN_ORIGIN_ENV)} {shlex.quote(sandbox_origin)}
+        chown root:{SERVICE_USER} "$path"
+        chmod 0640 "$path"
+    """).strip()
+    runner.run(root_exec(target, command, remote=remote), input_bytes=script.encode("utf-8"))
 
 
 def read_existing_fingerprints(runner: Runner, target: RegressionTarget, *, remote: str | None) -> dict:
@@ -1434,6 +1473,7 @@ def cmd_up(args: argparse.Namespace) -> int:
             write_runtime_env(runner, target, repo_root=repo_root, remote=args.remote)
         else:
             print("No regression env file loaded; preserving existing runtime env file.")
+            update_runtime_env_derived_values(runner, target, remote=args.remote)
         sync_source(runner, target, repo_root, remote=args.remote, clean=args.clean, include_ui_dist=args.no_build_ui)
         fingerprints = compute_fingerprints(repo_root)
         previous_fingerprints = read_existing_fingerprints(runner, target, remote=args.remote)

@@ -557,6 +557,32 @@ def test_ui_public_assets_are_part_of_source_fingerprint(tmp_path: Path) -> None
     assert before != after
 
 
+def test_ui_sandbox_assets_are_part_of_source_fingerprint(tmp_path: Path) -> None:
+    (tmp_path / "ui" / "src").mkdir(parents=True)
+    (tmp_path / "ui" / "public").mkdir(parents=True)
+    (tmp_path / "ui" / "sandbox" / "src").mkdir(parents=True)
+    (tmp_path / "ui" / "sandbox" / "src" / "main.tsx").write_text("one\n", encoding="utf-8")
+
+    before = incus_regression.compute_fingerprints(tmp_path)["ui_source"]
+    (tmp_path / "ui" / "sandbox" / "src" / "main.tsx").write_text("two\n", encoding="utf-8")
+    after = incus_regression.compute_fingerprints(tmp_path)["ui_source"]
+
+    assert before != after
+
+
+def test_ui_sandbox_config_is_part_of_source_fingerprint(tmp_path: Path) -> None:
+    (tmp_path / "ui" / "src").mkdir(parents=True)
+    (tmp_path / "ui" / "public").mkdir(parents=True)
+    (tmp_path / "ui" / "sandbox").mkdir(parents=True)
+    (tmp_path / "ui" / "vite.sandbox.config.ts").write_text("one\n", encoding="utf-8")
+
+    before = incus_regression.compute_fingerprints(tmp_path)["ui_source"]
+    (tmp_path / "ui" / "vite.sandbox.config.ts").write_text("two\n", encoding="utf-8")
+    after = incus_regression.compute_fingerprints(tmp_path)["ui_source"]
+
+    assert before != after
+
+
 def test_runtime_env_payload_maps_show_runtime_and_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("REGRESSION_SHOW_RUNTIME_GITHUB_REF", "main")
     monkeypatch.setenv("REGRESSION_SLACK_CHANNEL", "C123")
@@ -1048,6 +1074,39 @@ def test_write_runtime_env_uses_stdin_not_command_line() -> None:
     assert "chmod 0640 /etc/avibe-regression.env" in joined_command
     assert b"VIBE_SHOW_RUNTIME_SOURCE" in inputs[0]
     assert "OPENAI_API_KEY" not in joined_command
+
+
+def test_update_runtime_env_derived_values_preserves_existing_env() -> None:
+    commands = []
+    inputs = []
+
+    class RecordingRunner:
+        dry_run = True
+
+        def run(self, command, *, input_bytes=None, **kwargs):
+            commands.append(command)
+            inputs.append(input_bytes)
+            return subprocess.CompletedProcess(command, 0)
+
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15130,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+
+    incus_regression.update_runtime_env_derived_values(RecordingRunner(), target, remote="lab")
+
+    joined_command = " ".join(commands[0])
+    assert commands[0][:5] == ["incus", "--project", "avr-master", "exec", "lab:avibe-master"]
+    assert "VIBE_VAULT_SANDBOX_MAIN_ORIGIN" in joined_command
+    assert "http://127.0.0.1:15130" in joined_command
+    assert 'chown root:avibe "$path"' in joined_command
+    assert 'chmod 0640 "$path"' in joined_command
+    assert b"shlex.quote(value)" in inputs[0]
 
 
 def test_cleanup_stale_deletes_missing_worktree_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1557,6 +1616,7 @@ def test_up_stops_old_service_before_mutating_runtime(tmp_path: Path, monkeypatc
     monkeypatch.setattr(incus_regression, "ensure_project_and_instance", record("ensure_project_and_instance"))
     monkeypatch.setattr(incus_regression, "stop_service_for_update", record("stop_service_for_update"))
     monkeypatch.setattr(incus_regression, "write_runtime_env", record("write_runtime_env"))
+    monkeypatch.setattr(incus_regression, "update_runtime_env_derived_values", record("update_runtime_env_derived_values"))
     monkeypatch.setattr(incus_regression, "should_seed_state", lambda *args, **kwargs: False)
     monkeypatch.setattr(incus_regression, "sync_source", record("sync_source"))
     monkeypatch.setattr(incus_regression, "compute_fingerprints", lambda repo_root: {})
@@ -1625,6 +1685,7 @@ def test_up_preserves_runtime_env_when_existing_target_has_no_env_file(tmp_path:
     monkeypatch.setattr(incus_regression, "ensure_project_and_instance", record("ensure_project_and_instance"))
     monkeypatch.setattr(incus_regression, "stop_service_for_update", record("stop_service_for_update"))
     monkeypatch.setattr(incus_regression, "write_runtime_env", record("write_runtime_env"))
+    monkeypatch.setattr(incus_regression, "update_runtime_env_derived_values", record("update_runtime_env_derived_values"))
     monkeypatch.setattr(incus_regression, "should_seed_state", lambda *args, **kwargs: False)
     monkeypatch.setattr(incus_regression, "sync_source", record("sync_source"))
     monkeypatch.setattr(incus_regression, "compute_fingerprints", lambda repo_root: {})
@@ -1663,6 +1724,9 @@ def test_up_preserves_runtime_env_when_existing_target_has_no_env_file(tmp_path:
 
     assert incus_regression.cmd_up(args) == 0
     assert "write_runtime_env" not in calls
+    assert "update_runtime_env_derived_values" in calls
+    assert calls.index("stop_service_for_update") < calls.index("update_runtime_env_derived_values")
+    assert calls.index("update_runtime_env_derived_values") < calls.index("sync_source")
     assert calls.index("stop_service_for_update") < calls.index("sync_source")
 
 

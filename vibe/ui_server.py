@@ -7909,6 +7909,10 @@ def _vault_sandbox_bind_host(ui_host: str) -> str:
     normalized = (ui_host or "").strip()
     if normalized.startswith("[") and normalized.endswith("]"):
         normalized = normalized[1:-1]
+    if normalized in {"", "0.0.0.0", "*"}:
+        return "0.0.0.0"
+    if normalized == "::":
+        return "::"
     if ":" in normalized and normalized not in {"0.0.0.0", "*"}:
         return "::1"
     return "127.0.0.1"
