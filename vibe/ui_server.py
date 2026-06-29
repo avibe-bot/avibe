@@ -5483,6 +5483,72 @@ async def files_delete(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.get("/api/files/search", include_in_schema=False)
+async def files_search(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        args = request.args
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.search,
+                    args.get("root") or "",
+                    args.get("query") or "",
+                    regex=args.get("regex") == "1",
+                    case_sensitive=args.get("case") == "1",
+                    whole_word=args.get("word") == "1",
+                    include=args.get("include") or "",
+                    exclude=args.get("exclude") or "",
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/files/search/replace", include_in_schema=False)
+async def files_search_replace(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.replace,
+                    payload.get("root") or "",
+                    payload.get("query") or "",
+                    payload.get("replacement") or "",
+                    regex=_parse_explicit_bool(payload.get("regex")),
+                    case_sensitive=_parse_explicit_bool(payload.get("case")),
+                    whole_word=_parse_explicit_bool(payload.get("word")),
+                    include=payload.get("include") or "",
+                    exclude=payload.get("exclude") or "",
+                    paths=payload.get("paths"),
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/files/search/undo", include_in_schema=False)
+async def files_search_undo(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        payload = request.json or {}
+        try:
+            return jsonify(await asyncio.to_thread(file_browser_service.undo_replace, payload.get("token") or ""))
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 # Content types the media proxy is willing to serve ``inline``. Anything else —
 # text/html, image/svg+xml, xml, application/octet-stream, unknown — is forced to
 # ``attachment`` so a preview-open of agent-produced ACTIVE content can't execute

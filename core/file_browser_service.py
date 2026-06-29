@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import fnmatch
+import hashlib
 import logging
 import mimetypes
 import os
+import re
 import shutil
 import stat
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -902,3 +906,288 @@ def delete_path(raw_path: str, *, recursive: bool = False) -> dict[str, Any]:
             raise FileBrowserError("fs_error", str(exc), 400) from exc
 
     return _run_mutation("delete", target, _delete, recursive=recursive)
+
+
+# ---------------------------------------------------------------------------
+# Cross-file search + replace
+#
+# Search walks an absolute root directory (the folder open in the editor) and
+# scans text files line-by-line. Matching is unified through a single compiled
+# regex so search, replace, and the UI preview all agree on what a "match" is.
+# Replace is per-line (same semantics as search/preview) and snapshots the
+# original text so the whole batch can be undone with one click.
+# ---------------------------------------------------------------------------
+
+SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024
+SEARCH_MAX_MATCHES = 1000
+SEARCH_MAX_FILES = 200
+SEARCH_LINE_PREVIEW_CHARS = 400
+_BINARY_SNIFF_BYTES = 8192
+
+# Directories never worth searching — VCS metadata, dependency/build output,
+# caches. Pruned during the walk so we never descend into huge noise trees.
+SEARCH_SKIP_DIRS = frozenset(
+    {
+        ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
+        ".mypy_cache", ".pytest_cache", ".ruff_cache", ".cache", "dist", "build",
+        ".next", ".turbo", ".parcel-cache", ".gradle", "target", ".idea", ".tox",
+    }
+)
+
+_UNDO_TTL_SECONDS = 600.0
+_UNDO_MAX_TOKENS = 32
+_UNDO_STORE: dict[str, dict[str, Any]] = {}
+_UNDO_LOCK = threading.Lock()
+
+
+def _compile_search_matcher(query: str, *, regex: bool, case_sensitive: bool, whole_word: bool) -> "re.Pattern[str]":
+    if not isinstance(query, str) or query == "":
+        raise FileBrowserError("invalid_query", "Search query is required", 400)
+    pattern = query if regex else re.escape(query)
+    if whole_word:
+        pattern = rf"\b(?:{pattern})\b"
+    flags = 0 if case_sensitive else re.IGNORECASE
+    try:
+        return re.compile(pattern, flags)
+    except re.error as exc:
+        raise FileBrowserError("invalid_regex", f"Invalid regular expression: {exc}", 400) from exc
+
+
+def _split_globs(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [piece.strip() for piece in str(raw).replace("\n", ",").split(",") if piece.strip()]
+
+
+def _match_globs(rel_posix: str, patterns: list[str]) -> bool:
+    name = rel_posix.rsplit("/", 1)[-1]
+    return any(fnmatch.fnmatch(rel_posix, pat) or fnmatch.fnmatch(name, pat) for pat in patterns)
+
+
+def _read_file_text(path: Path, *, lossy: bool) -> str | None:
+    """Read a regular text file for search/replace, or None to skip it.
+
+    Skips directories, oversized files, and binaries (NUL in the first chunk).
+    ``lossy`` controls undecodable bytes: search previews tolerate replacement
+    characters; replace must not, so it returns None and leaves the file alone.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode) or st.st_size > SEARCH_MAX_FILE_BYTES:
+        return None
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(_BINARY_SNIFF_BYTES)
+            if b"\x00" in head:
+                return None
+            data = head + handle.read()
+    except OSError:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        if not lossy:
+            return None
+        return data.decode("utf-8", errors="replace")
+
+
+def _iter_search_files(root: Path, include: list[str], exclude: list[str]):
+    """Yield (path, rel_posix) for every candidate file under ``root``."""
+    exclude_names = [pat for pat in exclude if "/" not in pat]
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = sorted(
+            d for d in dirnames if d not in SEARCH_SKIP_DIRS and not _match_globs(d, exclude_names)
+        )
+        base = Path(dirpath)
+        for name in sorted(filenames):
+            fpath = base / name
+            rel = fpath.relative_to(root).as_posix()
+            if include and not _match_globs(rel, include):
+                continue
+            if exclude and _match_globs(rel, exclude):
+                continue
+            yield fpath, rel
+
+
+def _scan_lines(text: str, matcher: "re.Pattern[str]", remaining: int) -> tuple[list[dict[str, Any]], bool]:
+    matches: list[dict[str, Any]] = []
+    for line_no, line in enumerate(text.split("\n"), start=1):
+        for m in matcher.finditer(line):
+            matches.append(
+                {
+                    "line": line_no,
+                    "col": m.start(),
+                    "end": m.end(),
+                    "text": line[:SEARCH_LINE_PREVIEW_CHARS],
+                    "line_truncated": len(line) > SEARCH_LINE_PREVIEW_CHARS,
+                }
+            )
+            if len(matches) >= remaining:
+                return matches, True
+    return matches, False
+
+
+def search(
+    raw_root: str,
+    query: str,
+    *,
+    regex: bool = False,
+    case_sensitive: bool = False,
+    whole_word: bool = False,
+    include: str = "",
+    exclude: str = "",
+    max_matches: int = SEARCH_MAX_MATCHES,
+    max_files: int = SEARCH_MAX_FILES,
+) -> dict[str, Any]:
+    root = _require_directory(raw_root)
+    matcher = _compile_search_matcher(query, regex=regex, case_sensitive=case_sensitive, whole_word=whole_word)
+    include_globs = _split_globs(include)
+    exclude_globs = _split_globs(exclude)
+
+    results: list[dict[str, Any]] = []
+    total_matches = 0
+    truncated = False
+    reason: str | None = None
+    for fpath, rel in _iter_search_files(root, include_globs, exclude_globs):
+        text = _read_file_text(fpath, lossy=True)
+        if text is None:
+            continue
+        file_matches, hit_cap = _scan_lines(text, matcher, max_matches - total_matches)
+        if not file_matches:
+            continue
+        results.append({"path": str(fpath), "rel": rel, "match_count": len(file_matches), "matches": file_matches})
+        total_matches += len(file_matches)
+        if hit_cap or total_matches >= max_matches:
+            truncated = True
+            reason = "matches"
+            break
+        if len(results) >= max_files:
+            truncated = True
+            reason = "files"
+            break
+    return {
+        "root": str(root),
+        "query": query,
+        "results": results,
+        "total_matches": total_matches,
+        "total_files": len(results),
+        "truncated": truncated,
+        "truncated_reason": reason,
+    }
+
+
+def _apply_replacement(text: str, matcher: "re.Pattern[str]", replacement: str, *, regex: bool) -> tuple[str, int]:
+    # Per-line replace so the count and behavior match the per-line search/preview.
+    # Literal mode treats the replacement verbatim (a lambda avoids backref expansion);
+    # regex mode keeps Python's \1-style backreferences.
+    repl: Any = replacement if regex else (lambda _m: replacement)
+    out: list[str] = []
+    total = 0
+    for line in text.split("\n"):
+        try:
+            new_line, count = matcher.subn(repl, line)
+        except re.error as exc:
+            raise FileBrowserError("invalid_regex", f"Invalid replacement: {exc}", 400) from exc
+        out.append(new_line)
+        total += count
+    return "\n".join(out), total
+
+
+def _store_undo(token: str, files: dict[str, Any]) -> None:
+    now = time.monotonic()
+    with _UNDO_LOCK:
+        for stale in [key for key, value in _UNDO_STORE.items() if now - value["created"] > _UNDO_TTL_SECONDS]:
+            _UNDO_STORE.pop(stale, None)
+        while len(_UNDO_STORE) >= _UNDO_MAX_TOKENS:
+            oldest = min(_UNDO_STORE, key=lambda key: _UNDO_STORE[key]["created"])
+            _UNDO_STORE.pop(oldest, None)
+        _UNDO_STORE[token] = {"created": now, "files": files}
+
+
+def replace(
+    raw_root: str,
+    query: str,
+    replacement: str,
+    *,
+    regex: bool = False,
+    case_sensitive: bool = False,
+    whole_word: bool = False,
+    include: str = "",
+    exclude: str = "",
+    paths: list[str] | None = None,
+    max_files: int = SEARCH_MAX_FILES,
+) -> dict[str, Any]:
+    if not isinstance(replacement, str):
+        raise FileBrowserError("invalid_content", "Replacement must be text", 400)
+    root = _require_directory(raw_root)
+    matcher = _compile_search_matcher(query, regex=regex, case_sensitive=case_sensitive, whole_word=whole_word)
+
+    if paths:
+        candidates: list[tuple[Path, str]] = []
+        for raw in paths:
+            resolved = _require_regular_file(raw)
+            if resolved != root and root not in resolved.parents:
+                raise FileBrowserError("invalid_path", "Path is outside the search root", 400)
+            candidates.append((resolved, resolved.relative_to(root).as_posix()))
+    else:
+        candidates = list(_iter_search_files(root, _split_globs(include), _split_globs(exclude)))
+
+    changed: list[dict[str, Any]] = []
+    snapshots: dict[str, Any] = {}
+    total = 0
+    for fpath, rel in candidates:
+        text = _read_file_text(fpath, lossy=False)
+        if text is None:
+            continue
+        new_text, count = _apply_replacement(text, matcher, replacement, regex=regex)
+        if count == 0 or new_text == text:
+            continue
+        write_file(str(fpath), new_text, expected_mtime=_mtime_seconds(fpath.stat()))
+        snapshots[str(fpath)] = {
+            "original": text,
+            "after_sha": hashlib.sha256(new_text.encode("utf-8")).hexdigest(),
+        }
+        changed.append({"path": str(fpath), "rel": rel, "replacements": count})
+        total += count
+        if len(changed) >= max_files:
+            break
+
+    token: str | None = None
+    if snapshots:
+        token = uuid.uuid4().hex
+        _store_undo(token, snapshots)
+    return {"changed": changed, "total_replacements": total, "files_changed": len(changed), "undo_token": token}
+
+
+def undo_replace(token: str) -> dict[str, Any]:
+    with _UNDO_LOCK:
+        entry = _UNDO_STORE.pop(token, None)
+    if not entry or time.monotonic() - entry["created"] > _UNDO_TTL_SECONDS:
+        raise FileBrowserError("undo_unavailable", "Nothing to undo — it expired or was already undone", 404)
+
+    restored: list[str] = []
+    skipped: list[dict[str, str]] = []
+    for path, snap in entry["files"].items():
+        target = Path(path)
+        try:
+            current = target.read_bytes()
+        except FileNotFoundError:
+            skipped.append({"path": path, "reason": "missing"})
+            continue
+        except OSError:
+            skipped.append({"path": path, "reason": "unreadable"})
+            continue
+        # Only revert files still holding exactly what the replace wrote — never
+        # clobber edits the user (or anything else) made after the replace.
+        if hashlib.sha256(current).hexdigest() != snap["after_sha"]:
+            skipped.append({"path": path, "reason": "modified"})
+            continue
+        try:
+            write_file(path, snap["original"], expected_mtime=_mtime_seconds(target.stat()))
+        except FileBrowserError:
+            skipped.append({"path": path, "reason": "write_failed"})
+            continue
+        restored.append(path)
+    return {"restored": restored, "skipped": skipped}
