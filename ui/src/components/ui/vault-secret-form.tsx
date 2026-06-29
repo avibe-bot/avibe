@@ -5,10 +5,12 @@ import { useTranslation } from 'react-i18next';
 
 import { ApiError, useApi, type DependencyItem } from '@/context/ApiContext';
 import { cn } from '@/lib/utils';
-import { sealBlindBox, standardCreateBlindBoxContext } from '@/lib/vaultCrypto';
+import { sealBlindBox, standardCreateBlindBoxContext, type ProtectedRecordEnvelope } from '@/lib/vaultCrypto';
+import { useProtectedVault } from '@/lib/useProtectedVault';
 import { Button } from './button';
 import { Combobox } from './combobox';
 import { Input } from './input';
+import { VaultProtectedUnlock } from './vault-protected-unlock';
 
 const AVAULT_P2_MIN_VERSION = '0.1.3';
 type VaultProtection = 'standard' | 'protected';
@@ -95,10 +97,17 @@ export const VaultSecretForm: React.FC<{
     };
   }, [api]);
 
+  const protectedVault = useProtectedVault();
+  useEffect(() => {
+    if (protection === 'protected') void protectedVault.refresh();
+    // protectedVault.refresh is stable (useCallback); only re-check when the tier changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [protection]);
+
   const p2Ready = useMemo(() => avaultP2Ready(avaultDep), [avaultDep]);
   const standardCreateReady = useMemo(() => avaultInstalled(avaultDep), [avaultDep]);
   const secretName = (fixedName ?? name).trim().toUpperCase();
-  const protectedCreateReady = false;
+  const protectedCreateReady = protectedVault.status === 'unlocked';
   const canSubmit =
     Boolean(secretName && value) &&
     !submitting &&
@@ -119,28 +128,35 @@ export const VaultSecretForm: React.FC<{
     setSubmitting(true);
     setError(null);
     try {
-      if (protection === 'protected' && !protectedCreateReady) {
-        setError(t('vaults.dialog.protectedCreatePending'));
-        return;
-      }
       const hosts = allowHosts
         .split(',')
         .map((host) => host.trim())
         .filter(Boolean);
-      let blindBox: Awaited<ReturnType<typeof sealBlindBox>> | undefined;
-      if (p2Ready) {
+      const base = {
+        name: secretName,
+        protection,
+        group: group.trim() || undefined,
+        description: description.trim() || undefined,
+        policy: hosts.length ? { allowed_hosts: hosts } : undefined,
+      };
+      let cryptoFields:
+        | { sealed: ProtectedRecordEnvelope }
+        | { blind_box: Awaited<ReturnType<typeof sealBlindBox>> }
+        | { value: string };
+      let establishingVmk = false;
+      if (protection === 'protected') {
+        // Browser-sealed under the session VMK; the daemon stores it opaquely (no avault, no plaintext).
+        const sealed = await protectedVault.sealValue(secretName, value);
+        cryptoFields = { sealed: sealed.envelope };
+        establishingVmk = sealed.establishingVmk;
+      } else if (p2Ready) {
         const pubkey = await api.getVaultPubkey();
-        blindBox = await sealBlindBox(value, pubkey, standardCreateBlindBoxContext(secretName));
+        cryptoFields = { blind_box: await sealBlindBox(value, pubkey, standardCreateBlindBoxContext(secretName)) };
+      } else {
+        cryptoFields = { value };
       }
       const created = await api.createVaultSecret(
-        {
-          name: secretName,
-          protection,
-          ...(blindBox ? { blind_box: blindBox } : { value }),
-          group: group.trim() || undefined,
-          description: description.trim() || undefined,
-          policy: hosts.length ? { allowed_hosts: hosts } : undefined,
-        },
+        { ...base, ...cryptoFields, ...(establishingVmk ? { establishing_vmk: true } : {}) },
         { handleError: false },
       );
       if (!created.ok) {
@@ -148,8 +164,16 @@ export const VaultSecretForm: React.FC<{
           handleExistingSecret();
           return;
         }
+        if (created.code === 'vault_already_initialized') {
+          // Another tab established the vault first — drop the rejected local VMK and
+          // reload the server's wrap_meta so the user unlocks it instead of splitting keys.
+          await protectedVault.discardAndRefresh();
+          setError(t('vaults.protectedUnlock.errors.alreadyInitialized'));
+          return;
+        }
         throw new Error(created.message || created.code || t('vaults.request.saveFailed'));
       }
+      if (protection === 'protected') protectedVault.afterCreated();
       setValue('');
       onCreated(secretName, 'created');
     } catch (err: unknown) {
@@ -254,18 +278,14 @@ export const VaultSecretForm: React.FC<{
           })}
         </div>
       </div>
-      {protection === 'protected' && (
-        <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
-          {t('vaults.dialog.protectedCreatePending')}
-        </div>
-      )}
-      {checkingAvault && (
+      {protection === 'protected' && <VaultProtectedUnlock vault={protectedVault} />}
+      {protection === 'standard' && checkingAvault && (
         <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">
           <Loader2 className="size-4 animate-spin" />
           {t('vaults.dialog.checkingAvault')}
         </div>
       )}
-      {!checkingAvault && !p2Ready && (
+      {protection === 'standard' && !checkingAvault && !p2Ready && (
         <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
           {standardCreateReady
             ? t('vaults.dialog.p2UnavailableStandardFallback', {

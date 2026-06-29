@@ -101,6 +101,8 @@ export type VaultCreatePayload = {
   signer_kind?: string | null;
   policy?: Record<string, unknown>;
   public_meta?: Record<string, unknown>;
+  /** Set on the first protected secret so the daemon atomically guards single VMK init. */
+  establishing_vmk?: boolean;
 };
 
 export type ApiContextType = {
@@ -2011,13 +2013,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     setDefaultVibeAgent: (name) => postJson('/api/agents/default', { name }),
     removeVibeAgent: (name) => deleteJson(`/api/agents/${encodeURIComponent(name)}`),
+    getVaultVmk: () => getCachedJson('/api/vault/vmk', 1500, { handleError: false }),
     listVaultSecrets: (params) => {
       const search = new URLSearchParams();
       if (params?.group) search.set('group', params.group);
       const qs = search.toString();
       return getCachedJson(qs ? `/api/vault/secrets?${qs}` : '/api/vault/secrets', 1500);
     },
-    getVaultVmk: () => getJson('/api/vault/vmk'),
     getVaultPubkey: () => getCachedJson('/api/vault/pubkey', 1500),
     getVaultAgentPubkey: () => getCachedJson('/api/vault/agent/pubkey', 1500),
     createVaultSecret: (payload, opts) => postJson('/api/vault/secrets', payload, opts),

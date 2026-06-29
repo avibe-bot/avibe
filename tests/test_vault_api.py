@@ -176,6 +176,42 @@ def test_create_protected_stores_browser_envelope_without_avault(monkeypatch):
     assert json.loads(row["wrap_meta"]) == {"v": 1, "wrapped_dek": "dek"}
 
 
+def test_protected_create_establishing_vmk_rejects_second_init(monkeypatch):
+    first = api.create_vault_secret(
+        {
+            "name": "FIRST_PROTECTED",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct1", "nonce": "n1", "wrap_meta": {"v": 1, "copies": [], "wrapped_dek": "d1"}},
+            "establishing_vmk": True,
+        }
+    )
+    assert first["ok"] is True
+
+    # A second "establishing" create (concurrent first-time setup) must be rejected so
+    # the vault key history can't split under a different VMK.
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_secret(
+            {
+                "name": "SECOND_PROTECTED",
+                "protection": "protected",
+                "sealed": {"ciphertext": "ct2", "nonce": "n2", "wrap_meta": {"v": 1, "copies": [], "wrapped_dek": "d2"}},
+                "establishing_vmk": True,
+            }
+        )
+    assert exc.value.code == "vault_already_initialized"
+    assert exc.value.status == 409
+
+    # Adding a secret under the already-established VMK (not establishing) still works.
+    more = api.create_vault_secret(
+        {
+            "name": "THIRD_PROTECTED",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct3", "nonce": "n3", "wrap_meta": {"v": 1, "copies": [], "wrapped_dek": "d3"}},
+        }
+    )
+    assert more["ok"] is True
+
+
 def test_get_vault_vmk_returns_latest_protected_wrap_meta(monkeypatch):
     from unittest.mock import Mock
 

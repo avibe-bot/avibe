@@ -28,6 +28,9 @@ import {
   releaseProtectedDek,
   sealBlindBox,
   sealProtected,
+  openProtected,
+  packProtectedRecord,
+  unpackProtectedRecord,
   signDigest,
   SIGN_SCHEME_ECDSA_SECP256K1_DER,
   SIGN_SCHEME_ECDSA_SECP256K1_RECOVERABLE,
@@ -492,5 +495,29 @@ describe('vaultCrypto protected hierarchy', () => {
     expect(bytesToHexString(await derivePasskeyKek(prfOutput, prfSalt))).toBe(
       bytesToHexString(await derivePasskeyKek(prfOutput, prfSalt)),
     );
+  });
+});
+
+describe('protected record storage composition', () => {
+  it('packs a sealed record and unpacks it for a clean open round-trip', async () => {
+    const vmk = newVmk();
+    const wrapMeta = await buildWrapMeta(vmk, ['vault-password']);
+    const context = { name: 'OPENAI_API_KEY' };
+    const sealed = await sealProtected(new TextEncoder().encode('sk-secret-value'), vmk, context);
+
+    const envelope = packProtectedRecord(sealed, wrapMeta);
+    const restored = unpackProtectedRecord(envelope);
+    const vmkAgain = await unwrapVmk(restored.vmkWrapMeta, 'vault-password');
+    const opened = await openProtected(restored.sealed, vmkAgain, context);
+
+    expect(new TextDecoder().decode(opened)).toBe('sk-secret-value');
+  });
+
+  it('refuses to fold a DEK into a wrap_meta that already carries one', async () => {
+    const vmk = newVmk();
+    const wrapMeta = await buildWrapMeta(vmk, ['pw']);
+    const sealed = await sealProtected(new TextEncoder().encode('v'), vmk, { name: 'NAME' });
+    const once = packProtectedRecord(sealed, wrapMeta);
+    expect(() => packProtectedRecord(sealed, once.wrap_meta)).toThrow();
   });
 });

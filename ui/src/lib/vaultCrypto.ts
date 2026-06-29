@@ -1246,3 +1246,40 @@ export async function signProtectedDigest(
     privateKey.fill(0);
   }
 }
+
+/**
+ * Storage composition for protected-tier records.
+ *
+ * The daemon stores a protected secret as an opaque `{ciphertext, nonce, wrap_meta}`
+ * triple. The browser produces two artifacts on create: the {@link ProtectedSealed}
+ * envelope (value encrypted under a per-record DEK, and that DEK wrapped under the
+ * VMK) and the VMK `wrap_meta` (the VMK wrapped under the user's factors). We fold the
+ * DEK-under-VMK fields into the stored `wrap_meta` so every record is self-contained
+ * and round-trippable — pack on create, unpack on open. Field names match the Python
+ * reference (`storage/vault_protected.py`).
+ */
+export type ProtectedRecordEnvelope = { ciphertext: string; nonce: string; wrap_meta: string };
+
+export function packProtectedRecord(sealed: ProtectedSealed, vmkWrapMeta: string): ProtectedRecordEnvelope {
+  const meta = JSON.parse(vmkWrapMeta) as Record<string, unknown>;
+  if ('dek_nonce' in meta || 'wrapped_dek' in meta) {
+    throw new Error('vmk wrap_meta must not already carry a wrapped DEK');
+  }
+  return {
+    ciphertext: sealed.ciphertext,
+    nonce: sealed.nonce,
+    wrap_meta: JSON.stringify({ ...meta, dek_nonce: sealed.dek_nonce, wrapped_dek: sealed.wrapped_dek }),
+  };
+}
+
+export function unpackProtectedRecord(envelope: ProtectedRecordEnvelope): { sealed: ProtectedSealed; vmkWrapMeta: string } {
+  const parsed = JSON.parse(envelope.wrap_meta) as Record<string, unknown>;
+  const { dek_nonce, wrapped_dek, ...vmkMeta } = parsed;
+  if (typeof dek_nonce !== 'string' || typeof wrapped_dek !== 'string') {
+    throw new Error('protected record wrap_meta is missing the wrapped DEK');
+  }
+  return {
+    sealed: { ciphertext: envelope.ciphertext, nonce: envelope.nonce, dek_nonce, wrapped_dek },
+    vmkWrapMeta: JSON.stringify(vmkMeta),
+  };
+}

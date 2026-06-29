@@ -90,6 +90,10 @@ class NotGrantableError(VaultServiceError):
     pass
 
 
+class VaultAlreadyInitializedError(VaultServiceError):
+    pass
+
+
 class VaultGrantRuntimeCache:
     """Process-local grant delivery readiness tracker.
 
@@ -525,6 +529,7 @@ def create_secret(
     source: str = "manual",
     policy: dict[str, Any] | None = None,
     public_meta: dict[str, Any] | None = None,
+    establishing_vmk: bool = False,
 ) -> dict[str, Any]:
     """Create a secret from a caller-supplied encrypted envelope; return masked metadata.
 
@@ -546,6 +551,17 @@ def create_secret(
         raise VaultServiceError("signer_kind is only valid for keypair secrets")
     if conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name)).first() is not None:
         raise SecretExistsError(name)
+
+    if establishing_vmk and protection == "protected":
+        # Atomic single-init guard: this runs inside the write transaction (SQLite
+        # serialises writers), so two concurrent first-time setups cannot both pass —
+        # the loser is rejected instead of splitting the vault key history with a
+        # second VMK. The browser then reloads and unlocks the established vault.
+        if (
+            conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.protection == "protected").limit(1)).first()
+            is not None
+        ):
+            raise VaultAlreadyInitializedError("a protected vault already exists; unlock it instead of re-initializing")
 
     _ensure_group(conn, group)
     now = _now()
