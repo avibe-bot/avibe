@@ -180,8 +180,8 @@ def test_discover_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
         "per_use_sign": False,
     }
     assert secrets["ETH_KEY"]["per_use_sign"] is True
-    assert secrets["PROTECTED_STATIC_KEY"]["access_grantable"] is False
-    assert secrets["PROTECTED_ETH_KEY"]["per_use_sign"] is False
+    assert secrets["PROTECTED_STATIC_KEY"]["access_grantable"] is True
+    assert secrets["PROTECTED_ETH_KEY"]["per_use_sign"] is True
     assert secrets["REMOTE_ETH_KEY"]["per_use_sign"] is False
     assert "sk-" not in json.dumps(payload)
 
@@ -199,15 +199,16 @@ def test_access_request_cli_uses_caller_session(tmp_path, capfd, monkeypatch):
     assert payload["request"]["status"] == "pending"
 
 
-def test_access_request_cli_rejects_protected_next_version(capfd):
+def test_access_request_cli_accepts_protected_static_request(capfd):
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))
 
-    assert cli.cmd_vault_access(_ns(name="PROTECTED_KEY")) == 1
-    payload = json.loads(capfd.readouterr().err)
+    assert cli.cmd_vault_access(_ns(name="PROTECTED_KEY")) == 0
+    payload = json.loads(capfd.readouterr().out)
 
-    assert payload["code"] == "protected_requires_browser_sandbox"
-    assert "browser sandbox" in payload["error"]
+    assert payload["kind"] == "vault_access_request"
+    assert payload["request"]["secret_name"] == "PROTECTED_KEY"
+    assert payload["request"]["card"]["protection"] == "protected"
 
 
 def test_sign_request_and_await_cli_reads_approved_signature(capfd, monkeypatch):
@@ -240,6 +241,26 @@ def test_sign_request_and_await_cli_reads_approved_signature(capfd, monkeypatch)
     assert payload["kind"] == "vault_request_result"
     assert payload["status"] == "approved"
     assert payload["result"] == {"type": "signature", "signature": {"signature": "ab" * 64, "recovery_id": 1}}
+
+
+def test_sign_request_cli_accepts_protected_keypair(capfd):
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="PROTECTED_ETH_KEY",
+            protection="protected",
+            kind="keypair",
+            signer_kind="local",
+            sealed=_sealed("protected-key"),
+        )
+
+    assert cli.cmd_vault_sign(_ns(name="PROTECTED_ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")) == 0
+    payload = json.loads(capfd.readouterr().out)
+
+    assert payload["kind"] == "vault_sign_request"
+    assert payload["request"]["secret_name"] == "PROTECTED_ETH_KEY"
+    assert payload["request"]["card"]["protection"] == "protected"
+    assert payload["request"]["card"]["scope_options"] == []
 
 
 def test_vault_await_wait_treats_failed_request_as_terminal(capfd):

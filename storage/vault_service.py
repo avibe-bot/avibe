@@ -9,7 +9,7 @@ Secret values and key material never live here. Standard-tier values are sealed 
 ``avault`` before this layer stores them. Protected-tier values arrive already
 encrypted by the browser; this layer only stores the opaque ciphertext + wrap
 metadata. Scope grants persist metadata only; protected delivery material is owned by
-the resident avault agent in the follow-on, not by Python.
+the resident avault agent, not by Python.
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ class InvalidRequestError(VaultServiceError):
 
 
 class UnsupportedProtectionError(VaultServiceError):
-    """A caller attempted a delivery path that still needs the resident agent."""
+    """A caller attempted the wrong delivery path for a protection tier."""
 
 
 class KeypairNotValueDeliverableError(VaultServiceError):
@@ -620,13 +620,12 @@ def _secret_access_grantable(row: dict[str, Any]) -> bool:
 
 
 def _secret_agent_access_grantable(row: dict[str, Any]) -> bool:
-    return row.get("protection") == "standard" and _secret_access_grantable(row)
+    return _secret_access_grantable(row)
 
 
 def _secret_agent_per_use_signable(row: dict[str, Any]) -> bool:
     return (
         row.get("kind") == "keypair"
-        and row.get("protection") == "standard"
         and row.get("signer_kind") in (None, "local")
     )
 
@@ -898,13 +897,12 @@ def get_envelope(conn: Connection, name: str) -> Sealed:
     client (which decrypts + delivers), then records its own ``record_proxy_use``.
     Validate any policy (e.g. host allowlist) *before* delivering.
 
-    Protected delivery is intentionally not routed through this helper until the
-    resident-agent/DEK-blindbox follow-on lands; callers should use
-    :func:`resolve_secret_access` to decide whether an approval/grant is needed.
+    Protected delivery must go through :func:`resolve_secret_access` and the
+    resident avault agent so Python never opens released DEKs or plaintext.
     """
     row = _require_row(conn, name)
     if row.get("protection") != "standard":
-        raise UnsupportedProtectionError(f"{name} is protected-tier (resident grant delivery is not wired yet)")
+        raise UnsupportedProtectionError(f"{name} is protected-tier; use resident-agent grant delivery")
     _reject_keypair_value_delivery(row, name)
     return _row_sealed(row)
 
@@ -959,7 +957,7 @@ def get_envelopes(conn: Connection, names: list[str]) -> dict[str, Sealed]:
     for name in names:
         row = _require_row(conn, name)
         if row.get("protection") != "standard":
-            raise UnsupportedProtectionError(f"{name} is protected-tier (resident grant delivery is not wired yet)")
+            raise UnsupportedProtectionError(f"{name} is protected-tier; use resident-agent grant delivery")
         _reject_keypair_value_delivery(row, name)
         out[name] = _row_sealed(row)
     return out

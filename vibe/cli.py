@@ -3828,13 +3828,7 @@ def cmd_vault_access(args):
             raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name", help_command=help_command)
         engine = _open_vault_engine()
         with engine.begin() as conn:
-            meta = vault_service.get_secret_meta(conn, name)
-            if meta.get("protection") == "protected":
-                raise TaskCliError(
-                    "protected signing/access requires the browser sandbox (next version)",
-                    code="protected_requires_browser_sandbox",
-                    help_command=help_command,
-                )
+            vault_service.get_secret_meta(conn, name)
             request = vault_service.create_access_request(
                 conn,
                 name,
@@ -4568,12 +4562,6 @@ def cmd_vault_sign(args):
                 raise TaskCliError(
                     f"secret '{name}' is not locally signable",
                     code="unsupported_signer_kind",
-                    help_command=help_command,
-                )
-            if meta.get("protection") == "protected":
-                raise TaskCliError(
-                    "protected signing/access requires the browser sandbox (next version)",
-                    code="protected_requires_browser_sandbox",
                     help_command=help_command,
                 )
             request = vault_service.create_sign_request(
@@ -8116,8 +8104,9 @@ def build_parser():
         "access",
         help="Request approval to use a static secret",
         description=(
-            "Create a pending access request for a standard static secret in the current Agent Session. "
-            "The user approves it into a scope grant; then run/fetch/inject can deliver the value through avault."
+            "Create a pending access request for a static secret in the current Agent Session. "
+            "For protected secrets, the browser releases only an avault-bound DEK blind box; "
+            "then run/fetch/inject deliver the value inside avault."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault access --help",
@@ -8133,8 +8122,9 @@ def build_parser():
         "sign",
         help="Request one approved signature from a keypair secret",
         description=(
-            "Create a pending per-use signing request for a standard local keypair. "
-            "The approval path signs via avault; 'vibe vault await <request-id>' returns only the resulting signature."
+            "Create a pending per-use signing request for a local keypair. "
+            "Standard keys sign via avault; protected keys sign in the browser. "
+            "'vibe vault await <request-id>' returns only the resulting public signature."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault sign --help",

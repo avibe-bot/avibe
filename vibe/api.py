@@ -1516,13 +1516,14 @@ def _vault_request_result(conn, request: dict) -> dict | None:
     return None
 
 
-def get_vault_request(request_id: str) -> dict:
+def get_vault_request(request_id: str, *, audience: str | None = None) -> dict:
     from storage import vault_service
 
+    request_audience = audience or vault_service.REQUEST_AUDIENCE_AGENT
     engine = _vault_engine()
     try:
         with engine.begin() as conn:
-            request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+            request = vault_service.get_request(conn, request_id, audience=request_audience)
             result = _vault_request_result(conn, request)
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
@@ -1581,13 +1582,7 @@ def request_vault_access(payload: dict) -> dict:
     engine = _vault_engine()
     try:
         with engine.begin() as conn:
-            meta = vault_service.get_secret_meta(conn, name)
-            if meta.get("protection") == "protected":
-                raise VaultApiError(
-                    "protected signing/access requires the browser sandbox (next version)",
-                    code="protected_requires_browser_sandbox",
-                    status=409,
-                )
+            vault_service.get_secret_meta(conn, name)
             request = vault_service.create_access_request(
                 conn,
                 name,
@@ -1627,12 +1622,6 @@ def request_vault_sign(payload: dict) -> dict:
                 raise VaultApiError(
                     f"secret '{name}' uses signer_kind '{meta.get('signer_kind')}', which is not locally signable",
                     code="unsupported_signer_kind",
-                    status=409,
-                )
-            if meta.get("protection") == "protected":
-                raise VaultApiError(
-                    "protected signing/access requires the browser sandbox (next version)",
-                    code="protected_requires_browser_sandbox",
                     status=409,
                 )
             request = vault_service.create_sign_request(
@@ -1711,6 +1700,63 @@ def _agent_grant_cached_all(result: dict, expected_count: int) -> bool:
         return int(granted) == expected_count
     except (TypeError, ValueError):
         return False
+
+
+def _grant_dek_entries_from_payload(payload: dict) -> object:
+    deks = payload.get("deks")
+    if deks is None:
+        deks = payload.get("agent_deks")
+    if deks is None and isinstance(payload.get("deks_by_secret"), dict):
+        deks = []
+        for name, dek in payload["deks_by_secret"].items():
+            if isinstance(dek, dict) and "dek_blindbox" in dek:
+                deks.append(
+                    {
+                        "name": name,
+                        "dek_blindbox": dek.get("dek_blindbox"),
+                        "approval": dek.get("approval"),
+                    }
+                )
+            else:
+                deks.append({"name": name, "dek_blindbox": dek, "approval": None})
+    return deks
+
+
+def _resident_agent_deks_from_payload(payload: dict, *, needs_agent_deks: bool) -> list[dict[str, Any]]:
+    deks = _grant_dek_entries_from_payload(payload)
+    if deks is None and not needs_agent_deks:
+        return []
+    if not isinstance(deks, list) or (needs_agent_deks and not deks):
+        raise VaultApiError("resident agent grant requires sealed DEKs", code="invalid_grant")
+    agent_deks: list[dict[str, Any]] = []
+    allowed_keys = {"name", "dek_blindbox", "approval"}
+    for item in deks:
+        if not isinstance(item, dict):
+            raise VaultApiError("resident agent grant DEKs must be objects", code="invalid_grant")
+        extra_keys = set(item) - allowed_keys
+        if extra_keys:
+            raise VaultApiError("resident agent grant DEKs must contain only opaque blind-box metadata", code="invalid_grant")
+        name = item.get("name")
+        dek_blindbox = item.get("dek_blindbox")
+        approval = item.get("approval")
+        if not isinstance(name, str) or not name or not isinstance(dek_blindbox, dict) or not isinstance(approval, dict):
+            raise VaultApiError("resident agent grant DEKs require name, dek_blindbox, and approval", code="invalid_grant")
+        agent_deks.append({"name": name, "dek_blindbox": dek_blindbox, "approval": approval})
+    return agent_deks
+
+
+def _access_request_secret_name(request_id: str) -> str:
+    from storage import vault_service
+
+    engine = _vault_engine()
+    with engine.begin() as conn:
+        request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+    if request.get("request_type") != "access":
+        raise VaultApiError("access fulfillment must target an access request", code="invalid_request", status=409)
+    name = str(request.get("secret_name") or "").strip()
+    if not name:
+        raise VaultApiError("access request is missing a secret name", code="invalid_request", status=409)
+    return name
 
 
 def _grant_scope_payload(grant: dict) -> list[dict[str, str]]:
@@ -1805,30 +1851,7 @@ def create_vault_grant(payload: dict) -> dict:
     protected_member_names = {str(member["name"]) for member in grantable_members if member.get("protection") == "protected"}
     needs_agent_deks = bool(protected_member_names)
 
-    deks = payload.get("deks")
-    if deks is None:
-        deks = payload.get("agent_deks")
-    if deks is None and isinstance(payload.get("deks_by_secret"), dict):
-        deks = [
-            {"name": name, **dek}
-            if isinstance(dek, dict)
-            else {"name": name, "dek_blindbox": dek}
-            for name, dek in payload["deks_by_secret"].items()
-        ]
-    if deks is None and not needs_agent_deks:
-        deks = []
-    if not isinstance(deks, list) or (needs_agent_deks and not deks):
-        raise VaultApiError("resident agent grant requires sealed DEKs", code="invalid_grant")
-    agent_deks: list[dict[str, Any]] = []
-    for item in deks:
-        if not isinstance(item, dict):
-            raise VaultApiError("resident agent grant DEKs must be objects", code="invalid_grant")
-        name = item.get("name")
-        dek_blindbox = item.get("dek_blindbox")
-        approval = item.get("approval")
-        if not isinstance(name, str) or not name or not isinstance(dek_blindbox, dict) or not isinstance(approval, dict):
-            raise VaultApiError("resident agent grant DEKs require name, dek_blindbox, and approval", code="invalid_grant")
-        agent_deks.append({"name": name, "dek_blindbox": dek_blindbox, "approval": approval})
+    agent_deks = _resident_agent_deks_from_payload(payload, needs_agent_deks=needs_agent_deks)
     provided_names = {item["name"] for item in agent_deks}
     if needs_agent_deks and provided_names != protected_member_names:
         raise VaultApiError("resident agent DEKs must match the protected grant members", code="invalid_grant")
@@ -1917,6 +1940,31 @@ def create_vault_grant(payload: dict) -> dict:
             )
         raise
     return {"ok": True, "grant": grant}
+
+
+def fulfill_vault_access_request(request_id: str, payload: dict | None = None) -> dict:
+    """Approve an access request by relaying browser blind-boxed DEKs to avault.
+
+    The submitted DEKs are HPKE blind boxes addressed to the resident avault
+    agent. Python validates only metadata and forwards the opaque boxes; it never
+    opens a protected DEK or protected plaintext.
+    """
+
+    body = dict(payload) if isinstance(payload, dict) else {}
+    request_id = str(request_id or "").strip()
+    if not request_id:
+        raise VaultApiError("request_id is required to fulfill protected access", code="missing_request_id")
+    if not body.get("scope_type") or not body.get("scope_ref"):
+        body.setdefault("scope_type", "secret")
+        body.setdefault("scope_ref", _access_request_secret_name(request_id))
+    body["request_id"] = request_id
+    created = create_vault_grant(body)
+    return {
+        "ok": True,
+        "request_id": request_id,
+        "grant": created["grant"],
+        "result": {"type": "grant", "grant": created["grant"]},
+    }
 
 
 def _sign_digest_from_payload(value: object) -> str:

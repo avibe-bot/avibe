@@ -1076,6 +1076,7 @@ def test_agent_created_request_hydrates_only_for_ui_inbox(vault):
             requester={"source": "agent-cli", "session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
         )
+        ui_payload = vs.get_request(conn, req["id"])
         agent_payload = vs.get_request(conn, req["id"], audience=vs.REQUEST_AUDIENCE_AGENT)
         listed = vs.list_requests(conn)
 
@@ -1084,6 +1085,10 @@ def test_agent_created_request_hydrates_only_for_ui_inbox(vault):
     assert "unlock_material" not in agent_encoded
     assert "ct-protected" not in agent_encoded
     assert "wm-protected" not in agent_encoded
+    ui_encoded = json.dumps({"ui": ui_payload, "listed": listed})
+    assert "unlock_material" in ui_encoded
+    assert "ct-protected" in ui_encoded
+    assert "wm-protected" in ui_encoded
     group_option = next(option for option in listed[0]["card"]["scope_options"] if option["scope_type"] == "group")
     assert group_option["unlock_material"] == [
         {
