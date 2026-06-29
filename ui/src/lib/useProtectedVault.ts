@@ -112,26 +112,38 @@ function toUint8(buffer: ArrayBuffer | ArrayBufferView): Uint8Array {
 function passkeyResult(credential: PublicKeyCredential | null): Uint8Array {
   const ext = credential?.getClientExtensionResults() as { prf?: { results?: { first?: ArrayBuffer } } } | undefined;
   const first = ext?.prf?.results?.first;
+  // Treat a missing OR present-but-empty PRF result as "PRF unavailable" so the user sees a
+  // clear message instead of a raw zero-length-key error from KEK derivation.
   if (!first) throw new Error('passkey-prf-unavailable');
-  return toUint8(first);
+  const out = toUint8(first);
+  if (out.length === 0) throw new Error('passkey-prf-unavailable');
+  return out;
 }
 
 type PasskeyEntry = { credentialId?: string; prfSalt: Uint8Array };
 
 /**
- * Assert one of the vault's passkeys and extract its PRF output. Uses
- * `evalByCredential` so each credential is evaluated with its own stored salt, then
- * returns the salt of whichever credential actually responded.
+ * Assert one of the vault's passkeys and extract its PRF output.
+ *
+ * For a single passkey we request plain `prf.eval` (one salt) — the most widely supported
+ * PRF form. `prf.evalByCredential` is only needed to give *multiple* passkeys their own
+ * salt, and some authenticators (notably 1Password) return an EMPTY PRF for evalByCredential
+ * on a standalone unlock GET, which surfaced as "passkey PRF output is empty". The PRF
+ * output for a given (credential, salt) is identical whichever request form is used, so
+ * this never changes an already-stored KEK.
  */
 async function assertPasskeyPrf(entries: PasskeyEntry[]): Promise<{ prfOutput: Uint8Array; prfSalt: Uint8Array }> {
   const withId = entries.filter((entry) => entry.credentialId);
-  const evalByCredential: Record<string, { first: ArrayBuffer }> = {};
-  for (const entry of withId) {
-    evalByCredential[base64ToBase64Url(entry.credentialId as string)] = { first: bufferSource(entry.prfSalt) };
+  let extensions: AuthenticationExtensionsClientInputs;
+  if (entries.length <= 1) {
+    extensions = webAuthnPrfExtensionInput(entries[0].prfSalt) as AuthenticationExtensionsClientInputs;
+  } else {
+    const evalByCredential: Record<string, { first: ArrayBuffer }> = {};
+    for (const entry of withId) {
+      evalByCredential[base64ToBase64Url(entry.credentialId as string)] = { first: bufferSource(entry.prfSalt) };
+    }
+    extensions = { prf: { evalByCredential } } as AuthenticationExtensionsClientInputs;
   }
-  const extensions = (withId.length > 0
-    ? { prf: { evalByCredential } }
-    : webAuthnPrfExtensionInput(entries[0].prfSalt)) as AuthenticationExtensionsClientInputs;
   const assertion = (await navigator.credentials.get({
     publicKey: {
       challenge: randomChallenge(),
