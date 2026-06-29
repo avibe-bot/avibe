@@ -215,8 +215,10 @@ def test_search_windows_preview_around_long_line_match(tmp_path):
     _write(tmp_path, "long.txt", line + "\n")
     m = fbs.search(str(tmp_path), needle)["results"][0]["matches"][0]
     assert m["line_truncated"] is True
-    # The preview is windowed around the match, and the reported offsets still select the hit.
-    assert m["text"][m["col"] : m["end"]] == needle
+    # col/end are full-line offsets (the editor jump target), unaffected by the preview window.
+    assert (m["col"], m["end"]) == (1000, 1006)
+    # The windowed preview still contains the hit at its preview offsets.
+    assert m["text"][m["preview_col"] : m["preview_end"]] == needle
     assert len(m["text"]) <= fbs.SEARCH_LINE_PREVIEW_CHARS + 1  # +1 for the leading ellipsis
 
 

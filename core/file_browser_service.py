@@ -965,38 +965,41 @@ def _match_globs(rel_posix: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatch(rel_posix, pat) or fnmatch.fnmatch(name, pat) for pat in patterns)
 
 
-def _read_file_text(path: Path, *, lossy: bool) -> str | None:
-    """Read a regular text file for search/replace, or None to skip it.
+def _read_file_text(path: Path, *, lossy: bool) -> tuple[str | None, float | None]:
+    """Read a regular text file for search/replace; returns (text, mtime) or (None, None) to skip.
 
-    Skips directories, oversized files, and binaries (NUL in the first chunk).
-    ``lossy`` controls undecodable bytes: search previews tolerate replacement
-    characters; replace must not, so it returns None and leaves the file alone.
+    Skips directories, oversized files, and binaries (NUL in the first chunk). ``lossy`` controls
+    undecodable bytes: search previews tolerate replacement characters; replace must not, so it
+    returns None and leaves the file alone. The mtime is captured from the stat taken BEFORE the
+    read, so it corresponds to (at most) the content returned — search hands that mtime back as the
+    replace baseline, and a change during the read window then fails the later mtime check.
     """
     # The rest of the file browser treats symlinks as no-follow / non-editable; mirror that here so
     # search/replace can't follow a link out of the opened root (e.g. a planted
     # ``secret -> ~/.ssh/id_rsa``) and surface or rewrite content outside the tree.
     if path.is_symlink():
-        return None
+        return None, None
     try:
         st = path.stat()
     except OSError:
-        return None
+        return None, None
     if not stat.S_ISREG(st.st_mode) or st.st_size > SEARCH_MAX_FILE_BYTES:
-        return None
+        return None, None
+    mtime = _mtime_seconds(st)
     try:
         with open(path, "rb") as handle:
             head = handle.read(_BINARY_SNIFF_BYTES)
             if b"\x00" in head:
-                return None
+                return None, None
             data = head + handle.read()
     except OSError:
-        return None
+        return None, None
     try:
-        return data.decode("utf-8")
+        return data.decode("utf-8"), mtime
     except UnicodeDecodeError:
         if not lossy:
-            return None
-        return data.decode("utf-8", errors="replace")
+            return None, None
+        return data.decode("utf-8", errors="replace"), mtime
 
 
 def _iter_search_files(root: Path, include: list[str], exclude: list[str]):
@@ -1047,13 +1050,20 @@ def _scan_lines(text: str, matcher: "re.Pattern[str]", remaining: int) -> tuple[
     matches: list[dict[str, Any]] = []
     for line_no, line in enumerate(text.split("\n"), start=1):
         for m in matcher.finditer(line):
-            preview, col, end = _preview_for_match(line, m.start(), m.end())
+            # col/end are FULL-LINE UTF-16 offsets — the editor jump selects against the whole line.
+            # preview_col/preview_end index into the (possibly windowed) preview `text` for the row
+            # highlight; the two differ once a long line is truncated.
+            full_col = _utf16_len(line[: m.start()])
+            full_end = full_col + _utf16_len(line[m.start() : m.end()])
+            preview, preview_col, preview_end = _preview_for_match(line, m.start(), m.end())
             matches.append(
                 {
                     "line": line_no,
-                    "col": col,
-                    "end": end,
+                    "col": full_col,
+                    "end": full_end,
                     "text": preview,
+                    "preview_col": preview_col,
+                    "preview_end": preview_end,
                     "line_truncated": len(line) > SEARCH_LINE_PREVIEW_CHARS,
                 }
             )
@@ -1084,16 +1094,12 @@ def search(
     truncated = False
     reason: str | None = None
     for fpath, rel in _iter_search_files(root, include_globs, exclude_globs):
-        text = _read_file_text(fpath, lossy=True)
+        text, file_mtime = _read_file_text(fpath, lossy=True)
         if text is None:
             continue
         file_matches, hit_cap = _scan_lines(text, matcher, max_matches - total_matches)
         if not file_matches:
             continue
-        try:
-            file_mtime: float | None = _mtime_seconds(fpath.stat())
-        except OSError:
-            file_mtime = None
         results.append({"path": str(fpath), "rel": rel, "mtime": file_mtime, "match_count": len(file_matches), "matches": file_matches})
         total_matches += len(file_matches)
         if hit_cap or total_matches >= max_matches:
@@ -1212,7 +1218,7 @@ def replace(
             if expected is not None and abs(before_mtime - float(expected)) > 1e-6:
                 skipped.append({"path": str(fpath), "rel": rel, "reason": "modified"})
                 continue
-        text = _read_file_text(fpath, lossy=False)
+        text, _ = _read_file_text(fpath, lossy=False)
         if text is None:
             if explicit:
                 skipped.append({"path": str(fpath), "rel": rel, "reason": "unreadable"})

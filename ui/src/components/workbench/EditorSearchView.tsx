@@ -408,9 +408,9 @@ const FileGroup: React.FC<{
 };
 
 const MatchRow: React.FC<{ match: SearchMatch; previewer: ((hit: string) => string) | null; onClick: () => void }> = ({ match, previewer, onClick }) => {
-  const pre = match.text.slice(0, match.col);
-  const hit = match.text.slice(match.col, match.end);
-  const post = match.text.slice(match.end);
+  const pre = match.text.slice(0, match.preview_col);
+  const hit = match.text.slice(match.preview_col, match.preview_end);
+  const post = match.text.slice(match.preview_end);
   const replaced = previewer ? previewer(hit) : null;
   return (
     <button type="button" onClick={onClick} className="flex items-center gap-2 rounded px-1.5 py-0.5 text-left transition hover:bg-cyan-soft">

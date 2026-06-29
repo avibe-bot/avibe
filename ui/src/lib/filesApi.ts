@@ -218,7 +218,9 @@ export async function deletePath(path: string, recursive = false): Promise<{ ok:
 }
 
 // Cross-file search + replace (backend: file_browser_service.search/replace/undo_replace).
-export type SearchMatch = { line: number; col: number; end: number; text: string; line_truncated: boolean };
+// col/end are full-line UTF-16 offsets (the editor jump target); preview_col/preview_end index
+// into `text` (the possibly windowed preview) for the row highlight.
+export type SearchMatch = { line: number; col: number; end: number; preview_col: number; preview_end: number; text: string; line_truncated: boolean };
 export type SearchFileResult = { path: string; rel: string; mtime: number | null; match_count: number; matches: SearchMatch[] };
 export type SearchResponse = {
   root: string;

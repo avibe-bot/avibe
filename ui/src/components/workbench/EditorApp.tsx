@@ -115,7 +115,14 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
         const id = existing ? existing.id : `t${++tabSeq.current}`;
         setActive(id);
         if (target) setReveal({ tabId: id, line: target.line, column: target.column, endColumn: target.endColumn, nonce: ++revealSeq.current });
-        return existing ? ts : [...ts, { id, path, name, mtime }];
+        if (!existing) return [...ts, { id, path, name, mtime }];
+        // Jumping to an already-open tab whose file changed on disk since it was opened (e.g. a
+        // search hit in newer content): reload the clean buffer first so the revealed line matches
+        // what the search showed. A dirty tab keeps its edits.
+        if (mtime != null && existing.mtime !== mtime && !dirtyRef.current[existing.id]) {
+          return ts.map((x) => (x.id === id ? { ...x, mtime, reload: (x.reload ?? 0) + 1 } : x));
+        }
+        return ts;
       });
     },
     [],
