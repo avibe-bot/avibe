@@ -958,6 +958,17 @@ class SQLiteBackgroundTaskStore:
         with self.engine.begin() as conn:
             conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(**values))
 
+    def mark_callback_pending(self, run_id: str, *, updated_at: Optional[str] = None) -> None:
+        now = updated_at or _utc_now_iso()
+        values: dict[str, Any] = {
+            "callback_status": "pending",
+            "callback_error": None,
+            "callback_completed_at": None,
+            "updated_at": now,
+        }
+        with self.engine.begin() as conn:
+            conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(**values))
+
     def mark_run_queued_from_running(
         self,
         run_id: str,

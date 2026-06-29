@@ -1253,7 +1253,7 @@ def test_agent_run_create_session_uses_scope_anchor_for_channel_deliver_key(tmp_
     target = cli.resolve_session_id_target(payload["session_id"], db_path=db_path)
     assert target.session_key.to_key() == "slack::channel::C123"
     assert target.session_key.thread_id is None
-    assert target.session_anchor == "slack_C123"
+    assert target.session_anchor.startswith("slack_C123:run_")
 
 
 def test_agent_run_create_session_preserves_legacy_thread_deliver_key(tmp_path: Path, capsys) -> None:
@@ -1287,11 +1287,92 @@ def test_agent_run_create_session_preserves_legacy_thread_deliver_key(tmp_path: 
     payload = json.loads(capsys.readouterr().out)
     assert payload["deliver_key"] == "slack::channel::C123::thread::171717.123"
     target = cli.resolve_session_id_target(payload["session_id"], db_path=db_path)
-    assert target.session_key.to_key() == "slack::channel::C123"
-    assert target.session_key.thread_id is None
+    assert target.session_key.to_key() == "slack::channel::C123::thread::171717.123"
+    assert target.session_key.thread_id == "171717.123"
+    assert target.session_anchor.startswith("slack_171717.123:run_")
     queued = request_store.get_run(payload["run_id"])
     assert queued is not None
     assert queued["deliver_key"] == "slack::channel::C123::thread::171717.123"
+
+
+def test_agent_run_create_session_scope_id_uses_unique_project_anchors(tmp_path: Path, capsys) -> None:
+    from sqlalchemy import select
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, scope_settings
+    from storage.settings_service import upsert_scope
+
+    state_home = tmp_path / "home"
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
+        ensure_sqlite_state()
+        db_path = state_home / "state" / "vibe.sqlite"
+        engine = create_sqlite_engine(db_path)
+        with engine.begin() as conn:
+            scope_id = upsert_scope(
+                conn,
+                platform="avibe",
+                scope_type="project",
+                native_id="proj_unique",
+                now="2026-06-16T00:00:00Z",
+            )
+            conn.execute(
+                scope_settings.insert().values(
+                    scope_id=scope_id,
+                    enabled=1,
+                    role=None,
+                    workdir=str(tmp_path),
+                    agent_name="worker",
+                    agent_backend="codex",
+                    agent_variant="codex",
+                    model=None,
+                    reasoning_effort=None,
+                    require_mention=None,
+                    settings_version=1,
+                    settings_json="{}",
+                    created_at="2026-06-16T00:00:00Z",
+                    updated_at="2026-06-16T00:00:00Z",
+                )
+            )
+        agent_store = cli.VibeAgentStore(db_path)
+        agent_store.create(name="worker", backend="codex")
+        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+
+        payloads = []
+        for message in ("one", "two"):
+            args = _parse_agent_run(
+                [
+                    "--agent",
+                    "worker",
+                    "--async",
+                    "--no-callback",
+                    "--create-session",
+                    "--scope-id",
+                    scope_id,
+                    "--message",
+                    message,
+                ]
+            )
+            with (
+                patch("vibe.cli._agent_store", return_value=agent_store),
+                patch("vibe.cli._task_request_store", return_value=request_store),
+                patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+            ):
+                assert cli.cmd_agent_run(args) == 0
+            payloads.append(json.loads(capsys.readouterr().out))
+
+        with engine.connect() as conn:
+            rows = list(
+                conn.execute(
+                    select(agent_sessions.c.id, agent_sessions.c.session_anchor)
+                    .where(agent_sessions.c.scope_id == scope_id)
+                    .order_by(agent_sessions.c.created_at, agent_sessions.c.id)
+                ).mappings()
+            )
+
+    assert {payload["session_id"] for payload in payloads} == {row["id"] for row in rows}
+    anchors = {row["session_anchor"] for row in rows}
+    assert len(anchors) == 2
+    assert all(anchor.startswith("avibe_proj_unique:run_") for anchor in anchors)
 
 
 def test_agent_run_private_async_uses_no_delivery_channel_scope_for_lark(tmp_path: Path, capsys) -> None:
@@ -1352,7 +1433,7 @@ def test_agent_run_rejects_per_run_for_direct_invocation() -> None:
     assert payload["code"] == "invalid_session_policy"
 
 
-def test_agent_run_rejects_agent_override_for_existing_session(tmp_path: Path) -> None:
+def test_agent_run_rejects_cross_backend_agent_for_existing_session(tmp_path: Path) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     agent_store = cli.VibeAgentStore(db_path)
     agent_store.create(name="codex-worker", backend="codex")
@@ -1376,7 +1457,51 @@ def test_agent_run_rejects_agent_override_for_existing_session(tmp_path: Path) -
         result, payload = _capture_stderr_json(cli.cmd_agent_run, args)
 
     assert result == 1
-    assert payload["code"] == "agent_with_existing_session"
+    assert payload["code"] == "agent_session_backend_mismatch"
+
+
+def test_agent_run_existing_session_allows_matching_agent_hint(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="codex-worker", backend="codex")
+    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    from storage.sessions_service import SQLiteSessionsService
+
+    service = SQLiteSessionsService(db_path)
+    try:
+        session_id = service.reserve_private_agent_session(
+            platform="slack",
+            agent_backend="codex",
+            agent_name="codex-worker",
+            session_anchor="slack_private-agent-test",
+        )
+    finally:
+        service.close()
+    args = _parse_agent_run(
+        [
+            "--agent",
+            "codex-worker",
+            "--async",
+            "--no-callback",
+            "--session-id",
+            session_id,
+            "--message",
+            "hello",
+        ]
+    )
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+    ):
+        result = cli.cmd_agent_run(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["session_id"] == session_id
+    assert payload["agent"] == "codex-worker"
 
 
 def test_agent_run_rejects_post_to_thread_for_threadless_session_before_enqueue(tmp_path: Path) -> None:

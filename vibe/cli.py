@@ -1438,8 +1438,11 @@ def _validate_existing_scope_id(scope_id: str, *, help_command: str):
     try:
         with engine.connect() as conn:
             found = conn.execute(
-                select(scopes.c.id).where(scopes.c.id == target.session_scope).limit(1)
-            ).scalar_one_or_none()
+                select(scopes.c.id, scope_settings.c.enabled)
+                .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
+                .where(scopes.c.id == target.session_scope)
+                .limit(1)
+            ).mappings().first()
     finally:
         engine.dispose()
     if found is None:
@@ -1447,6 +1450,14 @@ def _validate_existing_scope_id(scope_id: str, *, help_command: str):
             f"scope id not found: {target.session_scope}",
             code="scope_not_found",
             hint="Pass an existing Scope ID, or use --same-scope from an Avibe Agent Session.",
+            help_command=help_command,
+            details={"scope_id": target.session_scope},
+        )
+    if target.platform == "avibe" and target.scope_type == "project" and found["enabled"] is not None and not bool(found["enabled"]):
+        raise TaskCliError(
+            f"scope id is archived: {target.session_scope}",
+            code="scope_archived",
+            hint="Choose an active Workbench project scope.",
             help_command=help_command,
             details={"scope_id": target.session_scope},
         )
@@ -1745,23 +1756,21 @@ def _resolve_agent_for_target(
         requested = store.require_enabled(agent_name) if agent_name else None
         if session_id:
             target = resolve_session_id_target(session_id)
-            resolved = requested
-            if resolved is None and target.agent_name:
-                resolved = store.require_enabled(target.agent_name)
-            if resolved is not None and target.agent_backend and resolved.backend != target.agent_backend:
+            session_agent = store.require_enabled(target.agent_name) if target.agent_name else None
+            if requested is not None and target.agent_backend and requested.backend != target.agent_backend:
                 raise TaskCliError(
                     "agent backend does not match the existing session backend",
                     code="agent_session_backend_mismatch",
                     hint="Use an Agent with the same backend as the Session, or create a new Session.",
                     details={
-                        "agent": resolved.name,
-                        "agent_backend": resolved.backend,
+                        "agent": requested.name,
+                        "agent_backend": requested.backend,
                         "session_id": session_id,
                         "session_backend": target.agent_backend,
                     },
                     help_command=help_command,
                 )
-            return resolved
+            return session_agent or requested
 
         if requested is not None:
             return requested
@@ -3046,13 +3055,6 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="Use --agent, --model, and --reasoning-effort as overrides when forking a Session.",
             help_command=help_command,
         )
-    if session_id and agent_name:
-        raise TaskCliError(
-            "--agent only applies when creating or forking a Session",
-            code="agent_with_existing_session",
-            hint="An existing --session-id keeps its own Agent, model, reasoning effort, cwd, and scope. Omit --agent to send a message to that Session.",
-            help_command=help_command,
-        )
     if session_id and (same_scope or scope_id):
         raise TaskCliError(
             "scope placement flags only apply when creating a new Session",
@@ -3383,6 +3385,7 @@ def _reserve_cli_session(
     scope_key: Optional[str],
     workdir: Optional[str] = None,
     metadata: Optional[dict] = None,
+    session_anchor_target=None,
 ) -> str:
     # Route through ``core.services.sessions`` so the CLI shares the same
     # business API as the UI server and the future N3 internal endpoint;
@@ -3391,7 +3394,8 @@ def _reserve_cli_session(
 
     if scope_key:
         target = _parse_validated_scope_id(scope_key, help_command="vibe agent run --help")
-        session_anchor = session_anchor_for_target(target)
+        anchor_target = session_anchor_target or target
+        session_anchor = f"{session_anchor_for_target(anchor_target)}:run_{uuid4().hex[:12]}"
         session_id = sessions_service.reserve_agent_session(
             scope_key=target.session_scope,
             agent_backend=agent.backend,
@@ -3424,6 +3428,14 @@ def _reserve_cli_session(
             help_command="vibe agent run --help",
         )
     return session_id
+
+
+def _sync_run_detached(run_payload: dict) -> bool:
+    return (
+        run_payload.get("wait_state") == "detached"
+        or run_payload.get("handoff_reason") == "wait_limit_reached"
+        or normalize_run_status(run_payload.get("status")) not in {"succeeded", "failed", "canceled"}
+    )
 
 
 def _reserve_forked_cli_session(
@@ -3544,11 +3556,13 @@ def cmd_agent_run(args):
         session_key = ""
         run_cwd = _resolve_run_cwd(args, session_policy=session_policy, help_command="vibe agent run --help")
         scope_key = _resolve_agent_run_scope_key(args, caller_context=caller_context, source_session_id=source_session_id)
+        legacy_reservation_target = None
         if not scope_key and (args.deliver_key or "").strip():
             # Hidden legacy compatibility: external docs and prompts should use
             # --scope-id/--same-scope, while old callers still map into the same
             # internal placement field.
-            scope_key = _parse_validated_session_key(args.deliver_key, help_command="vibe agent run --help").session_scope
+            legacy_reservation_target = _parse_validated_session_key(args.deliver_key, help_command="vibe agent run --help")
+            scope_key = legacy_reservation_target.session_scope
         agent = _agent_store().require_enabled(agent_name) if agent_name else None
         fork_result = None
         session_metadata = _session_creation_metadata_from_caller(caller_context)
@@ -3581,9 +3595,15 @@ def cmd_agent_run(args):
                 scope_key=scope_key,
                 workdir=run_cwd,
                 metadata=session_metadata,
+                session_anchor_target=legacy_reservation_target,
             )
         elif session_policy == "none":
-            session_id = _reserve_cli_session(agent=agent, scope_key=scope_key, workdir=run_cwd, metadata=session_metadata)
+            session_id = _reserve_cli_session(
+                agent=agent,
+                scope_key=scope_key,
+                workdir=run_cwd,
+                metadata=session_metadata,
+            )
         elif session_policy == "fork":
             fork_result = _reserve_forked_cli_session(
                 source_session_id=source_session_id or "",
@@ -3673,7 +3693,11 @@ def cmd_agent_run(args):
         if fork_result:
             payload["run"]["forked_from_session_id"] = fork_result.fork.source_session_id
         if not args.async_run:
-            payload["run"] = _wait_for_run_result(request_store, request.id, wait_timeout=args.wait_timeout)
+            run_payload = _wait_for_run_result(request_store, request.id, wait_timeout=args.wait_timeout)
+            if callback_session_id and _sync_run_detached(run_payload):
+                request_store.mark_callback_pending(request.id)
+                run_payload["callback_status"] = "pending"
+            payload["run"] = run_payload
         _print_cli_payload("agent_run", **payload)
         return 0
     except Exception as exc:

@@ -545,6 +545,87 @@ def test_agent_run_callback_session_records_sync_route_in_sqlite_store(tmp_path:
         assert cli.TaskExecutionStore().list_pending_callbacks() == []
 
 
+def test_agent_run_sync_detach_marks_callback_pending(tmp_path: Path, capsys) -> None:
+    from core.services import sessions as sessions_service
+    from sqlalchemy import select
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_runs, scope_settings
+    from storage.settings_service import upsert_scope
+
+    state_home = tmp_path / "home"
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
+        ensure_sqlite_state()
+        db_path = state_home / "state" / "vibe.sqlite"
+        agent_store = cli.VibeAgentStore(db_path)
+        agent_store.create(name="worker", backend="codex")
+        with create_sqlite_engine(db_path).begin() as conn:
+            scope_id = upsert_scope(
+                conn,
+                platform="slack",
+                scope_type="channel",
+                native_id="C123",
+                now="2026-06-10T00:00:00Z",
+            )
+            conn.execute(
+                scope_settings.insert().values(
+                    scope_id=scope_id,
+                    enabled=1,
+                    role=None,
+                    workdir=str(tmp_path),
+                    agent_name=None,
+                    agent_backend=None,
+                    agent_variant=None,
+                    model=None,
+                    reasoning_effort=None,
+                    require_mention=None,
+                    settings_version=1,
+                    settings_json="{}",
+                    created_at="2026-06-10T00:00:00Z",
+                    updated_at="2026-06-10T00:00:00Z",
+                )
+            )
+            callback_session = sessions_service.create_session(
+                conn,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_name="worker",
+            )
+
+        args = _parse_agent_run(
+            ["--agent", "worker", "--callback-session-id", callback_session["id"], "--message", "hi"]
+        )
+
+        with (
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+            patch("vibe.cli.paths.get_state_dir", return_value=state_home / "state"),
+            patch("vibe.cli._primary_platform", return_value="slack"),
+            patch(
+                "vibe.cli._wait_for_run_result",
+                return_value={
+                    "id": "still-running",
+                    "status": "running",
+                    "wait_state": "detached",
+                    "handoff_reason": "wait_limit_reached",
+                },
+            ),
+        ):
+            result = cli.cmd_agent_run(args)
+
+        assert result == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["run"]["callback_status"] == "pending"
+        with create_sqlite_engine(db_path).connect() as conn:
+            row = conn.execute(
+                select(agent_runs.c.callback_status, agent_runs.c.callback_completed_at)
+                .where(agent_runs.c.id == payload["run_id"])
+                .limit(1)
+            ).mappings().one()
+        assert row["callback_status"] == "pending"
+        assert row["callback_completed_at"] is None
+
+
 def test_agent_run_callback_conflict_does_not_reserve_session(tmp_path: Path, capsys) -> None:
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
@@ -850,6 +931,70 @@ def test_agent_run_create_scope_id_requires_existing_scope(tmp_path: Path, capsy
     assert result == 1
     payload = json.loads(capsys.readouterr().err)
     assert payload["code"] == "scope_not_found"
+
+
+def test_agent_run_create_scope_id_rejects_archived_project(tmp_path: Path, capsys) -> None:
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import scope_settings
+    from storage.settings_service import upsert_scope
+
+    state_home = tmp_path / "home"
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
+        ensure_sqlite_state()
+        db_path = state_home / "state" / "vibe.sqlite"
+        with create_sqlite_engine(db_path).begin() as conn:
+            scope_id = upsert_scope(
+                conn,
+                platform="avibe",
+                scope_type="project",
+                native_id="proj_archived",
+                now="2026-06-16T00:00:00Z",
+            )
+            conn.execute(
+                scope_settings.insert().values(
+                    scope_id=scope_id,
+                    enabled=0,
+                    role=None,
+                    workdir=str(tmp_path),
+                    agent_name="worker",
+                    agent_backend="codex",
+                    agent_variant="codex",
+                    model=None,
+                    reasoning_effort=None,
+                    require_mention=None,
+                    settings_version=1,
+                    settings_json="{}",
+                    created_at="2026-06-16T00:00:00Z",
+                    updated_at="2026-06-16T00:00:00Z",
+                )
+            )
+        agent_store = cli.VibeAgentStore(db_path)
+        agent_store.create(name="worker", backend="codex")
+        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        args = _parse_agent_run(
+            [
+                "--agent",
+                "worker",
+                "--scope-id",
+                scope_id,
+                "--async",
+                "--no-callback",
+                "--message",
+                "hi",
+            ]
+        )
+
+        with (
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch("vibe.cli._task_request_store", return_value=request_store),
+            patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        ):
+            result = cli.cmd_agent_run(args)
+
+    assert result == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["code"] == "scope_archived"
 
 
 def test_agent_run_fork_rejects_cross_backend_agent(tmp_path: Path, capsys) -> None:

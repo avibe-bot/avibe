@@ -1050,6 +1050,41 @@ class TaskExecutionStore:
             tmp_path.replace(path)
             return
 
+    def mark_callback_pending(self, run_id: str) -> None:
+        if self._sqlite is not None:
+            self._sqlite.mark_callback_pending(run_id)
+            return
+        now = _utc_now_iso()
+        for state in ("pending", "processing", "completed"):
+            path = self._request_path(run_id, state=state)
+            if not path.exists():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {"id": run_id}
+            if not isinstance(payload, dict):
+                payload = {"id": run_id}
+            payload.update(
+                {
+                    "callback_status": "pending",
+                    "callback_error": None,
+                    "callback_completed_at": None,
+                    "updated_at": now,
+                }
+            )
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                dir=path.parent,
+                suffix=".tmp",
+                delete=False,
+                encoding="utf-8",
+            ) as handle:
+                json.dump(payload, handle, indent=2)
+                tmp_path = Path(handle.name)
+            tmp_path.replace(path)
+            return
+
     def list_runs_page(
         self,
         *,

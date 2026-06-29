@@ -735,7 +735,12 @@ def test_reserve_forked_session_reanchors_when_moved_to_new_im_scope(tmp_path: P
     finally:
         engine.dispose()
 
-    result = reserve_forked_session(
+    first_result = reserve_forked_session(
+        source_session_id=source_id,
+        scope_id=target_scope_id,
+        db_path=db_path,
+    )
+    second_result = reserve_forked_session(
         source_session_id=source_id,
         scope_id=target_scope_id,
         db_path=db_path,
@@ -744,22 +749,29 @@ def test_reserve_forked_session_reanchors_when_moved_to_new_im_scope(tmp_path: P
     engine = create_sqlite_engine(db_path)
     try:
         with engine.connect() as conn:
-            row = conn.execute(
-                select(agent_sessions).where(agent_sessions.c.id == result.session_id)
-            ).mappings().one()
+            rows = list(
+                conn.execute(
+                    select(agent_sessions)
+                    .where(agent_sessions.c.id.in_([first_result.session_id, second_result.session_id]))
+                    .order_by(agent_sessions.c.id)
+                ).mappings()
+            )
     finally:
         engine.dispose()
 
+    assert len(rows) == 2
+    row = rows[0]
     metadata = json.loads(row["metadata_json"])
     assert row["scope_id"] == target_scope_id
-    assert row["session_anchor"] == "slack_C999"
+    assert row["session_anchor"].startswith("slack_C999:fork_")
     assert metadata["fork_target_scope_id"] == target_scope_id
     assert metadata["legacy_scope_key"] == target_scope_id
+    assert rows[0]["session_anchor"] != rows[1]["session_anchor"]
 
-    resolved = resolve_session_id_target(result.session_id, db_path=db_path)
+    resolved = resolve_session_id_target(first_result.session_id, db_path=db_path)
     assert resolved.session_key.to_key() == "slack::channel::C999"
     assert resolved.session_key.thread_id is None
-    assert resolved.session_anchor == "slack_C999"
+    assert resolved.session_anchor.startswith("slack_C999:fork_")
 
 
 def test_reserve_forked_session_rejects_backend_change(tmp_path: Path) -> None:

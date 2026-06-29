@@ -192,7 +192,11 @@ def reserve_forked_session(
             )
             target_scope_id = (_clean_optional(scope_id) if scope_id is not None else None) or row["scope_id"]
             if target_scope_id != row["scope_id"]:
-                target_anchor = _anchor_for_scope_id(target_scope_id)
+                target_anchor = _fork_session_anchor(
+                    _anchor_for_scope_id(target_scope_id),
+                    source_session_id=str(row["id"]),
+                    now=now,
+                )
             else:
                 target_anchor = _fork_session_anchor(row["session_anchor"], source_session_id=str(row["id"]), now=now)
             source_title = str(row["title"] or "").strip()
