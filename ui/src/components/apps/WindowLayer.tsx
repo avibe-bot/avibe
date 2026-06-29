@@ -75,8 +75,8 @@ export const WindowLayer: React.FC = () => {
       // Browser follows the workbench light/dark, while the Editor and Terminal stay dark like a VS
       // Code editor / a terminal. So the layer itself no longer forces a theme — each window opts in.
       // Spans the FULL viewport (no longer offset past the sidebar): windows can move over
-      // the sidebar and maximize fills the whole screen. The sidebar's bottom Apps/Dock
-      // cluster sits above this layer (z-30) so it stays reachable under a maximized window.
+      // the sidebar and maximize fills the whole screen. This layer (z-20) sits ABOVE the sidebar
+      // (z-10), so a maximized window covers the whole sidebar, Apps launcher included.
       className="pointer-events-none fixed inset-0 z-20 hidden md:block"
     >
       {windows.map((w) => (

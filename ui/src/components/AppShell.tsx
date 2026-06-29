@@ -374,11 +374,11 @@ export const AppShell: React.FC = () => {
     // Desktop: normal document flow.
     <WindowManagerProvider>
     <div className="flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground md:block md:h-auto md:min-h-screen md:overflow-visible">
-      {/* No z-index on the aside itself: a maximized window (window layer, z-20) must be able to
-          cover the sidebar nav (design If1Tt). Keeping it un-stacked (z-auto, no stacking context)
-          lets the Apps launcher inside escape to its own z-30 and float on top while the rest of the
-          sidebar stays below the window layer. */}
-      <aside className="fixed inset-y-0 left-0 hidden w-[240px] flex-col border-r border-border bg-surface md:flex">
+      {/* The sidebar forms its own stacking context BELOW the window layer (aside z-10 < window
+          layer z-20), so a maximized window covers the WHOLE sidebar — including the Apps launcher.
+          The Apps button no longer floats on top in full-screen (a Dock redesign comes later);
+          un-maximize to reach it. */}
+      <aside className="fixed inset-y-0 left-0 z-10 hidden w-[240px] flex-col border-r border-border bg-surface md:flex">
         <div className="flex h-full flex-col justify-between gap-6 px-4 py-5">
           {/* Top: Brand + Workspace label + Nav list */}
           {/* Workbench mounts a search field right under the brand, so use the
@@ -412,9 +412,8 @@ export const AppShell: React.FC = () => {
 
           {/* Bottom (design.pen NbPMq): row 1 = [Apps | Settings] two equal
               buttons; row 2 = [version … run-dot]. Admin keeps its quick-toggles
-              + hostname between the rows. Only the Apps launcher floats above a
-              maximized window (it carries its own z-30); Settings / version / run-dot
-              stay at the sidebar's level and are covered by a maximized window (If1Tt). */}
+              + hostname between the rows. The whole bottom cluster sits at the
+              sidebar's level (z-10) and is covered by a maximized window. */}
           <div className="relative flex flex-col gap-3">
             {/* Row 1 — Apps (Dock trigger, left) paired with the mode switch
                 (right). The Dock rises ABOVE the Apps button, clear of the

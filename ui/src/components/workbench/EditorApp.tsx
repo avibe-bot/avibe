@@ -137,6 +137,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   // Open (or focus) a raster image as a read-only preview tab (no Monaco). Dedups by path inside the
   // updater so a fast double-open can't append two tabs.
   const openImage = useCallback((path: string, name: string) => {
+    setRoot((r) => r ?? parentDir(path));
     setTabs((ts) => {
       const existing = ts.find((x) => x.path === path);
       const id = existing ? existing.id : `t${++tabSeq.current}`;
@@ -339,25 +340,31 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   // border). Width persists for the window's lifetime (state, not navigation).
   const [explorerCollapsed, setExplorerCollapsed] = useState(false);
   const [explorerWidth, setExplorerWidth] = useState(240);
+  // Holds the in-flight drag's teardown so an unmount mid-drag (window closed while dragging) can
+  // still remove the window listeners and restore the body cursor / user-select.
+  const resizeTeardown = useRef<(() => void) | null>(null);
   const startResize = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
       const startX = e.clientX;
       const startW = explorerWidth;
       const onMove = (ev: MouseEvent) => setExplorerWidth(Math.max(168, Math.min(520, startW + ev.clientX - startX)));
-      const onUp = () => {
+      const teardown = () => {
         window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onUp);
+        window.removeEventListener('mouseup', teardown);
         document.body.style.cursor = '';
         document.body.style.userSelect = '';
+        resizeTeardown.current = null;
       };
+      resizeTeardown.current = teardown;
       window.addEventListener('mousemove', onMove);
-      window.addEventListener('mouseup', onUp);
+      window.addEventListener('mouseup', teardown);
       document.body.style.cursor = 'col-resize';
       document.body.style.userSelect = 'none';
     },
     [explorerWidth],
   );
+  useEffect(() => () => resizeTeardown.current?.(), []);
 
   const showWelcome = root == null && tabs.length === 0;
   const activeTab = tabs.find((x) => x.id === active);

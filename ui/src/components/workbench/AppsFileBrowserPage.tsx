@@ -39,6 +39,7 @@ import {
   makeDir,
   pathCrumbs,
   systemFavorites,
+  writeFile,
   type Favorite,
   type FsEntry,
   type FsListing,
@@ -216,19 +217,21 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     }
   };
 
-  // New Folder: inline editable row in the listing (mirrors FilePicker), not a window.prompt.
-  // null = not creating; '' or a name = in-progress. Enter creates, Esc/blur cancels.
-  const [newFolder, setNewFolder] = useState<string | null>(null);
-  const startNewFolder = useCallback(() => {
+  // New File / New Folder: an inline editable row in the listing (mirrors FilePicker), not a
+  // window.prompt. null = not creating. Enter creates, Esc/blur cancels.
+  const [newEntry, setNewEntry] = useState<{ kind: 'file' | 'folder'; value: string } | null>(null);
+  const startNewEntry = useCallback((kind: 'file' | 'folder') => {
     setError(null);
-    setNewFolder('');
+    setNewEntry({ kind, value: '' });
   }, []);
-  const newFolderRef = useRef('');
-  newFolderRef.current = newFolder ?? '';
-  const commitNewFolder = useCallback(async () => {
-    const name = newFolderRef.current.trim();
+  const newEntryRef = useRef<{ kind: 'file' | 'folder'; value: string } | null>(null);
+  newEntryRef.current = newEntry;
+  const commitNewEntry = useCallback(async () => {
+    const session = newEntryRef.current;
+    if (!session) return;
+    const name = session.value.trim();
     if (name === '') {
-      setNewFolder(null);
+      setNewEntry(null);
       return;
     }
     if (!isPlainEntryName(name)) {
@@ -236,21 +239,29 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       return;
     }
     try {
-      await makeDir(joinPath(cwd, name));
-      setNewFolder(null);
+      // create-only on files: the backend atomically refuses a name clash, so a typo can't clobber.
+      if (session.kind === 'folder') await makeDir(joinPath(cwd, name));
+      else await writeFile(joinPath(cwd, name), '', undefined, true);
+      setNewEntry(null);
       navigate(cwd);
     } catch (e: unknown) {
-      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.createFolderFailed')));
+      setError(
+        fileBrowserErrorMessage(e, t, t(session.kind === 'folder' ? 'apps.fileBrowser.errors.createFolderFailed' : 'apps.fileBrowser.errors.saveFailed')),
+      );
     }
   }, [cwd, navigate, t]);
 
-  // New File: open the Editor rooted at the current dir with a fresh untitled buffer (creation +
-  // editing happen in the editor; the first save lands in cwd). Desktop only — the editor window
-  // layer is hidden below md.
+  // New File: on DESKTOP open the Editor rooted at the current dir with a fresh untitled buffer
+  // (richer creation + editing flow; first save lands in cwd). On mobile the editor window layer is
+  // hidden, so fall back to the inline create row so a file can still be made.
   const onNewFile = useCallback(() => {
     if (!cwd) return;
-    wm.openApp('editor', { title: t('apps.fileBrowser.newFile'), params: { newFileDir: cwd } });
-  }, [cwd, wm, t]);
+    if (window.matchMedia('(min-width: 768px)').matches) {
+      wm.openApp('editor', { title: t('apps.fileBrowser.newFile'), params: { newFileDir: cwd } });
+    } else {
+      startNewEntry('file');
+    }
+  }, [cwd, wm, t, startNewEntry]);
 
   const projectFavs = useMemo(
     () => (projects || []).filter((p) => !!p.folder_path).map((p) => ({ label: p.display_name, path: p.folder_path as string })),
@@ -316,10 +327,10 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
               className="w-28 bg-transparent text-[12px] text-foreground placeholder:text-muted focus:outline-none"
             />
           </label>
-          <Button type="button" size="sm" variant="brand" className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]" disabled={!cwd} onClick={onNewFile}>
+          <Button type="button" size="sm" variant="brand" className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]" disabled={!cwd || newEntry !== null} onClick={onNewFile}>
             <FilePlus className="size-3.5" /> {t('apps.fileBrowser.newFile')}
           </Button>
-          <Button type="button" size="sm" variant="outline" className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]" disabled={!cwd || newFolder !== null} onClick={startNewFolder}>
+          <Button type="button" size="sm" variant="outline" className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]" disabled={!cwd || newEntry !== null} onClick={() => startNewEntry('folder')}>
             <FolderPlus className="size-3.5" /> {t('apps.fileBrowser.newFolder')}
           </Button>
         </div>
@@ -368,31 +379,31 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
               {loading && !listing && (
                 <div className="grid place-items-center py-8"><Loader2 className="size-4 animate-spin text-muted" /></div>
               )}
-              {newFolder !== null && (
+              {newEntry !== null && (
                 <div className="flex items-center px-3 py-1.5">
                   <span className="flex min-w-0 flex-1 items-center gap-2">
-                    <Folder className="size-4 shrink-0 text-cyan" />
+                    {newEntry.kind === 'folder' ? <Folder className="size-4 shrink-0 text-cyan" /> : <FileIcon className="size-4 shrink-0 text-muted" />}
                     <input
                       autoFocus
-                      value={newFolder}
-                      onChange={(ev) => setNewFolder(ev.target.value)}
+                      value={newEntry.value}
+                      onChange={(ev) => setNewEntry((s) => (s ? { ...s, value: ev.target.value } : s))}
                       onKeyDown={(ev) => {
                         if (ev.key === 'Enter') {
                           ev.preventDefault();
-                          void commitNewFolder();
+                          void commitNewEntry();
                         } else if (ev.key === 'Escape') {
                           ev.preventDefault();
-                          setNewFolder(null);
+                          setNewEntry(null);
                         }
                       }}
-                      onBlur={() => setNewFolder(null)}
-                      placeholder={t('apps.fileBrowser.newFolderPlaceholder')}
+                      onBlur={() => setNewEntry(null)}
+                      placeholder={t(newEntry.kind === 'folder' ? 'apps.fileBrowser.newFolderPlaceholder' : 'apps.fileBrowser.newFilePrompt')}
                       className="min-w-0 flex-1 rounded border border-cyan bg-surface px-1.5 py-0.5 text-[12.5px] text-foreground placeholder:text-muted focus:outline-none"
                     />
                   </span>
                 </div>
               )}
-              {listing && entries.length === 0 && newFolder === null && (
+              {listing && entries.length === 0 && newEntry === null && (
                 <div className="px-3 py-8 text-center text-[12px] text-muted">{query ? t('apps.fileBrowser.noMatches') : t('apps.fileBrowser.empty')}</div>
               )}
               {entries.map((e) => {

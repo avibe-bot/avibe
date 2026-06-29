@@ -55,10 +55,10 @@ export const AppsLauncher: React.FC = () => {
   };
 
   return (
-    // z-30 keeps the Apps button (and its Dock popover) above the window layer (z-20) so it stays
-    // reachable even under a MAXIMIZED window (design If1Tt). The sidebar aside is intentionally
-    // un-stacked, so this z-30 composites at the root, above the window layer.
-    <div className="relative z-30 flex-1" onMouseEnter={openHover} onMouseLeave={queueClose}>
+    // The sidebar aside owns the stacking context (z-10, below the window layer z-20), so the Apps
+    // button is covered by a maximized window like the rest of the sidebar. `relative` is just the
+    // positioning context for the Dock popover below; the popover's z-50 is scoped to the sidebar.
+    <div className="relative flex-1" onMouseEnter={openHover} onMouseLeave={queueClose}>
       <button
         type="button"
         onClick={onClick}

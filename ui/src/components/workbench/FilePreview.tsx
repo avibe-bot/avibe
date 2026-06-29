@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -31,6 +31,12 @@ const ImagePreview: React.FC<{ src: string; name?: string; className?: string }>
   const { t } = useTranslation();
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [actual, setActual] = useState(false);
+  // Reset when the source changes — the live SVG preview re-points `src` on every keystroke, so a
+  // transient error (a momentarily-invalid buffer) must clear once the buffer becomes valid again.
+  useEffect(() => {
+    setStatus('loading');
+    setActual(false);
+  }, [src]);
 
   if (status === 'error') {
     return (

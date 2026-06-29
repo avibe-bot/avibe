@@ -165,9 +165,12 @@ const Dir: React.FC<{ path: string; name: string; depth: number }> = ({ path, na
   const [error, setError] = useState<string | null>(null);
   const version = tree.versionOf(path);
   // `menu.dir` is always the PARENT of the clicked entry (consistent with file rows), so new/rename/
-  // delete resolve the same way for files and folders.
+  // delete resolve the same way for files and folders. The ROOT row (depth 0) is special: it has no
+  // meaningful parent here and must not be renamed/deleted, so it opens the menu as blank space
+  // (entry=null, dir=path) — offering only New File/Folder INSIDE the root.
+  const isRoot = depth === 0;
   const parent = parentDir(path);
-  const renamingSelf = tree.edit?.mode === 'rename' && tree.edit.dir === parent && tree.edit.target === name;
+  const renamingSelf = !isRoot && tree.edit?.mode === 'rename' && tree.edit.dir === parent && tree.edit.target === name;
 
   const load = useCallback(() => {
     setLoading(true);
@@ -206,7 +209,13 @@ const Dir: React.FC<{ path: string; name: string; depth: number }> = ({ path, na
             <InlineNameInput initial={name} onCommit={tree.commitEdit} onCancel={tree.cancelEdit} />
           </div>
         ) : (
-          <Row depth={depth} onClick={() => setOpen((o) => !o)} onContextMenu={(e) => tree.openMenu(e, parent, { name, kind: 'dir', size: null, mtime: null, ext: '' })}>
+          <Row
+            depth={depth}
+            onClick={() => setOpen((o) => !o)}
+            onContextMenu={(e) =>
+              isRoot ? tree.openMenu(e, path, null) : tree.openMenu(e, parent, { name, kind: 'dir', size: null, mtime: null, ext: '' })
+            }
+          >
             {open ? <ChevronDown className="size-3.5 shrink-0 text-muted" /> : <ChevronRight className="size-3.5 shrink-0 text-muted" />}
             <span className="truncate font-medium text-muted">{name}</span>
           </Row>
