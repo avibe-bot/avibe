@@ -180,13 +180,6 @@ export const VaultSecretForm: React.FC<{
     setCopied(false);
   };
 
-  // Signing keys are sealed in the browser and signed locally by avault, so they
-  // require the P2 avault surface and (this version) the standard tier; the
-  // protected tier's browser signing sandbox lands next version.
-  useEffect(() => {
-    if (isKeypair && protection !== 'standard') setProtection('standard');
-  }, [isKeypair, protection]);
-
   // Zero any held private key when the form unmounts.
   useEffect(
     () => () => {
@@ -197,7 +190,10 @@ export const VaultSecretForm: React.FC<{
   );
 
   const valueReady = isKeypair ? signingKey != null : Boolean(value);
-  const keypairRequirementsMet = !isKeypair || p2Ready;
+  // Standard signing keys are blind-boxed to avault, so they need the P2 surface;
+  // protected signing keys are sealed under the browser VMK and signed locally, so they
+  // only need the vault unlocked (gated below via protectedCreateReady).
+  const keypairRequirementsMet = !isKeypair || protection === 'protected' || p2Ready;
   const canSubmit =
     Boolean(secretName && valueReady) &&
     keypairRequirementsMet &&
@@ -251,8 +247,9 @@ export const VaultSecretForm: React.FC<{
         | { value: string };
       let establishingVmk = false;
       if (protection === 'protected') {
-        // Browser-sealed under the session VMK; the daemon stores it opaquely (no avault, no plaintext).
-        const sealed = await protectedVault.sealValue(secretName, value);
+        // Browser-sealed under the session VMK; the daemon stores it opaquely (no avault, no
+        // plaintext). For a signing key this seals the raw 32-byte private key, not a string.
+        const sealed = await protectedVault.sealValue(secretName, plaintext);
         cryptoFields = { sealed: sealed.envelope };
         establishingVmk = sealed.establishingVmk;
       } else if (p2Ready) {
@@ -482,7 +479,7 @@ export const VaultSecretForm: React.FC<{
 
           {signingError && <span className="text-xs text-destructive">{signingError}</span>}
 
-          {!p2Ready && (
+          {!p2Ready && protection !== 'protected' && (
             <div className="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-xs text-warning">
               {t('vaults.dialog.signingNeedsAvault', { version: AVAULT_P2_MIN_VERSION })}
             </div>
@@ -562,21 +559,14 @@ export const VaultSecretForm: React.FC<{
             ] as const
           ).map(({ key, icon: Icon, title, desc }) => {
             const selected = protection === key;
-            // Protected signing keys need the browser signing sandbox (next version),
-            // so the protected tier is disabled while creating a keypair.
-            const optionDisabled = key === 'protected' && isKeypair;
             return (
               <button
                 key={key}
                 type="button"
                 aria-pressed={selected}
-                disabled={optionDisabled}
-                onClick={() => {
-                  if (!optionDisabled) setProtection(key);
-                }}
+                onClick={() => setProtection(key)}
                 className={cn(
                   'flex flex-col gap-1.5 rounded-lg border p-3 text-left transition-colors',
-                  optionDisabled && 'cursor-not-allowed opacity-50',
                   selected ? 'border-mint bg-mint-soft' : 'border-border bg-surface hover:bg-surface-2',
                 )}
               >
@@ -589,9 +579,6 @@ export const VaultSecretForm: React.FC<{
             );
           })}
         </div>
-        {isKeypair && (
-          <span className="text-xs font-normal text-muted-foreground">{t('vaults.dialog.protectedKeypairNextVersion')}</span>
-        )}
       </div>
       {protection === 'protected' && <VaultProtectedUnlock vault={protectedVault} />}
       {protection === 'standard' && checkingAvault && (

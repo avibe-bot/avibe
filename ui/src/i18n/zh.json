@@ -2207,7 +2207,7 @@
       "kindStaticHelp": "令牌、密码,或任意文本值。",
       "kindKeypair": "签名密钥",
       "kindKeypairHelp": "在你浏览器里生成的签名私钥。",
-      "signingKeyHelp": "会在你的浏览器里新生成一把 secp256k1 签名密钥。私钥像其他标准密钥一样被封存、由本机 avault 签名;只有公钥明文保存。",
+      "signingKeyHelp": "会在你的浏览器里新生成一把 secp256k1 签名密钥。私钥在浏览器中封存——标准密钥由本机 avault 签名,保护层密钥在浏览器中签名——只有公钥明文保存。",
       "signingGenerate": "生成",
       "signingImport": "导入",
       "signingGenerateCta": "生成签名密钥",
@@ -2217,7 +2217,6 @@
       "copyPublicKey": "复制公钥",
       "signingPublicKeyHint": "公钥可以放心分享。私钥始终留在你的保险库里;用哪条链、哪种签名方案,在签名时再定。",
       "signingNeedsAvault": "签名密钥需要安装 avault {{version}} 或更新版本。",
-      "protectedKeypairNextVersion": "保护层签名密钥将随浏览器签名沙箱在下个版本到来。",
       "checkingAvault": "正在检查 avault…",
       "p2Unavailable": "浏览器侧保险库创建需要 avault {{version}} 或更新版本。当前安装：{{installed}}。在兼容的 avault 发布版安装前，请使用 CLI stdin/file 路径。",
       "p2UnavailableStandardFallback": "浏览器侧封装需要 avault {{version}} 或更新版本。当前安装：{{installed}}。标准密钥仍可通过本机 avault seal fallback 保存。",
@@ -2250,6 +2249,54 @@
         "fingerprintMismatch": "avault 公钥指纹已变化。请先确认本机 avault 安装可信，再保存该密钥。",
         "pendingDraft": "请先按回车把输入框里的内容加进去,或清空它,再保存。",
         "secretExists": "同名密钥已存在。"
+      }
+    },
+    "requests": {
+      "title": "待处理请求",
+      "subtitle": "有 Agent 正在等待——在本设备上批准或拒绝。",
+      "reviewTitle": "审阅请求",
+      "review": "审阅",
+      "waiting": "等待批准",
+      "access": "使用密钥",
+      "sign": "签名",
+      "approved": "已批准访问",
+      "signed": "已返回签名",
+      "denied": "已拒绝请求"
+    },
+    "approval": {
+      "accessTitle": "Agent 想使用一个密钥",
+      "accessSubtitle": "密钥值绝不会展示给 Agent 或聊天。",
+      "signTitle": "Agent 想要签名",
+      "signSubtitle": "签名始终按次进行——无法预先批准。",
+      "secret": "密钥",
+      "key": "密钥",
+      "session": "会话",
+      "command": "命令",
+      "egress": "出网",
+      "digest": "摘要",
+      "scopeTitle": "授权范围",
+      "scopeMembers": "覆盖 {{count}} 个密钥",
+      "scope": {
+        "secret": "仅此密钥",
+        "skill": "技能 · {{ref}}",
+        "group": "分组 · {{ref}}"
+      },
+      "thisSessionOnly": "仅限本会话",
+      "approve": "批准",
+      "sign": "签名",
+      "deny": "拒绝",
+      "close": "关闭",
+      "loading": "正在加载请求…",
+      "ttlMinutes": "{{count}} 分钟",
+      "ttlHours": "{{count}} 小时",
+      "accessNote": "密钥在你的浏览器中解锁、在 avault 内交付——Python 永远看不到它。",
+      "signNote": "私钥绝不会离开你的浏览器——只返回签名。",
+      "errors": {
+        "failed": "批准未能完成，请重试。",
+        "loadFailed": "无法加载该请求，它可能已被处理。",
+        "noScope": "该请求没有可授权的范围。",
+        "missingDigest": "该签名请求缺少摘要。",
+        "missingMaterial": "无法获取用于签名的保护层密钥材料，请重新加载后重试。"
       }
     },
     "request": {

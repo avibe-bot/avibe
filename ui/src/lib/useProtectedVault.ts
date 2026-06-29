@@ -9,11 +9,30 @@ import {
   newVmk,
   packProtectedRecord,
   passkeyPrfSaltEntries,
+  releaseProtectedDek,
   sealProtected,
+  signProtectedDigest,
+  unpackProtectedRecord,
   unwrapVmk,
   webAuthnPrfExtensionInput,
+  type AvaultPublicKey,
+  type BlindBox,
+  type ProtectedDekDeliveryBlindBoxContext,
   type ProtectedRecordEnvelope,
+  type SignatureResult,
+  type SignatureScheme,
 } from './vaultCrypto';
+
+/**
+ * The protected envelope + name the daemon hydrates onto a UI-audience request card
+ * (`card.secret_unlock_material` / `scope_options[].unlock_material[]`). It is value-free
+ * metadata; the browser opens it locally with the unlocked VMK to sign or release a DEK.
+ */
+export type ProtectedUnlockMaterial = {
+  name: string;
+  kind?: string | null;
+  envelope: ProtectedRecordEnvelope;
+};
 
 /**
  * Protected-tier vault lifecycle for the Web UI.
@@ -222,12 +241,17 @@ export function useProtectedVault() {
     commit(await unwrapVmk(wrapMeta, { kind: 'passkey', prfOutput, prfSalt }), wrapMeta, false);
   }, []);
 
-  /** Seal a value under the unlocked VMK into a stored protected envelope. */
+  /**
+   * Seal a value under the unlocked VMK into a stored protected envelope. Accepts a
+   * string (static secret) or raw bytes (a keypair's 32-byte private key), so protected
+   * signing keys seal the key material itself, not a UTF-8 string.
+   */
   const sealValue = useCallback(
-    async (name: string, value: string): Promise<{ envelope: ProtectedRecordEnvelope; establishingVmk: boolean }> => {
+    async (name: string, value: Uint8Array | string): Promise<{ envelope: ProtectedRecordEnvelope; establishingVmk: boolean }> => {
       const { vmk, wrapMeta, freshSetup } = sessionVault;
       if (!vmk || !wrapMeta) throw new Error('vault-locked');
-      const sealed = await sealProtected(new TextEncoder().encode(value), vmk, { name });
+      const valueBytes = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+      const sealed = await sealProtected(valueBytes, vmk, { name });
       // `establishingVmk` lets the create transaction enforce the atomic single-init
       // guard server-side (a UI re-check here can't be race-free); the daemon rejects a
       // second VMK so concurrent first-time setups can't split the key history.
@@ -240,6 +264,42 @@ export function useProtectedVault() {
     // The vault now exists server-side; subsequent creates this session aren't "establishing".
     sessionVault.freshSetup = false;
   }, []);
+
+  /**
+   * Sign a digest locally with a protected keypair, approving a per-use sign request.
+   * The private key is opened from the request's unlock material under the cached VMK,
+   * used, and zeroed inside {@link signProtectedDigest} — only the public signature
+   * leaves the browser. The VMK never escapes this module.
+   */
+  const signProtectedRequest = useCallback(
+    async (material: ProtectedUnlockMaterial, digest: string, scheme: SignatureScheme): Promise<SignatureResult> => {
+      const { vmk } = sessionVault;
+      if (!vmk) throw new Error('vault-locked');
+      const { sealed } = unpackProtectedRecord(material.envelope);
+      return signProtectedDigest(sealed, vmk, { name: material.name }, digest, scheme);
+    },
+    [],
+  );
+
+  /**
+   * Release a protected secret's DEK as an opaque HPKE blind box addressed to the
+   * resident avault agent, approving a protected value-access request. The released DEK
+   * is sealed to the agent's pinned public key inside {@link releaseProtectedDek}; the
+   * daemon only ever relays the resulting blind box, never a raw DEK or plaintext.
+   */
+  const releaseProtectedDelivery = useCallback(
+    async (
+      material: ProtectedUnlockMaterial,
+      publicKey: AvaultPublicKey,
+      context: ProtectedDekDeliveryBlindBoxContext,
+    ): Promise<BlindBox> => {
+      const { vmk } = sessionVault;
+      if (!vmk) throw new Error('vault-locked');
+      const { sealed } = unpackProtectedRecord(material.envelope);
+      return releaseProtectedDek(sealed, vmk, publicKey, { name: material.name }, context);
+    },
+    [],
+  );
 
   const lock = useCallback(() => {
     sessionVault.vmk?.fill(0);
@@ -301,5 +361,5 @@ export function useProtectedVault() {
     }
   }, []);
 
-  return { status, error, setError, refresh, setupPassword, setupPasskey, unlockPassword, unlockPasskey, sealValue, afterCreated, lock, discardAndRefresh, hasPasskey, hasPassword, passkeyUsableHere };
+  return { status, error, setError, refresh, setupPassword, setupPasskey, unlockPassword, unlockPasskey, sealValue, signProtectedRequest, releaseProtectedDelivery, afterCreated, lock, discardAndRefresh, hasPasskey, hasPassword, passkeyUsableHere };
 }
