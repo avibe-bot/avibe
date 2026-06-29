@@ -1535,8 +1535,7 @@ def get_vault_request(request_id: str) -> dict:
 def _vault_requester_payload(payload: dict) -> dict:
     requester = payload.get("requester") if isinstance(payload.get("requester"), dict) else {}
     session_id = str(payload.get("session_id") or requester.get("session_id") or "").strip()
-    source = str(payload.get("source") or requester.get("source") or "agent-cli").strip() or "agent-cli"
-    out = {"source": source}
+    out = {"source": "agent-cli"}
     if session_id:
         out["session_id"] = session_id
     if payload.get("run_id"):
@@ -1595,6 +1594,7 @@ def request_vault_access(payload: dict) -> dict:
                 requester=_vault_requester_payload(payload),
                 delivery=_vault_delivery_payload(payload),
                 expires_at=_expires_at_from_ttl(payload),
+                audience=vault_service.REQUEST_AUDIENCE_AGENT,
             )
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc

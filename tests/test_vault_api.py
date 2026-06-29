@@ -460,6 +460,30 @@ def test_agent_access_request_does_not_return_protected_group_unlock_material(mo
     assert group_option["member_snapshot"] == ["PROTECTED_KEY", "STANDARD_KEY"]
 
 
+def test_agent_access_request_ignores_client_source_for_hydration(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("standard")))
+    api.create_vault_secret(
+        {
+            "name": "STANDARD_KEY",
+            "group": "crypto",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        }
+    )
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_KEY",
+            "protection": "protected",
+            "group": "crypto",
+            "sealed": {"ciphertext": "ct-protected", "nonce": "n-protected", "wrap_meta": "wm-protected"},
+        }
+    )
+
+    requested = api.request_vault_access({"name": "STANDARD_KEY", "session_id": "ses_1", "source": "ui"})
+
+    assert requested["request"]["requester"]["source"] == "agent-cli"
+    _assert_no_unlock_material(requested["request"]["card"])
+
+
 def test_agent_access_sibling_request_result_returns_covering_grant(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("api")))
     api.create_vault_secret({"name": "A_KEY", "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"}})
