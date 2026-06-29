@@ -193,15 +193,24 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
     setTabs((ts) => ts.map((tb) => (byId.has(tb.id) && !dirtyRef.current[tb.id] ? { ...tb, mtime: byId.get(tb.id) ?? tb.mtime, reload: (tb.reload ?? 0) + 1 } : tb)));
   }, []);
 
-  // Open the launch file (from the File Browser) once on mount.
+  // Open the launch file (from the File Browser) once on mount, OR — when the File Browser's
+  // "New File" launched us with a target dir — root the explorer there and start a fresh untitled
+  // buffer (its first save lands in that dir).
   useEffect(() => {
     const p = typeof params?.path === 'string' ? params.path : null;
-    if (p)
+    if (p) {
       openFile(
         p,
         (typeof params?.filename === 'string' ? params.filename : p.split('/').filter(Boolean).pop()) || p,
         typeof params?.mtime === 'number' ? params.mtime : null,
       );
+      return;
+    }
+    const dir = typeof params?.newFileDir === 'string' ? params.newFileDir : null;
+    if (dir) {
+      setRoot(dir);
+      newFile();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

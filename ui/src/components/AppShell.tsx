@@ -13,7 +13,7 @@ import { ThemeToggle } from './ThemeToggle';
 import { VersionBadge } from './VersionBadge';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
 import { AppsLauncher } from './AppsLauncher';
-import { WindowManagerProvider, useWindowManager } from '../context/WindowManagerContext';
+import { WindowManagerProvider } from '../context/WindowManagerContext';
 import { WindowLayer } from './apps/WindowLayer';
 import { NewSessionSheet } from './workbench/NewSessionSheet';
 import { SearchPalette } from './workbench/search/SearchPalette';
@@ -204,29 +204,6 @@ const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButton }> =
         {right.map((item) => <MobileNavLink key={item.to} item={item} />)}
       </div>
     </nav>
-  );
-};
-
-// When a window is MAXIMIZED it covers the sidebar (design If1Tt), so the in-sidebar Apps
-// launcher is hidden behind it. This floats a second Apps launcher at the bottom-left, ABOVE the
-// window layer, so the Dock stays reachable in full-screen — exactly the "Apps button floats on
-// top" of If1Tt. It must live OUTSIDE the aside: the aside is `position: fixed`, which always
-// forms a stacking context, so anything inside it can't rise above the window layer. Desktop-only
-// (windows are md+). Only one Apps launcher is ever visible — the sidebar's is covered when this shows.
-const FloatingApps: React.FC = () => {
-  const { windows } = useWindowManager();
-  const anyMaximized = windows.some((w) => w.maximized && !w.minimized);
-  if (!anyMaximized) return null;
-  return (
-    // A solid rounded backing + shadow makes it read as a clean floating Dock launcher (design
-    // If1Tt shows the pill clean) so the maximized app's content behind it — the editor activity
-    // bar, the file-browser rail — doesn't bleed through the translucent pill. It follows the
-    // workbench theme like the windows it sits over (no longer forced dark).
-    <div
-      className="fixed bottom-5 left-4 z-30 hidden w-[184px] rounded-full bg-surface-3 shadow-[0_10px_34px_-8px_rgba(0,0,0,0.7)] md:flex"
-    >
-      <AppsLauncher />
-    </div>
   );
 };
 
@@ -592,9 +569,11 @@ export const AppShell: React.FC = () => {
 
       {/* App windows float over the workbench main area (desktop). The Dock (P2)
           and the AppsLauncher bridge open windows via the WindowManager. */}
+      {/* A maximized window covers the sidebar Apps launcher. We intentionally do NOT float a
+          second launcher on top in full-screen anymore (product: avoid the fullscreen floating
+          button; a Dock redesign comes later). Un-maximize via the window traffic-lights to reach
+          the sidebar launcher. */}
       <WindowLayer />
-      {/* The Apps launcher floats back on top when a window is maximized (If1Tt). */}
-      <FloatingApps />
     </div>
     </WindowManagerProvider>
   );

@@ -682,6 +682,7 @@
       "newFolderPrompt": "新文件夹名称",
       "newFile": "新建文件",
       "newFilePrompt": "新文件名称",
+      "newFolderPlaceholder": "文件夹名称",
       "searchPlaceholder": "搜索",
       "colName": "名称",
       "colSize": "大小",

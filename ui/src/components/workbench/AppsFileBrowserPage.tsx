@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Braces,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   Download,
   FileCode2,
   FileText,
@@ -35,7 +37,6 @@ import {
   makeDir,
   pathCrumbs,
   systemFavorites,
-  writeFile,
   type Favorite,
   type FsEntry,
   type FsListing,
@@ -108,6 +109,14 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   const [sysFavs, setSysFavs] = useState<Favorite[]>([]);
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
+  // Column sort, Finder-like: click a header to cycle asc → desc → none (none = default
+  // dirs-first then name). Persists within the app session; folders always group before files.
+  const [sort, setSort] = useState<{ col: 'name' | 'size' | 'modified'; dir: 'asc' | 'desc' } | null>(null);
+  const cycleSort = useCallback(
+    (col: 'name' | 'size' | 'modified') =>
+      setSort((s) => (s?.col !== col ? { col, dir: 'asc' } : s.dir === 'asc' ? { col, dir: 'desc' } : null)),
+    [],
+  );
 
   const navSeq = useRef(0);
   const navigate = useCallback(
@@ -183,26 +192,41 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     }
   };
 
-  const createNamed = async (kind: 'file' | 'dir') => {
-    const raw = window.prompt(t(kind === 'dir' ? 'apps.fileBrowser.newFolderPrompt' : 'apps.fileBrowser.newFilePrompt'));
-    if (raw == null) return;
-    const name = raw.trim();
-    if (name === '') return;
+  // New Folder: inline editable row in the listing (mirrors FilePicker), not a window.prompt.
+  // null = not creating; '' or a name = in-progress. Enter creates, Esc/blur cancels.
+  const [newFolder, setNewFolder] = useState<string | null>(null);
+  const startNewFolder = useCallback(() => {
+    setError(null);
+    setNewFolder('');
+  }, []);
+  const newFolderRef = useRef('');
+  newFolderRef.current = newFolder ?? '';
+  const commitNewFolder = useCallback(async () => {
+    const name = newFolderRef.current.trim();
+    if (name === '') {
+      setNewFolder(null);
+      return;
+    }
     if (!isPlainEntryName(name)) {
       setError(t('apps.fileBrowser.errors.invalid_name'));
       return;
     }
-    const target = joinPath(cwd, name);
     try {
-      if (kind === 'dir') await makeDir(target);
-      // create-only: the backend atomically refuses (errors.exists) when the name is taken, so a
-      // typo can't truncate an existing file.
-      else await writeFile(target, '', undefined, true);
+      await makeDir(joinPath(cwd, name));
+      setNewFolder(null);
       navigate(cwd);
     } catch (e: unknown) {
-      setError(fileBrowserErrorMessage(e, t, t(kind === 'dir' ? 'apps.fileBrowser.errors.createFolderFailed' : 'apps.fileBrowser.errors.saveFailed')));
+      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.createFolderFailed')));
     }
-  };
+  }, [cwd, navigate, t]);
+
+  // New File: open the Editor rooted at the current dir with a fresh untitled buffer (creation +
+  // editing happen in the editor; the first save lands in cwd). Desktop only — the editor window
+  // layer is hidden below md.
+  const onNewFile = useCallback(() => {
+    if (!cwd) return;
+    wm.openApp('editor', { title: t('apps.fileBrowser.newFile'), params: { newFileDir: cwd } });
+  }, [cwd, wm, t]);
 
   const projectFavs = useMemo(
     () => (projects || []).filter((p) => !!p.folder_path).map((p) => ({ label: p.display_name, path: p.folder_path as string })),
@@ -213,8 +237,18 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     const all = listing?.entries ?? [];
     const q = query.trim().toLowerCase();
     const filtered = q ? all.filter((e) => e.name.toLowerCase().includes(q)) : all;
-    return [...filtered].sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === 'dir' ? -1 : 1));
-  }, [listing, query]);
+    return [...filtered].sort((a, b) => {
+      // Folders always group before files, regardless of column/direction (Finder-like).
+      if (a.kind !== b.kind) return a.kind === 'dir' ? -1 : 1;
+      if (!sort) return a.name.localeCompare(b.name);
+      let r = 0;
+      if (sort.col === 'size') r = (a.size ?? 0) - (b.size ?? 0);
+      else if (sort.col === 'modified') r = (a.mtime ?? 0) - (b.mtime ?? 0);
+      else r = a.name.localeCompare(b.name);
+      if (r === 0) r = a.name.localeCompare(b.name);
+      return sort.dir === 'asc' ? r : -r;
+    });
+  }, [listing, query, sort]);
   const selectedEntry = useMemo(
     () => (selected ? entries.find((e) => joinPath(cwd, e.name) === selected) ?? null : null),
     [entries, cwd, selected],
@@ -258,10 +292,10 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
               className="w-28 bg-transparent text-[12px] text-foreground placeholder:text-muted focus:outline-none"
             />
           </label>
-          <Button type="button" size="sm" variant="brand" className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]" disabled={!cwd} onClick={() => void createNamed('file')}>
+          <Button type="button" size="sm" variant="brand" className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]" disabled={!cwd} onClick={onNewFile}>
             <FilePlus className="size-3.5" /> {t('apps.fileBrowser.newFile')}
           </Button>
-          <Button type="button" size="sm" variant="outline" className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]" disabled={!cwd} onClick={() => void createNamed('dir')}>
+          <Button type="button" size="sm" variant="outline" className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]" disabled={!cwd || newFolder !== null} onClick={startNewFolder}>
             <FolderPlus className="size-3.5" /> {t('apps.fileBrowser.newFolder')}
           </Button>
         </div>
@@ -293,15 +327,48 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
           {/* Listing: Name / Size / Modified */}
           <div className="flex min-w-0 flex-1 flex-col">
             <div className="flex items-center border-b border-border px-3 py-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted">
-              <span className="min-w-0 flex-1">{t('apps.fileBrowser.colName')}</span>
-              <span className="w-20 shrink-0 text-right">{t('apps.fileBrowser.colSize')}</span>
-              <span className="w-36 shrink-0 pl-4">{t('apps.fileBrowser.colModified')}</span>
+              <button type="button" onClick={() => cycleSort('name')} className={clsx('flex min-w-0 flex-1 items-center gap-1 text-left transition hover:text-foreground', sort?.col === 'name' && 'text-foreground')}>
+                <span className="truncate">{t('apps.fileBrowser.colName')}</span>
+                {sort?.col === 'name' && (sort.dir === 'asc' ? <ChevronUp className="size-3 shrink-0" /> : <ChevronDown className="size-3 shrink-0" />)}
+              </button>
+              <button type="button" onClick={() => cycleSort('size')} className={clsx('flex w-20 shrink-0 items-center justify-end gap-1 transition hover:text-foreground', sort?.col === 'size' && 'text-foreground')}>
+                {t('apps.fileBrowser.colSize')}
+                {sort?.col === 'size' && (sort.dir === 'asc' ? <ChevronUp className="size-3 shrink-0" /> : <ChevronDown className="size-3 shrink-0" />)}
+              </button>
+              <button type="button" onClick={() => cycleSort('modified')} className={clsx('flex w-36 shrink-0 items-center gap-1 pl-4 transition hover:text-foreground', sort?.col === 'modified' && 'text-foreground')}>
+                {t('apps.fileBrowser.colModified')}
+                {sort?.col === 'modified' && (sort.dir === 'asc' ? <ChevronUp className="size-3 shrink-0" /> : <ChevronDown className="size-3 shrink-0" />)}
+              </button>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto py-1">
               {loading && !listing && (
                 <div className="grid place-items-center py-8"><Loader2 className="size-4 animate-spin text-muted" /></div>
               )}
-              {listing && entries.length === 0 && (
+              {newFolder !== null && (
+                <div className="flex items-center px-3 py-1.5">
+                  <span className="flex min-w-0 flex-1 items-center gap-2">
+                    <Folder className="size-4 shrink-0 text-cyan" />
+                    <input
+                      autoFocus
+                      value={newFolder}
+                      onChange={(ev) => setNewFolder(ev.target.value)}
+                      onKeyDown={(ev) => {
+                        if (ev.key === 'Enter') {
+                          ev.preventDefault();
+                          void commitNewFolder();
+                        } else if (ev.key === 'Escape') {
+                          ev.preventDefault();
+                          setNewFolder(null);
+                        }
+                      }}
+                      onBlur={() => setNewFolder(null)}
+                      placeholder={t('apps.fileBrowser.newFolderPlaceholder')}
+                      className="min-w-0 flex-1 rounded border border-cyan bg-surface px-1.5 py-0.5 text-[12.5px] text-foreground placeholder:text-muted focus:outline-none"
+                    />
+                  </span>
+                </div>
+              )}
+              {listing && entries.length === 0 && newFolder === null && (
                 <div className="px-3 py-8 text-center text-[12px] text-muted">{query ? t('apps.fileBrowser.noMatches') : t('apps.fileBrowser.empty')}</div>
               )}
               {entries.map((e) => {

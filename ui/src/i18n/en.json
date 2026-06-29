@@ -682,6 +682,7 @@
       "newFolderPrompt": "New folder name",
       "newFile": "New File",
       "newFilePrompt": "New file name",
+      "newFolderPlaceholder": "Folder name",
       "searchPlaceholder": "Search",
       "colName": "Name",
       "colSize": "Size",
