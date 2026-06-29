@@ -168,7 +168,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault }> = ({ vault }) => {
   }
 
   // status === 'locked'
-  const showUnlockPasskey = vault.hasPasskey() && canUsePasskey;
+  const showUnlockPasskey = vault.hasPasskey() && canUsePasskey && vault.passkeyUsableHere();
   const showUnlockPassword = vault.hasPassword();
   return (
     <div className={PANEL}>

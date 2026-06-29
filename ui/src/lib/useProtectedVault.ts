@@ -78,6 +78,14 @@ function baseVmkWrapMeta(wrapMeta: string): string {
   return JSON.stringify(parsed);
 }
 
+/** Record the WebAuthn RP ID (host) a passkey was bound to, so unlock only offers it on
+ *  the same site (the credential can't be asserted from a different host). */
+function withRpId(wrapMeta: string, rpId: string): string {
+  const meta = JSON.parse(wrapMeta) as Record<string, unknown>;
+  meta.rp_id = rpId;
+  return JSON.stringify(meta);
+}
+
 function toUint8(buffer: ArrayBuffer | ArrayBufferView): Uint8Array {
   return buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
 }
@@ -195,7 +203,8 @@ export function useProtectedVault() {
     const prfSalt = newPasskeyPrfSalt();
     const { prfOutput, credentialId } = await setupPasskeyFactor(prfSalt);
     const vmk = newVmk();
-    commit(vmk, await buildWrapMeta(vmk, [{ kind: 'passkey', prfOutput, prfSalt, credentialId }]), true);
+    const wrapMeta = await buildWrapMeta(vmk, [{ kind: 'passkey', prfOutput, prfSalt, credentialId }]);
+    commit(vmk, withRpId(wrapMeta, window.location.hostname), true);
   }, []);
 
   const unlockPassword = useCallback(async (password: string) => {
@@ -278,5 +287,19 @@ export function useProtectedVault() {
     }
   }, []);
 
-  return { status, error, setError, refresh, setupPassword, setupPasskey, unlockPassword, unlockPasskey, sealValue, afterCreated, lock, discardAndRefresh, hasPasskey, hasPassword };
+  // A passkey can only be asserted on the host (RP ID) it was created on. Offer passkey
+  // unlock only when the current host matches the stored one (legacy vaults without a
+  // recorded rp_id are not blocked).
+  const passkeyUsableHere = useCallback(() => {
+    const wrapMeta = sessionVault.wrapMeta;
+    if (!wrapMeta) return false;
+    try {
+      const meta = JSON.parse(wrapMeta) as { rp_id?: string };
+      return !meta.rp_id || meta.rp_id === window.location.hostname;
+    } catch {
+      return true;
+    }
+  }, []);
+
+  return { status, error, setError, refresh, setupPassword, setupPasskey, unlockPassword, unlockPasskey, sealValue, afterCreated, lock, discardAndRefresh, hasPasskey, hasPassword, passkeyUsableHere };
 }

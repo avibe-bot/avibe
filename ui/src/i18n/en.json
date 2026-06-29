@@ -2167,7 +2167,7 @@
       "passkeyOptionTitle": "Passkey · most secure",
       "passkeyOptionHelp": "Unlock with Touch ID / Windows Hello. No password to phish or leak.",
       "passkeyUnrecoverableWarning": "If you lose this passkey — or open this vault from a different site/address than where you set it up — these protected secrets can't be recovered. There is no password to fall back on.",
-      "passkeyAck": "I understand: if I lose this passkey, these secrets can't be recovered.",
+      "passkeyAck": "I understand: if I lose this passkey or open this vault from a different site, these secrets can't be recovered.",
       "setupWithPasskey": "Set up with passkey",
       "passwordOptionTitle": "Password · recoverable",
       "passwordOptionHelp": "Recoverable as long as you remember it, but a password is weaker (can be phished or leaked).",

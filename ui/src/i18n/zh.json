@@ -2166,7 +2166,7 @@
       "passkeyOptionTitle": "Passkey · 最安全",
       "passkeyOptionHelp": "用 Touch ID / Windows Hello 解锁,没有可被钓鱼或泄露的密码。",
       "passkeyUnrecoverableWarning": "一旦丢失此 passkey、或从与设置时不同的站点/地址打开此保险库,这些保护层密钥将无法恢复(没有密码可兜底)。",
-      "passkeyAck": "我明白:丢失此 passkey 后,这些密钥将无法恢复。",
+      "passkeyAck": "我明白:丢失此 passkey、或从其他站点打开此保险库后,这些密钥将无法恢复。",
       "setupWithPasskey": "用 passkey 设置",
       "passwordOptionTitle": "密码 · 可恢复",
       "passwordOptionHelp": "只要你记得就能恢复,但密码更弱(可能被钓鱼或泄露)。",
