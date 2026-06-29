@@ -103,7 +103,12 @@ def test_standard_static_secret_is_agent_access_grantable(vault):
     assert request["status"] == "pending"
     assert request["card"]["scope_options"][0]["scope_ref"] == "STANDARD_KEY"
     assert grant["delivery_ready"] is True
-    assert grant["delivery_status"] == "agent_cache_ready"
+    assert grant["delivery_status"] == "standard_ready"
+    with vault.begin() as conn:
+        row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant["id"])).mappings().one()
+        release_scopes = vs.agent_release_scopes_after_rows(conn, [dict(row)])
+    assert int(row["agent_ready"] or 0) == 0
+    assert release_scopes == []
 
 
 def test_deny_request_marks_pending_denied_and_audits(vault):
@@ -127,6 +132,24 @@ def test_deny_request_rejects_non_pending(vault):
         vs.deny_request(conn, request["id"])
         with pytest.raises(vs.InvalidRequestError):
             vs.deny_request(conn, request["id"])
+
+
+def test_deny_request_expires_timed_out_request_before_denial(vault):
+    _create(vault, name="STANDARD_KEY", protection="standard")
+    expired_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    with vault.begin() as conn:
+        request = vs.create_access_request(conn, "STANDARD_KEY", requester={"session_id": "ses_1"}, expires_at=expired_at)
+        with pytest.raises(vs.InvalidRequestError, match="expired"):
+            vs.deny_request(conn, request["id"], requester={"source": "gatekeeper"}, reason="late")
+        row = conn.execute(select(vault_requests).where(vault_requests.c.id == request["id"])).mappings().one()
+        events = [
+            item["event"]
+            for item in conn.execute(select(vault_audit.c.event).where(vault_audit.c.request_id == request["id"])).mappings()
+        ]
+
+    assert row["status"] == "expired"
+    assert "request-expired" in events
+    assert "request-denied" not in events
 
 
 def test_pubkey_pin_metadata_round_trips_through_masked_meta(vault):

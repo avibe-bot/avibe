@@ -4462,7 +4462,7 @@ def _wait_for_vault_request(request_id: str, *, timeout: float, poll_interval: f
     deadline = time.monotonic() + timeout
     engine = _open_vault_engine()
     while time.monotonic() < deadline:
-        with engine.connect() as conn:
+        with engine.begin() as conn:
             try:
                 request = vault_service.get_request(conn, request_id, hydrate_unlock_material=False)
             except vault_service.RequestNotFoundError:
@@ -4470,7 +4470,7 @@ def _wait_for_vault_request(request_id: str, *, timeout: float, poll_interval: f
             result = None
             if request.get("status") == "approved":
                 result = api._vault_request_result(conn, request)
-            if request.get("status") in {"approved", "denied", "expired", "fulfilled"}:
+            if request.get("status") in {"approved", "denied", "expired", "failed", "fulfilled"}:
                 return {"request": request, "result": result}
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -4613,7 +4613,7 @@ def cmd_vault_await(args):
     timeout = float(getattr(args, "wait", None) or 0)
     try:
         engine = _open_vault_engine()
-        with engine.connect() as conn:
+        with engine.begin() as conn:
             request = vault_service.get_request(conn, request_id, hydrate_unlock_material=False)
             result = api._vault_request_result(conn, request)
         if timeout > 0 and request.get("status") == "pending":

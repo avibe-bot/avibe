@@ -411,7 +411,15 @@ def test_agent_access_request_and_standard_grant_api(monkeypatch):
     )
     assert created["grant"]["member_snapshot"] == ["STANDARD_KEY"]
     assert created["grant"]["delivery_ready"] is True
+    assert created["grant"]["delivery_status"] == "standard_ready"
     agent_grant.assert_not_called()
+    with api._vault_engine().begin() as conn:
+        grant_row = conn.execute(
+            select(vault_service.vault_grants).where(vault_service.vault_grants.c.id == created["grant"]["id"])
+        ).mappings().one()
+        release_scopes = vault_service.agent_release_scopes_after_rows(conn, [dict(grant_row)])
+    assert int(grant_row["agent_ready"] or 0) == 0
+    assert release_scopes == []
 
     fetched = api.get_vault_request(requested["request"]["id"])
     assert fetched["request"]["status"] == "approved"
@@ -459,6 +467,32 @@ def test_get_vault_request_expires_timed_out_pending_request(monkeypatch):
 
     assert fetched["request"]["status"] == "expired"
     assert "result" not in fetched
+    with api._vault_engine().connect() as conn:
+        stored = conn.execute(
+            select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == requested["request"]["id"])
+        ).scalar_one()
+    assert stored == "expired"
+
+
+def test_get_vault_requests_expires_and_commits_timed_out_pending_request(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("api")))
+    api.create_vault_secret({"name": "STANDARD_KEY", "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"}})
+    requested = api.request_vault_access({"name": "STANDARD_KEY", "session_id": "ses_1", "request_ttl_seconds": 1})
+    with api._vault_engine().begin() as conn:
+        conn.execute(
+            vault_service.vault_requests.update()
+            .where(vault_service.vault_requests.c.id == requested["request"]["id"])
+            .values(expires_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat())
+        )
+
+    listed = api.get_vault_requests(status="pending")
+
+    assert listed["requests"] == []
+    with api._vault_engine().connect() as conn:
+        stored = conn.execute(
+            select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == requested["request"]["id"])
+        ).scalar_one()
+    assert stored == "expired"
 
 
 def test_agent_access_request_rejects_protected_next_version(monkeypatch):

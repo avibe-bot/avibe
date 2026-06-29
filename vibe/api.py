@@ -1483,7 +1483,7 @@ def get_vault_requests(*, status: Optional[str] = "pending", request_type: Optio
     from storage import vault_service
 
     engine = _vault_engine()
-    with engine.connect() as conn:
+    with engine.begin() as conn:
         requests = vault_service.list_requests(conn, status=status, request_type=request_type, limit=limit)
     return {"ok": True, "requests": requests}
 
@@ -1727,6 +1727,7 @@ def _cleanup_failed_agent_grant(
     grant: dict,
     reason: str,
     force_release_on_cleanup_failure: bool = False,
+    force_release_scope: bool = False,
 ) -> None:
     from storage import vault_service
 
@@ -1748,6 +1749,26 @@ def _cleanup_failed_agent_grant(
                 if grant_rows
                 else _grant_scope_payload(grant)
             )
+            if force_release_scope:
+                forced_scopes = _grant_scope_payload(grant)
+                for scope in forced_scopes:
+                    raw_scope_members = grant.get("member_snapshot") or []
+                    scope_members = set(raw_scope_members if isinstance(raw_scope_members, list) else [])
+                    active_scope_members: set[str] = set()
+                    for active in conn.execute(
+                        select(vault_service.vault_grants).where(
+                            vault_service.vault_grants.c.status == "active",
+                            vault_service.vault_grants.c.scope_type == scope["scope_type"],
+                            vault_service.vault_grants.c.scope_ref == scope["scope_ref"],
+                        )
+                    ).mappings():
+                        active_row = dict(active)
+                        if int(active_row.get("agent_ready") or 0) == 1:
+                            active_members = json.loads(active_row.get("member_snapshot") or "[]")
+                            if isinstance(active_members, list):
+                                active_scope_members.update(str(member) for member in active_members if isinstance(member, str))
+                    if not scope_members.issubset(active_scope_members) and scope not in release_scopes:
+                        release_scopes.append(scope)
     except Exception:
         if not force_release_on_cleanup_failure:
             raise
@@ -1837,7 +1858,7 @@ def create_vault_grant(payload: dict) -> dict:
                 created_by_request_id=str(request_id),
                 inherit_request_session=inherit_request_session,
                 expected_member_names=expected_member_names,
-                cache_ready=not needs_agent_deks,
+                cache_ready=False,
             )
     except vault_service.NotGrantableError as exc:
         raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
@@ -1873,6 +1894,7 @@ def create_vault_grant(payload: dict) -> dict:
                 grant=grant,
                 reason=f"create_vault_grant:{grant['id']}:mark-ready-failed",
                 force_release_on_cleanup_failure=True,
+                force_release_scope=True,
             )
         raise VaultApiError(str(exc), code="invalid_grant") from exc
     except AvaultError as exc:
@@ -1881,6 +1903,7 @@ def create_vault_grant(payload: dict) -> dict:
             grant=grant,
             reason=f"create_vault_grant:{grant['id']}",
             force_release_on_cleanup_failure=True,
+            force_release_scope=True,
         )
         raise _vault_api_error_from_avault(exc, prefix="avault agent grant failed") from exc
     except Exception:
@@ -1890,6 +1913,7 @@ def create_vault_grant(payload: dict) -> dict:
                 grant=grant,
                 reason=f"create_vault_grant:{grant['id']}:mark-ready-failed",
                 force_release_on_cleanup_failure=True,
+                force_release_scope=True,
             )
         raise
     return {"ok": True, "grant": grant}
