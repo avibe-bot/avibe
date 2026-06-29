@@ -7,6 +7,12 @@
     "step2": "Choose “Add to Home Screen”",
     "dismiss": "Collapse"
   },
+  "errorBoundary": {
+    "title": "Something went wrong",
+    "body": "This part of the app hit an unexpected error. The rest still works — retry, or reload the page.",
+    "retry": "Retry",
+    "reload": "Reload page"
+  },
   "common": {
     "back": "Back",
     "continue": "Continue",

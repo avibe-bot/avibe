@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { Wizard } from './components/Wizard';
 import { AppShell } from './components/AppShell';
+import { ErrorBoundary } from './components/ui/error-boundary';
 import { Workbench } from './components/Workbench';
 import { InboxPage } from './components/workbench/InboxPage';
 import { SearchPage } from './components/workbench/SearchPage';
@@ -385,7 +386,12 @@ function App() {
               <WorkbenchProjectsProvider>
                 <ComposerBridgeProvider>
                   <BrowserRouter>
-                    <AppRoutes />
+                    {/* Top-level backstop: catches a crash in the shell/providers themselves (the
+                        per-page and per-window boundaries handle the rest) so the app can never go
+                        to a blank white screen. */}
+                    <ErrorBoundary variant="page">
+                      <AppRoutes />
+                    </ErrorBoundary>
                   </BrowserRouter>
                   <AgentationToggle />
                 </ComposerBridgeProvider>

@@ -6,6 +6,7 @@ import { Minus, Plus, X, type LucideIcon } from 'lucide-react';
 import { APP_REGISTRY } from '../../apps/registry';
 import { useWindowManager, type WindowInstance } from '../../context/WindowManagerContext';
 import { clampToLayer, resizeBounds, type ResizeDir } from '../../lib/windowBounds';
+import { ErrorBoundary } from '../ui/error-boundary';
 
 const RESIZE_HANDLES: { dir: ResizeDir; className: string }[] = [
   { dir: 'n', className: 'left-2 right-2 top-0 h-1.5 cursor-ns-resize' },
@@ -213,7 +214,11 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
       </div>
 
       <div className="min-h-0 flex-1 overflow-hidden">
-        <Body windowId={win.id} params={win.params} />
+        {/* A crashing app only takes down its own window — the shell + other windows stay usable, and
+            "Retry" remounts just this app. */}
+        <ErrorBoundary variant="inline">
+          <Body windowId={win.id} params={win.params} />
+        </ErrorBoundary>
       </div>
 
       {!win.maximized &&

@@ -7,6 +7,12 @@
     "step2": "选「添加到主屏幕」",
     "dismiss": "收起"
   },
+  "errorBoundary": {
+    "title": "出了点问题",
+    "body": "这部分遇到了意外错误。其他功能仍可正常使用——可以重试，或刷新页面。",
+    "retry": "重试",
+    "reload": "刷新页面"
+  },
   "common": {
     "back": "返回",
     "continue": "继续",
