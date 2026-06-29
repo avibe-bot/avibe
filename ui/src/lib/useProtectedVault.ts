@@ -13,7 +13,6 @@ import {
   unwrapVmk,
   webAuthnPrfExtensionInput,
   type ProtectedRecordEnvelope,
-  type VmkWrapFactor,
 } from './vaultCrypto';
 
 /**
@@ -184,22 +183,19 @@ export function useProtectedVault() {
     setError(null);
   };
 
-  // First-time setup always includes a password (recovery root); a passkey is layered
-  // on top when available so device loss never strands protected secrets.
+  // First-time setup uses ONE factor. Passkey-only is the most secure option (no
+  // phishable/leakable password) but is unrecoverable if the device/passkey is lost —
+  // the UI requires an explicit acknowledgement. Password is the recoverable alternative.
   const setupPassword = useCallback(async (password: string) => {
     const vmk = newVmk();
     commit(vmk, await buildWrapMeta(vmk, [{ kind: 'password', password }]), true);
   }, []);
 
-  const setupPasskey = useCallback(async (recoveryPassword: string) => {
+  const setupPasskey = useCallback(async () => {
     const prfSalt = newPasskeyPrfSalt();
     const { prfOutput, credentialId } = await setupPasskeyFactor(prfSalt);
     const vmk = newVmk();
-    const factors: VmkWrapFactor[] = [
-      { kind: 'password', password: recoveryPassword },
-      { kind: 'passkey', prfOutput, prfSalt, credentialId },
-    ];
-    commit(vmk, await buildWrapMeta(vmk, factors), true);
+    commit(vmk, await buildWrapMeta(vmk, [{ kind: 'passkey', prfOutput, prfSalt, credentialId }]), true);
   }, []);
 
   const unlockPassword = useCallback(async (password: string) => {

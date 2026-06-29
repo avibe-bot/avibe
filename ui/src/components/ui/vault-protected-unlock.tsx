@@ -40,6 +40,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault }> = ({ vault }) => {
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [busy, setBusy] = useState(false);
+  const [ackLoss, setAckLoss] = useState(false);
 
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -93,16 +94,14 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault }> = ({ vault }) => {
   const canUsePasskey = webauthnAvailable();
 
   if (vault.status === 'needs-setup') {
-    const valid = password.trim().length > 0 && password === confirm;
-    const submitSetup = (withPasskey: boolean) => {
-      // Reject blank before any WebAuthn ceremony, or a passkey would be created and then
-      // orphaned when buildWrapMeta rejects the empty password (the button is also disabled).
+    const passwordValid = password.trim().length > 0 && password === confirm;
+    const submitPassword = () => {
       if (password.trim().length === 0) return;
       if (password !== confirm) {
         vault.setError(t('vaults.protectedUnlock.errors.mismatch'));
         return;
       }
-      void run(() => (withPasskey ? vault.setupPasskey(password) : vault.setupPassword(password)));
+      void run(() => vault.setupPassword(password));
     };
     return (
       <div className={PANEL}>
@@ -113,29 +112,50 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault }> = ({ vault }) => {
             <span className="text-xs text-muted-foreground">{t('vaults.protectedUnlock.setupHelp')}</span>
           </div>
         </div>
-        <label className="flex flex-col gap-1.5 text-xs font-medium text-muted-foreground">
-          <span className="flex items-center gap-1.5">
-            <KeyRound className="size-3.5" />
-            {t('vaults.protectedUnlock.setPasswordLabel')}
-          </span>
-          <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t('vaults.protectedUnlock.passwordPlaceholder')} autoComplete="new-password" />
-        </label>
-        <label className="flex flex-col gap-1.5 text-xs font-medium text-muted-foreground">
-          {t('vaults.protectedUnlock.confirmLabel')}
-          <Input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder={t('vaults.protectedUnlock.confirmPlaceholder')} autoComplete="new-password" />
-        </label>
-        <span className="text-xs text-muted-foreground">{t('vaults.protectedUnlock.passwordRecoveryNote')}</span>
-        <div className="flex flex-wrap gap-2">
-          {canUsePasskey && (
-            <Button type="button" onClick={() => submitSetup(true)} disabled={busy || !valid}>
+
+        {/* Passkey — most secure (no phishable password), but unrecoverable: explicit ack required. */}
+        {canUsePasskey && (
+          <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface p-2.5">
+            <span className="flex items-center gap-1.5 text-xs font-semibold">
+              <Fingerprint className="size-3.5 text-mint" />
+              {t('vaults.protectedUnlock.passkeyOptionTitle')}
+            </span>
+            <span className="text-xs text-muted-foreground">{t('vaults.protectedUnlock.passkeyOptionHelp')}</span>
+            <div className="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-xs text-warning">
+              {t('vaults.protectedUnlock.passkeyUnrecoverableWarning')}
+            </div>
+            <label className="flex items-start gap-2 text-xs text-muted-foreground">
+              <input type="checkbox" checked={ackLoss} onChange={(e) => setAckLoss(e.target.checked)} className="mt-0.5" />
+              <span>{t('vaults.protectedUnlock.passkeyAck')}</span>
+            </label>
+            <Button type="button" onClick={() => run(vault.setupPasskey)} disabled={busy || !ackLoss}>
               {busy ? <Loader2 className="size-4 animate-spin" /> : <Fingerprint className="size-4" />}
               {t('vaults.protectedUnlock.setupWithPasskey')}
             </Button>
-          )}
-          <Button type="button" variant={canUsePasskey ? 'ghost' : 'secondary'} onClick={() => submitSetup(false)} disabled={busy || !valid}>
-            {t('vaults.protectedUnlock.setupPasswordOnly')}
+          </div>
+        )}
+
+        {/* Password — recoverable alternative (weaker; can be phished/leaked). */}
+        <form
+          className="flex flex-col gap-2 rounded-lg border border-border bg-surface p-2.5"
+          onSubmit={(e) => {
+            e.preventDefault();
+            submitPassword();
+          }}
+        >
+          <span className="flex items-center gap-1.5 text-xs font-semibold">
+            <KeyRound className="size-3.5" />
+            {t('vaults.protectedUnlock.passwordOptionTitle')}
+          </span>
+          <span className="text-xs text-muted-foreground">{t('vaults.protectedUnlock.passwordOptionHelp')}</span>
+          <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t('vaults.protectedUnlock.passwordPlaceholder')} autoComplete="new-password" />
+          <Input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder={t('vaults.protectedUnlock.confirmPlaceholder')} autoComplete="new-password" />
+          <Button type="submit" variant={canUsePasskey ? 'ghost' : 'secondary'} disabled={busy || !passwordValid}>
+            {busy && <Loader2 className="size-4 animate-spin" />}
+            {t('vaults.protectedUnlock.setupWithPassword')}
           </Button>
-        </div>
+        </form>
+
         {vault.error && <div className="text-xs text-destructive">{friendlyError(t, vault.error)}</div>}
       </div>
     );
