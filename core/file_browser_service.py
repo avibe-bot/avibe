@@ -992,7 +992,10 @@ def _read_file_text(path: Path, *, lossy: bool) -> tuple[str | None, float | Non
             head = handle.read(_BINARY_SNIFF_BYTES)
             if b"\x00" in head:
                 return None, None
-            data = head + handle.read()
+            # Bound the read to the size limit even if the file grew since the stat above (TOCTOU, or
+            # a growing special file), so one read can't pull unbounded bytes into memory. For
+            # replace, a file that grew also fails the later mtime check, so no truncated write lands.
+            data = head + handle.read(max(0, SEARCH_MAX_FILE_BYTES - len(head)))
     except OSError:
         return None, None
     try:
@@ -1196,6 +1199,12 @@ def replace(
                 # A displayed file deleted/renamed/replaced since the search must be reported as
                 # skipped, not abort the whole batch (the other shown files should still apply).
                 pre_skipped.append({"path": raw, "rel": raw, "reason": exc.code})
+                continue
+            # Search skips symlinks; an explicit path that is now a symlink (e.g. swapped in for a
+            # shown file after the search) must not be followed, or replace could write through it to
+            # a target outside the root.
+            if _expanded_absolute_path(raw).is_symlink():
+                pre_skipped.append({"path": raw, "rel": raw, "reason": "symlink"})
                 continue
             if resolved != root and root not in resolved.parents:
                 raise FileBrowserError("invalid_path", "Path is outside the search root", 400)

@@ -249,6 +249,21 @@ def test_replace_applies_when_search_mtime_matches(tmp_path):
     assert a.read_text() == "x\n"
 
 
+def test_replace_skips_symlinked_explicit_path(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    real = root / "a.txt"
+    real.write_text("hit\n", encoding="utf-8")
+    outside = tmp_path / "secret.txt"
+    outside.write_text("hit\n", encoding="utf-8")
+    (root / "link.txt").symlink_to(outside)
+    res = fbs.replace(str(root), "hit", "x", paths=[str(real), str(root / "link.txt")])
+    assert res["files_changed"] == 1
+    assert any(s["reason"] == "symlink" for s in res["skipped"])
+    assert real.read_text() == "x\n"
+    assert outside.read_text() == "hit\n"  # symlink target never followed/written
+
+
 def test_replace_empty_paths_is_noop(tmp_path):
     a = _write(tmp_path, "a.txt", "hit\n")
     res = fbs.replace(str(tmp_path), "hit", "x", paths=[])
