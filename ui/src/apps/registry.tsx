@@ -21,6 +21,12 @@ export interface AppDefinition {
   defaultSize: { width: number; height: number };
   /** The window body. Receives the owning window id and its launch params. */
   Component: React.FC<{ windowId: string; params?: Record<string, unknown> }>;
+  /**
+   * Lock this app's window to a fixed theme regardless of the global light/dark. The Editor and
+   * Terminal stay dark (a code editor and a shell are conventionally dark); the File Browser omits
+   * this and follows the workbench theme.
+   */
+  lockTheme?: 'dark';
 }
 
 const Loading: React.FC = () => {
@@ -57,6 +63,7 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     icon: SquareTerminal,
     accent: '--mint',
     defaultSize: { width: 820, height: 540 },
+    lockTheme: 'dark',
     Component: () => (
       <Suspense fallback={<Loading />}>
         {/* Each windowed terminal takes a bounded, reused session slot internally so
@@ -71,6 +78,7 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
     icon: CodeXml,
     accent: '--violet',
     defaultSize: { width: 1000, height: 640 },
+    lockTheme: 'dark',
     Component: ({ windowId, params }) => (
       <Suspense fallback={<Loading />}>
         <EditorBody windowId={windowId} params={params} />

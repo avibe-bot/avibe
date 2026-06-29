@@ -128,6 +128,10 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
       // Keyboard chords resolve their target window from the DOM-focused element via
       // this id, so they act on the window you're actually typing in (not just the top).
       data-window-id={win.id}
+      // Per-app theme: the File Browser follows the global light/dark; the Editor and Terminal
+      // lock to dark (VS Code-style) via their registry `lockTheme`. `data-theme` re-cascades that
+      // token set to this window's subtree; an omitted (undefined) value inherits the global theme.
+      data-theme={def.lockTheme}
       // Minimized windows stay mounted (to preserve their body state) but go fully
       // inert: hidden from assistive tech, out of the tab order, non-interactive —
       // and React/the browser moves focus out automatically.

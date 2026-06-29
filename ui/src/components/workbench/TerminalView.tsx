@@ -6,7 +6,6 @@ import '@xterm/xterm/css/xterm.css';
 import { RotateCw } from 'lucide-react';
 
 import { Button } from '../ui/button';
-import { useTheme } from '../../context/ThemeContext';
 
 // xterm.js wired to the /api/terminal/{id} WebSocket. Protocol (locked with the
 // backend): client sends raw stdin as BINARY frames and JSON control as TEXT
@@ -18,42 +17,16 @@ export type TerminalStatus = 'connecting' | 'ready' | 'closed' | 'disabled' | 'e
 const ENC = new TextEncoder();
 const MAX_BUSY_RETRIES = 3; // auto-retry a transient "busy" (1013) close this many times
 
-// xterm palettes per app theme. The windows are no longer forced dark, so the terminal
-// follows the workbench light/dark theme. The light ANSI set is darkened so coloured
-// output stays legible on a light background; dark keeps xterm's default ANSI over a
-// near-black surface.
-const XTERM_THEME = {
-  dark: {
-    background: '#0b0b12',
-    foreground: '#e4e4e7',
-    cursor: '#e4e4e7',
-    cursorAccent: '#0b0b12',
-    selectionBackground: 'rgba(148,163,184,0.35)',
-  },
-  light: {
-    background: '#ffffff',
-    foreground: '#1f2328',
-    cursor: '#1f2328',
-    cursorAccent: '#ffffff',
-    selectionBackground: 'rgba(84,174,255,0.30)',
-    black: '#24292f',
-    red: '#cf222e',
-    green: '#116329',
-    yellow: '#7d4e00',
-    blue: '#0969da',
-    magenta: '#8250df',
-    cyan: '#1b7c83',
-    white: '#6e7781',
-    brightBlack: '#57606a',
-    brightRed: '#a40e26',
-    brightGreen: '#1a7f37',
-    brightYellow: '#633c01',
-    brightBlue: '#218bff',
-    brightMagenta: '#a475f9',
-    brightCyan: '#3192aa',
-    brightWhite: '#8c959f',
-  },
-} as const;
+// The terminal window is theme-locked to dark (registry lockTheme: a shell is conventionally
+// dark, like a code editor), so xterm carries a fixed dark palette regardless of the global theme.
+const TERMINAL_BG = '#0b0b12';
+const TERMINAL_THEME = {
+  background: TERMINAL_BG,
+  foreground: '#e4e4e7',
+  cursor: '#e4e4e7',
+  cursorAccent: TERMINAL_BG,
+  selectionBackground: 'rgba(148,163,184,0.35)',
+};
 
 // Accessory key bar for phones (their soft keyboards lack these). Each button sends the raw
 // byte sequence the PTY expects; Ctrl is a sticky modifier. Labels go through i18n (the
@@ -82,7 +55,6 @@ export const TerminalView: React.FC<{
   onStatus?: (status: TerminalStatus, exitCode: number | null) => void;
 }> = ({ sessionId, onPersistent, onStatus }) => {
   const { t } = useTranslation();
-  const { resolvedTheme } = useTheme();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -94,10 +66,6 @@ export const TerminalView: React.FC<{
   // the WS effect (which doesn't depend on the prop) always calls the latest callback.
   const onPersistentRef = useRef(onPersistent);
   onPersistentRef.current = onPersistent;
-  // Construct the terminal with the CURRENT theme without making the theme a dependency of the
-  // WS effect — otherwise every light/dark toggle would tear down and reconnect the shell.
-  const themeRef = useRef(resolvedTheme);
-  themeRef.current = resolvedTheme;
   const [status, setStatus] = useState<TerminalStatus>('connecting');
   const [exitCode, setExitCode] = useState<number | null>(null);
   const [reconnectKey, setReconnectKey] = useState(0);
@@ -115,7 +83,7 @@ export const TerminalView: React.FC<{
       fontSize: 13,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
       cursorBlink: true,
-      theme: XTERM_THEME[themeRef.current],
+      theme: TERMINAL_THEME,
       allowProposedApi: true,
     });
     const fit = new FitAddon();
@@ -250,12 +218,6 @@ export const TerminalView: React.FC<{
     };
   }, [sessionId, reconnectKey]);
 
-  // Follow live theme toggles without recreating the terminal (which would drop the shell).
-  useEffect(() => {
-    const term = termRef.current;
-    if (term) term.options.theme = XTERM_THEME[resolvedTheme];
-  }, [resolvedTheme]);
-
   const sendKey = (k: { seq?: string; ctrl?: boolean }) => {
     if (k.ctrl) {
       ctrlStickyRef.current = !ctrlStickyRef.current;
@@ -266,14 +228,13 @@ export const TerminalView: React.FC<{
     termRef.current?.focus();
   };
 
-  const termBg = XTERM_THEME[resolvedTheme].background;
   const reconnect = () => {
     busyRetriesRef.current = 0;
     setReconnectKey((k) => k + 1);
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col" style={{ backgroundColor: termBg }}>
+    <div className="flex h-full min-h-0 flex-col" style={{ backgroundColor: TERMINAL_BG }}>
       {status === 'disabled' ? (
         <div className="grid flex-1 place-items-center p-6 text-center text-[12.5px] text-muted">
           <div className="max-w-md">{t('apps.terminal.disabled')}</div>

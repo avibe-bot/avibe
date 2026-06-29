@@ -71,10 +71,9 @@ export const WindowLayer: React.FC = () => {
     <div
       ref={ref}
       aria-hidden={!anyShown}
-      // The windowed apps (Editor / Terminal / File Browser) follow the workbench light/dark
-      // theme: they're built on the shared semantic tokens, Monaco is themed from resolvedTheme,
-      // and xterm carries its own light/dark palette — so the layer inherits the ambient theme
-      // rather than forcing dark (the design frames dnYPx / iwYIX / nknn2 are the dark variant).
+      // Theme is per-window now (AppWindow sets it from each app's registry `lockTheme`): the File
+      // Browser follows the workbench light/dark, while the Editor and Terminal stay dark like a VS
+      // Code editor / a terminal. So the layer itself no longer forces a theme — each window opts in.
       // Spans the FULL viewport (no longer offset past the sidebar): windows can move over
       // the sidebar and maximize fills the whole screen. The sidebar's bottom Apps/Dock
       // cluster sits above this layer (z-30) so it stays reachable under a maximized window.
