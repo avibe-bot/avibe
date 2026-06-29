@@ -332,6 +332,11 @@ def _grant_member_names(row: dict[str, Any]) -> list[str]:
 
 
 def _grant_standard_ready(conn: Connection, row: dict[str, Any]) -> bool:
+    if row.get("status") != "active":
+        return False
+    expires_at = _parse_iso_datetime(row.get("expires_at"))
+    if expires_at is not None and expires_at <= datetime.now(timezone.utc):
+        return False
     members = _grant_member_names(row)
     if not members:
         return False
@@ -724,9 +729,8 @@ def rotate_secret(
     row = _require_row(conn, name)
     public_meta = _public_meta(row.get("public_meta"))
     public_meta.pop("preview", None)
-    if row.get("protection") == "protected":
-        _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
-        _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
+    _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
+    _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
     conn.execute(
         vault_secrets.update()
         .where(vault_secrets.c.name == name)
@@ -746,9 +750,8 @@ def delete_secret(conn: Connection, name: str, *, cache: VaultGrantRuntimeCache 
     row = conn.execute(select(vault_secrets).where(vault_secrets.c.name == name)).mappings().first()
     if row is None:
         raise SecretNotFoundError(name)
-    if row.get("protection") == "protected":
-        _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
-        _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
+    _expire_pending_requests_for_secret(conn, name, reason="request-expired-envelope-changed")
+    _expire_active_grants_for_secret(conn, name, cache=cache, reason="grant-expired-envelope-changed")
     conn.execute(vault_secrets.delete().where(vault_secrets.c.name == name))
     audit(conn, "deleted", secret_name=name)
 

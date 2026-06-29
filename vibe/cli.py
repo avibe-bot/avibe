@@ -4616,7 +4616,7 @@ def cmd_vault_await(args):
         with engine.begin() as conn:
             request = vault_service.get_request(conn, request_id, hydrate_unlock_material=False)
             result = api._vault_request_result(conn, request)
-        if timeout > 0 and request.get("status") == "pending":
+        if timeout > 0 and request.get("status") in {"pending", "signing"}:
             waited = _wait_for_vault_request(request_id, timeout=timeout)
             if waited is None:
                 raise TaskCliError(

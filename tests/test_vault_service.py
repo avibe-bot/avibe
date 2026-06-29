@@ -111,6 +111,45 @@ def test_standard_static_secret_is_agent_access_grantable(vault):
     assert release_scopes == []
 
 
+def test_inactive_standard_grants_are_not_delivery_ready(vault):
+    _create(vault, name="STANDARD_KEY", protection="standard", group="default")
+    with vault.begin() as conn:
+        request = vs.create_access_request(conn, "STANDARD_KEY", requester={"session_id": "ses_1"})
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="STANDARD_KEY",
+            session_id="ses_1",
+            created_by_request_id=request["id"],
+        )
+        revoked = vs.revoke_grant(conn, grant["id"])
+
+    assert revoked["status"] == "revoked"
+    assert revoked["delivery_ready"] is False
+    assert revoked["delivery_status"] == "agent_cache_unverified"
+
+
+def test_expired_standard_grants_are_not_delivery_ready(vault):
+    _create(vault, name="STANDARD_KEY", protection="standard", group="default")
+    with vault.begin() as conn:
+        request = vs.create_access_request(conn, "STANDARD_KEY", requester={"session_id": "ses_1"})
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="STANDARD_KEY",
+            session_id="ses_1",
+            created_by_request_id=request["id"],
+        )
+        expired_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        conn.execute(vault_grants.update().where(vault_grants.c.id == grant["id"]).values(expires_at=expired_at))
+        payload = vs.get_grant_created_by_request(conn, request["id"])
+
+    assert payload is not None
+    assert payload["status"] == "active"
+    assert payload["delivery_ready"] is False
+    assert payload["delivery_status"] == "agent_cache_unverified"
+
+
 def test_deny_request_marks_pending_denied_and_audits(vault):
     _create(vault, name="STANDARD_KEY", protection="standard")
     with vault.begin() as conn:
@@ -1265,6 +1304,50 @@ def test_rotating_protected_secret_expires_pending_access_and_sign_requests(vaul
     assert sign_status == "expired"
 
 
+def test_rotating_standard_secret_expires_pending_requests_and_active_grants(vault):
+    _create(vault, name="A_KEY", protection="standard")
+    _create(vault, name="ETH_KEY", protection="standard", kind="keypair", signer_kind="local")
+    with vault.begin() as conn:
+        access_req = _access_request(conn, "A_KEY", session_id="ses_1")
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="A_KEY",
+            session_id="ses_1",
+            created_by_request_id=access_req["id"],
+        )
+        pending_access_req = _access_request(conn, "A_KEY", session_id="ses_2")
+        vs.rotate_secret(conn, "A_KEY", _sealed("rotated"))
+        access_status = conn.execute(
+            select(vault_requests.c.status).where(vault_requests.c.id == pending_access_req["id"])
+        ).scalar_one()
+        grant_status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
+        with pytest.raises(vs.InvalidRequestError):
+            vs.create_grant(
+                conn,
+                scope_type="secret",
+                scope_ref="A_KEY",
+                session_id="ses_2",
+                created_by_request_id=pending_access_req["id"],
+            )
+
+        sign_req = vs.create_sign_request(conn, "ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")
+        vs.rotate_secret(conn, "ETH_KEY", _sealed("rotated-key"))
+        sign_status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == sign_req["id"])).scalar_one()
+        with pytest.raises(vs.InvalidRequestError):
+            vs.claim_sign_request(
+                conn,
+                sign_req["id"],
+                name="ETH_KEY",
+                digest="00" * 32,
+                scheme="ecdsa-secp256k1-recoverable",
+            )
+
+    assert access_status == "expired"
+    assert grant_status == "expired"
+    assert sign_status == "expired"
+
+
 def test_deleting_protected_secret_expires_pending_access_requests(vault):
     _create(vault, name="A_KEY", protection="protected")
     with vault.begin() as conn:
@@ -1273,6 +1356,22 @@ def test_deleting_protected_secret_expires_pending_access_requests(vault):
         status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == access_req["id"])).scalar_one()
 
     assert status == "expired"
+
+
+def test_deleting_standard_secret_expires_pending_access_and_sign_requests(vault):
+    _create(vault, name="A_KEY", protection="standard")
+    _create(vault, name="ETH_KEY", protection="standard", kind="keypair", signer_kind="local")
+    with vault.begin() as conn:
+        access_req = _access_request(conn, "A_KEY", session_id="ses_1")
+        vs.delete_secret(conn, "A_KEY")
+        access_status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == access_req["id"])).scalar_one()
+
+        sign_req = vs.create_sign_request(conn, "ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")
+        vs.delete_secret(conn, "ETH_KEY")
+        sign_status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == sign_req["id"])).scalar_one()
+
+    assert access_status == "expired"
+    assert sign_status == "expired"
 
 
 def test_sign_request_completion_can_only_claim_pending_once(vault):

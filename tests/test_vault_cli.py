@@ -273,6 +273,45 @@ def test_vault_await_wait_treats_failed_request_as_terminal(capfd):
     assert payload["details"] == {"request_id": req["id"]}
 
 
+def test_vault_await_wait_keeps_waiting_from_signing_status(capfd, monkeypatch):
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="ETH_KEY",
+            kind="keypair",
+            signer_kind="local",
+            sealed=_sealed("key"),
+        )
+        req = vault_service.create_sign_request(
+            conn,
+            "ETH_KEY",
+            digest="00" * 32,
+            scheme="ecdsa-secp256k1-recoverable",
+        )
+        vault_service.claim_sign_request(
+            conn,
+            req["id"],
+            name="ETH_KEY",
+            digest="00" * 32,
+            scheme="ecdsa-secp256k1-recoverable",
+        )
+
+    wait_mock = Mock(
+        return_value={
+            "request": {"id": req["id"], "status": "approved"},
+            "result": {"type": "signature", "signature": {"signature": "ab" * 64, "recovery_id": 1}},
+        }
+    )
+    monkeypatch.setattr(cli, "_wait_for_vault_request", wait_mock)
+
+    assert cli.cmd_vault_await(_ns(request_id=req["id"], wait=5)) == 0
+    payload = json.loads(capfd.readouterr().out)
+
+    wait_mock.assert_called_once_with(req["id"], timeout=5.0)
+    assert payload["status"] == "approved"
+    assert payload["result"] == {"type": "signature", "signature": {"signature": "ab" * 64, "recovery_id": 1}}
+
+
 def test_set_rejects_invalid_name_before_avault(tmp_path, capfd, monkeypatch):
     from unittest.mock import Mock
 
