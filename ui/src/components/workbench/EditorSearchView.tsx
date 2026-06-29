@@ -36,23 +36,39 @@ type Props = {
   onFilesChanged?: (paths: string[]) => void;
 };
 
-// Build a per-match replacement preview that mirrors what the backend will write. Literal mode is
-// exact (the whole match becomes the replacement; an empty replacement is a deletion). Regex mode
-// is best-effort: it re-applies the pattern to the matched text in JS, translating Python-style
-// backrefs (\1) to JS ($1); if the pattern isn't JS-compatible it falls back to the raw string.
-function makePreviewer(query: string, replacement: string, regex: boolean, caseSensitive: boolean): (hit: string) => string {
+// Build a per-match replacement preview that mirrors what the backend will write, given the match's
+// preview line and its start offset within it. Literal mode is exact (the whole match becomes the
+// replacement; an empty replacement is a deletion). Regex mode is best-effort: it evaluates the
+// pattern against the full preview line (so anchors / lookaround see surrounding context, not just
+// the isolated hit) and computes the replacement for the occurrence at `start`, translating
+// Python-style backrefs (\1) to JS ($1). It falls back to the raw string if the pattern isn't
+// JS-compatible. (Truncated long lines and Python-only regex syntax remain approximations; the
+// actual replace is always computed server-side.)
+function makePreviewer(query: string, replacement: string, regex: boolean, caseSensitive: boolean): (line: string, start: number) => string {
   if (!regex) return () => replacement;
-  let re: RegExp | null = null;
+  const flags = caseSensitive ? '' : 'i';
+  let valid = true;
   try {
-    re = new RegExp(query, caseSensitive ? '' : 'i');
+    new RegExp(query, flags);
   } catch {
-    re = null;
+    valid = false;
   }
   const jsRepl = replacement.replace(/\$/g, '$$$$').replace(/\\(\d)/g, '$$$1');
-  return (hit: string) => {
-    if (!re) return replacement;
+  return (line: string, start: number) => {
+    if (!valid) return replacement;
     try {
-      return hit.replace(new RegExp(re.source, re.flags), jsRepl);
+      const global = new RegExp(query, flags.includes('g') ? flags : `${flags}g`);
+      let out = replacement;
+      let found = false;
+      line.replace(global, (matched: string, ...args: unknown[]) => {
+        const offset = args[args.length - 2] as number;
+        if (!found && offset === start) {
+          found = true;
+          out = matched.replace(new RegExp(query, flags), jsRepl);
+        }
+        return matched;
+      });
+      return out;
     } catch {
       return replacement;
     }
@@ -378,7 +394,7 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
 const FileGroup: React.FC<{
   file: SearchFileResult;
   collapsed: boolean;
-  previewer: ((hit: string) => string) | null;
+  previewer: ((line: string, start: number) => string) | null;
   onToggle: () => void;
   onJump: (path: string, line: number, col: number, endCol: number) => void;
 }> = ({ file, collapsed, previewer, onToggle, onJump }) => {
@@ -408,11 +424,11 @@ const FileGroup: React.FC<{
   );
 };
 
-const MatchRow: React.FC<{ match: SearchMatch; previewer: ((hit: string) => string) | null; onClick: () => void }> = ({ match, previewer, onClick }) => {
+const MatchRow: React.FC<{ match: SearchMatch; previewer: ((line: string, start: number) => string) | null; onClick: () => void }> = ({ match, previewer, onClick }) => {
   const pre = match.text.slice(0, match.preview_col);
   const hit = match.text.slice(match.preview_col, match.preview_end);
   const post = match.text.slice(match.preview_end);
-  const replaced = previewer ? previewer(hit) : null;
+  const replaced = previewer ? previewer(match.text, match.preview_col) : null;
   return (
     <button type="button" onClick={onClick} className="flex items-center gap-2 rounded px-1.5 py-0.5 text-left transition hover:bg-cyan-soft">
       <span className="w-7 shrink-0 text-right font-mono text-[11px] tabular-nums text-muted">{match.line}</span>
