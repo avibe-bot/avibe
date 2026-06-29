@@ -38,10 +38,16 @@ type VaultKind = 'static' | 'keypair';
 const AVAULT_P2_MIN_VERSION = '0.1.3';
 const DEFAULT_GROUP = 'default';
 
-/** Lenient host matcher for the brokered HTTP proxy allow-list (e.g. '.example.com', 'api.example.com:8443'). */
+// Accept only what the brokered fetch matcher (`_host_allowed` in vibe/cli.py) can
+// actually match against `urlsplit(url).hostname`: a bare hostname (`api.example.com`,
+// `localhost`) or a leading-dot subdomain entry (`.example.com`). No port, scheme,
+// path, or wildcard — those would persist a policy that never authorizes a request.
 function normalizeHost(raw: string): string | null {
   const host = raw.trim().toLowerCase();
-  return /^[a-z0-9.*:-]+$/.test(host) ? host : null;
+  if (!host) return null;
+  const core = host.startsWith('.') ? host.slice(1) : host;
+  const label = '[a-z0-9](?:[a-z0-9-]*[a-z0-9])?';
+  return new RegExp(`^${label}(?:\\.${label})*$`).test(core) ? host : null;
 }
 type VaultProtection = 'standard' | 'protected';
 
@@ -304,9 +310,19 @@ export const VaultSecretForm: React.FC<{
                 key={key}
                 type="button"
                 aria-pressed={selected}
-                onClick={() => setKind(key)}
+                disabled={submitting}
+                onClick={() => {
+                  setKind(key);
+                  // Leaving keypair: drop any held private key so unused key material
+                  // isn't kept in memory until the dialog closes.
+                  if (key === 'static') {
+                    applySigningKey(null);
+                    setImportHex('');
+                    setSigningError(null);
+                  }
+                }}
                 className={cn(
-                  'flex flex-col gap-1.5 rounded-lg border p-3 text-left transition-colors',
+                  'flex flex-col gap-1.5 rounded-lg border p-3 text-left transition-colors disabled:opacity-50',
                   selected ? 'border-mint bg-mint-soft' : 'border-border bg-surface hover:bg-surface-2',
                 )}
               >
@@ -357,6 +373,7 @@ export const VaultSecretForm: React.FC<{
                 type="button"
                 size="sm"
                 variant={signingSource === src ? 'secondary' : 'ghost'}
+                disabled={submitting}
                 onClick={() => {
                   setSigningSource(src);
                   setSigningError(null);
@@ -373,6 +390,7 @@ export const VaultSecretForm: React.FC<{
             <Button
               type="button"
               variant="secondary"
+              disabled={submitting}
               onClick={() => {
                 try {
                   applySigningKey(generateSigningKey());
@@ -392,6 +410,7 @@ export const VaultSecretForm: React.FC<{
               value={importHex}
               spellCheck={false}
               autoComplete="off"
+              disabled={submitting}
               placeholder={t('vaults.dialog.signingImportPlaceholder')}
               className="font-mono"
               onChange={(event) => {
@@ -474,6 +493,7 @@ export const VaultSecretForm: React.FC<{
           onChange={setTags}
           placeholder={t('vaults.dialog.tagsPlaceholder')}
           ariaLabel={t('vaults.dialog.tags')}
+          removeLabel={(value) => t('vaults.dialog.removeChip', { value })}
         />
         <span className="text-xs font-normal text-muted-foreground">{t('vaults.dialog.tagsHelp')}</span>
       </div>
@@ -498,6 +518,7 @@ export const VaultSecretForm: React.FC<{
               normalize={normalizeHost}
               placeholder={t('vaults.dialog.allowHostsPlaceholder')}
               ariaLabel={t('vaults.dialog.allowHosts')}
+              removeLabel={(value) => t('vaults.dialog.removeChip', { value })}
             />
             <span className="text-xs font-normal text-muted-foreground">{t('vaults.dialog.allowHostsHelp')}</span>
           </>

@@ -14,6 +14,8 @@ export type TagInputProps = {
    */
   normalize?: (raw: string) => string | null;
   ariaLabel?: string;
+  /** Localized aria-label for a chip's remove button. Defaults to English. */
+  removeLabel?: (value: string) => string;
   className?: string;
   inputClassName?: string;
 };
@@ -34,6 +36,7 @@ export const TagInput: React.FC<TagInputProps> = ({
   placeholder,
   normalize = defaultNormalize,
   ariaLabel,
+  removeLabel = (value) => `Remove ${value}`,
   className,
   inputClassName,
 }) => {
@@ -88,7 +91,7 @@ export const TagInput: React.FC<TagInputProps> = ({
           <button
             type="button"
             onClick={() => removeAt(index)}
-            aria-label={`Remove ${value}`}
+            aria-label={removeLabel(value)}
             className="text-muted hover:text-foreground"
           >
             <X className="size-3" />
