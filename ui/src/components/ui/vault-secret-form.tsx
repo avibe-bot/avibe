@@ -1,6 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { Check, Copy, Eye, EyeOff, KeyRound, Loader2, RefreshCw, Server, ShieldCheck, Wallet } from 'lucide-react';
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Loader2,
+  RefreshCw,
+  Server,
+  ShieldCheck,
+  Wallet,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { ApiError, useApi, type DependencyItem } from '@/context/ApiContext';
@@ -17,11 +30,19 @@ import { useProtectedVault } from '@/lib/useProtectedVault';
 import { Button } from './button';
 import { Combobox } from './combobox';
 import { Input } from './input';
+import { TagInput } from './tag-input';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 
 type VaultKind = 'static' | 'keypair';
 
 const AVAULT_P2_MIN_VERSION = '0.1.3';
+const DEFAULT_GROUP = 'default';
+
+/** Lenient host matcher for the brokered HTTP proxy allow-list (e.g. '.example.com', 'api.example.com:8443'). */
+function normalizeHost(raw: string): string | null {
+  const host = raw.trim().toLowerCase();
+  return /^[a-z0-9.*:-]+$/.test(host) ? host : null;
+}
 type VaultProtection = 'standard' | 'protected';
 
 function versionAtLeast(current: string | null | undefined, minimum: string): boolean {
@@ -81,9 +102,11 @@ export const VaultSecretForm: React.FC<{
   const [signingKey, setSigningKey] = useState<SigningKeyMaterial | null>(null);
   const [signingError, setSigningError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [group, setGroup] = useState('');
+  const [group, setGroup] = useState(DEFAULT_GROUP);
+  const [tags, setTags] = useState<string[]>([]);
   const [description, setDescription] = useState('');
-  const [allowHosts, setAllowHosts] = useState('');
+  const [allowHosts, setAllowHosts] = useState<string[]>([]);
+  const [hostsOpen, setHostsOpen] = useState(false);
   const [protection, setProtection] = useState<VaultProtection>(defaultProtection);
   const [showValue, setShowValue] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -179,16 +202,13 @@ export const VaultSecretForm: React.FC<{
     setSubmitting(true);
     setError(null);
     try {
-      const hosts = allowHosts
-        .split(',')
-        .map((host) => host.trim())
-        .filter(Boolean);
       const base = {
         name: secretName,
         protection,
         group: group.trim() || undefined,
         description: description.trim() || undefined,
-        policy: hosts.length ? { allowed_hosts: hosts } : undefined,
+        tags: tags.length ? tags : undefined,
+        policy: allowHosts.length ? { allowed_hosts: allowHosts } : undefined,
         ...(isKeypair && signingKey
           ? {
               kind: 'keypair',
@@ -432,7 +452,7 @@ export const VaultSecretForm: React.FC<{
       <label className="flex flex-col gap-1.5 text-sm font-medium">
         {t('vaults.dialog.group')}
         <Combobox
-          options={groups.map((g) => ({ value: g, label: g }))}
+          options={[...new Set([DEFAULT_GROUP, ...groups])].map((g) => ({ value: g, label: g }))}
           value={group}
           onValueChange={setGroup}
           allowCustomValue
@@ -447,11 +467,42 @@ export const VaultSecretForm: React.FC<{
         {t('vaults.dialog.description')}
         <Input value={description} onChange={(event) => setDescription(event.target.value)} />
       </label>
-      <label className="flex flex-col gap-1.5 text-sm font-medium">
-        {t('vaults.dialog.allowHosts')}
-        <Input value={allowHosts} onChange={(event) => setAllowHosts(event.target.value)} />
-        <span className="text-xs text-muted-foreground">{t('vaults.dialog.allowHostsHelp')}</span>
-      </label>
+      <div className="flex flex-col gap-1.5 text-sm font-medium">
+        <span>{t('vaults.dialog.tags')}</span>
+        <TagInput
+          values={tags}
+          onChange={setTags}
+          placeholder={t('vaults.dialog.tagsPlaceholder')}
+          ariaLabel={t('vaults.dialog.tags')}
+        />
+        <span className="text-xs font-normal text-muted-foreground">{t('vaults.dialog.tagsHelp')}</span>
+      </div>
+      <div className="flex flex-col gap-1.5 text-sm font-medium">
+        <button
+          type="button"
+          onClick={() => setHostsOpen((open) => !open)}
+          aria-expanded={hostsOpen}
+          className="flex items-center gap-1.5 text-left text-sm font-medium text-muted-foreground hover:text-foreground"
+        >
+          {hostsOpen ? <ChevronDown className="size-4 shrink-0" /> : <ChevronRight className="size-4 shrink-0" />}
+          {t('vaults.dialog.allowHosts')}
+          {!hostsOpen && allowHosts.length > 0 && (
+            <span className="rounded bg-surface-2 px-1.5 py-0.5 text-xs font-normal text-foreground">{allowHosts.length}</span>
+          )}
+        </button>
+        {hostsOpen && (
+          <>
+            <TagInput
+              values={allowHosts}
+              onChange={setAllowHosts}
+              normalize={normalizeHost}
+              placeholder={t('vaults.dialog.allowHostsPlaceholder')}
+              ariaLabel={t('vaults.dialog.allowHosts')}
+            />
+            <span className="text-xs font-normal text-muted-foreground">{t('vaults.dialog.allowHostsHelp')}</span>
+          </>
+        )}
+      </div>
       <div className="flex flex-col gap-1.5 text-sm font-medium">
         <span>{t('vaults.dialog.protection')}</span>
         <div className="grid grid-cols-2 gap-2.5">
