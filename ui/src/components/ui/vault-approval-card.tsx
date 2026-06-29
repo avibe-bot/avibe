@@ -84,51 +84,33 @@ function useTtlLabel() {
  * or an avault-bound DEK blind box) is ever submitted to the daemon.
  */
 export const VaultApprovalCard: React.FC<{
-  requestId: string;
+  request: VaultRequest;
   onResolved: (outcome: ApprovalOutcome) => void;
   onCancel: () => void;
-}> = ({ requestId, onResolved, onCancel }) => {
+}> = ({ request, onResolved, onCancel }) => {
   const { t } = useTranslation();
   const api = useApi();
   const vault = useProtectedVault();
   const ttlLabel = useTtlLabel();
 
-  const [request, setRequest] = useState<VaultRequest | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [scopeIdx, setScopeIdx] = useState(0);
-  const [thisSessionOnly, setThisSessionOnly] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    setLoadError(null);
-    api
-      .getVaultRequest(requestId, { handleError: false })
-      .then((res) => {
-        if (!alive) return;
-        // handleError:false makes HTTP errors resolve to the error payload rather than
-        // reject, so a stale/expired/already-handled request comes back as {ok:false}
-        // with no `request`. Surface that as a load error instead of spinning forever.
-        if (!res.ok || !res.request) throw new Error(res.message || res.code || 'request-unavailable');
-        setRequest(res.request);
-        const options = ((res.request.card as ApprovalCard | null)?.scope_options ?? []) as ScopeOption[];
-        if (options.length > 0) setThisSessionOnly(options[0].session_binding_default !== false);
-      })
-      .catch((err: unknown) => {
-        if (alive) setLoadError(err instanceof Error ? err.message : String(err));
-      });
-    return () => {
-      alive = false;
-    };
-  }, [api, requestId]);
-
-  const card = (request?.card ?? null) as ApprovalCard | null;
-  const delivery = (request?.delivery ?? {}) as { digest?: string; scheme?: string };
-  const isSign = (card?.request_type ?? request?.request_type) === 'sign';
+  // The request is passed in already hydrated by the UI-audience inbox list
+  // (`getVaultRequests`, #708), so `card.secret_unlock_material` /
+  // `scope_options[].unlock_material` are present for protected requests. No fetch or
+  // loading state is needed here — the single-request GET is agent-audience (value-free).
+  const card = (request.card ?? null) as ApprovalCard | null;
+  const delivery = (request.delivery ?? {}) as { digest?: string; scheme?: string };
+  const isSign = (card?.request_type ?? request.request_type) === 'sign';
   const isProtected = card?.protection === 'protected';
   const isKeypair = card?.kind === 'keypair';
   const scopeOptions = card?.scope_options ?? [];
+
+  const [scopeIdx, setScopeIdx] = useState(0);
+  const [thisSessionOnly, setThisSessionOnly] = useState(
+    () => scopeOptions.length === 0 || scopeOptions[0].session_binding_default !== false,
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
   const selectedOption = scopeOptions[scopeIdx];
   const selectedMaterials = useMemo(() => selectedOption?.unlock_material ?? [], [selectedOption]);
 
@@ -172,7 +154,7 @@ export const VaultApprovalCard: React.FC<{
         // Standard members only — a metadata-only scope grant, no DEK release.
         failIfNotOk(
           await api.createVaultGrant({
-            request_id: requestId,
+            request_id: request.id,
             scope_type: option.scope_type,
             scope_ref: option.scope_ref,
             ttl_seconds: ttlSeconds,
@@ -206,7 +188,7 @@ export const VaultApprovalCard: React.FC<{
           });
         }
         failIfNotOk(
-          await api.fulfillVaultAccessRequest(requestId, {
+          await api.fulfillVaultAccessRequest(request.id, {
             scope_type: option.scope_type,
             scope_ref: option.scope_ref,
             ttl_seconds: ttlSeconds,
@@ -232,21 +214,24 @@ export const VaultApprovalCard: React.FC<{
         const sig = await vault.signProtectedRequest(material, digest, scheme as SignatureScheme);
         const signature: Record<string, unknown> = { signature: sig.signature, browser_signed: true };
         if (sig.recovery_id != null) signature.recovery_id = sig.recovery_id;
-        failIfNotOk(await api.signVaultDigest({ name, request_id: requestId, digest, scheme, signature }));
+        failIfNotOk(await api.signVaultDigest({ name, request_id: request.id, digest, scheme, signature }));
       } else {
         // Standard keypair: avault signs; we only relay the approved request.
-        failIfNotOk(await api.signVaultDigest({ name, request_id: requestId, digest, scheme }));
+        failIfNotOk(await api.signVaultDigest({ name, request_id: request.id, digest, scheme }));
       }
       onResolved({ kind: 'approved', requestType: 'sign' });
     });
 
   const deny = () =>
     finish(async () => {
-      await api.denyVaultRequest(requestId);
+      await api.denyVaultRequest(request.id);
       onResolved({ kind: 'denied', requestType: isSign ? 'sign' : 'access' });
     });
 
-  if (loadError) {
+  // The request is provided pre-loaded (hydrated by the inbox list), so there's no async
+  // load to fail. A missing card means a malformed/non-approval request slipped through
+  // the section filter — surface an error instead of rendering a broken form.
+  if (!card) {
     return (
       <div className="flex flex-col gap-3">
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
@@ -257,15 +242,6 @@ export const VaultApprovalCard: React.FC<{
             {t('vaults.approval.close')}
           </Button>
         </div>
-      </div>
-    );
-  }
-
-  if (!card) {
-    return (
-      <div className="flex items-center gap-2 px-1 py-6 text-sm text-muted">
-        <Loader2 className="size-4 animate-spin" />
-        {t('vaults.approval.loading')}
       </div>
     );
   }

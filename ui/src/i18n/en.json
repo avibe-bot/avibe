@@ -2287,7 +2287,6 @@
       "sign": "Sign",
       "deny": "Deny",
       "close": "Close",
-      "loading": "Loading request…",
       "ttlMinutes": "{{count}} min",
       "ttlHours": "{{count}} h",
       "accessNote": "The secret is unlocked in your browser and delivered inside avault — Python never sees it.",

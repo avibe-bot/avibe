@@ -174,7 +174,7 @@ const GrantRow: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: Vau
 };
 
 /** A compact pending-request row: who is asking, for what, with a Review action. */
-const RequestRow: React.FC<{ request: VaultRequest; onReview: (id: string) => void }> = ({ request: r, onReview }) => {
+const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultRequest) => void }> = ({ request: r, onReview }) => {
   const { t } = useTranslation();
   const card = (r.card ?? {}) as { request_type?: string; kind?: string; protection?: string; session_id?: string };
   const isSign = (card.request_type ?? r.request_type) === 'sign';
@@ -203,7 +203,7 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (id: string) => vo
         </span>
       </div>
       <div className="ml-auto">
-        <Button size="sm" onClick={() => onReview(r.id)}>
+        <Button size="sm" onClick={() => onReview(r)}>
           {t('vaults.requests.review')}
         </Button>
       </div>
@@ -222,7 +222,7 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
   const api = useApi();
   const { showToast } = useToast();
   const [requests, setRequests] = useState<VaultRequest[]>([]);
-  const [reviewing, setReviewing] = useState<string | null>(null);
+  const [reviewing, setReviewing] = useState<VaultRequest | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -250,9 +250,9 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
 
   const handleOutcome = useCallback(
     (outcome: ApprovalOutcome) => {
-      // Drop the row immediately so it doesn't linger behind the 1.5s poll cache; the
-      // next load reconciles against the server.
-      if (reviewing) setRequests((prev) => prev.filter((r) => r.id !== reviewing));
+      // Drop the row immediately so it doesn't linger behind the poll; the next load
+      // reconciles against the server.
+      if (reviewing) setRequests((prev) => prev.filter((r) => r.id !== reviewing.id));
       setReviewing(null);
       const key =
         outcome.kind === 'denied'
@@ -291,7 +291,7 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
             <DialogTitle>{t('vaults.requests.reviewTitle')}</DialogTitle>
           </DialogHeader>
           {reviewing != null ? (
-            <VaultApprovalCard requestId={reviewing} onResolved={handleOutcome} onCancel={() => setReviewing(null)} />
+            <VaultApprovalCard key={reviewing.id} request={reviewing} onResolved={handleOutcome} onCancel={() => setReviewing(null)} />
           ) : null}
         </DialogContent>
       </Dialog>

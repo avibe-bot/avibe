@@ -79,13 +79,6 @@ type VaultBlindBox = {
   ct: string;
 };
 
-/** Terminal outcome of an approved request, surfaced by GET /api/vault/requests/<id>. */
-export type VaultRequestResult = {
-  type: 'grant' | 'signature';
-  grant?: VaultGrant;
-  signature?: Record<string, unknown>;
-};
-
 /**
  * Browser-relayed protected access fulfillment. The browser releases each protected
  * DEK as an opaque HPKE blind box addressed to the resident avault agent and submits
@@ -343,7 +336,6 @@ export type ApiContextType = {
   createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
   getVaultRequests: (params?: { status?: string; type?: string; limit?: number }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; requests: VaultRequest[] }>;
-  getVaultRequest: (requestId: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; request?: VaultRequest; result?: VaultRequestResult | null; code?: string; message?: string }>;
   denyVaultRequest: (requestId: string) => Promise<{ ok: boolean; request?: VaultRequest; code?: string; message?: string }>;
   fulfillVaultAccessRequest: (requestId: string, payload: VaultAccessFulfillmentPayload) => Promise<{ ok: boolean; request_id?: string; grant?: VaultGrant; result?: { type: string; grant?: VaultGrant }; code?: string; message?: string }>;
   getVaultGrants: (params?: { status?: string; sessionId?: string }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; grants: VaultGrant[] }>;
@@ -2063,9 +2055,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const qs = search.toString();
       return getCachedJson(qs ? `/api/vault/requests?${qs}` : '/api/vault/requests', 1500, opts);
     },
-    // Uncached: the single request carries the protected unlock material the browser
-    // releases against, and its result flips once approved — always read it fresh.
-    getVaultRequest: (requestId, opts) => getJson(`/api/vault/requests/${encodeURIComponent(requestId)}`, opts),
     denyVaultRequest: (requestId) => postJson(`/api/vault/requests/${encodeURIComponent(requestId)}/deny`, {}),
     fulfillVaultAccessRequest: (requestId, payload) =>
       postJson(`/api/vault/requests/${encodeURIComponent(requestId)}/fulfill-access`, payload),

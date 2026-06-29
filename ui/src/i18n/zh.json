@@ -2286,7 +2286,6 @@
       "sign": "签名",
       "deny": "拒绝",
       "close": "关闭",
-      "loading": "正在加载请求…",
       "ttlMinutes": "{{count}} 分钟",
       "ttlHours": "{{count}} 小时",
       "accessNote": "密钥在你的浏览器中解锁、在 avault 内交付——Python 永远看不到它。",
