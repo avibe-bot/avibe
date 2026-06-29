@@ -312,15 +312,11 @@ def _request_audience_from_requester(requester: Any) -> str:
     return REQUEST_AUDIENCE_UI
 
 
-def _card_hydration_policy(audience: str | None, requester: Any) -> CardHydrationPolicy:
+def _card_hydration_policy(audience: str | None) -> CardHydrationPolicy:
     normalized = _normalize_request_audience(audience)
-    requester_audience = _request_audience_from_requester(requester)
     return CardHydrationPolicy(
         audience=normalized,
-        include_protected_unlock_material=(
-            normalized == REQUEST_AUDIENCE_UI
-            and requester_audience != REQUEST_AUDIENCE_AGENT
-        ),
+        include_protected_unlock_material=normalized == REQUEST_AUDIENCE_UI,
     )
 
 
@@ -488,7 +484,7 @@ def _request_row_payload(
     requester = _loads(row.get("requester"))
     delivery = _loads(row.get("delivery"))
     card = delivery.get("card") if isinstance(delivery, dict) else None
-    policy = _card_hydration_policy(audience, requester)
+    policy = _card_hydration_policy(audience)
     if (
         policy.include_protected_unlock_material
         and row.get("status") == "pending"
