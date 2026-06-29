@@ -1066,6 +1066,27 @@ def test_request_inbox_hydrates_unlock_material_without_persisting_it(vault):
     assert "ct-1" not in raw_delivery
 
 
+def test_agent_created_request_never_hydrates_unlock_material(vault):
+    _create(vault, name="STANDARD_KEY", protection="standard", group="crypto")
+    with vault.begin() as conn:
+        vs.create_secret(conn, name="PROTECTED_KEY", protection="protected", group="crypto", sealed=_sealed("protected"))
+        req = vs.create_access_request(
+            conn,
+            "STANDARD_KEY",
+            requester={"source": "agent-cli", "session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        ui_payload = vs.get_request(conn, req["id"])
+        agent_payload = vs.get_request(conn, req["id"], audience=vs.REQUEST_AUDIENCE_AGENT)
+        listed = vs.list_requests(conn)
+
+    encoded = json.dumps({"ui": ui_payload, "agent": agent_payload, "listed": listed})
+    assert "secret_unlock_material" not in encoded
+    assert "unlock_material" not in encoded
+    assert "ct-protected" not in encoded
+    assert "wm-protected" not in encoded
+
+
 def test_resolve_access_card_uses_delivery_session_fallback(vault):
     _create(vault, name="PROTECTED_KEY", protection="protected", group="crypto")
     with vault.begin() as conn:

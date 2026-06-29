@@ -1522,7 +1522,7 @@ def get_vault_request(request_id: str) -> dict:
     engine = _vault_engine()
     try:
         with engine.begin() as conn:
-            request = vault_service.get_request(conn, request_id, hydrate_unlock_material=False)
+            request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
             result = _vault_request_result(conn, request)
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
@@ -1535,8 +1535,7 @@ def get_vault_request(request_id: str) -> dict:
 def _vault_requester_payload(payload: dict) -> dict:
     requester = payload.get("requester") if isinstance(payload.get("requester"), dict) else {}
     session_id = str(payload.get("session_id") or requester.get("session_id") or "").strip()
-    source = str(payload.get("source") or requester.get("source") or "agent-cli").strip() or "agent-cli"
-    out = {"source": source}
+    out = {"source": "agent-cli"}
     if session_id:
         out["session_id"] = session_id
     if payload.get("run_id"):
@@ -1595,7 +1594,7 @@ def request_vault_access(payload: dict) -> dict:
                 requester=_vault_requester_payload(payload),
                 delivery=_vault_delivery_payload(payload),
                 expires_at=_expires_at_from_ttl(payload),
-                hydrate_unlock_material=False,
+                audience=vault_service.REQUEST_AUDIENCE_AGENT,
             )
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
@@ -1764,7 +1763,7 @@ def _cleanup_failed_agent_grant(
                         )
                     ).mappings():
                         active_row = dict(active)
-                        if int(active_row.get("agent_ready") or 0) == 1:
+                        if vault_service.grant_row_has_resident_agent_ready(active_row):
                             active_members = json.loads(active_row.get("member_snapshot") or "[]")
                             if isinstance(active_members, list):
                                 active_scope_members.update(str(member) for member in active_members if isinstance(member, str))
