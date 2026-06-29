@@ -199,7 +199,9 @@ def test_task_add_help_includes_examples_and_threadless_guidance(capsys) -> None
     assert "If this is your first time using this command, read this whole help entry before creating a task." in captured.out
     assert "`--session-id` chooses which Agent Session Avibe will continue using when the task runs." in captured.out
     assert "--post-to" in captured.out
-    assert "--deliver-key" in captured.out
+    assert "--same-scope" in captured.out
+    assert "--scope-id" in captured.out
+    assert "--deliver-key" not in captured.out
     assert "Cron weekday digits use APScheduler semantics: 0=Mon through 6=Sun; 7 is invalid." in captured.out
     assert "Prefer weekday names such as mon, tue, or sun when scheduling by day of week." in captured.out
 
@@ -260,7 +262,7 @@ def test_hook_send_help_includes_examples_and_threadless_guidance(capsys) -> Non
     captured = capsys.readouterr()
     assert "`vibe hook send` queues one deprecated asynchronous compatibility turn" in captured.out
     assert "--post-to" in captured.out
-    assert "--deliver-key" in captured.out
+    assert "--deliver-key" not in captured.out
     assert "--session-id" in captured.out
     assert "vibe agent run --async --session-id sesk8m4q2p7x --no-callback" in captured.out
 
@@ -274,10 +276,14 @@ def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
     assert exc.value.code == 0
     captured = capsys.readouterr()
     assert "--fork-session FORK_SESSION" in captured.out
-    assert "Use --fork-session to create a new Session by forking an existing Session's native backend context." in captured.out
-    assert "Forks keep the same backend as the source Session." in captured.out
-    assert "vibe agent run --async --fork-session sesk8m4q2p7x --callback-session-id sescaller123" in captured.out
-    assert "Do not combine --fork-session with --session-id, --create-session, --create-session-per-run, --deliver-key, or --post-to." in captured.out
+    assert "--fork-self" in captured.out
+    assert "--same-scope" in captured.out
+    assert "--scope-id" in captured.out
+    assert "--deliver-key" not in captured.out
+    assert "--fork-self forks the current caller Session from AVIBE_SESSION_ID." in captured.out
+    assert "Forks keep the same backend, scope, and cwd as the source Session." in captured.out
+    assert "vibe agent run --async --fork-self --message" in captured.out
+    assert "Do not combine fork flags with --session-id, --create-session, or --create-session-per-run." in captured.out
 
 
 def test_task_add_parse_error_is_structured_json(capsys) -> None:
@@ -497,6 +503,139 @@ def test_task_add_records_caller_context_metadata(tmp_path: Path, capsys) -> Non
     stored = cli.ScheduledTaskStore(store_path).get_task(payload["task"]["id"])
     assert stored is not None
     assert stored.metadata["created_by"] == expected
+
+
+def test_task_add_create_per_run_scope_id_records_session_scope_metadata(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="project-agent", backend="codex")
+    from storage.importer import ensure_sqlite_state
+    from storage.models import scope_settings
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+    with cli.create_sqlite_engine(db_path).begin() as conn:
+        now = "2026-06-29T00:00:00+00:00"
+        scope_id = upsert_scope(conn, "avibe", "project", "proj-scope-task", now=now)
+        conn.execute(
+            scope_settings.insert().values(
+                scope_id=scope_id,
+                enabled=1,
+                role=None,
+                workdir=str(tmp_path),
+                agent_name="project-agent",
+                agent_backend="codex",
+                agent_variant=None,
+                model=None,
+                reasoning_effort=None,
+                require_mention=None,
+                settings_version=1,
+                settings_json=json.dumps({"routing": {"agent_name": "project-agent"}}),
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    store_path = tmp_path / "scheduled_tasks.json"
+    store = cli.ScheduledTaskStore(store_path)
+    invoke_dir = tmp_path / "invoke"
+    invoke_dir.mkdir()
+    args = _parse_task_add(
+        [
+            "--create-session-per-run",
+            "--scope-id",
+            "avibe::project::proj-scope-task",
+            "--cron",
+            "0 * * * *",
+            "--message",
+            "hello",
+        ]
+    )
+
+    with (
+        patch("os.getcwd", return_value=str(invoke_dir)),
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["task"]["session_policy"] == "create_per_run"
+    assert payload["task"]["deliver_key"] is None
+    assert payload["task"]["cwd"] == str(invoke_dir)
+    assert payload["task"]["metadata"]["session_scope_id"] == "avibe::project::proj-scope-task"
+    assert payload["task"]["metadata"]["session_workdir"] == str(invoke_dir)
+    assert payload["task"]["agent_name"] == "project-agent"
+
+
+def test_task_add_create_session_scope_id_supports_project_scope(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="project-agent", backend="codex")
+    from storage.importer import ensure_sqlite_state
+    from storage.models import scope_settings
+    from storage.settings_service import upsert_scope
+
+    ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+    with cli.create_sqlite_engine(db_path).begin() as conn:
+        now = "2026-06-29T00:00:00+00:00"
+        scope_id = upsert_scope(conn, "avibe", "project", "proj-once-task", now=now)
+        conn.execute(
+            scope_settings.insert().values(
+                scope_id=scope_id,
+                enabled=1,
+                role=None,
+                workdir=str(tmp_path),
+                agent_name="project-agent",
+                agent_backend="codex",
+                agent_variant=None,
+                model=None,
+                reasoning_effort=None,
+                require_mention=None,
+                settings_version=1,
+                settings_json=json.dumps({"routing": {"agent_name": "project-agent"}}),
+                created_at=now,
+                updated_at=now,
+            )
+        )
+
+    store_path = tmp_path / "scheduled_tasks.json"
+    store = cli.ScheduledTaskStore(store_path)
+    invoke_dir = tmp_path / "invoke"
+    invoke_dir.mkdir()
+    args = _parse_task_add(
+        [
+            "--create-session",
+            "--scope-id",
+            "avibe::project::proj-once-task",
+            "--at",
+            "2026-06-30T00:00:00+00:00",
+            "--message",
+            "hello",
+        ]
+    )
+
+    with (
+        patch("os.getcwd", return_value=str(invoke_dir)),
+        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_add(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["task"]["session_policy"] == "create_once"
+    target = cli.resolve_session_id_target(payload["task"]["session_id"], db_path=db_path)
+    assert target.session_key.session_scope == "avibe::project::proj-once-task"
+    assert target.workdir == str(invoke_dir)
+    assert payload["task"]["cwd"] == str(invoke_dir)
+    assert payload["task"]["metadata"]["session_scope_id"] == "avibe::project::proj-once-task"
+    assert payload["task"]["metadata"]["session_workdir"] == str(invoke_dir)
 
 
 def test_task_add_defaults_target_to_caller_session(tmp_path: Path, capsys) -> None:
@@ -1139,7 +1278,7 @@ def test_agent_run_rejects_per_run_for_direct_invocation() -> None:
     assert payload["code"] == "invalid_session_policy"
 
 
-def test_agent_run_rejects_backend_mismatch_for_existing_session(tmp_path: Path) -> None:
+def test_agent_run_rejects_agent_override_for_existing_session(tmp_path: Path) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     agent_store = cli.VibeAgentStore(db_path)
     agent_store.create(name="codex-worker", backend="codex")
@@ -1163,7 +1302,7 @@ def test_agent_run_rejects_backend_mismatch_for_existing_session(tmp_path: Path)
         result, payload = _capture_stderr_json(cli.cmd_agent_run, args)
 
     assert result == 1
-    assert payload["code"] == "agent_session_backend_mismatch"
+    assert payload["code"] == "agent_with_existing_session"
 
 
 def test_agent_run_rejects_post_to_thread_for_threadless_session_before_enqueue(tmp_path: Path) -> None:

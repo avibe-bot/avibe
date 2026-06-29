@@ -997,7 +997,7 @@ def _lookup_scope_id(conn: Connection, scope_key: str) -> str | None:
 def resolve_scope_from_legacy_key(conn: Connection, scope_key: str, *, now: str) -> str | None:
     raw_scope_key = str(scope_key or "")
     parts = raw_scope_key.split("::")
-    if len(parts) == 3 and parts[1] in {"channel", "user", "platform"}:
+    if len(parts) == 3 and parts[1] in {"channel", "user", "platform", "project"}:
         platform, scope_type, native_id = parts
         if not platform or not native_id:
             return None

@@ -102,6 +102,7 @@ def reserve_forked_session(
     agent_name: Optional[str] = None,
     model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    scope_id: Optional[str] = None,
     trim_latest_running_turn: bool = False,
     native_turn_started: bool = False,
     db_path: Optional[Path] = None,
@@ -190,6 +191,7 @@ def reserve_forked_session(
                 if reasoning_effort is not None
                 else row["reasoning_effort"]
             )
+            target_scope_id = _clean_optional(scope_id) if scope_id is not None else row["scope_id"]
             source_title = str(row["title"] or "").strip()
             target_title = _forked_session_title(source_title, title_lang)
 
@@ -216,9 +218,11 @@ def reserve_forked_session(
                 metadata["fork_opencode_fork_empty_history"] = True
             if opencode_boundary_from_active_run:
                 metadata["fork_opencode_boundary_from_active_run"] = True
+            if target_scope_id != row["scope_id"]:
+                metadata["fork_target_scope_id"] = target_scope_id
             session_id = create_agent_session_row(
                 conn,
-                scope_id=row["scope_id"],
+                scope_id=target_scope_id,
                 # Keep IM delivery stable while satisfying the per-scope anchor
                 # uniqueness invariant. resolve_session_id_target strips the
                 # suffix after ":" when deriving the IM thread id.

@@ -174,9 +174,9 @@ Useful Harness queries include schema discovery, current session lookup, existin
 | --- | --- |
 | Time trigger | `vibe task add` |
 | External signal trigger | `vibe watch add` |
-| Independent Agent delegation | `vibe agent run --create-session` |
+| Independent Agent delegation | `vibe agent run --agent <agent-name>` |
 | Same-session follow-up | `vibe agent run --session-id ...` |
-| Branch from existing Session context | `vibe agent run --fork-session ...` |
+| Branch from current Session context | `vibe agent run --fork-self ...` |
 | State/history inspection | `vibe data query`, `vibe runs list`, `vibe runs show` |
 | Recurring specialist workflow | `vibe agent create/update` plus tasks, watches, or runs |
 
@@ -184,11 +184,11 @@ Useful Harness queries include schema discovery, current session lookup, existin
 
 `vibe watch add` creates a managed monitor, usually backed by a small script or command, for any observable condition that must be watched until true: product signals, business events, files, logs, CI/reviews/deploys, service health, data freshness, and similar signals.
 
-Use `vibe agent run --async ...` when one Agent delegates work to another Session and the final result text should return to this caller Session as a follow-up Agent message. Avibe injects this Session as the default async callback target. Pass `--no-callback` only when you intentionally want no automatic follow-up and will inspect the run later.
+Use `vibe agent run --agent <agent-name> --message ...` when one Agent delegates work to another Agent. By default this creates a private/background Session, records this caller Session as the callback route, and waits synchronously unless `--async` is passed. Add `--same-scope` when the new Session should live under the same Workbench project or IM scope as the caller. Add `--scope-id <scopes.id>` only when placing the new Session in a specific existing scope.
 
-Use `vibe agent run --fork-session <source-session-id> --message ...` when work should branch from an existing Session's native backend context without mutating that source Session. Forks keep the source Session backend; `--agent`, `--model`, and `--reasoning-effort` may override the forked Session only when the backend stays the same. Do not combine `--fork-session` with `--session-id`, `--create-session`, `--deliver-key`, or `--post-to`.
+Use `vibe agent run --fork-self --message ...` when work should branch from this current Session's native backend context without mutating it. Use `--fork-session <source-session-id>` only when branching from a different explicit Session. Forks keep the source Session backend, scope, and cwd by default; `--agent`, `--model`, and `--reasoning-effort` may override the forked Session only when the backend stays the same.
 
-`--post-to` changes the delivery target, not the session scope. Use `--post-to channel` when the session should stay thread-scoped but the follow-up message should be posted to the parent channel. For tasks, use `--message "..."` or `--message-file <path>` as the stored message. For watches, use `--prefix "..."` for the follow-up instruction prepended before waiter stdout.
+For tasks, use `--message "..."` or `--message-file <path>` as the stored message. For watches, use `--prefix "..."` for the follow-up instruction prepended before waiter stdout. `--post-to` is a delivery override, not session placement; avoid it unless a reply must be posted somewhere other than the target Session's normal delivery path.
 
 Manage existing work with `vibe task <list|show|pause|resume|run|remove>`, `vibe watch <list|show|pause|resume|remove>`, and `vibe runs <list|show|cancel>`.
 
@@ -201,11 +201,12 @@ The table below is generated from currently enabled Agents at prompt-injection t
 
 Rules:
 - All Agents listed in the generated table are enabled. Use the `Agent Name` value exactly as listed in shell commands such as `vibe agent show <agent-name>` and `vibe agent run --agent <agent-name> ...`.
-- `--session-id <id>` resumes that exact Agent Session and its transcript, backend identity, Show Page, and routing. `--create-session` creates a separate Session for the target Agent.
-- `--fork-session <id>` creates a new Agent Session from that source Session's native backend context; use it for alternate paths that need the source context but should not mutate the source Session.
-- For another Agent doing an independent trial, comparison, delegation, or specialist subtask, use `vibe agent run --agent <agent-name> --create-session --message ...`.
+- `--session-id <id>` resumes that exact Agent Session and its transcript, backend identity, Show Page, and routing. Without `--session-id`, `--fork-self`, or `--fork-session`, `vibe agent run --agent <agent-name>` creates a separate private/background Session for the target Agent.
+- `--fork-self` creates a new Agent Session from this current Session's native backend context; use it for alternate paths that need the current context but should not mutate this Session.
+- `--fork-session <id>` creates a new Agent Session from that explicit source Session's native backend context.
+- For another Agent doing an independent trial, comparison, delegation, or specialist subtask, use `vibe agent run --agent <agent-name> --message ...`.
 - Use `vibe agent run --agent <agent-name> --session-id ... --message ...` only to continue that same Session. Reuse the current session id only with Agents whose `Backend` matches `{current_agent_backend}`; otherwise use `--create-session`.
-- With `--fork-session`, pass `--agent`, `--model`, or `--reasoning-effort` only as forked-Session overrides, and only when the requested Agent backend matches the source Session backend.
+- With `--fork-self` or `--fork-session`, pass `--agent`, `--model`, or `--reasoning-effort` only as forked-Session overrides, and only when the requested Agent backend matches the source Session backend.
 - `--async` changes waiting behavior, not session identity: synchronous waits for the result; async runs in the background and is inspected later with `vibe runs`.
 - Create or update Agents only when it captures a reusable role, reduces repeated prompting, or makes a long-running Harness more reliable.
 
