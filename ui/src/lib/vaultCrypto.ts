@@ -446,7 +446,12 @@ export async function derivePasskeyKek(prfOutput: BytesLike, prfSalt: BytesLike)
   const output = toUint8Array(prfOutput, 'passkey PRF output');
   try {
     const salt = toUint8Array(prfSalt, 'passkey PRF salt');
-    assertLength(output, KEY_BYTES, 'passkey PRF output');
+    // The WebAuthn PRF output length varies by authenticator/provider (e.g. 1Password
+    // does not return exactly 32 bytes). HKDF accepts variable-length IKM, so require it
+    // only be present rather than asserting an exact length, then derive a 32-byte KEK.
+    if (output.length === 0) {
+      throw new Error('passkey PRF output is empty');
+    }
     assertLength(salt, PASSKEY_PRF_SALT_BYTES, 'passkey PRF salt');
     return await hkdfSha256(output, salt, utf8(PASSKEY_HKDF_INFO), KEY_BYTES);
   } finally {
