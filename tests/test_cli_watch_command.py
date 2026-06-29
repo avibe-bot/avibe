@@ -916,6 +916,50 @@ def test_watch_update_session_key_clears_previous_session_id(tmp_path: Path, cap
     assert payload["watch"]["session_key"] == "slack::channel::C456"
 
 
+def test_watch_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: Path, capsys) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = store.add_watch(
+        name="Watch CI",
+        session_key="",
+        command=["python3", "wait.py"],
+        shell_command=None,
+        prefix=None,
+        cwd=str(tmp_path),
+        mode="once",
+        timeout_seconds=600,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key="avibe::project::proj-reset-watch",
+        agent_name="worker",
+        session_policy="create_per_run",
+        metadata={
+            "session_scope_id": "avibe::project::proj-reset-watch",
+            "session_workdir": str(tmp_path),
+        },
+    )
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    agent_store.create(name="worker", backend="codex")
+    args = _parse_watch_update([watch.id, "--reset-delivery"])
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2(set())),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
+    ):
+        result = cli.cmd_watch_update(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["watch"]["post_to"] is None
+    assert payload["watch"]["deliver_key"] is None
+    assert payload["watch"]["metadata"]["session_scope_id"] == "avibe::project::proj-reset-watch"
+    assert payload["watch"]["metadata"]["session_workdir"] == str(tmp_path)
+
+
 def test_watch_update_replaces_argv_command(tmp_path: Path, capsys) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")

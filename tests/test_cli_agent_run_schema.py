@@ -472,6 +472,79 @@ def test_agent_run_callback_session_records_sync_route(tmp_path: Path, capsys) -
     assert stored["callback_status"] is None
 
 
+def test_agent_run_callback_session_records_sync_route_in_sqlite_store(tmp_path: Path, capsys) -> None:
+    from core.services import sessions as sessions_service
+    from sqlalchemy import select
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_runs, scope_settings
+    from storage.settings_service import upsert_scope
+
+    state_home = tmp_path / "home"
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
+        ensure_sqlite_state()
+        db_path = state_home / "state" / "vibe.sqlite"
+        agent_store = cli.VibeAgentStore(db_path)
+        agent_store.create(name="worker", backend="codex")
+        with create_sqlite_engine(db_path).begin() as conn:
+            scope_id = upsert_scope(
+                conn,
+                platform="slack",
+                scope_type="channel",
+                native_id="C123",
+                now="2026-06-10T00:00:00Z",
+            )
+            conn.execute(
+                scope_settings.insert().values(
+                    scope_id=scope_id,
+                    enabled=1,
+                    role=None,
+                    workdir=str(tmp_path),
+                    agent_name=None,
+                    agent_backend=None,
+                    agent_variant=None,
+                    model=None,
+                    reasoning_effort=None,
+                    require_mention=None,
+                    settings_version=1,
+                    settings_json="{}",
+                    created_at="2026-06-10T00:00:00Z",
+                    updated_at="2026-06-10T00:00:00Z",
+                )
+            )
+            callback_session = sessions_service.create_session(
+                conn,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_name="worker",
+            )
+
+        args = _parse_agent_run(
+            ["--agent", "worker", "--callback-session-id", callback_session["id"], "--message", "hi"]
+        )
+
+        with (
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+            patch("vibe.cli.paths.get_state_dir", return_value=state_home / "state"),
+            patch("vibe.cli._primary_platform", return_value="slack"),
+            patch("vibe.cli._wait_for_run_result", return_value={"id": "done", "status": "succeeded"}),
+        ):
+            result = cli.cmd_agent_run(args)
+
+        assert result == 0
+        payload = json.loads(capsys.readouterr().out)
+        with create_sqlite_engine(db_path).connect() as conn:
+            row = conn.execute(
+                select(agent_runs.c.callback_session_id, agent_runs.c.callback_status)
+                .where(agent_runs.c.id == payload["run_id"])
+                .limit(1)
+            ).mappings().one()
+        assert row["callback_session_id"] == callback_session["id"]
+        assert row["callback_status"] is None
+        assert cli.TaskExecutionStore().list_pending_callbacks() == []
+
+
 def test_agent_run_callback_conflict_does_not_reserve_session(tmp_path: Path, capsys) -> None:
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state

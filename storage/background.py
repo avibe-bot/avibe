@@ -1217,7 +1217,7 @@ class SQLiteBackgroundTaskStore:
             "result_payload_json": self._payload_json(payload, "result_payload", "result_payload_json"),
             "message_ids_json": self._payload_json(payload, "message_ids", "message_ids_json"),
             "callback_session_id": payload.get("callback_session_id"),
-            "callback_status": payload.get("callback_status") or ("pending" if payload.get("callback_session_id") else None),
+            "callback_status": payload.get("callback_status"),
             "callback_error": payload.get("callback_error"),
             "callback_run_id": payload.get("callback_run_id"),
             "callback_completed_at": payload.get("callback_completed_at"),

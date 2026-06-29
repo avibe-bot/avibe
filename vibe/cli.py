@@ -2274,7 +2274,7 @@ def cmd_task_update(args):
         metadata = dict(task.metadata or {})
         if requested_scope_key:
             metadata["session_scope_id"] = requested_scope_key
-        elif scope_arg_present or getattr(args, "reset_delivery", False):
+        elif scope_arg_present:
             metadata.pop("session_scope_id", None)
 
         if getattr(args, "name", None) is not None and getattr(args, "clear_name", False):
@@ -3573,7 +3573,7 @@ def cmd_agent_run(args):
         if callback_session_id:
             _validate_callback_session_id(callback_session_id, help_command="vibe agent run --help")
         legacy_deliver_key = args.deliver_key
-        if scope_key and legacy_deliver_key != scope_key:
+        if (getattr(args, "same_scope", False) or (getattr(args, "scope_id", None) or "").strip()) and legacy_deliver_key != scope_key:
             legacy_deliver_key = None
         if session_policy == "create":
             session_id = _reserve_cli_session(
@@ -5832,7 +5832,7 @@ def cmd_watch_update(args):
         metadata = dict(watch.metadata or {})
         if requested_scope_key:
             metadata["session_scope_id"] = requested_scope_key
-        elif scope_arg_present or getattr(args, "reset_delivery", False):
+        elif scope_arg_present:
             metadata.pop("session_scope_id", None)
 
         command = list(watch.command)

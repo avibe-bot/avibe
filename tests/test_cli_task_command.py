@@ -979,6 +979,42 @@ def test_task_update_replaces_post_to_with_deliver_key(tmp_path: Path, capsys) -
     assert payload["task"]["deliver_key"] == "slack::channel::C999"
 
 
+def test_task_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: Path, capsys) -> None:
+    store_path = tmp_path / "scheduled_tasks.json"
+    store = cli.ScheduledTaskStore(store_path)
+    task = store.add_task(
+        session_key="",
+        prompt="hello",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="Asia/Shanghai",
+        agent_name="worker",
+        session_policy="create_per_run",
+        post_to="channel",
+        metadata={
+            "session_scope_id": "avibe::project::proj-reset-task",
+            "session_workdir": str(tmp_path),
+        },
+    )
+    agent_store = cli.VibeAgentStore(tmp_path / "state" / "vibe.sqlite")
+    agent_store.create(name="worker", backend="codex")
+    parser = cli.build_parser()
+    args = parser.parse_args(["task", "update", task.id, "--reset-delivery"])
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2(set())),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_store", return_value=store),
+    ):
+        result = cli.cmd_task_update(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["task"]["post_to"] is None
+    assert payload["task"]["deliver_key"] is None
+    assert payload["task"]["metadata"]["session_scope_id"] == "avibe::project::proj-reset-task"
+
+
 def test_task_add_returns_reachability_warning_for_unbound_lark_dm(tmp_path: Path, capsys) -> None:
     parser = cli.build_parser()
     args = parser.parse_args(
@@ -1218,6 +1254,44 @@ def test_agent_run_create_session_uses_scope_anchor_for_channel_deliver_key(tmp_
     assert target.session_key.to_key() == "slack::channel::C123"
     assert target.session_key.thread_id is None
     assert target.session_anchor == "slack_C123"
+
+
+def test_agent_run_create_session_preserves_legacy_thread_deliver_key(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="worker", backend="codex")
+    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    args = _parse_agent_run(
+        [
+            "--agent",
+            "worker",
+            "--async",
+            "--no-callback",
+            "--create-session",
+            "--deliver-key",
+            "slack::channel::C123::thread::171717.123",
+            "--message",
+            "hello",
+        ]
+    )
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+    ):
+        result = cli.cmd_agent_run(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["deliver_key"] == "slack::channel::C123::thread::171717.123"
+    target = cli.resolve_session_id_target(payload["session_id"], db_path=db_path)
+    assert target.session_key.to_key() == "slack::channel::C123"
+    assert target.session_key.thread_id is None
+    queued = request_store.get_run(payload["run_id"])
+    assert queued is not None
+    assert queued["deliver_key"] == "slack::channel::C123::thread::171717.123"
 
 
 def test_agent_run_private_async_uses_no_delivery_channel_scope_for_lark(tmp_path: Path, capsys) -> None:
