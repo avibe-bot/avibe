@@ -576,15 +576,36 @@ def test_get_vault_request_does_not_hydrate_protected_pending_unlock_material(mo
     _assert_no_unlock_material(fetched["request"]["card"])
 
 
-def test_agent_access_request_rejects_protected_next_version(monkeypatch):
+def test_agent_access_request_fulfilled_by_browser_value(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("protected")))
     api.create_vault_secret({"name": "PROTECTED_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
 
-    with pytest.raises(api.VaultApiError) as exc:
-        api.request_vault_access({"name": "PROTECTED_KEY", "session_id": "ses_1"})
+    requested = api.request_vault_access({"name": "PROTECTED_KEY", "session_id": "ses_1"})
+    request_id = requested["request"]["id"]
 
-    assert exc.value.code == "protected_requires_browser_sandbox"
-    assert "browser sandbox" in str(exc.value)
+    assert requested["request"]["card"]["fulfillment"] == "browser_value"
+    assert requested["request"]["card"]["scope_options"] == []
+    completed = api.fulfill_vault_request(request_id, {"value": "browser-decrypted", "requester": {"source": "browser"}})
+    fetched = api.get_vault_request(request_id)
+
+    assert completed["ok"] is True
+    assert completed["request"]["status"] == "approved"
+    assert "value" not in completed["request"]["delivery"]
+    assert fetched["result"] == {"type": "value", "value": "browser-decrypted"}
+    with api._vault_engine().connect() as conn:
+        raw_delivery = conn.execute(
+            select(vault_service.vault_requests.c.delivery).where(vault_service.vault_requests.c.id == request_id)
+        ).scalar_one()
+    assert "browser-decrypted" not in raw_delivery
+    claimed = api.claim_vault_access_result(request_id)
+    assert claimed["result"] == {"type": "value", "value": "browser-decrypted"}
+    with pytest.raises(api.VaultApiError) as exc:
+        api.claim_vault_access_result(request_id)
+    assert exc.value.code == "value_not_available"
+    with api._vault_engine().connect() as conn:
+        meta = vault_service.get_secret_meta(conn, "PROTECTED_KEY")
+    assert meta["use_count"] == 1
+    assert meta["last_used_at"] is not None
 
 
 def test_deny_vault_request_api(monkeypatch):
@@ -631,6 +652,40 @@ def test_agent_sign_request_approved_via_avault_sign(monkeypatch):
     assert completed["request"]["delivery"]["signature"] == {"signature": "ab" * 64, "recovery_id": 1}
     assert api.get_vault_request(requested["request"]["id"])["result"]["signature"] == {"signature": "ab" * 64, "recovery_id": 1}
     sign.assert_called_once_with(_sealed("key"), "00" * 32, "ecdsa-secp256k1-recoverable", name="ETH_KEY")
+
+
+def test_agent_protected_sign_request_fulfilled_by_browser_signature(monkeypatch):
+    sign = Mock()
+    monkeypatch.setattr(api, "avault_sign", sign)
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("key")))
+    api.create_vault_secret(
+        {
+            "name": "ETH_KEY",
+            "protection": "protected",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+        }
+    )
+
+    requested = api.request_vault_sign(
+        {"name": "ETH_KEY", "digest": "00" * 32, "scheme": "ecdsa-secp256k1-recoverable", "session_id": "ses_1"}
+    )
+    request_id = requested["request"]["id"]
+    completed = api.fulfill_vault_request(
+        request_id,
+        {"signature": {"signature": "ab" * 64, "recovery_id": 1, "browser_signed": True}},
+    )
+
+    assert requested["request"]["card"]["fulfillment"] == "browser_signature"
+    assert completed["ok"] is True
+    assert completed["request"]["status"] == "approved"
+    assert api.get_vault_request(request_id)["result"]["signature"] == {
+        "signature": "ab" * 64,
+        "recovery_id": 1,
+        "browser_signed": True,
+    }
+    sign.assert_not_called()
 
 
 def test_agent_sign_claims_request_before_avault_sign(monkeypatch):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import Mock
 
+from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
 from storage.vault_crypto import Sealed
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import api
@@ -194,3 +195,49 @@ def test_rest_sign_errors_are_stable(monkeypatch):
     )
     assert not_key.status_code == 409
     assert not_key.get_json()["code"] == "not_signing_key"
+
+
+def test_rest_fulfill_protected_access_request(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_REST",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+        }
+    )
+    requested = api.request_vault_access({"name": "PROTECTED_REST", "session_id": "ses_1"})
+    client = app.test_client()
+
+    response = client.post(
+        f"/api/vault/requests/{requested['request']['id']}/fulfill",
+        json={"value": "browser-value"},
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["request"]["status"] == "approved"
+    assert api.get_vault_request(requested["request"]["id"])["result"] == {"type": "value", "value": "browser-value"}
+
+    claim = client.post(
+        f"/api/vault/requests/{requested['request']['id']}/claim-value",
+        json={},
+        headers={"X-Vibe-Show-Client": "cli", SHOW_CLI_EVENT_TOKEN_HEADER: show_cli_event_token()},
+    )
+    assert claim.status_code == 200
+    assert claim.get_json()["result"] == {"type": "value", "value": "browser-value"}
+
+    second_claim = client.post(
+        f"/api/vault/requests/{requested['request']['id']}/claim-value",
+        json={},
+        headers={"X-Vibe-Show-Client": "cli", SHOW_CLI_EVENT_TOKEN_HEADER: show_cli_event_token()},
+    )
+    assert second_claim.status_code == 409
+    assert second_claim.get_json()["code"] == "value_not_available"
+
+    forbidden = client.post(
+        f"/api/vault/requests/{requested['request']['id']}/claim-value",
+        json={},
+        headers=csrf_headers(client),
+    )
+    assert forbidden.status_code == 403

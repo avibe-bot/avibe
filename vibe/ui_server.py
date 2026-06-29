@@ -301,7 +301,7 @@ def _current_origin() -> str:
 def _is_mutation_guard_exempt() -> bool:
     if request.path in {"/auth/callback"}:
         return True
-    if _is_cli_show_event_request() or _is_cli_session_activity_request():
+    if _is_cli_show_event_request() or _is_cli_session_activity_request() or _is_cli_vault_result_request():
         return True
     return (
         request.path == "/e2e/simulate-interaction"
@@ -332,6 +332,13 @@ def _is_cli_session_activity_request() -> bool:
     return (
         _cli_local_event_token_ok()
         and re.fullmatch(r"/api/sessions/[^/]+/cli-activity", request.path or "") is not None
+    )
+
+
+def _is_cli_vault_result_request() -> bool:
+    return (
+        _cli_local_event_token_ok()
+        and re.fullmatch(r"/api/vault/requests/[^/]+/claim-value", request.path or "") is not None
     )
 
 
@@ -2769,6 +2776,28 @@ def vault_request_deny_post(request_id):
 
     try:
         return jsonify(api.deny_vault_request(request_id, request.json or {}))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/requests/<request_id>/fulfill", methods=["POST"])
+def vault_request_fulfill_post(request_id):
+    from vibe import api
+
+    try:
+        return jsonify(api.fulfill_vault_request(request_id, request.json or {}))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/requests/<request_id>/claim-value", methods=["POST"])
+def vault_request_claim_value_post(request_id):
+    if not _is_cli_vault_result_request():
+        return jsonify({"error": "forbidden"}), 403
+    from vibe import api
+
+    try:
+        return jsonify(api.claim_vault_access_result(request_id))
     except ValueError as exc:
         return _vault_error_response(exc)
 

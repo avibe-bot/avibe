@@ -199,15 +199,30 @@ def test_access_request_cli_uses_caller_session(tmp_path, capfd, monkeypatch):
     assert payload["request"]["status"] == "pending"
 
 
-def test_access_request_cli_rejects_protected_next_version(capfd):
+def test_access_request_cli_creates_protected_browser_value_request(capfd, monkeypatch):
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))
 
-    assert cli.cmd_vault_access(_ns(name="PROTECTED_KEY")) == 1
-    payload = json.loads(capfd.readouterr().err)
+    assert cli.cmd_vault_access(_ns(name="PROTECTED_KEY")) == 0
+    payload = json.loads(capfd.readouterr().out)
 
-    assert payload["code"] == "protected_requires_browser_sandbox"
-    assert "browser sandbox" in payload["error"]
+    assert payload["kind"] == "vault_access_request"
+    assert payload["request"]["card"]["fulfillment"] == "browser_value"
+    assert payload["request"]["card"]["scope_options"] == []
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.complete_access_request(
+            conn,
+            payload["request_id"],
+            name="PROTECTED_KEY",
+            value="browser-value",
+            requester={"source": "browser"},
+        )
+    claim = Mock(return_value={"type": "value", "value": "browser-value"})
+    monkeypatch.setattr(cli, "_claim_vault_access_result_from_live_ui", claim)
+    assert cli.cmd_vault_await(_ns(request_id=payload["request_id"])) == 0
+    result = json.loads(capfd.readouterr().out)
+    assert result["result"] == {"type": "value", "value": "browser-value"}
+    claim.assert_called_once_with(payload["request_id"])
 
 
 def test_sign_request_and_await_cli_reads_approved_signature(capfd, monkeypatch):
@@ -240,6 +255,40 @@ def test_sign_request_and_await_cli_reads_approved_signature(capfd, monkeypatch)
     assert payload["kind"] == "vault_request_result"
     assert payload["status"] == "approved"
     assert payload["result"] == {"type": "signature", "signature": {"signature": "ab" * 64, "recovery_id": 1}}
+
+
+def test_protected_sign_request_and_await_cli_reads_browser_signature(capfd, monkeypatch):
+    from vibe import api
+
+    sign = Mock()
+    monkeypatch.setattr(api, "avault_sign", sign)
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="ETH_KEY",
+            protection="protected",
+            kind="keypair",
+            signer_kind="local",
+            sealed=_sealed("key"),
+        )
+
+    assert cli.cmd_vault_sign(_ns(name="ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")) == 0
+    request_id = json.loads(capfd.readouterr().out)["request_id"]
+    api.fulfill_vault_request(
+        request_id,
+        {"signature": {"signature": "ab" * 64, "recovery_id": 1, "browser_signed": True}},
+    )
+
+    assert cli.cmd_vault_await(_ns(request_id=request_id)) == 0
+    payload = json.loads(capfd.readouterr().out)
+
+    assert payload["kind"] == "vault_request_result"
+    assert payload["status"] == "approved"
+    assert payload["result"] == {
+        "type": "signature",
+        "signature": {"signature": "ab" * 64, "recovery_id": 1, "browser_signed": True},
+    }
+    sign.assert_not_called()
 
 
 def test_vault_await_wait_treats_failed_request_as_terminal(capfd):

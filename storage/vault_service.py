@@ -487,6 +487,8 @@ def _request_row_payload(
 ) -> dict[str, Any]:
     requester = _loads(row.get("requester"))
     delivery = _loads(row.get("delivery"))
+    if isinstance(delivery, dict) and "value" in delivery:
+        delivery = {key: value for key, value in delivery.items() if key != "value"}
     card = delivery.get("card") if isinstance(delivery, dict) else None
     policy = _card_hydration_policy(audience, requester)
     if (
@@ -638,6 +640,12 @@ def _secret_agent_per_use_signable(row: dict[str, Any]) -> bool:
 def _reject_keypair_value_delivery(row: dict[str, Any], name: str) -> None:
     if row.get("kind") == "keypair":
         raise KeypairNotValueDeliverableError(f"{name} is a signing key; use vault_sign instead of value delivery")
+
+
+def _validate_released_value(value: Any) -> str:
+    if not isinstance(value, str):
+        raise InvalidRequestError("released value must be a string")
+    return value
 
 
 def audit(
@@ -990,7 +998,14 @@ def get_signing_envelope(conn: Connection, name: str) -> Sealed:
     return get_key_envelope(conn, name)
 
 
-def record_deliveries(conn: Connection, names: list[str], *, requester: Any = None, mode: str | None = None) -> None:
+def record_deliveries(
+    conn: Connection,
+    names: list[str],
+    *,
+    requester: Any = None,
+    mode: str | None = None,
+    request_id: str | None = None,
+) -> None:
     """Bump usage + write a value-free ``delivered`` audit row per name.
 
     Call this only AFTER the delivery action (child spawn / file write / stream) succeeds,
@@ -1002,7 +1017,7 @@ def record_deliveries(conn: Connection, names: list[str], *, requester: Any = No
             .where(vault_secrets.c.name == name)
             .values(last_used_at=_now(), use_count=vault_secrets.c.use_count + 1)
         )
-        audit(conn, "delivered", secret_name=name, requester=requester, delivery={"mode": mode})
+        audit(conn, "delivered", secret_name=name, requester=requester, delivery={"mode": mode}, request_id=request_id)
 
 
 def create_provision_request(
@@ -1252,6 +1267,11 @@ def approval_card(
         "scope_options": scope_options,
         "value": None,
     }
+    if row.get("protection") == "protected":
+        if request_type == "sign":
+            card["fulfillment"] = "browser_signature"
+        elif request_type == "access" and not grantable:
+            card["fulfillment"] = "browser_value"
     return card
 
 
@@ -1264,6 +1284,7 @@ def create_access_request(
     message_id: str | None = None,
     expires_at: str | None = None,
     audience: str | None = None,
+    grantable: bool = True,
 ) -> dict[str, Any]:
     row = _require_row(conn, name)
     if not _secret_access_grantable(row):
@@ -1281,6 +1302,7 @@ def create_access_request(
         egress=delivery_payload.get("egress"),
         skill=delivery_payload.get("skill") or requester_payload.get("skill"),
         session_id=requester_payload.get("session_id") or delivery_payload.get("session_id"),
+        grantable=grantable,
     )
     delivery_payload["card"] = card
     conn.execute(
@@ -1311,6 +1333,7 @@ def create_sign_request(
     delivery: dict[str, Any] | None = None,
     message_id: str | None = None,
     expires_at: str | None = None,
+    audience: str | None = None,
 ) -> dict[str, Any]:
     if scheme not in SUPPORTED_SIGNATURE_SCHEMES:
         raise InvalidRequestError(f"unsupported signature scheme: {scheme}")
@@ -1319,7 +1342,7 @@ def create_sign_request(
         raise InvalidRequestError(f"{name} is not a signing key")
     if row.get("signer_kind") not in (None, "local"):
         raise InvalidRequestError(f"{name} is not locally signable")
-    payload_audience = _request_audience_from_requester(requester)
+    payload_audience = audience or _request_audience_from_requester(requester)
     request_id = _id("vrq")
     delivery_payload = dict(delivery or {})
     requester_payload = requester if isinstance(requester, dict) else {}
@@ -1431,6 +1454,49 @@ def complete_sign_request(
         delivery={"scheme": scheme, "digest": digest, "browser_signed": bool(signature.get("browser_signed"))},
         request_id=request_id,
     )
+    updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
+    return _request_row_payload(dict(updated), conn=conn, audience=REQUEST_AUDIENCE_AGENT)
+
+
+def complete_access_request(
+    conn: Connection,
+    request_id: str,
+    *,
+    name: str,
+    value: str,
+    requester: Any = None,
+) -> dict[str, Any]:
+    row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().first()
+    if row is None:
+        raise RequestNotFoundError(request_id)
+    row_dict = dict(row)
+    if row_dict.get("request_type") != "access":
+        raise InvalidRequestError("value completion must target an access request")
+    if row_dict.get("status") == "pending":
+        row_dict, expired = _expire_request_if_due(conn, row_dict)
+        if expired:
+            raise InvalidRequestError("access request has expired")
+    if row_dict.get("status") != "pending":
+        raise InvalidRequestError("access request is not pending")
+    if row_dict.get("secret_name") != name:
+        raise InvalidRequestError("value secret does not match the access request")
+    secret_row = _require_row(conn, name)
+    _reject_keypair_value_delivery(secret_row, name)
+    if secret_row.get("protection") != "protected":
+        raise InvalidRequestError("value completion must target a protected static secret")
+    _validate_released_value(value)
+    _, delivery = _request_json_payloads(row_dict)
+    delivery_payload = dict(delivery) if isinstance(delivery, dict) else {}
+    completed_delivery = dict(delivery_payload)
+    completed_delivery["browser_released"] = True
+    claim = conn.execute(
+        vault_requests.update()
+        .where(vault_requests.c.id == request_id, vault_requests.c.request_type == "access", vault_requests.c.status == "pending")
+        .values(status="approved", decided_at=_now(), delivery=json.dumps(completed_delivery))
+    )
+    if claim.rowcount != 1:
+        raise InvalidRequestError("access request is not pending")
+    record_deliveries(conn, [name], requester=requester, mode="browser_release", request_id=request_id)
     updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
     return _request_row_payload(dict(updated), conn=conn, audience=REQUEST_AUDIENCE_AGENT)
 

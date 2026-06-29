@@ -1218,6 +1218,15 @@ def test_keypair_and_always_ask_are_not_grantable(vault):
     assert sign_req["request_type"] == "sign"
 
 
+def test_protected_keypair_value_delivery_still_rejected(vault):
+    _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
+    with vault.begin() as conn:
+        with pytest.raises(vs.NotGrantableError):
+            vs.create_access_request(conn, "ETH_KEY")
+        with pytest.raises(vs.KeypairNotValueDeliverableError):
+            vs.resolve_secret_access(conn, "ETH_KEY")
+
+
 def test_always_ask_access_request_is_rejected_until_one_shot_approval_exists(vault):
     _create(vault, name="ASK_KEY", protection="protected", group="crypto", policy={"always_ask": True})
     _create(vault, name="GROUP_KEY", protection="protected", group="crypto")

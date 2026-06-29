@@ -3829,17 +3829,12 @@ def cmd_vault_access(args):
         engine = _open_vault_engine()
         with engine.begin() as conn:
             meta = vault_service.get_secret_meta(conn, name)
-            if meta.get("protection") == "protected":
-                raise TaskCliError(
-                    "protected signing/access requires the browser sandbox (next version)",
-                    code="protected_requires_browser_sandbox",
-                    help_command=help_command,
-                )
             request = vault_service.create_access_request(
                 conn,
                 name,
                 requester=_vault_cli_requester(args),
                 delivery=_vault_cli_delivery(args, mode="access"),
+                grantable=meta.get("protection") != "protected",
             )
         _print_cli_payload(
             "vault_access_request",
@@ -4473,6 +4468,8 @@ def _wait_for_vault_request(request_id: str, *, timeout: float, poll_interval: f
             result = None
             if request.get("status") == "approved":
                 result = api._vault_request_result(conn, request)
+                if result is None and _vault_request_needs_value_claim(request):
+                    result = _claim_vault_access_result_or_raise(request_id)
             if request.get("status") in {"approved", "denied", "expired", "failed", "fulfilled"}:
                 return {"request": request, "result": result}
         remaining = deadline - time.monotonic()
@@ -4480,6 +4477,74 @@ def _wait_for_vault_request(request_id: str, *, timeout: float, poll_interval: f
             break
         time.sleep(min(poll_interval, remaining))
     return None
+
+
+def _vault_request_needs_value_claim(request: dict) -> bool:
+    delivery = request.get("delivery") if isinstance(request.get("delivery"), dict) else {}
+    return request.get("request_type") == "access" and delivery.get("browser_released") is True
+
+
+def _local_vault_claim_targets(request_id: str) -> list[_LocalShowEventsTarget]:
+    from urllib.parse import quote
+
+    try:
+        config = V2Config.load()
+    except Exception:
+        return []
+    status = runtime.read_status()
+    port = getattr(config.ui, "setup_port", None)
+    if not status.get("ui_pid") or not port:
+        return []
+    path = f"/api/vault/requests/{quote(request_id, safe='')}/claim-value"
+    configured_host = _ui_show_events_host(config)
+    if configured_host in {"127.0.0.1", "localhost", "[::1]"}:
+        return [_LocalShowEventsTarget(f"http://{configured_host}:{int(port)}{path}")]
+    try:
+        ui_pid = int(status["ui_pid"])
+    except (TypeError, ValueError):
+        ui_pid = None
+    return [_LocalShowEventsTarget(f"http://127.0.0.1:{int(port)}{path}", verify_ui_pid=ui_pid)]
+
+
+def _claim_vault_access_result_from_live_ui(request_id: str) -> dict | None:
+    from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Vibe-Show-Client": "cli",
+        SHOW_CLI_EVENT_TOKEN_HEADER: show_cli_event_token(),
+    }
+    for target in _local_vault_claim_targets(request_id):
+        if target.verify_ui_pid is not None and not _show_prewarm_target_matches_ui_pid(target.url, target.verify_ui_pid):
+            continue
+        request = urllib.request.Request(target.url, data=b"{}", method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                payload = json.loads(response.read().decode("utf-8") or "{}")
+        except urllib.error.HTTPError as exc:
+            try:
+                payload = json.loads(exc.read().decode("utf-8") or "{}")
+            except (OSError, json.JSONDecodeError, ValueError):
+                payload = {}
+            code = str(payload.get("code") or "value_not_available")
+            message = str(payload.get("message") or payload.get("error") or "browser-released value is not available")
+            raise TaskCliError(message, code=code, help_command="vibe vault await --help") from exc
+        except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(payload, dict) and payload.get("ok") is True and isinstance(payload.get("result"), dict):
+            return payload["result"]
+    return None
+
+
+def _claim_vault_access_result_or_raise(request_id: str) -> dict:
+    result = _claim_vault_access_result_from_live_ui(request_id)
+    if result is None:
+        raise TaskCliError(
+            "browser-released value is not available from the running daemon",
+            code="value_not_available",
+            help_command="vibe vault await --help",
+        )
+    return result
 
 
 def cmd_vault_request(args):
@@ -4570,12 +4635,6 @@ def cmd_vault_sign(args):
                     code="unsupported_signer_kind",
                     help_command=help_command,
                 )
-            if meta.get("protection") == "protected":
-                raise TaskCliError(
-                    "protected signing/access requires the browser sandbox (next version)",
-                    code="protected_requires_browser_sandbox",
-                    help_command=help_command,
-                )
             request = vault_service.create_sign_request(
                 conn,
                 name,
@@ -4619,6 +4678,8 @@ def cmd_vault_await(args):
         with engine.begin() as conn:
             request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
             result = api._vault_request_result(conn, request)
+        if request.get("status") == "approved" and result is None and _vault_request_needs_value_claim(request):
+            result = _claim_vault_access_result_or_raise(request_id)
         if timeout > 0 and request.get("status") in {"pending", "signing"}:
             waited = _wait_for_vault_request(request_id, timeout=timeout)
             if waited is None:

@@ -76,6 +76,9 @@ logger = logging.getLogger(__name__)
 _OPENCODE_OPTIONS_CACHE: dict[str, dict] = {}
 _OPENCODE_OPTIONS_TTL_SECONDS = 30.0
 
+_VAULT_ACCESS_RESULT_LOCK = threading.RLock()
+_VAULT_ACCESS_RESULTS: dict[str, str] = {}
+
 
 _PLATFORM_SECRET_FIELDS: dict[str, tuple[str, ...]] = {
     "slack": ("bot_token", "app_token", "signing_secret"),
@@ -1495,6 +1498,10 @@ def _vault_request_result(conn, request: dict) -> dict | None:
     if request.get("status") != "approved":
         return None
     if request_type == "access":
+        with _VAULT_ACCESS_RESULT_LOCK:
+            value = _VAULT_ACCESS_RESULTS.get(str(request["id"]))
+        if value is not None:
+            return {"type": "value", "value": value}
         grant = vault_service.get_grant_created_by_request(conn, str(request["id"]))
         if grant is None:
             requester = request.get("requester") if isinstance(request.get("requester"), dict) else {}
@@ -1514,6 +1521,32 @@ def _vault_request_result(conn, request: dict) -> dict | None:
         if isinstance(signature, dict):
             return {"type": "signature", "signature": signature}
     return None
+
+
+def _store_vault_access_result(request_id: str, value: str) -> None:
+    with _VAULT_ACCESS_RESULT_LOCK:
+        _VAULT_ACCESS_RESULTS[request_id] = value
+
+
+def claim_vault_access_result(request_id: str) -> dict:
+    from storage import vault_service
+
+    engine = _vault_engine()
+    try:
+        with engine.connect() as conn:
+            request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+    except vault_service.RequestNotFoundError as exc:
+        raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
+    if request.get("request_type") != "access" or request.get("status") != "approved":
+        raise VaultApiError("access request has no claimable browser value", code="value_not_available", status=409)
+    delivery = request.get("delivery") if isinstance(request.get("delivery"), dict) else {}
+    if delivery.get("browser_released") is not True:
+        raise VaultApiError("access request has no claimable browser value", code="value_not_available", status=409)
+    with _VAULT_ACCESS_RESULT_LOCK:
+        value = _VAULT_ACCESS_RESULTS.pop(request_id, None)
+    if value is None:
+        raise VaultApiError("browser-released value is no longer available", code="value_not_available", status=409)
+    return {"ok": True, "result": {"type": "value", "value": value}}
 
 
 def get_vault_request(request_id: str) -> dict:
@@ -1582,12 +1615,6 @@ def request_vault_access(payload: dict) -> dict:
     try:
         with engine.begin() as conn:
             meta = vault_service.get_secret_meta(conn, name)
-            if meta.get("protection") == "protected":
-                raise VaultApiError(
-                    "protected signing/access requires the browser sandbox (next version)",
-                    code="protected_requires_browser_sandbox",
-                    status=409,
-                )
             request = vault_service.create_access_request(
                 conn,
                 name,
@@ -1595,6 +1622,7 @@ def request_vault_access(payload: dict) -> dict:
                 delivery=_vault_delivery_payload(payload),
                 expires_at=_expires_at_from_ttl(payload),
                 audience=vault_service.REQUEST_AUDIENCE_AGENT,
+                grantable=meta.get("protection") != "protected",
             )
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
@@ -1629,12 +1657,6 @@ def request_vault_sign(payload: dict) -> dict:
                     code="unsupported_signer_kind",
                     status=409,
                 )
-            if meta.get("protection") == "protected":
-                raise VaultApiError(
-                    "protected signing/access requires the browser sandbox (next version)",
-                    code="protected_requires_browser_sandbox",
-                    status=409,
-                )
             request = vault_service.create_sign_request(
                 conn,
                 name,
@@ -1643,6 +1665,7 @@ def request_vault_sign(payload: dict) -> dict:
                 requester=_vault_requester_payload(payload),
                 delivery=_vault_delivery_payload(payload),
                 expires_at=_expires_at_from_ttl(payload),
+                audience=vault_service.REQUEST_AUDIENCE_AGENT,
             )
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
@@ -1651,6 +1674,63 @@ def request_vault_sign(payload: dict) -> dict:
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
     return {"ok": True, "request": request}
+
+
+def fulfill_vault_request(request_id: str, payload: dict) -> dict:
+    from storage import vault_service
+
+    if not isinstance(payload, dict):
+        raise VaultApiError("payload must be an object", code="invalid_payload")
+    name = str(payload.get("name") or "").strip()
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+            if not name:
+                name = str(request.get("secret_name") or "").strip()
+            if request.get("request_type") == "sign":
+                delivery = request.get("delivery") if isinstance(request.get("delivery"), dict) else {}
+                digest = _sign_digest_from_payload(payload.get("digest") or delivery.get("digest"))
+                scheme = str(payload.get("scheme") or delivery.get("scheme") or "ecdsa-secp256k1-recoverable").strip()
+                if scheme not in vault_service.SUPPORTED_SIGNATURE_SCHEMES:
+                    raise VaultApiError(f"unsupported signature scheme: {scheme}", code="invalid_request", status=409)
+                signature = payload.get("signature")
+                if not isinstance(signature, dict):
+                    raise VaultApiError("signature payload must be an object", code="invalid_request", status=409)
+                completed = vault_service.complete_sign_request(
+                    conn,
+                    request_id,
+                    name=name,
+                    digest=digest,
+                    scheme=scheme,
+                    signature=signature,
+                    requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
+                )
+                return {"ok": True, "request": completed, "signature": signature}
+            if request.get("request_type") == "access":
+                value = payload.get("value")
+                if not isinstance(value, str):
+                    raise VaultApiError("released value must be a string", code="invalid_request", status=409)
+                completed = vault_service.complete_access_request(
+                    conn,
+                    request_id,
+                    name=name,
+                    value=value,
+                    requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
+                )
+                _store_vault_access_result(request_id, value)
+                return {"ok": True, "request": completed}
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.RequestNotFoundError as exc:
+        raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+    except vault_service.KeypairNotValueDeliverableError as exc:
+        raise VaultApiError(str(exc), code="keypair_not_value_deliverable", status=409) from exc
+    except vault_service.VaultServiceError as exc:
+        raise VaultApiError(str(exc), code="vault_error") from exc
+    raise VaultApiError("request type cannot be browser-fulfilled", code="invalid_request", status=409)
 
 
 def deny_vault_request(request_id: str, payload: dict | None = None) -> dict:
@@ -1990,6 +2070,7 @@ def vault_sign(payload: dict) -> dict:
                         scheme=scheme,
                         requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
                         delivery=payload.get("delivery") if isinstance(payload.get("delivery"), dict) else None,
+                        audience=vault_service.REQUEST_AUDIENCE_AGENT,
                     )
                     return {"ok": False, "code": "browser_signature_required", "request": request}
                 request_id = str(payload.get("request_id") or "")
