@@ -90,6 +90,31 @@ export function isEditableFile(entry: { kind: string; size: number | null; name:
   return entry.kind === 'file' && previewKind(entry.name) != null && (entry.size == null || entry.size <= PREVIEW_MAX_BYTES);
 }
 
+// Raster image extensions an <img> tag can render directly. SVG is handled separately because it's
+// ALSO editable text (it keeps its 'source' previewKind), so it can be both edited and rendered.
+const RASTER_IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'ico', 'apng']);
+
+export type ImageKind = 'raster' | 'svg';
+
+// Whether a file can be rendered as an image preview, and how. Deliberately separate from
+// ``previewKind`` (which classifies EDITABLE text): images have no text kind, and SVG is both an
+// image (renderable here) and source (editable in Monaco), so ``previewKind('x.svg') === 'source'``
+// must stay true while this still reports it as an image.
+export function imageKind(name: string, mime?: string | null): ImageKind | null {
+  const ext = extOf(name);
+  const m = (mime || '').split(';')[0].trim().toLowerCase();
+  if (ext === 'svg' || m === 'image/svg+xml') return 'svg';
+  if (RASTER_IMAGE_EXT.has(ext) || (m.startsWith('image/') && m !== 'image/svg+xml')) return 'raster';
+  return null;
+}
+
+// Whether a file should preview as RENDERED (not edited) when opened from the File Browser: a raster
+// image (no editable text form) is the only such case. SVG/Markdown stay editable, gaining a
+// preview TOGGLE inside the editor instead. A directory or symlink is never previewed here.
+export function isRenderOnlyImage(entry: { kind: string; name: string }): boolean {
+  return entry.kind === 'file' && imageKind(entry.name) === 'raster';
+}
+
 // Shiki language id for the 'code'/'source' kinds; 'text' (no highlight) otherwise.
 export function codeLanguage(name: string, serverExt?: string | null): string {
   const b = baseName(name).toLowerCase();

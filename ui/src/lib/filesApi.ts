@@ -217,6 +217,18 @@ export async function deletePath(path: string, recursive = false): Promise<{ ok:
   );
 }
 
+// Rename an entry in place (same parent). The backend validates the new name and refuses to
+// clobber an existing destination (errors.exists). Returns the new absolute path.
+export async function renamePath(path: string, newName: string): Promise<{ ok: true; path: string }> {
+  return parse(
+    await apiFetch('/api/files/rename', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, new_name: newName }),
+    }),
+  );
+}
+
 // Cross-file search + replace (backend: file_browser_service.search/replace/undo_replace).
 // col/end are full-line UTF-16 offsets (the editor jump target); preview_col/preview_end index
 // into `text` (the possibly windowed preview) for the row highlight.
