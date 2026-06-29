@@ -74,6 +74,10 @@ class UnsupportedProtectionError(VaultServiceError):
     """A caller attempted a delivery path that still needs the resident agent."""
 
 
+class KeypairNotValueDeliverableError(VaultServiceError):
+    """A signing key was requested through a value-delivery path."""
+
+
 class InvalidGrantError(VaultServiceError):
     pass
 
@@ -442,6 +446,11 @@ def _secret_is_grantable(row: dict[str, Any]) -> bool:
     return True
 
 
+def _reject_keypair_value_delivery(row: dict[str, Any], name: str) -> None:
+    if row.get("kind") == "keypair":
+        raise KeypairNotValueDeliverableError(f"{name} is a signing key; use vault_sign instead of value delivery")
+
+
 def audit(
     conn: Connection,
     event: str,
@@ -713,6 +722,7 @@ def get_envelope(conn: Connection, name: str) -> Sealed:
     row = _require_row(conn, name)
     if row.get("protection") != "standard":
         raise UnsupportedProtectionError(f"{name} is protected-tier (resident grant delivery is not wired yet)")
+    _reject_keypair_value_delivery(row, name)
     return _row_sealed(row)
 
 
@@ -720,6 +730,7 @@ def get_protected_envelope(conn: Connection, name: str) -> Sealed:
     row = _require_row(conn, name)
     if row.get("protection") != "protected":
         raise UnsupportedProtectionError(f"{name} is standard-tier")
+    _reject_keypair_value_delivery(row, name)
     return _row_sealed(row)
 
 
@@ -766,6 +777,7 @@ def get_envelopes(conn: Connection, names: list[str]) -> dict[str, Sealed]:
         row = _require_row(conn, name)
         if row.get("protection") != "standard":
             raise UnsupportedProtectionError(f"{name} is protected-tier (resident grant delivery is not wired yet)")
+        _reject_keypair_value_delivery(row, name)
         out[name] = _row_sealed(row)
     return out
 
@@ -1897,6 +1909,7 @@ def resolve_secret_access(
     expire the grant and re-run this resolver to create a fresh approval request.
     """
     row = _require_row(conn, name)
+    _reject_keypair_value_delivery(row, name)
     if row.get("protection") == "standard":
         return {"status": "standard", "secret": _meta_payload(row), "envelope": _row_sealed(row)}
     delivery_payload = dict(delivery or {})

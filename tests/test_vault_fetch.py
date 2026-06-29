@@ -108,6 +108,31 @@ def test_fetch_passes_bearer_request_to_avault_and_writes_stdout(tmp_path, capfd
         assert vault_service.get_secret_meta(conn, "GH_PAT")["use_count"] == 1
 
 
+def test_fetch_rejects_keypair_before_avault_delivery(capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="ETH_KEY",
+            sealed=_sealed("eth"),
+            kind="keypair",
+            signer_kind="local",
+            policy={"allowed_hosts": ["api.example.com"]},
+        )
+    fetch = Mock()
+    monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
+
+    code = cli.cmd_vault_fetch(_ns(auth="ETH_KEY", url="https://api.example.com/v1/thing"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "keypair_not_value_deliverable"
+    fetch.assert_not_called()
+
+
 def test_fetch_uses_agent_delivery_for_protected_grant(capfd, monkeypatch):
     from unittest.mock import Mock
 

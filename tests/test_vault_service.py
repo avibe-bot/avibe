@@ -147,6 +147,18 @@ def test_get_envelopes_validates_batch_before_returning(vault):
         vs.get_envelopes(conn, ["A_KEY", "NOPE"])
 
 
+def test_keypair_is_not_value_deliverable(vault):
+    _create(vault, name="ETH_KEY", kind="keypair", signer_kind="local")
+    with vault.connect() as conn:
+        with pytest.raises(vs.KeypairNotValueDeliverableError):
+            vs.get_envelope(conn, "ETH_KEY")
+        with pytest.raises(vs.KeypairNotValueDeliverableError):
+            vs.get_envelopes(conn, ["ETH_KEY"])
+        with pytest.raises(vs.KeypairNotValueDeliverableError):
+            vs.resolve_secret_access(conn, "ETH_KEY")
+        assert vs.get_key_envelope(conn, "ETH_KEY") == _sealed()
+
+
 def test_record_deliveries_bumps_usage_and_audits(vault):
     _create(vault, name="DB_URL")
     with vault.begin() as conn:

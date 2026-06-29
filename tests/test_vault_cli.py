@@ -195,6 +195,22 @@ def test_run_calls_avault_with_env_mapping_and_records_delivery(tmp_path, capfd,
     assert secret["last_used_at"] is not None
 
 
+def test_run_rejects_keypair_before_avault_delivery(capfd, monkeypatch):
+    from vibe import api
+
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="ETH_KEY", sealed=_sealed("eth"), kind="keypair", signer_kind="local")
+    deliver = Mock()
+    monkeypatch.setattr(api, "avault_deliver_run", deliver)
+
+    code = cli.cmd_vault_run(_ns(env=["ETH_KEY"], command_argv=["python3", "-c", "pass"]))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "keypair_not_value_deliverable"
+    deliver.assert_not_called()
+
+
 def test_run_delivers_protected_secret_under_agent_grant(tmp_path, capfd, monkeypatch):
     from vibe import api
 
