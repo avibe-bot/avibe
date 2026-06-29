@@ -267,5 +267,16 @@ export function useProtectedVault() {
     }
   }, []);
 
-  return { status, error, setError, refresh, setupPassword, setupPasskey, unlockPassword, unlockPasskey, sealValue, afterCreated, lock, discardAndRefresh, hasPasskey };
+  const hasPassword = useCallback(() => {
+    const wrapMeta = sessionVault.wrapMeta;
+    if (!wrapMeta) return false;
+    try {
+      const meta = JSON.parse(wrapMeta) as { copies?: Array<{ kind?: string }> };
+      return Array.isArray(meta.copies) && meta.copies.some((copy) => copy.kind === 'password');
+    } catch {
+      return false;
+    }
+  }, []);
+
+  return { status, error, setError, refresh, setupPassword, setupPasskey, unlockPassword, unlockPasskey, sealValue, afterCreated, lock, discardAndRefresh, hasPasskey, hasPassword };
 }

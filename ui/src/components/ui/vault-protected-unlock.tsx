@@ -148,8 +148,14 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault }> = ({ vault }) => {
             {t('vaults.protectedUnlock.passwordOptionTitle')}
           </span>
           <span className="text-xs text-muted-foreground">{t('vaults.protectedUnlock.passwordOptionHelp')}</span>
-          <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t('vaults.protectedUnlock.passwordPlaceholder')} autoComplete="new-password" />
-          <Input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder={t('vaults.protectedUnlock.confirmPlaceholder')} autoComplete="new-password" />
+          <label className="flex flex-col gap-1.5 text-xs text-muted-foreground">
+            {t('vaults.protectedUnlock.setPasswordLabel')}
+            <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t('vaults.protectedUnlock.passwordPlaceholder')} autoComplete="new-password" />
+          </label>
+          <label className="flex flex-col gap-1.5 text-xs text-muted-foreground">
+            {t('vaults.protectedUnlock.confirmLabel')}
+            <Input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder={t('vaults.protectedUnlock.confirmPlaceholder')} autoComplete="new-password" />
+          </label>
           <Button type="submit" variant={canUsePasskey ? 'ghost' : 'secondary'} disabled={busy || !passwordValid}>
             {busy && <Loader2 className="size-4 animate-spin" />}
             {t('vaults.protectedUnlock.setupWithPassword')}
@@ -162,6 +168,8 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault }> = ({ vault }) => {
   }
 
   // status === 'locked'
+  const showUnlockPasskey = vault.hasPasskey() && canUsePasskey;
+  const showUnlockPassword = vault.hasPassword();
   return (
     <div className={PANEL}>
       <div className="flex items-start gap-2">
@@ -171,31 +179,38 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault }> = ({ vault }) => {
           <span className="text-xs text-muted-foreground">{t('vaults.protectedUnlock.unlockHelp')}</span>
         </div>
       </div>
-      {vault.hasPasskey() && canUsePasskey && (
+      {showUnlockPasskey && (
         <Button type="button" variant="secondary" onClick={() => run(vault.unlockPasskey)} disabled={busy}>
           {busy ? <Loader2 className="size-4 animate-spin" /> : <Fingerprint className="size-4" />}
           {t('vaults.protectedUnlock.unlockPasskey')}
         </Button>
       )}
-      <form
-        className="flex items-end gap-2"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (password.trim()) void run(() => vault.unlockPassword(password));
-        }}
-      >
-        <label className="flex flex-1 flex-col gap-1.5 text-xs font-medium text-muted-foreground">
-          <span className="flex items-center gap-1.5">
-            <KeyRound className="size-3.5" />
-            {t('vaults.protectedUnlock.passwordLabel')}
-          </span>
-          <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t('vaults.protectedUnlock.passwordPlaceholder')} autoComplete="current-password" />
-        </label>
-        <Button type="submit" disabled={busy || !password.trim()}>
-          {busy && <Loader2 className="size-4 animate-spin" />}
-          {t('vaults.protectedUnlock.unlockCta')}
-        </Button>
-      </form>
+      {showUnlockPassword && (
+        <form
+          className="flex items-end gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (password.trim()) void run(() => vault.unlockPassword(password));
+          }}
+        >
+          <label className="flex flex-1 flex-col gap-1.5 text-xs font-medium text-muted-foreground">
+            <span className="flex items-center gap-1.5">
+              <KeyRound className="size-3.5" />
+              {t('vaults.protectedUnlock.passwordLabel')}
+            </span>
+            <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t('vaults.protectedUnlock.passwordPlaceholder')} autoComplete="current-password" />
+          </label>
+          <Button type="submit" disabled={busy || !password.trim()}>
+            {busy && <Loader2 className="size-4 animate-spin" />}
+            {t('vaults.protectedUnlock.unlockCta')}
+          </Button>
+        </form>
+      )}
+      {!showUnlockPasskey && !showUnlockPassword && (
+        <div className="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-xs text-warning">
+          {t('vaults.protectedUnlock.unlockUnavailableHere')}
+        </div>
+      )}
       {vault.error && <div className="text-xs text-destructive">{friendlyError(t, vault.error)}</div>}
     </div>
   );

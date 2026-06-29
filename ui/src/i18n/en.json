@@ -2166,7 +2166,7 @@
       "confirmPlaceholder": "Re-enter the password",
       "passkeyOptionTitle": "Passkey · most secure",
       "passkeyOptionHelp": "Unlock with Touch ID / Windows Hello. No password to phish or leak.",
-      "passkeyUnrecoverableWarning": "If you lose this passkey, these protected secrets can't be recovered — keep it safe.",
+      "passkeyUnrecoverableWarning": "If you lose this passkey — or open this vault from a different site/address than where you set it up — these protected secrets can't be recovered. There is no password to fall back on.",
       "passkeyAck": "I understand: if I lose this passkey, these secrets can't be recovered.",
       "setupWithPasskey": "Set up with passkey",
       "passwordOptionTitle": "Password · recoverable",
@@ -2174,6 +2174,7 @@
       "setupWithPassword": "Set up with password",
       "unlockPasskey": "Unlock with passkey",
       "unlockCta": "Unlock",
+      "unlockUnavailableHere": "This vault is unlocked by a passkey set up on the site where you created it. Open Vaults from that site (Touch ID / Windows Hello) to unlock — this address can't.",
       "errors": {
         "prfUnavailable": "This passkey/browser doesn't support the PRF extension needed for encryption. Try a platform passkey (Touch ID / Windows Hello) or use a password.",
         "cancelled": "Passkey prompt was cancelled.",
