@@ -1522,7 +1522,7 @@ def get_vault_request(request_id: str) -> dict:
     engine = _vault_engine()
     try:
         with engine.begin() as conn:
-            request = vault_service.get_request(conn, request_id)
+            request = vault_service.get_request(conn, request_id, hydrate_unlock_material=False)
             result = _vault_request_result(conn, request)
     except vault_service.RequestNotFoundError as exc:
         raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
@@ -1595,6 +1595,7 @@ def request_vault_access(payload: dict) -> dict:
                 requester=_vault_requester_payload(payload),
                 delivery=_vault_delivery_payload(payload),
                 expires_at=_expires_at_from_ttl(payload),
+                hydrate_unlock_material=False,
             )
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
@@ -2017,14 +2018,19 @@ def vault_sign(payload: dict) -> dict:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
+
+    def _fail_claimed_request(reason: str) -> None:
+        request_id = str(payload.get("request_id") or "")
+        if not request_id:
+            return
+        with contextlib.suppress(Exception):
+            with engine.begin() as conn:
+                vault_service.fail_sign_request(conn, request_id, reason=reason)
+
     try:
         signature = avault_sign(key_envelope, digest, scheme, name=name)
     except AvaultError as exc:
-        request_id = str(payload.get("request_id") or "")
-        if request_id:
-            with contextlib.suppress(Exception):
-                with engine.begin() as conn:
-                    vault_service.fail_sign_request(conn, request_id, reason="avault_failed")
+        _fail_claimed_request("avault_failed")
         raise VaultApiError(f"avault sign failed: {exc}", code="avault_failed") from exc
     request_id = str(payload.get("request_id") or "")
     if request_id:
@@ -2042,6 +2048,7 @@ def vault_sign(payload: dict) -> dict:
         except vault_service.RequestNotFoundError as exc:
             raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
         except vault_service.InvalidRequestError as exc:
+            _fail_claimed_request("signature_rejected")
             raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
         return {"ok": True, "signature": signature, "request": request}
     try:

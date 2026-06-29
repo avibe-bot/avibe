@@ -1145,6 +1145,7 @@ def create_access_request(
     delivery: dict[str, Any] | None = None,
     message_id: str | None = None,
     expires_at: str | None = None,
+    hydrate_unlock_material: bool = True,
 ) -> dict[str, Any]:
     row = _require_row(conn, name)
     if not _secret_access_grantable(row):
@@ -1178,7 +1179,7 @@ def create_access_request(
     )
     audit(conn, "access_requested", secret_name=name, requester=requester, delivery=delivery_payload, request_id=request_id)
     row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
-    return _request_row_payload(dict(row), conn=conn, hydrate_unlock_material=True)
+    return _request_row_payload(dict(row), conn=conn, hydrate_unlock_material=hydrate_unlock_material)
 
 
 def create_sign_request(
