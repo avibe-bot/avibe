@@ -20,6 +20,8 @@ import {
   bytesFromHex,
   bytesToHexString,
   derivePasskeyKek,
+  generateSigningKey,
+  importSigningKey,
   newVmk,
   passkeyPrfSaltEntries,
   passkeyPrfSalts,
@@ -519,5 +521,38 @@ describe('protected record storage composition', () => {
     const sealed = await sealProtected(new TextEncoder().encode('v'), vmk, { name: 'NAME' });
     const once = packProtectedRecord(sealed, wrapMeta);
     expect(() => packProtectedRecord(sealed, once.wrap_meta)).toThrow();
+  });
+});
+
+describe('vaultCrypto signing key generation', () => {
+  it('generates a valid, chain-agnostic secp256k1 signing key', () => {
+    const key = generateSigningKey();
+    expect(key.privateKey).toBeInstanceOf(Uint8Array);
+    expect(key.privateKey.length).toBe(32);
+    // Compressed secp256k1 public key: 33 bytes (66 hex), 0x02/0x03 prefix.
+    expect(key.publicKey).toMatch(/^0[23][0-9a-f]{64}$/);
+    // The key works with the supported signing schemes (signDigest copies its
+    // input, so the private key stays usable afterwards).
+    expect(() =>
+      signDigest(key.privateKey, p2.signing.digest_hex, SIGN_SCHEME_ECDSA_SECP256K1_RECOVERABLE),
+    ).not.toThrow();
+    expect(key.privateKey.some((b) => b !== 0)).toBe(true);
+  });
+
+  it('derives the same public key on import as on generation', () => {
+    const key = generateSigningKey();
+    expect(importSigningKey(key.privateKey).publicKey).toBe(key.publicKey);
+  });
+
+  it('imports a known private key deterministically (hex)', () => {
+    const a = importSigningKey(p2.signing.private_key_hex);
+    const b = importSigningKey(p2.signing.private_key_hex);
+    expect(a.publicKey).toBe(b.publicKey);
+    expect(a.publicKey).toMatch(/^0[23][0-9a-f]{64}$/);
+  });
+
+  it('rejects an invalid private key', () => {
+    expect(() => importSigningKey('00'.repeat(32))).toThrow(); // zero scalar
+    expect(() => importSigningKey('zz')).toThrow(); // not hex / wrong length
   });
 });

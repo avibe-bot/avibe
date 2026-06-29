@@ -1,16 +1,25 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { Eye, EyeOff, Loader2, Server, ShieldCheck } from 'lucide-react';
+import { Check, Copy, Eye, EyeOff, KeyRound, Loader2, RefreshCw, Server, ShieldCheck, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { ApiError, useApi, type DependencyItem } from '@/context/ApiContext';
 import { cn } from '@/lib/utils';
-import { sealBlindBox, standardCreateBlindBoxContext, type ProtectedRecordEnvelope } from '@/lib/vaultCrypto';
+import {
+  generateSigningKey,
+  importSigningKey,
+  sealBlindBox,
+  standardCreateBlindBoxContext,
+  type ProtectedRecordEnvelope,
+  type SigningKeyMaterial,
+} from '@/lib/vaultCrypto';
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { Button } from './button';
 import { Combobox } from './combobox';
 import { Input } from './input';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
+
+type VaultKind = 'static' | 'keypair';
 
 const AVAULT_P2_MIN_VERSION = '0.1.3';
 type VaultProtection = 'standard' | 'protected';
@@ -66,6 +75,12 @@ export const VaultSecretForm: React.FC<{
   const api = useApi();
   const [name, setName] = useState(fixedName ?? '');
   const [value, setValue] = useState('');
+  const [kind, setKind] = useState<VaultKind>('static');
+  const [signingSource, setSigningSource] = useState<'generate' | 'import'>('generate');
+  const [importHex, setImportHex] = useState('');
+  const [signingKey, setSigningKey] = useState<SigningKeyMaterial | null>(null);
+  const [signingError, setSigningError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const [group, setGroup] = useState('');
   const [description, setDescription] = useState('');
   const [allowHosts, setAllowHosts] = useState('');
@@ -108,8 +123,44 @@ export const VaultSecretForm: React.FC<{
   const standardCreateReady = useMemo(() => avaultInstalled(avaultDep), [avaultDep]);
   const secretName = (fixedName ?? name).trim().toUpperCase();
   const protectedCreateReady = protectedVault.status === 'unlocked';
+  const isKeypair = kind === 'keypair';
+
+  // Hold the latest key material in a ref too, so the unmount cleanup can zero
+  // the *current* private key (a [] effect would capture a stale value).
+  const signingKeyRef = useRef<SigningKeyMaterial | null>(null);
+
+  // Replace the in-memory signing key, zeroing the previous private key so raw
+  // key material never lingers longer than needed.
+  const applySigningKey = (next: SigningKeyMaterial | null) => {
+    if (signingKeyRef.current && signingKeyRef.current !== next) {
+      signingKeyRef.current.privateKey.fill(0);
+    }
+    signingKeyRef.current = next;
+    setSigningKey(next);
+    setCopied(false);
+  };
+
+  // Signing keys are sealed in the browser and signed locally by avault, so they
+  // require the P2 avault surface and (this version) the standard tier; the
+  // protected tier's browser signing sandbox lands next version.
+  useEffect(() => {
+    if (isKeypair && protection !== 'standard') setProtection('standard');
+  }, [isKeypair, protection]);
+
+  // Zero any held private key when the form unmounts.
+  useEffect(
+    () => () => {
+      if (signingKeyRef.current) signingKeyRef.current.privateKey.fill(0);
+      signingKeyRef.current = null;
+    },
+    [],
+  );
+
+  const valueReady = isKeypair ? signingKey != null : Boolean(value);
+  const keypairRequirementsMet = !isKeypair || p2Ready;
   const canSubmit =
-    Boolean(secretName && value) &&
+    Boolean(secretName && valueReady) &&
+    keypairRequirementsMet &&
     !submitting &&
     ((protection === 'standard' && standardCreateReady) || (protection === 'protected' && protectedCreateReady));
 
@@ -138,7 +189,20 @@ export const VaultSecretForm: React.FC<{
         group: group.trim() || undefined,
         description: description.trim() || undefined,
         policy: hosts.length ? { allowed_hosts: hosts } : undefined,
+        ...(isKeypair && signingKey
+          ? {
+              kind: 'keypair',
+              signer_kind: 'local',
+              // Chain-agnostic: only the compressed secp256k1 public key is pinned
+              // in the clear; the scheme is chosen at sign time, not here.
+              public_meta: { signing_public_key: { curve: 'secp256k1', public_key: signingKey.publicKey } },
+            }
+          : {}),
       };
+      // For a signing key the sealed value is the raw 32-byte private key (avault
+      // opens it back into a 32-byte signing key); for a static secret it is the
+      // entered string.
+      const plaintext: Uint8Array | string = isKeypair && signingKey ? signingKey.privateKey : value;
       let cryptoFields:
         | { sealed: ProtectedRecordEnvelope }
         | { blind_box: Awaited<ReturnType<typeof sealBlindBox>> }
@@ -151,8 +215,10 @@ export const VaultSecretForm: React.FC<{
         establishingVmk = sealed.establishingVmk;
       } else if (p2Ready) {
         const pubkey = await api.getVaultPubkey();
-        cryptoFields = { blind_box: await sealBlindBox(value, pubkey, standardCreateBlindBoxContext(secretName)) };
+        cryptoFields = { blind_box: await sealBlindBox(plaintext, pubkey, standardCreateBlindBoxContext(secretName)) };
       } else {
+        // Plain-value fallback exists only for static secrets; signing keys require
+        // the avault P2 surface (gated by canSubmit), so plaintext is a string here.
         cryptoFields = { value };
       }
       const created = await api.createVaultSecret(
@@ -175,6 +241,8 @@ export const VaultSecretForm: React.FC<{
       }
       if (protection === 'protected') protectedVault.afterCreated();
       setValue('');
+      applySigningKey(null);
+      setImportHex('');
       onCreated(secretName, 'created');
     } catch (err: unknown) {
       if (err instanceof Error && err.message.includes('fingerprint mismatch')) {
@@ -201,29 +269,166 @@ export const VaultSecretForm: React.FC<{
           <Input value={name} onChange={(event) => setName(event.target.value)} autoFocus required />
         </label>
       )}
-      <label className="flex flex-col gap-1.5 text-sm font-medium">
-        {t('vaults.dialog.value')}
-        <div className="flex items-center gap-2">
-          <Input
-            type={showValue ? 'text' : 'password'}
-            value={value}
-            onChange={(event) => setValue(event.target.value)}
-            placeholder={t('vaults.dialog.valuePlaceholder')}
-            autoFocus={Boolean(fixedName)}
-            required
-            className="min-w-0 flex-1 font-mono"
-          />
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            onClick={() => setShowValue((current) => !current)}
-            aria-label={showValue ? t('vaults.dialog.hideValue') : t('vaults.dialog.showValue')}
-          >
-            {showValue ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-          </Button>
+      <div className="flex flex-col gap-1.5 text-sm font-medium">
+        <span>{t('vaults.dialog.kindLabel')}</span>
+        <div className="grid grid-cols-2 gap-2.5">
+          {(
+            [
+              { key: 'static', icon: KeyRound, title: t('vaults.dialog.kindStatic'), desc: t('vaults.dialog.kindStaticHelp') },
+              { key: 'keypair', icon: Wallet, title: t('vaults.dialog.kindKeypair'), desc: t('vaults.dialog.kindKeypairHelp') },
+            ] as const
+          ).map(({ key, icon: Icon, title, desc }) => {
+            const selected = kind === key;
+            return (
+              <button
+                key={key}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => setKind(key)}
+                className={cn(
+                  'flex flex-col gap-1.5 rounded-lg border p-3 text-left transition-colors',
+                  selected ? 'border-mint bg-mint-soft' : 'border-border bg-surface hover:bg-surface-2',
+                )}
+              >
+                <span className="flex items-center gap-2">
+                  <Icon className={cn('size-4', selected ? 'text-mint' : 'text-muted')} />
+                  <span className="text-sm font-semibold text-foreground">{title}</span>
+                </span>
+                <span className="text-xs font-normal text-muted-foreground">{desc}</span>
+              </button>
+            );
+          })}
         </div>
-      </label>
+      </div>
+
+      {!isKeypair && (
+        <label className="flex flex-col gap-1.5 text-sm font-medium">
+          {t('vaults.dialog.value')}
+          <div className="flex items-center gap-2">
+            <Input
+              type={showValue ? 'text' : 'password'}
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
+              placeholder={t('vaults.dialog.valuePlaceholder')}
+              autoFocus={Boolean(fixedName)}
+              required
+              className="min-w-0 flex-1 font-mono"
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              onClick={() => setShowValue((current) => !current)}
+              aria-label={showValue ? t('vaults.dialog.hideValue') : t('vaults.dialog.showValue')}
+            >
+              {showValue ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+            </Button>
+          </div>
+        </label>
+      )}
+
+      {isKeypair && (
+        <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-surface-2 px-3 py-3">
+          <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingKeyHelp')}</span>
+          <div className="grid grid-cols-2 gap-2">
+            {(['generate', 'import'] as const).map((src) => (
+              <Button
+                key={src}
+                type="button"
+                size="sm"
+                variant={signingSource === src ? 'secondary' : 'ghost'}
+                onClick={() => {
+                  setSigningSource(src);
+                  setSigningError(null);
+                  applySigningKey(null);
+                  setImportHex('');
+                }}
+              >
+                {src === 'generate' ? t('vaults.dialog.signingGenerate') : t('vaults.dialog.signingImport')}
+              </Button>
+            ))}
+          </div>
+
+          {signingSource === 'generate' && (
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => {
+                try {
+                  applySigningKey(generateSigningKey());
+                  setSigningError(null);
+                } catch (err) {
+                  setSigningError(err instanceof Error ? err.message : String(err));
+                }
+              }}
+            >
+              <RefreshCw className="size-4" />
+              {signingKey ? t('vaults.dialog.signingRegenerate') : t('vaults.dialog.signingGenerateCta')}
+            </Button>
+          )}
+
+          {signingSource === 'import' && (
+            <Input
+              value={importHex}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder={t('vaults.dialog.signingImportPlaceholder')}
+              className="font-mono"
+              onChange={(event) => {
+                const next = event.target.value;
+                setImportHex(next);
+                const trimmed = next.trim();
+                if (!trimmed) {
+                  applySigningKey(null);
+                  setSigningError(null);
+                  return;
+                }
+                try {
+                  applySigningKey(importSigningKey(trimmed));
+                  setSigningError(null);
+                } catch {
+                  applySigningKey(null);
+                  setSigningError(t('vaults.dialog.errors.invalidPrivateKey'));
+                }
+              }}
+            />
+          )}
+
+          {signingKey && (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs font-medium text-muted-foreground">{t('vaults.dialog.signingPublicKey')}</span>
+              <div className="flex items-center gap-2">
+                <code className="min-w-0 flex-1 truncate rounded-md border border-border bg-surface px-2 py-1.5 font-mono text-xs">
+                  {signingKey.publicKey}
+                </code>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label={t('vaults.dialog.copyPublicKey')}
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(signingKey.publicKey).then(() => {
+                      setCopied(true);
+                      window.setTimeout(() => setCopied(false), 1500);
+                    });
+                  }}
+                >
+                  {copied ? <Check className="size-4 text-mint" /> : <Copy className="size-4" />}
+                </Button>
+              </div>
+              <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingPublicKeyHint')}</span>
+            </div>
+          )}
+
+          {signingError && <span className="text-xs text-destructive">{signingError}</span>}
+
+          {!p2Ready && (
+            <div className="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-xs text-warning">
+              {t('vaults.dialog.signingNeedsAvault', { version: AVAULT_P2_MIN_VERSION })}
+            </div>
+          )}
+        </div>
+      )}
       <label className="flex flex-col gap-1.5 text-sm font-medium">
         {t('vaults.dialog.group')}
         <Combobox
@@ -257,14 +462,21 @@ export const VaultSecretForm: React.FC<{
             ] as const
           ).map(({ key, icon: Icon, title, desc }) => {
             const selected = protection === key;
+            // Protected signing keys need the browser signing sandbox (next version),
+            // so the protected tier is disabled while creating a keypair.
+            const optionDisabled = key === 'protected' && isKeypair;
             return (
               <button
                 key={key}
                 type="button"
                 aria-pressed={selected}
-                onClick={() => setProtection(key)}
+                disabled={optionDisabled}
+                onClick={() => {
+                  if (!optionDisabled) setProtection(key);
+                }}
                 className={cn(
                   'flex flex-col gap-1.5 rounded-lg border p-3 text-left transition-colors',
+                  optionDisabled && 'cursor-not-allowed opacity-50',
                   selected ? 'border-mint bg-mint-soft' : 'border-border bg-surface hover:bg-surface-2',
                 )}
               >
@@ -277,6 +489,9 @@ export const VaultSecretForm: React.FC<{
             );
           })}
         </div>
+        {isKeypair && (
+          <span className="text-xs font-normal text-muted-foreground">{t('vaults.dialog.protectedKeypairNextVersion')}</span>
+        )}
       </div>
       {protection === 'protected' && <VaultProtectedUnlock vault={protectedVault} />}
       {protection === 'standard' && checkingAvault && (
@@ -285,7 +500,7 @@ export const VaultSecretForm: React.FC<{
           {t('vaults.dialog.checkingAvault')}
         </div>
       )}
-      {protection === 'standard' && !checkingAvault && !p2Ready && (
+      {protection === 'standard' && !isKeypair && !checkingAvault && !p2Ready && (
         <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
           {standardCreateReady
             ? t('vaults.dialog.p2UnavailableStandardFallback', {
