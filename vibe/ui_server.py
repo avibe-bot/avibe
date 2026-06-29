@@ -7939,7 +7939,7 @@ def _with_vault_sandbox_headers(response: FastAPIResponse) -> FastAPIResponse:
     response.headers["Content-Security-Policy"] = _vault_sandbox_csp()
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    response.headers["Cross-Origin-Resource-Policy"] = "cross-origin"
     response.headers["Permissions-Policy"] = (
         "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), "
         "payment=(), usb=(), publickey-credentials-create=(self), publickey-credentials-get=(self)"

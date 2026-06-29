@@ -388,9 +388,14 @@ def allocated_worktree_ports(repo_root: Path) -> set[int]:
     payload = load_worktree_mapping(repo_root)
     ports: set[int] = set()
     for item in (payload.get("worktrees") or {}).values():
-        if isinstance(item, dict) and isinstance(item.get("host_port"), int):
-            ports.add(item["host_port"])
-        if isinstance(item, dict) and isinstance(item.get("vault_sandbox_host_port"), int):
+        if not isinstance(item, dict):
+            continue
+        host_port = item.get("host_port")
+        if isinstance(host_port, int):
+            ports.add(host_port)
+            if not isinstance(item.get("vault_sandbox_host_port"), int):
+                ports.add(host_port + 1)
+        if isinstance(item.get("vault_sandbox_host_port"), int):
             ports.add(item["vault_sandbox_host_port"])
     return ports
 
@@ -868,7 +873,7 @@ def runtime_env_payload(repo_root: Path | None = None, target: RegressionTarget 
         "OPENAI_API_BASE": os.environ.get("OPENAI_API_BASE", ""),
     }
     if target is not None:
-        mappings["VIBE_VAULT_SANDBOX_MAIN_ORIGIN"] = f"http://localhost:{target.host_port}"
+        mappings["VIBE_VAULT_SANDBOX_MAIN_ORIGIN"] = f"http://{target.ui_host}:{target.host_port}"
     for key, value in os.environ.items():
         if key == "REGRESSION_UI_HOST":
             continue

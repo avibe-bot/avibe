@@ -46,7 +46,7 @@ def test_vault_sandbox_serves_bundle_with_hardened_csp(monkeypatch, tmp_path):
     assert "unsafe-inline" not in csp
     assert index.headers["x-content-type-options"] == "nosniff"
     assert index.headers["referrer-policy"] == "no-referrer"
-    assert index.headers["cross-origin-resource-policy"] == "same-origin"
+    assert index.headers["cross-origin-resource-policy"] == "cross-origin"
     assert "publickey-credentials-get=(self)" in index.headers["permissions-policy"]
 
 

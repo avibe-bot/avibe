@@ -220,6 +220,41 @@ def test_worktree_target_reuses_mapped_port_without_allocation(tmp_path: Path, m
     assert target.host_port == 15234
 
 
+def test_worktree_allocation_reserves_legacy_implicit_sandbox_port(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = tmp_path / ".runtime" / "incus-regression"
+    runtime.mkdir(parents=True)
+    (runtime / "worktrees.json").write_text(
+        json.dumps({"schema_version": 1, "worktrees": {"old-branch": {"host_port": 15200}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda repo_root: repo_root)
+    preflight_calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        incus_regression,
+        "ensure_host_port_available",
+        lambda host, port: preflight_calls.append((host, port)),
+    )
+
+    target = incus_regression.resolve_target(
+        argparse.Namespace(
+            target="worktree",
+            slug="new-branch",
+            host_port=None,
+            ui_host="127.0.0.1",
+            ui_port=5123,
+            worktree_port_start=15200,
+            worktree_port_end=15205,
+        ),
+        tmp_path,
+        dry_run=False,
+        preflight_ports=True,
+    )
+
+    assert target.host_port == 15202
+    assert target.vault_sandbox_host_port == 15203
+    assert preflight_calls == [("127.0.0.1", 15202), ("127.0.0.1", 15203)]
+
+
 def test_worktree_maintenance_target_does_not_allocate_port(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(incus_regression, "allocate_worktree_port", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not allocate for maintenance")))
 
@@ -574,7 +609,7 @@ def test_runtime_env_payload_maps_vault_sandbox_main_origin() -> None:
 
     payload = incus_regression.runtime_env_payload(target=target).decode()
 
-    assert "VIBE_VAULT_SANDBOX_MAIN_ORIGIN=http://localhost:15130" in payload
+    assert "VIBE_VAULT_SANDBOX_MAIN_ORIGIN=http://127.0.0.1:15130" in payload
 
 
 def test_load_env_file_accepts_export_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
