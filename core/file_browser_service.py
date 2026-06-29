@@ -1048,7 +1048,10 @@ def _preview_for_match(line: str, start: int, end: int) -> tuple[str, int, int]:
 
 def _scan_lines(text: str, matcher: "re.Pattern[str]", remaining: int) -> tuple[list[dict[str, Any]], bool]:
     matches: list[dict[str, Any]] = []
-    for line_no, line in enumerate(text.split("\n"), start=1):
+    for line_no, raw_line in enumerate(text.split("\n"), start=1):
+        # Drop a trailing CR so line-end anchors ('foo$') and previews behave on CRLF files; the CR
+        # sits after any match, so offsets are unaffected.
+        line = raw_line[:-1] if raw_line.endswith("\r") else raw_line
         for m in matcher.finditer(line):
             # col/end are FULL-LINE UTF-16 offsets — the editor jump selects against the whole line.
             # preview_col/preview_end index into the (possibly windowed) preview `text` for the row
@@ -1128,12 +1131,16 @@ def _apply_replacement(text: str, matcher: "re.Pattern[str]", replacement: str, 
     repl: Any = replacement if regex else (lambda _m: replacement)
     out: list[str] = []
     total = 0
-    for line in text.split("\n"):
+    for raw_line in text.split("\n"):
+        # Match the same CR-stripped content search did, then re-attach the terminator so CRLF files
+        # keep their line endings.
+        cr = "\r" if raw_line.endswith("\r") else ""
+        core = raw_line[: -len(cr)] if cr else raw_line
         try:
-            new_line, count = matcher.subn(repl, line)
+            new_core, count = matcher.subn(repl, core)
         except re.error as exc:
             raise FileBrowserError("invalid_regex", f"Invalid replacement: {exc}", 400) from exc
-        out.append(new_line)
+        out.append(new_core + cr)
         total += count
     return "\n".join(out), total
 
@@ -1169,7 +1176,9 @@ def replace(
     matcher = _compile_search_matcher(query, regex=regex, case_sensitive=case_sensitive, whole_word=whole_word)
 
     pre_skipped: list[dict[str, Any]] = []
-    if paths:
+    # `paths is not None` (not truthiness) marks explicit mode: an empty list means "replace none of
+    # the shown files" (a no-op), never "walk and rewrite the whole root".
+    if paths is not None:
         candidates: list[tuple[Path, str]] = []
         for raw in paths:
             try:
@@ -1189,7 +1198,7 @@ def replace(
     # we now can't process (vanished, or not strict-UTF-8 while search saw it via a lossy decode of
     # an ASCII match) is reported as skipped rather than silently dropped. In walk mode a None just
     # means "not a candidate", so stay quiet.
-    explicit = bool(paths)
+    explicit = paths is not None
     changed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = list(pre_skipped)
     snapshots: dict[str, Any] = {}

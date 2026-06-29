@@ -249,6 +249,25 @@ def test_replace_applies_when_search_mtime_matches(tmp_path):
     assert a.read_text() == "x\n"
 
 
+def test_replace_empty_paths_is_noop(tmp_path):
+    a = _write(tmp_path, "a.txt", "hit\n")
+    res = fbs.replace(str(tmp_path), "hit", "x", paths=[])
+    # An explicit empty selection must replace nothing — never fall through to a whole-tree walk.
+    assert res["files_changed"] == 0
+    assert res["undo_token"] is None
+    assert a.read_text() == "hit\n"
+
+
+def test_search_and_replace_handle_crlf_line_end(tmp_path):
+    p = tmp_path / "win.txt"
+    p.write_bytes(b"foo\r\nbar\r\n")
+    # A line-end anchor matches despite the CRLF terminator...
+    assert fbs.search(str(tmp_path), "foo$", regex=True)["total_matches"] == 1
+    # ...and replace preserves the CRLF endings.
+    fbs.replace(str(tmp_path), "foo$", "FOO", regex=True, paths=[str(p)])
+    assert p.read_bytes() == b"FOO\r\nbar\r\n"
+
+
 def test_search_root_must_be_directory(tmp_path):
     f = _write(tmp_path, "a.txt", "x\n")
     with pytest.raises(FileBrowserError):

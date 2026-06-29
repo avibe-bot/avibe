@@ -158,9 +158,10 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
   }, []);
 
   const doReplace = useCallback(async () => {
-    // Only act when the shown results match the current query (resultsCurrent) and aren't loading —
-    // otherwise a replace could touch matches the user hasn't previewed.
-    if (!root || !query || busy || loading || !data?.results.length || !resultsCurrent) return;
+    // Only act when the shown results match the current query (resultsCurrent), aren't loading, and
+    // aren't truncated — a truncated result set hides matches (even inside shown files), so replacing
+    // could touch occurrences the user never previewed. They must narrow the search first.
+    if (!root || !query || busy || loading || !data?.results.length || !resultsCurrent || data.truncated) return;
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -283,7 +284,7 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
                   <button
                     type="button"
                     onClick={() => void doReplace()}
-                    disabled={busy || loading || !data?.results.length || !resultsCurrent}
+                    disabled={busy || loading || !data?.results.length || !resultsCurrent || data?.truncated}
                     aria-label={t('apps.editor.search.replaceAll')}
                     title={t('apps.editor.search.replaceAll')}
                     className="grid size-5 place-items-center rounded text-muted transition hover:bg-foreground/10 hover:text-foreground disabled:opacity-40"
