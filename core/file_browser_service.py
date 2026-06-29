@@ -942,12 +942,22 @@ _UNDO_STORE: dict[str, dict[str, Any]] = {}
 _UNDO_LOCK = threading.Lock()
 
 
+def _is_word_char(ch: str) -> bool:
+    return re.match(r"\w", ch) is not None
+
+
 def _compile_search_matcher(query: str, *, regex: bool, case_sensitive: bool, whole_word: bool) -> "re.Pattern[str]":
     if not isinstance(query, str) or query == "":
         raise FileBrowserError("invalid_query", "Search query is required", 400)
     pattern = query if regex else re.escape(query)
     if whole_word:
-        pattern = rf"\b(?:{pattern})\b"
+        # Guard an edge with \b only when the query's edge char is itself a word char. A symbol query
+        # like "C++" or "foo()" ends in a non-word char, and \b needs a word/non-word transition, so
+        # a both-sides \b would make it never match. (For regex queries the edge is taken from the raw
+        # query text — a heuristic, but it fixes the common literal symbol case.)
+        prefix = r"\b" if _is_word_char(query[0]) else ""
+        suffix = r"\b" if _is_word_char(query[-1]) else ""
+        pattern = f"{prefix}(?:{pattern}){suffix}"
     flags = 0 if case_sensitive else re.IGNORECASE
     try:
         return re.compile(pattern, flags)
@@ -963,7 +973,14 @@ def _split_globs(raw: str | None) -> list[str]:
 
 def _match_globs(rel_posix: str, patterns: list[str]) -> bool:
     name = rel_posix.rsplit("/", 1)[-1]
-    return any(fnmatch.fnmatch(rel_posix, pat) or fnmatch.fnmatch(name, pat) for pat in patterns)
+    for pat in patterns:
+        # A leading `**/` should also match at the root: fnmatch's `**/` needs a real slash, so
+        # `**/*.py` would miss root `foo.py` and `**/dist/**` would miss root `dist/a.ts`. Also try
+        # the pattern with the `**/` prefix stripped.
+        forms = [pat, pat[3:]] if pat.startswith("**/") else [pat]
+        if any(fnmatch.fnmatch(rel_posix, form) for form in forms) or fnmatch.fnmatch(name, pat):
+            return True
+    return False
 
 
 def _read_file_text(path: Path, *, lossy: bool) -> tuple[str | None, float | None]:

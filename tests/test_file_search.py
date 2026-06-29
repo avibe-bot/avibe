@@ -63,6 +63,27 @@ def test_search_empty_query_rejected(tmp_path):
     assert exc.value.code == "invalid_query"
 
 
+def test_whole_word_matches_symbol_query(tmp_path):
+    # A symbol ending in a non-word char (C++) must still match under Whole Word — the old both-sides
+    # \b made it never match.
+    _write(tmp_path, "a.txt", "use C++ here\nand Cxx too\n")
+    res = fbs.search(str(tmp_path), "C++", whole_word=True)
+    assert res["total_matches"] == 1
+
+
+def test_include_globstar_matches_root_level(tmp_path):
+    _write(tmp_path, "foo.py", "needle\n")
+    _write(tmp_path, "sub/bar.py", "needle\n")
+    _write(tmp_path, "baz.txt", "needle\n")
+    assert _rels(fbs.search(str(tmp_path), "needle", include="**/*.py")) == {"foo.py", "sub/bar.py"}
+
+
+def test_exclude_globstar_matches_root_level(tmp_path):
+    _write(tmp_path, "keep.txt", "needle\n")
+    _write(tmp_path, "generated/a.ts", "needle\n")
+    assert _rels(fbs.search(str(tmp_path), "needle", exclude="**/generated/**")) == {"keep.txt"}
+
+
 def test_search_include_exclude_globs(tmp_path):
     _write(tmp_path, "keep.py", "needle\n")
     _write(tmp_path, "skip.txt", "needle\n")
