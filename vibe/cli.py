@@ -4370,6 +4370,9 @@ def cmd_vault_run(args):
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
         return 1
+    except vault_service.KeypairNotValueDeliverableError as exc:
+        _print_task_error(TaskCliError(str(exc), code="keypair_not_value_deliverable", help_command=help_command))
+        return 1
     except vault_service.UnsupportedProtectionError as exc:
         _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
         return 1
@@ -4898,6 +4901,9 @@ def cmd_vault_fetch(args):
     except vault_service.SecretNotFoundError:
         _print_task_error(TaskCliError(f"secret '{args.auth}' not found", code="secret_not_found", help_command=help_command))
         return 1
+    except vault_service.KeypairNotValueDeliverableError as exc:
+        _print_task_error(TaskCliError(str(exc), code="keypair_not_value_deliverable", help_command=help_command))
+        return 1
     except vault_service.UnsupportedProtectionError as exc:
         _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
         return 1
@@ -5038,6 +5044,9 @@ def cmd_vault_inject(args):
         return 0
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.KeypairNotValueDeliverableError as exc:
+        _print_task_error(TaskCliError(str(exc), code="keypair_not_value_deliverable", help_command=help_command))
         return 1
     except vault_service.UnsupportedProtectionError as exc:
         _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))

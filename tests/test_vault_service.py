@@ -216,6 +216,32 @@ def test_pubkey_pin_metadata_round_trips_through_masked_meta(vault):
     assert "ignored" not in listed_meta["avault_pubkey_pin"]
 
 
+def test_keypair_signing_public_key_surfaces_in_masked_meta(vault):
+    public_key = "02" + "cd" * 32
+    _create(
+        vault,
+        name="ETH_KEY",
+        kind="keypair",
+        signer_kind="local",
+        public_meta={
+            "signing_public_key": {
+                "curve": "secp256k1",
+                "public_key": public_key,
+                "ignored": "nope",
+            }
+        },
+    )
+
+    with vault.connect() as conn:
+        meta = vs.get_secret_meta(conn, "ETH_KEY")
+        listed = vs.list_secrets(conn)
+
+    assert meta["signing_public_key"] == {"curve": "secp256k1", "public_key": public_key}
+    listed_meta = next(item for item in listed if item["name"] == "ETH_KEY")
+    assert listed_meta["signing_public_key"] == {"curve": "secp256k1", "public_key": public_key}
+    assert "ignored" not in listed_meta["signing_public_key"]
+
+
 def test_pubkey_pin_does_not_change_secret_version(vault):
     _create(vault, name="A_KEY", protection="protected", group="crypto")
     with vault.begin() as conn:
@@ -251,6 +277,18 @@ def test_get_envelopes_validates_batch_before_returning(vault):
     _create(vault, name="A_KEY")
     with vault.connect() as conn, pytest.raises(vs.SecretNotFoundError):
         vs.get_envelopes(conn, ["A_KEY", "NOPE"])
+
+
+def test_keypair_is_not_value_deliverable(vault):
+    _create(vault, name="ETH_KEY", kind="keypair", signer_kind="local")
+    with vault.connect() as conn:
+        with pytest.raises(vs.KeypairNotValueDeliverableError):
+            vs.get_envelope(conn, "ETH_KEY")
+        with pytest.raises(vs.KeypairNotValueDeliverableError):
+            vs.get_envelopes(conn, ["ETH_KEY"])
+        with pytest.raises(vs.KeypairNotValueDeliverableError):
+            vs.resolve_secret_access(conn, "ETH_KEY")
+        assert vs.get_key_envelope(conn, "ETH_KEY") == _sealed()
 
 
 def test_record_deliveries_bumps_usage_and_audits(vault):

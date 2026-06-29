@@ -106,6 +106,24 @@ def test_inject_calls_avault_and_records_delivery(tmp_path, capfd, monkeypatch, 
     assert secrets["B_KEY"]["use_count"] == 1
 
 
+def test_inject_rejects_keypair_before_avault_delivery(tmp_path, capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="ETH_KEY", sealed=_sealed("eth"), kind="keypair", signer_kind="local")
+    inject = Mock()
+    monkeypatch.setattr(api, "avault_deliver_inject", inject)
+
+    code = cli.cmd_vault_inject(_ns(keys="ETH_KEY", out=str(tmp_path / "secrets.env"), format="dotenv"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "keypair_not_value_deliverable"
+    inject.assert_not_called()
+
+
 def test_inject_uses_agent_delivery_for_protected_grant(tmp_path, capfd, monkeypatch):
     from unittest.mock import Mock
 

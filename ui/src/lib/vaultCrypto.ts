@@ -923,6 +923,32 @@ function normalizeHexOrBytes(value: HexOrBytes, field: string): Uint8Array {
   return typeof value === 'string' ? hexToBytes(value) : toUint8Array(value, field);
 }
 
+export type SigningKeyMaterial = {
+  /** Raw 32-byte secp256k1 private key. The caller MUST zero it after sealing. */
+  privateKey: Uint8Array;
+  /**
+   * Compressed secp256k1 public key (33 bytes), hex. A signing key is
+   * chain-agnostic: the signature scheme (ECDSA / Schnorr) is chosen at sign
+   * time, not at creation, so this is the only public material we pin.
+   */
+  publicKey: string;
+};
+
+/** Generate a fresh, chain-agnostic secp256k1 signing key. */
+export function generateSigningKey(): SigningKeyMaterial {
+  const privateKey = secp256k1.utils.randomSecretKey();
+  return { privateKey, publicKey: bytesToHex(secp256k1.getPublicKey(privateKey, true)) };
+}
+
+/**
+ * Validate + load an imported secp256k1 private key (hex or raw bytes) and
+ * derive its compressed public key. Throws if it is not a valid 32-byte key.
+ */
+export function importSigningKey(privateKey: BytesLike | string): SigningKeyMaterial {
+  const key = normalizePrivateKey(privateKey);
+  return { privateKey: key, publicKey: bytesToHex(secp256k1.getPublicKey(key, true)) };
+}
+
 function validateSecretName(name: string): string {
   if (typeof name !== 'string' || !SECRET_NAME_PATTERN.test(name)) {
     throw new Error('vault secret name must match ^[A-Z][A-Z0-9_]*$');
