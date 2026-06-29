@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, Clock, Copy, History, Inbox, KeyRound, Layers, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, ShieldOff, Trash2, Wallet } from 'lucide-react';
+import { Check, Clock, Copy, Folder, History, Inbox, KeyRound, Layers, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, Trash2, Wallet, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
+import { cn } from '../../lib/utils';
 import { useApi, type VaultAuditEvent, type VaultGrant, type VaultRequest, type VaultSecret } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { VaultApprovalCard, type ApprovalOutcome } from '../ui/vault-approval-card';
@@ -37,10 +38,13 @@ const AddSecretDialog: React.FC<{
 
 type ViewMode = 'all' | 'group';
 
-const hasProxy = (s: VaultSecret): boolean => {
+/** First allowed host (for the `proxy · <host>` badge), or null when none is set. */
+const proxyHost = (s: VaultSecret): string | null => {
   const hosts = (s.policy as { allowed_hosts?: string[] })?.allowed_hosts;
-  return Array.isArray(hosts) && hosts.length > 0;
+  return Array.isArray(hosts) && hosts.length > 0 ? hosts[0] : null;
 };
+
+const isAlwaysAsk = (s: VaultSecret): boolean => Boolean((s.policy as { always_ask?: boolean })?.always_ask);
 
 const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => void }> = ({ secret: s, onDelete }) => {
   const { t } = useTranslation();
@@ -71,7 +75,8 @@ const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => voi
               {t('vaults.signing')}
             </Badge>
           ) : null}
-          {hasProxy(s) ? <Badge variant="info">{t('vaults.proxyBound')}</Badge> : null}
+          {isAlwaysAsk(s) ? <Badge variant="destructive">{t('vaults.alwaysAsk')}</Badge> : null}
+          {proxyHost(s) ? <Badge variant="info">{t('vaults.proxyHost', { host: proxyHost(s) })}</Badge> : null}
           {s.tags?.map((tag) => (
             <Badge key={tag} variant="outline" className="text-muted">
               {tag}
@@ -128,7 +133,18 @@ function isExpired(expiresAt: string, now: number): boolean {
   return !Number.isNaN(end) && end <= now;
 }
 
-const GrantRow: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: VaultGrant) => void }> = ({
+/** Compact mm:ss / h:mm:ss countdown for a grant chip (design.pen `y4rw5Q` shows `12:34`). */
+function chipCountdown(rem: { h: number; m: number; s: number }): string {
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return rem.h > 0 ? `${rem.h}:${pad(rem.m)}:${pad(rem.s)}` : `${pad(rem.m)}:${pad(rem.s)}`;
+}
+
+/**
+ * Active-grant chip (design.pen `y4rw5Q` ACTIVE GRANTS row): a compact mint pill with the
+ * scope icon, `type · ref`, a live countdown, and an inline × to revoke. Replaces the older
+ * full-width grant card so the strip reads as a quick "what's live right now" glance.
+ */
+const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: VaultGrant) => void }> = ({
   grant: g,
   now,
   onRevoke,
@@ -136,40 +152,24 @@ const GrantRow: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: Vau
   const { t } = useTranslation();
   const Icon = SCOPE_ICON[g.scope_type] ?? KeyRound;
   const rem = remaining(g.expires_at, now);
-  const time =
-    rem.h > 0
-      ? t('vaults.grants.dur.hm', { h: rem.h, m: rem.m })
-      : rem.m > 0
-        ? t('vaults.grants.dur.ms', { m: rem.m, s: rem.s })
-        : t('vaults.grants.dur.s', { s: rem.s });
   return (
-    <div className="flex items-center gap-3.5 rounded-xl border border-border bg-surface px-4 py-3">
-      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-mint/10 text-mint">
-        <Icon className="size-4" />
-      </div>
-      <div className="flex min-w-0 flex-col gap-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="truncate font-mono text-sm font-semibold">{g.scope_ref}</span>
-          <Badge variant="secondary">{t(`vaults.grants.scope.${g.scope_type}`)}</Badge>
-          <Badge variant="outline">
-            {g.session_id ? t('vaults.grants.session.bound') : t('vaults.grants.session.any')}
-          </Badge>
-        </div>
-        <span className="flex items-center gap-1.5 text-xs text-muted">
-          <span>{t('vaults.secretCount', { count: g.runtime_member_count })}</span>
-          <span aria-hidden>·</span>
-          <Clock className="size-3" />
-          <span className={rem.urgent ? 'text-warning' : undefined}>
-            {rem.expired ? t('vaults.grants.expired') : t('vaults.grants.expiresIn', { time })}
-          </span>
-        </span>
-      </div>
-      <div className="ml-auto">
-        <Button variant="ghost" size="icon" onClick={() => onRevoke(g)} aria-label={t('vaults.grants.revoke')}>
-          <ShieldOff className="size-4" />
-        </Button>
-      </div>
-    </div>
+    <span className="inline-flex items-center gap-2 rounded-full border border-mint/40 bg-mint-soft py-1 pl-2.5 pr-1.5 text-xs text-mint">
+      <Icon className="size-3.5 shrink-0" />
+      <span className="font-medium">
+        {t(`vaults.grants.scope.${g.scope_type}`)} · {g.scope_ref}
+      </span>
+      <span className={cn('font-mono tabular-nums', rem.urgent ? 'text-warning' : 'text-mint/80')}>
+        {rem.expired ? t('vaults.grants.expired') : chipCountdown(rem)}
+      </span>
+      <button
+        type="button"
+        onClick={() => onRevoke(g)}
+        aria-label={t('vaults.grants.revoke')}
+        className="flex size-4 items-center justify-center rounded-full text-mint/70 transition-colors hover:bg-mint/15 hover:text-mint"
+      >
+        <X className="size-3" />
+      </button>
+    </span>
   );
 };
 
@@ -436,9 +436,11 @@ export const VaultsPage: React.FC = () => {
             <Badge variant="secondary">{grants.length}</Badge>
             <span className="hidden text-xs text-muted sm:inline">{t('vaults.grants.subtitle')}</span>
           </div>
-          {grants.map((g) => (
-            <GrantRow key={g.id} grant={g} now={now} onRevoke={onRevokeGrant} />
-          ))}
+          <div className="flex flex-wrap gap-2">
+            {grants.map((g) => (
+              <GrantChip key={g.id} grant={g} now={now} onRevoke={onRevokeGrant} />
+            ))}
+          </div>
         </div>
       )}
       {secrets.length > 0 ? (
@@ -460,17 +462,23 @@ export const VaultsPage: React.FC = () => {
         <div className="rounded-2xl border border-border bg-surface p-8 text-center text-sm text-muted">{t('vaults.empty')}</div>
       ) : view === 'group' ? (
         <div className="flex flex-col gap-4">
-          {groups.map(([group, items]) => (
-            <div key={group} className="flex flex-col gap-2">
-              <div className="flex items-center gap-2 px-1 text-xs font-semibold text-muted">
-                <span>{group}</span>
-                <span className="font-normal">{t('vaults.secretCount', { count: items.length })}</span>
+          {groups.map(([group, items]) => {
+            const allKeys = items.every((s) => s.kind === 'keypair');
+            return (
+              <div key={group} className="flex flex-col gap-2">
+                <div className="flex items-center gap-2 px-1 text-xs font-semibold text-foreground">
+                  <Folder className="size-3.5 text-muted" />
+                  <span>{group}</span>
+                  <span className="font-normal text-muted">
+                    {allKeys ? t('vaults.keyCount', { count: items.length }) : t('vaults.secretCount', { count: items.length })}
+                  </span>
+                </div>
+                {items.map((s) => (
+                  <SecretRow key={s.name} secret={s} onDelete={onDelete} />
+                ))}
               </div>
-              {items.map((s) => (
-                <SecretRow key={s.name} secret={s} onDelete={onDelete} />
-              ))}
-            </div>
-          ))}
+            );
+          })}
         </div>
       ) : (
         <div className="flex flex-col gap-2">

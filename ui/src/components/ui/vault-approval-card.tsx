@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, Globe, KeyRound, Loader2, Lock, ShieldCheck, Terminal, Wallet } from 'lucide-react';
+import { Check, Cpu, Loader2, LockKeyhole, PenTool, ShieldCheck, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { useApi, type VaultRequest } from '@/context/ApiContext';
@@ -53,9 +53,10 @@ function shortDigest(hex: string): string {
   return `0x${clean.slice(0, 10)}…${clean.slice(-8)}`;
 }
 
-const PANEL = 'flex flex-col rounded-xl border border-border bg-surface';
-const ROW = 'flex items-start gap-3 px-4 py-2.5 text-sm';
-const ROW_LABEL = 'w-20 shrink-0 pt-0.5 text-xs font-medium uppercase tracking-wide text-muted';
+// design.pen `SKBld` / `pRtHq`: a borderless detail list (no inner card) with sentence-case
+// muted row labels at a fixed width and the value flowing to fill.
+const ROW = 'flex items-start gap-2.5 text-sm';
+const ROW_LABEL = 'w-[74px] shrink-0 pt-0.5 text-[12px] text-muted';
 
 const DetailRow: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
   <div className={ROW}>
@@ -250,18 +251,18 @@ export const VaultApprovalCard: React.FC<{
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Header */}
+      {/* Header — design.pen `SKBld` (access, gold lock) / `pRtHq` (sign, violet pen). */}
       <div className="flex items-start gap-3">
         <div
           className={cn(
             'flex size-10 shrink-0 items-center justify-center rounded-xl',
-            isSign ? 'bg-violet/10 text-violet' : 'bg-accent/10 text-accent',
+            isSign ? 'bg-violet/15 text-violet' : 'bg-gold/15 text-gold',
           )}
         >
-          {isSign ? <Wallet className="size-5" /> : <KeyRound className="size-5" />}
+          {isSign ? <PenTool className="size-5" /> : <LockKeyhole className="size-5" />}
         </div>
         <div className="flex flex-col gap-0.5">
-          <span className="text-sm font-semibold">
+          <span className="text-[15px] font-semibold">
             {isSign ? t('vaults.approval.signTitle') : t('vaults.approval.accessTitle')}
           </span>
           <span className="text-xs text-muted-foreground">
@@ -270,10 +271,12 @@ export const VaultApprovalCard: React.FC<{
         </div>
       </div>
 
-      {/* Details */}
-      <div className={PANEL}>
+      <div className="h-px bg-border" />
+
+      {/* Details — borderless list, sentence-case labels. */}
+      <div className="flex flex-col gap-3.5">
         <DetailRow label={isSign ? t('vaults.approval.key') : t('vaults.approval.secret')}>
-          <span className="truncate font-mono text-sm font-semibold">{card.secret_name}</span>
+          <span className="truncate font-mono text-[13px] font-semibold">{card.secret_name}</span>
           {isProtected ? (
             <Badge variant="warning">{t('vaults.protected')}</Badge>
           ) : (
@@ -287,47 +290,34 @@ export const VaultApprovalCard: React.FC<{
           ) : null}
         </DetailRow>
         {card.session_id ? (
-          <>
-            <div className="h-px bg-border" />
-            <DetailRow label={t('vaults.approval.session')}>
-              <span className="truncate font-mono text-xs text-foreground">{card.session_id}</span>
-            </DetailRow>
-          </>
+          <DetailRow label={t('vaults.approval.session')}>
+            <span className="truncate text-[13px] text-foreground">{card.session_id}</span>
+          </DetailRow>
         ) : null}
         {!isSign && card.command ? (
-          <>
-            <div className="h-px bg-border" />
-            <DetailRow label={t('vaults.approval.command')}>
-              <span className="flex items-center gap-1.5 truncate rounded-md bg-surface-2 px-2 py-1 font-mono text-xs">
-                <Terminal className="size-3 shrink-0 text-muted" />
-                {card.command}
-              </span>
-            </DetailRow>
-          </>
+          <DetailRow label={t('vaults.approval.command')}>
+            <span className="min-w-0 flex-1 truncate rounded-md bg-surface-2 px-2 py-1 font-mono text-xs">{card.command}</span>
+          </DetailRow>
         ) : null}
         {!isSign && card.egress ? (
-          <>
-            <div className="h-px bg-border" />
-            <DetailRow label={t('vaults.approval.egress')}>
-              <span className="flex items-center gap-1.5 text-xs text-muted">
-                <Globe className="size-3 shrink-0" />
-                {card.egress}
-              </span>
-            </DetailRow>
-          </>
+          <DetailRow label={t('vaults.approval.egress')}>
+            <span className="flex items-center gap-1.5 text-[13px] text-foreground">
+              <Cpu className="size-3.5 shrink-0 text-muted" />
+              {card.egress}
+            </span>
+          </DetailRow>
         ) : null}
         {isSign && delivery.digest ? (
-          <>
-            <div className="h-px bg-border" />
-            <DetailRow label={t('vaults.approval.digest')}>
-              <span className="truncate font-mono text-xs text-foreground" title={delivery.digest}>
-                {shortDigest(delivery.digest)}
-              </span>
-              {delivery.scheme ? <Badge variant="secondary">{delivery.scheme}</Badge> : null}
-            </DetailRow>
-          </>
+          <DetailRow label={t('vaults.approval.digest')}>
+            <span className="truncate font-mono text-xs text-foreground" title={delivery.digest}>
+              {shortDigest(delivery.digest)}
+            </span>
+            {delivery.scheme ? <Badge variant="secondary">{delivery.scheme}</Badge> : null}
+          </DetailRow>
         ) : null}
       </div>
+
+      <div className="h-px bg-border" />
 
       {/* Approval scope (access only) */}
       {!isSign && scopeOptions.length > 0 ? (
@@ -335,34 +325,49 @@ export const VaultApprovalCard: React.FC<{
           <span className="px-1 text-xs font-semibold uppercase tracking-wide text-muted">
             {t('vaults.approval.scopeTitle')}
           </span>
-          <div className="flex flex-col gap-2">
+          <div
+            role="radiogroup"
+            aria-label={t('vaults.approval.scopeTitle')}
+            className="flex flex-col gap-2"
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+                e.preventDefault();
+                setScopeIdx((i) => (i + 1) % scopeOptions.length);
+              } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+                e.preventDefault();
+                setScopeIdx((i) => (i - 1 + scopeOptions.length) % scopeOptions.length);
+              }
+            }}
+          >
             {scopeOptions.map((option, idx) => {
               const selected = idx === scopeIdx;
               return (
                 <button
                   key={`${option.scope_type}:${option.scope_ref}`}
                   type="button"
-                  aria-pressed={selected}
+                  role="radio"
+                  aria-checked={selected}
+                  tabIndex={selected ? 0 : -1}
                   onClick={() => setScopeIdx(idx)}
                   className={cn(
-                    'flex items-start gap-3 rounded-xl border p-3 text-left transition-colors',
+                    'flex items-center gap-2.5 rounded-lg border p-2.5 text-left transition-colors',
                     selected ? 'border-mint bg-mint-soft' : 'border-border bg-surface hover:bg-surface-2',
                   )}
                 >
                   <span
                     className={cn(
-                      'mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border',
-                      selected ? 'border-mint bg-mint text-background' : 'border-border-strong',
+                      'flex size-[18px] shrink-0 items-center justify-center rounded-full border-[1.5px]',
+                      selected ? 'border-2 border-mint' : 'border-border-strong',
                     )}
                   >
-                    {selected ? <Check className="size-3" /> : null}
+                    {selected ? <span className="size-2 rounded-full bg-mint" /> : null}
                   </span>
-                  <span className="flex min-w-0 flex-col gap-0.5">
-                    <span className="flex flex-wrap items-center gap-1.5 text-sm font-medium">
+                  <span className="flex min-w-0 flex-col gap-px">
+                    <span className={cn('flex flex-wrap items-center gap-1.5 text-[13px]', selected ? 'font-semibold' : 'font-medium')}>
                       {t(`vaults.approval.scope.${option.scope_type}`, { ref: option.scope_ref })}
                       <Badge variant="secondary">{ttlLabel(option.default_ttl_seconds)}</Badge>
                     </span>
-                    <span className="text-xs text-muted-foreground">
+                    <span className="text-[11px] text-muted-foreground">
                       {t('vaults.approval.scopeMembers', { count: option.member_count })}
                     </span>
                   </span>
@@ -373,15 +378,14 @@ export const VaultApprovalCard: React.FC<{
         </div>
       ) : null}
 
-      {/* Protected unlock + invariant note */}
-      {needsUnlock ? (
-        <div className="flex flex-col gap-2">
-          <VaultProtectedUnlock vault={vault} />
-          <span className="flex items-center gap-1.5 rounded-lg border border-mint/40 bg-mint-soft px-3 py-2 text-xs text-mint">
-            <Lock className="size-3.5 shrink-0" />
-            {isSign ? t('vaults.approval.signNote') : t('vaults.approval.accessNote')}
-          </span>
-        </div>
+      {/* Protected gating: show the browser-unlock panel while locked (it carries its own
+          factor note); once unlocked, show only the design's mint operation note. */}
+      {needsUnlock && !unlocked ? <VaultProtectedUnlock vault={vault} /> : null}
+      {needsUnlock && unlocked ? (
+        <span className="flex items-start gap-2 rounded-lg bg-mint-soft px-3 py-2.5 text-[11.5px] text-foreground">
+          <ShieldCheck className="mt-0.5 size-[15px] shrink-0 text-mint" />
+          {isSign ? t('vaults.approval.signNote') : t('vaults.approval.accessNote')}
+        </span>
       ) : null}
 
       {error ? (
@@ -408,7 +412,13 @@ export const VaultApprovalCard: React.FC<{
             {t('vaults.approval.deny')}
           </Button>
           <Button type="button" onClick={isSign ? approveSign : approveAccess} disabled={approveDisabled}>
-            {busy ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
+            {busy ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : isSign ? (
+              <PenTool className="size-4" />
+            ) : (
+              <Check className="size-4" />
+            )}
             {isSign ? t('vaults.approval.sign') : t('vaults.approval.approve')}
           </Button>
         </div>

@@ -1,18 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
+  Asterisk,
   Check,
-  ChevronDown,
-  ChevronRight,
   Copy,
   Eye,
   EyeOff,
-  KeyRound,
   Loader2,
   RefreshCw,
   Server,
   ShieldCheck,
-  Wallet,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -27,9 +25,12 @@ import {
   type SigningKeyMaterial,
 } from '@/lib/vaultCrypto';
 import { useProtectedVault } from '@/lib/useProtectedVault';
+import { Badge } from './badge';
 import { Button } from './button';
 import { Combobox } from './combobox';
 import { Input } from './input';
+import { SegmentedRadio } from './segmented';
+import { Switch } from './switch';
 import { TagInput } from './tag-input';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 
@@ -90,6 +91,9 @@ function avaultInstalled(dep: DependencyItem | null): boolean {
   return Boolean(dep?.installed);
 }
 
+/** Shared field label — 13px medium, matches design.pen create-dialog field labels. */
+const FIELD_LABEL = 'text-[13px] font-medium text-foreground';
+
 export const VaultSecretForm: React.FC<{
   fixedName?: string;
   onCancel: () => void;
@@ -121,7 +125,8 @@ export const VaultSecretForm: React.FC<{
   const [tags, setTags] = useState<string[]>([]);
   const [description, setDescription] = useState('');
   const [allowHosts, setAllowHosts] = useState<string[]>([]);
-  const [hostsOpen, setHostsOpen] = useState(false);
+  const [alwaysAsk, setAlwaysAsk] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [tagsPending, setTagsPending] = useState(false);
   const [hostsPending, setHostsPending] = useState(false);
   const [protection, setProtection] = useState<VaultProtection>(defaultProtection);
@@ -164,6 +169,7 @@ export const VaultSecretForm: React.FC<{
   const secretName = (fixedName ?? name).trim().toUpperCase();
   const protectedCreateReady = protectedVault.status === 'unlocked';
   const isKeypair = kind === 'keypair';
+  const isProvision = Boolean(fixedName);
 
   // Hold the latest key material in a ref too, so the unmount cleanup can zero
   // the *current* private key (a [] effect would capture a stale value).
@@ -212,21 +218,31 @@ export const VaultSecretForm: React.FC<{
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
     if (!canSubmit) return;
-    // Don't silently drop a half-typed tag/host chip the user can still see.
-    if (tagsPending || (hostsOpen && hostsPending)) {
+    // Don't silently drop a half-typed tag/host chip the user can still see. Both inputs
+    // live in the Advanced collapsible, so only enforce the guard while it's open —
+    // collapsing Advanced also clears the pending flags (see the toggle), so a hidden
+    // draft can never block submit.
+    if (advancedOpen && (tagsPending || hostsPending)) {
       setError(t('vaults.dialog.errors.pendingDraft'));
       return;
     }
     setSubmitting(true);
     setError(null);
     try {
+      // `always_ask` is a real backend policy field (storage/vault_service.py:
+      // `_secret_access_grantable` returns False when set) — the secret is then never
+      // granted in advance, even per-key. Keypairs are already never value-grantable, so
+      // the flag is only meaningful for static secrets.
+      const policy: Record<string, unknown> = {};
+      if (allowHosts.length) policy.allowed_hosts = allowHosts;
+      if (alwaysAsk && !isKeypair) policy.always_ask = true;
       const base = {
         name: secretName,
         protection,
         group: group.trim() || undefined,
         description: description.trim() || undefined,
         tags: tags.length ? tags : undefined,
-        policy: allowHosts.length ? { allowed_hosts: allowHosts } : undefined,
+        policy: Object.keys(policy).length ? policy : undefined,
         ...(isKeypair && signingKey
           ? {
               kind: 'keypair',
@@ -300,89 +316,195 @@ export const VaultSecretForm: React.FC<{
     }
   };
 
-  return (
-    <form className={cn('flex flex-col gap-3', className)} onSubmit={onSubmit}>
-      {!fixedName && (
-        <label className="flex flex-col gap-1.5 text-sm font-medium">
-          {t('vaults.dialog.name')}
-          <Input value={name} onChange={(event) => setName(event.target.value)} autoFocus required />
-        </label>
-      )}
-      {/* Provision ($NAME) requests are for a specific value the agent asked for, so
-          the type selector is hidden there — a provision must stay a static secret,
-          not be fulfilled with a signing key. */}
-      {!fixedName && (
-      <div className="flex flex-col gap-1.5 text-sm font-medium">
-        <span>{t('vaults.dialog.kindLabel')}</span>
-        <div className="grid grid-cols-2 gap-2.5">
-          {(
-            [
-              { key: 'static', icon: KeyRound, title: t('vaults.dialog.kindStatic'), desc: t('vaults.dialog.kindStaticHelp') },
-              { key: 'keypair', icon: Wallet, title: t('vaults.dialog.kindKeypair'), desc: t('vaults.dialog.kindKeypairHelp') },
-            ] as const
-          ).map(({ key, icon: Icon, title, desc }) => {
-            const selected = kind === key;
-            return (
-              <button
-                key={key}
-                type="button"
-                aria-pressed={selected}
-                disabled={submitting}
-                onClick={() => {
-                  setKind(key);
-                  // Leaving keypair: drop any held private key so unused key material
-                  // isn't kept in memory until the dialog closes.
-                  if (key === 'static') {
-                    applySigningKey(null);
-                    setImportHex('');
-                    setSigningError(null);
-                  }
-                }}
-                className={cn(
-                  'flex flex-col gap-1.5 rounded-lg border p-3 text-left transition-colors disabled:opacity-50',
-                  selected ? 'border-mint bg-mint-soft' : 'border-border bg-surface hover:bg-surface-2',
-                )}
-              >
-                <span className="flex items-center gap-2">
-                  <Icon className={cn('size-4', selected ? 'text-mint' : 'text-muted')} />
-                  <span className="text-sm font-semibold text-foreground">{title}</span>
-                </span>
-                <span className="text-xs font-normal text-muted-foreground">{desc}</span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-      )}
+  const valueField = (
+    <div className="flex items-center gap-2">
+      <Input
+        type={showValue ? 'text' : 'password'}
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        placeholder={t('vaults.dialog.valuePlaceholder')}
+        autoFocus={isProvision}
+        required
+        className="min-w-0 flex-1 font-mono"
+      />
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        onClick={() => setShowValue((current) => !current)}
+        aria-label={showValue ? t('vaults.dialog.hideValue') : t('vaults.dialog.showValue')}
+      >
+        {showValue ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+      </Button>
+    </div>
+  );
 
-      {!isKeypair && (
-        <label className="flex flex-col gap-1.5 text-sm font-medium">
-          {t('vaults.dialog.value')}
-          <div className="flex items-center gap-2">
-            <Input
-              type={showValue ? 'text' : 'password'}
-              value={value}
-              onChange={(event) => setValue(event.target.value)}
-              placeholder={t('vaults.dialog.valuePlaceholder')}
-              autoFocus={Boolean(fixedName)}
-              required
-              className="min-w-0 flex-1 font-mono"
-            />
-            <Button
+  // Protection selector — two cards (Standard / Protected) matching design.pen `vyed5`.
+  const protectionCards = (
+    <div className="flex flex-col gap-1.5">
+      <span className={FIELD_LABEL}>{t('vaults.dialog.protection')}</span>
+      <div className="grid grid-cols-2 gap-2.5">
+        {(
+          [
+            { key: 'standard', icon: Server, title: t('vaults.dialog.standardProtection'), desc: t('vaults.dialog.standardHelp') },
+            { key: 'protected', icon: ShieldCheck, title: t('vaults.dialog.protectedProtection'), desc: t('vaults.dialog.protectedHelp') },
+          ] as const
+        ).map(({ key, icon: Icon, title, desc }) => {
+          const selected = protection === key;
+          return (
+            <button
+              key={key}
               type="button"
-              variant="ghost"
-              size="icon"
-              onClick={() => setShowValue((current) => !current)}
-              aria-label={showValue ? t('vaults.dialog.hideValue') : t('vaults.dialog.showValue')}
+              aria-pressed={selected}
+              onClick={() => setProtection(key)}
+              className={cn(
+                'flex flex-col gap-1.5 rounded-[10px] border p-3 text-left transition-colors',
+                selected ? 'border-[1.5px] border-mint bg-mint-soft' : 'border-border bg-surface hover:bg-surface-2',
+              )}
             >
-              {showValue ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-            </Button>
+              <span className="flex items-center gap-2">
+                <Icon className={cn('size-4', selected ? 'text-mint' : 'text-muted')} />
+                <span className="flex-1 text-[13.5px] font-semibold text-foreground">{title}</span>
+                {selected && <Check className="size-4 text-mint" />}
+              </span>
+              <span className="text-[11.5px] leading-snug text-muted-foreground">{desc}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  // Protected setup/unlock gating step + avault availability notices, shared by both modes.
+  const gatingNotices = (
+    <>
+      {protection === 'protected' && !protectedCreateReady && (
+        <VaultProtectedUnlock vault={protectedVault} secretName={secretName || undefined} />
+      )}
+      {protection === 'protected' && protectedCreateReady && <VaultProtectedUnlock vault={protectedVault} />}
+      {protection === 'standard' && checkingAvault && (
+        <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">
+          <Loader2 className="size-4 animate-spin" />
+          {t('vaults.dialog.checkingAvault')}
+        </div>
+      )}
+      {protection === 'standard' && !isKeypair && !checkingAvault && !p2Ready && (
+        <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
+          {standardCreateReady
+            ? t('vaults.dialog.p2UnavailableStandardFallback', {
+                version: AVAULT_P2_MIN_VERSION,
+                installed: avaultDep?.version ?? 'unknown',
+              })
+            : t('vaults.dialog.p2Unavailable', {
+                version: AVAULT_P2_MIN_VERSION,
+                installed: avaultDep?.version ?? 'unknown',
+              })}
+        </div>
+      )}
+      {error && (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {error}
+        </div>
+      )}
+    </>
+  );
+
+  // ---- Provision ($NAME) mode — design.pen `F4N19` (SecureInputCard) ------------------
+  // A provision fulfils a specific value the agent asked for, so the kind/group/advanced
+  // controls are hidden: it must stay a static secret. The same submit path is used.
+  if (isProvision) {
+    return (
+      <form className={cn('flex flex-col gap-4', className)} onSubmit={onSubmit}>
+        {/* Name highlight — the secret the agent is waiting on (design.pen `F4N19`). */}
+        <div className="flex items-center gap-3 rounded-xl bg-accent/15 p-3.5">
+          <Asterisk className="size-[18px] shrink-0 text-accent" />
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span className="text-[10px] font-semibold uppercase tracking-wide text-muted">{t('vaults.dialog.nameUpper')}</span>
+            <span className="truncate font-mono text-[15px] font-semibold text-foreground">{secretName}</span>
           </div>
+          <Badge variant="secondary" className="bg-surface">{t('vaults.request.notSetYet')}</Badge>
+        </div>
+
+        <label className="flex flex-col gap-1.5">
+          <span className={FIELD_LABEL}>{t('vaults.dialog.value')}</span>
+          {valueField}
+          <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.provisionValueHelp')}</span>
+        </label>
+
+        <div className="flex flex-col gap-1.5">
+          <span className={FIELD_LABEL}>{t('vaults.dialog.storeAs')}</span>
+          <div className="self-start">
+            <SegmentedRadio<VaultProtection>
+              value={protection}
+              onChange={setProtection}
+              ariaLabel={t('vaults.dialog.storeAs')}
+              options={[
+                { id: 'standard', label: t('vaults.dialog.standardProtection') },
+                { id: 'protected', label: t('vaults.dialog.protectedProtection') },
+              ]}
+            />
+          </div>
+        </div>
+
+        {gatingNotices}
+
+        <div className="mt-1 flex justify-end gap-2">
+          <Button type="button" variant="ghost" onClick={onCancel} disabled={submitting}>
+            {t('vaults.request.dismiss')}
+          </Button>
+          <Button type="submit" disabled={!canSubmit}>
+            {submitting ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
+            {t('vaults.request.saveAndWake')}
+          </Button>
+        </div>
+      </form>
+    );
+  }
+
+  // ---- Create mode — design.pen `vyed5` ----------------------------------------------
+  return (
+    <form className={cn('flex flex-col gap-4', className)} onSubmit={onSubmit}>
+      {/* Kind — 2-segment toggle (Static value | Signing key). */}
+      <div className="flex flex-col gap-1.5">
+        <span className={FIELD_LABEL}>{t('vaults.dialog.kindLabel')}</span>
+        <SegmentedRadio<VaultKind>
+          value={kind}
+          onChange={(next) => {
+            setKind(next);
+            // Leaving keypair: drop any held private key so unused key material isn't kept
+            // in memory until the dialog closes.
+            if (next === 'static') {
+              applySigningKey(null);
+              setImportHex('');
+              setSigningError(null);
+            }
+          }}
+          disabled={submitting}
+          ariaLabel={t('vaults.dialog.kindLabel')}
+          options={[
+            { id: 'static', label: t('vaults.dialog.kindStatic') },
+            { id: 'keypair', label: t('vaults.dialog.kindKeypair') },
+          ]}
+        />
+      </div>
+
+      {/* Name */}
+      <label className="flex flex-col gap-1.5">
+        <span className={FIELD_LABEL}>{t('vaults.dialog.name')}</span>
+        <Input value={name} onChange={(event) => setName(event.target.value)} autoFocus required className="font-mono" />
+        <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.nameHint')}</span>
+      </label>
+
+      {/* Value (static) or signing-key builder (keypair) */}
+      {!isKeypair && (
+        <label className="flex flex-col gap-1.5">
+          <span className={FIELD_LABEL}>{t('vaults.dialog.value')}</span>
+          {valueField}
         </label>
       )}
 
       {isKeypair && (
-        <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-surface-2 px-3 py-3">
+        <div className="flex flex-col gap-2.5 rounded-[10px] border border-border bg-surface-2 px-3 py-3">
           <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingKeyHelp')}</span>
           <div className="grid grid-cols-2 gap-2">
             {(['generate', 'import'] as const).map((src) => (
@@ -486,132 +608,119 @@ export const VaultSecretForm: React.FC<{
           )}
         </div>
       )}
-      <label className="flex flex-col gap-1.5 text-sm font-medium">
-        {t('vaults.dialog.group')}
+
+      {/* Protection */}
+      {protectionCards}
+
+      {/* Group */}
+      <label className="flex flex-col gap-1.5">
+        <span className={FIELD_LABEL}>{t('vaults.dialog.group')}</span>
         <Combobox
           options={[...new Set([DEFAULT_GROUP, ...groups])].map((g) => ({ value: g, label: g }))}
           value={group}
           onValueChange={setGroup}
           allowCustomValue
           commitOnClose
+          withFolderIcon
           createLabel={(v) => t('vaults.dialog.groupCreate', { name: v })}
+          createButtonLabel={t('vaults.dialog.groupCreateCta')}
           createHeading={t('vaults.dialog.groupCreateHeading')}
           placeholder={t('vaults.dialog.groupPlaceholder')}
           searchPlaceholder={t('vaults.dialog.groupSearch')}
         />
       </label>
-      <label className="flex flex-col gap-1.5 text-sm font-medium">
-        {t('vaults.dialog.description')}
-        <Input value={description} onChange={(event) => setDescription(event.target.value)} />
-      </label>
-      <div className="flex flex-col gap-1.5 text-sm font-medium">
-        <span>{t('vaults.dialog.tags')}</span>
-        <TagInput
-          values={tags}
-          onChange={setTags}
-          placeholder={t('vaults.dialog.tagsPlaceholder')}
-          ariaLabel={t('vaults.dialog.tags')}
-          removeLabel={(value) => t('vaults.dialog.removeChip', { value })}
-          onPendingChange={setTagsPending}
-        />
-        <span className="text-xs font-normal text-muted-foreground">{t('vaults.dialog.tagsHelp')}</span>
-      </div>
-      <div className="flex flex-col gap-1.5 text-sm font-medium">
+
+      {/* Advanced — collapsible: description, tags, allowed hosts, always-ask. */}
+      <div className="flex flex-col overflow-hidden rounded-[10px] bg-surface-2">
         <button
           type="button"
-          onClick={() =>
-            setHostsOpen((open) => {
-              if (open) setHostsPending(false);
+          onClick={() => {
+            setAdvancedOpen((open) => {
+              // Collapsing hides the tag/host inputs — drop their pending-draft flags so a
+              // draft the user can no longer see doesn't block submit.
+              if (open) {
+                setHostsPending(false);
+                setTagsPending(false);
+              }
               return !open;
-            })
-          }
-          aria-expanded={hostsOpen}
-          className="flex items-center gap-1.5 text-left text-sm font-medium text-muted-foreground hover:text-foreground"
+            });
+          }}
+          aria-expanded={advancedOpen}
+          className="flex items-center gap-1.5 px-3 py-2.5 text-left"
         >
-          {hostsOpen ? <ChevronDown className="size-4 shrink-0" /> : <ChevronRight className="size-4 shrink-0" />}
-          {t('vaults.dialog.allowHosts')}
-          {!hostsOpen && allowHosts.length > 0 && (
-            <span className="rounded bg-surface-2 px-1.5 py-0.5 text-xs font-normal text-foreground">{allowHosts.length}</span>
+          <SlidersHorizontal className="size-3.5 text-muted" />
+          <span className="flex-1 text-xs font-semibold text-foreground">{t('vaults.dialog.advanced')}</span>
+          {!advancedOpen && (description || tags.length > 0 || allowHosts.length > 0 || alwaysAsk) && (
+            <span className="size-1.5 rounded-full bg-mint" aria-hidden />
           )}
         </button>
-        {hostsOpen && (
-          <>
-            <TagInput
-              values={allowHosts}
-              onChange={setAllowHosts}
-              normalize={normalizeHost}
-              placeholder={t('vaults.dialog.allowHostsPlaceholder')}
-              ariaLabel={t('vaults.dialog.allowHosts')}
-              removeLabel={(value) => t('vaults.dialog.removeChip', { value })}
-              onPendingChange={setHostsPending}
-            />
-            <span className="text-xs font-normal text-muted-foreground">{t('vaults.dialog.allowHostsHelp')}</span>
-          </>
+        {advancedOpen && (
+          <div className="flex flex-col gap-3 px-3 pb-3">
+            {/* Description (kept functional; absent from the vyed5 mock — folded here). */}
+            <label className="flex flex-col gap-1.5">
+              <span className={FIELD_LABEL}>{t('vaults.dialog.description')}</span>
+              <Input
+                value={description}
+                onChange={(event) => setDescription(event.target.value)}
+                placeholder={t('vaults.dialog.descriptionPlaceholder')}
+              />
+            </label>
+
+            {/* Tags (kept functional; absent from the vyed5 mock — folded here). */}
+            <div className="flex flex-col gap-1.5">
+              <span className={FIELD_LABEL}>{t('vaults.dialog.tags')}</span>
+              <TagInput
+                values={tags}
+                onChange={setTags}
+                placeholder={t('vaults.dialog.tagsPlaceholder')}
+                ariaLabel={t('vaults.dialog.tags')}
+                removeLabel={(value) => t('vaults.dialog.removeChip', { value })}
+                onPendingChange={setTagsPending}
+              />
+              <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.tagsHelp')}</span>
+            </div>
+
+            {/* Allowed hosts (for proxy fetch). */}
+            <div className="flex flex-col gap-1.5">
+              <span className={FIELD_LABEL}>{t('vaults.dialog.allowHosts')}</span>
+              <TagInput
+                values={allowHosts}
+                onChange={setAllowHosts}
+                normalize={normalizeHost}
+                placeholder={t('vaults.dialog.allowHostsPlaceholder')}
+                ariaLabel={t('vaults.dialog.allowHosts')}
+                removeLabel={(value) => t('vaults.dialog.removeChip', { value })}
+                onPendingChange={setHostsPending}
+              />
+              <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.allowHostsHelp')}</span>
+            </div>
+
+            {/* Always ask before each use → policy.always_ask (static secrets only). */}
+            <div className="flex items-center gap-3">
+              <div className="flex min-w-0 flex-1 flex-col">
+                <span className={FIELD_LABEL}>{t('vaults.dialog.alwaysAsk')}</span>
+                <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.alwaysAskHelp')}</span>
+              </div>
+              <Switch
+                checked={alwaysAsk}
+                onCheckedChange={setAlwaysAsk}
+                disabled={isKeypair}
+                label={t('vaults.dialog.alwaysAsk')}
+              />
+            </div>
+          </div>
         )}
       </div>
-      <div className="flex flex-col gap-1.5 text-sm font-medium">
-        <span>{t('vaults.dialog.protection')}</span>
-        <div className="grid grid-cols-2 gap-2.5">
-          {(
-            [
-              { key: 'standard', icon: Server, title: t('vaults.dialog.standardProtection'), desc: t('vaults.dialog.standardHelp') },
-              { key: 'protected', icon: ShieldCheck, title: t('vaults.dialog.protectedProtection'), desc: t('vaults.dialog.protectedHelp') },
-            ] as const
-          ).map(({ key, icon: Icon, title, desc }) => {
-            const selected = protection === key;
-            return (
-              <button
-                key={key}
-                type="button"
-                aria-pressed={selected}
-                onClick={() => setProtection(key)}
-                className={cn(
-                  'flex flex-col gap-1.5 rounded-lg border p-3 text-left transition-colors',
-                  selected ? 'border-mint bg-mint-soft' : 'border-border bg-surface hover:bg-surface-2',
-                )}
-              >
-                <span className="flex items-center gap-2">
-                  <Icon className={cn('size-4', selected ? 'text-mint' : 'text-muted')} />
-                  <span className="text-sm font-semibold text-foreground">{title}</span>
-                </span>
-                <span className="text-xs font-normal text-muted-foreground">{desc}</span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-      {protection === 'protected' && <VaultProtectedUnlock vault={protectedVault} />}
-      {protection === 'standard' && checkingAvault && (
-        <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">
-          <Loader2 className="size-4 animate-spin" />
-          {t('vaults.dialog.checkingAvault')}
-        </div>
-      )}
-      {protection === 'standard' && !isKeypair && !checkingAvault && !p2Ready && (
-        <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
-          {standardCreateReady
-            ? t('vaults.dialog.p2UnavailableStandardFallback', {
-                version: AVAULT_P2_MIN_VERSION,
-                installed: avaultDep?.version ?? 'unknown',
-              })
-            : t('vaults.dialog.p2Unavailable', {
-                version: AVAULT_P2_MIN_VERSION,
-                installed: avaultDep?.version ?? 'unknown',
-              })}
-        </div>
-      )}
-      {error && (
-        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          {error}
-        </div>
-      )}
-      <div className="mt-2 flex justify-end gap-2">
+
+      {gatingNotices}
+
+      <div className="mt-1 flex justify-end gap-2">
         <Button type="button" variant="ghost" onClick={onCancel} disabled={submitting}>
           {t('vaults.dialog.cancel')}
         </Button>
         <Button type="submit" disabled={!canSubmit}>
           {submitting && <Loader2 className="size-4 animate-spin" />}
-          {t('vaults.dialog.save')}
+          {t('vaults.dialog.createSecret')}
         </Button>
       </div>
     </form>

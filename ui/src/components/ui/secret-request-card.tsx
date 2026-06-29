@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { CheckCircle2, KeyRound } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { badgeVariants } from './badge';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from './dialog';
+import { Dialog, DialogContent } from './dialog';
 import { VaultSecretForm } from './vault-secret-form';
 import { cn } from '@/lib/utils';
 
@@ -37,21 +37,25 @@ export const SecretRequestCard: React.FC<{ name: string }> = ({ name }) => {
       </button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t('vaults.request.title', { name })}</DialogTitle>
-          </DialogHeader>
-          <div className="flex flex-col gap-3">
-            <p className="text-sm text-muted">{t('vaults.request.help')}</p>
-            <VaultSecretForm
-              fixedName={name}
-              onCancel={() => setOpen(false)}
-              onCreated={() => {
-                setFulfilled(true);
-                setOpen(false);
-              }}
-              treatExistingAsFulfilled
-            />
+          {/* Header — design.pen `F4N19` (SecureInputCard): cyan key + ask copy. */}
+          <div className="flex items-start gap-3 pr-6">
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-accent/15 text-accent">
+              <KeyRound className="size-5" />
+            </span>
+            <div className="flex flex-col gap-0.5">
+              <span className="text-[15px] font-semibold text-foreground">{t('vaults.request.title')}</span>
+              <span className="text-xs text-muted-foreground">{t('vaults.request.help')}</span>
+            </div>
           </div>
+          <VaultSecretForm
+            fixedName={name}
+            onCancel={() => setOpen(false)}
+            onCreated={() => {
+              setFulfilled(true);
+              setOpen(false);
+            }}
+            treatExistingAsFulfilled
+          />
         </DialogContent>
       </Dialog>
     </>
