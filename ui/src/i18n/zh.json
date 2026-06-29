@@ -626,7 +626,8 @@
       "saveBeforePopOut": "请先保存，再在新窗口中打开",
       "confirmDiscardClose": "放弃未保存的更改并关闭此窗口？",
       "selectAll": "全选",
-      "copyAll": "全部复制"
+      "copyAll": "全部复制",
+      "untitled": "未命名-{{n}}"
     },
     "dock": {
       "newInstanceHint": "⌘ 点击可新建窗口",
@@ -716,6 +717,15 @@
         "interrupt": "^C",
         "pipe": "|"
       }
+    },
+    "picker": {
+      "openFolderTitle": "打开文件夹",
+      "saveFileTitle": "保存文件",
+      "selectFolder": "选择此文件夹",
+      "save": "保存",
+      "fileName": "文件名",
+      "newFolder": "新建文件夹",
+      "newFolderName": "文件夹名称"
     }
   },
   "appShell": {

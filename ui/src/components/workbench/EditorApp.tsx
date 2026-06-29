@@ -1,19 +1,30 @@
-import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import { Blocks, Bug, Clock, CodeXml, FilePlus, Files, FolderOpen, GitBranch, Search, Settings, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
-import { useWindowCloseGuard, useWindowManager } from '../../context/WindowManagerContext';
-import { downloadFile, fileBrowserErrorMessage, fileMeta, isPlainEntryName, joinPath, listDir, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
+import { useWindowCloseGuard } from '../../context/WindowManagerContext';
+import { downloadFile, fileMeta, joinPath, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
 import { isEditableFile } from '../../lib/filePreview';
 import { FileTree } from './FileTree';
+import { FilePicker, type FilePickerMode } from './FilePicker';
 
 const FileEditorPane = lazy(() => import('./FileEditorPane').then((m) => ({ default: m.FileEditorPane })));
 
 // A tab carries the file's mtime captured at open time, so saving stays conditional on it
 // (writeFile's expected_mtime) and the backend can surface a conflict instead of silently
-// clobbering newer on-disk content.
-type Tab = { path: string; name: string; mtime: number | null };
+// clobbering newer on-disk content. `path` is null for an unsaved "untitled" buffer (a VS
+// Code-style new file): it lives only in memory until the first save picks a location. Tabs are
+// keyed by a synthetic `id` (not the path) so an untitled tab survives becoming a saved file.
+type Tab = { id: string; path: string | null; name: string; mtime: number | null };
+
+// A pending file dialog, rendered as the in-window FilePicker overlay.
+type PickerState = {
+  mode: FilePickerMode;
+  initialPath: string | null;
+  defaultName?: string;
+  onConfirm: (result: { path: string; name?: string }) => Promise<void> | void;
+};
 
 // Human language label for the status bar (design dnYPx shows e.g. "TypeScript React").
 const LANGUAGE_LABEL: Record<string, string> = {
@@ -62,23 +73,36 @@ function languageLabel(filename: string | undefined): string | undefined {
 }
 
 // The Editor IDE (design dnYPx + welcome w0qoC): activity bar + collapsible explorer tree +
-// editor tabs + Monaco + cyan status bar; a VS-Code-style welcome when nothing is open.
-// Monaco is fully integrated here. Files opens a file via openApp('editor', { params: { path } }).
+// editor tabs + Monaco + cyan status bar; a VS-Code-style welcome when nothing is open. Monaco is
+// fully integrated here. Files opens a file via openApp('editor', { params: { path } }). Open
+// Folder / Save use the in-window FilePicker (browsing the real filesystem), and New File opens an
+// untitled buffer that picks its location only on first save.
 export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, unknown> }> = ({ windowId, params }) => {
   const { t } = useTranslation();
-  const wm = useWindowManager();
   const [root, setRoot] = useState<string | null>(null);
   const [tabs, setTabs] = useState<Tab[]>([]);
-  const [active, setActive] = useState<string | null>(null);
-  const [dirty, setDirty] = useState<Record<string, boolean>>({});
+  const [active, setActive] = useState<string | null>(null); // active tab id
+  const [dirty, setDirty] = useState<Record<string, boolean>>({}); // keyed by tab id
   const [cursor, setCursor] = useState<{ line: number; col: number } | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [picker, setPicker] = useState<PickerState | null>(null);
+  const tabSeq = useRef(0);
+  const untitledSeq = useRef(0);
+  // Latest tabs for dedup / id-resolution outside the setState updater (avoids side effects in a
+  // reducer while still keying on the synthetic id).
+  const tabsRef = useRef<Tab[]>(tabs);
+  tabsRef.current = tabs;
 
   const openFile = useCallback((path: string, name: string, mtime: number | null) => {
     setRoot((r) => r ?? parentDir(path));
-    setTabs((ts) => (ts.some((x) => x.path === path) ? ts : [...ts, { path, name, mtime }]));
     setCursor(null);
-    setActive(path);
+    const existing = tabsRef.current.find((x) => x.path === path);
+    if (existing) {
+      setActive(existing.id);
+      return;
+    }
+    const id = `t${++tabSeq.current}`;
+    setTabs((ts) => [...ts, { id, path, name, mtime }]);
+    setActive(id);
   }, []);
 
   // The explorer tree emits a clicked entry. Gate it like the File Browser: only a regular,
@@ -122,68 +146,86 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   const anyDirty = Object.values(dirty).some(Boolean);
   useWindowCloseGuard(windowId, anyDirty ? t('apps.editor.confirmDiscardClose') : null);
 
-  const closeTab = (path: string) => {
+  const closeTab = (id: string) => {
     // Closing a dirty tab drops its in-memory buffer (only the window-level guard existed before),
     // so confirm first when there are unsaved edits.
-    if (dirty[path] && !window.confirm(t('apps.editor.confirmDiscardClose'))) return;
-    setTabs((ts) => {
-      const rest = ts.filter((x) => x.path !== path);
-      setActive((cur) => (cur === path ? (rest.length ? rest[rest.length - 1].path : null) : cur));
-      return rest;
-    });
+    if (dirty[id] && !window.confirm(t('apps.editor.confirmDiscardClose'))) return;
+    const rest = tabsRef.current.filter((x) => x.id !== id);
+    setTabs(rest);
+    if (active === id) setActive(rest.length ? rest[rest.length - 1].id : null);
     setDirty((d) => {
       const n = { ...d };
-      delete n[path];
+      delete n[id];
       return n;
     });
   };
 
-  // Prompt for + validate a folder, set it as the explorer root, and RETURN it (or null) so
-  // callers like New File can continue the flow with the chosen folder.
-  const openFolder = async (): Promise<string | null> => {
-    const p = window.prompt(t('apps.editor.openFolderPrompt'));
-    const path = p?.trim();
-    if (!path) return null;
-    // Validate it's a listable directory before swapping the explorer root, so a typo doesn't
-    // leave the tree stuck on a bad/non-existent path.
-    try {
-      await listDir(path);
-      setError(null);
-      setRoot(path);
-      return path;
-    } catch (e: unknown) {
-      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.listFailed')));
-      return null;
-    }
-  };
-  const newFile = async () => {
-    // From the welcome state there's no folder yet: prompt for one and CONTINUE creating the file
-    // in it (rather than behaving like a bare "Open Folder").
-    const dir = root ?? (await openFolder());
-    if (!dir) return;
-    const raw = window.prompt(t('apps.fileBrowser.newFilePrompt'));
-    if (raw == null) return;
-    const name = raw.trim();
-    if (name === '') return;
-    if (!isPlainEntryName(name)) {
-      setError(t('apps.fileBrowser.errors.invalid_name'));
-      return;
-    }
-    const full = joinPath(dir, name);
-    try {
-      // create-only: the backend atomically refuses (errors.exists) if the name is taken, so a
-      // typo can never truncate an existing file.
-      const result = await writeFile(full, '', undefined, true);
-      openFile(full, name, result.mtime);
-    } catch (e: unknown) {
-      setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.saveFailed')));
-    }
-  };
+  // Open Folder: pick a folder via the in-window FilePicker (no manual path typing), set it as the
+  // explorer root. The picker only resolves to listable folders, so no extra validation is needed.
+  const openFolder = useCallback(() => {
+    setPicker({
+      mode: 'open-directory',
+      initialPath: root,
+      onConfirm: ({ path }) => {
+        setRoot(path);
+        setPicker(null);
+      },
+    });
+  }, [root]);
+
+  // New File: open an empty untitled buffer (VS Code-style). It has no path until the first save.
+  const newFile = useCallback(() => {
+    const id = `t${++tabSeq.current}`;
+    setTabs((ts) => [...ts, { id, path: null, name: t('apps.editor.untitled', { n: ++untitledSeq.current }), mtime: null }]);
+    setActive(id);
+    setCursor(null);
+  }, [t]);
+
+  // Save As (for an untitled buffer): pick a folder + filename, write create-only (so it can't
+  // clobber an existing file), then re-point the tab at the chosen path. A name clash throws
+  // errors.exists, which keeps the picker open with the message so the user can rename.
+  const saveAs = useCallback(
+    (tabId: string, text: string) => {
+      setPicker({
+        mode: 'save-file',
+        initialPath: root,
+        onConfirm: async ({ path, name }) => {
+          const full = joinPath(path, name as string);
+          const result = await writeFile(full, text, undefined, true);
+          setTabs((ts) => ts.map((x) => (x.id === tabId ? { ...x, path: full, name: name as string, mtime: result.mtime } : x)));
+          setRoot((r) => r ?? path);
+          setPicker(null);
+        },
+      });
+    },
+    [root],
+  );
+
+  // ⌘O Open Folder · ⌘N New File — only while THIS editor window holds focus (several windows can
+  // be open). Capture phase + preventDefault so ⌘O doesn't fall through to the browser's open dialog.
+  useEffect(() => {
+    if (!windowId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      const k = e.key.toLowerCase();
+      if (k !== 'o' && k !== 'n') return;
+      if (picker) return; // a dialog is already open
+      const winEl = (document.activeElement as Element | null)?.closest('[data-window-id]');
+      if (winEl?.getAttribute('data-window-id') !== windowId) return;
+      e.preventDefault();
+      if (k === 'o') openFolder();
+      else newFile();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [windowId, openFolder, newFile, picker]);
 
   const ACTIVITY = [Files, Search, GitBranch, Bug, Blocks];
+  const showWelcome = root == null && tabs.length === 0;
+  const activeName = tabs.find((x) => x.id === active)?.name;
 
   return (
-    <div className="flex h-full min-h-0 w-full flex-col bg-surface">
+    <div className="relative flex h-full min-h-0 w-full flex-col bg-surface">
       <div className="flex min-h-0 flex-1">
         {/* Activity bar */}
         <div className="flex w-12 shrink-0 flex-col items-center justify-between border-r border-border bg-surface-3 py-3">
@@ -210,52 +252,46 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                 <FolderOpen className="size-3.5" />
                 {t('apps.editor.openFolder')}
               </button>
-              {/* Folder-validation errors (bad path / permission) must surface here too — the
-                  main-area error banner only renders once a folder is open. */}
-              {error && (
-                <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-2 py-1.5 text-[11.5px] text-destructive">
-                  {error}
-                </div>
-              )}
             </div>
           ) : (
             <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">
-              <FileTree rootPath={root} rootName={root.split('/').filter(Boolean).pop() || root} activePath={active} onOpenFile={onTreeOpen} />
+              <FileTree rootPath={root} rootName={root.split('/').filter(Boolean).pop() || root} activePath={tabs.find((x) => x.id === active)?.path ?? null} onOpenFile={onTreeOpen} />
             </div>
           )}
         </div>
 
-        {/* Main area: welcome (no folder) · tabs + Monaco (file open) · select-a-file hint (folder, no file). */}
+        {/* Main area: welcome (nothing open) · tabs + Monaco (a file or untitled buffer open) ·
+            select-a-file hint (folder open, no tab). */}
         <div className="flex min-w-0 flex-1 flex-col bg-surface">
-          {root == null ? (
-            <Welcome onOpenFolder={openFolder} onNewFile={newFile} onOpenFiles={() => wm.openApp('files')} />
+          {showWelcome ? (
+            <Welcome onOpenFolder={openFolder} onNewFile={newFile} />
           ) : (
             <>
               {tabs.length > 0 && (
                 <div className="flex items-center overflow-x-auto border-b border-border bg-surface-2">
                   {tabs.map((tab) => (
                     <div
-                      key={tab.path}
+                      key={tab.id}
                       className={clsx(
                         'group/tab flex shrink-0 items-center gap-2 border-r border-border px-3 py-2 text-[12px] transition',
-                        active === tab.path ? 'bg-surface text-foreground shadow-[inset_0_2px_0_0_var(--cyan)]' : 'text-muted hover:bg-foreground/[0.04]',
+                        active === tab.id ? 'bg-surface text-foreground shadow-[inset_0_2px_0_0_var(--cyan)]' : 'text-muted hover:bg-foreground/[0.04]',
                       )}
                     >
                       <button
                         type="button"
                         onClick={() => {
-                          if (tab.path !== active) setCursor(null);
-                          setActive(tab.path);
+                          if (tab.id !== active) setCursor(null);
+                          setActive(tab.id);
                         }}
                         className="flex items-center gap-1.5"
                       >
                         <CodeXml className="size-3.5 text-cyan" />
                         {tab.name}
-                        {dirty[tab.path] && <span className="size-1.5 rounded-full bg-mint" />}
+                        {dirty[tab.id] && <span className="size-1.5 rounded-full bg-mint" />}
                       </button>
                       <button
                         type="button"
-                        onClick={() => closeTab(tab.path)}
+                        onClick={() => closeTab(tab.id)}
                         aria-label={t('common.close')}
                         className="grid size-4 place-items-center rounded text-muted opacity-0 transition hover:bg-foreground/10 hover:text-foreground group-hover/tab:opacity-100"
                       >
@@ -266,22 +302,21 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                 </div>
               )}
 
-              {error && <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive">{error}</div>}
-
               <div className="relative min-h-0 flex-1">
                 {tabs.length === 0 ? (
                   <div className="grid h-full place-items-center text-[12.5px] text-muted">{t('apps.editor.selectFileHint')}</div>
                 ) : (
                   tabs.map((tab) => (
-                    <div key={tab.path} className={clsx('absolute inset-0', active === tab.path ? 'block' : 'hidden')}>
+                    <div key={tab.id} className={clsx('absolute inset-0', active === tab.id ? 'block' : 'hidden')}>
                       <Suspense fallback={<div className="grid h-full place-items-center text-[12px] text-muted">{t('common.loading')}</div>}>
                         <FileEditorPane
                           path={tab.path}
                           filename={tab.name}
                           mtime={tab.mtime}
                           chromeless
-                          onDirtyChange={(d) => setDirty((prev) => (prev[tab.path] === d ? prev : { ...prev, [tab.path]: d }))}
-                          onCursor={active === tab.path ? (line, col) => setCursor({ line, col }) : undefined}
+                          onDirtyChange={(d) => setDirty((prev) => (prev[tab.id] === d ? prev : { ...prev, [tab.id]: d }))}
+                          onCursor={active === tab.id ? (line, col) => setCursor({ line, col }) : undefined}
+                          onSaveAs={(textValue) => saveAs(tab.id, textValue)}
                         />
                       </Suspense>
                     </div>
@@ -302,22 +337,31 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
           <>
             <span className="ml-auto tabular-nums">{t('apps.editor.lineCol', { line: cursor?.line ?? 1, col: cursor?.col ?? 1 })}</span>
             <span>{t('apps.editor.spaces', { n: 2 })}</span>
-            <span className="truncate">{languageLabel(tabs.find((x) => x.path === active)?.name) ?? t('apps.editor.plainText')}</span>
+            <span className="truncate">{languageLabel(activeName) ?? t('apps.editor.plainText')}</span>
           </>
         ) : (
           <span className="ml-auto truncate opacity-80">{t('apps.editor.label')}</span>
         )}
       </div>
+
+      {picker && (
+        <FilePicker
+          mode={picker.mode}
+          initialPath={picker.initialPath}
+          defaultName={picker.defaultName}
+          onCancel={() => setPicker(null)}
+          onConfirm={picker.onConfirm}
+        />
+      )}
     </div>
   );
 };
 
-const Welcome: React.FC<{ onOpenFolder: () => void; onNewFile: () => void; onOpenFiles: () => void }> = ({ onOpenFolder, onNewFile, onOpenFiles }) => {
+const Welcome: React.FC<{ onOpenFolder: () => void; onNewFile: () => void }> = ({ onOpenFolder, onNewFile }) => {
   const { t } = useTranslation();
   const actions: { Icon: typeof FolderOpen; color: string; label: string; onClick: () => void; sc?: string }[] = [
     { Icon: FolderOpen, color: 'text-cyan', label: t('apps.editor.openFolder'), onClick: onOpenFolder, sc: '⌘O' },
     { Icon: FilePlus, color: 'text-mint', label: t('apps.fileBrowser.newFile'), onClick: onNewFile, sc: '⌘N' },
-    { Icon: Files, color: 'text-violet', label: t('apps.editor.browseFiles'), onClick: onOpenFiles },
   ];
   return (
     <div className="grid min-w-0 flex-1 place-items-center bg-surface p-10">

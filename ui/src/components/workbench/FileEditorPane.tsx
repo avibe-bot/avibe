@@ -76,7 +76,8 @@ function monacoLanguage(filename: string): string | undefined {
 // the new window saves against the current revision (this pane may have saved
 // since the row was opened), not the stale metadata the row carried.
 export const FileEditorPane: React.FC<{
-  path: string;
+  /** null = an unsaved "untitled" buffer (no file yet); ⌘S routes through onSaveAs (save-as). */
+  path: string | null;
   filename: string;
   mtime: number | null;
   readOnly?: boolean;
@@ -93,7 +94,12 @@ export const FileEditorPane: React.FC<{
   chromeless?: boolean;
   /** Live 1-based cursor position, surfaced in the IDE status bar. */
   onCursor?: (line: number, column: number) => void;
-}> = ({ path, filename, mtime, readOnly = false, onPopOut, windowId, onDirtyChange, chromeless = false, onCursor }) => {
+  /**
+   * Untitled buffers (path === null) call this with the buffer text on save; the parent runs the
+   * save-as picker + write, then re-points this pane at the chosen path.
+   */
+  onSaveAs?: (text: string) => void;
+}> = ({ path, filename, mtime, readOnly = false, onPopOut, windowId, onDirtyChange, chromeless = false, onCursor, onSaveAs }) => {
   const { t } = useTranslation();
   const { resolvedTheme } = useTheme();
   const [text, setText] = useState<string | null>(null);
@@ -105,10 +111,18 @@ export const FileEditorPane: React.FC<{
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
     setError(null);
-    setText(null);
     setSavedMtime(mtime);
+    // Untitled buffer (no path yet): start empty with no fetch. Saving opens the save-as picker;
+    // once written, the parent re-points this pane at the real path and this effect re-runs to read it.
+    if (path === null) {
+      setText('');
+      setOriginal('');
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setText(null);
     readText(path)
       .then((body) => {
         if (cancelled) return;
@@ -138,16 +152,23 @@ export const FileEditorPane: React.FC<{
   // other looking dirty and false-conflicting. Prefix a per-instance id; keep the file
   // extension so Monaco's TS worker still picks JSX/TSX for .tsx/.jsx.
   const editorUid = useId();
-  const monacoPath = `${editorUid.replace(/:/g, '')}/${path.replace(/^\/+/, '')}`;
+  const monacoPath = `${editorUid.replace(/:/g, '')}/${(path ?? 'untitled').replace(/^\/+/, '')}`;
 
   // Veto closing the owning window while there are unsaved edits (the close unmounts
   // this pane and the buffer only lives in React state). No-op for the full-page route.
   useWindowCloseGuard(windowId, dirty ? t('apps.editor.confirmDiscardClose') : null);
 
   async function save() {
+    if (text === null || saving || readOnly) return;
+    // Untitled: hand the buffer text up so the parent runs the save-as picker + write (an empty new
+    // file is allowed to be saved, unlike a clean existing file which skips the no-op PUT below).
+    if (path === null) {
+      onSaveAs?.(text);
+      return;
+    }
     // ⌘S reaches here even when the buffer is clean (the visible Save button is disabled but the
     // Monaco command isn't); skip the no-op PUT so it doesn't bump mtime / wake file watchers.
-    if (text === null || saving || readOnly || !dirty) return;
+    if (!dirty) return;
     setSaving(true);
     setError(null);
     try {

@@ -626,7 +626,8 @@
       "saveBeforePopOut": "Save before opening in a window",
       "confirmDiscardClose": "Discard unsaved changes and close this window?",
       "selectAll": "Select all",
-      "copyAll": "Copy all"
+      "copyAll": "Copy all",
+      "untitled": "Untitled-{{n}}"
     },
     "dock": {
       "newInstanceHint": "⌘-click for a new window",
@@ -716,6 +717,15 @@
         "interrupt": "^C",
         "pipe": "|"
       }
+    },
+    "picker": {
+      "openFolderTitle": "Open Folder",
+      "saveFileTitle": "Save File",
+      "selectFolder": "Select Folder",
+      "save": "Save",
+      "fileName": "File name",
+      "newFolder": "New Folder",
+      "newFolderName": "Folder name"
     }
   },
   "appShell": {
