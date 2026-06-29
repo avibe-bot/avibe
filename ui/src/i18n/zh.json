@@ -716,7 +716,8 @@
         "right": "→",
         "interrupt": "^C",
         "pipe": "|"
-      }
+      },
+      "renameHint": "双击重命名"
     },
     "picker": {
       "openFolderTitle": "打开文件夹",

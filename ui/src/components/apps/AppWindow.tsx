@@ -32,6 +32,19 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
   // CSS owns the timing). Minimizing is a pure mounted hide (see className) so the
   // window body — terminal session, editor buffer — stays alive and intact.
   const [exitKind, setExitKind] = useState<'close' | null>(null);
+  // Briefly enable a geometry transition while a maximize/restore toggle is animating (see the
+  // className), then drop it so a drag/resize stays instant (a transition there would lag the pointer).
+  const [animatingMax, setAnimatingMax] = useState(false);
+  const maxMounted = useRef(false);
+  useEffect(() => {
+    if (!maxMounted.current) {
+      maxMounted.current = true;
+      return;
+    }
+    setAnimatingMax(true);
+    const id = window.setTimeout(() => setAnimatingMax(false), 220);
+    return () => window.clearTimeout(id);
+  }, [win.maximized]);
 
   // Keep a visible window reachable when the geometry around it changes without a
   // drag: the layer shrinking, or the window being restored / un-maximized after the
@@ -156,12 +169,19 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
       }}
       className={clsx(
         'group/win absolute flex flex-col overflow-hidden border bg-surface-2 outline-none',
-        'origin-center transition-[transform,opacity] duration-200 ease-out',
+        // Minimize shrinks toward the bottom-left (where the Dock lives) for a macOS-like genie;
+        // otherwise scale from center for the open/close keyframe.
+        win.minimized ? 'origin-bottom-left' : 'origin-center',
+        // Animate geometry ONLY while a maximize/restore toggle is in flight — a transition during a
+        // drag/resize would lag the pointer.
+        animatingMax
+          ? 'transition-[left,top,width,height,transform,opacity] duration-200 ease-out'
+          : 'transition-[transform,opacity] duration-200 ease-out',
         win.maximized ? 'rounded-none' : 'rounded-xl',
         exitKind === 'close' ? 'animate-appwindow-out' : 'animate-appwindow-in',
-        // Minimize = mounted hide: the body stays alive (terminal/editor state
-        // preserved) while the window scales away and stops taking pointer events.
-        win.minimized ? 'pointer-events-none scale-90 opacity-0' : 'pointer-events-auto',
+        // Minimize = mounted hide: the body stays alive (terminal/editor state preserved) while the
+        // window scales away toward the Dock and stops taking pointer events.
+        win.minimized ? 'pointer-events-none scale-[0.18] opacity-0' : 'pointer-events-auto',
         focused
           ? 'border-border-strong shadow-[0_28px_60px_-12px_rgba(0,0,0,0.7)]'
           : 'border-border shadow-[0_16px_40px_-16px_rgba(0,0,0,0.6)]',

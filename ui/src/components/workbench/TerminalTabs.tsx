@@ -29,7 +29,7 @@ function getSessionId(identity: string | null, key?: string): string {
   }
 }
 
-type Tab = { key: number; slot: number | null };
+type Tab = { key: number; slot: number | null; title?: string };
 
 // DELETE a slot-backed terminal session, then release its slot ONLY on a confirmed teardown
 // (HTTP ok or 404). If the delete failed (expired auth, CSRF/origin rejection, network error, 5xx)
@@ -62,6 +62,17 @@ export const TerminalTabs: React.FC<{ windowed?: boolean }> = ({ windowed = fals
   // Per-tab connection status (reported by each TerminalView). The tab bar shows the ACTIVE tab's
   // status merged with the persistence badge into ONE chip — there's no standalone status row.
   const [statuses, setStatuses] = useState<Record<number, TerminalStatus>>({});
+  // Inline tab rename: the tab being renamed + its draft label (double-click a tab to start).
+  const [editing, setEditing] = useState<{ key: number; value: string } | null>(null);
+  const commitRename = () => {
+    setEditing((cur) => {
+      if (cur) {
+        const v = cur.value.trim();
+        setTabs((ts) => ts.map((x) => (x.key === cur.key ? { ...x, title: v || undefined } : x)));
+      }
+      return null;
+    });
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -151,10 +162,33 @@ export const TerminalTabs: React.FC<{ windowed?: boolean }> = ({ windowed = fals
                 tab.key === active ? 'bg-surface text-foreground shadow-[inset_0_-2px_0_0_var(--mint)]' : 'text-muted hover:bg-foreground/[0.05]',
               )}
             >
-              <button type="button" onClick={() => setActive(tab.key)} className="flex items-center gap-1.5">
-                <SquareTerminal className="size-3.5 text-mint" />
-                {t('apps.terminal.tabTitle', { n: i + 1 })}
-              </button>
+              {editing && editing.key === tab.key ? (
+                <span className="flex items-center gap-1.5">
+                  <SquareTerminal className="size-3.5 shrink-0 text-mint" />
+                  <input
+                    autoFocus
+                    value={editing.value}
+                    onChange={(e) => setEditing({ key: tab.key, value: e.target.value })}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') commitRename();
+                      else if (e.key === 'Escape') setEditing(null);
+                    }}
+                    onBlur={commitRename}
+                    className="w-20 bg-transparent text-[12px] text-foreground focus:outline-none"
+                  />
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setActive(tab.key)}
+                  onDoubleClick={() => setEditing({ key: tab.key, value: tab.title ?? t('apps.terminal.tabTitle', { n: i + 1 }) })}
+                  title={t('apps.terminal.renameHint')}
+                  className="flex items-center gap-1.5"
+                >
+                  <SquareTerminal className="size-3.5 text-mint" />
+                  {tab.title ?? t('apps.terminal.tabTitle', { n: i + 1 })}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => closeTab(tab.key)}

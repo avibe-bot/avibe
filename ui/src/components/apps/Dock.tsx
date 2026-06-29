@@ -6,11 +6,12 @@ import clsx from 'clsx';
 import { APP_LIST, APP_REGISTRY, type AppId } from '../../apps/registry';
 import { useWindowManager } from '../../context/WindowManagerContext';
 
-// The unified Dock panel: app launcher + running indicators + minimized-window
-// thumbnails. Headless of how it's revealed — the AppsLauncher trigger floats it
-// above the bottom-left Apps button (hover = preview, click = pin). A running app's
-// tile reveals a ＋ (and right-click menu) to open another window — windows are
-// multi-instance, so this is the explicit path to a second Files/Terminal/Editor.
+// The unified Dock panel: app launcher + running indicators + minimized windows.
+// Headless of how it's revealed — the AppsLauncher trigger floats it above the bottom-left
+// Apps button (hover = preview, click = pin). A running app's tile reveals a ＋ (and right-click
+// menu) to open another window — windows are multi-instance, so this is the explicit path to a
+// second Files/Terminal/Editor. Each app tile carries its name (macOS-style label) and each
+// minimized window shows its title so the user can tell several open windows apart.
 export const Dock: React.FC = () => {
   const { t } = useTranslation();
   const wm = useWindowManager();
@@ -61,49 +62,57 @@ export const Dock: React.FC = () => {
   return (
     <div className="relative">
       {menuApp && <div className="fixed inset-0 z-0" onClick={() => setMenuApp(null)} aria-hidden />}
-      <div className="relative flex items-center gap-2 rounded-2xl border border-border-strong bg-surface-2/95 p-2 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.65)] backdrop-blur-xl">
+      <div className="relative flex items-end gap-2 rounded-2xl border border-border-strong bg-surface-2/95 p-2 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.65)] backdrop-blur-xl">
         {APP_LIST.map((app) => {
           const Icon = app.icon;
           const running = windows.some((w) => w.appId === app.id);
           const active = focusedApp === app.id;
           return (
-            <div key={app.id} className="group/tile relative flex flex-col items-center gap-1.5">
-              <button
-                type="button"
-                title={t(app.titleKey)}
-                aria-label={t(app.titleKey)}
-                onClick={(e) => (e.metaKey || e.ctrlKey || e.altKey ? openNew(app.id) : activate(app.id))}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  setMenuApp((cur) => (cur === app.id ? null : app.id));
-                }}
-                className={clsx(
-                  'grid size-12 place-items-center rounded-xl border transition',
-                  active ? 'border-2 bg-foreground/[0.07]' : 'border-border bg-foreground/[0.03] hover:bg-foreground/[0.07]',
-                )}
-                style={active ? { borderColor: `var(${app.accent})` } : undefined}
-              >
-                <Icon className="size-6" style={{ color: `var(${app.accent})` }} />
-              </button>
-              <span className="size-1.5 rounded-full" style={{ backgroundColor: running ? `var(${app.accent})` : 'transparent' }} />
+            <div key={app.id} className="group/tile flex w-[60px] flex-col items-center gap-1">
+              {/* Icon wrapper is the positioning context for the ＋ affordance so it pins to the
+                  icon's corner (not the wider labelled tile). */}
+              <div className="relative">
+                <button
+                  type="button"
+                  title={t(app.titleKey)}
+                  aria-label={t(app.titleKey)}
+                  onClick={(e) => (e.metaKey || e.ctrlKey || e.altKey ? openNew(app.id) : activate(app.id))}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setMenuApp((cur) => (cur === app.id ? null : app.id));
+                  }}
+                  className={clsx(
+                    'grid size-10 place-items-center rounded-xl border transition',
+                    active ? 'border-2 bg-foreground/[0.07]' : 'border-border bg-foreground/[0.03] hover:bg-foreground/[0.07]',
+                  )}
+                  style={active ? { borderColor: `var(${app.accent})` } : undefined}
+                >
+                  <Icon className="size-5" style={{ color: `var(${app.accent})` }} />
+                </button>
 
-              {/* ＋ reveals on hover and directly opens another window (the one-click affordance the
-                  label advertises). The New Window / Show All Windows menu is the tile's right-click. */}
-              <button
-                type="button"
-                title={t('apps.dock.newWindow')}
-                aria-label={t('apps.dock.newWindow')}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  openNew(app.id);
-                }}
-                className={clsx(
-                  'absolute -right-1 -top-1 grid size-4 place-items-center rounded-full border border-border-strong bg-surface-2 text-muted shadow transition hover:text-foreground',
-                  menuApp === app.id ? 'opacity-100' : 'opacity-0 group-hover/tile:opacity-100',
-                )}
-              >
-                <Plus className="size-2.5" strokeWidth={3} />
-              </button>
+                {/* ＋ reveals on hover and directly opens another window (the one-click affordance the
+                    label advertises). The New Window / Show All Windows menu is the tile's right-click. */}
+                <button
+                  type="button"
+                  title={t('apps.dock.newWindow')}
+                  aria-label={t('apps.dock.newWindow')}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openNew(app.id);
+                  }}
+                  className={clsx(
+                    'absolute -right-1 -top-1 grid size-4 place-items-center rounded-full border border-border-strong bg-surface-2 text-muted shadow transition hover:text-foreground',
+                    menuApp === app.id ? 'opacity-100' : 'opacity-0 group-hover/tile:opacity-100',
+                  )}
+                >
+                  <Plus className="size-2.5" strokeWidth={3} />
+                </button>
+              </div>
+
+              {/* App name (macOS-style labelled tile) + running indicator. The name also surfaces on
+                  hover via the icon button's title, in case it's truncated. */}
+              <span className="max-w-full truncate text-[10px] leading-tight text-muted">{t(app.titleKey)}</span>
+              <span className="size-1 rounded-full" style={{ backgroundColor: running ? `var(${app.accent})` : 'transparent' }} />
 
               {menuApp === app.id && (
                 <div
@@ -138,28 +147,26 @@ export const Dock: React.FC = () => {
           );
         })}
 
-        {minimized.length > 0 && <div className="mx-1 h-11 w-px shrink-0 bg-border-strong" />}
+        {minimized.length > 0 && <div className="mx-1 h-11 w-px shrink-0 self-center bg-border-strong" />}
 
+        {/* Minimized windows: an icon + the window's title so several open windows are
+            distinguishable at a glance (a true live thumbnail isn't practical — the editor/terminal
+            render to canvas — so the title carries the identification). */}
         {minimized.map((w) => {
           const def = APP_REGISTRY[w.appId];
           const Icon = def.icon;
+          const label = w.title ?? t(def.titleKey);
           return (
             <button
               key={w.id}
               type="button"
-              title={w.title ?? t(def.titleKey)}
+              title={label}
               aria-label={t('apps.window.restore', { defaultValue: 'Restore' })}
               onClick={() => wm.restore(w.id)}
-              className="flex h-[52px] w-[76px] shrink-0 flex-col overflow-hidden rounded-lg border border-border-strong bg-surface transition hover:border-foreground/30"
+              className="flex h-10 w-[136px] shrink-0 items-center gap-2 self-center rounded-lg border border-border-strong bg-surface px-2.5 text-left transition hover:border-foreground/30"
             >
-              <span className="flex items-center gap-1 bg-surface-2 px-1.5 py-1">
-                {['#ff5f57', '#febc2e', '#28c840'].map((c) => (
-                  <span key={c} className="size-1 rounded-full" style={{ backgroundColor: c }} />
-                ))}
-              </span>
-              <span className="flex flex-1 items-center justify-center">
-                <Icon className="size-4" style={{ color: `var(${def.accent})` }} />
-              </span>
+              <Icon className="size-4 shrink-0" style={{ color: `var(${def.accent})` }} />
+              <span className="min-w-0 flex-1 truncate text-[11px] text-foreground">{label}</span>
             </button>
           );
         })}
