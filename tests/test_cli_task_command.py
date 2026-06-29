@@ -1075,6 +1075,99 @@ def test_task_update_rejects_cwd_for_already_reserved_create_once_task(tmp_path:
     assert payload["code"] == "cwd_with_existing_session"
 
 
+def test_task_update_create_session_preserves_existing_cwd_without_cwd_flag(tmp_path: Path, capsys) -> None:
+    from sqlalchemy import select
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, scope_settings
+    from storage.settings_service import upsert_scope
+
+    state_home = tmp_path / "home"
+    invoke_dir = tmp_path / "invoke"
+    invoke_dir.mkdir()
+    saved_cwd = tmp_path / "saved"
+    saved_cwd.mkdir()
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
+        ensure_sqlite_state()
+        db_path = state_home / "state" / "vibe.sqlite"
+        engine = create_sqlite_engine(db_path)
+        with engine.begin() as conn:
+            scope_id = upsert_scope(conn, "avibe", "project", "proj-replace-cwd", now="2026-06-16T00:00:00Z")
+            conn.execute(
+                scope_settings.insert().values(
+                    scope_id=scope_id,
+                    enabled=1,
+                    role=None,
+                    workdir=str(tmp_path),
+                    agent_name="worker",
+                    agent_backend="codex",
+                    agent_variant="codex",
+                    model=None,
+                    reasoning_effort=None,
+                    require_mention=None,
+                    settings_version=1,
+                    settings_json="{}",
+                    created_at="2026-06-16T00:00:00Z",
+                    updated_at="2026-06-16T00:00:00Z",
+                )
+            )
+            conn.execute(
+                agent_sessions.insert().values(
+                    id="sesOld",
+                    scope_id=scope_id,
+                    agent_backend="codex",
+                    agent_name="worker",
+                    agent_variant="codex",
+                    session_anchor="avibe_proj-replace-cwd:definition_old",
+                    native_session_id="native-old",
+                    status="active",
+                    metadata_json="{}",
+                    created_at="2026-06-16T00:00:00Z",
+                    updated_at="2026-06-16T00:00:00Z",
+                    last_active_at="2026-06-16T00:00:00Z",
+                    workdir=str(saved_cwd),
+                )
+            )
+        agent_store = cli.VibeAgentStore(db_path)
+        agent_store.create(name="worker", backend="codex")
+        store = cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+        task = store.add_task(
+            session_id="sesOld",
+            session_key="",
+            prompt="hello",
+            schedule_type="cron",
+            cron="0 * * * *",
+            timezone_name="Asia/Shanghai",
+            agent_name="worker",
+            session_policy="create_once",
+            cwd=str(saved_cwd),
+            metadata={"session_scope_id": scope_id, "session_workdir": str(saved_cwd)},
+        )
+        parser = cli.build_parser()
+        args = parser.parse_args(["task", "update", task.id, "--create-session"])
+
+        with (
+            patch("vibe.cli._ensure_config", return_value=_configured_v2(set())),
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch("vibe.cli._task_store", return_value=store),
+            patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+            patch("os.getcwd", return_value=str(invoke_dir)),
+        ):
+            result = cli.cmd_task_update(args)
+
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(agent_sessions.c.workdir).where(agent_sessions.c.id == store.get_task(task.id).session_id).limit(1)
+            ).mappings().one()
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["task"]["cwd"] == str(saved_cwd)
+    assert payload["task"]["metadata"]["session_workdir"] == str(saved_cwd)
+    assert row["workdir"] == str(saved_cwd)
+    assert payload["task"]["session_id"] != "sesOld"
+
+
 def test_task_update_session_key_clears_previous_session_id(tmp_path: Path, capsys) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
     store = cli.ScheduledTaskStore(store_path)

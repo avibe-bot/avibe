@@ -190,8 +190,9 @@ def reserve_forked_session(
                 if reasoning_effort is not None
                 else row["reasoning_effort"]
             )
-            target_scope_id = (_clean_optional(scope_id) if scope_id is not None else None) or row["scope_id"]
-            if target_scope_id != row["scope_id"]:
+            explicit_scope_id = _clean_optional(scope_id) if scope_id is not None else None
+            target_scope_id = explicit_scope_id or row["scope_id"]
+            if explicit_scope_id or target_scope_id != row["scope_id"]:
                 target_anchor = _fork_session_anchor(
                     _anchor_for_scope_id(target_scope_id),
                     source_session_id=str(row["id"]),

@@ -1052,7 +1052,53 @@ def test_watch_update_rejects_scope_without_session_creation(tmp_path: Path) -> 
     assert payload["code"] == "scope_without_session_creation"
 
 
-def test_watch_update_rejects_cwd_for_already_reserved_create_once_watch(tmp_path: Path) -> None:
+def test_watch_update_allows_cwd_for_already_reserved_create_once_watch(tmp_path: Path, capsys) -> None:
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, scope_settings
+    from storage.settings_service import upsert_scope
+
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="worker", backend="codex")
+    with cli.create_sqlite_engine(db_path).begin() as conn:
+        now = "2026-06-16T00:00:00Z"
+        scope_id = upsert_scope(conn, "avibe", "project", "proj-existing", now=now)
+        conn.execute(
+            scope_settings.insert().values(
+                scope_id=scope_id,
+                enabled=1,
+                role=None,
+                workdir=str(tmp_path),
+                agent_name="worker",
+                agent_backend="codex",
+                agent_variant="codex",
+                model=None,
+                reasoning_effort=None,
+                require_mention=None,
+                settings_version=1,
+                settings_json="{}",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        conn.execute(
+            agent_sessions.insert().values(
+                id="sesExisting",
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_name="worker",
+                agent_variant="codex",
+                session_anchor="avibe_proj-existing:definition_old",
+                native_session_id="native-old",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+                workdir=str(tmp_path / "old"),
+            )
+        )
     store = ManagedWatchStore(tmp_path / "watches.json")
     watch = store.add_watch(
         name="Watch CI",
@@ -1079,12 +1125,17 @@ def test_watch_update_rejects_cwd_for_already_reserved_create_once_watch(tmp_pat
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2(set())),
+        patch("vibe.cli._agent_store", return_value=agent_store),
         patch("vibe.cli._watch_store", return_value=store),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
     ):
-        result, payload = _capture_stderr_json(cli.cmd_watch_update, args)
+        result = cli.cmd_watch_update(args)
 
-    assert result == 1
-    assert payload["code"] == "cwd_with_existing_session"
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["watch"]["session_id"] == "sesExisting"
+    assert payload["watch"]["cwd"] == str(new_cwd)
+    assert payload["watch"]["metadata"]["session_workdir"] == str(new_cwd)
 
 
 def test_watch_update_rejects_deprecated_prompt_argument(tmp_path: Path) -> None:

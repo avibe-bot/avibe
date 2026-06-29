@@ -407,6 +407,93 @@ def test_agent_run_async_self_target_defaults_to_no_callback(
     assert stored["callback_status"] is None
 
 
+def test_agent_run_sync_self_target_detach_defaults_to_no_callback(
+    tmp_path: Path, capsys
+) -> None:
+    from core.services import sessions as sessions_service
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import scope_settings
+    from storage.settings_service import upsert_scope
+
+    state_home = tmp_path / "home"
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
+        ensure_sqlite_state()
+        db_path = state_home / "state" / "vibe.sqlite"
+        engine = create_sqlite_engine(db_path)
+        with engine.begin() as conn:
+            scope_id = upsert_scope(
+                conn,
+                platform="avibe",
+                scope_type="project",
+                native_id="proj_caller",
+                now="2026-06-10T00:00:00Z",
+            )
+            conn.execute(
+                scope_settings.insert().values(
+                    scope_id=scope_id,
+                    enabled=1,
+                    role=None,
+                    workdir=str(tmp_path),
+                    agent_name=None,
+                    agent_backend=None,
+                    agent_variant=None,
+                    model=None,
+                    reasoning_effort=None,
+                    require_mention=None,
+                    settings_version=1,
+                    settings_json="{}",
+                    created_at="2026-06-10T00:00:00Z",
+                    updated_at="2026-06-10T00:00:00Z",
+                )
+            )
+            caller_session = sessions_service.create_session(
+                conn,
+                scope_id=scope_id,
+                agent_backend="codex",
+                agent_name="caller",
+            )
+        agent_store = cli.VibeAgentStore(db_path)
+        agent_store.create(name="caller", backend="codex")
+        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        args = _parse_agent_run(["--session-id", caller_session["id"], "--message", "hi"])
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "AVIBE_SESSION_ID": caller_session["id"],
+                    "AVIBE_RUN_ID": "run-parent",
+                    "AVIBE_CALLER_SOURCE": "agent_run",
+                    "AVIBE_CALLER_BACKEND": "codex",
+                },
+            ),
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch("vibe.cli._task_request_store", return_value=request_store),
+            patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+            patch(
+                "vibe.cli._wait_for_run_result",
+                return_value={
+                    "id": "still-running",
+                    "status": "running",
+                    "wait_state": "detached",
+                    "handoff_reason": "wait_limit_reached",
+                },
+            ),
+        ):
+            result = cli.cmd_agent_run(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["callback_session_id"] is None
+    assert payload["callback_notice"]["code"] == "async_self_run_without_callback"
+    assert payload["run"].get("callback_status") is None
+    stored = request_store.get_run(payload["run_id"])
+    assert stored is not None
+    assert stored["callback_session_id"] is None
+    assert stored["callback_status"] is None
+
+
 def test_agent_run_callback_session_records_sync_route(tmp_path: Path, capsys) -> None:
     from core.services import sessions as sessions_service
     from storage.db import create_sqlite_engine

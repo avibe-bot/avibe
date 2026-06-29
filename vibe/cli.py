@@ -2427,7 +2427,7 @@ def cmd_task_update(args):
                 help_command="vibe task update --help",
             )
         elif getattr(args, "create_session", False) or getattr(args, "create_session_per_run", False):
-            cwd = os.getcwd()
+            cwd = task.cwd or os.getcwd()
         else:
             cwd = task.cwd
         scope_key = requested_scope_key or str(metadata.get("session_scope_id") or "").strip() or _legacy_scope_key_from_target(deliver_key)
@@ -3417,11 +3417,11 @@ def _resolve_callback_session_id(args, caller_context, *, target_session_id: Opt
         }
     if caller_context is not None:
         caller_session_id = caller_context.session_id
-        if is_async and target_session_id and target_session_id == caller_session_id:
+        if target_session_id and target_session_id == caller_session_id:
             return None, {
                 "code": "async_self_run_without_callback",
                 "message": (
-                    "Started async Agent Run on the caller Session without a callback. "
+                    "Started Agent Run on the caller Session without a callback. "
                     "The target Session will receive the run result directly, so Avibe did not create a duplicate callback turn."
                 ),
             }
@@ -6016,13 +6016,6 @@ def cmd_watch_update(args):
             current_policy=watch.session_policy,
             current_schedule_type="watch",
             next_schedule_type="watch",
-            help_command="vibe watch update --help",
-        )
-        _reject_inert_create_once_cwd_update(
-            explicit_cwd=getattr(args, "cwd", None),
-            current_policy=watch.session_policy,
-            current_session_id=watch.session_id,
-            create_session=bool(getattr(args, "create_session", False)),
             help_command="vibe watch update --help",
         )
         scope_key = requested_scope_key or str(metadata.get("session_scope_id") or "").strip() or _legacy_scope_key_from_target(deliver_key)
