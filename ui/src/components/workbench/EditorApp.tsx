@@ -147,6 +147,14 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   const anyDirty = Object.values(dirty).some(Boolean);
   useWindowCloseGuard(windowId, anyDirty ? t('apps.editor.confirmDiscardClose') : null);
 
+  // Reflect the active file in the window title, so the Dock + titlebar identify which file this
+  // editor window holds (important when several editor windows are open). Clears to the app title
+  // when nothing is open. setTitle no-ops when unchanged, so this can run on every tab change.
+  useEffect(() => {
+    if (windowId) wm.setTitle(windowId, tabs.find((x) => x.id === active)?.name);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [windowId, active, tabs]);
+
   const closeTab = (id: string) => {
     // Closing a dirty tab drops its in-memory buffer (only the window-level guard existed before),
     // so confirm first when there are unsaved edits.

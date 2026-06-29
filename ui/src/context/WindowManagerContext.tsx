@@ -45,6 +45,9 @@ export interface WindowManagerValue {
   toggleMaximize: (id: string) => void;
   /** Patch a window's bounds (used by drag + resize). */
   setBounds: (id: string, bounds: Partial<WindowBounds>) => void;
+  /** Set (or clear) a window's title — e.g. the Editor reflecting its active file so several open
+   *  windows are distinguishable in the Dock + titlebar. No-op when the title is unchanged. */
+  setTitle: (id: string, title: string | undefined) => void;
   /**
    * Register (or clear, by passing null) a guard a window body uses to veto closing.
    * The getter returns a confirm message when closing would lose work, else null.
@@ -157,6 +160,16 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
     setWindows((prev) => prev.map((w) => (w.id === id ? { ...w, bounds: { ...w.bounds, ...patch } } : w)));
   }, []);
 
+  const setTitle = useCallback((id: string, title: string | undefined) => {
+    // Return the SAME array reference when nothing changes so a body that calls this every render
+    // (the Editor, on active-tab change) can't trigger a re-render loop.
+    setWindows((prev) => {
+      const w = prev.find((x) => x.id === id);
+      if (!w || w.title === title) return prev;
+      return prev.map((x) => (x.id === id ? { ...x, title } : x));
+    });
+  }, []);
+
   const focusedId = useMemo(() => {
     const visible = windows.filter((w) => !w.minimized);
     if (visible.length === 0) return null;
@@ -174,10 +187,11 @@ export const WindowManagerProvider: React.FC<{ children: React.ReactNode }> = ({
       restore,
       toggleMaximize,
       setBounds,
+      setTitle,
       setCloseGuard,
       confirmClose,
     }),
-    [windows, focusedId, openApp, close, focus, minimize, restore, toggleMaximize, setBounds, setCloseGuard, confirmClose],
+    [windows, focusedId, openApp, close, focus, minimize, restore, toggleMaximize, setBounds, setTitle, setCloseGuard, confirmClose],
   );
 
   return <WindowManagerContext.Provider value={value}>{children}</WindowManagerContext.Provider>;
