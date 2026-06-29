@@ -126,18 +126,6 @@ export type VaultCreatePayload = {
   establishing_vmk?: boolean;
 };
 
-export type VaultAccessFulfillmentPayload = {
-  scope_type?: 'secret' | 'skill' | 'group';
-  scope_ref?: string;
-  session_id?: string | null;
-  ttl_seconds?: number;
-  this_session_only?: boolean;
-  agent_pubkey?: { public_key?: string; fingerprint?: string };
-  deks?: Array<{ name: string; dek_blindbox: VaultBlindBox; approval: Record<string, unknown> }>;
-  agent_deks?: Array<{ name: string; dek_blindbox: VaultBlindBox; approval: Record<string, unknown> }>;
-  deks_by_secret?: Record<string, { dek_blindbox: VaultBlindBox; approval: Record<string, unknown> }>;
-};
-
 export type ApiContextType = {
   getConfig: () => Promise<any>;
   getPlatformCatalog: () => Promise<any>;
@@ -352,7 +340,6 @@ export type ApiContextType = {
   fulfillVaultAccessRequest: (requestId: string, payload: VaultAccessFulfillmentPayload) => Promise<{ ok: boolean; request_id?: string; grant?: VaultGrant; result?: { type: string; grant?: VaultGrant }; code?: string; message?: string }>;
   getVaultGrants: (params?: { status?: string; sessionId?: string }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; grants: VaultGrant[] }>;
   createVaultGrant: (payload: Record<string, unknown>) => Promise<{ ok: boolean; grant: VaultGrant; code?: string; message?: string }>;
-  fulfillVaultAccessRequest: (requestId: string, payload: VaultAccessFulfillmentPayload) => Promise<{ ok: boolean; request_id?: string; grant?: VaultGrant; result?: { type: string; grant?: VaultGrant }; code?: string; message?: string }>;
   revokeVaultGrant: (grantId: string) => Promise<{ ok: boolean; grant?: VaultGrant; code?: string; message?: string }>;
   signVaultDigest: (payload: Record<string, unknown>) => Promise<{ ok: boolean; signature?: Record<string, unknown>; request?: VaultRequest; code?: string; message?: string }>;
   pinVaultPubkey: (payload: Record<string, unknown>) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
@@ -2079,7 +2066,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return getCachedJson(qs ? `/api/vault/grants?${qs}` : '/api/vault/grants', 1500, opts);
     },
     createVaultGrant: (payload) => postJson('/api/vault/grants', payload),
-    fulfillVaultAccessRequest: (requestId, payload) => postJson(`/api/vault/requests/${encodeURIComponent(requestId)}/fulfill-access`, payload),
     revokeVaultGrant: (grantId) => deleteJson(`/api/vault/grants/${encodeURIComponent(grantId)}`),
     signVaultDigest: (payload) => postJson('/api/vault/sign', payload),
     pinVaultPubkey: (payload) => postJson('/api/vault/pubkey-pin', payload),
