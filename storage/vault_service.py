@@ -231,6 +231,13 @@ def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
             for key, value in pubkey_pin.items()
             if key in {"public_key", "fingerprint", "attested_at", "attestation"}
         }
+    signing_public_key = public_meta.get("signing_public_key")
+    if isinstance(signing_public_key, dict):
+        payload["signing_public_key"] = {
+            key: value
+            for key, value in signing_public_key.items()
+            if key in {"curve", "public_key"}
+        }
     return payload
 
 
