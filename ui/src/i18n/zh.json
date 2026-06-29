@@ -627,7 +627,32 @@
       "confirmDiscardClose": "放弃未保存的更改并关闭此窗口？",
       "selectAll": "全选",
       "copyAll": "全部复制",
-      "untitled": "未命名-{{n}}"
+      "untitled": "未命名-{{n}}",
+      "search": {
+        "title": "搜索",
+        "placeholder": "搜索",
+        "replacePlaceholder": "替换",
+        "caseSensitive": "区分大小写",
+        "wholeWord": "全字匹配",
+        "regex": "使用正则表达式",
+        "toggleReplace": "切换替换",
+        "replaceAll": "全部替换",
+        "showScope": "包含 / 排除文件",
+        "hideScope": "隐藏包含 / 排除",
+        "include": "包含的文件(如 ui/src/**)",
+        "exclude": "排除的文件(如 **/dist/**)",
+        "searching": "搜索中…",
+        "summary": "在 {{files}} 个文件中找到 {{matches}} 处",
+        "hint": "输入关键字,在该文件夹内搜索",
+        "needFolder": "请先打开一个文件夹,再进行跨文件搜索。",
+        "truncatedMatches": "仅显示前 1000 处匹配 —— 缩小搜索范围以查看其余结果。",
+        "truncatedFiles": "仅显示前 200 个文件 —— 缩小搜索范围以查看其余结果。",
+        "replaced": "已在 {{files}} 个文件中替换 {{total}} 处。",
+        "undo": "撤销",
+        "failed": "搜索失败",
+        "replaceFailed": "替换失败",
+        "undoFailed": "撤销失败"
+      }
     },
     "dock": {
       "newInstanceHint": "⌘ 点击可新建窗口",
