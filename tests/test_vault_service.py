@@ -1066,7 +1066,7 @@ def test_request_inbox_hydrates_unlock_material_without_persisting_it(vault):
     assert "ct-1" not in raw_delivery
 
 
-def test_agent_created_request_never_hydrates_unlock_material(vault):
+def test_agent_created_request_hydrates_only_for_ui_inbox(vault):
     _create(vault, name="STANDARD_KEY", protection="standard", group="crypto")
     with vault.begin() as conn:
         vs.create_secret(conn, name="PROTECTED_KEY", protection="protected", group="crypto", sealed=_sealed("protected"))
@@ -1076,15 +1076,54 @@ def test_agent_created_request_never_hydrates_unlock_material(vault):
             requester={"source": "agent-cli", "session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
         )
-        ui_payload = vs.get_request(conn, req["id"])
         agent_payload = vs.get_request(conn, req["id"], audience=vs.REQUEST_AUDIENCE_AGENT)
         listed = vs.list_requests(conn)
 
-    encoded = json.dumps({"ui": ui_payload, "agent": agent_payload, "listed": listed})
-    assert "secret_unlock_material" not in encoded
-    assert "unlock_material" not in encoded
-    assert "ct-protected" not in encoded
-    assert "wm-protected" not in encoded
+    agent_encoded = json.dumps(agent_payload)
+    assert "secret_unlock_material" not in agent_encoded
+    assert "unlock_material" not in agent_encoded
+    assert "ct-protected" not in agent_encoded
+    assert "wm-protected" not in agent_encoded
+    group_option = next(option for option in listed[0]["card"]["scope_options"] if option["scope_type"] == "group")
+    assert group_option["unlock_material"] == [
+        {
+            "name": "PROTECTED_KEY",
+            "kind": "static",
+            "envelope": {
+                "ciphertext": "ct-protected",
+                "nonce": "n-protected",
+                "wrap_meta": "wm-protected",
+            },
+        }
+    ]
+
+
+def test_cli_resolve_protected_request_hydrates_only_for_ui_inbox(vault):
+    _create(vault, name="PROTECTED_KEY", protection="protected", group="crypto")
+    with vault.begin() as conn:
+        result = vs.resolve_secret_access(
+            conn,
+            "PROTECTED_KEY",
+            session_id="ses_1",
+            requester={"source": "cli", "session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        listed = vs.list_requests(conn)
+        raw_delivery = conn.execute(
+            select(vault_requests.c.delivery).where(vault_requests.c.id == result["request"]["id"])
+        ).scalar_one()
+
+    agent_encoded = json.dumps(result["request"]["card"])
+    assert result["status"] == "approval_required"
+    assert "secret_unlock_material" not in agent_encoded
+    assert "ct-1" not in agent_encoded
+    assert listed[0]["card"]["secret_unlock_material"]["envelope"] == {
+        "ciphertext": "ct-1",
+        "nonce": "n-1",
+        "wrap_meta": "wm-1",
+    }
+    assert "secret_unlock_material" not in raw_delivery
+    assert "ct-1" not in raw_delivery
 
 
 def test_resolve_access_card_uses_delivery_session_fallback(vault):
