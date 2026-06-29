@@ -32,19 +32,11 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
   // CSS owns the timing). Minimizing is a pure mounted hide (see className) so the
   // window body — terminal session, editor buffer — stays alive and intact.
   const [exitKind, setExitKind] = useState<'close' | null>(null);
-  // Briefly enable a geometry transition while a maximize/restore toggle is animating (see the
-  // className), then drop it so a drag/resize stays instant (a transition there would lag the pointer).
-  const [animatingMax, setAnimatingMax] = useState(false);
-  const maxMounted = useRef(false);
-  useEffect(() => {
-    if (!maxMounted.current) {
-      maxMounted.current = true;
-      return;
-    }
-    setAnimatingMax(true);
-    const id = window.setTimeout(() => setAnimatingMax(false), 220);
-    return () => window.clearTimeout(id);
-  }, [win.maximized]);
+  // Animate window GEOMETRY (maximize/restore) but NOT during a drag/resize, which must track the
+  // pointer instantly. `dragging` is state (not a ref) so the transition is enabled in the SAME render
+  // that changes the bounds — otherwise the geometry jumps before the transition class arrives and
+  // maximize/restore don't animate at all.
+  const [dragging, setDragging] = useState(false);
 
   // Keep a visible window reachable when the geometry around it changes without a
   // drag: the layer shrinking, or the window being restored / un-maximized after the
@@ -85,6 +77,7 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
     // titlebar/handle stops propagation, so the root's own focus handler won't run.
     rootRef.current?.focus({ preventScroll: true });
     draggingRef.current = true;
+    setDragging(true);
     const startX = e.clientX;
     const startY = e.clientY;
     const start = { ...win.bounds };
@@ -101,6 +94,7 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
     };
     const onUp = () => {
       draggingRef.current = false;
+      setDragging(false);
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
     };
@@ -172,11 +166,11 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
         // Minimize shrinks toward the bottom-left (where the Dock lives) for a macOS-like genie;
         // otherwise scale from center for the open/close keyframe.
         win.minimized ? 'origin-bottom-left' : 'origin-center',
-        // Animate geometry ONLY while a maximize/restore toggle is in flight — a transition during a
-        // drag/resize would lag the pointer.
-        animatingMax
-          ? 'transition-[left,top,width,height,transform,opacity] duration-200 ease-out'
-          : 'transition-[transform,opacity] duration-200 ease-out',
+        // Geometry animates (maximize/restore) except during a drag/resize, which must track the
+        // pointer instantly.
+        dragging
+          ? 'transition-[transform,opacity] duration-200 ease-out'
+          : 'transition-[left,top,width,height,transform,opacity] duration-200 ease-out',
         win.maximized ? 'rounded-none' : 'rounded-xl',
         exitKind === 'close' ? 'animate-appwindow-out' : 'animate-appwindow-in',
         // Minimize = mounted hide: the body stays alive (terminal/editor state preserved) while the

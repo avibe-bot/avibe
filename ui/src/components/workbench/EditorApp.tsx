@@ -88,22 +88,22 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   const [picker, setPicker] = useState<PickerState | null>(null);
   const tabSeq = useRef(0);
   const untitledSeq = useRef(0);
-  // Latest tabs for dedup / id-resolution outside the setState updater (avoids side effects in a
-  // reducer while still keying on the synthetic id).
-  const tabsRef = useRef<Tab[]>(tabs);
-  tabsRef.current = tabs;
 
   const openFile = useCallback((path: string, name: string, mtime: number | null) => {
     setRoot((r) => r ?? parentDir(path));
     setCursor(null);
-    const existing = tabsRef.current.find((x) => x.path === path);
-    if (existing) {
-      setActive(existing.id);
-      return;
-    }
-    const id = `t${++tabSeq.current}`;
-    setTabs((ts) => [...ts, { id, path, name, mtime }]);
-    setActive(id);
+    setTabs((ts) => {
+      // Dedup inside the updater so two concurrent opens of the same file (e.g. a fast double-click
+      // firing two fileMeta requests) can't both append a tab — both see the same current `ts`.
+      const existing = ts.find((x) => x.path === path);
+      if (existing) {
+        setActive(existing.id);
+        return ts;
+      }
+      const id = `t${++tabSeq.current}`;
+      setActive(id);
+      return [...ts, { id, path, name, mtime }];
+    });
   }, []);
 
   // The explorer tree emits a clicked entry. Gate it like the File Browser: only a regular,
@@ -159,9 +159,11 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
     // Closing a dirty tab drops its in-memory buffer (only the window-level guard existed before),
     // so confirm first when there are unsaved edits.
     if (dirty[id] && !window.confirm(t('apps.editor.confirmDiscardClose'))) return;
-    const rest = tabsRef.current.filter((x) => x.id !== id);
-    setTabs(rest);
-    if (active === id) setActive(rest.length ? rest[rest.length - 1].id : null);
+    setTabs((ts) => {
+      const rest = ts.filter((x) => x.id !== id);
+      setActive((cur) => (cur === id ? (rest.length ? rest[rest.length - 1].id : null) : cur));
+      return rest;
+    });
     setDirty((d) => {
       const n = { ...d };
       delete n[id];

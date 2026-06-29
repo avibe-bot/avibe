@@ -68,7 +68,7 @@ export const Dock: React.FC = () => {
           const running = windows.some((w) => w.appId === app.id);
           const active = focusedApp === app.id;
           return (
-            <div key={app.id} className="group/tile flex w-[60px] flex-col items-center gap-1">
+            <div key={app.id} className="group/tile relative flex w-[60px] flex-col items-center gap-1">
               {/* Icon wrapper is the positioning context for the ＋ affordance so it pins to the
                   icon's corner (not the wider labelled tile). */}
               <div className="relative">

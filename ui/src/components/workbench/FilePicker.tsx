@@ -53,6 +53,9 @@ export const FilePicker: React.FC<{
   const [submitting, setSubmitting] = useState(false);
   // Inline new-folder input (rather than a window.prompt, matching the "no manual typing" intent).
   const [newFolder, setNewFolder] = useState<string | null>(null);
+  // Hidden entries are off by default but toggleable, so dot-dirs (.config, .git, …) stay reachable
+  // — the picker is the only way to navigate now (there's no manual path field).
+  const [showHidden, setShowHidden] = useState(false);
 
   const navSeq = useRef(0);
   const navigate = useCallback(
@@ -61,7 +64,7 @@ export const FilePicker: React.FC<{
       setLoading(true);
       setError(null);
       setNewFolder(null);
-      listDir(path)
+      listDir(path, showHidden)
         .then((r) => {
           if (seq !== navSeq.current) return;
           setCwd(r.path);
@@ -74,7 +77,7 @@ export const FilePicker: React.FC<{
           if (seq === navSeq.current) setLoading(false);
         });
     },
-    [t],
+    [showHidden, t],
   );
 
   // Pick a sensible starting folder once: the caller's initial path, else the first project, else
@@ -103,6 +106,11 @@ export const FilePicker: React.FC<{
     if (sysFavs.length === 0) systemFavorites().then(setSysFavs).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // Re-list the current folder when the hidden toggle flips.
+  useEffect(() => {
+    if (cwd) navigate(cwd);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showHidden]);
 
   const crumbs = cwd ? pathCrumbs(cwd) : [];
   const projectFavs = (projects || []).filter((p) => !!p.folder_path).map((p) => ({ label: p.display_name, path: p.folder_path as string }));
@@ -190,6 +198,10 @@ export const FilePicker: React.FC<{
               </span>
             ))}
           </div>
+          <label className="flex shrink-0 items-center gap-1 text-[11px] text-muted" title={t('apps.fileBrowser.showHidden')}>
+            <input type="checkbox" checked={showHidden} onChange={(e) => setShowHidden(e.target.checked)} className="size-3" />
+            {t('apps.fileBrowser.showHidden')}
+          </label>
           <Button
             type="button"
             size="sm"
@@ -228,7 +240,9 @@ export const FilePicker: React.FC<{
                   if (e.key === 'Enter') void createFolder(newFolder);
                   else if (e.key === 'Escape') setNewFolder(null);
                 }}
-                onBlur={() => void createFolder(newFolder)}
+                // Blur abandons the inline input — only Enter creates the folder, so cancelling the
+                // picker (which blurs the input first) can't silently makeDir a folder.
+                onBlur={() => setNewFolder(null)}
                 placeholder={t('apps.picker.newFolderName')}
                 className="mb-1 w-full rounded-md border border-cyan/50 bg-surface px-2 py-1.5 text-[12.5px] text-foreground placeholder:text-muted focus:outline-none"
               />
@@ -266,6 +280,8 @@ export const FilePicker: React.FC<{
         <div className="flex items-center gap-2 border-t border-border px-3.5 py-2.5">
           {mode === 'save-file' && (
             <input
+              // Autofocus so ⌘S-from-Monaco lands here, not behind the modal in the editor buffer.
+              autoFocus
               value={name}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => {
