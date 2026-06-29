@@ -93,8 +93,11 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault }> = ({ vault }) => {
   const canUsePasskey = webauthnAvailable();
 
   if (vault.status === 'needs-setup') {
-    const valid = password.length > 0 && password === confirm;
+    const valid = password.trim().length > 0 && password === confirm;
     const submitSetup = (withPasskey: boolean) => {
+      // Reject blank before any WebAuthn ceremony, or a passkey would be created and then
+      // orphaned when buildWrapMeta rejects the empty password (the button is also disabled).
+      if (password.trim().length === 0) return;
       if (password !== confirm) {
         vault.setError(t('vaults.protectedUnlock.errors.mismatch'));
         return;
@@ -158,7 +161,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault }> = ({ vault }) => {
         className="flex items-end gap-2"
         onSubmit={(e) => {
           e.preventDefault();
-          if (password) void run(() => vault.unlockPassword(password));
+          if (password.trim()) void run(() => vault.unlockPassword(password));
         }}
       >
         <label className="flex flex-1 flex-col gap-1.5 text-xs font-medium text-muted-foreground">
@@ -168,7 +171,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault }> = ({ vault }) => {
           </span>
           <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t('vaults.protectedUnlock.passwordPlaceholder')} autoComplete="current-password" />
         </label>
-        <Button type="submit" disabled={busy || !password}>
+        <Button type="submit" disabled={busy || !password.trim()}>
           {busy && <Loader2 className="size-4 animate-spin" />}
           {t('vaults.protectedUnlock.unlockCta')}
         </Button>

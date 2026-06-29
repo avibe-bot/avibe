@@ -165,9 +165,10 @@ export const VaultSecretForm: React.FC<{
           return;
         }
         if (created.code === 'vault_already_initialized') {
-          // Another tab established the vault first — force a reload/unlock instead of splitting keys.
+          // Another tab established the vault first — drop the rejected local VMK and
+          // reload the server's wrap_meta so the user unlocks it instead of splitting keys.
+          await protectedVault.discardAndRefresh();
           setError(t('vaults.protectedUnlock.errors.alreadyInitialized'));
-          protectedVault.lock();
           return;
         }
         throw new Error(created.message || created.code || t('vaults.request.saveFailed'));

@@ -239,9 +239,27 @@ export function useProtectedVault() {
   const lock = useCallback(() => {
     sessionVault.vmk?.fill(0);
     sessionVault.vmk = null;
-    sessionVault.freshSetup = false;
-    setStatus(sessionVault.wrapMeta ? 'locked' : 'needs-setup');
+    if (sessionVault.freshSetup) {
+      // An uncommitted fresh VMK (set up but no protected secret saved yet) — discard it
+      // so a later unlock can't seal under a stale local VMK that skips the init guard.
+      sessionVault.wrapMeta = null;
+      sessionVault.freshSetup = false;
+      setStatus('needs-setup');
+    } else {
+      setStatus(sessionVault.wrapMeta ? 'locked' : 'needs-setup');
+    }
   }, []);
+
+  const discardAndRefresh = useCallback(async () => {
+    // After an init collision (another tab established the vault first), drop the
+    // rejected local VMK and reload the server's real wrap_meta so the user unlocks the
+    // established vault instead of resealing under the loser VMK.
+    sessionVault.vmk?.fill(0);
+    sessionVault.vmk = null;
+    sessionVault.wrapMeta = null;
+    sessionVault.freshSetup = false;
+    await refresh();
+  }, [refresh]);
 
   const hasPasskey = useCallback(() => {
     const wrapMeta = sessionVault.wrapMeta;
@@ -253,5 +271,5 @@ export function useProtectedVault() {
     }
   }, []);
 
-  return { status, error, setError, refresh, setupPassword, setupPasskey, unlockPassword, unlockPasskey, sealValue, afterCreated, lock, hasPasskey };
+  return { status, error, setError, refresh, setupPassword, setupPasskey, unlockPassword, unlockPasskey, sealValue, afterCreated, lock, discardAndRefresh, hasPasskey };
 }
