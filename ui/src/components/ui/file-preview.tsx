@@ -133,27 +133,21 @@ const PdfView: React.FC<{ url: string; className?: string }> = ({ url, className
 const HTML_PREVIEW_CSP =
   "default-src 'none'; img-src data:; media-src data:; font-src data:; style-src 'unsafe-inline' data:; base-uri 'none'; form-action 'none'";
 
-// Build the srcDoc for an HTML preview. Parse the markup with DOMParser — which is INERT (runs no
-// scripts, fetches no resources) — then drop every meta-refresh and inject our CSP as the first <head>
-// child. Parsing (vs. a regex) is what makes the no-auto-navigation guarantee hold: the parser decodes
-// entities, so an obfuscated `http-equiv="ref&#114;esh"` normalizes to `refresh` and is removed, where
-// a regex would miss it. The CSP (parsed before any subresource) pins network to nothing.
+// Build the srcDoc for an HTML preview. Parse via a <template>, NOT DOMParser: a template's contents
+// live in a browsing-context-less "template contents owner" document, so they're truly inert — no
+// <img>/<iframe> subresource is fetched while we inspect them (MDN warns a DOMParser document *can*
+// download those). Parsing (vs. a regex) still decodes entities, so an obfuscated
+// `http-equiv="ref&#114;esh"` normalizes to `refresh` and is dropped. We then prepend our restrictive
+// CSP (parsed before any subresource in the eventual iframe) — so the actual rendering frame fetches
+// nothing and can't auto-navigate.
 function buildHtmlPreviewDoc(html: string): string {
-  let doc: Document;
-  try {
-    doc = new DOMParser().parseFromString(html, 'text/html');
-  } catch {
-    return `<!DOCTYPE html><meta http-equiv="Content-Security-Policy" content="${HTML_PREVIEW_CSP}">`;
-  }
-  doc.querySelectorAll('meta[http-equiv]').forEach((m) => {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html; // inert: template contents never load resources
+  tpl.content.querySelectorAll('meta[http-equiv]').forEach((m) => {
     if ((m.getAttribute('http-equiv') || '').trim().toLowerCase() === 'refresh') m.remove();
   });
-  const head = doc.head || doc.documentElement;
-  const csp = doc.createElement('meta');
-  csp.setAttribute('http-equiv', 'Content-Security-Policy');
-  csp.setAttribute('content', HTML_PREVIEW_CSP);
-  head.insertBefore(csp, head.firstChild);
-  return `<!DOCTYPE html>${doc.documentElement.outerHTML}`;
+  // The <template> innerHTML getter serializes the (now meta-refresh-free) contents.
+  return `<!DOCTYPE html><meta http-equiv="Content-Security-Policy" content="${HTML_PREVIEW_CSP}">\n${tpl.innerHTML}`;
 }
 
 const HtmlView: React.FC<{ html: string; className?: string }> = ({ html, className }) => {
@@ -211,7 +205,10 @@ const DocxView: React.FC<{ url: string; className?: string }> = ({ url, classNam
         const { renderAsync } = await import('docx-preview');
         if (!alive) return;
         container.innerHTML = '';
-        await renderAsync(bytes, container, undefined, { className: 'docx-rendered', inWrapper: true, ignoreLastRenderedPageBreak: true });
+        // renderAltChunks: false — a DOCX can embed an HTML "altChunk" part, which docx-preview would
+        // otherwise render straight into our DOM (with remote subresources / active attributes),
+        // bypassing the sandbox+CSP path used for .html previews. Disable it for untrusted files.
+        await renderAsync(bytes, container, undefined, { className: 'docx-rendered', inWrapper: true, ignoreLastRenderedPageBreak: true, renderAltChunks: false });
         if (alive) setRender('done');
       } catch {
         if (alive) setRender('error');
