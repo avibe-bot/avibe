@@ -433,7 +433,7 @@ export const AppShell: React.FC = () => {
                 Control Panel → Back to Workbench, the mint counterpart. */}
             <div className="flex items-stretch gap-2">
               <AppsLauncher />
-              {shellMode === 'workbench' ? (
+              {shellMode === 'workbench' && (
                 <Link
                   to="/admin/dashboard"
                   title={t('appShell.openControlPanel')}
@@ -442,16 +442,22 @@ export const AppShell: React.FC = () => {
                 >
                   <Settings className="size-[18px] text-muted group-hover:text-foreground" />
                 </Link>
-              ) : (
-                <Link
-                  to="/"
-                  className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-mint/30 bg-mint/[0.06] px-3 py-2.5 text-[13px] font-semibold text-mint transition hover:bg-mint/[0.12]"
-                >
-                  <ArrowLeft className="size-3.5" />
-                  <span>{t('appShell.backToWorkbench')}</span>
-                </Link>
               )}
             </div>
+
+            {/* Back-to-Workbench (admin only) gets its own full-width row below
+                Apps. As a half-width button beside Apps, the English "Workbench"
+                label + arrow overflowed the 240px sidebar; a full row fits every
+                locale. */}
+            {shellMode === 'admin' && (
+              <Link
+                to="/"
+                className="flex items-center justify-center gap-2 rounded-lg border border-mint/30 bg-mint/[0.06] px-3 py-2.5 text-[13px] font-semibold text-mint transition hover:bg-mint/[0.12]"
+              >
+                <ArrowLeft className="size-3.5 shrink-0" />
+                <span className="truncate">{t('appShell.backToWorkbench')}</span>
+              </Link>
+            )}
 
             {/* Language / theme / account quick-toggles only show in the
                 Control Panel, which is the operational surface. The
