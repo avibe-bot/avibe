@@ -1718,9 +1718,7 @@ def consume_one_shot_grants(grants: list[dict] | tuple[dict, ...] | None, *, rea
                 continue
             seen.add(grant_id)
             with contextlib.suppress(vault_service.GrantNotActiveError, vault_service.GrantNotFoundError):
-                vault_service.consume_one_shot_grant(conn, grant_id)
-            if bool(grant.get("delivery_ready")) and str(grant.get("delivery_status") or "") != "standard_ready":
-                release_scopes.extend(_grant_scope_payload(grant))
+                release_scopes.extend(vault_service.consume_one_shot_grant(conn, grant_id))
     release_vault_agent_scopes(release_scopes, reason=reason)
 
 
@@ -1919,22 +1917,31 @@ def create_vault_grant(payload: dict) -> dict:
     if not request_id:
         raise VaultApiError("request_id is required to create a grant", code="missing_request_id")
     engine = _vault_engine()
-    try:
-        with engine.connect() as conn:
+    preflight_error: Exception | None = None
+    with engine.begin() as conn:
+        try:
             grantable_members = vault_service.request_grantable_member_metas(
                 conn,
                 scope_type,
                 scope_ref,
                 str(request_id),
             )
-    except vault_service.SecretNotFoundError as exc:
-        raise VaultApiError(f"secret '{exc}' not found", code="secret_not_found", status=404) from exc
-    except vault_service.RequestNotFoundError as exc:
-        raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
-    except vault_service.InvalidRequestError as exc:
-        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
-    except vault_service.InvalidGrantError as exc:
-        raise VaultApiError(str(exc), code="invalid_grant") from exc
+        except (
+            vault_service.SecretNotFoundError,
+            vault_service.RequestNotFoundError,
+            vault_service.InvalidRequestError,
+            vault_service.InvalidGrantError,
+        ) as exc:
+            preflight_error = exc
+            grantable_members = []
+    if isinstance(preflight_error, vault_service.SecretNotFoundError):
+        raise VaultApiError(f"secret '{preflight_error}' not found", code="secret_not_found", status=404) from preflight_error
+    if isinstance(preflight_error, vault_service.RequestNotFoundError):
+        raise VaultApiError(f"request '{preflight_error}' not found", code="request_not_found", status=404) from preflight_error
+    if isinstance(preflight_error, vault_service.InvalidRequestError):
+        raise VaultApiError(str(preflight_error), code="invalid_request", status=409) from preflight_error
+    if isinstance(preflight_error, vault_service.InvalidGrantError):
+        raise VaultApiError(str(preflight_error), code="invalid_grant") from preflight_error
     if not grantable_members:
         raise VaultApiError(f"{scope_type}:{scope_ref} has no grantable static secrets", code="not_grantable", status=409)
     protected_member_names = {str(member["name"]) for member in grantable_members if member.get("protection") == "protected"}

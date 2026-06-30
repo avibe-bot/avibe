@@ -1303,6 +1303,7 @@ def test_keypair_is_not_value_requestable_and_always_ask_is_not_pregrantable(vau
         kind="keypair",
         signer_kind="local",
         public_meta=PROTECTED_SIGNING_PUBLIC_META,
+        policy={"always_ask": True},
     )
     _create(vault, name="STATIC_KEY", protection="protected", policy={"always_ask": True})
     with vault.begin() as conn:
@@ -1326,6 +1327,8 @@ def test_keypair_is_not_value_requestable_and_always_ask_is_not_pregrantable(vau
     assert req["card"]["scope_options"][0]["member_snapshot"] == ["STATIC_KEY"]
     assert req["card"]["scope_options"][0]["one_shot"] is True
     assert sign_req["request_type"] == "sign"
+    assert sign_req["card"]["one_shot"] is False
+    assert sign_req["card"]["scope_options"] == []
 
 
 def test_always_ask_honors_group_grantability(vault):

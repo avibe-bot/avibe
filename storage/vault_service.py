@@ -1324,8 +1324,9 @@ def approval_card(
     row = _require_row(conn, secret_name)
     group = row.get("group_name") or DEFAULT_GROUP
     always_ask = _secret_always_ask(row)
+    one_shot_access = request_type == "access" and always_ask and _secret_access_requestable(row)
     scope_options: list[dict[str, Any]] = []
-    if always_ask:
+    if one_shot_access:
         option = _secret_scope_option(
             conn,
             row,
@@ -1376,7 +1377,7 @@ def approval_card(
         "egress": egress,
         "session_id": session_id,
         "approve_once": True,
-        "one_shot": always_ask,
+        "one_shot": one_shot_access,
         "scope_options": scope_options,
         "value": None,
     }
@@ -2371,7 +2372,7 @@ def consume_one_shot_grant(
     grant_id: str,
     *,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
-) -> None:
+) -> list[dict[str, str]]:
     row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().first()
     if row is None:
         raise GrantNotFoundError(grant_id)
@@ -2379,13 +2380,14 @@ def consume_one_shot_grant(
     if row_dict.get("status") != "active":
         raise GrantNotActiveError(grant_id)
     if not _grant_is_always_ask_for_members(conn, row_dict):
-        return
+        return []
     _expire_grant_rows(
         conn,
         [row_dict],
         cache=cache,
         reason="grant-expired-always-ask-consumed",
     )
+    return agent_release_scopes_after_rows(conn, [row_dict], cache=cache)
 
 
 def find_active_grant_for_secrets(

@@ -4713,7 +4713,10 @@ def _resolve_cli_output_path(path: str) -> str:
 def _consume_one_shot_grants(grants: list[dict] | tuple[dict, ...] | None, *, reason: str) -> None:
     from vibe import api
 
-    api.consume_one_shot_grants(grants, reason=reason)
+    try:
+        api.consume_one_shot_grants(grants, reason=reason)
+    except Exception:
+        logger.debug("failed to consume one-shot vault grants after delivery", exc_info=True)
 
 
 def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: list[str], *, args=None):
