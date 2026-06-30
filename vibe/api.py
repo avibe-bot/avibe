@@ -9250,7 +9250,14 @@ def lark_list_chats_live(app_id: str, app_secret: str, domain: str = "feishu") -
         seen_page_tokens: set = set()
         max_pages = 50  # safety cap to prevent infinite loop
         page = 0
-        while page < max_pages:
+        # `truncated` marks an INCOMPLETE inventory. Any early/abnormal exit while
+        # the server still reports more pages must set it, so the caller never
+        # marks the unseen chats not_returned from a partial list.
+        truncated = False
+        while True:
+            if page >= max_pages:
+                truncated = True
+                break
             url = f"{base}/open-apis/im/v1/chats?page_size=100"
             if page_token:
                 url = f"{url}&page_token={page_token}"
@@ -9270,14 +9277,21 @@ def lark_list_chats_live(app_id: str, app_secret: str, domain: str = "feishu") -
                 }
                 for c in items
             )
+            has_more = bool(data.get("has_more"))
             page_token = data.get("page_token") or ""
-            if not data.get("has_more") or not page_token:
+            if not has_more:
+                break
+            if not page_token:
+                # Server claims more pages but gave no cursor — cannot continue.
+                truncated = True
                 break
             if page_token in seen_page_tokens:
-                break  # server returned the same token — avoid loop
+                # Server returned a repeated cursor — avoid an infinite loop, but
+                # the remaining pages are unreachable, so the list is incomplete.
+                truncated = True
+                break
             seen_page_tokens.add(page_token)
             page += 1
-        truncated = page >= max_pages
         return {"ok": True, "channels": channels, "truncated": truncated}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
