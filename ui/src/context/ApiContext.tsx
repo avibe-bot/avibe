@@ -23,6 +23,9 @@ export type VaultSecret = {
   kind: string;
   protection: string;
   signer_kind: string | null;
+  /** Pinned public key for keypair secrets (non-secret); surfaced so the saved
+   *  signing key's public key is recoverable after the create dialog closes. */
+  signing_public_key?: { curve?: string; public_key: string } | null;
   source: string;
   description?: string | null;
   policy: Record<string, unknown>;
@@ -76,6 +79,24 @@ type VaultBlindBox = {
   ct: string;
 };
 
+/**
+ * Browser-relayed protected access fulfillment. The browser releases each protected
+ * DEK as an opaque HPKE blind box addressed to the resident avault agent and submits
+ * ONLY `{name, dek_blindbox, approval}` per secret — never a raw DEK or plaintext.
+ * Mirrors the backend contract in PR #711 so the two additions dedupe cleanly on merge.
+ */
+export type VaultAccessFulfillmentPayload = {
+  scope_type?: 'secret' | 'skill' | 'group';
+  scope_ref?: string;
+  session_id?: string | null;
+  ttl_seconds?: number;
+  this_session_only?: boolean;
+  agent_pubkey?: { public_key?: string; fingerprint?: string };
+  deks?: Array<{ name: string; dek_blindbox: VaultBlindBox; approval: Record<string, unknown> }>;
+  agent_deks?: Array<{ name: string; dek_blindbox: VaultBlindBox; approval: Record<string, unknown> }>;
+  deks_by_secret?: Record<string, { dek_blindbox: VaultBlindBox; approval: Record<string, unknown> } | VaultBlindBox>;
+};
+
 type VaultSealedEnvelope = {
   ciphertext: string;
   nonce: string;
@@ -101,6 +122,8 @@ export type VaultCreatePayload = {
   signer_kind?: string | null;
   policy?: Record<string, unknown>;
   public_meta?: Record<string, unknown>;
+  /** Set on the first protected secret so the daemon atomically guards single VMK init. */
+  establishing_vmk?: boolean;
 };
 
 export type ApiContextType = {
@@ -312,7 +335,9 @@ export type ApiContextType = {
   getVaultAgentPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
-  getVaultRequests: (params?: { status?: string; type?: string; limit?: number }) => Promise<{ ok: boolean; requests: VaultRequest[] }>;
+  getVaultRequests: (params?: { status?: string; type?: string; limit?: number }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; requests: VaultRequest[] }>;
+  denyVaultRequest: (requestId: string) => Promise<{ ok: boolean; request?: VaultRequest; code?: string; message?: string }>;
+  fulfillVaultAccessRequest: (requestId: string, payload: VaultAccessFulfillmentPayload) => Promise<{ ok: boolean; request_id?: string; grant?: VaultGrant; result?: { type: string; grant?: VaultGrant }; code?: string; message?: string }>;
   getVaultGrants: (params?: { status?: string; sessionId?: string }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; grants: VaultGrant[] }>;
   createVaultGrant: (payload: Record<string, unknown>) => Promise<{ ok: boolean; grant: VaultGrant; code?: string; message?: string }>;
   revokeVaultGrant: (grantId: string) => Promise<{ ok: boolean; grant?: VaultGrant; code?: string; message?: string }>;
@@ -2011,25 +2036,28 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     setDefaultVibeAgent: (name) => postJson('/api/agents/default', { name }),
     removeVibeAgent: (name) => deleteJson(`/api/agents/${encodeURIComponent(name)}`),
+    getVaultVmk: () => getCachedJson('/api/vault/vmk', 1500, { handleError: false }),
     listVaultSecrets: (params) => {
       const search = new URLSearchParams();
       if (params?.group) search.set('group', params.group);
       const qs = search.toString();
       return getCachedJson(qs ? `/api/vault/secrets?${qs}` : '/api/vault/secrets', 1500);
     },
-    getVaultVmk: () => getJson('/api/vault/vmk'),
     getVaultPubkey: () => getCachedJson('/api/vault/pubkey', 1500),
     getVaultAgentPubkey: () => getCachedJson('/api/vault/agent/pubkey', 1500),
     createVaultSecret: (payload, opts) => postJson('/api/vault/secrets', payload, opts),
     deleteVaultSecret: (name) => deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}`),
-    getVaultRequests: (params) => {
+    getVaultRequests: (params, opts) => {
       const search = new URLSearchParams();
       if (params?.status) search.set('status', params.status);
       if (params?.type) search.set('type', params.type);
       if (params?.limit) search.set('limit', String(params.limit));
       const qs = search.toString();
-      return getCachedJson(qs ? `/api/vault/requests?${qs}` : '/api/vault/requests', 1500);
+      return getCachedJson(qs ? `/api/vault/requests?${qs}` : '/api/vault/requests', 1500, opts);
     },
+    denyVaultRequest: (requestId) => postJson(`/api/vault/requests/${encodeURIComponent(requestId)}/deny`, {}),
+    fulfillVaultAccessRequest: (requestId, payload) =>
+      postJson(`/api/vault/requests/${encodeURIComponent(requestId)}/fulfill-access`, payload),
     getVaultGrants: (params, opts) => {
       const search = new URLSearchParams();
       if (params?.status) search.set('status', params.status);

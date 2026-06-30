@@ -29,6 +29,14 @@ def _sealed(suffix: str = "1") -> Sealed:
     return Sealed(ciphertext=f"ct-{suffix}", nonce=f"n-{suffix}", wrap_meta=f"wm-{suffix}")
 
 
+PROTECTED_SIGNING_PUBLIC_META = {
+    "signing_public_key": {
+        "curve": "secp256k1",
+        "public_key": "02" + "cd" * 32,
+    }
+}
+
+
 def _create(engine, **kw):
     with engine.begin() as conn:
         return vs.create_secret(conn, sealed=_sealed(), **kw)
@@ -85,6 +93,112 @@ def test_create_persists_no_value_derived_public_meta(vault):
     assert value_tail not in json.dumps(listed)
 
 
+def test_standard_static_secret_is_agent_access_grantable(vault):
+    _create(vault, name="STANDARD_KEY", protection="standard", group="default")
+    with vault.begin() as conn:
+        request = vs.create_access_request(conn, "STANDARD_KEY", requester={"session_id": "ses_1"})
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="STANDARD_KEY",
+            session_id="ses_1",
+            created_by_request_id=request["id"],
+        )
+        listed = vs.list_secrets(conn)
+
+    assert listed[0]["access_grantable"] is True
+    assert listed[0]["per_use_sign"] is False
+    assert request["status"] == "pending"
+    assert request["card"]["scope_options"][0]["scope_ref"] == "STANDARD_KEY"
+    assert grant["delivery_ready"] is True
+    assert grant["delivery_status"] == "standard_ready"
+    with vault.begin() as conn:
+        row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant["id"])).mappings().one()
+        release_scopes = vs.agent_release_scopes_after_rows(conn, [dict(row)])
+    assert int(row["agent_ready"] or 0) == 0
+    assert release_scopes == []
+
+
+def test_inactive_standard_grants_are_not_delivery_ready(vault):
+    _create(vault, name="STANDARD_KEY", protection="standard", group="default")
+    with vault.begin() as conn:
+        request = vs.create_access_request(conn, "STANDARD_KEY", requester={"session_id": "ses_1"})
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="STANDARD_KEY",
+            session_id="ses_1",
+            created_by_request_id=request["id"],
+        )
+        revoked = vs.revoke_grant(conn, grant["id"])
+
+    assert revoked["status"] == "revoked"
+    assert revoked["delivery_ready"] is False
+    assert revoked["delivery_status"] == "agent_cache_unverified"
+
+
+def test_expired_standard_grants_are_not_delivery_ready(vault):
+    _create(vault, name="STANDARD_KEY", protection="standard", group="default")
+    with vault.begin() as conn:
+        request = vs.create_access_request(conn, "STANDARD_KEY", requester={"session_id": "ses_1"})
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="STANDARD_KEY",
+            session_id="ses_1",
+            created_by_request_id=request["id"],
+        )
+        expired_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+        conn.execute(vault_grants.update().where(vault_grants.c.id == grant["id"]).values(expires_at=expired_at))
+        payload = vs.get_grant_created_by_request(conn, request["id"])
+
+    assert payload is not None
+    assert payload["status"] == "active"
+    assert payload["delivery_ready"] is False
+    assert payload["delivery_status"] == "agent_cache_unverified"
+
+
+def test_deny_request_marks_pending_denied_and_audits(vault):
+    _create(vault, name="STANDARD_KEY", protection="standard")
+    with vault.begin() as conn:
+        request = vs.create_access_request(conn, "STANDARD_KEY", requester={"session_id": "ses_1"})
+        denied = vs.deny_request(conn, request["id"], requester={"source": "gatekeeper"}, reason="no")
+        event = conn.execute(
+            select(vault_audit).where(vault_audit.c.request_id == request["id"], vault_audit.c.event == "request-denied")
+        ).mappings().one()
+
+    assert denied["status"] == "denied"
+    assert denied["decided_at"] is not None
+    assert json.loads(event["delivery"]) == {"request_type": "access", "reason": "no"}
+
+
+def test_deny_request_rejects_non_pending(vault):
+    _create(vault, name="STANDARD_KEY", protection="standard")
+    with vault.begin() as conn:
+        request = vs.create_access_request(conn, "STANDARD_KEY")
+        vs.deny_request(conn, request["id"])
+        with pytest.raises(vs.InvalidRequestError):
+            vs.deny_request(conn, request["id"])
+
+
+def test_deny_request_expires_timed_out_request_before_denial(vault):
+    _create(vault, name="STANDARD_KEY", protection="standard")
+    expired_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    with vault.begin() as conn:
+        request = vs.create_access_request(conn, "STANDARD_KEY", requester={"session_id": "ses_1"}, expires_at=expired_at)
+        with pytest.raises(vs.InvalidRequestError, match="expired"):
+            vs.deny_request(conn, request["id"], requester={"source": "gatekeeper"}, reason="late")
+        row = conn.execute(select(vault_requests).where(vault_requests.c.id == request["id"])).mappings().one()
+        events = [
+            item["event"]
+            for item in conn.execute(select(vault_audit.c.event).where(vault_audit.c.request_id == request["id"])).mappings()
+        ]
+
+    assert row["status"] == "expired"
+    assert "request-expired" in events
+    assert "request-denied" not in events
+
+
 def test_pubkey_pin_metadata_round_trips_through_masked_meta(vault):
     _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
     pin = {
@@ -108,6 +222,71 @@ def test_pubkey_pin_metadata_round_trips_through_masked_meta(vault):
     listed_meta = next(item for item in listed if item["name"] == "ETH_KEY")
     assert listed_meta["avault_pubkey_pin"]["fingerprint"] == "fp_123"
     assert "ignored" not in listed_meta["avault_pubkey_pin"]
+
+
+def test_keypair_signing_public_key_surfaces_in_masked_meta(vault):
+    public_key = "02" + "cd" * 32
+    _create(
+        vault,
+        name="ETH_KEY",
+        kind="keypair",
+        signer_kind="local",
+        public_meta={
+            "signing_public_key": {
+                "curve": "secp256k1",
+                "public_key": public_key,
+                "ignored": "nope",
+            }
+        },
+    )
+
+    with vault.connect() as conn:
+        meta = vs.get_secret_meta(conn, "ETH_KEY")
+        listed = vs.list_secrets(conn)
+
+    assert meta["signing_public_key"] == {"curve": "secp256k1", "public_key": public_key}
+    listed_meta = next(item for item in listed if item["name"] == "ETH_KEY")
+    assert listed_meta["signing_public_key"] == {"curve": "secp256k1", "public_key": public_key}
+    assert "ignored" not in listed_meta["signing_public_key"]
+
+
+def test_protected_keypair_requires_signing_public_key_for_per_use_sign(vault):
+    _create(
+        vault,
+        name="UNPINNED_KEY",
+        kind="keypair",
+        protection="protected",
+        signer_kind="local",
+    )
+
+    with vault.connect() as conn:
+        meta = vs.get_secret_meta(conn, "UNPINNED_KEY")
+        listed = vs.list_secrets(conn)
+    listed_meta = next(item for item in listed if item["name"] == "UNPINNED_KEY")
+
+    assert meta["per_use_sign"] is False
+    assert listed_meta["per_use_sign"] is False
+    assert "signing_public_key" not in meta
+    with vault.begin() as conn:
+        with pytest.raises(vs.InvalidRequestError):
+            vs.create_sign_request(conn, "UNPINNED_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")
+
+
+def test_protected_keypair_with_signing_public_key_is_per_use_signable(vault):
+    public_key = "02" + "cd" * 32
+    _create(
+        vault,
+        name="PINNED_KEY",
+        kind="keypair",
+        protection="protected",
+        signer_kind="local",
+        public_meta={"signing_public_key": {"curve": "secp256k1", "public_key": public_key}},
+    )
+
+    with vault.connect() as conn:
+        meta = vs.get_secret_meta(conn, "PINNED_KEY")
+
+    assert meta["per_use_sign"] is True
 
 
 def test_pubkey_pin_does_not_change_secret_version(vault):
@@ -145,6 +324,18 @@ def test_get_envelopes_validates_batch_before_returning(vault):
     _create(vault, name="A_KEY")
     with vault.connect() as conn, pytest.raises(vs.SecretNotFoundError):
         vs.get_envelopes(conn, ["A_KEY", "NOPE"])
+
+
+def test_keypair_is_not_value_deliverable(vault):
+    _create(vault, name="ETH_KEY", kind="keypair", signer_kind="local")
+    with vault.connect() as conn:
+        with pytest.raises(vs.KeypairNotValueDeliverableError):
+            vs.get_envelope(conn, "ETH_KEY")
+        with pytest.raises(vs.KeypairNotValueDeliverableError):
+            vs.get_envelopes(conn, ["ETH_KEY"])
+        with pytest.raises(vs.KeypairNotValueDeliverableError):
+            vs.resolve_secret_access(conn, "ETH_KEY")
+        assert vs.get_key_envelope(conn, "ETH_KEY") == _sealed()
 
 
 def test_record_deliveries_bumps_usage_and_audits(vault):
@@ -922,6 +1113,71 @@ def test_request_inbox_hydrates_unlock_material_without_persisting_it(vault):
     assert "ct-1" not in raw_delivery
 
 
+def test_agent_created_request_hydrates_only_for_ui_inbox(vault):
+    _create(vault, name="STANDARD_KEY", protection="standard", group="crypto")
+    with vault.begin() as conn:
+        vs.create_secret(conn, name="PROTECTED_KEY", protection="protected", group="crypto", sealed=_sealed("protected"))
+        req = vs.create_access_request(
+            conn,
+            "STANDARD_KEY",
+            requester={"source": "agent-cli", "session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        ui_payload = vs.get_request(conn, req["id"])
+        agent_payload = vs.get_request(conn, req["id"], audience=vs.REQUEST_AUDIENCE_AGENT)
+        listed = vs.list_requests(conn)
+
+    agent_encoded = json.dumps(agent_payload)
+    assert "secret_unlock_material" not in agent_encoded
+    assert "unlock_material" not in agent_encoded
+    assert "ct-protected" not in agent_encoded
+    assert "wm-protected" not in agent_encoded
+    ui_encoded = json.dumps({"ui": ui_payload, "listed": listed})
+    assert "unlock_material" in ui_encoded
+    assert "ct-protected" in ui_encoded
+    assert "wm-protected" in ui_encoded
+    group_option = next(option for option in listed[0]["card"]["scope_options"] if option["scope_type"] == "group")
+    assert group_option["unlock_material"] == [
+        {
+            "name": "PROTECTED_KEY",
+            "kind": "static",
+            "envelope": {
+                "ciphertext": "ct-protected",
+                "nonce": "n-protected",
+                "wrap_meta": "wm-protected",
+            },
+        }
+    ]
+
+
+def test_cli_resolve_protected_request_hydrates_only_for_ui_inbox(vault):
+    _create(vault, name="PROTECTED_KEY", protection="protected", group="crypto")
+    with vault.begin() as conn:
+        result = vs.resolve_secret_access(
+            conn,
+            "PROTECTED_KEY",
+            session_id="ses_1",
+            requester={"source": "cli", "session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        listed = vs.list_requests(conn)
+        raw_delivery = conn.execute(
+            select(vault_requests.c.delivery).where(vault_requests.c.id == result["request"]["id"])
+        ).scalar_one()
+
+    agent_encoded = json.dumps(result["request"]["card"])
+    assert result["status"] == "approval_required"
+    assert "secret_unlock_material" not in agent_encoded
+    assert "ct-1" not in agent_encoded
+    assert listed[0]["card"]["secret_unlock_material"]["envelope"] == {
+        "ciphertext": "ct-1",
+        "nonce": "n-1",
+        "wrap_meta": "wm-1",
+    }
+    assert "secret_unlock_material" not in raw_delivery
+    assert "ct-1" not in raw_delivery
+
+
 def test_resolve_access_card_uses_delivery_session_fallback(vault):
     _create(vault, name="PROTECTED_KEY", protection="protected", group="crypto")
     with vault.begin() as conn:
@@ -1037,7 +1293,14 @@ def test_grant_can_be_intentionally_unbound_from_request_session(vault):
 
 
 def test_keypair_and_always_ask_are_not_grantable(vault):
-    _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
+    _create(
+        vault,
+        name="ETH_KEY",
+        protection="protected",
+        kind="keypair",
+        signer_kind="local",
+        public_meta=PROTECTED_SIGNING_PUBLIC_META,
+    )
     _create(vault, name="STATIC_KEY", protection="protected", policy={"always_ask": True})
     with vault.begin() as conn:
         with pytest.raises(vs.NotGrantableError):
@@ -1108,7 +1371,14 @@ def test_grant_creation_rejects_expected_member_mismatch_without_claiming_reques
 def test_grant_creation_must_match_pending_access_request(vault):
     _create(vault, name="A_KEY", protection="protected")
     _create(vault, name="B_KEY", protection="protected")
-    _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
+    _create(
+        vault,
+        name="ETH_KEY",
+        protection="protected",
+        kind="keypair",
+        signer_kind="local",
+        public_meta=PROTECTED_SIGNING_PUBLIC_META,
+    )
     with vault.begin() as conn:
         access_req = _access_request(conn, "A_KEY", session_id="ses_1")
         sign_req = vs.create_sign_request(conn, "ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")
@@ -1168,7 +1438,14 @@ def test_grant_creation_rejects_expired_access_request(vault):
 
 def test_rotating_protected_secret_expires_pending_access_and_sign_requests(vault):
     _create(vault, name="A_KEY", protection="protected")
-    _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
+    _create(
+        vault,
+        name="ETH_KEY",
+        protection="protected",
+        kind="keypair",
+        signer_kind="local",
+        public_meta=PROTECTED_SIGNING_PUBLIC_META,
+    )
     with vault.begin() as conn:
         access_req = _access_request(conn, "A_KEY", session_id="ses_1")
         vs.rotate_secret(conn, "A_KEY", _sealed("rotated"))
@@ -1198,6 +1475,50 @@ def test_rotating_protected_secret_expires_pending_access_and_sign_requests(vaul
     assert sign_status == "expired"
 
 
+def test_rotating_standard_secret_expires_pending_requests_and_active_grants(vault):
+    _create(vault, name="A_KEY", protection="standard")
+    _create(vault, name="ETH_KEY", protection="standard", kind="keypair", signer_kind="local")
+    with vault.begin() as conn:
+        access_req = _access_request(conn, "A_KEY", session_id="ses_1")
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="A_KEY",
+            session_id="ses_1",
+            created_by_request_id=access_req["id"],
+        )
+        pending_access_req = _access_request(conn, "A_KEY", session_id="ses_2")
+        vs.rotate_secret(conn, "A_KEY", _sealed("rotated"))
+        access_status = conn.execute(
+            select(vault_requests.c.status).where(vault_requests.c.id == pending_access_req["id"])
+        ).scalar_one()
+        grant_status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
+        with pytest.raises(vs.InvalidRequestError):
+            vs.create_grant(
+                conn,
+                scope_type="secret",
+                scope_ref="A_KEY",
+                session_id="ses_2",
+                created_by_request_id=pending_access_req["id"],
+            )
+
+        sign_req = vs.create_sign_request(conn, "ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")
+        vs.rotate_secret(conn, "ETH_KEY", _sealed("rotated-key"))
+        sign_status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == sign_req["id"])).scalar_one()
+        with pytest.raises(vs.InvalidRequestError):
+            vs.claim_sign_request(
+                conn,
+                sign_req["id"],
+                name="ETH_KEY",
+                digest="00" * 32,
+                scheme="ecdsa-secp256k1-recoverable",
+            )
+
+    assert access_status == "expired"
+    assert grant_status == "expired"
+    assert sign_status == "expired"
+
+
 def test_deleting_protected_secret_expires_pending_access_requests(vault):
     _create(vault, name="A_KEY", protection="protected")
     with vault.begin() as conn:
@@ -1208,8 +1529,31 @@ def test_deleting_protected_secret_expires_pending_access_requests(vault):
     assert status == "expired"
 
 
+def test_deleting_standard_secret_expires_pending_access_and_sign_requests(vault):
+    _create(vault, name="A_KEY", protection="standard")
+    _create(vault, name="ETH_KEY", protection="standard", kind="keypair", signer_kind="local")
+    with vault.begin() as conn:
+        access_req = _access_request(conn, "A_KEY", session_id="ses_1")
+        vs.delete_secret(conn, "A_KEY")
+        access_status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == access_req["id"])).scalar_one()
+
+        sign_req = vs.create_sign_request(conn, "ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")
+        vs.delete_secret(conn, "ETH_KEY")
+        sign_status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == sign_req["id"])).scalar_one()
+
+    assert access_status == "expired"
+    assert sign_status == "expired"
+
+
 def test_sign_request_completion_can_only_claim_pending_once(vault):
-    _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
+    _create(
+        vault,
+        name="ETH_KEY",
+        protection="protected",
+        kind="keypair",
+        signer_kind="local",
+        public_meta=PROTECTED_SIGNING_PUBLIC_META,
+    )
     digest = "00" * 32
     with vault.begin() as conn:
         sign_req = vs.create_sign_request(conn, "ETH_KEY", digest=digest, scheme="ecdsa-secp256k1-recoverable")
@@ -1242,8 +1586,63 @@ def test_sign_request_completion_can_only_claim_pending_once(vault):
     assert meta["last_used_at"] is not None
 
 
+def test_get_request_expires_timed_out_pending_request(vault):
+    _create(vault, name="A_KEY")
+    expired_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    with vault.begin() as conn:
+        req = vs.create_access_request(conn, "A_KEY", expires_at=expired_at)
+        fetched = vs.get_request(conn, req["id"])
+        audit_events = [
+            row["event"]
+            for row in conn.execute(select(vault_audit.c.event).where(vault_audit.c.request_id == req["id"])).mappings()
+        ]
+
+    assert fetched["status"] == "expired"
+    assert "request-expired" in audit_events
+
+
+def test_list_requests_expires_timed_out_pending_requests(vault):
+    _create(vault, name="A_KEY")
+    expired_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+    with vault.begin() as conn:
+        req = vs.create_access_request(conn, "A_KEY", expires_at=expired_at)
+        pending = vs.list_requests(conn, status="pending")
+        expired = vs.get_request(conn, req["id"])
+
+    assert pending == []
+    assert expired["status"] == "expired"
+
+
+def test_claim_sign_request_prevents_concurrent_deny_before_completion(vault):
+    _create(vault, name="ETH_KEY", kind="keypair", signer_kind="local")
+    digest = "00" * 32
+    with vault.begin() as conn:
+        req = vs.create_sign_request(conn, "ETH_KEY", digest=digest, scheme="ecdsa-secp256k1-recoverable")
+        claimed = vs.claim_sign_request(conn, req["id"], name="ETH_KEY", digest=digest, scheme="ecdsa-secp256k1-recoverable")
+        with pytest.raises(vs.InvalidRequestError):
+            vs.deny_request(conn, req["id"])
+        completed = vs.complete_sign_request(
+            conn,
+            req["id"],
+            name="ETH_KEY",
+            digest=digest,
+            scheme="ecdsa-secp256k1-recoverable",
+            signature={"signature": "ab" * 64, "recovery_id": 1},
+        )
+
+    assert claimed["status"] == "signing"
+    assert completed["status"] == "approved"
+
+
 def test_sign_request_completion_rejects_malformed_signatures(vault):
-    _create(vault, name="ETH_KEY", protection="protected", kind="keypair", signer_kind="local")
+    _create(
+        vault,
+        name="ETH_KEY",
+        protection="protected",
+        kind="keypair",
+        signer_kind="local",
+        public_meta=PROTECTED_SIGNING_PUBLIC_META,
+    )
     digest = "00" * 32
     with vault.begin() as conn:
         req = vs.create_sign_request(conn, "ETH_KEY", digest=digest, scheme="ecdsa-secp256k1-recoverable")

@@ -3601,6 +3601,48 @@ def _open_vault_engine():
     return create_sqlite_engine(paths.get_sqlite_state_path())
 
 
+def _vault_caller_metadata() -> dict[str, str]:
+    context = caller_context_from_env()
+    return context.to_metadata() if context is not None else {}
+
+
+def _vault_cli_session_id(args) -> str | None:
+    session_id = (getattr(args, "session_id", None) or "").strip()
+    if session_id:
+        return session_id
+    context = caller_context_from_env()
+    return _default_session_id_from_caller(context)
+
+
+def _vault_cli_requester(args) -> dict:
+    requester = {"source": "agent-cli", "pid": os.getpid()}
+    requester.update(_vault_caller_metadata())
+    session_id = _vault_cli_session_id(args)
+    if session_id:
+        requester["session_id"] = session_id
+    skill = (getattr(args, "skill", None) or "").strip()
+    if skill:
+        requester["skill"] = skill
+    return requester
+
+
+def _vault_cli_delivery(args, **fields) -> dict:
+    delivery = {key: value for key, value in fields.items() if value is not None}
+    session_id = _vault_cli_session_id(args)
+    if session_id:
+        delivery["session_id"] = session_id
+    skill = (getattr(args, "skill", None) or "").strip()
+    if skill:
+        delivery["skill"] = skill
+    command = getattr(args, "command", None)
+    if command:
+        delivery["command"] = command
+    egress = getattr(args, "egress", None)
+    if egress:
+        delivery["egress"] = egress
+    return delivery
+
+
 def _is_env_name(name: str) -> bool:
     """ASCII shell/env identifier: a letter or underscore, then letters/digits/underscores."""
     if not name or not name[0].isascii() or not (name[0].isalpha() or name[0] == "_"):
@@ -3723,6 +3765,36 @@ def cmd_vault_list(args):
         return 1
 
 
+def cmd_vault_discover(args):
+    from storage import vault_service
+
+    try:
+        engine = _open_vault_engine()
+        with engine.connect() as conn:
+            secrets = vault_service.list_secrets(conn, group=getattr(args, "group", None))
+        kind = (getattr(args, "kind", None) or "").strip()
+        if kind:
+            secrets = [secret for secret in secrets if secret.get("kind") == kind]
+        protection = (getattr(args, "protection", None) or "").strip()
+        if protection:
+            secrets = [secret for secret in secrets if secret.get("protection") == protection]
+        capabilities = [
+            {
+                "name": secret["name"],
+                "kind": secret.get("kind"),
+                "protection": secret.get("protection"),
+                "access_grantable": bool(secret.get("access_grantable")),
+                "per_use_sign": bool(secret.get("per_use_sign")),
+            }
+            for secret in secrets
+        ]
+        _print_cli_payload("vault_discovery", secrets=capabilities)
+        return 0
+    except Exception as exc:
+        _print_task_error(exc, help_command="vibe vault discover --help")
+        return 1
+
+
 def cmd_vault_rm(args):
     from storage import vault_service
     from vibe import api
@@ -3746,11 +3818,50 @@ def cmd_vault_rm(args):
         return 1
 
 
+def cmd_vault_access(args):
+    from storage import vault_crypto, vault_service
+
+    help_command = "vibe vault access --help"
+    name = getattr(args, "name", "")
+    try:
+        if not vault_crypto.is_valid_secret_name(name):
+            raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name", help_command=help_command)
+        engine = _open_vault_engine()
+        with engine.begin() as conn:
+            vault_service.get_secret_meta(conn, name)
+            request = vault_service.create_access_request(
+                conn,
+                name,
+                requester=_vault_cli_requester(args),
+                delivery=_vault_cli_delivery(args, mode="access"),
+            )
+        _print_cli_payload(
+            "vault_access_request",
+            request_id=request["id"],
+            request=request,
+            message="Request recorded. Wait for approval with: vibe vault await " + request["id"],
+        )
+        return 0
+    except vault_service.SecretNotFoundError:
+        _print_task_error(TaskCliError(f"secret '{name}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.NotGrantableError as exc:
+        _print_task_error(TaskCliError(str(exc), code="not_grantable", help_command=help_command))
+        return 1
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
 def _expire_agent_grant_after_missing(
     engine,
     grant_id: str,
     names: list[str],
     *,
+    requester: dict | None = None,
     delivery: dict | None = None,
 ) -> dict | None:
     from storage import vault_service
@@ -3763,7 +3874,7 @@ def _expire_agent_grant_after_missing(
                 resolved = vault_service.resolve_secret_access(
                     conn,
                     name,
-                    requester={"source": "cli", "pid": os.getpid()},
+                    requester=requester or {"source": "cli", "pid": os.getpid()},
                     delivery=delivery or {},
                 )
                 if first_request is None and isinstance(resolved.get("request"), dict):
@@ -3777,6 +3888,16 @@ def _expire_agent_grant_after_missing(
 def _agent_missing_grant(exc: Exception) -> bool:
     text = str(exc).lower()
     return "grant is missing or expired" in text or "grant does not cover" in text
+
+
+def _vault_cli_delivery_context(args, *, mode: str, **extra) -> tuple[dict, dict, str | None]:
+    session_id = _vault_cli_session_id(args)
+    requester = {"source": "cli", "pid": os.getpid()}
+    delivery = {"mode": mode, **extra}
+    if session_id:
+        requester["session_id"] = session_id
+        delivery["session_id"] = session_id
+    return requester, delivery, session_id
 
 
 def _preflight_vault_names(engine, names: list[str], *, mixed_message: str, mixed_code: str = "mixed_protection_tiers") -> dict[str, dict]:
@@ -4073,13 +4194,14 @@ def _resolve_cli_output_path(path: str) -> str:
     return str(output_path)
 
 
-def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: list[str]):
+def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: list[str], *, args=None):
     from storage import vault_service
 
+    requester, delivery, session_id = _vault_cli_delivery_context(args, mode="run", command=command_argv)
     metas = _preflight_vault_run_batch(engine, mapping)
     if metas and {str(meta.get("protection") or "standard") for meta in metas.values()} == {"protected"}:
         with engine.begin() as conn:
-            common_grant = vault_service.find_active_grant_for_secrets(conn, list(mapping.values()))
+            common_grant = vault_service.find_active_grant_for_secrets(conn, list(mapping.values()), session_id=session_id)
             if common_grant is not None:
                 return common_grant, [
                     {"name": vault_name, "env": env_name, "envelope": vault_service.get_protected_envelope(conn, vault_name)}
@@ -4093,8 +4215,8 @@ def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: l
             resolved = vault_service.resolve_secret_access(
                 conn,
                 vault_name,
-                requester={"source": "cli", "pid": os.getpid()},
-                delivery={"mode": "run", "command": command_argv},
+                requester=requester,
+                delivery=delivery,
             )
             if resolved["status"] == "approval_required":
                 req = resolved.get("request") or {}
@@ -4162,13 +4284,14 @@ def _resolve_single_vault_delivery(
     raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
 
 
-def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: str):
+def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: str, args=None):
     from storage import vault_service
 
+    requester, delivery, session_id = _vault_cli_delivery_context(args, mode="inject", path=path, format=fmt)
     metas = _preflight_vault_inject_batch(engine, names)
     if metas and {str(meta.get("protection") or "standard") for meta in metas.values()} == {"protected"}:
         with engine.begin() as conn:
-            common_grant = vault_service.find_active_grant_for_secrets(conn, names)
+            common_grant = vault_service.find_active_grant_for_secrets(conn, names, session_id=session_id)
             if common_grant is not None:
                 return common_grant, [
                     {"name": name, "key": name, "envelope": vault_service.get_protected_envelope(conn, name)}
@@ -4182,8 +4305,8 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
             resolved = vault_service.resolve_secret_access(
                 conn,
                 name,
-                requester={"source": "cli", "pid": os.getpid()},
-                delivery={"mode": "inject", "path": path, "format": fmt},
+                requester=requester,
+                delivery=delivery,
             )
             if resolved["status"] == "approval_required":
                 req = resolved.get("request") or {}
@@ -4250,9 +4373,12 @@ def cmd_vault_run(args):
                 example="vibe vault run --env OPENAI_API_KEY -- python sync.py",
             )
         engine = _open_vault_engine()
-        grant, secrets = _resolve_vault_run_delivery(engine, mapping, command_argv)
+        grant, secrets = _resolve_vault_run_delivery(engine, mapping, command_argv, args=args)
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except vault_service.KeypairNotValueDeliverableError as exc:
+        _print_task_error(TaskCliError(str(exc), code="keypair_not_value_deliverable", help_command=help_command))
         return 1
     except vault_service.UnsupportedProtectionError as exc:
         _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
@@ -4298,11 +4424,13 @@ def cmd_vault_run(args):
         return 1
     except api.AvaultError as exc:
         if grant is not None and _agent_missing_grant(exc):
+            requester, delivery, _session_id = _vault_cli_delivery_context(args, mode="run", command=command_argv)
             _expire_agent_grant_after_missing(
                 engine,
                 grant["id"],
                 sorted(set(mapping.values())),
-                delivery={"mode": "run", "command": command_argv},
+                requester=requester,
+                delivery=delivery,
             )
             _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
             return 1
@@ -4338,6 +4466,29 @@ def _wait_for_provision(request_id: str, *, timeout: float, poll_interval: float
             break
         time.sleep(min(poll_interval, remaining))
     return False
+
+
+def _wait_for_vault_request(request_id: str, *, timeout: float, poll_interval: float = 2.0) -> dict | None:
+    from storage import vault_service
+
+    deadline = time.monotonic() + timeout
+    engine = _open_vault_engine()
+    while time.monotonic() < deadline:
+        with engine.begin() as conn:
+            try:
+                request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+            except vault_service.RequestNotFoundError:
+                raise
+            result = None
+            if request.get("status") == "approved":
+                result = api._vault_request_result(conn, request)
+            if request.get("status") in {"approved", "denied", "expired", "failed", "fulfilled"}:
+                return {"request": request, "result": result}
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval, remaining))
+    return None
 
 
 def cmd_vault_request(args):
@@ -4399,6 +4550,124 @@ def cmd_vault_request(args):
             ),
         )
         return 0
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
+def cmd_vault_sign(args):
+    from storage import vault_crypto, vault_service
+
+    help_command = "vibe vault sign --help"
+    name = getattr(args, "name", "")
+    try:
+        if not vault_crypto.is_valid_secret_name(name):
+            raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name", help_command=help_command)
+        digest = api._sign_digest_from_payload(getattr(args, "digest", None))
+        scheme = getattr(args, "scheme", None) or "ecdsa-secp256k1-recoverable"
+        engine = _open_vault_engine()
+        with engine.begin() as conn:
+            meta = vault_service.get_secret_meta(conn, name)
+            if meta.get("kind") != "keypair":
+                raise TaskCliError(f"secret '{name}' is not a signing key", code="not_signing_key", help_command=help_command)
+            if (meta.get("signer_kind") or "local") != "local":
+                raise TaskCliError(
+                    f"secret '{name}' is not locally signable",
+                    code="unsupported_signer_kind",
+                    help_command=help_command,
+                )
+            request = vault_service.create_sign_request(
+                conn,
+                name,
+                digest=digest,
+                scheme=scheme,
+                requester=_vault_cli_requester(args),
+                delivery=_vault_cli_delivery(args, mode="sign"),
+            )
+        _print_cli_payload(
+            "vault_sign_request",
+            request_id=request["id"],
+            request=request,
+            message="Request recorded. Wait for approval with: vibe vault await " + request["id"],
+        )
+        return 0
+    except vault_service.SecretNotFoundError:
+        _print_task_error(TaskCliError(f"secret '{name}' not found", code="secret_not_found", help_command=help_command))
+        return 1
+    except api.VaultApiError as exc:
+        _print_task_error(TaskCliError(str(exc), code=exc.code, help_command=help_command))
+        return 1
+    except vault_service.InvalidRequestError as exc:
+        _print_task_error(TaskCliError(str(exc), code="invalid_request", help_command=help_command))
+        return 1
+    except TaskCliError as exc:
+        _print_task_error(exc)
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
+def cmd_vault_await(args):
+    from storage import vault_service
+
+    help_command = "vibe vault await --help"
+    request_id = str(getattr(args, "request_id", "") or "").strip()
+    timeout = float(getattr(args, "wait", None) or 0)
+    try:
+        engine = _open_vault_engine()
+        with engine.begin() as conn:
+            request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+            result = api._vault_request_result(conn, request)
+        if timeout > 0 and request.get("status") in {"pending", "signing"}:
+            waited = _wait_for_vault_request(request_id, timeout=timeout)
+            if waited is None:
+                raise TaskCliError(
+                    f"request '{request_id}' was not decided within {timeout:g}s",
+                    code="request_timeout",
+                    help_command=help_command,
+                    details={"request_id": request_id},
+                )
+            request = waited["request"]
+            result = waited.get("result")
+        if request.get("status") == "denied":
+            raise TaskCliError(
+                f"request '{request_id}' was denied",
+                code="request_denied",
+                help_command=help_command,
+                details={"request_id": request_id},
+            )
+        if request.get("status") == "expired":
+            raise TaskCliError(
+                f"request '{request_id}' expired",
+                code="request_expired",
+                help_command=help_command,
+                details={"request_id": request_id},
+            )
+        if request.get("status") == "failed":
+            raise TaskCliError(
+                f"request '{request_id}' failed",
+                code="request_failed",
+                help_command=help_command,
+                details={"request_id": request_id},
+            )
+        if request.get("status") != "approved":
+            _print_cli_payload("vault_request_status", request_id=request_id, status=request.get("status"), request=request)
+            return 0
+        _print_cli_payload("vault_request_result", request_id=request_id, status=request.get("status"), request=request, result=result)
+        return 0
+    except vault_service.RequestNotFoundError:
+        _print_task_error(TaskCliError(f"request '{request_id}' not found", code="request_not_found", help_command=help_command))
+        return 1
+    except vault_service.InvalidRequestError as exc:
+        _print_task_error(TaskCliError(str(exc), code="invalid_request", help_command=help_command))
+        return 1
+    except api.AvaultError as exc:
+        _print_task_error(TaskCliError(f"avault sign failed: {exc}", code="avault_failed", help_command=help_command))
+        return 1
     except TaskCliError as exc:
         _print_task_error(exc)
         return 1
@@ -4558,6 +4827,11 @@ def cmd_vault_fetch(args):
         # envelope to avault, so a disallowed target never even unwraps the secret.
         with engine.connect() as conn:
             policy = vault_service.get_secret_policy(conn, name)
+            meta = vault_service.get_secret_meta(conn, name)
+            if meta.get("kind") == "keypair":
+                raise vault_service.KeypairNotValueDeliverableError(
+                    f"{name} is a signing key; use vault_sign instead of value delivery"
+                )
             allowed = policy.get("allowed_hosts") or []
             if not allowed:
                 raise TaskCliError(
@@ -4600,11 +4874,12 @@ def cmd_vault_fetch(args):
             "body": body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else body,
             "inject": inject,
         }
+        requester, delivery, _session_id = _vault_cli_delivery_context(args, mode="fetch", host=host, method=method)
         grant, sealed = _resolve_single_vault_delivery(
             engine,
             name,
-            requester={"source": "cli", "pid": os.getpid()},
-            delivery={"mode": "fetch", "host": host, "method": method},
+            requester=requester,
+            delivery=delivery,
         )
         if grant is not None:
             result = api.avault_agent_deliver_fetch(
@@ -4635,6 +4910,9 @@ def cmd_vault_fetch(args):
     except vault_service.SecretNotFoundError:
         _print_task_error(TaskCliError(f"secret '{args.auth}' not found", code="secret_not_found", help_command=help_command))
         return 1
+    except vault_service.KeypairNotValueDeliverableError as exc:
+        _print_task_error(TaskCliError(str(exc), code="keypair_not_value_deliverable", help_command=help_command))
+        return 1
     except vault_service.UnsupportedProtectionError as exc:
         _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
         return 1
@@ -4649,7 +4927,8 @@ def cmd_vault_fetch(args):
                     engine,
                     grant_id,
                     [name],
-                    delivery={"mode": "fetch", "host": host, "method": method},
+                    requester=requester,
+                    delivery=delivery,
                 )
                 _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
                 return 1
@@ -4751,7 +5030,7 @@ def cmd_vault_inject(args):
             raise TaskCliError(f"unknown --format: {fmt!r} (dotenv|json)", code="invalid_format", help_command=help_command)
         engine = _open_vault_engine()
         resolved_out = _resolve_cli_output_path(str(out))
-        grant, secrets = _resolve_vault_inject_delivery(engine, keys, path=resolved_out, fmt=fmt)
+        grant, secrets = _resolve_vault_inject_delivery(engine, keys, path=resolved_out, fmt=fmt, args=args)
         # avault writes the 0600 file atomically; if the path is unwritable it raises and no
         # delivery is recorded.
         if grant is not None:
@@ -4776,6 +5055,9 @@ def cmd_vault_inject(args):
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
         return 1
+    except vault_service.KeypairNotValueDeliverableError as exc:
+        _print_task_error(TaskCliError(str(exc), code="keypair_not_value_deliverable", help_command=help_command))
+        return 1
     except vault_service.UnsupportedProtectionError as exc:
         _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
         return 1
@@ -4784,11 +5066,18 @@ def cmd_vault_inject(args):
         return 1
     except api.AvaultError as exc:
         if engine is not None and isinstance(grant, dict) and _agent_missing_grant(exc):
+            requester, delivery, _session_id = _vault_cli_delivery_context(
+                args,
+                mode="inject",
+                path=_resolve_cli_output_path(str(out)),
+                format=fmt,
+            )
             _expire_agent_grant_after_missing(
                 engine,
                 grant["id"],
                 keys,
-                delivery={"mode": "inject", "path": _resolve_cli_output_path(str(out)), "format": fmt},
+                requester=requester,
+                delivery=delivery,
             )
             _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
             return 1
@@ -7731,7 +8020,10 @@ def build_parser():
         error_help_command="vibe vault --help",
         error_hint="Run one of the vault subcommands below. Start with: vibe vault list",
     )
-    vault_subparsers = vault_parser.add_subparsers(dest="vault_command", metavar="{set,list,rm,run,fetch,request,export,inject,key}")
+    vault_subparsers = vault_parser.add_subparsers(
+        dest="vault_command",
+        metavar="{set,list,discover,rm,run,fetch,access,sign,await,request,export,inject,key}",
+    )
     vault_subparsers.required = True
 
     vault_set_parser = vault_subparsers.add_parser(
@@ -7766,6 +8058,18 @@ def build_parser():
     )
     vault_list_parser.add_argument("--group", help="Only list secrets in this group")
     _add_json_noop(vault_list_parser)
+
+    vault_discover_parser = vault_subparsers.add_parser(
+        "discover",
+        help="Discover requestable secrets and signing keys",
+        description="List value-free Vault capabilities for agents: name, kind, protection tier, access grantability, and per-use signing.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault discover --help",
+    )
+    vault_discover_parser.add_argument("--group", help="Only list secrets in this group")
+    vault_discover_parser.add_argument("--kind", choices=["static", "keypair"], help="Only show this secret kind")
+    vault_discover_parser.add_argument("--protection", choices=["standard", "protected"], help="Only show this protection tier")
+    _add_json_noop(vault_discover_parser)
 
     vault_rm_parser = vault_subparsers.add_parser(
         "rm",
@@ -7819,6 +8123,60 @@ def build_parser():
     vault_fetch_parser.add_argument("--data-file", help="Request body read from this file")
     vault_fetch_parser.add_argument("--output", help="Write the response body to this file instead of stdout")
     _add_json_noop(vault_fetch_parser)
+
+    vault_access_parser = vault_subparsers.add_parser(
+        "access",
+        help="Request approval to use a static secret",
+        description=(
+            "Create a pending access request for a static secret in the current Agent Session. "
+            "For protected secrets, the browser releases only an avault-bound DEK blind box; "
+            "then run/fetch/inject deliver the value inside avault."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault access --help",
+    )
+    vault_access_parser.add_argument("name", help="Static secret name to request")
+    vault_access_parser.add_argument("--session-id", help="Agent Session ID. Defaults from AVIBE_SESSION_ID inside an Agent shell.")
+    vault_access_parser.add_argument("--skill", help="Skill requesting the secret")
+    vault_access_parser.add_argument("--command", help="Command or operation shown to the user")
+    vault_access_parser.add_argument("--egress", help="Egress description shown to the user")
+    _add_json_noop(vault_access_parser)
+
+    vault_sign_parser = vault_subparsers.add_parser(
+        "sign",
+        help="Request one approved signature from a keypair secret",
+        description=(
+            "Create a pending per-use signing request for a local keypair. "
+            "Standard keys sign via avault; protected keys sign in the browser. "
+            "'vibe vault await <request-id>' returns only the resulting public signature."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault sign --help",
+    )
+    vault_sign_parser.add_argument("name", help="Keypair secret name")
+    vault_sign_parser.add_argument("--digest", required=True, help="32-byte digest as hex")
+    vault_sign_parser.add_argument(
+        "--scheme",
+        default="ecdsa-secp256k1-recoverable",
+        choices=["ecdsa-secp256k1-recoverable", "ecdsa-secp256k1-der", "schnorr-secp256k1-bip340"],
+        help="Signature scheme",
+    )
+    vault_sign_parser.add_argument("--session-id", help="Agent Session ID. Defaults from AVIBE_SESSION_ID inside an Agent shell.")
+    vault_sign_parser.add_argument("--skill", help="Skill requesting the signature")
+    vault_sign_parser.add_argument("--command", help="Operation shown to the user")
+    vault_sign_parser.add_argument("--egress", help="Egress description shown to the user")
+    _add_json_noop(vault_sign_parser)
+
+    vault_await_parser = vault_subparsers.add_parser(
+        "await",
+        help="Read or wait for an access/sign request result",
+        description="Return the request status/result. With --wait, poll until approved, denied, expired, or timeout.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault await --help",
+    )
+    vault_await_parser.add_argument("request_id", help="Vault request ID")
+    vault_await_parser.add_argument("--wait", type=float, default=0, metavar="SECONDS", help="Poll for a decision up to SECONDS")
+    _add_json_noop(vault_await_parser)
 
     vault_export_parser = vault_subparsers.add_parser(
         "export",
@@ -8626,12 +8984,20 @@ def main():
             sys.exit(cmd_vault_set(args))
         if args.vault_command == "list":
             sys.exit(cmd_vault_list(args))
+        if args.vault_command == "discover":
+            sys.exit(cmd_vault_discover(args))
         if args.vault_command == "rm":
             sys.exit(cmd_vault_rm(args))
         if args.vault_command == "run":
             sys.exit(cmd_vault_run(args))
         if args.vault_command == "fetch":
             sys.exit(cmd_vault_fetch(args))
+        if args.vault_command == "access":
+            sys.exit(cmd_vault_access(args))
+        if args.vault_command == "sign":
+            sys.exit(cmd_vault_sign(args))
+        if args.vault_command == "await":
+            sys.exit(cmd_vault_await(args))
         if args.vault_command == "request":
             sys.exit(cmd_vault_request(args))
         if args.vault_command == "export":

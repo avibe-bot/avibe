@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import fnmatch
+import hashlib
 import logging
 import mimetypes
 import os
+import re
 import shutil
 import stat
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -517,7 +521,9 @@ def _write_lock_for(path: Path) -> threading.Lock:
         return lock
 
 
-def write_file(raw_path: str, content: str, *, expected_mtime: float | None = None) -> dict[str, Any]:
+def write_file(
+    raw_path: str, content: str, *, expected_mtime: float | None = None, create_only: bool = False
+) -> dict[str, Any]:
     if not isinstance(content, str):
         raise FileBrowserError("invalid_content", "Content must be UTF-8 text", 400)
     data = content.encode("utf-8")
@@ -551,6 +557,37 @@ def write_file(raw_path: str, content: str, *, expected_mtime: float | None = No
                 raise FileBrowserError("is_symlink", "Refusing to write through a symlink", 400)
             if target.exists() and not target.is_file():
                 raise FileBrowserError("not_file", "Path is not a regular file", 400)
+            # create_only ("New File"): create the final path atomically with O_EXCL — no temp +
+            # replace, so it can never overwrite a file another writer/move/external process slipped
+            # in. O_EXCL fails outright if the path already exists.
+            if create_only:
+                try:
+                    excl_fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                except FileExistsError as exc:
+                    raise ConflictError("exists", "Path already exists") from exc
+                except PermissionError as exc:
+                    raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
+                except OSError as exc:
+                    raise FileBrowserError("fs_error", str(exc), 400) from exc
+                created_ino = os.fstat(excl_fd).st_ino
+                try:
+                    with os.fdopen(excl_fd, "wb") as handle:
+                        handle.write(data)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                except OSError as exc:
+                    # Remove the partial file we created so a retry isn't blocked by a stale
+                    # `exists` — but ONLY if the path still resolves to OUR inode, so we never delete
+                    # a file an external writer slipped in between the failure and here (mirrors the
+                    # hard-link rollback guard).
+                    try:
+                        if os.stat(target).st_ino == created_ino:
+                            os.unlink(target)
+                    except OSError:
+                        pass
+                    raise FileBrowserError("fs_error", str(exc), 400) from exc
+                _fsync_dir(parent)
+                return {"ok": True, "mtime": _mtime_seconds(target.stat())}
             fd = -1
             temp_name = ""
             try:
@@ -869,3 +906,443 @@ def delete_path(raw_path: str, *, recursive: bool = False) -> dict[str, Any]:
             raise FileBrowserError("fs_error", str(exc), 400) from exc
 
     return _run_mutation("delete", target, _delete, recursive=recursive)
+
+
+# ---------------------------------------------------------------------------
+# Cross-file search + replace
+#
+# Search walks an absolute root directory (the folder open in the editor) and
+# scans text files line-by-line. Matching is unified through a single compiled
+# regex so search, replace, and the UI preview all agree on what a "match" is.
+# Replace is per-line (same semantics as search/preview) and snapshots the
+# original text so the whole batch can be undone with one click.
+# ---------------------------------------------------------------------------
+
+SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024
+SEARCH_MAX_MATCHES = 1000
+SEARCH_MAX_FILES = 200
+SEARCH_LINE_PREVIEW_CHARS = 400
+SEARCH_PREVIEW_CONTEXT = 60
+_BINARY_SNIFF_BYTES = 8192
+
+# Directories never worth searching — VCS metadata, dependency/build output,
+# caches. Pruned during the walk so we never descend into huge noise trees.
+SEARCH_SKIP_DIRS = frozenset(
+    {
+        ".git", ".hg", ".svn", "node_modules", ".venv", "venv", "__pycache__",
+        ".mypy_cache", ".pytest_cache", ".ruff_cache", ".cache", "dist", "build",
+        ".next", ".turbo", ".parcel-cache", ".gradle", "target", ".idea", ".tox",
+    }
+)
+
+_UNDO_TTL_SECONDS = 600.0
+_UNDO_MAX_TOKENS = 32
+_UNDO_MAX_BYTES = 64 * 1024 * 1024
+_UNDO_STORE: dict[str, dict[str, Any]] = {}
+_UNDO_LOCK = threading.Lock()
+
+
+def _is_word_char(ch: str) -> bool:
+    return re.match(r"\w", ch) is not None
+
+
+def _compile_search_matcher(query: str, *, regex: bool, case_sensitive: bool, whole_word: bool) -> "re.Pattern[str]":
+    if not isinstance(query, str) or query == "":
+        raise FileBrowserError("invalid_query", "Search query is required", 400)
+    pattern = query if regex else re.escape(query)
+    if whole_word:
+        # Guard an edge with \b only when the query's edge char is itself a word char. A symbol query
+        # like "C++" or "foo()" ends in a non-word char, and \b needs a word/non-word transition, so
+        # a both-sides \b would make it never match. (For regex queries the edge is taken from the raw
+        # query text — a heuristic, but it fixes the common literal symbol case.)
+        prefix = r"\b" if _is_word_char(query[0]) else ""
+        suffix = r"\b" if _is_word_char(query[-1]) else ""
+        pattern = f"{prefix}(?:{pattern}){suffix}"
+    flags = 0 if case_sensitive else re.IGNORECASE
+    try:
+        return re.compile(pattern, flags)
+    except re.error as exc:
+        raise FileBrowserError("invalid_regex", f"Invalid regular expression: {exc}", 400) from exc
+
+
+def _split_globs(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [piece.strip() for piece in str(raw).replace("\n", ",").split(",") if piece.strip()]
+
+
+def _match_globs(rel_posix: str, patterns: list[str]) -> bool:
+    name = rel_posix.rsplit("/", 1)[-1]
+    for pat in patterns:
+        # A leading `**/` should also match at the root: fnmatch's `**/` needs a real slash, so
+        # `**/*.py` would miss root `foo.py` and `**/dist/**` would miss root `dist/a.ts`. Also try
+        # the pattern with the `**/` prefix stripped.
+        forms = [pat, pat[3:]] if pat.startswith("**/") else [pat]
+        if any(fnmatch.fnmatch(rel_posix, form) for form in forms) or fnmatch.fnmatch(name, pat):
+            return True
+    return False
+
+
+def _read_file_text(path: Path, *, lossy: bool) -> tuple[str | None, float | None]:
+    """Read a regular text file for search/replace; returns (text, mtime) or (None, None) to skip.
+
+    Skips directories, oversized files, and binaries (NUL in the first chunk). ``lossy`` controls
+    undecodable bytes: search previews tolerate replacement characters; replace must not, so it
+    returns None and leaves the file alone. The mtime is captured from the stat taken BEFORE the
+    read, so it corresponds to (at most) the content returned — search hands that mtime back as the
+    replace baseline, and a change during the read window then fails the later mtime check.
+    """
+    # The rest of the file browser treats symlinks as no-follow / non-editable; mirror that here so
+    # search/replace can't follow a link out of the opened root (e.g. a planted
+    # ``secret -> ~/.ssh/id_rsa``) and surface or rewrite content outside the tree.
+    if path.is_symlink():
+        return None, None
+    try:
+        st = path.stat()
+    except OSError:
+        return None, None
+    if not stat.S_ISREG(st.st_mode) or st.st_size > SEARCH_MAX_FILE_BYTES:
+        return None, None
+    mtime = _mtime_seconds(st)
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(_BINARY_SNIFF_BYTES)
+            if b"\x00" in head:
+                return None, None
+            # Bound the read to the size limit even if the file grew since the stat above (TOCTOU, or
+            # a growing special file), so one read can't pull unbounded bytes into memory. For
+            # replace, a file that grew also fails the later mtime check, so no truncated write lands.
+            data = head + handle.read(max(0, SEARCH_MAX_FILE_BYTES - len(head)))
+    except OSError:
+        return None, None
+    try:
+        return data.decode("utf-8"), mtime
+    except UnicodeDecodeError:
+        if not lossy:
+            return None, None
+        return data.decode("utf-8", errors="replace"), mtime
+
+
+def _iter_search_files(root: Path, include: list[str], exclude: list[str]):
+    """Yield (path, rel_posix) for every candidate file under ``root``."""
+    exclude_names = [pat for pat in exclude if "/" not in pat]
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = sorted(
+            d for d in dirnames if d not in SEARCH_SKIP_DIRS and not _match_globs(d, exclude_names)
+        )
+        base = Path(dirpath)
+        for name in sorted(filenames):
+            fpath = base / name
+            rel = fpath.relative_to(root).as_posix()
+            if include and not _match_globs(rel, include):
+                continue
+            if exclude and _match_globs(rel, exclude):
+                continue
+            yield fpath, rel
+
+
+def _utf16_len(s: str) -> int:
+    # Python indexes strings by code point; the React preview (String.slice) and Monaco columns
+    # count UTF-16 code units. Convert so a non-BMP char (emoji, etc.) before a match doesn't shift
+    # the highlight / jump selection.
+    return len(s.encode("utf-16-le")) // 2
+
+
+def _preview_for_match(line: str, start: int, end: int) -> tuple[str, int, int]:
+    """Build a preview snippet that always contains the match, with UTF-16 col/end into it.
+
+    Short lines are returned whole. For a long line (e.g. minified code) the snippet is windowed
+    around the match — otherwise a hit past the first 400 chars would be sliced off and the row
+    would show no highlight. A leading '…' marks a left-truncated window.
+    """
+    if len(line) <= SEARCH_LINE_PREVIEW_CHARS:
+        col = _utf16_len(line[:start])
+        return line, col, col + _utf16_len(line[start:end])
+    win_start = max(0, start - SEARCH_PREVIEW_CONTEXT)
+    snippet = line[win_start : win_start + SEARCH_LINE_PREVIEW_CHARS]
+    prefix = "…" if win_start > 0 else ""
+    text = prefix + snippet
+    rel_start = len(prefix) + (start - win_start)
+    rel_end = len(prefix) + min(end - win_start, len(snippet))
+    return text, _utf16_len(text[:rel_start]), _utf16_len(text[:rel_end])
+
+
+def _scan_lines(text: str, matcher: "re.Pattern[str]", remaining: int) -> tuple[list[dict[str, Any]], bool]:
+    matches: list[dict[str, Any]] = []
+    for line_no, raw_line in enumerate(text.split("\n"), start=1):
+        # Drop a trailing CR so line-end anchors ('foo$') and previews behave on CRLF files; the CR
+        # sits after any match, so offsets are unaffected.
+        line = raw_line[:-1] if raw_line.endswith("\r") else raw_line
+        for m in matcher.finditer(line):
+            # Check the cap BEFORE recording: returning True only once we see a match BEYOND the
+            # limit means a result set with exactly `remaining` matches isn't falsely flagged
+            # truncated (which would needlessly disable Replace All).
+            if len(matches) >= remaining:
+                return matches, True
+            # col/end are FULL-LINE UTF-16 offsets — the editor jump selects against the whole line.
+            # preview_col/preview_end index into the (possibly windowed) preview `text` for the row
+            # highlight; the two differ once a long line is truncated.
+            full_col = _utf16_len(line[: m.start()])
+            full_end = full_col + _utf16_len(line[m.start() : m.end()])
+            preview, preview_col, preview_end = _preview_for_match(line, m.start(), m.end())
+            matches.append(
+                {
+                    "line": line_no,
+                    "col": full_col,
+                    "end": full_end,
+                    "text": preview,
+                    "preview_col": preview_col,
+                    "preview_end": preview_end,
+                    "line_truncated": len(line) > SEARCH_LINE_PREVIEW_CHARS,
+                }
+            )
+    return matches, False
+
+
+def search(
+    raw_root: str,
+    query: str,
+    *,
+    regex: bool = False,
+    case_sensitive: bool = False,
+    whole_word: bool = False,
+    include: str = "",
+    exclude: str = "",
+    max_matches: int = SEARCH_MAX_MATCHES,
+    max_files: int = SEARCH_MAX_FILES,
+) -> dict[str, Any]:
+    root = _require_directory(raw_root)
+    matcher = _compile_search_matcher(query, regex=regex, case_sensitive=case_sensitive, whole_word=whole_word)
+    include_globs = _split_globs(include)
+    exclude_globs = _split_globs(exclude)
+
+    results: list[dict[str, Any]] = []
+    total_matches = 0
+    truncated = False
+    reason: str | None = None
+    for fpath, rel in _iter_search_files(root, include_globs, exclude_globs):
+        text, file_mtime = _read_file_text(fpath, lossy=True)
+        if text is None:
+            continue
+        file_matches, overflowed = _scan_lines(text, matcher, max_matches - total_matches)
+        if not file_matches:
+            # `remaining` was already 0 and this file still holds a match → a genuine hidden match.
+            if overflowed:
+                truncated = True
+                reason = "matches"
+                break
+            continue
+        if len(results) >= max_files:
+            # This matching file is the (max_files + 1)th — more files match than we display.
+            truncated = True
+            reason = "files"
+            break
+        results.append({"path": str(fpath), "rel": rel, "mtime": file_mtime, "match_count": len(file_matches), "matches": file_matches})
+        total_matches += len(file_matches)
+        if overflowed:
+            truncated = True
+            reason = "matches"
+            break
+    return {
+        "root": str(root),
+        "query": query,
+        "results": results,
+        "total_matches": total_matches,
+        "total_files": len(results),
+        "truncated": truncated,
+        "truncated_reason": reason,
+    }
+
+
+def _apply_replacement(text: str, matcher: "re.Pattern[str]", replacement: str, *, regex: bool) -> tuple[str, int]:
+    # Per-line replace so the count and behavior match the per-line search/preview.
+    # Literal mode treats the replacement verbatim (a lambda avoids backref expansion);
+    # regex mode keeps Python's \1-style backreferences.
+    repl: Any = replacement if regex else (lambda _m: replacement)
+    out: list[str] = []
+    total = 0
+    for raw_line in text.split("\n"):
+        # Match the same CR-stripped content search did, then re-attach the terminator so CRLF files
+        # keep their line endings.
+        cr = "\r" if raw_line.endswith("\r") else ""
+        core = raw_line[: -len(cr)] if cr else raw_line
+        try:
+            new_core, count = matcher.subn(repl, core)
+        except (re.error, IndexError) as exc:
+            # A bad replacement template (out-of-range \1 or unknown named group \g<x>) raises
+            # re.error or IndexError; surface a clean 400 instead of a 500.
+            raise FileBrowserError("invalid_regex", f"Invalid replacement: {exc}", 400) from exc
+        out.append(new_core + cr)
+        total += count
+    return "\n".join(out), total
+
+
+def _store_undo(token: str, files: dict[str, Any]) -> None:
+    now = time.monotonic()
+    size = sum(len(snap["original"].encode("utf-8")) for snap in files.values())
+    with _UNDO_LOCK:
+        for stale in [key for key, value in _UNDO_STORE.items() if now - value["created"] > _UNDO_TTL_SECONDS]:
+            _UNDO_STORE.pop(stale, None)
+        # Bound the store by BOTH token count and total snapshot bytes so a few large Replace All
+        # batches can't pin unbounded memory. Evict oldest-first until the new entry fits; a single
+        # batch larger than the budget still gets stored (it's the user's latest, undoable action)
+        # but evicts everything else.
+        def total_bytes() -> int:
+            return sum(value["bytes"] for value in _UNDO_STORE.values())
+
+        while _UNDO_STORE and (len(_UNDO_STORE) >= _UNDO_MAX_TOKENS or total_bytes() + size > _UNDO_MAX_BYTES):
+            oldest = min(_UNDO_STORE, key=lambda key: _UNDO_STORE[key]["created"])
+            _UNDO_STORE.pop(oldest, None)
+        _UNDO_STORE[token] = {"created": now, "files": files, "bytes": size}
+
+
+def replace(
+    raw_root: str,
+    query: str,
+    replacement: str,
+    *,
+    regex: bool = False,
+    case_sensitive: bool = False,
+    whole_word: bool = False,
+    include: str = "",
+    exclude: str = "",
+    paths: list[str] | None = None,
+    expected_mtimes: dict[str, float] | None = None,
+    max_files: int = SEARCH_MAX_FILES,
+) -> dict[str, Any]:
+    if not isinstance(replacement, str):
+        raise FileBrowserError("invalid_content", "Replacement must be text", 400)
+    root = _require_directory(raw_root)
+    matcher = _compile_search_matcher(query, regex=regex, case_sensitive=case_sensitive, whole_word=whole_word)
+
+    pre_skipped: list[dict[str, Any]] = []
+    # `paths is not None` (not truthiness) marks explicit mode: an empty list means "replace none of
+    # the shown files" (a no-op), never "walk and rewrite the whole root".
+    if paths is not None:
+        candidates: list[tuple[Path, str]] = []
+        for raw in paths:
+            try:
+                resolved = _require_regular_file(raw)
+            except FileBrowserError as exc:
+                # A displayed file deleted/renamed/replaced since the search must be reported as
+                # skipped, not abort the whole batch (the other shown files should still apply).
+                pre_skipped.append({"path": raw, "rel": raw, "reason": exc.code})
+                continue
+            # Search skips symlinks; an explicit path that is now a symlink (e.g. swapped in for a
+            # shown file after the search) must not be followed, or replace could write through it to
+            # a target outside the root.
+            if _expanded_absolute_path(raw).is_symlink():
+                pre_skipped.append({"path": raw, "rel": raw, "reason": "symlink"})
+                continue
+            if resolved != root and root not in resolved.parents:
+                raise FileBrowserError("invalid_path", "Path is outside the search root", 400)
+            candidates.append((resolved, resolved.relative_to(root).as_posix()))
+    else:
+        # Lazy: iterate the walk and stop at the file cap (the loop breaks) rather than
+        # materializing every candidate under the root up front.
+        candidates = _iter_search_files(root, _split_globs(include), _split_globs(exclude))
+
+    # In paths mode the caller is replacing the exact files shown in the search results, so a file
+    # we now can't process (vanished, or not strict-UTF-8 while search saw it via a lossy decode of
+    # an ASCII match) is reported as skipped rather than silently dropped. In walk mode a None just
+    # means "not a candidate", so stay quiet.
+    explicit = paths is not None
+    changed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = list(pre_skipped)
+    snapshots: dict[str, Any] = {}
+    total = 0
+    truncated = False
+    for fpath, rel in candidates:
+        if len(changed) >= max_files:
+            # Stop after the file cap, but tell the caller the batch was bounded so the UI doesn't
+            # claim the whole root was rewritten.
+            truncated = True
+            break
+        # Capture the mtime BEFORE reading, and hand it to write_file as expected_mtime. A
+        # concurrent edit landing after this read makes the on-disk mtime diverge, so write_file
+        # raises a conflict instead of overwriting the other writer with a replacement computed
+        # from stale bytes.
+        try:
+            before_mtime = _mtime_seconds(fpath.stat())
+        except OSError:
+            if explicit:
+                skipped.append({"path": str(fpath), "rel": rel, "reason": "missing"})
+            continue
+        # Reject a file that changed between the search the user previewed and this replace, so the
+        # batch never rewrites matches they never saw (expected_mtimes carries the search-time mtime).
+        if explicit and expected_mtimes is not None:
+            expected = expected_mtimes.get(str(fpath))
+            if expected is not None and abs(before_mtime - float(expected)) > 1e-6:
+                skipped.append({"path": str(fpath), "rel": rel, "reason": "modified"})
+                continue
+        text, _ = _read_file_text(fpath, lossy=False)
+        if text is None:
+            if explicit:
+                skipped.append({"path": str(fpath), "rel": rel, "reason": "unreadable"})
+            continue
+        new_text, count = _apply_replacement(text, matcher, replacement, regex=regex)
+        if count == 0 or new_text == text:
+            continue
+        try:
+            write_file(str(fpath), new_text, expected_mtime=before_mtime)
+        except FileBrowserError as exc:
+            # One file failing (read-only, vanished, concurrent edit) must NOT abort the whole batch
+            # and strip undo from the files already replaced. Record it and keep going; the token
+            # below still covers every file that did change.
+            skipped.append({"path": str(fpath), "rel": rel, "reason": exc.code})
+            continue
+        snapshots[str(fpath)] = {
+            "original": text,
+            "after_sha": hashlib.sha256(new_text.encode("utf-8")).hexdigest(),
+        }
+        changed.append({"path": str(fpath), "rel": rel, "replacements": count})
+        total += count
+
+    token: str | None = None
+    if snapshots:
+        token = uuid.uuid4().hex
+        _store_undo(token, snapshots)
+    return {
+        "changed": changed,
+        "skipped": skipped,
+        "total_replacements": total,
+        "files_changed": len(changed),
+        "truncated": truncated,
+        "undo_token": token,
+    }
+
+
+def undo_replace(token: str) -> dict[str, Any]:
+    with _UNDO_LOCK:
+        entry = _UNDO_STORE.pop(token, None)
+    if not entry or time.monotonic() - entry["created"] > _UNDO_TTL_SECONDS:
+        raise FileBrowserError("undo_unavailable", "Nothing to undo — it expired or was already undone", 404)
+
+    restored: list[str] = []
+    skipped: list[dict[str, str]] = []
+    for path, snap in entry["files"].items():
+        target = Path(path)
+        # Read the mtime from the SAME window as the bytes we verify, and hand it to write_file as
+        # expected_mtime. Otherwise a re-stat after hashing opens a race where an edit landing
+        # between the hash check and the write would be silently clobbered by the restore.
+        try:
+            before_mtime = _mtime_seconds(target.stat())
+            current = target.read_bytes()
+        except FileNotFoundError:
+            skipped.append({"path": path, "reason": "missing"})
+            continue
+        except OSError:
+            skipped.append({"path": path, "reason": "unreadable"})
+            continue
+        # Only revert files still holding exactly what the replace wrote — never
+        # clobber edits the user (or anything else) made after the replace.
+        if hashlib.sha256(current).hexdigest() != snap["after_sha"]:
+            skipped.append({"path": path, "reason": "modified"})
+            continue
+        try:
+            write_file(path, snap["original"], expected_mtime=before_mtime)
+        except FileBrowserError:
+            skipped.append({"path": path, "reason": "write_failed"})
+            continue
+        restored.append(path)
+    return {"restored": restored, "skipped": skipped}

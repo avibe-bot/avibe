@@ -71,7 +71,13 @@ export const WindowLayer: React.FC = () => {
     <div
       ref={ref}
       aria-hidden={!anyShown}
-      className="pointer-events-none fixed inset-y-0 left-0 right-0 z-20 hidden md:left-[240px] md:block"
+      // Theme is per-window now (AppWindow sets it from each app's registry `lockTheme`): the File
+      // Browser follows the workbench light/dark, while the Editor and Terminal stay dark like a VS
+      // Code editor / a terminal. So the layer itself no longer forces a theme — each window opts in.
+      // Spans the FULL viewport (no longer offset past the sidebar): windows can move over
+      // the sidebar and maximize fills the whole screen. This layer (z-20) sits ABOVE the sidebar
+      // (z-10), so a maximized window covers the whole sidebar, Apps launcher included.
+      className="pointer-events-none fixed inset-0 z-20 hidden md:block"
     >
       {windows.map((w) => (
         <AppWindow key={w.id} win={w} layerWidth={size.w} layerHeight={size.h} />

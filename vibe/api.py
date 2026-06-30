@@ -13,7 +13,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.client import HTTPSConnection
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -1397,6 +1397,7 @@ def create_vault_secret(payload: dict) -> dict:
     policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else None
     public_meta = payload.get("public_meta") if isinstance(payload.get("public_meta"), dict) else None
     protection = str(payload.get("protection") or "standard").strip().lower()
+    establishing_vmk = bool(payload.get("establishing_vmk"))
     kind = str(payload.get("kind") or "static").strip().lower()
     signer_kind = payload.get("signer_kind")
     if signer_kind is not None:
@@ -1440,11 +1441,14 @@ def create_vault_secret(payload: dict) -> dict:
                 description=payload.get("description"),
                 policy=policy,
                 public_meta=public_meta,
+                establishing_vmk=establishing_vmk,
             )
     except vault_service.InvalidSecretNameError as exc:
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name") from exc
     except vault_service.SecretExistsError as exc:
         raise VaultApiError(f"secret '{name}' already exists", code="secret_exists", status=409) from exc
+    except vault_service.VaultAlreadyInitializedError as exc:
+        raise VaultApiError(str(exc), code="vault_already_initialized", status=409) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
     return {"ok": True, "secret": meta}
@@ -1479,9 +1483,183 @@ def get_vault_requests(*, status: Optional[str] = "pending", request_type: Optio
     from storage import vault_service
 
     engine = _vault_engine()
-    with engine.connect() as conn:
+    with engine.begin() as conn:
         requests = vault_service.list_requests(conn, status=status, request_type=request_type, limit=limit)
     return {"ok": True, "requests": requests}
+
+
+def _vault_request_result(conn, request: dict) -> dict | None:
+    from storage import vault_service
+
+    request_type = request.get("request_type")
+    if request.get("status") != "approved":
+        return None
+    if request_type == "access":
+        grant = vault_service.get_grant_created_by_request(conn, str(request["id"]))
+        if grant is None:
+            requester = request.get("requester") if isinstance(request.get("requester"), dict) else {}
+            delivery = request.get("delivery") if isinstance(request.get("delivery"), dict) else {}
+            session_id = str(requester.get("session_id") or delivery.get("session_id") or "").strip() or None
+            grant = vault_service.find_active_grant_for_secret(
+                conn,
+                str(request["secret_name"]),
+                session_id=session_id,
+            )
+        if grant is None:
+            return None
+        return {"type": "grant", "grant": grant}
+    if request_type == "sign":
+        delivery = request.get("delivery") if isinstance(request.get("delivery"), dict) else {}
+        signature = delivery.get("signature") if isinstance(delivery, dict) else None
+        if isinstance(signature, dict):
+            return {"type": "signature", "signature": signature}
+    return None
+
+
+def get_vault_request(request_id: str, *, audience: str | None = None) -> dict:
+    from storage import vault_service
+
+    request_audience = audience or vault_service.REQUEST_AUDIENCE_AGENT
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            request = vault_service.get_request(conn, request_id, audience=request_audience)
+            result = _vault_request_result(conn, request)
+    except vault_service.RequestNotFoundError as exc:
+        raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
+    payload = {"ok": True, "request": request}
+    if result is not None:
+        payload["result"] = result
+    return payload
+
+
+def _vault_requester_payload(payload: dict) -> dict:
+    requester = payload.get("requester") if isinstance(payload.get("requester"), dict) else {}
+    session_id = str(payload.get("session_id") or requester.get("session_id") or "").strip()
+    out = {"source": "agent-cli"}
+    if session_id:
+        out["session_id"] = session_id
+    if payload.get("run_id"):
+        out["run_id"] = str(payload["run_id"])
+    if payload.get("skill"):
+        out["skill"] = str(payload["skill"])
+    if isinstance(requester, dict):
+        for key in ("backend", "native_session_id"):
+            if requester.get(key):
+                out[key] = str(requester[key])
+    return out
+
+
+def _vault_delivery_payload(payload: dict) -> dict:
+    delivery = dict(payload.get("delivery") if isinstance(payload.get("delivery"), dict) else {})
+    for key in ("session_id", "skill", "command", "egress", "mode"):
+        if payload.get(key) is not None:
+            delivery[key] = payload[key]
+    return delivery
+
+
+def _expires_at_from_ttl(payload: dict) -> str | None:
+    ttl = payload.get("request_ttl_seconds")
+    if ttl is None:
+        return None
+    try:
+        ttl_seconds = int(ttl)
+    except (TypeError, ValueError) as exc:
+        raise VaultApiError("request_ttl_seconds must be an integer", code="invalid_request") from exc
+    if ttl_seconds <= 0:
+        raise VaultApiError("request_ttl_seconds must be positive", code="invalid_request")
+    return (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat()
+
+
+def request_vault_access(payload: dict) -> dict:
+    from storage import vault_crypto, vault_service
+
+    if not isinstance(payload, dict):
+        raise VaultApiError("payload must be an object", code="invalid_payload")
+    name = str(payload.get("name") or "").strip()
+    if not vault_crypto.is_valid_secret_name(name):
+        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            vault_service.get_secret_meta(conn, name)
+            request = vault_service.create_access_request(
+                conn,
+                name,
+                requester=_vault_requester_payload(payload),
+                delivery=_vault_delivery_payload(payload),
+                expires_at=_expires_at_from_ttl(payload),
+                audience=vault_service.REQUEST_AUDIENCE_AGENT,
+            )
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.NotGrantableError as exc:
+        raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+    return {"ok": True, "request": request}
+
+
+def request_vault_sign(payload: dict) -> dict:
+    from storage import vault_crypto, vault_service
+
+    if not isinstance(payload, dict):
+        raise VaultApiError("payload must be an object", code="invalid_payload")
+    name = str(payload.get("name") or "").strip()
+    digest = _sign_digest_from_payload(payload.get("digest"))
+    scheme = str(payload.get("scheme") or "ecdsa-secp256k1-recoverable").strip()
+    if scheme not in vault_service.SUPPORTED_SIGNATURE_SCHEMES:
+        raise VaultApiError(f"unsupported signature scheme: {scheme}", code="invalid_request", status=409)
+    if not vault_crypto.is_valid_secret_name(name):
+        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            meta = vault_service.get_secret_meta(conn, name)
+            if meta.get("kind") != "keypair":
+                raise VaultApiError(f"secret '{name}' is not a signing key", code="not_signing_key", status=409)
+            if (meta.get("signer_kind") or "local") != "local":
+                raise VaultApiError(
+                    f"secret '{name}' uses signer_kind '{meta.get('signer_kind')}', which is not locally signable",
+                    code="unsupported_signer_kind",
+                    status=409,
+                )
+            request = vault_service.create_sign_request(
+                conn,
+                name,
+                digest=digest,
+                scheme=scheme,
+                requester=_vault_requester_payload(payload),
+                delivery=_vault_delivery_payload(payload),
+                expires_at=_expires_at_from_ttl(payload),
+            )
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+    except vault_service.VaultServiceError as exc:
+        raise VaultApiError(str(exc), code="vault_error") from exc
+    return {"ok": True, "request": request}
+
+
+def deny_vault_request(request_id: str, payload: dict | None = None) -> dict:
+    from storage import vault_service
+
+    body = payload if isinstance(payload, dict) else {}
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            request = vault_service.deny_request(
+                conn,
+                str(request_id),
+                requester=body.get("requester") if isinstance(body.get("requester"), dict) else None,
+                reason=str(body.get("reason") or "").strip() or None,
+            )
+    except vault_service.RequestNotFoundError as exc:
+        raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+    return {"ok": True, "request": request}
 
 
 def get_vault_grants(*, status: Optional[str] = "active", session_id: Optional[str] = None) -> dict:
@@ -1524,6 +1702,110 @@ def _agent_grant_cached_all(result: dict, expected_count: int) -> bool:
         return False
 
 
+def _restore_access_request_after_failed_agent_grant(
+    *,
+    engine: Any,
+    request_id: str,
+    member_names: list[str] | set[str] | tuple[str, ...] | None,
+    session_id: str | None,
+) -> None:
+    from storage import vault_service
+
+    with contextlib.suppress(Exception), engine.begin() as conn:
+        vault_service.restore_access_request_after_failed_grant(
+            conn,
+            created_by_request_id=str(request_id),
+            member_names=list(member_names or []),
+            session_id=session_id,
+        )
+
+
+def _grant_dek_entries_from_payload(payload: dict) -> object:
+    deks = payload.get("deks")
+    if deks is None:
+        deks = payload.get("agent_deks")
+    if deks is None and isinstance(payload.get("deks_by_secret"), dict):
+        deks = []
+        for name, dek in payload["deks_by_secret"].items():
+            if isinstance(dek, dict):
+                deks.append({"name": name, **dek})
+            else:
+                deks.append({"name": name, "dek_blindbox": dek, "approval": None})
+    return deks
+
+
+def _validate_resident_agent_dek_blindbox(blindbox: dict[str, Any]) -> dict[str, str]:
+    allowed_keys = {"scheme", "enc", "ct"}
+    if set(blindbox) != allowed_keys:
+        raise VaultApiError("resident agent grant DEKs must contain only opaque blind-box metadata", code="invalid_grant")
+    normalized: dict[str, str] = {}
+    for key in allowed_keys:
+        value = blindbox.get(key)
+        if not isinstance(value, str) or not value:
+            raise VaultApiError("resident agent grant DEK blind boxes require non-empty scheme, enc, and ct", code="invalid_grant")
+        normalized[key] = value
+    return normalized
+
+
+def _validate_resident_agent_dek_approval(approval: dict[str, Any]) -> dict[str, Any]:
+    allowed_keys = {"nonce", "expires_at_unix"}
+    if set(approval) != allowed_keys:
+        raise VaultApiError("resident agent grant DEKs must contain only opaque blind-box metadata", code="invalid_grant")
+    nonce = approval.get("nonce")
+    expires_at_unix = approval.get("expires_at_unix")
+    if not isinstance(nonce, str) or not nonce:
+        raise VaultApiError("resident agent grant DEK approvals require a non-empty nonce", code="invalid_grant")
+    if type(expires_at_unix) is not int:
+        raise VaultApiError("resident agent grant DEK approvals require expires_at_unix", code="invalid_grant")
+    return {"nonce": nonce, "expires_at_unix": expires_at_unix}
+
+
+def _resident_agent_deks_from_payload(payload: dict, *, needs_agent_deks: bool) -> list[dict[str, Any]]:
+    deks = _grant_dek_entries_from_payload(payload)
+    if deks is None and not needs_agent_deks:
+        return []
+    if not isinstance(deks, list) or (needs_agent_deks and not deks):
+        raise VaultApiError("resident agent grant requires sealed DEKs", code="invalid_grant")
+    agent_deks: list[dict[str, Any]] = []
+    allowed_keys = {"name", "dek_blindbox", "approval"}
+    for item in deks:
+        if not isinstance(item, dict):
+            raise VaultApiError("resident agent grant DEKs must be objects", code="invalid_grant")
+        extra_keys = set(item) - allowed_keys
+        if extra_keys:
+            raise VaultApiError("resident agent grant DEKs must contain only opaque blind-box metadata", code="invalid_grant")
+        name = item.get("name")
+        dek_blindbox = item.get("dek_blindbox")
+        approval = item.get("approval")
+        if not isinstance(name, str) or not name or not isinstance(dek_blindbox, dict) or not isinstance(approval, dict):
+            raise VaultApiError("resident agent grant DEKs require name, dek_blindbox, and approval", code="invalid_grant")
+        agent_deks.append(
+            {
+                "name": name,
+                "dek_blindbox": _validate_resident_agent_dek_blindbox(dek_blindbox),
+                "approval": _validate_resident_agent_dek_approval(approval),
+            }
+        )
+    return agent_deks
+
+
+def _access_request_secret_name(request_id: str) -> str:
+    from storage import vault_service
+
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+    except vault_service.RequestNotFoundError as exc:
+        raise VaultApiError(f"request '{request_id}' not found", code="request_not_found", status=404) from exc
+    if request.get("request_type") != "access":
+        raise VaultApiError("access fulfillment must target an access request", code="invalid_request", status=409)
+    name = str(request.get("secret_name") or "").strip()
+    if not name:
+        raise VaultApiError("access request is missing a secret name", code="invalid_request", status=409)
+    return name
+
+
 def _grant_scope_payload(grant: dict) -> list[dict[str, str]]:
     scope_type = str(grant.get("scope_type") or "")
     scope_ref = str(grant.get("scope_ref") or "")
@@ -1538,6 +1820,7 @@ def _cleanup_failed_agent_grant(
     grant: dict,
     reason: str,
     force_release_on_cleanup_failure: bool = False,
+    force_release_scope: bool = False,
 ) -> None:
     from storage import vault_service
 
@@ -1559,6 +1842,26 @@ def _cleanup_failed_agent_grant(
                 if grant_rows
                 else _grant_scope_payload(grant)
             )
+            if force_release_scope:
+                forced_scopes = _grant_scope_payload(grant)
+                for scope in forced_scopes:
+                    raw_scope_members = grant.get("member_snapshot") or []
+                    scope_members = set(raw_scope_members if isinstance(raw_scope_members, list) else [])
+                    active_scope_members: set[str] = set()
+                    for active in conn.execute(
+                        select(vault_service.vault_grants).where(
+                            vault_service.vault_grants.c.status == "active",
+                            vault_service.vault_grants.c.scope_type == scope["scope_type"],
+                            vault_service.vault_grants.c.scope_ref == scope["scope_ref"],
+                        )
+                    ).mappings():
+                        active_row = dict(active)
+                        if vault_service.grant_row_has_resident_agent_ready(active_row):
+                            active_members = json.loads(active_row.get("member_snapshot") or "[]")
+                            if isinstance(active_members, list):
+                                active_scope_members.update(str(member) for member in active_members if isinstance(member, str))
+                    if not scope_members.issubset(active_scope_members) and scope not in release_scopes:
+                        release_scopes.append(scope)
     except Exception:
         if not force_release_on_cleanup_failure:
             raise
@@ -1582,43 +1885,38 @@ def create_vault_grant(payload: dict) -> dict:
         ttl_seconds = int(ttl) if ttl is not None else None
     except (TypeError, ValueError) as exc:
         raise VaultApiError("ttl_seconds must be an integer", code="invalid_grant") from exc
-    deks = payload.get("deks")
-    if deks is None:
-        deks = payload.get("agent_deks")
-    if deks is None and isinstance(payload.get("deks_by_secret"), dict):
-        deks = [
-            {"name": name, **dek}
-            if isinstance(dek, dict)
-            else {"name": name, "dek_blindbox": dek}
-            for name, dek in payload["deks_by_secret"].items()
-        ]
-    if not isinstance(deks, list) or not deks:
-        raise VaultApiError("resident agent grant requires sealed DEKs", code="invalid_grant")
-    agent_deks: list[dict[str, Any]] = []
-    for item in deks:
-        if not isinstance(item, dict):
-            raise VaultApiError("resident agent grant DEKs must be objects", code="invalid_grant")
-        name = item.get("name")
-        dek_blindbox = item.get("dek_blindbox")
-        approval = item.get("approval")
-        if not isinstance(name, str) or not name or not isinstance(dek_blindbox, dict) or not isinstance(approval, dict):
-            raise VaultApiError("resident agent grant DEKs require name, dek_blindbox, and approval", code="invalid_grant")
-        agent_deks.append({"name": name, "dek_blindbox": dek_blindbox, "approval": approval})
+    engine = _vault_engine()
+    try:
+        with engine.connect() as conn:
+            grantable_members = vault_service.grantable_member_metas(conn, scope_type, scope_ref)
+    except vault_service.SecretNotFoundError as exc:
+        raise VaultApiError(f"secret '{exc}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.InvalidGrantError as exc:
+        raise VaultApiError(str(exc), code="invalid_grant") from exc
+    if not grantable_members:
+        raise VaultApiError(f"{scope_type}:{scope_ref} has no grantable static secrets", code="not_grantable", status=409)
+    protected_member_names = {str(member["name"]) for member in grantable_members if member.get("protection") == "protected"}
+    needs_agent_deks = bool(protected_member_names)
+
+    agent_deks = _resident_agent_deks_from_payload(payload, needs_agent_deks=needs_agent_deks)
     provided_names = {item["name"] for item in agent_deks}
+    if needs_agent_deks and provided_names != protected_member_names:
+        raise VaultApiError("resident agent DEKs must match the protected grant members", code="invalid_grant")
+    expected_member_names = {str(member["name"]) for member in grantable_members} if needs_agent_deks else None
     request_id = payload.get("request_id") or payload.get("created_by_request_id")
     if not request_id:
         raise VaultApiError("request_id is required to create a grant", code="missing_request_id")
     expected_pubkey = payload.get("agent_pubkey") if isinstance(payload.get("agent_pubkey"), dict) else None
-    try:
-        _require_avault_p2_surface("resident agent grant")
-        validate_avault_agent_pubkey(expected_pubkey)
-    except AvaultError as exc:
-        raise _vault_api_error_from_avault(exc, prefix="avault agent grant failed") from exc
+    if needs_agent_deks:
+        try:
+            _require_avault_p2_surface("resident agent grant")
+            validate_avault_agent_pubkey(expected_pubkey)
+        except AvaultError as exc:
+            raise _vault_api_error_from_avault(exc, prefix="avault agent grant failed") from exc
     session_id = payload.get("session_id")
     inherit_request_session = payload.get("this_session_only") is not False
     if not inherit_request_session:
         session_id = None
-    engine = _vault_engine()
     try:
         with engine.begin() as conn:
             grant = vault_service.create_grant(
@@ -1629,7 +1927,7 @@ def create_vault_grant(payload: dict) -> dict:
                 ttl_seconds=ttl_seconds,
                 created_by_request_id=str(request_id),
                 inherit_request_session=inherit_request_session,
-                expected_member_names=provided_names,
+                expected_member_names=expected_member_names,
                 cache_ready=False,
             )
     except vault_service.NotGrantableError as exc:
@@ -1642,6 +1940,8 @@ def create_vault_grant(payload: dict) -> dict:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.InvalidGrantError as exc:
         raise VaultApiError(str(exc), code="invalid_grant") from exc
+    if not needs_agent_deks:
+        return {"ok": True, "grant": grant}
     agent_relayed = False
     try:
         relay_ttl = _grant_ttl_seconds(grant)
@@ -1664,6 +1964,13 @@ def create_vault_grant(payload: dict) -> dict:
                 grant=grant,
                 reason=f"create_vault_grant:{grant['id']}:mark-ready-failed",
                 force_release_on_cleanup_failure=True,
+                force_release_scope=True,
+            )
+            _restore_access_request_after_failed_agent_grant(
+                engine=engine,
+                request_id=str(request_id),
+                member_names=expected_member_names,
+                session_id=str(grant.get("session_id") or "") or None,
             )
         raise VaultApiError(str(exc), code="invalid_grant") from exc
     except AvaultError as exc:
@@ -1672,6 +1979,13 @@ def create_vault_grant(payload: dict) -> dict:
             grant=grant,
             reason=f"create_vault_grant:{grant['id']}",
             force_release_on_cleanup_failure=True,
+            force_release_scope=True,
+        )
+        _restore_access_request_after_failed_agent_grant(
+            engine=engine,
+            request_id=str(request_id),
+            member_names=expected_member_names,
+            session_id=str(grant.get("session_id") or "") or None,
         )
         raise _vault_api_error_from_avault(exc, prefix="avault agent grant failed") from exc
     except Exception:
@@ -1681,9 +1995,35 @@ def create_vault_grant(payload: dict) -> dict:
                 grant=grant,
                 reason=f"create_vault_grant:{grant['id']}:mark-ready-failed",
                 force_release_on_cleanup_failure=True,
+                force_release_scope=True,
             )
         raise
     return {"ok": True, "grant": grant}
+
+
+def fulfill_vault_access_request(request_id: str, payload: dict | None = None) -> dict:
+    """Approve an access request by relaying browser blind-boxed DEKs to avault.
+
+    The submitted DEKs are HPKE blind boxes addressed to the resident avault
+    agent. Python validates only metadata and forwards the opaque boxes; it never
+    opens a protected DEK or protected plaintext.
+    """
+
+    body = dict(payload) if isinstance(payload, dict) else {}
+    request_id = str(request_id or "").strip()
+    if not request_id:
+        raise VaultApiError("request_id is required to fulfill protected access", code="missing_request_id")
+    if not body.get("scope_type") or not body.get("scope_ref"):
+        body.setdefault("scope_type", "secret")
+        body.setdefault("scope_ref", _access_request_secret_name(request_id))
+    body["request_id"] = request_id
+    created = create_vault_grant(body)
+    return {
+        "ok": True,
+        "request_id": request_id,
+        "grant": created["grant"],
+        "result": {"type": "grant", "grant": created["grant"]},
+    }
 
 
 def _sign_digest_from_payload(value: object) -> str:
@@ -1697,6 +2037,275 @@ def _sign_digest_from_payload(value: object) -> str:
     if len(digest) != 64 or len(decoded) != 32:
         raise VaultApiError("digest must be a 32-byte hex string", code="invalid_digest")
     return digest.lower()
+
+
+def _protected_sign_invalid(message: str) -> VaultApiError:
+    return VaultApiError(message, code="invalid_request", status=409)
+
+
+def _protected_signing_public_key_bytes(meta: dict) -> bytes:
+    signing_key = meta.get("signing_public_key")
+    if not isinstance(signing_key, dict):
+        raise _protected_sign_invalid("protected signing key is missing signing_public_key")
+    if signing_key.get("curve") != "secp256k1":
+        raise _protected_sign_invalid("protected signing key must use secp256k1")
+    public_key = signing_key.get("public_key")
+    if not isinstance(public_key, str) or not public_key:
+        raise _protected_sign_invalid("protected signing key is missing a public key")
+    try:
+        public_key_bytes = bytes.fromhex(public_key)
+    except ValueError as exc:
+        raise _protected_sign_invalid("protected signing public key must be hex-encoded") from exc
+    return public_key_bytes
+
+
+def _signature_bytes_for_verification(signature: dict[str, Any]) -> bytes:
+    raw_signature = signature.get("signature")
+    if not isinstance(raw_signature, str) or not raw_signature:
+        raise _protected_sign_invalid("signature payload requires a non-empty signature")
+    try:
+        return bytes.fromhex(raw_signature)
+    except ValueError as exc:
+        raise _protected_sign_invalid("signature must be hex-encoded bytes") from exc
+
+
+def _normalized_protected_signature(signature: dict[str, Any]) -> dict[str, Any]:
+    allowed_keys = {"signature", "recovery_id"}
+    extra_keys = set(signature) - allowed_keys
+    if extra_keys:
+        raise _protected_sign_invalid(f"signature payload contains unsupported fields: {', '.join(sorted(extra_keys))}")
+    normalized = {"signature": signature.get("signature")}
+    if signature.get("recovery_id") is not None:
+        normalized["recovery_id"] = signature.get("recovery_id")
+    return normalized
+
+
+def _verify_protected_ecdsa_signature(
+    *,
+    public_key_bytes: bytes,
+    digest_bytes: bytes,
+    scheme: str,
+    signature: dict[str, Any],
+) -> None:
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec, utils
+
+    sig_bytes = _signature_bytes_for_verification(signature)
+    recovery_id = signature.get("recovery_id")
+    try:
+        public_key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256K1(), public_key_bytes)
+    except ValueError as exc:
+        raise _protected_sign_invalid("protected signing public key is not a valid secp256k1 point") from exc
+    if scheme == "ecdsa-secp256k1-recoverable":
+        if len(sig_bytes) != 64:
+            raise _protected_sign_invalid("recoverable secp256k1 signatures must be 64 bytes")
+        if type(recovery_id) is not int or recovery_id not in {0, 1, 2, 3}:
+            raise _protected_sign_invalid("recoverable secp256k1 signatures require recovery_id 0..3")
+        r = int.from_bytes(sig_bytes[:32], "big")
+        s = int.from_bytes(sig_bytes[32:], "big")
+        sig_bytes = utils.encode_dss_signature(r, s)
+    else:
+        if len(sig_bytes) < 8 or sig_bytes[0] != 0x30:
+            raise _protected_sign_invalid("DER secp256k1 signatures must be DER-encoded")
+        if recovery_id is not None:
+            raise _protected_sign_invalid("DER secp256k1 signatures must not include recovery_id")
+    try:
+        public_key.verify(sig_bytes, digest_bytes, ec.ECDSA(utils.Prehashed(hashes.SHA256())))
+    except InvalidSignature as exc:
+        raise _protected_sign_invalid("browser signature does not verify against signing_public_key") from exc
+    if scheme == "ecdsa-secp256k1-recoverable":
+        _verify_recoverable_signature_recovery_id(
+            public_key_bytes=public_key_bytes,
+            digest_bytes=digest_bytes,
+            r=r,
+            s=s,
+            recovery_id=recovery_id,
+        )
+
+
+_SECP256K1_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+_SECP256K1_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+_SECP256K1_G = (
+    0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+    0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8,
+)
+_Secp256k1Point = tuple[int, int] | None
+
+
+def _secp256k1_mod_sqrt(value: int) -> int | None:
+    root = pow(value, (_SECP256K1_P + 1) // 4, _SECP256K1_P)
+    return root if pow(root, 2, _SECP256K1_P) == value % _SECP256K1_P else None
+
+
+def _secp256k1_decompress_public_key(public_key_bytes: bytes) -> _Secp256k1Point:
+    if len(public_key_bytes) == 33 and public_key_bytes[0] in {2, 3}:
+        x = int.from_bytes(public_key_bytes[1:], "big")
+        if x >= _SECP256K1_P:
+            return None
+        y = _secp256k1_mod_sqrt((pow(x, 3, _SECP256K1_P) + 7) % _SECP256K1_P)
+        if y is None:
+            return None
+        if (y % 2) != (public_key_bytes[0] & 1):
+            y = _SECP256K1_P - y
+        return (x, y)
+    if len(public_key_bytes) == 65 and public_key_bytes[0] == 4:
+        x = int.from_bytes(public_key_bytes[1:33], "big")
+        y = int.from_bytes(public_key_bytes[33:], "big")
+        if x >= _SECP256K1_P or y >= _SECP256K1_P or (pow(y, 2, _SECP256K1_P) - pow(x, 3, _SECP256K1_P) - 7) % _SECP256K1_P:
+            return None
+        return (x, y)
+    return None
+
+
+def _secp256k1_lift_x(x: int) -> _Secp256k1Point:
+    if x >= _SECP256K1_P:
+        return None
+    y_sq = (pow(x, 3, _SECP256K1_P) + 7) % _SECP256K1_P
+    y = _secp256k1_mod_sqrt(y_sq)
+    if y is None:
+        return None
+    return (x, y if y % 2 == 0 else _SECP256K1_P - y)
+
+
+def _secp256k1_add(point_a: _Secp256k1Point, point_b: _Secp256k1Point) -> _Secp256k1Point:
+    if point_a is None:
+        return point_b
+    if point_b is None:
+        return point_a
+    x1, y1 = point_a
+    x2, y2 = point_b
+    if x1 == x2 and (y1 + y2) % _SECP256K1_P == 0:
+        return None
+    if point_a == point_b:
+        slope = (3 * x1 * x1 * pow(2 * y1, -1, _SECP256K1_P)) % _SECP256K1_P
+    else:
+        slope = ((y2 - y1) * pow(x2 - x1, -1, _SECP256K1_P)) % _SECP256K1_P
+    x3 = (slope * slope - x1 - x2) % _SECP256K1_P
+    y3 = (slope * (x1 - x3) - y1) % _SECP256K1_P
+    return (x3, y3)
+
+
+def _secp256k1_mul(scalar: int, point: _Secp256k1Point) -> _Secp256k1Point:
+    result: _Secp256k1Point = None
+    addend = point
+    while scalar:
+        if scalar & 1:
+            result = _secp256k1_add(result, addend)
+        addend = _secp256k1_add(addend, addend)
+        scalar >>= 1
+    return result
+
+
+def _secp256k1_recover_ecdsa_public_key(r: int, s: int, digest_bytes: bytes, recovery_id: int) -> _Secp256k1Point:
+    if not (1 <= r < _SECP256K1_N and 1 <= s < _SECP256K1_N):
+        return None
+    x = r + (recovery_id >> 1) * _SECP256K1_N
+    if x >= _SECP256K1_P:
+        return None
+    y = _secp256k1_mod_sqrt((pow(x, 3, _SECP256K1_P) + 7) % _SECP256K1_P)
+    if y is None:
+        return None
+    if (y % 2) != (recovery_id & 1):
+        y = _SECP256K1_P - y
+    point_r = (x, y)
+    if _secp256k1_mul(_SECP256K1_N, point_r) is not None:
+        return None
+    z = int.from_bytes(digest_bytes, "big") % _SECP256K1_N
+    r_inv = pow(r, -1, _SECP256K1_N)
+    return _secp256k1_mul(
+        r_inv,
+        _secp256k1_add(
+            _secp256k1_mul(s, point_r),
+            _secp256k1_mul(z, (_SECP256K1_G[0], (-_SECP256K1_G[1]) % _SECP256K1_P)),
+        ),
+    )
+
+
+def _verify_recoverable_signature_recovery_id(
+    *,
+    public_key_bytes: bytes,
+    digest_bytes: bytes,
+    r: int,
+    s: int,
+    recovery_id: int,
+) -> None:
+    expected = _secp256k1_decompress_public_key(public_key_bytes)
+    if expected is None:
+        raise _protected_sign_invalid("protected signing public key is not a valid secp256k1 point")
+    recovered = _secp256k1_recover_ecdsa_public_key(r, s, digest_bytes, recovery_id)
+    if recovered != expected:
+        raise _protected_sign_invalid("recoverable signature recovery_id does not match signing_public_key")
+
+
+def _bip340_tagged_hash(tag: str, payload: bytes) -> bytes:
+    import hashlib
+
+    tag_hash = hashlib.sha256(tag.encode("utf-8")).digest()
+    return hashlib.sha256(tag_hash + tag_hash + payload).digest()
+
+
+def _xonly_public_key(public_key_bytes: bytes) -> bytes:
+    if len(public_key_bytes) == 32:
+        x_only = public_key_bytes
+    elif len(public_key_bytes) == 33 and public_key_bytes[0] in {2, 3}:
+        x_only = public_key_bytes[1:]
+    elif len(public_key_bytes) == 65 and public_key_bytes[0] == 4:
+        x_only = public_key_bytes[1:33]
+        x = int.from_bytes(x_only, "big")
+        y = int.from_bytes(public_key_bytes[33:], "big")
+        if x >= _SECP256K1_P or y >= _SECP256K1_P or (pow(y, 2, _SECP256K1_P) - pow(x, 3, _SECP256K1_P) - 7) % _SECP256K1_P:
+            raise _protected_sign_invalid("protected signing public key is not a valid secp256k1 point")
+    else:
+        raise _protected_sign_invalid("protected signing public key must be compressed, uncompressed, or x-only secp256k1")
+    if _secp256k1_lift_x(int.from_bytes(x_only, "big")) is None:
+        raise _protected_sign_invalid("protected signing public key is not a valid secp256k1 point")
+    return x_only
+
+
+def _verify_protected_schnorr_signature(
+    *,
+    public_key_bytes: bytes,
+    digest_bytes: bytes,
+    signature: dict[str, Any],
+) -> None:
+    sig_bytes = _signature_bytes_for_verification(signature)
+    if len(sig_bytes) != 64:
+        raise _protected_sign_invalid("BIP340 Schnorr signatures must be 64 bytes")
+    if signature.get("recovery_id") is not None:
+        raise _protected_sign_invalid("BIP340 Schnorr signatures must not include recovery_id")
+    public_key_xonly = _xonly_public_key(public_key_bytes)
+    r = int.from_bytes(sig_bytes[:32], "big")
+    s = int.from_bytes(sig_bytes[32:], "big")
+    if r >= _SECP256K1_P or s >= _SECP256K1_N:
+        raise _protected_sign_invalid("browser signature does not verify against signing_public_key")
+    point_p = _secp256k1_lift_x(int.from_bytes(public_key_xonly, "big"))
+    if point_p is None:
+        raise _protected_sign_invalid("protected signing public key is not a valid secp256k1 point")
+    challenge = int.from_bytes(_bip340_tagged_hash("BIP0340/challenge", sig_bytes[:32] + public_key_xonly + digest_bytes), "big") % _SECP256K1_N
+    point_r = _secp256k1_add(
+        _secp256k1_mul(s, _SECP256K1_G),
+        _secp256k1_mul(challenge, (point_p[0], (-point_p[1]) % _SECP256K1_P)),
+    )
+    if point_r is None or point_r[1] % 2 != 0 or point_r[0] != r:
+        raise _protected_sign_invalid("browser signature does not verify against signing_public_key")
+
+
+def _verify_protected_browser_signature(meta: dict, *, digest: str, scheme: str, signature: dict[str, Any]) -> None:
+    public_key_bytes = _protected_signing_public_key_bytes(meta)
+    digest_bytes = bytes.fromhex(digest)
+    if scheme in {"ecdsa-secp256k1-recoverable", "ecdsa-secp256k1-der"}:
+        _verify_protected_ecdsa_signature(
+            public_key_bytes=public_key_bytes,
+            digest_bytes=digest_bytes,
+            scheme=scheme,
+            signature=signature,
+        )
+        return
+    if scheme == "schnorr-secp256k1-bip340":
+        _verify_protected_schnorr_signature(public_key_bytes=public_key_bytes, digest_bytes=digest_bytes, signature=signature)
+        return
+    raise _protected_sign_invalid(f"unsupported signature scheme: {scheme}")
 
 
 def revoke_vault_grant(grant_id: str) -> dict:
@@ -1762,6 +2371,9 @@ def vault_sign(payload: dict) -> dict:
                 request_id = str(payload.get("request_id") or "")
                 if not request_id:
                     raise VaultApiError("request_id is required to complete protected signing", code="missing_request_id")
+                vault_service.validate_sign_request(conn, request_id, name=name, digest=digest, scheme=scheme)
+                signature = _normalized_protected_signature(signature)
+                _verify_protected_browser_signature(meta, digest=digest, scheme=scheme, signature=signature)
                 request = vault_service.complete_sign_request(
                     conn,
                     request_id,
@@ -1772,6 +2384,9 @@ def vault_sign(payload: dict) -> dict:
                     requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
                 )
                 return {"ok": True, "signature": signature, "request": request}
+            request_id = str(payload.get("request_id") or "")
+            if request_id:
+                vault_service.claim_sign_request(conn, request_id, name=name, digest=digest, scheme=scheme)
             key_envelope = vault_service.get_key_envelope(conn, name)
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
@@ -1781,10 +2396,39 @@ def vault_sign(payload: dict) -> dict:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="vault_error") from exc
+
+    def _fail_claimed_request(reason: str) -> None:
+        request_id = str(payload.get("request_id") or "")
+        if not request_id:
+            return
+        with contextlib.suppress(Exception):
+            with engine.begin() as conn:
+                vault_service.fail_sign_request(conn, request_id, reason=reason)
+
     try:
         signature = avault_sign(key_envelope, digest, scheme, name=name)
     except AvaultError as exc:
+        _fail_claimed_request("avault_failed")
         raise VaultApiError(f"avault sign failed: {exc}", code="avault_failed") from exc
+    request_id = str(payload.get("request_id") or "")
+    if request_id:
+        try:
+            with engine.begin() as conn:
+                request = vault_service.complete_sign_request(
+                    conn,
+                    request_id,
+                    name=name,
+                    digest=digest,
+                    scheme=scheme,
+                    signature=signature,
+                    requester=payload.get("requester") if isinstance(payload.get("requester"), dict) else None,
+                )
+        except vault_service.RequestNotFoundError as exc:
+            raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
+        except vault_service.InvalidRequestError as exc:
+            _fail_claimed_request("signature_rejected")
+            raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+        return {"ok": True, "signature": signature, "request": request}
     try:
         with engine.begin() as conn:
             vault_service.record_signing_use(

@@ -374,7 +374,11 @@ export const AppShell: React.FC = () => {
     // Desktop: normal document flow.
     <WindowManagerProvider>
     <div className="flex h-[var(--app-shell-h)] flex-col overflow-hidden bg-background text-foreground md:block md:h-auto md:min-h-screen md:overflow-visible">
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-[240px] flex-col border-r border-border bg-surface md:flex">
+      {/* The sidebar forms its own stacking context BELOW the window layer (aside z-10 < window
+          layer z-20), so a maximized window covers the WHOLE sidebar — including the Apps launcher.
+          The Apps button no longer floats on top in full-screen (a Dock redesign comes later);
+          un-maximize to reach it. */}
+      <aside className="fixed inset-y-0 left-0 z-10 hidden w-[240px] flex-col border-r border-border bg-surface md:flex">
         <div className="flex h-full flex-col justify-between gap-6 px-4 py-5">
           {/* Top: Brand + Workspace label + Nav list */}
           {/* Workbench mounts a search field right under the brand, so use the
@@ -408,8 +412,9 @@ export const AppShell: React.FC = () => {
 
           {/* Bottom (design.pen NbPMq): row 1 = [Apps | Settings] two equal
               buttons; row 2 = [version … run-dot]. Admin keeps its quick-toggles
-              + hostname between the rows. */}
-          <div className="flex flex-col gap-3">
+              + hostname between the rows. The whole bottom cluster sits at the
+              sidebar's level (z-10) and is covered by a maximized window. */}
+          <div className="relative flex flex-col gap-3">
             {/* Row 1 — Apps (Dock trigger, left) paired with the mode switch
                 (right). The Dock rises ABOVE the Apps button, clear of the
                 centered Chat composer. Workbench → Settings (control panel);
@@ -419,10 +424,11 @@ export const AppShell: React.FC = () => {
               {shellMode === 'workbench' ? (
                 <Link
                   to="/admin/dashboard"
-                  className="group flex flex-1 items-center justify-center gap-2 rounded-lg border border-border-strong px-3 py-2.5 text-[13px] font-medium text-foreground transition-colors hover:bg-foreground/[0.04]"
+                  title={t('appShell.openControlPanel')}
+                  aria-label={t('appShell.openControlPanel')}
+                  className="group flex w-11 shrink-0 items-center justify-center rounded-lg border border-border-strong text-foreground transition-colors hover:bg-foreground/[0.04]"
                 >
-                  <Settings className="size-4 text-muted group-hover:text-foreground" />
-                  <span>{t('appShell.openControlPanel')}</span>
+                  <Settings className="size-[18px] text-muted group-hover:text-foreground" />
                 </Link>
               ) : (
                 <Link
@@ -453,18 +459,18 @@ export const AppShell: React.FC = () => {
               </div>
             )}
 
-            {/* Row 2 — version + a compact run-state dot at the very bottom. The
-                green/grey dot conveys running vs stopped (hover shows the text). */}
-            <div className="flex items-center gap-2">
+            {/* Row 2 (design bVke5) — run-state dot + label on the LEFT, version on the RIGHT. */}
+            <div className="flex items-center justify-between gap-2">
+              <span className="flex items-center gap-1.5 text-[11px] font-medium text-muted">
+                <span
+                  className={clsx(
+                    'size-2 shrink-0 rounded-full',
+                    isRunning ? 'bg-mint shadow-[0_0_8px_rgba(91,255,160,0.9)]' : 'bg-muted'
+                  )}
+                />
+                {isRunning ? t('common.running') : t('common.stopped')}
+              </span>
               <VersionBadge openUpward />
-              <span
-                title={isRunning ? t('common.running') : t('common.stopped')}
-                aria-label={isRunning ? t('common.running') : t('common.stopped')}
-                className={clsx(
-                  'ml-auto size-2.5 shrink-0 rounded-full',
-                  isRunning ? 'bg-mint shadow-[0_0_8px_rgba(91,255,160,0.9)]' : 'bg-muted'
-                )}
-              />
             </div>
           </div>
         </div>
@@ -562,6 +568,10 @@ export const AppShell: React.FC = () => {
 
       {/* App windows float over the workbench main area (desktop). The Dock (P2)
           and the AppsLauncher bridge open windows via the WindowManager. */}
+      {/* A maximized window covers the sidebar Apps launcher. We intentionally do NOT float a
+          second launcher on top in full-screen anymore (product: avoid the fullscreen floating
+          button; a Dock redesign comes later). Un-maximize via the window traffic-lights to reach
+          the sidebar launcher. */}
       <WindowLayer />
     </div>
     </WindowManagerProvider>

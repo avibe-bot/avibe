@@ -122,6 +122,13 @@ export function pathCrumbs(path: string): { label: string; path: string }[] {
   return out;
 }
 
+// The parent directory of a path, Windows-aware (reuses pathCrumbs' separator handling) so the
+// editor opens its explorer on the right root for POSIX, Windows drive, and UNC paths alike.
+export function parentDir(path: string): string {
+  const crumbs = pathCrumbs(path);
+  return crumbs.length >= 2 ? crumbs[crumbs.length - 2].path : path;
+}
+
 export async function listDir(path: string, showHidden = false): Promise<FsListing> {
   const res = await apiFetch(
     `/api/files/list?path=${encodeURIComponent(path)}&show_hidden=${showHidden ? '1' : '0'}`,
@@ -135,6 +142,27 @@ export async function fileMeta(path: string): Promise<FsMeta> {
 
 export function contentUrl(path: string, download = false): string {
   return `/api/files/content?path=${encodeURIComponent(path)}${download ? '&download=1' : ''}`;
+}
+
+// Trigger a file download via a programmatic anchor click rather than window.open. An anchor
+// download is not a popup, so — unlike window.open('_blank') — it isn't popup-blocked and survives
+// an awaited metadata recheck without losing the click's user activation (Safari/iOS). The backend's
+// Content-Disposition (download=1) names the file and forces the save in-place.
+export function downloadFile(path: string): void {
+  const a = document.createElement('a');
+  a.href = contentUrl(path, true);
+  a.rel = 'noopener';
+  // target=_blank: if remote-auth expired, /content 302-redirects to the Cloud login — that
+  // cross-origin redirect would otherwise replace the SPA in this tab. Sending it to a new context
+  // keeps the app intact (a real attachment still downloads in-place, so no stray tab opens).
+  a.target = '_blank';
+  // download attr: keep this a download even if the server returns a JSON error (file removed /
+  // permission) instead of an attachment, so the SPA is never navigated to the error body.
+  a.download = '';
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 export async function readText(path: string): Promise<string> {
@@ -157,11 +185,14 @@ export async function writeFile(
   path: string,
   content: string,
   expectedMtime?: number | null,
+  // create_only: backend refuses (errors.exists) if the path already exists, checked atomically
+  // under its per-path write lock — used by "New File" so a name typo can never clobber a file.
+  createOnly = false,
 ): Promise<{ ok: true; mtime: number }> {
   const res = await apiFetch('/api/files/write', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path, content, expected_mtime: expectedMtime ?? undefined }),
+    body: JSON.stringify({ path, content, expected_mtime: expectedMtime ?? undefined, create_only: createOnly || undefined }),
   });
   return parse<{ ok: true; mtime: number }>(res);
 }
@@ -182,6 +213,89 @@ export async function deletePath(path: string, recursive = false): Promise<{ ok:
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path, recursive }),
+    }),
+  );
+}
+
+// Rename an entry in place (same parent). The backend validates the new name and refuses to
+// clobber an existing destination (errors.exists). Returns the new absolute path.
+export async function renamePath(path: string, newName: string): Promise<{ ok: true; path: string }> {
+  return parse(
+    await apiFetch('/api/files/rename', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, new_name: newName }),
+    }),
+  );
+}
+
+// Cross-file search + replace (backend: file_browser_service.search/replace/undo_replace).
+// col/end are full-line UTF-16 offsets (the editor jump target); preview_col/preview_end index
+// into `text` (the possibly windowed preview) for the row highlight.
+export type SearchMatch = { line: number; col: number; end: number; preview_col: number; preview_end: number; text: string; line_truncated: boolean };
+export type SearchFileResult = { path: string; rel: string; mtime: number | null; match_count: number; matches: SearchMatch[] };
+export type SearchResponse = {
+  root: string;
+  query: string;
+  results: SearchFileResult[];
+  total_matches: number;
+  total_files: number;
+  truncated: boolean;
+  truncated_reason: 'matches' | 'files' | null;
+};
+export type SearchOptions = { regex?: boolean; caseSensitive?: boolean; wholeWord?: boolean; include?: string; exclude?: string };
+export type ReplaceResponse = {
+  changed: { path: string; rel: string; replacements: number }[];
+  skipped: { path: string; rel: string; reason: string }[];
+  total_replacements: number;
+  files_changed: number;
+  truncated: boolean;
+  undo_token: string | null;
+};
+export type UndoResponse = { restored: string[]; skipped: { path: string; reason: string }[] };
+
+export async function searchFiles(root: string, query: string, opts: SearchOptions = {}, signal?: AbortSignal): Promise<SearchResponse> {
+  const params = new URLSearchParams({ root, query });
+  if (opts.regex) params.set('regex', '1');
+  if (opts.caseSensitive) params.set('case', '1');
+  if (opts.wholeWord) params.set('word', '1');
+  if (opts.include) params.set('include', opts.include);
+  if (opts.exclude) params.set('exclude', opts.exclude);
+  return parse<SearchResponse>(await apiFetch(`/api/files/search?${params.toString()}`, { signal }));
+}
+
+export async function replaceInFiles(
+  root: string,
+  query: string,
+  replacement: string,
+  opts: SearchOptions & { paths?: string[]; expectedMtimes?: Record<string, number> } = {},
+): Promise<ReplaceResponse> {
+  return parse<ReplaceResponse>(
+    await apiFetch('/api/files/search/replace', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        root,
+        query,
+        replacement,
+        regex: opts.regex || undefined,
+        case: opts.caseSensitive || undefined,
+        word: opts.wholeWord || undefined,
+        include: opts.include || undefined,
+        exclude: opts.exclude || undefined,
+        paths: opts.paths,
+        expected_mtimes: opts.expectedMtimes,
+      }),
+    }),
+  );
+}
+
+export async function undoReplace(token: string): Promise<UndoResponse> {
+  return parse<UndoResponse>(
+    await apiFetch('/api/files/search/undo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
     }),
   );
 }

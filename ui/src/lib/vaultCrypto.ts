@@ -446,7 +446,12 @@ export async function derivePasskeyKek(prfOutput: BytesLike, prfSalt: BytesLike)
   const output = toUint8Array(prfOutput, 'passkey PRF output');
   try {
     const salt = toUint8Array(prfSalt, 'passkey PRF salt');
-    assertLength(output, KEY_BYTES, 'passkey PRF output');
+    // The WebAuthn PRF output length varies by authenticator/provider (e.g. 1Password
+    // does not return exactly 32 bytes). HKDF accepts variable-length IKM, so require it
+    // only be present rather than asserting an exact length, then derive a 32-byte KEK.
+    if (output.length === 0) {
+      throw new Error('passkey PRF output is empty');
+    }
     assertLength(salt, PASSKEY_PRF_SALT_BYTES, 'passkey PRF salt');
     return await hkdfSha256(output, salt, utf8(PASSKEY_HKDF_INFO), KEY_BYTES);
   } finally {
@@ -918,6 +923,32 @@ function normalizeHexOrBytes(value: HexOrBytes, field: string): Uint8Array {
   return typeof value === 'string' ? hexToBytes(value) : toUint8Array(value, field);
 }
 
+export type SigningKeyMaterial = {
+  /** Raw 32-byte secp256k1 private key. The caller MUST zero it after sealing. */
+  privateKey: Uint8Array;
+  /**
+   * Compressed secp256k1 public key (33 bytes), hex. A signing key is
+   * chain-agnostic: the signature scheme (ECDSA / Schnorr) is chosen at sign
+   * time, not at creation, so this is the only public material we pin.
+   */
+  publicKey: string;
+};
+
+/** Generate a fresh, chain-agnostic secp256k1 signing key. */
+export function generateSigningKey(): SigningKeyMaterial {
+  const privateKey = secp256k1.utils.randomSecretKey();
+  return { privateKey, publicKey: bytesToHex(secp256k1.getPublicKey(privateKey, true)) };
+}
+
+/**
+ * Validate + load an imported secp256k1 private key (hex or raw bytes) and
+ * derive its compressed public key. Throws if it is not a valid 32-byte key.
+ */
+export function importSigningKey(privateKey: BytesLike | string): SigningKeyMaterial {
+  const key = normalizePrivateKey(privateKey);
+  return { privateKey: key, publicKey: bytesToHex(secp256k1.getPublicKey(key, true)) };
+}
+
 function validateSecretName(name: string): string {
   if (typeof name !== 'string' || !SECRET_NAME_PATTERN.test(name)) {
     throw new Error('vault secret name must match ^[A-Z][A-Z0-9_]*$');
@@ -1245,4 +1276,41 @@ export async function signProtectedDigest(
   } finally {
     privateKey.fill(0);
   }
+}
+
+/**
+ * Storage composition for protected-tier records.
+ *
+ * The daemon stores a protected secret as an opaque `{ciphertext, nonce, wrap_meta}`
+ * triple. The browser produces two artifacts on create: the {@link ProtectedSealed}
+ * envelope (value encrypted under a per-record DEK, and that DEK wrapped under the
+ * VMK) and the VMK `wrap_meta` (the VMK wrapped under the user's factors). We fold the
+ * DEK-under-VMK fields into the stored `wrap_meta` so every record is self-contained
+ * and round-trippable — pack on create, unpack on open. Field names match the Python
+ * reference (`storage/vault_protected.py`).
+ */
+export type ProtectedRecordEnvelope = { ciphertext: string; nonce: string; wrap_meta: string };
+
+export function packProtectedRecord(sealed: ProtectedSealed, vmkWrapMeta: string): ProtectedRecordEnvelope {
+  const meta = JSON.parse(vmkWrapMeta) as Record<string, unknown>;
+  if ('dek_nonce' in meta || 'wrapped_dek' in meta) {
+    throw new Error('vmk wrap_meta must not already carry a wrapped DEK');
+  }
+  return {
+    ciphertext: sealed.ciphertext,
+    nonce: sealed.nonce,
+    wrap_meta: JSON.stringify({ ...meta, dek_nonce: sealed.dek_nonce, wrapped_dek: sealed.wrapped_dek }),
+  };
+}
+
+export function unpackProtectedRecord(envelope: ProtectedRecordEnvelope): { sealed: ProtectedSealed; vmkWrapMeta: string } {
+  const parsed = JSON.parse(envelope.wrap_meta) as Record<string, unknown>;
+  const { dek_nonce, wrapped_dek, ...vmkMeta } = parsed;
+  if (typeof dek_nonce !== 'string' || typeof wrapped_dek !== 'string') {
+    throw new Error('protected record wrap_meta is missing the wrapped DEK');
+  }
+  return {
+    sealed: { ciphertext: envelope.ciphertext, nonce: envelope.nonce, dek_nonce, wrapped_dek },
+    vmkWrapMeta: JSON.stringify(vmkMeta),
+  };
 }

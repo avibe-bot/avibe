@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from unittest.mock import Mock
 
 from storage.vault_crypto import Sealed
@@ -129,6 +131,31 @@ def test_rest_requests_and_grants_routes(monkeypatch):
     assert inbox["requests"][0]["card"]["card_type"] == "approval"
 
 
+def test_rest_request_get_hydrates_browser_unlock_material_for_protected_access(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_REST",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct-protected", "nonce": "n-protected", "wrap_meta": "wm-protected"},
+        }
+    )
+    requested = api.request_vault_access({"name": "PROTECTED_REST", "session_id": "ses_1"})
+    client = app.test_client()
+
+    response = client.get(f"/api/vault/requests/{requested['request']['id']}")
+
+    assert response.status_code == 200
+    card = response.get_json()["request"]["card"]
+    assert card["secret_unlock_material"] == {
+        "name": "PROTECTED_REST",
+        "kind": "static",
+        "envelope": {"ciphertext": "ct-protected", "nonce": "n-protected", "wrap_meta": "wm-protected"},
+    }
+    agent_payload = api.get_vault_request(requested["request"]["id"])
+    assert "secret_unlock_material" not in json.dumps(agent_payload)
+
+
 def test_rest_grant_rejects_mismatched_request(monkeypatch):
     _mock_avault_p2(monkeypatch)
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
@@ -173,6 +200,63 @@ def test_rest_grant_rejects_mismatched_request(monkeypatch):
 
     assert response.status_code == 409
     assert response.get_json()["code"] == "invalid_request"
+
+
+def test_rest_fulfill_access_request_route(monkeypatch):
+    _mock_avault_p2(monkeypatch)
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_REST",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+        }
+    )
+    requested = api.request_vault_access({"name": "PROTECTED_REST", "session_id": "ses_1"})
+    client = app.test_client()
+
+    response = client.post(
+        f"/api/vault/requests/{requested['request']['id']}/fulfill-access",
+        json={
+            "session_id": "ses_1",
+            "deks": [
+                {
+                    "name": "PROTECTED_REST",
+                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                }
+            ],
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["result"]["type"] == "grant"
+    assert agent_grant.call_count == 1
+
+
+def test_rest_fulfill_access_request_unknown_default_scope_returns_vault_error(monkeypatch):
+    _mock_avault_p2(monkeypatch)
+    client = app.test_client()
+
+    response = client.post(
+        "/api/vault/requests/vrq_missing/fulfill-access",
+        json={
+            "deks": [
+                {
+                    "name": "PROTECTED_REST",
+                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                }
+            ],
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert response.status_code == 404
+    assert response.get_json()["code"] == "request_not_found"
 
 
 def test_rest_sign_errors_are_stable(monkeypatch):

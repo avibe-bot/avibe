@@ -102,6 +102,12 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
             kind="keypair",
             signer_kind="local",
             sealed=Sealed("ct-key", "nonce-key", "wrap-key"),
+            public_meta={
+                "signing_public_key": {
+                    "curve": "secp256k1",
+                    "public_key": "02" + "cd" * 32,
+                }
+            },
         )
         req = vs.create_access_request(conn, "ARCHIVE_KEY", requester={"session_id": sid}, delivery={"session_id": sid})
         pending_req = vs.create_access_request(

@@ -346,6 +346,39 @@ async def _terminal_resize_applies_winsize(monkeypatch, tmp_path):
         await service.shutdown()
 
 
+def test_terminal_resize_signals_winch_to_child_group(monkeypatch, tmp_path):
+    asyncio.run(_terminal_resize_signals_winch(monkeypatch, tmp_path))
+
+
+async def _terminal_resize_signals_winch(monkeypatch, tmp_path):
+    # The PTY child has no controlling terminal (start_new_session + dup'd slave), so the
+    # kernel never raises SIGWINCH on a winsize change. resize() must deliver it to the
+    # child's process group itself, or the tmux client never re-reads the new size.
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(terminal_service, "resolve_tmux_binary", lambda: None)
+    calls: list[tuple[int, int]] = []
+    real_killpg = terminal_service.os.killpg
+    monkeypatch.setattr(terminal_service.os, "killpg", lambda pgid, sig: calls.append((pgid, sig)))
+    service = TerminalService(idle_timeout_seconds=60, max_sessions=2)
+    connection = await service.open("winch")
+    try:
+        expected_pgid = os.getpgid(connection.process.pid)
+        await service.resize(connection, cols=120, rows=40)
+        assert calls == [(expected_pgid, signal.SIGWINCH)]
+    finally:
+        monkeypatch.setattr(terminal_service.os, "killpg", real_killpg)
+        await service.close(connection)
+        await service.shutdown()
+
+
+def test_signal_winch_ignores_missing_process():
+    # A resize that races a just-exited child must be a no-op, not an error: getpgid on an
+    # unknown pid raises ProcessLookupError, which _signal_winch is expected to swallow.
+    terminal_service._signal_winch(2**31 - 1)
+
+
 def test_terminal_tmux_launch_command_uses_safe_session():
     cmd = _tmux_launch_command("/tmp/tmux", sanitize_session_id("../bad session!"))
 
@@ -362,6 +395,19 @@ def test_terminal_tmux_launch_command_uses_safe_session():
         "-g",
         "status",
         "off",
+        # mouse mode routes the browser xterm's wheel into tmux copy-mode so history is
+        # scrollable (tmux owns the alternate screen); set-clipboard lets a selection reach
+        # the system clipboard via OSC 52.
+        ";",
+        "set-option",
+        "-g",
+        "mouse",
+        "on",
+        ";",
+        "set-option",
+        "-g",
+        "set-clipboard",
+        "on",
     ]
     assert _tmux_socket_name().startswith("avibe-")
 

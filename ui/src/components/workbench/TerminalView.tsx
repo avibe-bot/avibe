@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import clsx from 'clsx';
 import { RotateCw } from 'lucide-react';
 
 import { Button } from '../ui/button';
@@ -13,10 +12,21 @@ import { Button } from '../ui/button';
 // frames ({type:"resize",cols,rows}); server sends PTY output as BINARY and
 // {type:"ready"|"exit"} as TEXT. Lazy-loaded by AppsTerminalPage so xterm stays
 // out of the main bundle.
-type Status = 'connecting' | 'ready' | 'closed' | 'disabled' | 'error';
+export type TerminalStatus = 'connecting' | 'ready' | 'closed' | 'disabled' | 'error';
 
 const ENC = new TextEncoder();
 const MAX_BUSY_RETRIES = 3; // auto-retry a transient "busy" (1013) close this many times
+
+// The terminal window is theme-locked to dark (registry lockTheme: a shell is conventionally
+// dark, like a code editor), so xterm carries a fixed dark palette regardless of the global theme.
+const TERMINAL_BG = '#0b0b12';
+const TERMINAL_THEME = {
+  background: TERMINAL_BG,
+  foreground: '#e4e4e7',
+  cursor: '#e4e4e7',
+  cursorAccent: TERMINAL_BG,
+  selectionBackground: 'rgba(148,163,184,0.35)',
+};
 
 // Accessory key bar for phones (their soft keyboards lack these). Each button sends the raw
 // byte sequence the PTY expects; Ctrl is a sticky modifier. Labels go through i18n (the
@@ -38,7 +48,12 @@ function buildWsUrl(sessionId: string): string {
   return `${proto}://${window.location.host}/api/terminal/${encodeURIComponent(sessionId)}`;
 }
 
-export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => {
+export const TerminalView: React.FC<{
+  sessionId: string;
+  onPersistent?: (persistent: boolean) => void;
+  /** Report connection status up so the tab bar can show one combined status + persistence chip. */
+  onStatus?: (status: TerminalStatus, exitCode: number | null) => void;
+}> = ({ sessionId, onPersistent, onStatus }) => {
   const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -46,29 +61,86 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
   const ctrlStickyRef = useRef(false);
   const busyRetriesRef = useRef(0);
   const retryTimerRef = useRef<number | null>(null);
-  const [status, setStatus] = useState<Status>('connecting');
-  const [persistent, setPersistent] = useState(false);
+  // Report actual session persistence (from the backend 'ready' frame) up to the tab bar, so its
+  // badge reflects reality — tmux-backed = persistent, plain-shell fallback = not. Held in a ref so
+  // the WS effect (which doesn't depend on the prop) always calls the latest callback.
+  const onPersistentRef = useRef(onPersistent);
+  onPersistentRef.current = onPersistent;
+  const [status, setStatus] = useState<TerminalStatus>('connecting');
   const [exitCode, setExitCode] = useState<number | null>(null);
   const [reconnectKey, setReconnectKey] = useState(0);
+
+  // Surface connection status to the parent (tab bar). The standalone status row inside the
+  // body was removed — only the terminating states render an in-body overlay (below).
+  const onStatusRef = useRef(onStatus);
+  onStatusRef.current = onStatus;
+  useEffect(() => {
+    onStatusRef.current?.(status, exitCode);
+  }, [status, exitCode]);
 
   useEffect(() => {
     const term = new Terminal({
       fontSize: 13,
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
       cursorBlink: true,
-      theme: { background: '#0b0b12' },
+      theme: TERMINAL_THEME,
       allowProposedApi: true,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
     termRef.current = term;
-    if (containerRef.current) {
-      term.open(containerRef.current);
+    const settleTimers: number[] = [];
+    let resizeSendTimer: number | null = null;
+    // Push the CURRENT terminal size to the PTY. The backend only learns the size from these
+    // messages, and xterm's onResize fires ONLY on a change — so a no-op fit (the size already
+    // settled before connect/reconnect) would otherwise never tell the PTY, leaving it at the
+    // default 24x80. A maximized window then shows the shell using only the top ~24 rows with a
+    // big blank area below (and the cursor stuck partway up).
+    const sendSize = () => {
+      const term = termRef.current;
+      const ws = wsRef.current;
+      if (term && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      }
+    };
+    // Debounced so a maximize/restore animation's flurry of fits sends just the final size.
+    const queueSendSize = () => {
+      if (resizeSendTimer != null) window.clearTimeout(resizeSendTimer);
+      resizeSendTimer = window.setTimeout(sendSize, 80);
+    };
+    const refit = () => {
+      const el = containerRef.current;
+      // Skip when the container is hidden (a background tab uses display:none → 0×0): fitting to
+      // zero would send a tiny {cols,rows} resize to the PTY and disrupt full-screen programs /
+      // shells running in inactive tabs. The ResizeObserver fires again with real dimensions when
+      // the tab is shown.
+      if (!el || el.clientWidth === 0 || el.clientHeight === 0) return;
       try {
         fit.fit();
       } catch {
         /* container not measured yet */
       }
+      // Always (re)send the fitted size — covers the no-op fit at connect/reconnect that onResize misses.
+      queueSendSize();
+    };
+    // A single fit can land before BOTH the layout and xterm's own character-cell metrics have
+    // settled. On some browsers (notably Safari) the cell size finalises a frame or two after
+    // open while the CONTAINER box never changes again — so the ResizeObserver never fires to
+    // correct an initial under-fit, and the terminal stays only a few rows tall with the rest of
+    // the window blank ("only the top third renders"). Re-fit across the next couple of frames
+    // plus a short tail of timeouts so the row count converges no matter when metrics settle;
+    // once it's correct, fit() is a no-op.
+    const settle = () => {
+      refit();
+      requestAnimationFrame(() => {
+        refit();
+        requestAnimationFrame(refit);
+      });
+      settleTimers.push(window.setTimeout(refit, 120), window.setTimeout(refit, 360));
+    };
+    if (containerRef.current) {
+      term.open(containerRef.current);
+      settle();
     }
 
     const onData = term.onData((data: string) => {
@@ -81,11 +153,6 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
       }
       ws.send(ENC.encode(out));
     });
-    const onResize = term.onResize(({ cols, rows }: { cols: number; rows: number }) => {
-      const ws = wsRef.current;
-      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols, rows }));
-    });
-
     setStatus('connecting');
     setExitCode(null);
     const ws = new WebSocket(buildWsUrl(sessionId));
@@ -93,7 +160,7 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
     wsRef.current = ws;
     ws.onopen = () => {
       try {
-        fit.fit();
+        refit();
       } catch {
         /* noop */
       }
@@ -105,7 +172,10 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
           if (msg.type === 'ready') {
             busyRetriesRef.current = 0; // a successful attach resets the transient-retry budget
             setStatus('ready');
-            setPersistent(!!msg.persistent);
+            onPersistentRef.current?.(!!msg.persistent);
+            // The shell is live and about to paint its first content — settle the fit again so a
+            // late cell-metric correction doesn't leave the terminal a few rows tall.
+            settle();
           } else if (msg.type === 'exit') {
             setExitCode(typeof msg.code === 'number' ? msg.code : null);
             setStatus('closed');
@@ -135,20 +205,15 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
       );
     };
 
-    const ro = new ResizeObserver(() => {
-      try {
-        fit.fit();
-      } catch {
-        /* noop */
-      }
-    });
+    const ro = new ResizeObserver(() => refit());
     if (containerRef.current) ro.observe(containerRef.current);
 
     return () => {
       if (retryTimerRef.current != null) window.clearTimeout(retryTimerRef.current);
+      if (resizeSendTimer != null) window.clearTimeout(resizeSendTimer);
+      for (const id of settleTimers) window.clearTimeout(id);
       ro.disconnect();
       onData.dispose();
-      onResize.dispose();
       // Detach handlers before closing. A closing socket's onclose can fire asynchronously
       // *after* its replacement has already reported 'ready' (reconnect / effect remount);
       // left attached, the stale onclose would mark the live terminal 'closed' or schedule a
@@ -178,48 +243,49 @@ export const TerminalView: React.FC<{ sessionId: string }> = ({ sessionId }) => 
     termRef.current?.focus();
   };
 
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-center gap-2 border-b border-border px-3 py-1.5 text-[11.5px] text-muted">
-        <span
-          className={clsx(
-            'size-2 shrink-0 rounded-full',
-            status === 'ready' ? 'bg-mint' : status === 'connecting' ? 'bg-amber-400' : 'bg-muted',
-          )}
-        />
-        <span>
-          {t(`apps.terminal.status.${status}`)}
-          {status === 'closed' && exitCode != null ? ` · ${t('apps.terminal.exitCode', { code: exitCode })}` : ''}
-        </span>
-        {status === 'ready' && persistent && (
-          <span className="rounded-full border border-border px-1.5 text-[10px]">{t('apps.terminal.persistent')}</span>
-        )}
-        {(status === 'closed' || status === 'error') && (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            className="ml-auto h-6 gap-1 px-2 text-[11px]"
-            onClick={() => {
-              busyRetriesRef.current = 0;
-              setReconnectKey((k) => k + 1);
-            }}
-          >
-            <RotateCw className="size-3" /> {t('apps.terminal.reconnect')}
-          </Button>
-        )}
-      </div>
+  const reconnect = () => {
+    busyRetriesRef.current = 0;
+    setReconnectKey((k) => k + 1);
+  };
 
+  return (
+    <div className="flex h-full min-h-0 flex-col" style={{ backgroundColor: TERMINAL_BG }}>
       {status === 'disabled' ? (
         <div className="grid flex-1 place-items-center p-6 text-center text-[12.5px] text-muted">
           <div className="max-w-md">{t('apps.terminal.disabled')}</div>
         </div>
       ) : (
-        <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden bg-[#0b0b12] p-1.5" />
+        <div className="relative min-h-0 flex-1">
+          <div ref={containerRef} className="absolute inset-0 overflow-hidden p-1.5" />
+          {(status === 'closed' || status === 'error') && (
+            // The "connected" status no longer occupies its own row — it lives in the tab bar.
+            // Only the terminating states surface in the body, as a centred overlay that offers
+            // a reconnect (the dimmed last output stays visible underneath).
+            <div className="absolute inset-0 grid place-items-center bg-surface/85 p-6 text-center backdrop-blur-[1px]">
+              <div className="flex flex-col items-center gap-3">
+                <span className="text-[12.5px] text-muted">
+                  {t(`apps.terminal.status.${status}`)}
+                  {status === 'closed' && exitCode != null ? ` · ${t('apps.terminal.exitCode', { code: exitCode })}` : ''}
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 gap-1.5 px-3 text-[12px]"
+                  onClick={reconnect}
+                >
+                  <RotateCw className="size-3" /> {t('apps.terminal.reconnect')}
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
       )}
 
       {status !== 'disabled' && (
-        <div className="flex gap-1 overflow-x-auto border-t border-border bg-surface px-2 py-1.5 md:hidden">
+        // The accessory key bar shows on desktop too (design iwYIX): quick esc/tab/ctrl/arrows
+        // without leaving the window. On phones it's essential (soft keyboards lack these keys).
+        <div className="flex gap-1 overflow-x-auto border-t border-border bg-surface px-2 py-1.5">
           {KEYS.map((k) => (
             <button
               key={k.labelKey}
