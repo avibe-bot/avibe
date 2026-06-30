@@ -35,6 +35,7 @@ from config.v2_config import V2Config
 from core.scheduled_tasks import (
     ScheduledTaskStore,
     TaskExecutionStore,
+    parse_scope_id,
     parse_session_key,
     resolve_session_id_target,
     session_anchor_for_target,
@@ -61,7 +62,7 @@ from vibe.upgrade import (
 )
 from storage.db import create_sqlite_engine
 from storage.background import compute_next_run_at, normalize_run_status
-from storage.models import scope_settings
+from storage.models import scope_settings, scopes
 from storage.pagination import DEFAULT_PAGE_LIMIT, PageRequest, make_page_request, pagination_payload
 from storage.read_only_query import ReadOnlyQueryError, run_read_only_query
 from storage.settings_service import make_scope_id
@@ -279,7 +280,8 @@ def _task_add_examples_text() -> str:
           `--session-id` chooses which Agent Session Avibe will continue using when the task runs.
           Omit --session-id only when this task should follow the current caller Session.
           `--post-to channel` changes where the message is posted, not which session is continued.
-          Use --deliver-key only when delivery must go to a different explicit target.
+          Use --create-session with --same-scope to create a reusable sibling Session in the current Workbench project or IM scope.
+          Use --create-session with --scope-id <scopes.id> to create a reusable Session in a specific existing scope.
           `--message` and `--message-file` provide the stored user message that will be sent each time the task runs.
           Use --cron for recurring jobs and --at for one-shot jobs.
           Cron weekday digits use APScheduler semantics: 0=Mon through 6=Sun; 7 is invalid. Prefer weekday names such as mon, tue, or sun when scheduling by day of week.
@@ -288,7 +290,7 @@ def _task_add_examples_text() -> str:
         Examples:
           vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
           vibe task add --session-id sesk8m4q2p7x --post-to channel --cron '*/5 * * * *' --message 'Tell a new joke each time.'
-          vibe task add --session-id sesk8m4q2p7x --deliver-key 'slack::channel::C999' --cron '0 9 * * *' --message 'Post the daily summary in the announcements channel.'
+          vibe task add --create-session --same-scope --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'
         """
     )
 
@@ -303,12 +305,13 @@ def _task_update_examples_text() -> str:
           vibe task update 12ab34cd56ef --cron '*/30 * * * *'
           vibe task update 12ab34cd56ef --message 'Send a shorter summary.'
           vibe task update 12ab34cd56ef --session-id sesk8m4q2p7x --post-to channel
-          vibe task update 12ab34cd56ef --deliver-key 'slack::channel::C999'
+          vibe task update 12ab34cd56ef --create-session --same-scope
           vibe task update 12ab34cd56ef --reset-delivery
 
         Guidance:
           Unspecified fields keep their existing values.
           Use --reset-delivery to return to following the session target directly.
+          Use --same-scope or --scope-id when this task should create new Sessions in a specific scope.
           When changing schedule fields, pass either --cron or --at.
           Cron weekday digits use APScheduler semantics: 0=Mon through 6=Sun; 7 is invalid. Prefer weekday names such as mon, tue, or sun when scheduling by day of week.
           Use --clear-name if you want the task to stop storing a custom name.
@@ -333,7 +336,7 @@ def _hook_send_examples_text() -> str:
           Keep the current session id when the hook should continue in the same session.
           If no session id is available, trigger this from an active Avibe conversation instead of guessing.
           `--post-to channel` changes where the message is posted, not which session is continued.
-          Use --deliver-key only when delivery must go to a different explicit target.
+          For new async one-shot work, prefer `vibe agent run --async`.
           `--message` and `--message-file` provide the one-shot async user message that will be queued immediately.
 
         Examples:
@@ -616,7 +619,8 @@ def _watch_add_examples_text() -> str:
           `--session-id` chooses which Agent Session Avibe will continue using for follow-up messages from the watch.
           Omit --session-id only when this watch should follow up in the current caller Session.
           `--post-to channel` changes where the follow-up is posted, not which session is continued.
-          Use --deliver-key only when delivery must go to a different explicit target.
+          Use --create-session with --same-scope to create a reusable sibling Session in the current Workbench project or IM scope.
+          Use --create-session with --scope-id <scopes.id> to create a reusable Session in a specific existing scope.
           `--prefix` becomes the instruction text of the follow-up hook. On a successful cycle, Avibe prepends `--prefix` before waiter stdout and joins them with a blank line when both exist.
           Terminal failures also send a follow-up and disable the watch.
           In forever mode, failures are retried only when the waiter exits with an allowed `--retry-exit-code`.
@@ -636,19 +640,22 @@ def _agent_run_examples_text() -> str:
         """\
         Session target:
           Use --session-id to continue an existing Agent Session.
-          Use --create-session to start a new blank Session.
-          Use --fork-session to create a new Session by forking an existing Session's native backend context.
+          Omit --session-id/--fork-self/--fork-session to create a private background Session for --agent.
+          Use --same-scope to place a new Session in the caller/source Session's scope.
+          Use --scope-id <scopes.id> to place a new Session in a specific existing scope.
 
         Forking:
+          --fork-self forks the current caller Session from AVIBE_SESSION_ID.
           --fork-session <session-id> creates a new Avibe Agent Session and asks the native backend to fork the source native session on the first turn.
-          Forks keep the same backend as the source Session. Passing --agent is allowed only when that Agent uses the same backend.
+          Forks keep the same backend, scope, and cwd as the source Session. Passing --agent is allowed only when that Agent uses the same backend.
           --agent, --model, and --reasoning-effort may override the forked Session's Agent/model/effort.
-          Do not combine --fork-session with --session-id, --create-session, --create-session-per-run, --deliver-key, or --post-to.
+          Do not combine fork flags with --session-id, --create-session, or --create-session-per-run.
 
         Examples:
           vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
+          vibe agent run --agent release-reviewer --same-scope --message 'Review this project in a visible sibling Session.'
           vibe agent run --async --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
-          vibe agent run --async --fork-session sesk8m4q2p7x --callback-session-id sescaller123 --message 'Explore this alternate fix from the current context.'
+          vibe agent run --async --fork-self --message 'Explore this alternate fix from the current context.'
           vibe agent run --fork-session sesk8m4q2p7x --agent reviewer --model gpt-5.4 --reasoning-effort high --message 'Review the forked context.'
         """
     )
@@ -971,19 +978,23 @@ def _normalize_watch_name(value: Optional[str], *, help_command: str = "vibe wat
     return normalized
 
 
-def _resolve_watch_cwd(value: Optional[str], *, help_command: str) -> Optional[str]:
-    if not value:
-        return None
+def _resolve_existing_cwd(value: str, *, help_command: str, code: str, label: str) -> str:
     resolved = Path(value).expanduser().resolve()
     if not resolved.exists() or not resolved.is_dir():
         raise TaskCliError(
-            f"watch cwd does not exist: {value}",
-            code="invalid_watch_cwd",
-            hint="Point --cwd to an existing directory, or omit it to inherit the service working directory.",
+            f"{label} cwd does not exist: {value}",
+            code=code,
+            hint="Point --cwd to an existing directory, or omit it to use the invocation directory.",
             help_command=help_command,
             details={"cwd": value},
         )
     return str(resolved)
+
+
+def _resolve_watch_cwd(value: Optional[str], *, help_command: str, default_to_invocation: bool = False) -> Optional[str]:
+    if not value:
+        return os.getcwd() if default_to_invocation else None
+    return _resolve_existing_cwd(value, help_command=help_command, code="invalid_watch_cwd", label="watch")
 
 
 def _validate_watch_timing(
@@ -1348,6 +1359,18 @@ def _resolve_caller_session_id(args, *, purpose: str, help_command: str) -> tupl
     return session_id, notice
 
 
+def _require_caller_session_id(caller_context, *, purpose: str, help_command: str) -> str:
+    session_id = _default_session_id_from_caller(caller_context)
+    if session_id:
+        return session_id
+    raise TaskCliError(
+        f"{purpose} requires an Avibe Agent caller Session.",
+        code="missing_caller_session",
+        hint="Run this command from an Avibe Agent shell where AVIBE_SESSION_ID is injected, or pass an explicit Session ID.",
+        help_command=help_command,
+    )
+
+
 def _default_run_id_from_caller(caller_context) -> Optional[str]:
     if caller_context is None:
         return None
@@ -1375,6 +1398,192 @@ def _resolve_caller_run_id(args, *, purpose: str, help_command: str) -> tuple[st
         "message": f"{purpose} defaulted to the caller Run from AVIBE_RUN_ID.",
         "run_id": default_run_id,
     }
+
+
+def _parse_validated_scope_id(scope_id: str, *, help_command: str):
+    try:
+        target = parse_scope_id(scope_id)
+    except ValueError as exc:
+        raise TaskCliError(
+            str(exc),
+            code="invalid_scope_id",
+            hint="Pass a Scope ID from the scopes table, for example avibe::project::proj_123.",
+            example="avibe::project::proj_abc123",
+            help_command=help_command,
+            details={"scope_id": scope_id},
+        ) from exc
+
+    supported_platforms = _supported_task_platforms()
+    if target.platform not in supported_platforms:
+        supported_text = ", ".join(sorted(supported_platforms)) or "none"
+        raise TaskCliError(
+            f"unsupported scope platform: {target.platform}",
+            code="unsupported_platform",
+            hint="Choose a scope whose platform is enabled in Avibe before sending the request.",
+            example="avibe::project::proj_abc123",
+            help_command=help_command,
+            details={
+                "requested_platform": target.platform,
+                "configured_platforms": sorted(supported_platforms),
+                "configured_platforms_text": supported_text,
+            },
+        )
+    return target
+
+
+def _validate_existing_scope_id(scope_id: str, *, help_command: str):
+    target = _parse_validated_scope_id(scope_id, help_command=help_command)
+    _ensure_cli_sqlite_state()
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.connect() as conn:
+            found = conn.execute(
+                select(scopes.c.id, scope_settings.c.enabled)
+                .select_from(scopes.outerjoin(scope_settings, scope_settings.c.scope_id == scopes.c.id))
+                .where(scopes.c.id == target.session_scope)
+                .limit(1)
+            ).mappings().first()
+    finally:
+        engine.dispose()
+    if found is None:
+        raise TaskCliError(
+            f"scope id not found: {target.session_scope}",
+            code="scope_not_found",
+            hint="Pass an existing Scope ID, or use --same-scope from an Avibe Agent Session.",
+            help_command=help_command,
+            details={"scope_id": target.session_scope},
+        )
+    if target.platform == "avibe" and target.scope_type == "project" and found["enabled"] is not None and not bool(found["enabled"]):
+        raise TaskCliError(
+            f"scope id is archived: {target.session_scope}",
+            code="scope_archived",
+            hint="Choose an active Workbench project scope.",
+            help_command=help_command,
+            details={"scope_id": target.session_scope},
+        )
+    return target
+
+
+def _scope_id_from_session_id(session_id: str, *, help_command: str) -> str:
+    resolved = resolve_session_id_target(session_id)
+    return resolved.session_key.to_key(include_thread=False)
+
+
+def _legacy_scope_key_from_target(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    try:
+        return parse_scope_id(value).session_scope
+    except ValueError:
+        try:
+            return parse_session_key(value).session_scope
+        except ValueError:
+            return ""
+
+
+def _resolve_agent_run_scope_key(args, *, caller_context, source_session_id: Optional[str]) -> Optional[str]:
+    raw_scope_id = (getattr(args, "scope_id", None) or "").strip()
+    if raw_scope_id:
+        return _validate_existing_scope_id(raw_scope_id, help_command="vibe agent run --help").session_scope
+    if bool(getattr(args, "same_scope", False)):
+        if source_session_id:
+            return _scope_id_from_session_id(source_session_id, help_command="vibe agent run --help")
+        caller_session_id = _require_caller_session_id(
+            caller_context,
+            purpose="--same-scope",
+            help_command="vibe agent run --help",
+        )
+        return _scope_id_from_session_id(caller_session_id, help_command="vibe agent run --help")
+    return None
+
+
+def _resolve_definition_scope_key(args, *, caller_context, help_command: str) -> Optional[str]:
+    raw_scope_id = (getattr(args, "scope_id", None) or "").strip()
+    same_scope = bool(getattr(args, "same_scope", False))
+    legacy_deliver_key = (getattr(args, "deliver_key", None) or "").strip()
+    if raw_scope_id and same_scope:
+        raise TaskCliError(
+            "use either --same-scope or --scope-id, not both",
+            code="conflicting_scope_target",
+            hint="Use --same-scope to reuse the caller scope, or --scope-id to place the new Session explicitly.",
+            help_command=help_command,
+        )
+    if legacy_deliver_key and (raw_scope_id or same_scope):
+        raise TaskCliError(
+            "use either legacy --deliver-key or the new scope placement flags, not both",
+            code="conflicting_scope_target",
+            hint="Use --scope-id or --same-scope for new Agent-facing commands.",
+            help_command=help_command,
+        )
+    if raw_scope_id:
+        return _validate_existing_scope_id(raw_scope_id, help_command=help_command).session_scope
+    if same_scope:
+        caller_session_id = _require_caller_session_id(
+            caller_context,
+            purpose="--same-scope",
+            help_command=help_command,
+        )
+        return _scope_id_from_session_id(caller_session_id, help_command=help_command)
+    if legacy_deliver_key:
+        return _parse_validated_session_key(legacy_deliver_key, help_command=help_command).session_scope
+    return None
+
+
+def _definition_metadata_with_scope(
+    caller_context,
+    *,
+    scope_id: Optional[str],
+    session_workdir: Optional[str] = None,
+) -> dict:
+    metadata = _definition_creation_metadata_from_caller(caller_context)
+    if scope_id:
+        metadata["session_scope_id"] = scope_id
+    if session_workdir:
+        metadata["session_workdir"] = session_workdir
+    return metadata
+
+
+def _scope_id_payload_from_session(session_id: Optional[str]) -> Optional[str]:
+    if not session_id:
+        return None
+    try:
+        return resolve_session_id_target(session_id).session_key.to_key(include_thread=False)
+    except ValueError:
+        return None
+
+
+def _validate_callback_session_id(session_id: str, *, help_command: str) -> None:
+    try:
+        resolve_session_id_target(session_id)
+    except ValueError as exc:
+        raise TaskCliError(
+            str(exc),
+            code="invalid_session_id",
+            hint="Pass an existing Agent Session ID as the callback target.",
+            help_command=help_command,
+            details={"session_id": session_id},
+        ) from exc
+
+
+def _resolve_runs_list_session_filter(args) -> Optional[str]:
+    explicit_session_id = (getattr(args, "session_id", None) or "").strip()
+    current_session = bool(getattr(args, "current_session", False))
+    if explicit_session_id and current_session:
+        raise TaskCliError(
+            "use either --session-id or --current-session, not both",
+            code="conflicting_session_filter",
+            hint="Use --current-session to resolve AVIBE_SESSION_ID, or pass a specific --session-id.",
+            help_command="vibe runs list --help",
+        )
+    if explicit_session_id:
+        return explicit_session_id
+    if current_session:
+        return _require_caller_session_id(
+            caller_context_from_env(),
+            purpose="--current-session",
+            help_command="vibe runs list --help",
+        )
+    return None
 
 
 def _validate_delivery_args(
@@ -1418,6 +1627,38 @@ def _validate_delivery_args(
             hint="Use a thread-bound Agent Session ID or --deliver-key with a thread target.",
             help_command=help_command,
             details={"session_id": session_id, "session_key": session_key, "post_to": post_to},
+        )
+    return session_target, delivery_target
+
+
+def _validate_delivery_override_for_target(
+    session_target,
+    *,
+    post_to: Optional[str],
+    deliver_key: Optional[str],
+    help_command: str,
+):
+    delivery_target = None
+    if deliver_key:
+        delivery_target = _parse_validated_session_key(deliver_key, help_command=help_command)
+        if delivery_target.platform != session_target.platform:
+            raise TaskCliError(
+                "--deliver-key must use the same platform as the session target",
+                code="invalid_delivery_target",
+                hint="Keep session memory and delivery on the same IM platform. Change only the channel, user, or thread target.",
+                help_command=help_command,
+                details={
+                    "session_platform": session_target.platform,
+                    "delivery_platform": delivery_target.platform,
+                },
+            )
+    elif post_to == "thread" and not session_target.thread_id:
+        raise TaskCliError(
+            "--post-to thread requires a thread-bound session target",
+            code="invalid_delivery_target",
+            hint="Use a thread-bound Agent Session ID, or keep delivery following the created Session target.",
+            help_command=help_command,
+            details={"post_to": post_to},
         )
     return session_target, delivery_target
 
@@ -1475,9 +1716,12 @@ def _resolve_scope_routing_target(session_key: str) -> _ScopeRoutingTarget:
     if not session_key:
         return _ScopeRoutingTarget(None)
     try:
-        parsed = parse_session_key(session_key)
+        parsed = parse_scope_id(session_key)
     except ValueError:
-        return _ScopeRoutingTarget(None)
+        try:
+            parsed = parse_session_key(session_key)
+        except ValueError:
+            return _ScopeRoutingTarget(None)
     scope_id = make_scope_id(parsed.platform, parsed.scope_type, parsed.scope_id)
     _ensure_cli_sqlite_state()
     engine = create_sqlite_engine(paths.get_sqlite_state_path())
@@ -1512,23 +1756,33 @@ def _resolve_agent_for_target(
         requested = store.require_enabled(agent_name) if agent_name else None
         if session_id:
             target = resolve_session_id_target(session_id)
-            resolved = requested
-            if resolved is None and target.agent_name:
-                resolved = store.require_enabled(target.agent_name)
-            if resolved is not None and target.agent_backend and resolved.backend != target.agent_backend:
+            session_agent = store.require_enabled(target.agent_name) if target.agent_name else None
+            if requested is not None and session_agent is not None and requested.name != session_agent.name:
+                raise TaskCliError(
+                    "agent does not match the existing session agent",
+                    code="agent_session_agent_mismatch",
+                    hint="Omit --agent when continuing an existing Session, or pass the same Agent name already bound to that Session.",
+                    details={
+                        "agent": requested.name,
+                        "session_id": session_id,
+                        "session_agent": session_agent.name,
+                    },
+                    help_command=help_command,
+                )
+            if requested is not None and target.agent_backend and requested.backend != target.agent_backend:
                 raise TaskCliError(
                     "agent backend does not match the existing session backend",
                     code="agent_session_backend_mismatch",
                     hint="Use an Agent with the same backend as the Session, or create a new Session.",
                     details={
-                        "agent": resolved.name,
-                        "agent_backend": resolved.backend,
+                        "agent": requested.name,
+                        "agent_backend": requested.backend,
                         "session_id": session_id,
                         "session_backend": target.agent_backend,
                     },
                     help_command=help_command,
                 )
-            return resolved
+            return session_agent or requested
 
         if requested is not None:
             return requested
@@ -1778,6 +2032,7 @@ def cmd_task_add(args):
             help_command="vibe task add --help",
             allow_caller_session_default=caller_context is not None,
         )
+        scope_key = _resolve_definition_scope_key(args, caller_context=caller_context, help_command="vibe task add --help")
         message = _resolve_prompt_input(
             args,
             help_command="vibe task add --help",
@@ -1788,25 +2043,33 @@ def cmd_task_add(args):
             required=session_policy == "existing",
             help_command="vibe task add --help",
         )
+        cwd = _resolve_definition_session_cwd(
+            explicit_cwd=getattr(args, "cwd", None),
+            existing_cwd=None,
+            session_policy=session_policy,
+            help_command="vibe task add --help",
+        )
         agent = _resolve_agent_for_target(
             agent_name=getattr(args, "agent", None),
             session_id=session_id,
-            session_key=session_key or getattr(args, "deliver_key", None) or "",
+            session_key=session_key or scope_key or "",
             help_command="vibe task add --help",
         )
         agent_name = agent.name if agent else None
         if session_policy == "create_once":
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
-                deliver_key=args.deliver_key,
+                deliver_key=scope_key or "",
+                workdir=cwd,
                 help_command="vibe task add --help",
             )
-        validation_session_key = session_key or (args.deliver_key if session_policy == "create_per_run" else "")
-        session_target, delivery_target = _validate_delivery_args(
+        session_target, delivery_target = _validate_definition_delivery_target(
+            session_policy=session_policy,
             session_id=session_id,
-            session_key=validation_session_key,
+            session_key=session_key,
             post_to=getattr(args, "post_to", None),
             deliver_key=getattr(args, "deliver_key", None),
+            scope_key=scope_key,
             help_command="vibe task add --help",
         )
         timezone_name = args.timezone or _default_timezone_name()
@@ -1845,9 +2108,10 @@ def cmd_task_add(args):
                 schedule_type="cron",
                 agent_name=agent_name,
                 session_policy=session_policy,
+                cwd=cwd,
                 cron=args.cron,
                 timezone_name=timezone_name,
-                metadata=_definition_creation_metadata_from_caller(caller_context),
+                metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=cwd),
             )
         else:
             try:
@@ -1871,9 +2135,10 @@ def cmd_task_add(args):
                 schedule_type="at",
                 agent_name=agent_name,
                 session_policy=session_policy,
+                cwd=cwd,
                 run_at=run_at,
                 timezone_name=timezone_name,
-                metadata=_definition_creation_metadata_from_caller(caller_context),
+                metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=cwd),
             )
         warnings = _collect_target_warnings(session_target, delivery_target)
         task_payload = _task_payload(task)
@@ -1980,14 +2245,33 @@ def cmd_task_update(args):
             )
 
         if getattr(args, "reset_delivery", False) and (
-            getattr(args, "post_to", None) is not None or getattr(args, "deliver_key", None) is not None
+            getattr(args, "post_to", None) is not None
+            or getattr(args, "deliver_key", None) is not None
+            or getattr(args, "scope_id", None) is not None
+            or bool(getattr(args, "same_scope", False))
         ):
             raise TaskCliError(
                 "use either --reset-delivery or a new delivery flag, not both",
                 code="conflicting_delivery_target",
-                hint="Pass --reset-delivery to clear delivery overrides, or pass --post-to/--deliver-key to replace them.",
+                hint="Pass --reset-delivery to clear delivery overrides, or pass --post-to/--scope-id/--same-scope to replace them.",
                 help_command="vibe task update --help",
             )
+        caller_context = caller_context_from_env()
+        scope_arg_present = (getattr(args, "scope_id", None) is not None) or bool(getattr(args, "same_scope", False))
+        if scope_arg_present and not (
+            bool(getattr(args, "create_session", False)) or bool(getattr(args, "create_session_per_run", False))
+        ):
+            raise TaskCliError(
+                "scope placement flags only apply when creating Sessions",
+                code="scope_without_session_creation",
+                hint="Use --create-session or --create-session-per-run with --scope-id/--same-scope, or omit the scope placement flag.",
+                help_command="vibe task update --help",
+            )
+        requested_scope_key = _resolve_definition_scope_key(
+            args,
+            caller_context=caller_context,
+            help_command="vibe task update --help",
+        )
         session_id_update, session_key_update = _resolve_session_target_args(
             args,
             required=False,
@@ -2017,6 +2301,11 @@ def cmd_task_update(args):
             else:
                 post_to = task.post_to
                 deliver_key = task.deliver_key
+        metadata = dict(task.metadata or {})
+        if requested_scope_key:
+            metadata["session_scope_id"] = requested_scope_key
+        elif scope_arg_present:
+            metadata.pop("session_scope_id", None)
 
         if getattr(args, "name", None) is not None and getattr(args, "clear_name", False):
             raise TaskCliError(
@@ -2115,18 +2404,45 @@ def cmd_task_update(args):
             next_schedule_type=schedule_type,
             help_command="vibe task update --help",
         )
-        if session_policy in {"create_once", "create_per_run"} and not deliver_key:
+        explicit_cwd = getattr(args, "cwd", None)
+        _reject_inert_create_once_cwd_update(
+            explicit_cwd=explicit_cwd,
+            current_policy=task.session_policy,
+            current_session_id=task.session_id,
+            create_session=bool(getattr(args, "create_session", False)),
+            help_command="vibe task update --help",
+        )
+        if session_policy == "existing":
+            cwd = _resolve_definition_session_cwd(
+                explicit_cwd=explicit_cwd,
+                existing_cwd=None,
+                session_policy=session_policy,
+                help_command="vibe task update --help",
+            )
+        elif explicit_cwd is not None:
+            cwd = _resolve_definition_session_cwd(
+                explicit_cwd=explicit_cwd,
+                existing_cwd=None,
+                session_policy=session_policy,
+                help_command="vibe task update --help",
+            )
+        elif getattr(args, "create_session", False) or getattr(args, "create_session_per_run", False):
+            cwd = task.cwd or os.getcwd()
+        else:
+            cwd = task.cwd
+        scope_key = requested_scope_key or str(metadata.get("session_scope_id") or "").strip() or _legacy_scope_key_from_target(deliver_key)
+        if session_policy in {"create_once", "create_per_run"} and not scope_key:
             raise TaskCliError(
-                "--deliver-key is required when a stored definition creates sessions",
+                "--scope-id or --same-scope is required when a stored definition creates sessions",
                 code="missing_delivery_target",
-                hint="Pass the Scope ID that owns the new Session.",
+                hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
                 help_command="vibe task update --help",
             )
         if agent_name is None and session_policy != "existing":
             agent = _resolve_agent_for_target(
                 agent_name=None,
                 session_id=None,
-                session_key=deliver_key or "",
+                session_key=scope_key,
                 help_command="vibe task update --help",
             )
             agent_name = agent.name if agent else None
@@ -2143,16 +2459,24 @@ def cmd_task_update(args):
         ):
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
-                deliver_key=deliver_key or "",
+                deliver_key=scope_key,
+                workdir=cwd,
                 help_command="vibe task update --help",
             )
             session_key = ""
+        if session_policy == "existing":
+            metadata.pop("session_workdir", None)
+        elif cwd:
+            metadata["session_workdir"] = cwd
+        else:
+            metadata.pop("session_workdir", None)
         session_target, delivery_target = _validate_definition_update_delivery_target(
             session_policy=session_policy,
             session_id=session_id,
             session_key=session_key,
             post_to=post_to,
             deliver_key=deliver_key,
+            scope_key=scope_key,
             help_command="vibe task update --help",
         )
 
@@ -2166,9 +2490,11 @@ def cmd_task_update(args):
             "schedule_type": schedule_type,
             "post_to": post_to,
             "deliver_key": deliver_key,
+            "cwd": cwd,
             "cron": cron,
             "run_at": run_at,
             "timezone": timezone_name,
+            "metadata": metadata,
         }
         current = {
             "name": task.name,
@@ -2180,15 +2506,17 @@ def cmd_task_update(args):
             "schedule_type": task.schedule_type,
             "post_to": task.post_to,
             "deliver_key": task.deliver_key,
+            "cwd": task.cwd,
             "cron": task.cron,
             "run_at": task.run_at,
             "timezone": task.timezone,
+            "metadata": task.metadata,
         }
         if changes == current:
             raise TaskCliError(
                 "no task fields were changed",
                 code="no_task_changes",
-                hint="Pass at least one field to update, such as --name, --cron, --message, --session-id, or --deliver-key.",
+                hint="Pass at least one field to update, such as --name, --cron, --message, --session-id, or --scope-id.",
                 help_command="vibe task update --help",
                 details={"task_id": args.task_id},
             )
@@ -2204,9 +2532,12 @@ def cmd_task_update(args):
             session_policy=session_policy,
             post_to=post_to,
             deliver_key=deliver_key,
+            cwd=cwd,
+            update_cwd=True,
             cron=cron,
             run_at=run_at,
             timezone_name=timezone_name,
+            metadata=metadata,
         )
         warnings = _collect_target_warnings(session_target, delivery_target)
         task_payload = _task_payload(updated)
@@ -2686,8 +3017,13 @@ def cmd_agent_import(args):
 def _validate_run_session_policy(args, *, help_command: str) -> str:
     session_id = (getattr(args, "session_id", None) or "").strip()
     fork_session = (getattr(args, "fork_session", None) or "").strip()
+    fork_self = bool(getattr(args, "fork_self", False))
     create_session = bool(getattr(args, "create_session", False))
     create_per_run = bool(getattr(args, "create_session_per_run", False))
+    same_scope = bool(getattr(args, "same_scope", False))
+    scope_id = (getattr(args, "scope_id", None) or "").strip()
+    deliver_key = (getattr(args, "deliver_key", None) or "").strip()
+    agent_name = (getattr(args, "agent", None) or "").strip()
     if bool(getattr(args, "async_run", False)) and getattr(args, "wait_timeout", None) is not None:
         raise TaskCliError(
             "use --async or --wait-timeout, not both",
@@ -2702,35 +3038,56 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="Pass --callback-session-id to receive a follow-up, or --no-callback to intentionally inspect the run later.",
             help_command=help_command,
         )
-    if (getattr(args, "callback_session_id", None) or "").strip() and not bool(getattr(args, "async_run", False)):
+    if same_scope and scope_id:
         raise TaskCliError(
-            "--callback-session-id requires --async",
-            code="callback_requires_async",
-            hint="Callback delivery happens after an asynchronous run completes.",
+            "use either --same-scope or --scope-id, not both",
+            code="conflicting_scope_placement",
+            hint="Use --same-scope to reuse the caller/source scope, or --scope-id to place the new Session explicitly.",
             help_command=help_command,
         )
-    if bool(getattr(args, "no_callback", False)) and not bool(getattr(args, "async_run", False)):
+    if deliver_key and (same_scope or scope_id):
         raise TaskCliError(
-            "--no-callback requires --async",
-            code="no_callback_requires_async",
-            hint="Only asynchronous runs need an explicit callback or no-callback policy.",
+            "use either legacy --deliver-key or the new scope placement flags, not both",
+            code="conflicting_scope_placement",
+            hint="Use --scope-id or --same-scope for new Agent-facing commands.",
             help_command=help_command,
         )
-    if fork_session and (session_id or create_session or create_per_run):
+    if fork_self and fork_session:
         raise TaskCliError(
-            "use --fork-session without --session-id or session creation flags",
+            "use either --fork-self or --fork-session, not both",
+            code="conflicting_session_policy",
+            hint="Use --fork-self from inside an Avibe Agent shell, or pass an explicit --fork-session.",
+            help_command=help_command,
+        )
+    if fork_self and session_id:
+        raise TaskCliError(
+            "use --fork-self without --session-id",
+            code="conflicting_session_policy",
+            hint="--fork-self resolves the source Session from AVIBE_SESSION_ID.",
+            help_command=help_command,
+        )
+    if (fork_session or fork_self) and (session_id or create_session or create_per_run):
+        raise TaskCliError(
+            "use fork without --session-id or session creation flags",
             code="conflicting_session_policy",
             hint="Fork creates a new Session from the source Session.",
             help_command=help_command,
         )
-    if not fork_session and (
+    if not (fork_session or fork_self) and (
         (getattr(args, "model", None) or "").strip()
         or (getattr(args, "reasoning_effort", None) or "").strip()
     ):
         raise TaskCliError(
-            "--model and --reasoning-effort are only valid with --fork-session",
+            "--model and --reasoning-effort are only valid with forked Sessions",
             code="fork_override_without_fork",
             hint="Use --agent, --model, and --reasoning-effort as overrides when forking a Session.",
+            help_command=help_command,
+        )
+    if session_id and (same_scope or scope_id):
+        raise TaskCliError(
+            "scope placement flags only apply when creating a new Session",
+            code="scope_with_existing_session",
+            hint="An existing --session-id keeps its original scope.",
             help_command=help_command,
         )
     if session_id and (create_session or create_per_run):
@@ -2752,7 +3109,7 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="Use --create-session for a one-shot agent run.",
             help_command=help_command,
         )
-    if fork_session:
+    if fork_session or fork_self:
         return "fork"
     if create_session:
         return "create"
@@ -2773,6 +3130,8 @@ def _validate_definition_session_policy(
     create_session = bool(getattr(args, "create_session", False))
     create_per_run = bool(getattr(args, "create_session_per_run", False))
     deliver_key = (getattr(args, "deliver_key", None) or "").strip()
+    scope_id = (getattr(args, "scope_id", None) or "").strip()
+    same_scope = bool(getattr(args, "same_scope", False))
     specified = sum(1 for value in (bool(session_id or session_key), create_session, create_per_run) if value)
     if specified > 1:
         raise TaskCliError(
@@ -2788,11 +3147,18 @@ def _validate_definition_session_policy(
             hint="Use --create-session for a one-shot task because it only runs once.",
             help_command=help_command,
         )
-    if (create_session or create_per_run) and not deliver_key:
+    if (scope_id or same_scope) and not (create_session or create_per_run):
         raise TaskCliError(
-            "--deliver-key is required when a stored definition creates sessions",
+            "scope placement flags only apply when creating Sessions",
+            code="scope_without_session_creation",
+            hint="Use --create-session or --create-session-per-run with --scope-id/--same-scope, or omit the scope placement flag.",
+            help_command=help_command,
+        )
+    if (create_session or create_per_run) and not (deliver_key or scope_id or same_scope):
+        raise TaskCliError(
+            "--scope-id or --same-scope is required when a stored definition creates sessions",
             code="missing_delivery_target",
-            hint="Pass the Scope ID that owns the new Session.",
+            hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
             help_command=help_command,
         )
     if create_session:
@@ -2807,7 +3173,7 @@ def _validate_definition_session_policy(
         "one session policy is required",
         code="missing_session_policy",
         hint=(
-            "Use --session-id to continue a Session, or --create-session with --deliver-key to create one. "
+            "Use --session-id to continue a Session, or --create-session with --same-scope/--scope-id to create one. "
             "Inside an Avibe Agent shell, Avibe can default this to the caller Session from AVIBE_SESSION_ID."
         ),
         help_command=help_command,
@@ -2826,6 +3192,8 @@ def _definition_session_policy_for_update(
     create_per_run = bool(getattr(args, "create_session_per_run", False))
     session_id = (getattr(args, "session_id", None) or "").strip()
     session_key = (getattr(args, "session_key", None) or "").strip()
+    scope_id = (getattr(args, "scope_id", None) or "").strip()
+    same_scope = bool(getattr(args, "same_scope", False))
     if create_session and create_per_run:
         raise TaskCliError(
             "use either --create-session or --create-session-per-run, not both",
@@ -2845,6 +3213,13 @@ def _definition_session_policy_for_update(
             hint="Use --create-session for a one-shot task because it only runs once.",
             help_command=help_command,
         )
+    if (scope_id or same_scope) and not (create_session or create_per_run):
+        raise TaskCliError(
+            "scope placement flags only apply when creating Sessions",
+            code="scope_without_session_creation",
+            hint="Use --create-session or --create-session-per-run with --scope-id/--same-scope, or omit the scope placement flag.",
+            help_command=help_command,
+        )
     if create_session:
         return "create_once"
     if create_per_run:
@@ -2861,6 +3236,25 @@ def _definition_session_policy_for_update(
     return current_policy or "existing"
 
 
+def _reject_inert_create_once_cwd_update(
+    *,
+    explicit_cwd: Optional[str],
+    current_policy: Optional[str],
+    current_session_id: Optional[str],
+    create_session: bool,
+    help_command: str,
+) -> None:
+    if explicit_cwd is None or create_session:
+        return
+    if current_policy == "create_once" and current_session_id:
+        raise TaskCliError(
+            "--cwd cannot update an already-created reusable Session",
+            code="cwd_with_existing_session",
+            hint="Pass --create-session with --cwd to reserve a replacement Session, or omit --cwd because the existing Session keeps its own workdir.",
+            help_command=help_command,
+        )
+
+
 def _validate_definition_update_delivery_target(
     *,
     session_policy: str,
@@ -2868,12 +3262,48 @@ def _validate_definition_update_delivery_target(
     session_key: str,
     post_to: Optional[str],
     deliver_key: Optional[str],
+    scope_key: Optional[str],
     help_command: str,
 ):
-    validation_session_key = session_key or (deliver_key if session_policy == "create_per_run" else "")
+    return _validate_definition_delivery_target(
+        session_policy=session_policy,
+        session_id=session_id,
+        session_key=session_key,
+        post_to=post_to,
+        deliver_key=deliver_key,
+        scope_key=scope_key,
+        help_command=help_command,
+    )
+
+
+def _validate_definition_delivery_target(
+    *,
+    session_policy: str,
+    session_id: Optional[str],
+    session_key: str,
+    post_to: Optional[str],
+    deliver_key: Optional[str],
+    scope_key: Optional[str],
+    help_command: str,
+):
+    if session_policy == "create_per_run":
+        if not scope_key:
+            raise TaskCliError(
+                "--scope-id or --same-scope is required when a stored definition creates sessions",
+                code="missing_delivery_target",
+                hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
+                help_command=help_command,
+            )
+        session_target = _parse_validated_scope_id(scope_key, help_command=help_command)
+        return _validate_delivery_override_for_target(
+            session_target,
+            post_to=post_to,
+            deliver_key=deliver_key,
+            help_command=help_command,
+        )
     return _validate_delivery_args(
         session_id=session_id,
-        session_key=validation_session_key,
+        session_key=session_key,
         post_to=post_to,
         deliver_key=deliver_key,
         help_command=help_command,
@@ -2881,24 +3311,20 @@ def _validate_definition_update_delivery_target(
 
 
 def _resolve_run_cwd(args, *, session_policy: str, help_command: str) -> Optional[str]:
-    """Working directory for a session this run RESERVES; None = scope snapshot.
+    """Working directory for a session this run RESERVES.
 
-    An explicit ``--cwd`` must exist and always wins. Without it, a private
-    (no ``--deliver-key``) reservation follows the CLI invocation's cwd — the
-    caller stands in a concrete directory, which IS the natural context, like
-    every other CLI tool. A ``--deliver-key`` reservation keeps the target
-    scope's configured workdir (returning None defers to the scope snapshot in
-    ``create_agent_session_row``): the scope's binding is the deliberate choice
-    there, not wherever the CLI happens to run. ``--session-id`` reserves
-    nothing — an existing session keeps its workdir — so ``--cwd`` is an error.
+    An explicit ``--cwd`` must exist and always wins for blank session creation.
+    Without it, new blank sessions follow the CLI invocation's cwd, including
+    private/background and same-scope/scope-id placements.
+    Existing and forked sessions keep their own cwd, so ``--cwd`` is an error.
     """
     raw = (getattr(args, "cwd", None) or "").strip()
-    if session_policy == "existing":
+    if session_policy in {"existing", "fork"}:
         if raw:
             raise TaskCliError(
-                "--cwd only applies when this run creates a session",
+                "--cwd only applies when this run creates a blank session",
                 code="cwd_with_existing_session",
-                hint="An existing --session-id keeps its own working directory.",
+                hint="Existing and forked Sessions keep their own working directory.",
                 help_command=help_command,
             )
         return None
@@ -2912,9 +3338,29 @@ def _resolve_run_cwd(args, *, session_policy: str, help_command: str) -> Optiona
                 help_command=help_command,
             )
         return resolved
-    if (getattr(args, "deliver_key", None) or "").strip():
-        return None
     return os.getcwd()
+
+
+def _resolve_definition_session_cwd(
+    *,
+    explicit_cwd: Optional[str],
+    existing_cwd: Optional[str],
+    session_policy: str,
+    help_command: str,
+) -> Optional[str]:
+    raw = (explicit_cwd or "").strip()
+    if session_policy == "existing":
+        if raw:
+            raise TaskCliError(
+                "--cwd only applies when this definition creates new Sessions",
+                code="cwd_with_existing_session",
+                hint="An existing target Session keeps its own working directory.",
+                help_command=help_command,
+            )
+        return None
+    if raw:
+        return _resolve_existing_cwd(raw, help_command=help_command, code="cwd_not_found", label="task")
+    return existing_cwd or os.getcwd()
 
 
 def _session_creation_metadata_from_caller(caller_context) -> dict:
@@ -2939,41 +3385,57 @@ def _agent_run_source_from_caller(caller_context) -> tuple[str, Optional[str], O
     return "agent", caller_context.session_id, caller_context.run_id, metadata
 
 
-def _resolve_async_callback_session_id(args, caller_context, *, target_session_id: Optional[str] = None):
+def _resolve_callback_session_id(args, caller_context, *, target_session_id: Optional[str] = None):
     explicit_callback = (getattr(args, "callback_session_id", None) or "").strip() or None
     no_callback = bool(getattr(args, "no_callback", False))
-    if not bool(getattr(args, "async_run", False)):
-        return explicit_callback, None
+    is_async = bool(getattr(args, "async_run", False))
     if explicit_callback:
-        return explicit_callback, None
+        return explicit_callback, {
+            "code": "callback_explicit",
+            "message": (
+                "Callback route recorded for this Agent Run."
+                if not is_async
+                else "Async callback will be sent to the explicit Session."
+            ),
+            "callback_session_id": explicit_callback,
+        }
     if no_callback:
+        message = (
+            "Started async Agent Run without a callback. This run will not post its final result back into a "
+            "Session automatically. Track it with `vibe runs show <run-id>` or by polling/listing runs for the "
+            "target Session. To receive a follow-up message next time, use `--callback-session-id <session-id>` "
+            "or run from a resolved caller context so Avibe can default the callback to the current Session."
+        )
+        if not is_async:
+            message = (
+                "Recorded an explicit no-callback policy. This synchronous run will not send a callback if it later "
+                "detaches into an asynchronous background run."
+            )
         return None, {
             "code": "async_run_without_callback",
-            "message": (
-                "Started async Agent Run without a callback. This run will not post its final result back into a "
-                "Session automatically. Track it with `vibe runs show <run-id>` or by polling/listing runs for the "
-                "target Session. To receive a follow-up message next time, use `--callback-session-id <session-id>` "
-                "or run from a resolved caller context so Avibe can default the callback to the current Session."
-            ),
+            "message": message,
         }
     if caller_context is not None:
         caller_session_id = caller_context.session_id
         if target_session_id and target_session_id == caller_session_id:
-            raise TaskCliError(
-                "This async Agent Run targets the caller Session itself, so Avibe cannot safely default a callback.",
-                code="self_callback_requires_explicit_policy",
-                hint=(
-                    "Pass --no-callback when continuing the same Session asynchronously, or pass "
-                    "--callback-session-id <session-id> to send the final result to a different caller Session. "
-                    "Default callbacks are only inferred when the delegated run targets a different Session."
+            return None, {
+                "code": "async_self_run_without_callback",
+                "message": (
+                    "Started Agent Run on the caller Session without a callback. "
+                    "The target Session will receive the run result directly, so Avibe did not create a duplicate callback turn."
                 ),
-                help_command="vibe agent run --help",
-            )
+            }
         return caller_context.session_id, {
             "code": "callback_defaulted_to_caller_session",
-            "message": "Async callback defaulted to the caller Session from AVIBE_SESSION_ID.",
+            "message": (
+                "Async callback defaulted to the caller Session from AVIBE_SESSION_ID."
+                if is_async
+                else "Callback route defaulted to the caller Session from AVIBE_SESSION_ID."
+            ),
             "callback_session_id": caller_session_id,
         }
+    if not is_async:
+        return None, None
     raise TaskCliError(
         "This async Agent Run has no callback target.",
         code="missing_async_callback",
@@ -2991,18 +3453,20 @@ def _resolve_async_callback_session_id(args, caller_context, *, target_session_i
 def _reserve_cli_session(
     *,
     agent,
-    deliver_key: Optional[str],
+    scope_key: Optional[str],
     workdir: Optional[str] = None,
     metadata: Optional[dict] = None,
+    session_anchor_target=None,
 ) -> str:
     # Route through ``core.services.sessions`` so the CLI shares the same
     # business API as the UI server and the future N3 internal endpoint;
     # see docs/plans/workbench-dispatch-architecture.md §6 (C2).
     from core.services import sessions as sessions_service
 
-    if deliver_key:
-        target = _parse_validated_session_key(deliver_key, help_command="vibe agent run --help")
-        session_anchor = session_anchor_for_target(target)
+    if scope_key:
+        target = _parse_validated_scope_id(scope_key, help_command="vibe agent run --help")
+        anchor_target = session_anchor_target or target
+        session_anchor = _session_anchor_with_suffix(anchor_target, suffix="run")
         session_id = sessions_service.reserve_agent_session(
             scope_key=target.session_scope,
             agent_backend=agent.backend,
@@ -3012,7 +3476,7 @@ def _reserve_cli_session(
             model=agent.model,
             reasoning_effort=agent.reasoning_effort,
             workdir=workdir,
-            metadata=metadata,
+            metadata={"scope_placement": "explicit", **dict(metadata or {})},
         )
     else:
         platform = _primary_platform()
@@ -3037,12 +3501,25 @@ def _reserve_cli_session(
     return session_id
 
 
+def _session_anchor_with_suffix(target, *, suffix: str) -> str:
+    return f"{session_anchor_for_target(target)}:{suffix}_{uuid4().hex[:12]}"
+
+
+def _sync_run_detached(run_payload: dict) -> bool:
+    return (
+        run_payload.get("wait_state") == "detached"
+        or run_payload.get("handoff_reason") == "wait_limit_reached"
+        or normalize_run_status(run_payload.get("status")) not in {"succeeded", "failed", "canceled"}
+    )
+
+
 def _reserve_forked_cli_session(
     *,
     source_session_id: str,
     agent_name: Optional[str],
     model: Optional[str],
     reasoning_effort: Optional[str],
+    scope_key: Optional[str],
 ):
     from core.services.session_fork import SessionForkError, reserve_forked_session
 
@@ -3052,6 +3529,7 @@ def _reserve_forked_cli_session(
             agent_name=agent_name or None,
             model=model,
             reasoning_effort=reasoning_effort,
+            scope_id=scope_key,
             db_path=paths.get_sqlite_state_path(),
         )
     except SessionForkError as exc:
@@ -3064,10 +3542,19 @@ def _reserve_forked_cli_session(
         ) from exc
 
 
-def _reserve_definition_session(*, agent_name: Optional[str], deliver_key: str, help_command: str) -> str:
+def _reserve_definition_session(
+    *,
+    agent_name: Optional[str],
+    deliver_key: str,
+    help_command: str,
+    workdir: Optional[str] = None,
+) -> str:
     from core.services import sessions as sessions_service
 
-    target = _parse_validated_session_key(deliver_key, help_command=help_command)
+    try:
+        target = _parse_validated_scope_id(deliver_key, help_command=help_command)
+    except TaskCliError:
+        target = _parse_validated_session_key(deliver_key, help_command=help_command)
     agent = _resolve_agent_for_session_reservation(
         agent_name=agent_name,
         deliver_key=deliver_key,
@@ -3081,7 +3568,7 @@ def _reserve_definition_session(*, agent_name: Optional[str], deliver_key: str, 
             help_command=help_command,
         )
     agent_backend = agent.backend
-    session_anchor = session_anchor_for_target(target)
+    session_anchor = _session_anchor_with_suffix(target, suffix="definition")
     session_id = sessions_service.reserve_agent_session(
         scope_key=target.session_scope,
         agent_backend=agent_backend,
@@ -3090,6 +3577,7 @@ def _reserve_definition_session(*, agent_name: Optional[str], deliver_key: str, 
         agent_name=agent.name if agent else None,
         model=agent.model if agent else None,
         reasoning_effort=agent.reasoning_effort if agent else None,
+        workdir=workdir,
     )
     if not session_id:
         raise TaskCliError(
@@ -3117,23 +3605,39 @@ def cmd_agent_run(args):
                 hint="Pass --agent with the Avibe Agent name to run.",
                 help_command="vibe agent run --help",
             )
-        if session_policy in {"none", "fork"} and (args.deliver_key or args.post_to):
+        source_session_id = (args.fork_session or "").strip() or None
+        if bool(getattr(args, "fork_self", False)):
+            source_session_id = _require_caller_session_id(
+                caller_context,
+                purpose="--fork-self",
+                help_command="vibe agent run --help",
+            )
+            setattr(args, "fork_session", source_session_id)
+        if session_policy == "none" and (args.deliver_key or args.post_to):
             raise TaskCliError(
-                "delivery options require --session-id or --create-session",
+                "delivery options require an explicit Session target",
                 code="delivery_target_without_session_policy",
-                hint="Use --create-session --deliver-key <scope-id> when a new delivered Session should be created.",
+                hint="Use --same-scope or --scope-id for new Session placement. Use --post-to only with an existing target.",
+                help_command="vibe agent run --help",
+            )
+        if session_policy == "fork" and args.post_to:
+            raise TaskCliError(
+                "delivery options require an existing Session target",
+                code="delivery_target_without_session_policy",
+                hint="Fork creates a new Session. Use scope placement flags for where it lives; callback controls where results return.",
                 help_command="vibe agent run --help",
             )
         session_id = (args.session_id or "").strip() or None
         session_key = ""
-        if session_policy == "fork" and (args.cwd or "").strip():
-            raise TaskCliError(
-                "--cwd only applies when this run creates a blank session",
-                code="cwd_with_fork_session",
-                hint="A fork copies the source Session working directory.",
-                help_command="vibe agent run --help",
-            )
         run_cwd = _resolve_run_cwd(args, session_policy=session_policy, help_command="vibe agent run --help")
+        scope_key = _resolve_agent_run_scope_key(args, caller_context=caller_context, source_session_id=source_session_id)
+        legacy_reservation_target = None
+        if not scope_key and (args.deliver_key or "").strip():
+            # Hidden legacy compatibility: external docs and prompts should use
+            # --scope-id/--same-scope, while old callers still map into the same
+            # internal placement field.
+            legacy_reservation_target = _parse_validated_session_key(args.deliver_key, help_command="vibe agent run --help")
+            scope_key = legacy_reservation_target.session_scope
         agent = _agent_store().require_enabled(agent_name) if agent_name else None
         fork_result = None
         session_metadata = _session_creation_metadata_from_caller(caller_context)
@@ -3154,30 +3658,34 @@ def cmd_agent_run(args):
                 deliver_key=args.deliver_key,
                 help_command="vibe agent run --help",
             )
-        elif session_policy == "create" and args.deliver_key:
-            _parse_validated_session_key(args.deliver_key, help_command="vibe agent run --help")
-        callback_session_id, callback_notice = _resolve_async_callback_session_id(
-            args,
-            caller_context,
-            target_session_id=session_id,
-        )
+        callback_session_id, callback_notice = _resolve_callback_session_id(args, caller_context, target_session_id=session_id)
         if callback_session_id:
-            resolve_session_id_target(callback_session_id)
+            _validate_callback_session_id(callback_session_id, help_command="vibe agent run --help")
+        legacy_deliver_key = args.deliver_key
+        if (getattr(args, "same_scope", False) or (getattr(args, "scope_id", None) or "").strip()) and legacy_deliver_key != scope_key:
+            legacy_deliver_key = None
         if session_policy == "create":
             session_id = _reserve_cli_session(
                 agent=agent,
-                deliver_key=args.deliver_key,
+                scope_key=scope_key,
+                workdir=run_cwd,
+                metadata=session_metadata,
+                session_anchor_target=legacy_reservation_target,
+            )
+        elif session_policy == "none":
+            session_id = _reserve_cli_session(
+                agent=agent,
+                scope_key=scope_key,
                 workdir=run_cwd,
                 metadata=session_metadata,
             )
-        elif session_policy == "none":
-            session_id = _reserve_cli_session(agent=agent, deliver_key=None, workdir=run_cwd, metadata=session_metadata)
         elif session_policy == "fork":
             fork_result = _reserve_forked_cli_session(
-                source_session_id=(args.fork_session or "").strip(),
+                source_session_id=source_session_id or "",
                 agent_name=agent_name or None,
                 model=args.model,
                 reasoning_effort=args.reasoning_effort,
+                scope_key=scope_key,
             )
             session_id = fork_result.session_id
             if agent_name:
@@ -3191,14 +3699,12 @@ def cmd_agent_run(args):
                 session_key=session_key,
                 help_command="vibe agent run --help",
             )
-        if (session_policy in {"create", "none"} or fork_result) and (
-            session_policy != "none" or args.post_to or args.deliver_key
-        ):
+        if (session_policy in {"create", "none"} or fork_result) and args.post_to:
             _validate_delivery_args(
                 session_id=session_id,
                 session_key=session_key,
                 post_to=args.post_to,
-                deliver_key=args.deliver_key,
+                deliver_key=None,
                 help_command="vibe agent run --help",
             )
         source_kind, source_actor, parent_run_id, provenance_metadata = _agent_run_source_from_caller(caller_context)
@@ -3220,14 +3726,16 @@ def cmd_agent_run(args):
             session_key=session_key,
             session_id=session_id,
             post_to=args.post_to,
-            deliver_key=args.deliver_key,
+            deliver_key=legacy_deliver_key,
             message=message,
             source_kind=source_kind,
             source_actor=source_actor,
             parent_run_id=parent_run_id,
             callback_session_id=callback_session_id,
+            callback_active=bool(args.async_run),
             metadata=provenance_metadata or None,
         )
+        resolved_scope_id = _scope_id_payload_from_session(session_id)
         payload = {
             "accepted": True,
             "request_type": request.request_type,
@@ -3236,7 +3744,8 @@ def cmd_agent_run(args):
             "agent": agent.name if agent else None,
             "session_policy": session_policy,
             "session_id": session_id,
-            "deliver_key": args.deliver_key,
+            "scope_id": resolved_scope_id,
+            "deliver_key": legacy_deliver_key,
             "callback_session_id": callback_session_id,
             "async": bool(args.async_run),
             "caller_context": caller_context.to_metadata() if caller_context else None,
@@ -3247,6 +3756,7 @@ def cmd_agent_run(args):
                 "run_type": request.request_type,
                 "agent_name": agent.name if agent else None,
                 "session_id": session_id,
+                "scope_id": resolved_scope_id,
                 "callback_session_id": callback_session_id,
                 "source_kind": source_kind,
                 "source_actor": source_actor,
@@ -3258,7 +3768,11 @@ def cmd_agent_run(args):
         if fork_result:
             payload["run"]["forked_from_session_id"] = fork_result.fork.source_session_id
         if not args.async_run:
-            payload["run"] = _wait_for_run_result(request_store, request.id, wait_timeout=args.wait_timeout)
+            run_payload = _wait_for_run_result(request_store, request.id, wait_timeout=args.wait_timeout)
+            if callback_session_id and _sync_run_detached(run_payload):
+                request_store.mark_callback_pending(request.id)
+                run_payload["callback_status"] = "pending"
+            payload["run"] = run_payload
         _print_cli_payload("agent_run", **payload)
         return 0
     except Exception as exc:
@@ -3303,7 +3817,7 @@ def cmd_runs_list(args):
             run_type=getattr(args, "type", None),
             agent_name=getattr(args, "agent", None),
             agent_backend=getattr(args, "backend", None),
-            session_id=getattr(args, "session_id", None),
+            session_id=_resolve_runs_list_session_filter(args),
             definition_id=getattr(args, "definition_id", None),
             created_after=created_after,
             created_before=created_before,
@@ -3317,6 +3831,8 @@ def cmd_runs_list(args):
         _add_optional_arg(command, "--agent", getattr(args, "agent", None))
         _add_optional_arg(command, "--backend", getattr(args, "backend", None))
         _add_optional_arg(command, "--session-id", getattr(args, "session_id", None))
+        if getattr(args, "current_session", False):
+            command.append("--current-session")
         _add_optional_arg(command, "--definition-id", getattr(args, "definition_id", None))
         _add_optional_arg(command, "--created-after", created_after)
         _add_optional_arg(command, "--created-before", created_before)
@@ -5194,6 +5710,7 @@ def cmd_watch_add(args):
             help_command="vibe watch add --help",
             allow_caller_session_default=caller_context is not None,
         )
+        scope_key = _resolve_definition_scope_key(args, caller_context=caller_context, help_command="vibe watch add --help")
         command, shell_command = _resolve_watch_command(args, help_command="vibe watch add --help")
         session_id, session_key = _resolve_session_target_args(
             args,
@@ -5203,22 +5720,25 @@ def cmd_watch_add(args):
         agent = _resolve_agent_for_target(
             agent_name=getattr(args, "agent", None),
             session_id=session_id,
-            session_key=session_key or getattr(args, "deliver_key", None) or "",
+            session_key=session_key or scope_key or "",
             help_command="vibe watch add --help",
         )
         agent_name = agent.name if agent else None
+        cwd = _resolve_watch_cwd(args.cwd, help_command="vibe watch add --help", default_to_invocation=True)
         if session_policy == "create_once":
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
-                deliver_key=args.deliver_key,
+                deliver_key=scope_key or "",
+                workdir=cwd,
                 help_command="vibe watch add --help",
             )
-        validation_session_key = session_key or (args.deliver_key if session_policy == "create_per_run" else "")
-        session_target, delivery_target = _validate_delivery_args(
+        session_target, delivery_target = _validate_definition_delivery_target(
+            session_policy=session_policy,
             session_id=session_id,
-            session_key=validation_session_key,
+            session_key=session_key,
             post_to=getattr(args, "post_to", None),
             deliver_key=getattr(args, "deliver_key", None),
+            scope_key=scope_key,
             help_command="vibe watch add --help",
         )
 
@@ -5230,7 +5750,6 @@ def cmd_watch_add(args):
             mode=mode,
             help_command="vibe watch add --help",
         )
-        cwd = _resolve_watch_cwd(args.cwd, help_command="vibe watch add --help")
         prefix = _normalize_task_name(getattr(args, "prefix", None))
         message = _resolve_optional_message_input(
             args,
@@ -5259,7 +5778,7 @@ def cmd_watch_add(args):
             deliver_key=args.deliver_key,
             agent_name=agent_name,
             session_policy=session_policy,
-            metadata=_definition_creation_metadata_from_caller(caller_context),
+            metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=cwd),
         )
         runtime_store = _watch_runtime_store()
         watch, runtime_entry = _wait_for_watch_startup(store, runtime_store, watch.id)
@@ -5348,14 +5867,33 @@ def cmd_watch_update(args):
             )
 
         if getattr(args, "reset_delivery", False) and (
-            getattr(args, "post_to", None) is not None or getattr(args, "deliver_key", None) is not None
+            getattr(args, "post_to", None) is not None
+            or getattr(args, "deliver_key", None) is not None
+            or getattr(args, "scope_id", None) is not None
+            or bool(getattr(args, "same_scope", False))
         ):
             raise TaskCliError(
                 "use either --reset-delivery or a new delivery flag, not both",
                 code="conflicting_delivery_target",
-                hint="Pass --reset-delivery to clear delivery overrides, or pass --post-to/--deliver-key to replace them.",
+                hint="Pass --reset-delivery to clear delivery overrides, or pass --post-to/--scope-id/--same-scope to replace them.",
                 help_command="vibe watch update --help",
             )
+        caller_context = caller_context_from_env()
+        scope_arg_present = (getattr(args, "scope_id", None) is not None) or bool(getattr(args, "same_scope", False))
+        if scope_arg_present and not (
+            bool(getattr(args, "create_session", False)) or bool(getattr(args, "create_session_per_run", False))
+        ):
+            raise TaskCliError(
+                "scope placement flags only apply when creating Sessions",
+                code="scope_without_session_creation",
+                hint="Use --create-session or --create-session-per-run with --scope-id/--same-scope, or omit the scope placement flag.",
+                help_command="vibe watch update --help",
+            )
+        requested_scope_key = _resolve_definition_scope_key(
+            args,
+            caller_context=caller_context,
+            help_command="vibe watch update --help",
+        )
         if getattr(args, "name", None) is not None and getattr(args, "clear_name", False):
             raise TaskCliError(
                 "use either --name or --clear-name, not both",
@@ -5399,6 +5937,11 @@ def cmd_watch_update(args):
             else:
                 post_to = watch.post_to
                 deliver_key = watch.deliver_key
+        metadata = dict(watch.metadata or {})
+        if requested_scope_key:
+            metadata["session_scope_id"] = requested_scope_key
+        elif scope_arg_present:
+            metadata.pop("session_scope_id", None)
 
         command = list(watch.command)
         shell_command = watch.shell_command
@@ -5475,18 +6018,19 @@ def cmd_watch_update(args):
             next_schedule_type="watch",
             help_command="vibe watch update --help",
         )
-        if session_policy in {"create_once", "create_per_run"} and not deliver_key:
+        scope_key = requested_scope_key or str(metadata.get("session_scope_id") or "").strip() or _legacy_scope_key_from_target(deliver_key)
+        if session_policy in {"create_once", "create_per_run"} and not scope_key:
             raise TaskCliError(
-                "--deliver-key is required when a stored definition creates sessions",
+                "--scope-id or --same-scope is required when a stored definition creates sessions",
                 code="missing_delivery_target",
-                hint="Pass the Scope ID that owns the new Session.",
+                hint="Pass --scope-id <scopes.id>, or run from an Avibe Agent Session and pass --same-scope.",
                 help_command="vibe watch update --help",
             )
         if agent_name is None and session_policy != "existing":
             agent = _resolve_agent_for_target(
                 agent_name=None,
                 session_id=None,
-                session_key=deliver_key or "",
+                session_key=scope_key,
                 help_command="vibe watch update --help",
             )
             agent_name = agent.name if agent else None
@@ -5503,16 +6047,22 @@ def cmd_watch_update(args):
         ):
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
-                deliver_key=deliver_key or "",
+                deliver_key=scope_key,
+                workdir=cwd,
                 help_command="vibe watch update --help",
             )
             session_key = ""
+        if cwd:
+            metadata["session_workdir"] = cwd
+        else:
+            metadata.pop("session_workdir", None)
         session_target, delivery_target = _validate_definition_update_delivery_target(
             session_policy=session_policy,
             session_id=session_id,
             session_key=session_key,
             post_to=post_to,
             deliver_key=deliver_key,
+            scope_key=scope_key,
             help_command="vibe watch update --help",
         )
 
@@ -5534,6 +6084,7 @@ def cmd_watch_update(args):
             "retry_delay_seconds": retry_delay_seconds,
             "post_to": post_to,
             "deliver_key": deliver_key,
+            "metadata": metadata,
         }
         current = {
             "name": watch.name,
@@ -5553,12 +6104,13 @@ def cmd_watch_update(args):
             "retry_delay_seconds": watch.retry_delay_seconds,
             "post_to": watch.post_to,
             "deliver_key": watch.deliver_key,
+            "metadata": watch.metadata,
         }
         if changes == current:
             raise TaskCliError(
                 "no watch fields were changed",
                 code="no_watch_changes",
-                hint="Pass at least one field to update, such as --name, --shell, --timeout, --session-id, or --deliver-key.",
+                hint="Pass at least one field to update, such as --name, --shell, --timeout, --session-id, or --scope-id.",
                 help_command="vibe watch update --help",
                 details={"watch_id": args.watch_id},
             )
@@ -7900,18 +8452,19 @@ def build_parser():
     agent_run_parser.add_argument("--agent", help="Avibe Agent name")
     agent_run_parser.add_argument("--session-id", help="Existing Agent Session ID to continue")
     agent_run_parser.add_argument("--fork-session", help="Existing Agent Session ID to fork into a new Session")
+    agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork the current caller Session from AVIBE_SESSION_ID")
     agent_run_parser.add_argument("--create-session", action="store_true", help="Create a new Avibe Session ID before running")
     agent_run_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID for each definition run")
-    agent_run_parser.add_argument("--deliver-key", help="Scope ID used as delivery target when creating or sending to a target")
+    agent_run_parser.add_argument("--same-scope", action="store_true", help="Place a new or forked Session in the caller/source Session scope")
+    agent_run_parser.add_argument("--scope-id", help="Existing scopes.id that should own the new or forked Session")
+    agent_run_parser.add_argument("--deliver-key", help=argparse.SUPPRESS)
     agent_run_parser.add_argument("--model", help="Model override for the new forked Session")
     agent_run_parser.add_argument("--reasoning-effort", help="Reasoning effort override for the new forked Session")
     agent_run_parser.add_argument(
         "--cwd",
         help=(
             "Working directory for the NEW session. Defaults to the directory the command is "
-            "invoked from; sessions created with --deliver-key default to the target scope's "
-            "configured workdir instead. Invalid with --session-id (an existing session keeps "
-            "its own working directory)."
+            "invoked from. Invalid with --session-id (an existing session keeps its own working directory)."
         ),
     )
     agent_run_parser.add_argument("--post-to", choices=("thread", "channel"))
@@ -7945,6 +8498,7 @@ def build_parser():
     runs_list_parser.add_argument("--agent", help="Filter by Avibe Agent name")
     runs_list_parser.add_argument("--backend", choices=("codex", "claude", "opencode"), help="Filter by backend")
     runs_list_parser.add_argument("--session-id", help="Filter by Agent Session ID")
+    runs_list_parser.add_argument("--current-session", action="store_true", help="Filter to the caller Session from AVIBE_SESSION_ID")
     runs_list_parser.add_argument("--definition-id", help="Filter by task or watch definition ID")
     runs_list_parser.add_argument("--created-after", help="Filter by created_at >= timestamp, or relative value such as 6h or 7d")
     runs_list_parser.add_argument("--created-before", help="Filter by created_at <= timestamp, or relative value such as 6h or 7d")
@@ -8433,7 +8987,7 @@ def build_parser():
         epilog=_task_add_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe task add --help",
-        error_hint="Use --session-id together with exactly one schedule flag and one message input flag. Add --post-to or --deliver-key only when delivery must differ from the session target.",
+        error_hint="Use --session-id together with exactly one schedule flag and one message input flag. Use --same-scope or --scope-id when the task creates a new Session.",
     )
     task_add_parser.add_argument(
         "--name",
@@ -8449,7 +9003,10 @@ def build_parser():
     )
     task_add_parser.add_argument("--create-session", action="store_true", help="Create one reusable Avibe Session ID for this task")
     task_add_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID each time this task runs")
+    task_add_parser.add_argument("--same-scope", action="store_true", help="Place a created Session in the caller Session scope")
+    task_add_parser.add_argument("--scope-id", help="Existing scopes.id that should own created Sessions")
     task_add_parser.add_argument("--agent", help="Avibe Agent name to use when the task runs")
+    task_add_parser.add_argument("--cwd", help="Working directory for Sessions created by this task. Defaults to the caller's current directory.")
     delivery_group = task_add_parser.add_mutually_exclusive_group()
     delivery_group.add_argument(
         "--post-to",
@@ -8458,7 +9015,7 @@ def build_parser():
     )
     delivery_group.add_argument(
         "--deliver-key",
-        help="Explicit delivery target key. Use this only when delivery must go to a different target than the continued session.",
+        help=argparse.SUPPRESS,
     )
     schedule_group = task_add_parser.add_mutually_exclusive_group(required=True)
     schedule_group.add_argument("--cron", help="Recurring schedule in 5-field crontab format")
@@ -8491,8 +9048,11 @@ def build_parser():
     task_update_parser.add_argument("--session-key", help="Legacy compatibility target; prefer --session-id")
     task_update_parser.add_argument("--create-session", action="store_true", help="Replace the task with one reusable newly-created Avibe Session ID")
     task_update_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID each time this task runs")
+    task_update_parser.add_argument("--same-scope", action="store_true", help="Place created Sessions in the caller Session scope")
+    task_update_parser.add_argument("--scope-id", help="Existing scopes.id that should own created Sessions")
     task_update_parser.add_argument("--agent", help="Replace the Avibe Agent used by this task")
     task_update_parser.add_argument("--clear-agent", action="store_true", help="Clear the stored Avibe Agent override")
+    task_update_parser.add_argument("--cwd", help="Set working directory for Sessions created by this task")
     update_delivery_group = task_update_parser.add_mutually_exclusive_group()
     update_delivery_group.add_argument(
         "--post-to",
@@ -8501,7 +9061,7 @@ def build_parser():
     )
     update_delivery_group.add_argument(
         "--deliver-key",
-        help="Replace the explicit delivery target key",
+        help=argparse.SUPPRESS,
     )
     task_update_parser.add_argument(
         "--reset-delivery",
@@ -8612,7 +9172,7 @@ def build_parser():
         epilog=_hook_send_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe hook send --help",
-        error_hint="Use --session-id together with exactly one message input flag. Add --post-to or --deliver-key only when delivery must differ from the session target.",
+        error_hint="Use 'vibe agent run --async' for new async Agent Runs.",
     )
     hook_send_parser.add_argument(
         "--session-id",
@@ -8631,7 +9191,7 @@ def build_parser():
     )
     hook_delivery_group.add_argument(
         "--deliver-key",
-        help="Explicit delivery target key. Use this only when delivery must go to a different target than the continued session.",
+        help=argparse.SUPPRESS,
     )
     hook_prompt_group = hook_send_parser.add_mutually_exclusive_group(required=True)
     hook_prompt_group.add_argument("--message", help="One-shot async user message to queue immediately")
@@ -8675,6 +9235,8 @@ def build_parser():
     )
     watch_add_parser.add_argument("--create-session", action="store_true", help="Create one reusable Avibe Session ID for this watch")
     watch_add_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID each time this watch triggers")
+    watch_add_parser.add_argument("--same-scope", action="store_true", help="Place a created Session in the caller Session scope")
+    watch_add_parser.add_argument("--scope-id", help="Existing scopes.id that should own created Sessions")
     watch_add_parser.add_argument("--agent", help="Avibe Agent name to use for follow-up messages")
     watch_delivery_group = watch_add_parser.add_mutually_exclusive_group()
     watch_delivery_group.add_argument(
@@ -8684,7 +9246,7 @@ def build_parser():
     )
     watch_delivery_group.add_argument(
         "--deliver-key",
-        help="Explicit delivery target key. Use this only when delivery must go to a different target than the continued session.",
+        help=argparse.SUPPRESS,
     )
     watch_add_parser.add_argument(
         "--prefix",
@@ -8745,7 +9307,7 @@ def build_parser():
         epilog="Find watch IDs with: vibe watch list",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe watch update --help",
-        error_hint="Pass at least one field to update, such as --name, --shell, --timeout, --session-id, or --deliver-key.",
+        error_hint="Pass at least one field to update, such as --name, --shell, --timeout, --session-id, or --scope-id.",
     )
     watch_update_parser.add_argument("watch_id", help="Watch ID from 'vibe watch list'")
     watch_update_parser.add_argument("--name", help="Set a human-friendly watch name")
@@ -8760,6 +9322,8 @@ def build_parser():
     )
     watch_update_parser.add_argument("--create-session", action="store_true", help="Replace the watch with one reusable newly-created Avibe Session ID")
     watch_update_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID each time this watch triggers")
+    watch_update_parser.add_argument("--same-scope", action="store_true", help="Place created Sessions in the caller Session scope")
+    watch_update_parser.add_argument("--scope-id", help="Existing scopes.id that should own created Sessions")
     watch_update_parser.add_argument("--agent", help="Replace the Avibe Agent used for follow-up messages")
     watch_update_parser.add_argument("--clear-agent", action="store_true", help="Clear the stored Avibe Agent override")
     watch_update_delivery_group = watch_update_parser.add_mutually_exclusive_group()
@@ -8770,7 +9334,7 @@ def build_parser():
     )
     watch_update_delivery_group.add_argument(
         "--deliver-key",
-        help="Explicit delivery target key. Use this only when delivery must go to a different target than the continued session.",
+        help=argparse.SUPPRESS,
     )
     watch_update_delivery_group.add_argument(
         "--reset-delivery",

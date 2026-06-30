@@ -275,6 +275,7 @@ class ManagedWatchStore:
         agent_name: Optional[str] = None,
         session_policy: Optional[str] = None,
         message: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> ManagedWatch:
         watch = self._watches[watch_id]
         watch.name = name
@@ -296,6 +297,8 @@ class ManagedWatchStore:
         watch.retry_delay_seconds = retry_delay_seconds
         watch.post_to = post_to
         watch.deliver_key = deliver_key
+        if metadata is not None:
+            watch.metadata = dict(metadata)
         watch.updated_at = _utc_now_iso()
         if self._sqlite is not None:
             self._sqlite.upsert_watch(watch.to_dict())
@@ -728,6 +731,7 @@ class ManagedWatchService:
             run_type="watch",
             definition_id=watch.id,
             source_kind="watch",
+            metadata=watch.metadata,
         )
 
     def _enqueue_failure_hook(self, watch: ManagedWatch, *, exit_code: int, error_text: str) -> None:

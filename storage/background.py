@@ -958,6 +958,17 @@ class SQLiteBackgroundTaskStore:
         with self.engine.begin() as conn:
             conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(**values))
 
+    def mark_callback_pending(self, run_id: str, *, updated_at: Optional[str] = None) -> None:
+        now = updated_at or _utc_now_iso()
+        values: dict[str, Any] = {
+            "callback_status": "pending",
+            "callback_error": None,
+            "callback_completed_at": None,
+            "updated_at": now,
+        }
+        with self.engine.begin() as conn:
+            conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(**values))
+
     def mark_run_queued_from_running(
         self,
         run_id: str,
@@ -1127,7 +1138,7 @@ class SQLiteBackgroundTaskStore:
             "command_json": None,
             "shell_command": None,
             "prefix": None,
-            "cwd": None,
+            "cwd": payload.get("cwd"),
             "mode": None,
             "timeout_seconds": None,
             "lifetime_timeout_seconds": None,
@@ -1217,7 +1228,7 @@ class SQLiteBackgroundTaskStore:
             "result_payload_json": self._payload_json(payload, "result_payload", "result_payload_json"),
             "message_ids_json": self._payload_json(payload, "message_ids", "message_ids_json"),
             "callback_session_id": payload.get("callback_session_id"),
-            "callback_status": payload.get("callback_status") or ("pending" if payload.get("callback_session_id") else None),
+            "callback_status": payload.get("callback_status"),
             "callback_error": payload.get("callback_error"),
             "callback_run_id": payload.get("callback_run_id"),
             "callback_completed_at": payload.get("callback_completed_at"),
@@ -1250,6 +1261,7 @@ class SQLiteBackgroundTaskStore:
             "schedule_type": row["schedule_type"] or "",
             "post_to": row["post_to"],
             "deliver_key": row["deliver_key"],
+            "cwd": row["cwd"],
             "cron": row["cron"],
             "run_at": row["run_at"],
             "timezone": row["timezone"] or "UTC",
