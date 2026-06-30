@@ -132,13 +132,33 @@ const PdfView: React.FC<{ url: string; className?: string }> = ({ url, className
 // a static, no-network preview (mirrors the no-auto-fetch policy of chat Markdown previews).
 const HTML_PREVIEW_CSP =
   "default-src 'none'; img-src data:; media-src data:; font-src data:; style-src 'unsafe-inline' data:; base-uri 'none'; form-action 'none'";
+
+// Build the srcDoc for an HTML preview. Parse the markup with DOMParser — which is INERT (runs no
+// scripts, fetches no resources) — then drop every meta-refresh and inject our CSP as the first <head>
+// child. Parsing (vs. a regex) is what makes the no-auto-navigation guarantee hold: the parser decodes
+// entities, so an obfuscated `http-equiv="ref&#114;esh"` normalizes to `refresh` and is removed, where
+// a regex would miss it. The CSP (parsed before any subresource) pins network to nothing.
+function buildHtmlPreviewDoc(html: string): string {
+  let doc: Document;
+  try {
+    doc = new DOMParser().parseFromString(html, 'text/html');
+  } catch {
+    return `<!DOCTYPE html><meta http-equiv="Content-Security-Policy" content="${HTML_PREVIEW_CSP}">`;
+  }
+  doc.querySelectorAll('meta[http-equiv]').forEach((m) => {
+    if ((m.getAttribute('http-equiv') || '').trim().toLowerCase() === 'refresh') m.remove();
+  });
+  const head = doc.head || doc.documentElement;
+  const csp = doc.createElement('meta');
+  csp.setAttribute('http-equiv', 'Content-Security-Policy');
+  csp.setAttribute('content', HTML_PREVIEW_CSP);
+  head.insertBefore(csp, head.firstChild);
+  return `<!DOCTYPE html>${doc.documentElement.outerHTML}`;
+}
+
 const HtmlView: React.FC<{ html: string; className?: string }> = ({ html, className }) => {
   const { t } = useTranslation();
-  // The CSP blocks subresources and sandbox blocks scripts, but neither stops a `<meta
-  // http-equiv="refresh">` from navigating the sandboxed frame to a remote URL the instant the
-  // preview opens (a network/IP leak). Strip those tags so opening a preview never auto-navigates.
-  const noRefresh = html.replace(/<meta\b[^>]*?http-equiv\s*=\s*["']?\s*refresh\b[^>]*>/gi, '');
-  const safeHtml = `<meta http-equiv="Content-Security-Policy" content="${HTML_PREVIEW_CSP}">\n${noRefresh}`;
+  const safeHtml = React.useMemo(() => buildHtmlPreviewDoc(html), [html]);
   return (
     <iframe
       title={t('preview.title')}
@@ -245,18 +265,26 @@ const XlsxView: React.FC<{ url: string; className?: string }> = ({ url, classNam
         const out: XlsxSheet[] = [];
         wb.SheetNames.forEach((name, i) => {
           if (wb.Workbook?.Sheets?.[i]?.Hidden) return; // 1 = hidden, 2 = very hidden → skip
-          const grid = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: false, defval: '', blankrows: true }) as unknown as string[][];
-          let rows = grid;
+          const ws = wb.Sheets[name];
+          // Clamp the declared range BEFORE converting: sheet_to_json materializes the whole `!ref`
+          // grid, and with blankrows/defval a small workbook with a huge sparse `!ref` would allocate
+          // hundreds of thousands of empty rows and freeze the tab. Trim `!ref` so the cap applies
+          // before allocation.
           let truncated = false;
-          if (rows.length > MAX_ROWS) {
-            rows = rows.slice(0, MAX_ROWS);
-            truncated = true;
+          if (ws['!ref']) {
+            const r = XLSX.utils.decode_range(ws['!ref']);
+            if (r.e.r - r.s.r > MAX_ROWS) {
+              r.e.r = r.s.r + MAX_ROWS;
+              truncated = true;
+            }
+            if (r.e.c - r.s.c > MAX_COLS) {
+              r.e.c = r.s.c + MAX_COLS;
+              truncated = true;
+            }
+            ws['!ref'] = XLSX.utils.encode_range(r);
           }
-          let cols = rows.reduce((m, r) => Math.max(m, r.length), 0);
-          if (cols > MAX_COLS) {
-            cols = MAX_COLS;
-            truncated = true;
-          }
+          const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '', blankrows: true }) as unknown as string[][];
+          const cols = rows.reduce((m, r) => Math.max(m, r.length), 0);
           out.push({ name, rows, cols, truncated });
         });
         if (alive) setSheets(out);

@@ -66,11 +66,17 @@ function extOf(name: string): string {
   return i > 0 ? b.slice(i + 1).toLowerCase() : '';
 }
 
+// The extension to classify by. The server-supplied ext wins when present: for chat media the `name`
+// can be an arbitrary Markdown label (`[report.pdf](…/report.docx)`) while serverExt/mime are the real
+// type — so trusting the label's suffix would route to the wrong renderer. Falls back to the name's
+// own extension when no serverExt is given (File Browser / editor, which pass real filenames).
+function effectiveExt(name: string, serverExt?: string | null): string {
+  return (serverExt || '').replace(/^\.+/, '').toLowerCase() || extOf(name);
+}
+
 export function previewKind(name: string, mime?: string | null, serverExt?: string | null): PreviewKind | null {
   const b = baseName(name).toLowerCase();
-  // Prefer the name's own extension; fall back to the server-supplied ext when
-  // the link label is descriptive (e.g. "[view results](…/results.yaml)").
-  const ext = extOf(name) || (serverExt || '').replace(/^\.+/, '').toLowerCase();
+  const ext = effectiveExt(name, serverExt);
   const m = (mime || '').split(';')[0].trim().toLowerCase();
 
   if (MARKDOWN_EXT.has(ext)) return 'markdown';
@@ -116,8 +122,8 @@ export type ImageKind = 'raster' | 'svg';
 // ``previewKind`` (which classifies EDITABLE text): images have no text kind, and SVG is both an
 // image (renderable here) and source (editable in Monaco), so ``previewKind('x.svg') === 'source'``
 // must stay true while this still reports it as an image.
-export function imageKind(name: string, mime?: string | null): ImageKind | null {
-  const ext = extOf(name);
+export function imageKind(name: string, mime?: string | null, serverExt?: string | null): ImageKind | null {
+  const ext = effectiveExt(name, serverExt);
   const m = (mime || '').split(';')[0].trim().toLowerCase();
   if (ext === 'svg' || m === 'image/svg+xml') return 'svg';
   if (RASTER_IMAGE_EXT.has(ext) || (m.startsWith('image/') && m !== 'image/svg+xml')) return 'raster';
@@ -142,19 +148,20 @@ const DOC_EXT: Record<string, DocPreviewKind> = {
 export const DOC_PREVIEW_MAX_BYTES = IMAGE_PREVIEW_MAX_BYTES; // 25 MB, matches the backend content cap
 
 // Office/PDF content types → kind, so a descriptive-label chat link (whose name carries no real
-// suffix) still classifies via the server-supplied content-type or /meta ext.
+// suffix) still classifies via the server-supplied content-type. Limited to formats our renderers
+// actually read: the OOXML types + PDF, plus legacy .xls (SheetJS reads BIFF). Legacy binary .doc
+// (application/msword) and .ppt (application/vnd.ms-powerpoint) are intentionally absent — docx-preview
+// and PptxViewJS only load OOXML, so advertising them would open a broken preview instead of download.
 const OFFICE_MIME: Record<string, DocPreviewKind> = {
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
-  'application/msword': 'docx',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
   'application/vnd.ms-excel': 'xlsx',
   'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
-  'application/vnd.ms-powerpoint': 'pptx',
   'application/pdf': 'pdf',
 };
 
 export function docPreviewKind(name: string, mime?: string | null, serverExt?: string | null): DocPreviewKind | null {
-  const ext = extOf(name) || (serverExt || '').replace(/^\.+/, '').toLowerCase();
+  const ext = effectiveExt(name, serverExt);
   if (ext in DOC_EXT) return DOC_EXT[ext];
   const m = (mime || '').split(';')[0].trim().toLowerCase();
   return OFFICE_MIME[m] ?? null;
@@ -182,10 +189,10 @@ export type PreviewRenderKind =
 const HTML_EXT = new Set(['html', 'htm']);
 
 export function previewRenderKind(name: string, mime?: string | null, serverExt?: string | null): PreviewRenderKind | null {
-  const img = imageKind(name, mime);
+  const img = imageKind(name, mime, serverExt);
   if (img === 'raster') return 'image';
   if (img === 'svg') return 'svg';
-  const ext = extOf(name) || (serverExt || '').replace(/^\.+/, '').toLowerCase();
+  const ext = effectiveExt(name, serverExt);
   const m = (mime || '').split(';')[0].trim().toLowerCase();
   if (HTML_EXT.has(ext) || m === 'text/html') return 'html';
   const doc = docPreviewKind(name, mime, serverExt);
@@ -223,7 +230,7 @@ export function previewOverlayKind(entry: { kind: string; name: string; size: nu
 // Shiki language id for the 'code'/'source' kinds; 'text' (no highlight) otherwise.
 export function codeLanguage(name: string, serverExt?: string | null): string {
   const b = baseName(name).toLowerCase();
-  const ext = extOf(name) || (serverExt || '').replace(/^\.+/, '').toLowerCase();
+  const ext = effectiveExt(name, serverExt);
   return SOURCE_LANG[ext] || CODE_LANG[ext] || NAME_LANG[b] || 'text';
 }
 
