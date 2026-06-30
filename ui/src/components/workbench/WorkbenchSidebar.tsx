@@ -58,7 +58,6 @@ const CAPABILITY_NAV: CapabilityNavItem[] = [
 // Mirrors design.pen KmQ1L — header + a few session cards + footer "open full
 // inbox" link. Pure presentational; data comes from <WorkbenchInboxProvider>.
 const InboxHoverPopover: React.FC<{
-  visible: boolean;
   sessions: InboxSession[];
   unreadBySession: Record<string, number>;
   unreadSessions: number;
@@ -68,7 +67,6 @@ const InboxHoverPopover: React.FC<{
   onMouseEnter: () => void;
   onMouseLeave: () => void;
 }> = ({
-  visible,
   sessions,
   unreadBySession,
   unreadSessions,
@@ -80,18 +78,24 @@ const InboxHoverPopover: React.FC<{
 }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  if (!visible) return null;
   const shown = sessions.slice(0, 5);
   // The unread map is authoritative; a session absent from it has 0 unread
   // (don't fall back to the card's stale unread_count — see InboxPage).
   const unreadOf = (s: InboxSession) => unreadBySession[s.session_id] ?? 0;
   return (
-    <div
+    // Portaled (PopoverContent) so it escapes the sidebar's stacking context and
+    // floats above the chat panel — a plain `absolute z-50` div was painted under
+    // the chat's own stacking context, so the two visually overlapped.
+    <PopoverContent
+      side="right"
+      align="start"
+      sideOffset={12}
+      onOpenAutoFocus={(e) => e.preventDefault()}
       role="dialog"
       aria-label={t('workbench.inbox.title')}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
-      className="absolute left-full top-0 z-50 ml-3 flex w-[360px] flex-col gap-2.5 rounded-2xl border border-border-strong bg-surface-2 p-3.5 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
+      className="flex w-[360px] flex-col gap-2.5 rounded-2xl border-border-strong bg-surface-2 p-3.5 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
     >
       <div className="flex items-start gap-2">
         <div className="flex flex-1 flex-col">
@@ -175,7 +179,7 @@ const InboxHoverPopover: React.FC<{
         {t('workbench.inbox.viewAll')}
         <ArrowRight className="size-3" />
       </button>
-    </div>
+    </PopoverContent>
   );
 };
 
@@ -732,12 +736,10 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         </kbd>
       </Button>
 
-      {/* Inbox entry — hover opens the floating popover. */}
-      <div
-        className="relative"
-        onMouseEnter={openPopover}
-        onMouseLeave={queueClose}
-      >
+      {/* Inbox entry — hover opens the floating popover (portaled above the chat). */}
+      <Popover open={popoverOpen} onOpenChange={(open) => { if (!open) setPopoverOpen(false); }}>
+        <PopoverAnchor asChild>
+          <div onMouseEnter={openPopover} onMouseLeave={queueClose}>
         <NavLink
           to="/inbox"
           className={({ isActive }) =>
@@ -764,8 +766,9 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
             </>
           )}
         </NavLink>
+          </div>
+        </PopoverAnchor>
         <InboxHoverPopover
-          visible={popoverOpen}
           sessions={inboxSessions}
           unreadBySession={unreadBySession}
           unreadSessions={unreadSessions}
@@ -775,7 +778,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
           onMouseEnter={openPopover}
           onMouseLeave={queueClose}
         />
-      </div>
+      </Popover>
 
       <div className="flex flex-col gap-2">
         <div className="px-1 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
