@@ -27,7 +27,7 @@ import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
-import { isEditableFile, isEditableMeta, isRenderOnlyImage } from '../../lib/filePreview';
+import { isEditableFile, isEditableMeta, previewOverlayKind, type PreviewOverlayKind } from '../../lib/filePreview';
 import {
   contentUrl,
   downloadFile,
@@ -45,7 +45,7 @@ import {
   type FsListing,
 } from '../../lib/filesApi';
 import { Button } from '../ui/button';
-import { FilePreview } from './FilePreview';
+import { FilePreview } from '../ui/file-preview';
 
 // A code-file extension → its accent + glyph (mirrors design nknn2's colored type icons).
 const EXT_ICON: Record<string, { Icon: LucideIcon; color: string }> = {
@@ -124,7 +124,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // Quick-look image preview: a raster image opens in an in-window overlay (Finder-style) instead
   // of downloading. Kept in-window (not a portaled Dialog) so it stays inside the window's dark
   // data-theme scope and bounds.
-  const [preview, setPreview] = useState<{ path: string; name: string } | null>(null);
+  const [preview, setPreview] = useState<{ path: string; name: string; kind: PreviewOverlayKind } | null>(null);
   useEffect(() => {
     if (!preview) return;
     const onKey = (ev: KeyboardEvent) => {
@@ -185,13 +185,16 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       navigate(full);
       return;
     }
-    // A raster image has no editable text form (it would otherwise just download) — preview it in an
-    // overlay instead. Works on mobile too (the overlay is in-window, unlike the desktop-only editor).
-    if (isRenderOnlyImage(e)) {
-      setPreview({ path: full, name: e.name });
+    // A raster image, PDF, or Office doc (DOCX / XLSX / PPTX) → preview read-only in the in-window
+    // overlay instead of downloading. Works on mobile too (the overlay is in-window, unlike the
+    // desktop-only editor). Editable text (incl. svg / html / markdown) is excluded here — it opens in
+    // the editor, which carries its own Source ⇄ Preview toggle.
+    const overlay = previewOverlayKind(e);
+    if (overlay) {
+      setPreview({ path: full, name: e.name, kind: overlay });
       return;
     }
-    // Mobile has no editor window layer (windows are md+), so a non-image file just downloads.
+    // Mobile has no editor window layer (windows are md+), so a non-previewable file just downloads.
     const desktop = window.matchMedia('(min-width: 768px)').matches;
     if (!desktop) {
       downloadFile(full);
@@ -470,7 +473,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       {preview && (
         <div className="absolute inset-0 z-20 flex flex-col bg-surface">
           <div className="flex items-center gap-2 border-b border-border bg-surface-2/60 px-3 py-2">
-            <ImageIcon className="size-4 shrink-0 text-muted" />
+            {preview.kind === 'image' ? <ImageIcon className="size-4 shrink-0 text-muted" /> : <FileText className="size-4 shrink-0 text-muted" />}
             <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">{preview.name}</span>
             <Button
               type="button"
@@ -487,7 +490,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
             </Button>
           </div>
           <div className="min-h-0 flex-1">
-            <FilePreview kind="image" src={contentUrl(preview.path)} name={preview.name} />
+            <FilePreview source={{ url: contentUrl(preview.path), name: preview.name }} />
           </div>
         </div>
       )}
