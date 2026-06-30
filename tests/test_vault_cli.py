@@ -1016,6 +1016,26 @@ def test_inject_releases_standard_always_ask_grant_when_avault_fails_before_hand
     assert status == "active"
 
 
+def test_inject_uses_resolved_output_path_for_standard_always_ask_delivery(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    grant = _set_always_ask_standard_grant("ASK_KEY", session_id="ses_cli")
+    deliver = Mock(return_value=None)
+    monkeypatch.setattr(api, "avault_deliver_inject", deliver)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    expected = str((tmp_path / "out.env").resolve(strict=False))
+
+    code = cli.cmd_vault_inject(_ns(keys="ASK_KEY", out="~/out.env", format="dotenv", session_id="ses_cli"))
+    payload = json.loads(capfd.readouterr().out)
+
+    assert code == 0
+    assert payload["path"] == expected
+    deliver.assert_called_once_with(expected, "dotenv", [{"name": "ASK_KEY", "key": "ASK_KEY", "envelope": _sealed("ask_key")}])
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
+    assert status == "expired"
+
+
 def test_inject_rejects_unwritable_output_before_reserving_one_shot_grant(tmp_path, capfd, monkeypatch):
     from vibe import api
 
@@ -1026,6 +1046,26 @@ def test_inject_rejects_unwritable_output_before_reserving_one_shot_grant(tmp_pa
     code = cli.cmd_vault_inject(
         _ns(keys="ASK_KEY", out=str(tmp_path / "missing" / "out.env"), format="dotenv", session_id="ses_cli")
     )
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "output_unwritable"
+    deliver.assert_not_called()
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
+    assert status == "active"
+
+
+def test_inject_rejects_existing_directory_output_before_reserving_one_shot_grant(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    grant = _set_always_ask_standard_grant("ASK_KEY", session_id="ses_cli")
+    deliver = Mock()
+    monkeypatch.setattr(api, "avault_deliver_inject", deliver)
+    out = tmp_path / "out.env"
+    out.mkdir()
+
+    code = cli.cmd_vault_inject(_ns(keys="ASK_KEY", out=str(out), format="dotenv", session_id="ses_cli"))
     captured = capfd.readouterr()
 
     assert code == 1

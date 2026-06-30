@@ -4708,11 +4708,17 @@ def _resolve_cli_output_path(path: str) -> str:
     output_path = Path(path).expanduser()
     if not output_path.is_absolute():
         output_path = Path.cwd() / output_path
-    return str(output_path)
+    return str(output_path.resolve(strict=False))
 
 
 def _preflight_cli_output_path(path: str, *, help_command: str) -> None:
     output_path = Path(path)
+    if output_path.exists() and not output_path.is_file():
+        raise TaskCliError(
+            f"output path is not a regular file: {output_path}",
+            code="output_unwritable",
+            help_command=help_command,
+        )
     parent = output_path.parent
     if not parent.exists():
         raise TaskCliError(f"output parent does not exist: {parent}", code="output_unwritable", help_command=help_command)
@@ -5747,7 +5753,7 @@ def cmd_vault_inject(args):
                 secrets=secrets,
             )
         else:
-            api.avault_deliver_inject(out, fmt, secrets)
+            api.avault_deliver_inject(resolved_out, fmt, secrets)
         _consume_after_possible_use(one_shot_grants, reason="vault-inject-one-shot")
         # The file is on disk → delivered. A bookkeeping failure must not report a failed command
         # (callers would retry though the secrets are already written), so record best-effort.
@@ -5756,7 +5762,7 @@ def cmd_vault_inject(args):
                 vault_service.record_deliveries(conn, keys, requester={"source": "cli", "pid": os.getpid()}, mode=f"inject:{fmt}")
         except Exception:
             pass
-        _print_cli_payload("vault_inject", written=True, path=resolved_out if grant is not None else str(out), format=fmt, keys=keys)
+        _print_cli_payload("vault_inject", written=True, path=resolved_out, format=fmt, keys=keys)
         return 0
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
@@ -5780,7 +5786,7 @@ def cmd_vault_inject(args):
             requester, delivery, _session_id = _vault_cli_delivery_context(
                 args,
                 mode="inject",
-                path=_resolve_cli_output_path(str(out)),
+                path=resolved_out,
                 format=fmt,
             )
             _expire_agent_grant_after_missing(
