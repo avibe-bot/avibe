@@ -137,12 +137,13 @@ export function isRenderOnlyImage(entry: { kind: string; name: string; size: num
 // from previewKind/imageKind. The parsers pull the whole file into memory, so it's gated by the
 // content cap; an oversized doc (which /api/files/content would reject anyway) falls to download.
 export type DocPreviewKind = 'docx' | 'xlsx' | 'pptx' | 'pdf';
+// NB: csv is intentionally NOT here — it renders as a CSV table (papaparse), lighter than loading
+// SheetJS, and matches the chat viewer. ``previewRenderKind`` maps csv → 'csv'.
 const DOC_EXT: Record<string, DocPreviewKind> = {
   docx: 'docx',
   xlsx: 'xlsx',
   xlsm: 'xlsx',
   xls: 'xlsx',
-  csv: 'xlsx',
   pptx: 'pptx',
   pdf: 'pdf',
 };
@@ -156,11 +157,64 @@ export function docPreviewKind(name: string, mime?: string | null): DocPreviewKi
   return null;
 }
 
-// A regular file within the content cap that we can render as a rich document (Office / PDF).
-export function previewableDoc(entry: { kind: string; name: string; size: number | null }): DocPreviewKind | null {
+// ── Unified preview dispatch ────────────────────────────────────────────────
+// HOW a file renders in the shared <FilePreview> kernel (one classifier for the File Browser, the
+// editor preview, and the chat viewer). Combines imageKind (raster/svg) + html + docPreviewKind
+// (office/pdf) + previewKind (text). 'code' is the catch-all for highlightable text — including
+// non-HTML markup (xml/vue/svelte) and plain text (highlights to nothing). Order matters: images and
+// HTML are decided before the text classifier so an .svg renders as an image, not edited source.
+export type PreviewRenderKind =
+  | 'image'
+  | 'svg'
+  | 'html'
+  | 'pdf'
+  | 'docx'
+  | 'xlsx'
+  | 'pptx'
+  | 'markdown'
+  | 'json'
+  | 'csv'
+  | 'code';
+
+const HTML_EXT = new Set(['html', 'htm']);
+
+export function previewRenderKind(name: string, mime?: string | null, serverExt?: string | null): PreviewRenderKind | null {
+  const img = imageKind(name, mime);
+  if (img === 'raster') return 'image';
+  if (img === 'svg') return 'svg';
+  const ext = extOf(name) || (serverExt || '').replace(/^\.+/, '').toLowerCase();
+  const m = (mime || '').split(';')[0].trim().toLowerCase();
+  if (HTML_EXT.has(ext) || m === 'text/html') return 'html';
+  const doc = docPreviewKind(name, mime);
+  if (doc) return doc;
+  const k = previewKind(name, mime, serverExt);
+  if (k === 'markdown') return 'markdown';
+  if (k === 'json') return 'json';
+  if (k === 'csv') return 'csv';
+  if (k === 'code' || k === 'source' || k === 'text') return 'code';
+  return null;
+}
+
+// The renderable EDITABLE-text kinds the in-editor Source ⇄ Preview toggle offers: Markdown, SVG, and
+// HTML all have a meaningful rendered form while staying editable in Monaco. Everything else (code,
+// json, csv, plain text) has no distinct render, so the toggle is hidden.
+export type EditorPreviewKind = 'markdown' | 'svg' | 'html';
+export function editorPreviewKind(name: string): EditorPreviewKind | null {
+  if (previewKind(name) === 'markdown') return 'markdown';
+  if (imageKind(name) === 'svg') return 'svg';
+  if (HTML_EXT.has(extOf(name))) return 'html';
+  return null;
+}
+
+// What opens in the File Browser's read-only PREVIEW overlay (vs. the editor): a non-editable rich
+// file — raster image, PDF, or Office doc — within the content cap. Editable text (incl. svg / html /
+// markdown / code / json / csv) opens in the editor instead, which carries its own preview toggle.
+export type PreviewOverlayKind = 'image' | 'pdf' | 'docx' | 'xlsx' | 'pptx';
+export function previewOverlayKind(entry: { kind: string; name: string; size: number | null }): PreviewOverlayKind | null {
   if (entry.kind !== 'file') return null;
   if (entry.size != null && entry.size > DOC_PREVIEW_MAX_BYTES) return null;
-  return docPreviewKind(entry.name);
+  const rk = previewRenderKind(entry.name);
+  return rk === 'image' || rk === 'pdf' || rk === 'docx' || rk === 'xlsx' || rk === 'pptx' ? rk : null;
 }
 
 // Shiki language id for the 'code'/'source' kinds; 'text' (no highlight) otherwise.

@@ -7,7 +7,7 @@ import { useWindowCloseGuard, useWindowManager } from '../../context/WindowManag
 import { contentUrl, downloadFile, fileMeta, joinPath, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
 import { imageKind, isEditableFile, isEditableMeta, isRenderOnlyImage } from '../../lib/filePreview';
 import { FileTree } from './FileTree';
-import { FilePreview } from './FilePreview';
+import { FilePreview } from '../ui/file-preview';
 import { FilePicker, type FilePickerMode } from './FilePicker';
 import { EditorSearchView } from './EditorSearchView';
 
@@ -568,7 +568,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                   tabs.map((tab) => (
                     <div key={tab.id} className={clsx('absolute inset-0', active === tab.id ? 'block' : 'hidden')}>
                       {tab.kind === 'image' && tab.path ? (
-                        <FilePreview kind="image" src={contentUrl(tab.path)} name={tab.name} />
+                        <FilePreview source={{ url: contentUrl(tab.path), name: tab.name }} />
                       ) : (
                         <Suspense fallback={<div className="grid h-full place-items-center text-[12px] text-muted">{t('common.loading')}</div>}>
                           <FileEditorPane

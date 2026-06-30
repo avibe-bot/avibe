@@ -13,6 +13,16 @@
     "retry": "重试",
     "reload": "刷新页面"
   },
+  "preview": {
+    "title": "预览",
+    "unsupported": "此文件无法预览。",
+    "failed": "无法加载此文件预览。",
+    "tooLarge": "文件过大，无法预览，请直接下载。",
+    "truncated": "文件较大，仅显示开头部分。",
+    "empty": "此文件为空。",
+    "csvTruncated": "仅显示前 {{count}} 行",
+    "csvColsTruncated": "显示前 {{shown}} 列，共 {{total}} 列"
+  },
   "common": {
     "back": "返回",
     "continue": "继续",
@@ -696,9 +706,6 @@
       "rename": "重命名",
       "delete": "删除",
       "confirmDelete": "删除“{{name}}”？此操作无法撤销。",
-      "preview": "预览",
-      "previewFailed": "无法加载此文件预览。",
-      "previewTruncated": "文件较大，仅显示开头部分。",
       "searchPlaceholder": "搜索",
       "colName": "名称",
       "colSize": "大小",
@@ -2147,12 +2154,7 @@
       "previous": "上一张",
       "next": "下一张",
       "zoomIn": "放大",
-      "zoomOut": "缩小",
-      "loading": "加载中…",
-      "error": "无法加载该文件。",
-      "tooLarge": "文件过大，无法预览，请直接下载。",
-      "csvTruncated": "仅显示前 {{count}} 行",
-      "csvColsTruncated": "显示前 {{shown}} 列，共 {{total}} 列"
+      "zoomOut": "缩小"
     },
     "queue": {
       "title": "排队中 · {{count}}",

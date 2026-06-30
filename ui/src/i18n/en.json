@@ -13,6 +13,16 @@
     "retry": "Retry",
     "reload": "Reload page"
   },
+  "preview": {
+    "title": "Preview",
+    "unsupported": "This file can't be previewed.",
+    "failed": "Couldn't load this file for preview.",
+    "tooLarge": "File too large to preview — download it instead.",
+    "truncated": "Large file — showing only the first part.",
+    "empty": "This file is empty.",
+    "csvTruncated": "Showing the first {{count}} rows",
+    "csvColsTruncated": "Showing {{shown}} of {{total}} columns"
+  },
   "common": {
     "back": "Back",
     "continue": "Continue",
@@ -696,9 +706,6 @@
       "rename": "Rename",
       "delete": "Delete",
       "confirmDelete": "Delete \"{{name}}\"? This can't be undone.",
-      "preview": "Preview",
-      "previewFailed": "Couldn't load this file for preview.",
-      "previewTruncated": "Large file — showing only the first part.",
       "searchPlaceholder": "Search",
       "colName": "Name",
       "colSize": "Size",
@@ -2148,12 +2155,7 @@
       "previous": "Previous",
       "next": "Next",
       "zoomIn": "Zoom in",
-      "zoomOut": "Zoom out",
-      "loading": "Loading…",
-      "error": "Couldn't load this file.",
-      "tooLarge": "File too large to preview — download it instead.",
-      "csvTruncated": "Showing the first {{count}} rows",
-      "csvColsTruncated": "Showing {{shown}} of {{total}} columns"
+      "zoomOut": "Zoom out"
     },
     "queue": {
       "title": "Queued · {{count}}",
