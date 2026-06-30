@@ -783,12 +783,12 @@
     }
   },
   "appShell": {
-    "title": "Avibe OS",
+    "title": "Avibe",
     "subtitle": "Agent OS · Workbench",
     "workspaceLabel": "Settings",
     "moreSettings": "More Settings",
     "openControlPanel": "Settings",
-    "backToWorkbench": "Back to Workbench",
+    "backToWorkbench": "Workbench",
     "newSession": "New",
     "navigationLabel": "Console",
     "statusLabel": "Service status",

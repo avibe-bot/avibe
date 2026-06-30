@@ -384,22 +384,28 @@ export const AppShell: React.FC = () => {
             sidebar, so it runs a tighter vertical rhythm than admin — less outer
             padding and a smaller gap to the bottom cluster — to give the flex-1
             Projects list more height. Admin keeps the roomier spacing. */}
-        <div className={clsx('flex h-full flex-col justify-between px-4', shellMode === 'workbench' ? 'gap-4 py-4' : 'gap-6 py-5')}>
-          {/* Top: Brand + Workspace label + Nav list */}
-          {/* Workbench mounts a search field right under the brand; tighter gap to
-              keep the dense nav compact. Admin keeps the wider gap-6. */}
-          <div className={clsx('flex min-h-0 flex-1 flex-col', shellMode === 'workbench' ? 'gap-3' : 'gap-6')}>
-            <div className="flex items-center gap-2.5 px-1 py-2">
-              <img
-                src={logoImg}
-                alt="avibe logo"
-                className="size-9 rounded-lg border border-mint/35 bg-mint/[0.08] object-cover shadow-[0_0_16px_-4px_rgba(91,255,160,0.5)]"
-              />
-              <div className="min-w-0">
-                <div className="truncate text-[13px] font-semibold text-foreground">{t('appShell.title')}</div>
-                <div className="truncate text-[11px] text-muted">{t('appShell.subtitle')}</div>
-              </div>
+        <div className="flex h-full flex-col">
+          {/* Brand band — flush to the top edge and bordered like the chat
+              header (px-4 py-2.5) so the logo centerline lines up with the chat
+              title bar across one continuous divider. Logo is size-8 to match
+              the header's row height. */}
+          <div className="flex shrink-0 items-center gap-2.5 border-b border-border px-4 py-2.5">
+            <img
+              src={logoImg}
+              alt="avibe logo"
+              className="size-8 rounded-lg border border-mint/35 bg-mint/[0.08] object-cover shadow-[0_0_16px_-4px_rgba(91,255,160,0.5)]"
+            />
+            <div className="min-w-0 leading-tight">
+              <div className="truncate text-[13px] font-semibold text-foreground">{t('appShell.title')}</div>
+              <div className="truncate text-[11px] text-muted">{t('appShell.subtitle')}</div>
             </div>
+          </div>
+
+          {/* Middle: workspace label + nav list (scrolls). Carries the
+              horizontal + top padding the outer container used to own; workbench
+              runs a tighter rhythm than admin to give the flex-1 Projects list
+              more height. */}
+          <div className={clsx('flex min-h-0 flex-1 flex-col px-4', shellMode === 'workbench' ? 'gap-3 pt-3' : 'gap-6 pt-4')}>
 
             {shellMode === 'admin' && items.length > 0 && (
               <div className="flex flex-col gap-2">
@@ -417,8 +423,10 @@ export const AppShell: React.FC = () => {
           {/* Bottom (design.pen NbPMq): row 1 = [Apps | Settings] two equal
               buttons; row 2 = [version … run-dot]. Admin keeps its quick-toggles
               + hostname between the rows. The whole bottom cluster sits at the
-              sidebar's level (z-10) and is covered by a maximized window. */}
-          <div className="relative flex flex-col gap-3">
+              sidebar's level (z-10) and is covered by a maximized window. The
+              outer container no longer owns padding (the brand band is flush to
+              the top edge), so this cluster carries its own px-4 + bottom pad. */}
+          <div className={clsx('relative flex flex-col gap-3 px-4', shellMode === 'workbench' ? 'pb-4' : 'pb-5')}>
             {/* Row 1 — Apps (Dock trigger, left) paired with the mode switch
                 (right). The Dock rises ABOVE the Apps button, clear of the
                 centered Chat composer. Workbench → Settings (control panel);

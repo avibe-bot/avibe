@@ -783,12 +783,12 @@
     }
   },
   "appShell": {
-    "title": "Avibe OS",
-    "subtitle": "Agent操作系统 · 工作台",
+    "title": "Avibe",
+    "subtitle": "Agent OS · 工作台",
     "workspaceLabel": "设置",
     "moreSettings": "更多设置",
     "openControlPanel": "设置",
-    "backToWorkbench": "返回工作台",
+    "backToWorkbench": "工作台",
     "newSession": "新建",
     "navigationLabel": "控制台",
     "statusLabel": "服务状态",
