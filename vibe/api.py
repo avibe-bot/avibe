@@ -1878,7 +1878,7 @@ def _cleanup_failed_agent_grant(
                     active_scope_members: set[str] = set()
                     for active in conn.execute(
                         select(vault_service.vault_grants).where(
-                            vault_service.vault_grants.c.status == "active",
+                            vault_service.vault_grants.c.status.in_(vault_service.ACTIVE_GRANT_STATES),
                             vault_service.vault_grants.c.scope_type == scope["scope_type"],
                             vault_service.vault_grants.c.scope_ref == scope["scope_ref"],
                         )
@@ -4884,13 +4884,13 @@ def _version_at_least(current: str | None, minimum: str) -> bool:
 def _require_avault_p2_surface(feature: str) -> None:
     status = avault_status()
     if not status.get("installed"):
-        raise AvaultError(f"avault is required for {feature}")
+        raise AvaultPreHandoffError(f"avault is required for {feature}")
     version = status.get("version")
     if not _version_at_least(version, AVAULT_P2_MIN_VERSION):
         detail = f"{feature} requires avault >= {AVAULT_P2_MIN_VERSION}; installed {version or 'unknown'}"
         if not _managed_avault_release_satisfies_p2():
             detail = f"{detail}; managed avault install is pinned to {AVAULT_VERSION}"
-        raise AvaultError(detail)
+        raise AvaultPreHandoffError(detail)
 
 
 # ---------------------------------------------------------------------------
@@ -4911,6 +4911,10 @@ class AvaultError(Exception):
     avault is designed to keep secrets out of its stdout/stderr and errors."""
 
 
+class AvaultPreHandoffError(AvaultError):
+    """avault failed before receiving an envelope or performing delivery."""
+
+
 def _avault_detail(proc: "subprocess.CompletedProcess") -> str:
     """Best-effort, secret-free detail from a failed avault run (its stderr)."""
     raw = proc.stderr
@@ -4922,7 +4926,7 @@ def _avault_detail(proc: "subprocess.CompletedProcess") -> str:
 def _require_avault_path() -> str:
     path = _resolve_avault_cli_path()
     if not path:
-        raise AvaultError(backend_t("dependencies.avault.missing"))
+        raise AvaultPreHandoffError(backend_t("dependencies.avault.missing"))
     return path
 
 
@@ -4962,7 +4966,7 @@ def _run_avault(
             **isolated_subprocess_kwargs(),
         )
     except FileNotFoundError as exc:
-        raise AvaultError("avault binary not found") from exc
+        raise AvaultPreHandoffError("avault binary not found") from exc
     except subprocess.TimeoutExpired as exc:
         raise AvaultError("avault timed out") from exc
 

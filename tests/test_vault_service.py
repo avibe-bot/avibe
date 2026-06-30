@@ -1390,6 +1390,7 @@ def test_standard_always_ask_routes_every_access_through_one_shot_request(vault)
             session_id="ses_1",
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
+            reserve_one_shot=True,
         )
         still_active = vs.resolve_secret_access(
             conn,
@@ -1398,6 +1399,7 @@ def test_standard_always_ask_routes_every_access_through_one_shot_request(vault)
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
             create_request=False,
+            reserve_one_shot=True,
         )
         vs.consume_one_shot_grant(conn, grant["id"])
         second = vs.resolve_secret_access(
@@ -1460,6 +1462,7 @@ def test_protected_always_ask_routes_every_access_through_one_shot_request(vault
             requester={"session_id": "ses_1", "skill": "deploy"},
             delivery={"skill": "deploy"},
             cache=cache,
+            reserve_one_shot=True,
         )
         still_active = vs.resolve_secret_access(
             conn,
@@ -1469,6 +1472,7 @@ def test_protected_always_ask_routes_every_access_through_one_shot_request(vault
             delivery={"skill": "deploy"},
             cache=cache,
             create_request=False,
+            reserve_one_shot=True,
         )
         vs.consume_one_shot_grant(conn, grant["id"], cache=cache)
         second = vs.resolve_secret_access(
@@ -1519,6 +1523,7 @@ def test_one_shot_reservation_can_be_released_before_delivery(vault):
             session_id="ses_1",
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
+            reserve_one_shot=True,
         )
         missing = vs.resolve_secret_access(
             conn,
@@ -1527,6 +1532,7 @@ def test_one_shot_reservation_can_be_released_before_delivery(vault):
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
             create_request=False,
+            reserve_one_shot=True,
         )
         released = vs.release_one_shot_reservation(conn, grant["id"])
         available = vs.resolve_secret_access(
@@ -1535,6 +1541,7 @@ def test_one_shot_reservation_can_be_released_before_delivery(vault):
             session_id="ses_1",
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
+            reserve_one_shot=True,
         )
 
     assert reserved["grant"]["status"] == "reserved"
@@ -1544,6 +1551,95 @@ def test_one_shot_reservation_can_be_released_before_delivery(vault):
     assert available["status"] == "standard"
     assert available["grant"]["id"] == grant["id"]
     assert available["grant"]["status"] == "reserved"
+
+
+def test_resolve_secret_access_default_does_not_reserve_one_shot_grant(vault):
+    _create(vault, name="ASK_KEY", protection="standard", policy={"always_ask": True})
+    with vault.begin() as conn:
+        first = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            session_id="ses_1",
+            created_by_request_id=first["request"]["id"],
+        )
+        resolved = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
+
+    assert resolved["status"] == "standard"
+    assert resolved["grant"]["id"] == grant["id"]
+    assert resolved["grant"]["status"] == "active"
+    assert status == "active"
+
+
+def test_delivery_resolver_skips_reserved_one_shot_and_claims_next_active_grant(vault):
+    _create(vault, name="ASK_KEY", protection="standard", policy={"always_ask": True})
+    with vault.begin() as conn:
+        first = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant_1 = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            session_id="ses_1",
+            created_by_request_id=first["request"]["id"],
+        )
+        reserved = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+            reserve_one_shot=True,
+        )
+        second_req = vs.create_access_request(
+            conn,
+            "ASK_KEY",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant_2 = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            session_id="ses_1",
+            created_by_request_id=second_req["id"],
+        )
+        claimed = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+            reserve_one_shot=True,
+        )
+        statuses = {
+            row["id"]: row["status"]
+            for row in conn.execute(select(vault_grants.c.id, vault_grants.c.status).where(vault_grants.c.id.in_([grant_1["id"], grant_2["id"]]))).mappings()
+        }
+
+    assert reserved["grant"]["id"] == grant_1["id"]
+    assert claimed["status"] == "standard"
+    assert claimed["grant"]["id"] == grant_2["id"]
+    assert statuses == {grant_1["id"]: "reserved", grant_2["id"]: "reserved"}
 
 
 def test_reserved_one_shot_grants_are_expired_by_ttl_sweep(vault):
@@ -1569,6 +1665,7 @@ def test_reserved_one_shot_grants_are_expired_by_ttl_sweep(vault):
             session_id="ses_1",
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
+            reserve_one_shot=True,
         )
         conn.execute(
             vault_grants.update()
@@ -1605,6 +1702,7 @@ def test_reserved_one_shot_grants_are_revoked_with_session(vault):
             session_id="ses_1",
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
+            reserve_one_shot=True,
         )
         count = vs.revoke_session_grants(conn, "ses_1")
         status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()

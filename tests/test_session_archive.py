@@ -171,6 +171,7 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
             "ARCHIVE_RESERVED_KEY",
             requester={"session_id": sid},
             delivery={"session_id": sid, "command": "python reserved.py"},
+            reserve_one_shot=True,
         )
         assert cache.has(grant["id"], "ARCHIVE_KEY")
         assert reserved["grant"]["status"] == "reserved"

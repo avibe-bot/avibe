@@ -320,11 +320,12 @@ def _card_hydration_policy(audience: str | None) -> CardHydrationPolicy:
     )
 
 
-ACTIVE_GRANT_STATUSES = {"active", "reserved"}
+ACTIVE_GRANT_STATES = {"active", "reserved"}
+ACTIVE_GRANT_STATUSES = ACTIVE_GRANT_STATES
 
 
 def _grant_is_active(row: dict[str, Any]) -> bool:
-    if row.get("status") not in ACTIVE_GRANT_STATUSES:
+    if row.get("status") not in ACTIVE_GRANT_STATES:
         return False
     expires_at = _parse_iso_datetime(row.get("expires_at"))
     return expires_at is None or expires_at > datetime.now(timezone.utc)
@@ -1739,7 +1740,7 @@ def _expire_grant_rows(
     for row in rows:
         conn.execute(
             vault_grants.update()
-            .where(vault_grants.c.id == row["id"], vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES))
+            .where(vault_grants.c.id == row["id"], vault_grants.c.status.in_(ACTIVE_GRANT_STATES))
             .values(status="expired", revoked_at=now, agent_ready=0, agent_ready_at=None)
         )
         cache.drop(row["id"])
@@ -1762,7 +1763,7 @@ def _expire_active_grants_for_secret(
 def active_grant_rows_for_secret(conn: Connection, secret_name: str) -> list[dict[str, Any]]:
     return [
         dict(row)
-        for row in conn.execute(select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES))).mappings()
+        for row in conn.execute(select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATES))).mappings()
         if secret_name in (_loads(row.get("member_snapshot")) or [])
     ]
 
@@ -1775,7 +1776,7 @@ def active_grant_scopes_for_session(conn: Connection, session_id: str) -> list[d
     rows = [
         dict(row)
         for row in conn.execute(
-            select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES), vault_grants.c.session_id == session_id)
+            select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATES), vault_grants.c.session_id == session_id)
         ).mappings()
     ]
     return _unique_grant_scopes(rows)
@@ -1798,7 +1799,7 @@ def agent_release_scopes_after_rows(
     expired_rows = [
         dict(row)
         for row in conn.execute(
-            select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES), vault_grants.c.expires_at <= now)
+            select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATES), vault_grants.c.expires_at <= now)
         ).mappings()
     ]
     if expired_rows:
@@ -1809,7 +1810,7 @@ def agent_release_scopes_after_rows(
         return []
     active_rows = [
         dict(row)
-        for row in conn.execute(select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES))).mappings()
+        for row in conn.execute(select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATES))).mappings()
         if grant_row_has_resident_agent_ready(dict(row))
     ]
     active_by_scope: dict[tuple[str, str], set[str]] = {}
@@ -1843,7 +1844,7 @@ def agent_release_scopes_after_rows(
             .where(
                 vault_grants.c.scope_type == scope_type,
                 vault_grants.c.scope_ref == scope_ref,
-                vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES),
+                vault_grants.c.status.in_(ACTIVE_GRANT_STATES),
             )
             .values(agent_ready=0, agent_ready_at=None)
         )
@@ -1862,7 +1863,7 @@ def expire_grant(
     if row is None:
         raise GrantNotFoundError(grant_id)
     row_dict = dict(row)
-    if row_dict.get("status") in ACTIVE_GRANT_STATUSES:
+    if row_dict.get("status") in ACTIVE_GRANT_STATES:
         _expire_grant_rows(conn, [row_dict], cache=cache, reason=reason)
         row_dict = dict(conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().one())
     return _grant_payload(conn, row_dict, cache=cache)
@@ -1910,7 +1911,7 @@ def expire_grants(conn: Connection, *, cache: VaultGrantRuntimeCache = GRANT_RUN
     rows = [
         dict(row)
         for row in conn.execute(
-            select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES), vault_grants.c.expires_at <= now)
+            select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATES), vault_grants.c.expires_at <= now)
         ).mappings()
     ]
     return _expire_grant_rows(conn, rows, cache=cache)
@@ -2251,7 +2252,7 @@ def expire_active_grants(
 ) -> int:
     rows = [
         dict(row)
-        for row in conn.execute(select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES))).mappings()
+        for row in conn.execute(select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATES))).mappings()
     ]
     return _expire_grant_rows(conn, rows, cache=cache, reason=reason)
 
@@ -2266,7 +2267,7 @@ def revoke_grant(
     if row is None:
         raise GrantNotFoundError(grant_id)
     row_dict = dict(row)
-    if row_dict.get("status") not in ACTIVE_GRANT_STATUSES:
+    if row_dict.get("status") not in ACTIVE_GRANT_STATES:
         raise GrantNotActiveError(grant_id)
     now = _now()
     conn.execute(
@@ -2326,7 +2327,7 @@ def revoke_session_grants(
     rows = [
         dict(row)
         for row in conn.execute(
-            select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES), vault_grants.c.session_id == session_id)
+            select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATES), vault_grants.c.session_id == session_id)
         ).mappings()
     ]
     now = _now()
@@ -2334,7 +2335,7 @@ def revoke_session_grants(
     for row in rows:
         result = conn.execute(
             vault_grants.update()
-            .where(vault_grants.c.id == row["id"], vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES))
+            .where(vault_grants.c.id == row["id"], vault_grants.c.status.in_(ACTIVE_GRANT_STATES))
             .values(status="revoked", revoked_at=now, agent_ready=0, agent_ready_at=None)
         )
         if result.rowcount != 1:
@@ -2387,7 +2388,7 @@ def consume_one_shot_grant(
     if row is None:
         raise GrantNotFoundError(grant_id)
     row_dict = dict(row)
-    if row_dict.get("status") not in ACTIVE_GRANT_STATUSES:
+    if row_dict.get("status") not in ACTIVE_GRANT_STATES:
         raise GrantNotActiveError(grant_id)
     if not _grant_is_always_ask_for_members(conn, row_dict):
         return []
@@ -2435,8 +2436,10 @@ def _reserve_one_shot_grant(
     *,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
 ) -> dict[str, Any] | None:
-    if row.get("status") != "active" or not _grant_is_always_ask_for_members(conn, row):
+    if not _grant_is_always_ask_for_members(conn, row):
         return _grant_payload(conn, row, cache=cache)
+    if row.get("status") != "active":
+        return None
     result = conn.execute(
         vault_grants.update()
         .where(vault_grants.c.id == row["id"], vault_grants.c.status == "active")
@@ -2465,7 +2468,7 @@ def find_active_grant_for_secrets(
         dict(row)
         for row in conn.execute(
             select(vault_grants).where(
-                vault_grants.c.status == "active",
+                vault_grants.c.status.in_(ACTIVE_GRANT_STATES),
                 or_(vault_grants.c.session_id.is_(None), vault_grants.c.session_id == session_id),
             )
         ).mappings()
@@ -2477,6 +2480,8 @@ def find_active_grant_for_secrets(
         if not requested.issubset(member_set):
             continue
         payload = _grant_payload(conn, row, cache=cache)
+        if reserve_one_shot and payload.get("one_shot") is True and row.get("status") != "active":
+            continue
         standard_only = all(_require_row(conn, name).get("protection") == "standard" for name in requested)
         candidates.append((
             standard_only or bool(payload.get("delivery_ready")),
@@ -2511,7 +2516,7 @@ def resolve_secret_access(
     delivery: dict[str, Any] | None = None,
     create_request: bool = True,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
-    reserve_one_shot: bool = True,
+    reserve_one_shot: bool = False,
 ) -> dict[str, Any]:
     """Resolve an agent access attempt without exposing the value.
 

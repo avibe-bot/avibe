@@ -1262,6 +1262,76 @@ def test_consume_one_shot_keeps_agent_scope_when_other_active_grant_exists(monke
     assert active["delivery_ready"] is True
 
 
+def test_forced_agent_grant_cleanup_treats_reserved_grant_as_live(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_release = Mock(return_value={"released": True})
+    monkeypatch.setattr(api, "avault_agent_release", agent_release)
+    api.create_vault_secret(
+        {
+            "name": "ASK_KEY",
+            "protection": "protected",
+            "policy": {"always_ask": True},
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+        }
+    )
+    with api._vault_engine().begin() as conn:
+        req_1 = vault_service.create_access_request(
+            conn,
+            "ASK_KEY",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant_1 = vault_service.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            created_by_request_id=req_1["id"],
+        )
+        req_2 = vault_service.create_access_request(
+            conn,
+            "ASK_KEY",
+            requester={"session_id": "ses_2"},
+            delivery={"session_id": "ses_2"},
+        )
+        grant_2 = vault_service.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            session_id="ses_2",
+            created_by_request_id=req_2["id"],
+        )
+        reserved = vault_service.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_2",
+            requester={"session_id": "ses_2"},
+            delivery={"session_id": "ses_2"},
+            reserve_one_shot=True,
+        )
+
+    assert reserved["grant"]["id"] == grant_2["id"]
+    assert reserved["grant"]["status"] == "reserved"
+
+    api._cleanup_failed_agent_grant(
+        engine=api._vault_engine(),
+        grant=grant_1,
+        reason="test",
+        force_release_scope=True,
+    )
+
+    agent_release.assert_not_called()
+    with api._vault_engine().connect() as conn:
+        statuses = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                select(vault_service.vault_grants.c.id, vault_service.vault_grants.c.status).where(
+                    vault_service.vault_grants.c.id.in_([grant_1["id"], grant_2["id"]])
+                )
+            ).mappings()
+        }
+    assert statuses == {grant_1["id"]: "expired", grant_2["id"]: "reserved"}
+
+
 def test_revoke_grant_releases_scope_when_remaining_members_do_not_cover_cache(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     agent_release = Mock(return_value={"released": True})

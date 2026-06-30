@@ -4771,6 +4771,21 @@ def _consume_after_possible_use(grants: list[dict] | tuple[dict, ...] | None, *,
     _consume_one_shot_grants(_unique_one_shot_grants(grants), reason=reason)
 
 
+def _finish_one_shot_after_avault_error(
+    engine,
+    grants: list[dict] | tuple[dict, ...] | None,
+    exc: Exception,
+    *,
+    reason: str,
+) -> None:
+    from vibe import api
+
+    if isinstance(exc, api.AvaultPreHandoffError):
+        _release_one_shot_reservations(engine, grants)
+    else:
+        _consume_after_possible_use(grants, reason=reason)
+
+
 def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: list[str], *, args=None):
     from storage import vault_service
 
@@ -4804,6 +4819,7 @@ def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: l
                     vault_name,
                     requester=requester,
                     delivery=delivery,
+                    reserve_one_shot=True,
                 )
                 resolved_by_name[vault_name] = resolved
             if resolved["status"] == "approval_required":
@@ -4869,6 +4885,7 @@ def _resolve_single_vault_delivery(
             name,
             requester=requester,
             delivery=delivery,
+            reserve_one_shot=True,
         )
     if resolved["status"] == "approval_required":
         req = resolved.get("request") or {}
@@ -4919,6 +4936,7 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
                     name,
                     requester=requester,
                     delivery=delivery,
+                    reserve_one_shot=True,
                 )
                 resolved_by_name[name] = resolved
             if resolved["status"] == "approval_required":
@@ -5056,7 +5074,7 @@ def cmd_vault_run(args):
         _print_task_error(exc)
         return 1
     except api.AvaultError as exc:
-        _consume_after_possible_use(one_shot_grants, reason="vault-run-one-shot")
+        _finish_one_shot_after_avault_error(engine, one_shot_grants, exc, reason="vault-run-one-shot")
         if grant is not None and _agent_missing_grant(exc):
             requester, delivery, _session_id = _vault_cli_delivery_context(args, mode="run", command=command_argv)
             _expire_agent_grant_after_missing(
@@ -5568,10 +5586,12 @@ def cmd_vault_fetch(args):
         _print_task_error(exc)
         return 1
     except api.AvaultError as exc:
-        if handoff_started:
-            _consume_after_possible_use([one_shot_grant] if one_shot_grant is not None else [], reason="vault-fetch-one-shot")
-        else:
-            _release_one_shot_reservations(engine, [one_shot_grant] if one_shot_grant is not None else [])
+        _finish_one_shot_after_avault_error(
+            engine,
+            [one_shot_grant] if one_shot_grant is not None else [],
+            exc,
+            reason="vault-fetch-one-shot",
+        )
         if engine is not None and isinstance(grant, dict) and _agent_missing_grant(exc):
             grant_id = grant.get("id")
             if grant_id:
@@ -5729,10 +5749,7 @@ def cmd_vault_inject(args):
         _print_task_error(exc)
         return 1
     except api.AvaultError as exc:
-        if handoff_started:
-            _consume_after_possible_use(one_shot_grants, reason="vault-inject-one-shot")
-        else:
-            _release_one_shot_reservations(engine, one_shot_grants)
+        _finish_one_shot_after_avault_error(engine, one_shot_grants, exc, reason="vault-inject-one-shot")
         if engine is not None and isinstance(grant, dict) and _agent_missing_grant(exc):
             requester, delivery, _session_id = _vault_cli_delivery_context(
                 args,
