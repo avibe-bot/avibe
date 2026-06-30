@@ -4,10 +4,10 @@ Status: proposal.
 
 ## Background
 
-`vibe agent run --async` already lets one Agent queue work that continues in the
-background. The missing piece is a first-class way for the completed run to
-return its full result to the Session that initiated or is waiting for that
-work.
+`vibe agent run` lets one Agent queue async work that continues in the
+background by default. The missing piece is a first-class way for the completed
+run to return its full result to the Session that initiated or is waiting for
+that work.
 
 This is especially important for Agent-to-Agent delegation:
 
@@ -37,7 +37,6 @@ Add a callback option to direct Agent Runs:
 
 ```bash
 vibe agent run \
-  --async \
   --session-id <target-session-id> \
   --callback-session-id <caller-session-id> \
   --message "Run this delegated task."
@@ -155,7 +154,7 @@ terminal and after `result_text` has been recorded.
 
 High-level flow:
 
-1. `vibe agent run --async ... --callback-session-id ses_calling` enqueues an
+1. `vibe agent run ... --callback-session-id ses_calling` enqueues an
    `agent_run` row with `callback_session_id=ses_calling` and
    `callback_status=pending`.
 2. The scheduler/request drain executes the target run as today.
@@ -209,7 +208,7 @@ Retries:
 
 Focused test coverage:
 
-- CLI parser accepts `--callback-session-id` only for async direct Agent Runs.
+- CLI parser accepts `--callback-session-id` for default-async direct Agent Runs.
 - CLI payload and persisted row include `callback_session_id`.
 - unresolved/archived callback Session is rejected.
 - completed successful run dispatches full `result_text` into Caller Session.

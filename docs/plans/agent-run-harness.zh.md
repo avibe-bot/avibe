@@ -46,16 +46,16 @@ Web UI 可以是清晰的三个 tab：
 
 ### `vibe agent run`
 
-同步 Agent Run：
+异步 Agent Run（默认）：
 
 ```bash
 vibe agent run --agent release-reviewer --message "Review this diff."
 ```
 
-异步 Agent Run：
+同步 Agent Run：
 
 ```bash
-vibe agent run --agent release-reviewer --async --message-file request.md
+vibe agent run --agent release-reviewer --sync --message-file request.md
 ```
 
 继续已有 Session：
@@ -87,14 +87,15 @@ vibe agent run \
 - `--agent <name>` 为这次 run 选择 Vibe Agent。如果不传，则从 session 或
   delivery Scope 的默认配置解析 Agent。
 - `--deliver-key <scope-id>` 把结果发送到 IM Scope。
-- `--async` 表示排队后立即返回。
-- 不带 `--async` 时，命令等待完成并打印结果。
+- Run 默认排队后立即返回。
+- `--sync` 表示等待完成并打印结果。
+- `--async` 仍作为默认异步行为的兼容别名保留。
 
 执行控制：
 
 - 如果存在 scope/session，run 使用 scope/session workdir；否则使用服务默认
   workdir。
-- `--wait-timeout <seconds>` 控制同步命令最多等待多久；它不终止 run。默认不设置
+- `--wait-timeout <seconds>` 控制 `--sync` 命令最多等待多久；它不终止 run。默认不设置
   固定等待上限；如果同步 run 执行超过 30 分钟，CLI 应返回 accepted 结果并把
   run 转为 async 管理。30 分钟是系统保护阈值，不是用户可见的默认 timeout。
 - `--json` 是稳定的机器可读契约。非 JSON 输出面向人类，可以更简洁。
@@ -104,7 +105,7 @@ vibe agent run \
 兼容窗口：
 
 ```bash
-vibe hook send ... -> vibe agent run --async ...
+vibe hook send ... -> vibe agent run ...
 ```
 
 规则：
@@ -220,7 +221,7 @@ vibe watch remove <watch-id>
 
 ### One-Off Agent Run 和 One-Off Task 的区别
 
-`vibe agent run --async` 和 `vibe task add --at ...` 都可以只执行一次，但它们
+`vibe agent run` 和 `vibe task add --at ...` 都可以只执行一次，但它们
 对应不同产品需求：
 
 - Agent Run：现在执行；不保存 definition；通过 run history 管理。
@@ -340,7 +341,7 @@ lark::channel::oc_...
 | `--deliver-key` + `--post-to` | 拒绝 | 拒绝 | 拒绝 | 一个是显式 Scope，一个是 shortcut。 |
 | `--agent` + `--session-id` | backend 一致时允许 | backend 一致时允许 | backend 一致时允许 | `--agent` 只覆盖该次 run/definition，不修改 Session；若 Agent backend 和 Session backend 不同则拒绝。 |
 | `--agent` + `--deliver-key` | 允许 | 允许 | 允许 | `--agent` 覆盖 Scope 默认 Agent；`--deliver-key` 决定 delivery。 |
-| `--async` + `--wait-timeout` | 拒绝 | 不适用 | 不适用 | `--wait-timeout` 只控制同步 CLI 等待，不控制 async run 生命周期。 |
+| 默认 async + `--wait-timeout` | 拒绝 | 不适用 | 不适用 | `--wait-timeout` 只控制 `--sync` CLI 等待，不控制 async run 生命周期。 |
 
 ### Delivery Policies
 
@@ -458,7 +459,7 @@ Definition 表的迁移优先级：
 `agent_runs` 保存每一次实际执行：
 
 - 立即执行的 `vibe agent run`；
-- 异步的 `vibe agent run --async`；
+- 异步的 `vibe agent run`；
 - scheduled task 触发；
 - watch 进入终态后的 follow-up；
 - 未来 webhook invocation。
@@ -759,10 +760,9 @@ vibe runs cancel run123
 
 ## Runtime 和递归策略
 
-`vibe agent run --async` 应始终先创建 `agent_runs` 记录，然后交给 Vibe
-runtime 执行。
+`vibe agent run` 应始终先创建 `agent_runs` 记录，然后交给 Vibe runtime 执行。
 
-同步 `vibe agent run` 也应该先创建 run 记录，然后二选一：
+同步 `vibe agent run --sync` 也应该先创建 run 记录，然后二选一：
 
 - 通过本地 runtime service 执行并等待完成；
 - 只有当 runtime service 不可用且 backend 路径适合在 CLI 进程里安全运行时，

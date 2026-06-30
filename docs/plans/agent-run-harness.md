@@ -47,16 +47,16 @@ The shared primitive is the run record, not the task.
 
 ### `vibe agent run`
 
-Synchronous Agent Run:
+Asynchronous Agent Run (default):
 
 ```bash
 vibe agent run --agent release-reviewer --message "Review this diff."
 ```
 
-Asynchronous Agent Run:
+Synchronous Agent Run:
 
 ```bash
-vibe agent run --agent release-reviewer --async --message-file request.md
+vibe agent run --agent release-reviewer --sync --message-file request.md
 ```
 
 Continue an existing session:
@@ -89,14 +89,15 @@ Rules:
 - `--agent <name>` selects the Vibe Agent for this run. If omitted, resolve the
   Agent from the session or delivery Scope defaults.
 - `--deliver-key <scope-id>` sends the result to an IM scope.
-- `--async` returns after the run is queued.
-- Without `--async`, the command waits for completion and prints the result.
+- Runs return after they are queued by default.
+- `--sync` waits for completion and prints the result.
+- `--async` remains a compatibility alias for the default queued behavior.
 
 Execution controls:
 
 - The run uses the scope/session workdir when a scope/session is present;
   otherwise it uses the service default workdir.
-- `--wait-timeout <seconds>` controls how long a synchronous command waits; it
+- `--wait-timeout <seconds>` controls how long a `--sync` command waits; it
   does not terminate the run. There is no fixed default wait limit; if a
   synchronous run exceeds 30 minutes, the CLI returns an accepted response and
   the run continues asynchronously. The 30-minute threshold is a system
@@ -109,7 +110,7 @@ Execution controls:
 Compatibility window:
 
 ```bash
-vibe hook send ... -> vibe agent run --async ...
+vibe hook send ... -> vibe agent run ...
 ```
 
 Rules:
@@ -229,7 +230,7 @@ Rules:
 
 ### One-Off Agent Run vs One-Off Task
 
-`vibe agent run --async` and `vibe task add --at ...` can both execute once, but
+`vibe agent run` and `vibe task add --at ...` can both execute once, but
 they answer different product needs:
 
 - Agent Run: execute now; no saved definition; managed through run history.
@@ -351,7 +352,7 @@ Rules:
 | `--deliver-key` + `--post-to` | Reject | Reject | Reject | One is an explicit Scope; the other is a shortcut. |
 | `--agent` + `--session-id` | Allow if backend matches | Allow if backend matches | Allow if backend matches | `--agent` only overrides this run/definition and does not mutate the Session; reject if Agent backend differs from Session backend. |
 | `--agent` + `--deliver-key` | Allow | Allow | Allow | `--agent` overrides the Scope default Agent; `--deliver-key` controls delivery. |
-| `--async` + `--wait-timeout` | Reject | N/A | N/A | `--wait-timeout` only controls synchronous CLI waiting and does not control async run lifetime. |
+| default async + `--wait-timeout` | Reject | N/A | N/A | `--wait-timeout` only controls `--sync` CLI waiting and does not control async run lifetime. |
 
 ### Delivery Policies
 
@@ -482,7 +483,7 @@ Definition table migration priority:
 `agent_runs` stores every actual execution:
 
 - immediate `vibe agent run`;
-- async `vibe agent run --async`;
+- async `vibe agent run`;
 - scheduled task fire;
 - watch terminal event/follow-up;
 - future webhook invocation.
@@ -795,10 +796,10 @@ vibe runs cancel run123
 
 ## Runtime And Recursion Policy
 
-`vibe agent run --async` should always enqueue a `agent_runs` row and let
-the Vibe runtime execute it.
+`vibe agent run` should always enqueue a `agent_runs` row and let the Vibe
+runtime execute it.
 
-Synchronous `vibe agent run` should still create a run record first, then either:
+Synchronous `vibe agent run --sync` should still create a run record first, then either:
 
 - execute through the local runtime service and wait for completion; or
 - claim/execute the run inline only if the runtime service is unavailable and

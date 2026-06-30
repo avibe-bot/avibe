@@ -37,11 +37,10 @@ Avibe treats it as:
 - create a new private/background session;
 - use the caller shell cwd as the new session cwd;
 - record callback route to the caller session when `AVIBE_SESSION_ID` exists;
-- keep the run synchronous unless `--async` is explicitly passed.
+- queue the run and return immediately by default.
 
-The async-by-default proposal is intentionally left as a follow-up. It changes
-the waiting contract of every existing caller and should land separately with a
-focused migration.
+Use `--sync` only when the CLI process must wait for the run result. The legacy
+`--async` flag remains accepted for older scripts, but it is no longer required.
 
 ## New Target And Scope Parameters
 
@@ -76,8 +75,8 @@ All `vibe agent run` invocations resolve a callback route:
 - `--no-callback` records an intentional no-callback policy;
 - otherwise, `AVIBE_SESSION_ID` becomes the callback route when available.
 
-For async runs, the callback route is used when the run completes. For sync
-runs, the route is only recorded for future detach-to-async behavior.
+For default async runs, the callback route is used when the run completes. For
+sync runs, the route is recorded for future detach-to-async behavior.
 
 ## Other CLI Defaults
 

@@ -141,7 +141,7 @@ symlink `~/.vibe_remote → ~/.avibe`. Hardening so it never strands anyone:
   - C2 — adversarial review of §5a resolver/migration (state paths, first-run races, run-before-live, Windows, regression shared-state) and §5c sequencing.
   - C3 — mandated pre-merge Codex review (AGENTS.md §5).
 - **Invocation** (both verified):
-  - Native/dogfood: `vibe agent run --agent codex --message "<task>" [--async] [--session-id <id>]` (an enabled `codex` Vibe Agent already exists: backend codex, gpt-5.5, effort low; `--async` posts back).
+  - Native/dogfood: `vibe agent run --agent codex --message "<task>" [--session-id <id>]` (an enabled `codex` Vibe Agent already exists: backend codex, gpt-5.5, effort low; runs are async by default and post back; add `--sync` only when the terminal must wait).
   - Direct CLI: `codex exec --json --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --cd <dir> "<prompt>"` (codex-cli 0.130.0). Synchronous JSON, full control of reasoning effort — preferred for tight-loop sub-tasks and meticulous audits (the existing agent runs effort "low").
 
 ## 7. Testing / validation
