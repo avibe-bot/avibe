@@ -908,6 +908,53 @@ def test_fulfill_access_request_relays_only_browser_dek_blindbox(monkeypatch, av
     assert "plaintext-must-not-cross-python-agent-boundary" not in encoded
 
 
+def test_fulfill_protected_always_ask_access_uses_one_shot_resident_agent_grant(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    validate_pubkey = Mock()
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    monkeypatch.setattr(api, "validate_avault_agent_pubkey", validate_pubkey)
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_ASK",
+            "protection": "protected",
+            "policy": {"always_ask": True},
+            "sealed": {"ciphertext": "ct-protected", "nonce": "n-protected", "wrap_meta": "wm-protected"},
+        }
+    )
+    requested = api.request_vault_access({"name": "PROTECTED_ASK", "session_id": "ses_1"})
+
+    fulfilled = api.fulfill_vault_access_request(
+        requested["request"]["id"],
+        {
+            "session_id": "ses_1",
+            "agent_pubkey": {"public_key": "pk", "fingerprint": "fp"},
+            "deks": [
+                {
+                    "name": "PROTECTED_ASK",
+                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                }
+            ],
+        },
+    )
+
+    assert requested["request"]["card"]["one_shot"] is True
+    assert requested["request"]["card"]["scope_options"][0]["scope_ref"] == "PROTECTED_ASK"
+    assert fulfilled["grant"]["one_shot"] is True
+    assert fulfilled["grant"]["scope_type"] == "secret"
+    assert fulfilled["grant"]["scope_ref"] == "PROTECTED_ASK"
+    assert fulfilled["grant"]["delivery_ready"] is True
+    validate_pubkey.assert_called_once_with({"public_key": "pk", "fingerprint": "fp"})
+    assert agent_grant.call_args.kwargs["deks"] == [
+        {
+            "name": "PROTECTED_ASK",
+            "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+        }
+    ]
+
+
 def test_fulfill_access_request_rejects_dek_or_plaintext_material(monkeypatch, avault_p2):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})

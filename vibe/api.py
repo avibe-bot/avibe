@@ -1694,6 +1694,12 @@ def _grant_ttl_seconds(grant: dict) -> int:
     return max(1, int(round(approved_lifetime)))
 
 
+def _release_one_shot_agent_grant(grant: dict | None, *, reason: str) -> None:
+    if not isinstance(grant, dict) or grant.get("one_shot") is not True:
+        return
+    release_vault_agent_scopes(_grant_scope_payload(grant), reason=reason)
+
+
 def _agent_grant_cached_all(result: dict, expected_count: int) -> bool:
     granted = result.get("granted")
     try:
@@ -1885,10 +1891,18 @@ def create_vault_grant(payload: dict) -> dict:
         ttl_seconds = int(ttl) if ttl is not None else None
     except (TypeError, ValueError) as exc:
         raise VaultApiError("ttl_seconds must be an integer", code="invalid_grant") from exc
+    request_id = payload.get("request_id") or payload.get("created_by_request_id")
+    if not request_id:
+        raise VaultApiError("request_id is required to create a grant", code="missing_request_id")
     engine = _vault_engine()
     try:
         with engine.connect() as conn:
-            grantable_members = vault_service.grantable_member_metas(conn, scope_type, scope_ref)
+            grantable_members = vault_service.request_grantable_member_metas(
+                conn,
+                scope_type,
+                scope_ref,
+                str(request_id),
+            )
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{exc}' not found", code="secret_not_found", status=404) from exc
     except vault_service.InvalidGrantError as exc:
@@ -1903,9 +1917,6 @@ def create_vault_grant(payload: dict) -> dict:
     if needs_agent_deks and provided_names != protected_member_names:
         raise VaultApiError("resident agent DEKs must match the protected grant members", code="invalid_grant")
     expected_member_names = {str(member["name"]) for member in grantable_members} if needs_agent_deks else None
-    request_id = payload.get("request_id") or payload.get("created_by_request_id")
-    if not request_id:
-        raise VaultApiError("request_id is required to create a grant", code="missing_request_id")
     expected_pubkey = payload.get("agent_pubkey") if isinstance(payload.get("agent_pubkey"), dict) else None
     if needs_agent_deks:
         try:

@@ -4914,24 +4914,27 @@ def cmd_vault_run(args):
     try:
         if grant is not None:
             secret_env_names = {str(secret["env"]) for secret in secrets if secret.get("env")}
-            with _AgentRunOutputBridge(
-                sys.stdout.buffer,
-                sys.stderr.buffer,
-                env_exclude=secret_env_names,
-            ) as output_bridge:
-                result = api.avault_agent_deliver_run(
-                    scope_type=grant["scope_type"],
-                    scope_ref=grant["scope_ref"],
-                    secrets=secrets,
-                    command=_agent_run_command(
-                        command_argv,
-                        stdout_path=str(output_bridge.stdout_path),
-                        stderr_path=str(output_bridge.stderr_path),
-                        stdin_path=str(output_bridge.stdin_path),
-                        env_path=str(output_bridge.env_path),
-                        keep_env_path=str(output_bridge.keep_env_path),
-                    ),
-                )
+            try:
+                with _AgentRunOutputBridge(
+                    sys.stdout.buffer,
+                    sys.stderr.buffer,
+                    env_exclude=secret_env_names,
+                ) as output_bridge:
+                    result = api.avault_agent_deliver_run(
+                        scope_type=grant["scope_type"],
+                        scope_ref=grant["scope_ref"],
+                        secrets=secrets,
+                        command=_agent_run_command(
+                            command_argv,
+                            stdout_path=str(output_bridge.stdout_path),
+                            stderr_path=str(output_bridge.stderr_path),
+                            stdin_path=str(output_bridge.stdin_path),
+                            env_path=str(output_bridge.env_path),
+                            keep_env_path=str(output_bridge.keep_env_path),
+                        ),
+                    )
+            finally:
+                api._release_one_shot_agent_grant(grant, reason="vault-run-one-shot")
             exit_code = int(result["exit_code"])
         else:
             exit_code = api.avault_deliver_run(secrets, command_argv)
@@ -5398,13 +5401,16 @@ def cmd_vault_fetch(args):
             delivery=delivery,
         )
         if grant is not None:
-            result = api.avault_agent_deliver_fetch(
-                scope_type=grant["scope_type"],
-                scope_ref=grant["scope_ref"],
-                name=name,
-                sealed=sealed,
-                request=request,
-            )
+            try:
+                result = api.avault_agent_deliver_fetch(
+                    scope_type=grant["scope_type"],
+                    scope_ref=grant["scope_ref"],
+                    name=name,
+                    sealed=sealed,
+                    request=request,
+                )
+            finally:
+                api._release_one_shot_agent_grant(grant, reason="vault-fetch-one-shot")
         else:
             result = api.avault_deliver_fetch(name, sealed, request)
         status = int(result.get("status") or 0)
@@ -5550,13 +5556,16 @@ def cmd_vault_inject(args):
         # avault writes the 0600 file atomically; if the path is unwritable it raises and no
         # delivery is recorded.
         if grant is not None:
-            api.avault_agent_deliver_inject(
-                scope_type=grant["scope_type"],
-                scope_ref=grant["scope_ref"],
-                path=resolved_out,
-                fmt=fmt,
-                secrets=secrets,
-            )
+            try:
+                api.avault_agent_deliver_inject(
+                    scope_type=grant["scope_type"],
+                    scope_ref=grant["scope_ref"],
+                    path=resolved_out,
+                    fmt=fmt,
+                    secrets=secrets,
+                )
+            finally:
+                api._release_one_shot_agent_grant(grant, reason="vault-inject-one-shot")
         else:
             api.avault_deliver_inject(out, fmt, secrets)
         # The file is on disk → delivered. A bookkeeping failure must not report a failed command
