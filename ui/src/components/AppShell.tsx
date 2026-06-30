@@ -385,11 +385,11 @@ export const AppShell: React.FC = () => {
             padding and a smaller gap to the bottom cluster — to give the flex-1
             Projects list more height. Admin keeps the roomier spacing. */}
         <div className="flex h-full flex-col">
-          {/* Brand band — flush to the top edge and bordered like the chat
-              header (px-4 py-2.5) so the logo centerline lines up with the chat
-              title bar across one continuous divider. Logo is size-8 to match
-              the header's row height. */}
-          <div className="flex shrink-0 items-center gap-2.5 border-b border-border px-4 py-2.5">
+          {/* Brand band — flush to the top edge, sharing the chat header's
+              px-4 py-2.5 row height so the logo centerline lines up with the
+              chat title bar. No bottom border (it read as out of place under
+              the logo). Logo is size-8 to match the header's row height. */}
+          <div className="flex shrink-0 items-center gap-2.5 px-4 py-2.5">
             <img
               src={logoImg}
               alt="avibe logo"
