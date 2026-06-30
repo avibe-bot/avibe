@@ -165,6 +165,29 @@ const HtmlView: React.FC<{ html: string; className?: string }> = ({ html, classN
 };
 
 // ── Office (docx / xlsx / pptx) ────────────────────────────────────────────────
+// Neutralize hyperlinks in rendered-into-the-DOM content (docx-preview copies a DOCX relationship
+// target straight into <a href>, so a crafted `javascript:` link would run in the app origin on
+// click). Anything that isn't a plain web/mail link has its href stripped (inert text); safe links
+// open in a new tab so a click can't navigate the workbench away.
+const SAFE_LINK_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
+function sanitizeRenderedLinks(root: HTMLElement) {
+  root.querySelectorAll('a[href]').forEach((a) => {
+    let safe = false;
+    try {
+      // new URL() normalizes obfuscated schemes (e.g. `java\tscript:`), so the check can't be fooled.
+      safe = SAFE_LINK_PROTOCOLS.has(new URL(a.getAttribute('href') || '', window.location.href).protocol);
+    } catch {
+      safe = false;
+    }
+    if (safe) {
+      a.setAttribute('target', '_blank');
+      a.setAttribute('rel', 'noopener noreferrer');
+    } else {
+      a.removeAttribute('href');
+    }
+  });
+}
+
 // Fetch the file bytes once per URL. Shared by the Office views; their parsers want an ArrayBuffer.
 function useFileBytes(url: string) {
   const [state, setState] = React.useState<{ status: 'loading' | 'ready' | 'error'; bytes: ArrayBuffer | null }>({ status: 'loading', bytes: null });
@@ -209,7 +232,10 @@ const DocxView: React.FC<{ url: string; className?: string }> = ({ url, classNam
         // otherwise render straight into our DOM (with remote subresources / active attributes),
         // bypassing the sandbox+CSP path used for .html previews. Disable it for untrusted files.
         await renderAsync(bytes, container, undefined, { className: 'docx-rendered', inWrapper: true, ignoreLastRenderedPageBreak: true, renderAltChunks: false });
-        if (alive) setRender('done');
+        if (alive) {
+          sanitizeRenderedLinks(container); // strip javascript:/unsafe DOCX hyperlinks before the user can click
+          setRender('done');
+        }
       } catch {
         if (alive) setRender('error');
       }
