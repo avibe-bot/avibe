@@ -4720,21 +4720,30 @@ def _consume_one_shot_grants(grants: list[dict] | tuple[dict, ...] | None, *, re
         logger.debug("failed to consume one-shot vault grants after delivery", exc_info=True)
 
 
+def _unique_one_shot_grants(grants: list[dict] | tuple[dict, ...] | None) -> list[dict]:
+    unique: list[dict] = []
+    seen: set[str] = set()
+    for grant in grants or []:
+        if not isinstance(grant, dict) or grant.get("one_shot") is not True:
+            continue
+        grant_id = str(grant.get("id") or "")
+        if not grant_id or grant_id in seen:
+            continue
+        seen.add(grant_id)
+        unique.append(grant)
+    return unique
+
+
 def _release_one_shot_reservations(engine, grants: list[dict] | tuple[dict, ...] | None) -> None:
+    grants = _unique_one_shot_grants(grants)
     if not grants:
         return
     from storage import vault_service
 
     try:
         with engine.begin() as conn:
-            seen: set[str] = set()
             for grant in grants:
-                if not isinstance(grant, dict) or grant.get("one_shot") is not True:
-                    continue
-                grant_id = str(grant.get("id") or "")
-                if not grant_id or grant_id in seen:
-                    continue
-                seen.add(grant_id)
+                grant_id = str(grant["id"])
                 with contextlib.suppress(
                     vault_service.GrantNotActiveError,
                     vault_service.GrantNotFoundError,
@@ -4750,7 +4759,16 @@ def _run_delivery_result(raw_result) -> tuple[int, bool]:
         exit_code = int(raw_result["exit_code"])
         return exit_code, bool(raw_result.get("delivered", True))
     exit_code = int(raw_result)
-    return exit_code, exit_code != 70
+    return exit_code, True
+
+
+def _mixed_grants_error(message: str) -> TaskCliError:
+    return TaskCliError(message, code="mixed_grants")
+
+
+def _consume_after_possible_use(grants: list[dict] | tuple[dict, ...] | None, *, reason: str) -> None:
+    """Fail closed for one-shot grants after handoff to avault/resident agent."""
+    _consume_one_shot_grants(_unique_one_shot_grants(grants), reason=reason)
 
 
 def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: list[str], *, args=None):
@@ -4775,6 +4793,7 @@ def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: l
     grant: dict | None = None
     one_shot_grants: list[dict] = []
     approval_error: TaskCliError | None = None
+    pre_delivery_error: TaskCliError | None = None
     resolved_by_name: dict[str, dict] = {}
     with engine.begin() as conn:
         for env_name, vault_name in mapping.items():
@@ -4806,10 +4825,12 @@ def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: l
                 if grant is None:
                     grant = current_grant
                 elif grant["scope_type"] != current_grant["scope_type"] or grant["scope_ref"] != current_grant["scope_ref"]:
-                    raise TaskCliError(
+                    if current_grant.get("one_shot") is True:
+                        one_shot_grants.append(current_grant)
+                    pre_delivery_error = _mixed_grants_error(
                         "protected vault run currently requires all protected secrets to share one active grant",
-                        code="mixed_grants",
                     )
+                    break
                 if current_grant.get("one_shot") is True:
                     one_shot_grants.append(current_grant)
                 secrets.append({"name": vault_name, "env": env_name, "envelope": resolved["envelope"], "protected": True})
@@ -4818,6 +4839,9 @@ def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: l
     if approval_error is not None:
         _release_one_shot_reservations(engine, one_shot_grants)
         raise approval_error
+    if pre_delivery_error is not None:
+        _release_one_shot_reservations(engine, one_shot_grants)
+        raise pre_delivery_error
     protected = [item for item in secrets if item["protected"]]
     standard = [item for item in secrets if not item["protected"]]
     if protected and standard:
@@ -4884,6 +4908,7 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
     grant: dict | None = None
     one_shot_grants: list[dict] = []
     approval_error: TaskCliError | None = None
+    pre_delivery_error: TaskCliError | None = None
     resolved_by_name: dict[str, dict] = {}
     with engine.begin() as conn:
         for name in names:
@@ -4915,10 +4940,12 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
                 if grant is None:
                     grant = current_grant
                 elif grant["scope_type"] != current_grant["scope_type"] or grant["scope_ref"] != current_grant["scope_ref"]:
-                    raise TaskCliError(
+                    if current_grant.get("one_shot") is True:
+                        one_shot_grants.append(current_grant)
+                    pre_delivery_error = _mixed_grants_error(
                         "protected vault inject currently requires all protected secrets to share one active grant",
-                        code="mixed_grants",
                     )
+                    break
                 if current_grant.get("one_shot") is True:
                     one_shot_grants.append(current_grant)
                 secrets.append({"name": name, "key": name, "envelope": resolved["envelope"], "protected": True})
@@ -4927,6 +4954,9 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
     if approval_error is not None:
         _release_one_shot_reservations(engine, one_shot_grants)
         raise approval_error
+    if pre_delivery_error is not None:
+        _release_one_shot_reservations(engine, one_shot_grants)
+        raise pre_delivery_error
     protected = [item for item in secrets if item["protected"]]
     standard = [item for item in secrets if not item["protected"]]
     if protected and standard:
@@ -4990,6 +5020,7 @@ def cmd_vault_run(args):
     # returns the exit code.
     from vibe import api
 
+    handoff_started = False
     try:
         if grant is not None:
             secret_env_names = {str(secret["env"]) for secret in secrets if secret.get("env")}
@@ -4998,6 +5029,7 @@ def cmd_vault_run(args):
                 sys.stderr.buffer,
                 env_exclude=secret_env_names,
             ) as output_bridge:
+                handoff_started = True
                 result = api.avault_agent_deliver_run(
                     scope_type=grant["scope_type"],
                     scope_ref=grant["scope_ref"],
@@ -5014,13 +5046,17 @@ def cmd_vault_run(args):
             exit_code = int(result["exit_code"])
             delivered = True
         else:
+            handoff_started = True
             exit_code, delivered = _run_delivery_result(api.avault_deliver_run(secrets, command_argv))
     except TaskCliError as exc:
-        _release_one_shot_reservations(engine, one_shot_grants)
+        if handoff_started:
+            _consume_after_possible_use(one_shot_grants, reason="vault-run-one-shot")
+        else:
+            _release_one_shot_reservations(engine, one_shot_grants)
         _print_task_error(exc)
         return 1
     except api.AvaultError as exc:
-        _release_one_shot_reservations(engine, one_shot_grants)
+        _consume_after_possible_use(one_shot_grants, reason="vault-run-one-shot")
         if grant is not None and _agent_missing_grant(exc):
             requester, delivery, _session_id = _vault_cli_delivery_context(args, mode="run", command=command_argv)
             _expire_agent_grant_after_missing(
@@ -5034,8 +5070,15 @@ def cmd_vault_run(args):
             return 1
         _print_task_error(TaskCliError(f"avault deliver failed: {exc}", code="avault_failed", help_command=help_command))
         return 1
+    except Exception as exc:
+        if handoff_started:
+            _consume_after_possible_use(one_shot_grants, reason="vault-run-one-shot")
+        else:
+            _release_one_shot_reservations(engine, one_shot_grants)
+        _print_task_error(exc, help_command=help_command)
+        return 1
     if delivered:
-        _consume_one_shot_grants(one_shot_grants, reason="vault-run-one-shot")
+        _consume_after_possible_use(one_shot_grants, reason="vault-run-one-shot")
         try:
             with engine.begin() as conn:
                 vault_service.record_deliveries(
@@ -5369,6 +5412,7 @@ def cmd_vault_fetch(args):
     engine = None
     grant = None
     one_shot_grant = None
+    handoff_started = False
     name = getattr(args, "auth", "")
     host = ""
     method = "GET"
@@ -5479,6 +5523,7 @@ def cmd_vault_fetch(args):
             requester=requester,
             delivery=delivery,
         )
+        handoff_started = True
         if grant is not None:
             result = api.avault_agent_deliver_fetch(
                 scope_type=grant["scope_type"],
@@ -5489,7 +5534,7 @@ def cmd_vault_fetch(args):
             )
         else:
             result = api.avault_deliver_fetch(name, sealed, request)
-        _consume_one_shot_grants([one_shot_grant] if one_shot_grant is not None else [], reason="vault-fetch-one-shot")
+        _consume_after_possible_use([one_shot_grant] if one_shot_grant is not None else [], reason="vault-fetch-one-shot")
         status = int(result.get("status") or 0)
         resp_body = result.get("body") or ""
 
@@ -5516,11 +5561,17 @@ def cmd_vault_fetch(args):
         _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
         return 1
     except TaskCliError as exc:
-        _release_one_shot_reservations(engine, [one_shot_grant] if one_shot_grant is not None else [])
+        if handoff_started:
+            _consume_after_possible_use([one_shot_grant] if one_shot_grant is not None else [], reason="vault-fetch-one-shot")
+        else:
+            _release_one_shot_reservations(engine, [one_shot_grant] if one_shot_grant is not None else [])
         _print_task_error(exc)
         return 1
     except api.AvaultError as exc:
-        _release_one_shot_reservations(engine, [one_shot_grant] if one_shot_grant is not None else [])
+        if handoff_started:
+            _consume_after_possible_use([one_shot_grant] if one_shot_grant is not None else [], reason="vault-fetch-one-shot")
+        else:
+            _release_one_shot_reservations(engine, [one_shot_grant] if one_shot_grant is not None else [])
         if engine is not None and isinstance(grant, dict) and _agent_missing_grant(exc):
             grant_id = grant.get("id")
             if grant_id:
@@ -5536,7 +5587,10 @@ def cmd_vault_fetch(args):
         _print_task_error(TaskCliError(f"request failed: {exc}", code="request_failed", help_command=help_command))
         return 1
     except Exception as exc:
-        _release_one_shot_reservations(engine, [one_shot_grant] if one_shot_grant is not None else [])
+        if handoff_started:
+            _consume_after_possible_use([one_shot_grant] if one_shot_grant is not None else [], reason="vault-fetch-one-shot")
+        else:
+            _release_one_shot_reservations(engine, [one_shot_grant] if one_shot_grant is not None else [])
         _print_task_error(exc, help_command=help_command)
         return 1
 
@@ -5613,6 +5667,7 @@ def cmd_vault_inject(args):
     grant = None
     one_shot_grants: list[dict] = []
     keys: list[str] = []
+    handoff_started = False
     try:
         keys = [k.strip() for k in (getattr(args, "keys", None) or "").split(",") if k.strip()]
         keys = list(dict.fromkeys(keys))  # dedupe, preserve order: A,A is one entry + one audit
@@ -5636,6 +5691,7 @@ def cmd_vault_inject(args):
         grant, one_shot_grants, secrets = _resolve_vault_inject_delivery(engine, keys, path=resolved_out, fmt=fmt, args=args)
         # avault writes the 0600 file atomically; if the path is unwritable it raises and no
         # delivery is recorded.
+        handoff_started = True
         if grant is not None:
             api.avault_agent_deliver_inject(
                 scope_type=grant["scope_type"],
@@ -5646,7 +5702,7 @@ def cmd_vault_inject(args):
             )
         else:
             api.avault_deliver_inject(out, fmt, secrets)
-        _consume_one_shot_grants(one_shot_grants, reason="vault-inject-one-shot")
+        _consume_after_possible_use(one_shot_grants, reason="vault-inject-one-shot")
         # The file is on disk → delivered. A bookkeeping failure must not report a failed command
         # (callers would retry though the secrets are already written), so record best-effort.
         try:
@@ -5666,11 +5722,17 @@ def cmd_vault_inject(args):
         _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
         return 1
     except TaskCliError as exc:
-        _release_one_shot_reservations(engine, one_shot_grants)
+        if handoff_started:
+            _consume_after_possible_use(one_shot_grants, reason="vault-inject-one-shot")
+        else:
+            _release_one_shot_reservations(engine, one_shot_grants)
         _print_task_error(exc)
         return 1
     except api.AvaultError as exc:
-        _release_one_shot_reservations(engine, one_shot_grants)
+        if handoff_started:
+            _consume_after_possible_use(one_shot_grants, reason="vault-inject-one-shot")
+        else:
+            _release_one_shot_reservations(engine, one_shot_grants)
         if engine is not None and isinstance(grant, dict) and _agent_missing_grant(exc):
             requester, delivery, _session_id = _vault_cli_delivery_context(
                 args,
@@ -5690,7 +5752,10 @@ def cmd_vault_inject(args):
         _print_task_error(TaskCliError(f"avault inject failed: {exc}", code="avault_failed", help_command=help_command))
         return 1
     except Exception as exc:
-        _release_one_shot_reservations(engine, one_shot_grants)
+        if handoff_started:
+            _consume_after_possible_use(one_shot_grants, reason="vault-inject-one-shot")
+        else:
+            _release_one_shot_reservations(engine, one_shot_grants)
         _print_task_error(exc, help_command=help_command)
         return 1
 

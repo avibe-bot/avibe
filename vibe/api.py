@@ -4906,11 +4906,6 @@ def _require_avault_p2_surface(feature: str) -> None:
 # avibe's wait must outlast avault's own fetch timeout (10s connect + 30s total).
 _AVAULT_TIMEOUT_SECONDS = 20.0
 _AVAULT_FETCH_TIMEOUT_SECONDS = 60.0
-# avault exits 70 for an internal failure (bad envelope, decrypt error, store error)
-# before any delivery side effect — distinct from a delivered child's own exit code.
-_AVAULT_INTERNAL_ERROR_CODE = 70
-
-
 class AvaultError(Exception):
     """An ``avault`` invocation failed. Messages never carry secret material —
     avault is designed to keep secrets out of its stdout/stderr and errors."""
@@ -5108,8 +5103,9 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> dict:
     plaintext never returns here. The child inherits this process's stdio so its
     output passes through; the run-secrets JSON (envelopes only, no plaintext)
     goes on avault's stdin to stay out of ``ps``. Returns the child's exit code
-    (``128 + signal`` if signalled) plus whether avault reached the delivery side
-    effect, or raises :class:`AvaultError` if avault could not start the child.
+    (``128 + signal`` if signalled). Delivery is fail-closed: once avault returns
+    an exit code, callers must treat the secret as handed to the child unless a
+    future avault protocol provides a distinct pre-handoff failure signal.
     """
     path = _require_avault_path()
     payload = json.dumps(
@@ -5136,7 +5132,7 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> dict:
         # which surfaces its exit code.
         pass
     exit_code = proc.wait()
-    return {"exit_code": exit_code, "delivered": exit_code != _AVAULT_INTERNAL_ERROR_CODE}
+    return {"exit_code": exit_code, "delivered": True}
 
 
 def _agent_secret_payload(secret: dict, *, target_field: str) -> dict:

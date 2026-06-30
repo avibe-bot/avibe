@@ -412,6 +412,28 @@ def test_fetch_returns_response_even_if_one_shot_cleanup_fails(capfd, monkeypatc
     cleanup.assert_called_once()
 
 
+def test_fetch_consumes_one_shot_grant_when_avault_errors_after_possible_egress(capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    grant = _set_always_ask_grant("ASK_KEY", allow_host=["api.example.com"])
+    fetch = Mock(side_effect=api.AvaultError("timed out after sending request"))
+    monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
+
+    code = cli.cmd_vault_fetch(_ns(auth="ASK_KEY", url="https://api.example.com/x", method="POST"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "request_failed"
+    fetch.assert_called_once()
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(
+            vault_service.vault_grants.select().where(vault_service.vault_grants.c.id == grant["id"])
+        ).mappings().one()["status"]
+    assert status == "expired"
+
+
 def test_host_allowed_is_case_insensitive():
     assert cli._host_allowed("api.github.com", ["API.GITHUB.COM"]) is True
     assert cli._host_allowed("api.github.com", [".GitHub.com"]) is True
