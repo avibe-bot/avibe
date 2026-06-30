@@ -124,14 +124,6 @@ export function imageKind(name: string, mime?: string | null): ImageKind | null 
   return null;
 }
 
-// Whether a file should preview as RENDERED (not edited) when opened from the File Browser: a raster
-// image (no editable text form) within the content cap is the only such case. SVG/Markdown stay
-// editable, gaining a preview TOGGLE inside the editor instead. A directory, symlink, or oversized
-// image (which `/api/files/content` would reject) is never previewed here — it falls to download.
-export function isRenderOnlyImage(entry: { kind: string; name: string; size: number | null }): boolean {
-  return entry.kind === 'file' && imageKind(entry.name) === 'raster' && (entry.size == null || entry.size <= IMAGE_PREVIEW_MAX_BYTES);
-}
-
 // Rich documents we can preview client-side (read-only): Office files rendered by lazy-loaded libs
 // (docx-preview / SheetJS / PptxViewJS) and PDF via the browser's built-in viewer. Kept separate
 // from previewKind/imageKind. The parsers pull the whole file into memory, so it's gated by the

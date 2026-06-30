@@ -28,6 +28,9 @@ import {
 export type PreviewSource = {
   name: string;
   mime?: string | null;
+  /** Server-supplied extension (e.g. chat /meta `ext`) — used to classify when the name is just a
+   *  descriptive label whose suffix doesn't match the real file type. */
+  ext?: string | null;
   /** Same-origin, apiFetch-able content URL. Required for image / pdf / office; default fetch for text. */
   url?: string;
   /** In-memory text (the editor's live buffer). Used for text-derived kinds instead of fetching `url`. */
@@ -46,7 +49,7 @@ export const FilePreview: React.FC<{ source: PreviewSource; className?: string; 
   onText,
 }) => {
   const { t } = useTranslation();
-  const kind = previewRenderKind(source.name, source.mime);
+  const kind = previewRenderKind(source.name, source.mime, source.ext);
 
   if (!kind) return <Centered className={className}>{t('preview.unsupported')}</Centered>;
   if (kind === 'image')
@@ -117,16 +120,22 @@ const PdfView: React.FC<{ url: string; className?: string }> = ({ url, className
 
 // ── HTML ──────────────────────────────────────────────────────────────────────
 // Render the markup in a fully sandboxed iframe: `sandbox=""` disables scripts, same-origin access,
-// forms, and popups, so previewing an arbitrary (agent- or user-authored) HTML file can't run code or
-// reach the app. Relative asset references won't resolve — acceptable for a static preview.
+// forms, and popups. But sandbox does NOT stop subresource fetches — a `<img src="https://…">` or CSS
+// import in an untrusted file would still hit the network and leak the viewer's IP on preview. So we
+// prepend a restrictive CSP <meta> (parsed before any subresource): network pinned to nothing, only
+// inline styles + data: URIs allowed. Relative/remote asset references won't resolve — acceptable for
+// a static, no-network preview (mirrors the no-auto-fetch policy of chat Markdown previews).
+const HTML_PREVIEW_CSP =
+  "default-src 'none'; img-src data:; media-src data:; font-src data:; style-src 'unsafe-inline' data:; base-uri 'none'; form-action 'none'";
 const HtmlView: React.FC<{ html: string; className?: string }> = ({ html, className }) => {
   const { t } = useTranslation();
+  const safeHtml = `<meta http-equiv="Content-Security-Policy" content="${HTML_PREVIEW_CSP}">\n${html}`;
   return (
     <iframe
       title={t('preview.title')}
       sandbox=""
       referrerPolicy="no-referrer"
-      srcDoc={html}
+      srcDoc={safeHtml}
       className={clsx('h-full w-full border-0 bg-white', className)}
     />
   );
@@ -311,7 +320,7 @@ const PptxView: React.FC<{ url: string; className?: string }> = ({ url, classNam
         }
         viewerRef.current = viewer;
         setCount(viewer.getSlideCount());
-        await viewer.renderSlide(0, canvasRef.current);
+        await viewer.render(canvasRef.current); // canonical first paint (renders the current slide, 0)
       } catch {
         if (alive) setFailed(true);
       }
@@ -432,7 +441,7 @@ const TextPreview: React.FC<{ source: PreviewSource; kind: TextKind; onText?: (t
   if (kind === 'html') return <HtmlView html={text} className={className} />;
   if (kind === 'json') return <JsonBlock text={text} className={className} />;
   if (kind === 'csv') return <CsvTable text={text} className={className} />;
-  return <CodeBlock code={text} lang={codeLanguage(source.name)} className={className} />;
+  return <CodeBlock code={text} lang={codeLanguage(source.name, source.ext)} className={className} />;
 };
 
 // Scroll container shared by the text renderers (their inner markup owns its own padding via the

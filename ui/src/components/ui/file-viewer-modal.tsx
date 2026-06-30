@@ -21,12 +21,12 @@ import type { FilePreviewTarget } from '@/components/ui/file-viewer';
 // restricted to our own same-origin media proxy — a non-proxy URL is never auto-fetched (it would
 // leak the viewer's network to a third-party host).
 
-type Meta = { name: string; size: number | null; mime: string | null };
+type Meta = { name: string; size: number | null; mime: string | null; ext: string | null };
 
 export default function FileViewerModal({ target, onClose }: { target: FilePreviewTarget; onClose: () => void }) {
   const { t } = useTranslation();
   const proxy = isProxyMediaUrl(target.url);
-  const [meta, setMeta] = React.useState<Meta>(() => ({ name: target.name || '', size: null, mime: null }));
+  const [meta, setMeta] = React.useState<Meta>(() => ({ name: target.name || '', size: null, mime: null, ext: null }));
   const [metaLoaded, setMetaLoaded] = React.useState(false);
   // The kernel reports the file's text when it loads a text kind — enables the copy button (and stays
   // null for image / pdf / office, where copy is meaningless).
@@ -38,13 +38,14 @@ export default function FileViewerModal({ target, onClose }: { target: FilePrevi
     let alive = true;
     apiFetch(`${target.url}/meta`, { headers: { Accept: 'application/json' } })
       .then((res) => (res.ok ? res.json() : null))
-      .then((m: { name?: string; size?: number; content_type?: string } | null) => {
+      .then((m: { name?: string; size?: number; content_type?: string; ext?: string } | null) => {
         if (!alive) return;
         if (m) {
           setMeta({
             name: m.name || target.name || '',
             size: typeof m.size === 'number' ? m.size : null,
             mime: m.content_type || null,
+            ext: m.ext || null,
           });
         }
         setMetaLoaded(true);
@@ -72,7 +73,7 @@ export default function FileViewerModal({ target, onClose }: { target: FilePrevi
   let body: React.ReactNode;
   if (!proxy) body = <div className="vr-fileview-msg">{t('preview.failed')}</div>;
   else if (!metaLoaded) body = <div className="vr-fileview-msg">{t('common.loading')}</div>;
-  else body = <FilePreview source={{ url: target.url, name, mime: meta.mime, size: meta.size }} onText={setText} />;
+  else body = <FilePreview source={{ url: target.url, name, ext: meta.ext, mime: meta.mime, size: meta.size }} onText={setText} />;
 
   return (
     <Dialog

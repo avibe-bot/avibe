@@ -636,7 +636,6 @@
       "lineCol": "Ln {{line}}, Col {{col}}",
       "spaces": "Spaces: {{n}}",
       "plainText": "Plain Text",
-      "imagePreview": "Image preview",
       "source": "Source",
       "preview": "Preview",
       "empty": "No file open",

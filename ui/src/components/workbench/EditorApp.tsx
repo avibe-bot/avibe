@@ -1,11 +1,11 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
-import { Blocks, Bug, Clock, CodeXml, FilePlus, Files, FolderOpen, GitBranch, Image as ImageIcon, Search, Settings, X } from 'lucide-react';
+import { Blocks, Bug, Clock, CodeXml, FilePlus, Files, FileText, FolderOpen, GitBranch, Image as ImageIcon, Search, Settings, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 import { useWindowCloseGuard, useWindowManager } from '../../context/WindowManagerContext';
 import { contentUrl, downloadFile, fileMeta, joinPath, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
-import { imageKind, isEditableFile, isEditableMeta, isRenderOnlyImage } from '../../lib/filePreview';
+import { isEditableFile, isEditableMeta, previewOverlayKind, previewRenderKind } from '../../lib/filePreview';
 import { FileTree } from './FileTree';
 import { FilePreview } from '../ui/file-preview';
 import { FilePicker, type FilePickerMode } from './FilePicker';
@@ -18,9 +18,9 @@ const FileEditorPane = lazy(() => import('./FileEditorPane').then((m) => ({ defa
 // clobbering newer on-disk content. `path` is null for an unsaved "untitled" buffer (a VS
 // Code-style new file): it lives only in memory until the first save picks a location. Tabs are
 // keyed by a synthetic `id` (not the path) so an untitled tab survives becoming a saved file.
-// `kind` defaults to 'edit' (a Monaco buffer). An 'image' tab renders a read-only FilePreview
-// instead — a raster image has no editable text form, so it's viewed, not edited.
-type Tab = { id: string; path: string | null; name: string; mtime: number | null; reload?: number; kind?: 'edit' | 'image' };
+// `kind` defaults to 'edit' (a Monaco buffer). A 'preview' tab renders the read-only FilePreview
+// kernel instead — for a raster image / PDF / Office doc, which have no editable text form.
+type Tab = { id: string; path: string | null; name: string; mtime: number | null; reload?: number; kind?: 'edit' | 'preview' };
 
 // A pending file dialog, rendered as the in-window FilePicker overlay.
 type PickerState = {
@@ -134,9 +134,9 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
     [],
   );
 
-  // Open (or focus) a raster image as a read-only preview tab (no Monaco). Dedups by path inside the
-  // updater so a fast double-open can't append two tabs.
-  const openImage = useCallback((path: string, name: string) => {
+  // Open (or focus) a rich file (raster image / PDF / Office doc) as a read-only preview tab (no
+  // Monaco). Dedups by path inside the updater so a fast double-open can't append two tabs.
+  const openPreview = useCallback((path: string, name: string) => {
     setRoot((r) => r ?? parentDir(path));
     setTabs((ts) => {
       const existing = ts.find((x) => x.path === path);
@@ -144,7 +144,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
       setActive(id);
       setCursor(null);
       if (existing) return ts;
-      return [...ts, { id, path, name, mtime: null, kind: 'image' }];
+      return [...ts, { id, path, name, mtime: null, kind: 'preview' }];
     });
   }, []);
 
@@ -170,10 +170,10 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
   // await so the click's user activation survives (Safari/iOS would block the popup otherwise).
   const onTreeOpen = useCallback(
     async (path: string, entry: FsEntry) => {
-      // A raster image previews in an image tab (no Monaco); SVG/Markdown stay editable (with a
-      // preview toggle inside the pane).
-      if (isRenderOnlyImage(entry)) {
-        openImage(path, entry.name);
+      // A raster image / PDF / Office doc opens in a read-only preview tab (no Monaco); svg / html /
+      // markdown / code / json / csv stay editable (with a preview toggle inside the pane).
+      if (previewOverlayKind(entry)) {
+        openPreview(path, entry.name);
         return;
       }
       // Fetch fresh metadata (also content-sniffs `text`) and decide by CONTENT, not just the
@@ -195,7 +195,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
         }
       }
     },
-    [openFile, openImage],
+    [openFile, openPreview],
   );
 
   // After a cross-file replace/undo rewrites files on disk, reload any open, non-dirty tab for a
@@ -265,7 +265,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
     const p = typeof params?.path === 'string' ? params.path : null;
     if (p) {
       const name = (typeof params?.filename === 'string' ? params.filename : p.split('/').filter(Boolean).pop()) || p;
-      if (imageKind(name) === 'raster') openImage(p, name);
+      if (previewOverlayKind({ kind: 'file', name, size: null })) openPreview(p, name);
       else openFile(p, name, typeof params?.mtime === 'number' ? params.mtime : null);
       return;
     }
@@ -544,7 +544,11 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                         }}
                         className="flex items-center gap-1.5"
                       >
-                        {tab.kind === 'image' ? <ImageIcon className="size-3.5 text-violet" /> : <CodeXml className="size-3.5 text-cyan" />}
+                        {tab.kind === 'preview' ? (
+                          previewRenderKind(tab.name) === 'image' ? <ImageIcon className="size-3.5 text-violet" /> : <FileText className="size-3.5 text-violet" />
+                        ) : (
+                          <CodeXml className="size-3.5 text-cyan" />
+                        )}
                         {tab.name}
                         {dirty[tab.id] && <span className="size-1.5 rounded-full bg-mint" />}
                       </button>
@@ -567,7 +571,7 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
                 ) : (
                   tabs.map((tab) => (
                     <div key={tab.id} className={clsx('absolute inset-0', active === tab.id ? 'block' : 'hidden')}>
-                      {tab.kind === 'image' && tab.path ? (
+                      {tab.kind === 'preview' && tab.path ? (
                         <FilePreview source={{ url: contentUrl(tab.path), name: tab.name }} />
                       ) : (
                         <Suspense fallback={<div className="grid h-full place-items-center text-[12px] text-muted">{t('common.loading')}</div>}>
@@ -599,8 +603,8 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
           hardcoded "master · 0 ⚠ 0" would be misleading, so those are omitted until wired. The
           right side (cursor / indentation / language) is real. */}
       <div className="flex items-center gap-3.5 bg-cyan px-3.5 py-1 font-mono text-[10.5px] font-semibold text-[#06222B]">
-        {active && activeTab?.kind === 'image' ? (
-          <span className="ml-auto truncate">{t('apps.editor.imagePreview')}</span>
+        {active && activeTab?.kind === 'preview' ? (
+          <span className="ml-auto truncate">{t('preview.title')}</span>
         ) : active ? (
           <>
             <span className="ml-auto tabular-nums">{t('apps.editor.lineCol', { line: cursor?.line ?? 1, col: cursor?.col ?? 1 })}</span>
