@@ -338,6 +338,19 @@ describe('vaultCrypto protected hierarchy', () => {
     expect(copies.at(-1)?.kdf).toBe('argon2id');
   });
 
+  it('keeps setup passkey PRF bytes and credential id intact through wrap_meta', async () => {
+    const vmk = newVmk();
+    const prfSalt = new Uint8Array(32).fill(0x11);
+    const prfOutput = new Uint8Array(32).fill(0x22);
+    const credentialId = '/Wz4YbtaoR9NBzQH1amGZagS0BmEdIh2dS8OIbpdN2WftQMJlny4PP4I';
+
+    const wrapMeta = await buildWrapMeta(vmk, [{ kind: 'passkey', prfOutput, prfSalt, credentialId }]);
+
+    await expect(unwrapVmk(wrapMeta, { kind: 'passkey', prfOutput })).resolves.toEqual(vmk);
+    expect(passkeyPrfSaltEntries(wrapMeta)).toEqual([{ prfSalt, credentialId }]);
+    expect(prfOutput).toEqual(new Uint8Array(32).fill(0x22));
+  });
+
   it('skips malformed authenticated VMK copies and tries the next valid copy', async () => {
     const vmk = newVmk();
     const password = 'less-secure-fallback';
