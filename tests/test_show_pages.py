@@ -661,7 +661,7 @@ def test_show_path_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
     assert payload["session_id"] == "sesCaller"
     assert payload["session_default_notice"] == {
         "code": "session_defaulted_to_caller",
-        "message": "Show Page session defaulted to the caller Session from AVIBE_SESSION_ID.",
+        "message": "Show Page session defaulted to this Agent Session.",
         "session_id": "sesCaller",
     }
     assert (tmp_path / "show" / "sesCaller" / "index.html").exists()

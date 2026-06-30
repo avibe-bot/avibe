@@ -239,7 +239,8 @@ def test_session_handler_sets_claude_fork_session_for_pending_native_fork(monkey
     assert "Current session id: `ses-target`" in prompt
     assert "This Agent Session was forked from `ses-source`." in prompt
     assert "The authoritative Avibe session id for this fork is `ses-target`." in prompt
-    assert "use `ses-target` for Show Pages" in prompt
+    assert "treat it as historical source-context only" in prompt
+    assert "use `ses-target` for Show Pages" not in prompt
 
 
 def test_session_handler_disallows_remote_unsafe_claude_tools(monkeypatch, tmp_path: Path) -> None:
@@ -305,7 +306,8 @@ def test_session_handler_ensures_agent_session_id_before_prompt(
     prompt = prompt_value["append"] if isinstance(prompt_value, dict) else prompt_value
     assert captured["connected"] is True
     assert "Current session id: `sesk8m4q2p7x`" in prompt
-    assert "--session-id sesk8m4q2p7x" in prompt
+    assert "`vibe show path`" in prompt
+    assert "--session-id sesk8m4q2p7x" not in prompt
     assert "--session-key" not in prompt
 
 

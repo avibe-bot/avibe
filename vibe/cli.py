@@ -260,11 +260,11 @@ def _task_examples_text() -> str:
     return dedent(
         """\
         Examples:
-          vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
+          vibe task add --cron '0 * * * *' --message 'Share the hourly summary in this caller Session.'
           vibe task update 12ab34cd56ef --cron '*/30 * * * *' --name 'Half-hour summary'
           vibe task run 12ab34cd56ef
-          vibe task add --session-id sesk8m4q2p7x --post-to channel --cron '*/5 * * * *' --message 'Tell a new joke each time.'
-          vibe task add --session-id sesk8m4q2p7x --at '2026-03-31T09:00:00+08:00' --message-file briefing.md
+          vibe task add --post-to channel --cron '*/5 * * * *' --message 'Tell a new joke each time.'
+          vibe task add --at '2026-03-31T09:00:00+08:00' --message-file briefing.md
         """
     )
 
@@ -274,23 +274,23 @@ def _task_add_examples_text() -> str:
         """\
         Session target:
           Use --session-id with the target Agent Session ID, for example sesk8m4q2p7x.
-          Inside an Avibe Agent shell, omit --session-id to default to the caller Session from AVIBE_SESSION_ID.
+          Inside an Avibe Agent shell, tasks continue this conversation by default.
 
         Guidance:
           If this is your first time using this command, read this whole help entry before creating a task.
           `--session-id` chooses which Agent Session Avibe will continue using when the task runs.
-          Omit --session-id only when this task should follow the current caller Session.
           `--post-to channel` changes where the message is posted, not which session is continued.
           Use --create-session with --same-scope to create a reusable sibling Session in the current Workbench project or IM scope.
           Use --create-session with --scope-id <scopes.id> to create a reusable Session in a specific existing scope.
+          Use --cwd only for Sessions created by this task; existing target Sessions keep their own cwd.
           `--message` and `--message-file` provide the stored user message that will be sent each time the task runs.
           Use --cron for recurring jobs and --at for one-shot jobs.
           Cron weekday digits use APScheduler semantics: 0=Mon through 6=Sun; 7 is invalid. Prefer weekday names such as mon, tue, or sun when scheduling by day of week.
           --timezone controls how --cron and naive --at timestamps are interpreted.
 
         Examples:
-          vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
-          vibe task add --session-id sesk8m4q2p7x --post-to channel --cron '*/5 * * * *' --message 'Tell a new joke each time.'
+          vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'
+          vibe task add --post-to channel --cron '*/5 * * * *' --message 'Tell a new joke each time.'
           vibe task add --create-session --same-scope --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'
         """
     )
@@ -341,8 +341,8 @@ def _hook_send_examples_text() -> str:
           `--message` and `--message-file` provide the one-shot async user message that will be queued immediately.
 
         Examples:
-          vibe agent run --async --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
-          vibe agent run --async --session-id sesk8m4q2p7x --callback-session-id sescaller123 --message 'Share the benchmark result.'
+          vibe agent run --async --agent release-reviewer --message 'The export finished. Share the summary.'
+          vibe agent run --async --agent release-reviewer --no-callback --message 'Run the benchmark; I will inspect the run later.'
         """
     )
 
@@ -351,9 +351,9 @@ def _watch_examples_text() -> str:
     return dedent(
         """\
         Examples:
-          vibe watch add --session-id sesk8m4q2p7x --name 'Wait for export' --shell 'python3 scripts/wait_for_export.py'
-          vibe watch add --session-id sesk8m4q2p7x --post-to channel --prefix 'The CI job finished.' -- python3 scripts/wait_for_ci.py --build 42
-          vibe watch add --session-id sesk8m4q2p7x --forever --retry-exit-code 75 --retry-delay 60 --shell 'bash scripts/wait_for_log_pattern.sh'
+          vibe watch add --name 'Wait for export' --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
+          vibe watch add --post-to channel --message 'The CI job finished. Inspect the result.' -- python3 scripts/wait_for_ci.py --build 42
+          vibe watch add --forever --retry-exit-code 75 --retry-delay 60 --message 'The log pattern appeared. Continue from the result below.' --shell 'bash scripts/wait_for_log_pattern.sh'
           vibe watch list --brief
           vibe watch show 12ab34cd56ef
           vibe watch pause 12ab34cd56ef
@@ -612,26 +612,25 @@ def _watch_add_examples_text() -> str:
         """\
         Session target:
           Use --session-id with the target Agent Session ID, for example sesk8m4q2p7x.
-          Inside an Avibe Agent shell, omit --session-id to default to the caller Session from AVIBE_SESSION_ID.
+          Inside an Avibe Agent shell, watches follow up in this conversation by default.
 
         Guidance:
           If this is your first time using this command, read this whole help entry before creating a watch.
           Use a watch when a script should wait in the background and send a follow-up when it detects an event or reaches a terminal failure.
           `--session-id` chooses which Agent Session Avibe will continue using for follow-up messages from the watch.
-          Omit --session-id only when this watch should follow up in the current caller Session.
           `--post-to channel` changes where the follow-up is posted, not which session is continued.
           Use --create-session with --same-scope to create a reusable sibling Session in the current Workbench project or IM scope.
           Use --create-session with --scope-id <scopes.id> to create a reusable Session in a specific existing scope.
-          `--prefix` becomes the instruction text of the follow-up hook. On a successful cycle, Avibe prepends `--prefix` before waiter stdout and joins them with a blank line when both exist.
+          Prefer --message or --message-file for follow-up instructions; --prefix is legacy-compatible.
           Terminal failures also send a follow-up and disable the watch.
           In forever mode, failures are retried only when the waiter exits with an allowed `--retry-exit-code`.
           Pass either --shell '<command>' or a command after '--'.
           --timeout applies to each cycle. --lifetime-timeout applies only to the whole forever watch lifetime.
 
         Examples:
-          vibe watch add --session-id sesk8m4q2p7x --shell 'python3 scripts/wait_for_export.py'
-          vibe watch add --session-id sesk8m4q2p7x --post-to channel --prefix 'The export finished.' -- bash -lc 'sleep 120; echo done'
-          vibe watch add --session-id sesk8m4q2p7x --forever --timeout 600 --lifetime-timeout 86400 --retry-exit-code 75 --retry-delay 30 -- uv run --no-project scripts/wait_pr.py --repo avibe-bot/avibe --pr 153
+          vibe watch add --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
+          vibe watch add --post-to channel --message 'The export finished.' -- bash -lc 'sleep 120; echo done'
+          vibe watch add --forever --timeout 600 --lifetime-timeout 86400 --retry-exit-code 75 --retry-delay 30 --message 'PR #153 changed. Inspect it and continue.' -- uv run --no-project scripts/wait_pr.py --repo avibe-bot/avibe --pr 153
         """
     )
 
@@ -644,9 +643,15 @@ def _agent_run_examples_text() -> str:
           Omit --session-id/--fork-self/--fork-session to create a private background Session for --agent.
           Use --same-scope to place a new Session in the caller/source Session's scope.
           Use --scope-id <scopes.id> to place a new Session in a specific existing scope.
+          --cwd only applies to new Sessions; existing Sessions keep their own cwd.
+
+        Callback:
+          Async runs return their final result to this conversation by default.
+          Pass --no-callback only when you intentionally want no automatic follow-up.
+          Pass --callback-session-id only when the final result should return somewhere else.
 
         Forking:
-          --fork-self forks the current caller Session from AVIBE_SESSION_ID.
+          --fork-self forks this current Session.
           --fork-session <session-id> creates a new Avibe Agent Session and asks the native backend to fork the source native session on the first turn.
           Forks keep the same backend, scope, and cwd as the source Session. Passing --agent is allowed only when that Agent uses the same backend.
           --agent, --model, and --reasoning-effort may override the forked Session's Agent/model/effort.
@@ -655,7 +660,8 @@ def _agent_run_examples_text() -> str:
         Examples:
           vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
           vibe agent run --agent release-reviewer --same-scope --message 'Review this project in a visible sibling Session.'
-          vibe agent run --async --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
+          vibe agent run --async --agent release-reviewer --message 'Review the latest CI result and report back.'
+          vibe agent run --async --agent release-reviewer --no-callback --message 'Run a background experiment; I will inspect the run later.'
           vibe agent run --async --fork-self --message 'Explore this alternate fix from the current context.'
           vibe agent run --fork-session sesk8m4q2p7x --agent reviewer --model gpt-5.4 --reasoning-effort high --message 'Review the forked context.'
         """
@@ -1253,7 +1259,7 @@ def _validate_session_id_target(
         raise TaskCliError(
             str(exc),
             code="invalid_session_id",
-            hint="Use the current Agent Session ID from the prompt, such as sesk8m4q2p7x.",
+            hint="Use a valid Agent Session ID. Inside an Avibe Agent shell, commands that continue this conversation can use the default target.",
             example="sesk8m4q2p7x",
             help_command=help_command,
             details={"session_id": session_id},
@@ -1296,8 +1302,8 @@ def _resolve_session_target_args(
         raise TaskCliError(
             "one of --session-id or --session-key is required",
             code="missing_session_target",
-            hint="Use --session-id with the current Agent Session ID.",
-            example="vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'",
+            hint="Run from an Avibe Agent shell to continue this conversation by default, or pass --session-id for the target Session.",
+            example="vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'",
             help_command=help_command,
         )
     return session_id or None, session_key
@@ -1327,7 +1333,7 @@ def _apply_caller_session_default(args, caller_context, *, purpose: str) -> Opti
     setattr(args, "session_id", default_session_id)
     return {
         "code": "session_defaulted_to_caller",
-        "message": f"{purpose} defaulted to the caller Session from AVIBE_SESSION_ID.",
+        "message": f"{purpose} defaulted to this Agent Session.",
         "session_id": default_session_id,
     }
 
@@ -1340,7 +1346,7 @@ def _resolve_show_session_id(args, *, help_command: str) -> tuple[str, Optional[
         raise TaskCliError(
             "Show Page session id is required outside an Avibe Agent environment.",
             code="missing_session_target",
-            hint="Pass --session-id, or run this command from an Avibe Agent shell where AVIBE_SESSION_ID is injected.",
+            hint="Run this command from an Avibe Agent shell, or pass --session-id for the target Show Page.",
             help_command=help_command,
         )
     return session_id, notice
@@ -1354,7 +1360,7 @@ def _resolve_caller_session_id(args, *, purpose: str, help_command: str) -> tupl
         raise TaskCliError(
             f"{purpose} id is required outside an Avibe Agent environment.",
             code="missing_session_target",
-            hint="Pass the session id explicitly, or run this command from an Avibe Agent shell where AVIBE_SESSION_ID is injected.",
+            hint="Run this command from an Avibe Agent shell, or pass --session-id for the target Session.",
             help_command=help_command,
         )
     return session_id, notice
@@ -1367,7 +1373,7 @@ def _require_caller_session_id(caller_context, *, purpose: str, help_command: st
     raise TaskCliError(
         f"{purpose} requires an Avibe Agent caller Session.",
         code="missing_caller_session",
-        hint="Run this command from an Avibe Agent shell where AVIBE_SESSION_ID is injected, or pass an explicit Session ID.",
+        hint="Run this command from an Avibe Agent shell, or pass an explicit Session ID.",
         help_command=help_command,
     )
 
@@ -2037,7 +2043,7 @@ def cmd_task_add(args):
         message = _resolve_prompt_input(
             args,
             help_command="vibe task add --help",
-            example_command="vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *'",
+            example_command="vibe task add --cron '0 * * * *'",
         )
         session_id, session_key = _resolve_session_target_args(
             args,
@@ -3175,7 +3181,7 @@ def _validate_definition_session_policy(
         code="missing_session_policy",
         hint=(
             "Use --session-id to continue a Session, or --create-session with --same-scope/--scope-id to create one. "
-            "Inside an Avibe Agent shell, Avibe can default this to the caller Session from AVIBE_SESSION_ID."
+            "Inside an Avibe Agent shell, this can continue the current conversation by default."
         ),
         help_command=help_command,
     )
@@ -3429,9 +3435,9 @@ def _resolve_callback_session_id(args, caller_context, *, target_session_id: Opt
         return caller_context.session_id, {
             "code": "callback_defaulted_to_caller_session",
             "message": (
-                "Async callback defaulted to the caller Session from AVIBE_SESSION_ID."
+                "Async callback defaulted to this conversation."
                 if is_async
-                else "Callback route defaulted to the caller Session from AVIBE_SESSION_ID."
+                else "Callback route defaulted to this conversation."
             ),
             "callback_session_id": caller_session_id,
         }
@@ -3444,8 +3450,7 @@ def _resolve_callback_session_id(args, caller_context, *, target_session_id: Opt
             "Pass --callback-session-id <session-id> to send the final result back to a specific Agent Session, "
             "or pass --no-callback to run without an automatic follow-up and inspect the result later with "
             "`vibe runs show <run-id>` or by polling/listing runs for the target Session. "
-            "`--callback-session-id` identifies the Session that should receive the delegated run's final result; "
-            "when Avibe can resolve the caller context, this defaults to the current caller Session."
+            "`--callback-session-id` identifies the Session that should receive the delegated run's final result."
         ),
         help_command="vibe agent run --help",
     )
@@ -5959,7 +5964,7 @@ def cmd_watch_add(args):
         message = _resolve_optional_message_input(
             args,
             help_command="vibe watch add --help",
-            example_command="vibe watch add --session-id sesk8m4q2p7x",
+            example_command="vibe watch add --message 'Continue when the waiter finishes.'",
             legacy_prefix=prefix,
         )
 
@@ -8657,7 +8662,7 @@ def build_parser():
     agent_run_parser.add_argument("--agent", help="Avibe Agent name")
     agent_run_parser.add_argument("--session-id", help="Existing Agent Session ID to continue")
     agent_run_parser.add_argument("--fork-session", help="Existing Agent Session ID to fork into a new Session")
-    agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork the current caller Session from AVIBE_SESSION_ID")
+    agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork this current Agent Session")
     agent_run_parser.add_argument("--create-session", action="store_true", help="Create a new Avibe Session ID before running")
     agent_run_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID for each definition run")
     agent_run_parser.add_argument("--same-scope", action="store_true", help="Place a new or forked Session in the caller/source Session scope")
@@ -8703,7 +8708,7 @@ def build_parser():
     runs_list_parser.add_argument("--agent", help="Filter by Avibe Agent name")
     runs_list_parser.add_argument("--backend", choices=("codex", "claude", "opencode"), help="Filter by backend")
     runs_list_parser.add_argument("--session-id", help="Filter by Agent Session ID")
-    runs_list_parser.add_argument("--current-session", action="store_true", help="Filter to the caller Session from AVIBE_SESSION_ID")
+    runs_list_parser.add_argument("--current-session", action="store_true", help="Filter to this current Agent Session")
     runs_list_parser.add_argument("--definition-id", help="Filter by task or watch definition ID")
     runs_list_parser.add_argument("--created-after", help="Filter by created_at >= timestamp, or relative value such as 6h or 7d")
     runs_list_parser.add_argument("--created-before", help="Filter by created_at <= timestamp, or relative value such as 6h or 7d")

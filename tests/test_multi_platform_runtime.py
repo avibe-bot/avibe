@@ -1056,7 +1056,8 @@ def test_opencode_fork_prompt_marks_target_session_id_authoritative():
     assert "Current session id: `ses-target`" in system
     assert "This Agent Session was forked from `ses-source`." in system
     assert "The authoritative Avibe session id for this fork is `ses-target`." in system
-    assert "use `ses-target` for Show Pages" in system
+    assert "treat it as historical source-context only" in system
+    assert "use `ses-target` for Show Pages" not in system
 
 
 def test_opencode_normal_text_matching_legacy_question_prefix_is_processed():

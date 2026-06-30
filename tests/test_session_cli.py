@@ -137,7 +137,7 @@ def test_get_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
     assert payload["session"]["id"] == "sesaaa"
     assert payload["session_default_notice"] == {
         "code": "session_defaulted_to_caller",
-        "message": "Session defaulted to the caller Session from AVIBE_SESSION_ID.",
+        "message": "Session defaulted to this Agent Session.",
         "session_id": "sesaaa",
     }
 
@@ -196,7 +196,7 @@ def test_update_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
     assert payload["session"]["title"] == "New name"
     assert payload["session_default_notice"] == {
         "code": "session_defaulted_to_caller",
-        "message": "Session defaulted to the caller Session from AVIBE_SESSION_ID.",
+        "message": "Session defaulted to this Agent Session.",
         "session_id": "sesaaa",
     }
 
@@ -301,12 +301,13 @@ def _injection_for(session_id, *, platform="avibe", platform_specific=None):
     return build_system_prompt_injection(context=ctx)
 
 
-def test_web_title_prompt_is_fixed_and_uses_session_id():
+def test_web_title_prompt_defaults_to_current_session():
     out = _injection_for("sesweb")
     assert "## Session Title" in out
-    # the command carries the REAL session id (not a <id> placeholder)
-    assert "vibe session get sesweb" in out
-    assert 'vibe session update sesweb --title "<short title>"' in out
+    assert "`vibe session get`" in out
+    assert '`vibe session update --title "<short title>"`' in out
+    assert "vibe session get sesweb" not in out
+    assert 'vibe session update sesweb --title "<short title>"' not in out
     assert "metadata.title_source" in out
     assert "`user` or `agent`" in out
     assert "leave the title unchanged" in out
@@ -320,7 +321,7 @@ def test_im_title_prompt_is_not_injected():
     out = _injection_for("sesim", platform="slack")
     assert "## Session Title" not in out
     assert "vibe session update sesim --title" not in out
-    assert "Current Session Reminder" in out  # the reminder itself still renders
+    assert "Current Session Reminder" not in out
 
 
 def test_forked_session_prompt_marks_target_session_id_authoritative():
@@ -342,7 +343,8 @@ def test_forked_session_prompt_marks_target_session_id_authoritative():
     assert "This Agent Session was forked from `sessource`." in out
     assert "The authoritative Avibe session id for this fork is `sestarget`." in out
     assert "If copied source context mentions another Avibe session id" in out
-    assert "use `sestarget` for Show Pages, Harness commands, tasks, watches, callbacks, and session updates" in out
+    assert "treat it as historical source-context only" in out
+    assert "for Show Pages, Harness commands, tasks, watches, callbacks, and session updates" not in out
 
 
 def test_forked_session_prompt_can_use_persisted_metadata():

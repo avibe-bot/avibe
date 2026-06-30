@@ -1361,7 +1361,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["threadId"], "thread-existing")
         developer_instructions = params["developerInstructions"]
         self.assertEqual(developer_instructions.count("Focus on regressions."), 1)
-        self.assertEqual(developer_instructions.count("Current session id:"), 3)
+        self.assertEqual(developer_instructions.count("Current session id:"), 2)
         self.assertNotIn("Legacy session key:", developer_instructions)
         self.assertNotIn("--session-key", developer_instructions)
         self.assertEqual(developer_instructions.count("If you generate an image with Codex"), 1)
@@ -1549,7 +1549,8 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             "The authoritative Avibe session id for this fork is `ses-target`.",
             developer_instructions,
         )
-        self.assertIn("use `ses-target` for Show Pages", developer_instructions)
+        self.assertIn("treat it as historical source-context only", developer_instructions)
+        self.assertNotIn("use `ses-target` for Show Pages", developer_instructions)
         inject_method, inject_params = transport.send_request.await_args_list[1].args
         self.assertEqual(inject_method, "thread/inject_items")
         self.assertEqual(inject_params["threadId"], "thread-fork")

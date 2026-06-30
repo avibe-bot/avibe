@@ -65,7 +65,7 @@ def test_watch_help_describes_session_id_guidance(capsys) -> None:
     assert exc.value.code == 0
     captured = capsys.readouterr()
     assert "managed background watchers" in captured.out
-    assert "vibe watch add --session-id sesk8m4q2p7x" in captured.out
+    assert "vibe watch add --name 'Wait for export' --message" in captured.out
     assert "{add,update,list,show,pause,resume,remove}" in captured.out
 
 
@@ -79,8 +79,9 @@ def test_watch_add_help_mentions_shell_and_lifetime_timeout(capsys) -> None:
     captured = capsys.readouterr()
     assert "Pass either --shell '<command>' or a command after '--'." in captured.out
     assert "--lifetime-timeout" in captured.out
-    assert "vibe watch add --session-id sesk8m4q2p7x" in captured.out
-    assert "`--prefix` becomes the instruction text of the follow-up hook." in captured.out
+    assert "vibe watch add --message 'The export finished. Inspect it and continue.'" in captured.out
+    assert "watches follow up in this conversation by default" in captured.out
+    assert "Prefer --message or --message-file for follow-up instructions" in captured.out
     assert "Terminal failures also send a follow-up and disable the watch." in captured.out
     assert "If this is your first time using this command, read this whole help entry before creating a watch." in captured.out
 
@@ -475,7 +476,7 @@ def test_watch_add_defaults_target_to_caller_session(tmp_path: Path, capsys) -> 
     assert payload["watch"]["session_policy"] == "existing"
     assert payload["session_default_notice"] == {
         "code": "session_defaulted_to_caller",
-        "message": "Watch target Session defaulted to the caller Session from AVIBE_SESSION_ID.",
+        "message": "Watch target Session defaulted to this Agent Session.",
         "session_id": "sesCaller",
     }
 
