@@ -2933,11 +2933,13 @@ def delete_channel_scope(platform: str, native_id: str, scope_type: str = "chann
     if scope_type != "channel":
         return {"ok": False, "error": "only channel scopes can be removed here"}
     try:
-        removed = chat_discovery.delete_scope(platform, native_id, scope_type="channel")
+        outcome = chat_discovery.delete_scope(platform, native_id, scope_type="channel")
     except Exception as exc:
         logger.warning("Failed to delete %s scope %s: %s", platform, native_id, exc, exc_info=True)
         return {"ok": False, "error": str(exc)}
-    return {"ok": True, "removed": removed}
+    # ``dismissed`` means history was preserved and the entry was hidden instead
+    # of physically deleted; ``removed`` means the scope row was deleted outright.
+    return {"ok": True, **outcome}
 
 
 def telegram_list_chats(include_private: bool = False, include_not_returned: bool = False) -> dict:

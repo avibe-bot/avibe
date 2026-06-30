@@ -758,8 +758,9 @@ def test_delete_scope_removes_scope_and_settings(tmp_path: Path) -> None:
 
     assert any(c.chat_id == "999" for c in chat_discovery.list_chats("telegram", db_path=db_path))
 
-    removed = chat_discovery.delete_scope("telegram", "999", db_path=db_path)
-    assert removed is True
+    # No history → physical delete.
+    outcome = chat_discovery.delete_scope("telegram", "999", db_path=db_path)
+    assert outcome == {"removed": True, "dismissed": False}
     assert chat_discovery.list_chats("telegram", db_path=db_path) == []
     # Settings row is gone too (no orphan).
     reloaded = SQLiteSettingsService(db_path)
@@ -768,7 +769,96 @@ def test_delete_scope_removes_scope_and_settings(tmp_path: Path) -> None:
     finally:
         reloaded.close()
     # Deleting a missing scope is a no-op.
-    assert chat_discovery.delete_scope("telegram", "999", db_path=db_path) is False
+    assert chat_discovery.delete_scope("telegram", "999", db_path=db_path) == {
+        "removed": False,
+        "dismissed": False,
+    }
+
+
+def test_delete_scope_with_history_dismisses_instead_of_deleting(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+
+    from storage.models import messages
+
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    chat_discovery.remember_chat("telegram", "777", name="HasHistory", db_path=db_path)
+    scope_id = chat_discovery.make_scope_id("telegram", chat_discovery.CHANNEL_SCOPE_TYPE, "777")
+
+    # Insert a message owned by the scope (CASCADE FK). A physical delete would
+    # destroy it, so removal must dismiss instead.
+    now = datetime.now(timezone.utc).isoformat()
+    engine = chat_discovery._engine(db_path)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                messages.insert().values(
+                    id="m1",
+                    scope_id=scope_id,
+                    platform="telegram",
+                    author="user",
+                    type="user",
+                    content_json="{}",
+                    metadata_json="{}",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    finally:
+        engine.dispose()
+
+    outcome = chat_discovery.delete_scope("telegram", "777", db_path=db_path)
+    assert outcome == {"removed": False, "dismissed": True}
+
+    # Hidden from every listing, including the unavailable view.
+    assert chat_discovery.list_chats("telegram", db_path=db_path) == []
+    assert chat_discovery.list_chats("telegram", include_not_returned=True, db_path=db_path) == []
+
+    # History preserved (the scope row was kept, not cascade-deleted).
+    engine = chat_discovery._engine(db_path)
+    try:
+        with engine.connect() as conn:
+            kept = conn.execute(messages.select().where(messages.c.scope_id == scope_id)).first()
+    finally:
+        engine.dispose()
+    assert kept is not None
+
+
+def test_refresh_clears_dismissed_flag_on_rediscovery(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    auth_context = _auth_context("slack", bot_token="x")
+    chat_discovery.remember_chat(
+        "slack",
+        "C_BACK",
+        name="back",
+        metadata={
+            chat_discovery.METADATA_AUTH_CONTEXT: auth_context,
+            chat_discovery.METADATA_IS_MEMBER: True,
+            chat_discovery.METADATA_DISMISSED_AT: "2026-01-01T00:00:00+00:00",
+        },
+        db_path=db_path,
+    )
+    # Dismissed → hidden everywhere initially.
+    assert chat_discovery.list_chats("slack", include_not_returned=True, db_path=db_path) == []
+
+    from vibe import api
+
+    monkeypatch.setattr(
+        api,
+        "list_channels_live",
+        lambda _token, browse_all=False: {
+            "ok": True,
+            "channels": [{"id": "C_BACK", "name": "back", "is_private": False, "is_member": True}],
+            "is_member_only": not browse_all,
+        },
+    )
+
+    chat_discovery.refresh_platform("slack", force=True, bot_token="x", db_path=db_path)
+
+    chats = chat_discovery.list_chats("slack", db_path=db_path)
+    assert [c.chat_id for c in chats] == ["C_BACK"]
+    assert chats[0].visibility_status == chat_discovery.VISIBILITY_VISIBLE
 
 
 def test_malformed_legacy_discovered_chats_does_not_break_channel_response(tmp_path: Path, monkeypatch) -> None:

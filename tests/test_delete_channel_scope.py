@@ -9,7 +9,7 @@ def test_delete_channel_scope_rejects_non_channel_scope(monkeypatch) -> None:
 
     def fake_delete_scope(platform, native_id, *, scope_type="channel", db_path=None):
         calls.append((platform, native_id, scope_type))
-        return True
+        return {"removed": True, "dismissed": False}
 
     monkeypatch.setattr(chat_discovery, "delete_scope", fake_delete_scope)
 
@@ -24,12 +24,12 @@ def test_delete_channel_scope_allows_channel(monkeypatch) -> None:
 
     def fake_delete_scope(platform, native_id, *, scope_type="channel", db_path=None):
         calls.append((platform, native_id, scope_type))
-        return True
+        return {"removed": True, "dismissed": False}
 
     monkeypatch.setattr(chat_discovery, "delete_scope", fake_delete_scope)
 
     result = api.delete_channel_scope("discord", "C1")
-    assert result == {"ok": True, "removed": True}
+    assert result == {"ok": True, "removed": True, "dismissed": False}
     assert calls == [("discord", "C1", "channel")]
 
 

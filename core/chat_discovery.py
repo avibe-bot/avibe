@@ -16,7 +16,7 @@ from sqlalchemy import Connection, and_, select
 from config import paths
 from storage.db import create_sqlite_engine
 from storage.migrations import run_migrations
-from storage.models import scope_settings, scopes, state_meta
+from storage.models import agent_events, media_objects, messages, scope_settings, scopes, state_meta
 from storage.settings_service import make_scope_id, upsert_scope
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,10 @@ METADATA_CHANNEL_POSITION = "channel_position"
 METADATA_CHANNEL_CATEGORY_ID = "channel_category_id"
 METADATA_CHAT_MODE = "chat_mode"
 METADATA_AUTH_CONTEXT = "auth_context"
+# Set when a user removes a stale channel that still owns history (messages /
+# events / media). The scope row is kept so the CASCADE FKs do not wipe history;
+# this flag hides it from every discovery listing. Cleared on rediscovery.
+METADATA_DISMISSED_AT = "dismissed_at"
 
 _STICKY_TRUE_KEYS = {METADATA_IS_FORUM, METADATA_SUPPORTS_TOPICS}
 _DEBOUNCE_SECONDS = 60.0
@@ -386,6 +390,10 @@ def list_chats(
                 metadata = _json_loads(row["metadata_json"], {})
                 if auth_context is not None and metadata.get(METADATA_AUTH_CONTEXT) != auth_context:
                     continue
+                if metadata.get(METADATA_DISMISSED_AT):
+                    # User removed this stale entry but history kept the row alive;
+                    # never surface it in any discovery listing.
+                    continue
                 visibility = str(metadata.get(METADATA_VISIBILITY_STATUS) or VISIBILITY_UNKNOWN)
                 if visibility == VISIBILITY_NOT_RETURNED and not include_not_returned:
                     continue
@@ -482,6 +490,9 @@ def refresh_platform(
                             METADATA_VISIBILITY_STATUS: VISIBILITY_VISIBLE,
                             METADATA_LAST_REFRESHED_AT: success_at,
                             METADATA_LAST_MISSING_AT: None,
+                            # A channel that reappears on the platform is no longer
+                            # dismissed — surface it again.
+                            METADATA_DISMISSED_AT: None,
                             METADATA_AUTH_CONTEXT: auth_context,
                         },
                     )
@@ -803,29 +814,64 @@ def _mark_not_returned(
         )
 
 
+def _scope_has_history(conn: Connection, scope_id: str) -> bool:
+    """True if the scope owns rows whose FK to scopes is ON DELETE CASCADE.
+
+    ``messages``, ``agent_events`` and ``media_objects`` cascade-delete with the
+    scope row, so deleting a scope that owns any of them would destroy stored
+    chat history/traces/media — not just the discovery entry.
+    """
+    for table in (messages, agent_events, media_objects):
+        exists = conn.execute(
+            select(table.c.scope_id).where(table.c.scope_id == scope_id).limit(1)
+        ).first()
+        if exists is not None:
+            return True
+    return False
+
+
 def delete_scope(
     platform: str,
     native_id: str,
     *,
     scope_type: str = CHANNEL_SCOPE_TYPE,
     db_path: Path | None = None,
-) -> bool:
-    """Permanently delete a discovered scope and its settings.
+) -> dict[str, bool]:
+    """Remove a discovered scope and its settings without destroying history.
 
-    Deletes the ``scope_settings`` row first, then the ``scopes`` row, so the
-    removal is correct regardless of the SQLite ``foreign_keys`` pragma. Child
-    scopes (e.g. Discord channels under a deleted guild) have their
-    ``parent_scope_id`` set to NULL by the schema's ON DELETE SET NULL.
+    The user-facing intent is "clear this stale entry", not "purge all stored
+    messages". Because ``messages`` / ``agent_events`` / ``media_objects`` FK the
+    scope with ON DELETE CASCADE, a hard delete would wipe that history. So:
 
-    Returns ``True`` when a scope row was removed.
+    - the ``scope_settings`` row is always deleted (the user's config);
+    - if the scope owns no cascading history, the ``scopes`` row is physically
+      deleted (clean removal);
+    - otherwise the ``scopes`` row is kept and stamped ``dismissed_at`` so it is
+      hidden from every discovery listing while its history stays intact.
+
+    Returns ``{"removed": bool, "dismissed": bool}``.
     """
     scope_id = make_scope_id(platform, scope_type, native_id)
     engine = _engine(db_path)
     try:
         with engine.begin() as conn:
+            row = conn.execute(select(scopes).where(scopes.c.id == scope_id)).mappings().one_or_none()
+            if row is None:
+                return {"removed": False, "dismissed": False}
             conn.execute(scope_settings.delete().where(scope_settings.c.scope_id == scope_id))
+            if _scope_has_history(conn, scope_id):
+                metadata = _json_loads(row["metadata_json"], {})
+                metadata[METADATA_DISMISSED_AT] = _utc_now_iso()
+                conn.execute(
+                    scopes.update()
+                    .where(scopes.c.id == scope_id)
+                    .values(metadata_json=_json_dumps(metadata), updated_at=_utc_now_iso())
+                )
+                return {"removed": False, "dismissed": True}
+            # No cascading history — safe to physically delete. Child scopes keep
+            # their rows (parent_scope_id is ON DELETE SET NULL).
             result = conn.execute(scopes.delete().where(scopes.c.id == scope_id))
-            return bool(result.rowcount)
+            return {"removed": bool(result.rowcount), "dismissed": False}
     finally:
         engine.dispose()
 
