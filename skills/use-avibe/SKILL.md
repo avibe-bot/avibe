@@ -773,37 +773,43 @@ Agents should prefer these managed harness commands over ad-hoc detached shells 
 Preferred CLI shape:
 
 - one-shot direct run: `vibe agent run --agent '<agent-name>' --message '...'`
-- one-shot async run: `vibe agent run --async --session-id '<session-id>' --message '...'`
-- fork a Session for an alternate path: `vibe agent run --fork-session '<source-session-id>' --message '...'`
-- delegated async run that reports back: `vibe agent run --async --session-id '<target-session-id>' --callback-session-id '<caller-session-id>' --message '...'`
-- recurring task: `vibe task add --session-id '<session-id>' --cron '<expr>' --message '...'`
-- one-off task: `vibe task add --session-id '<session-id>' --at '<ISO-8601>' --message '...'`
+- delegated async run that reports back to the current caller Session: `vibe agent run --async --agent '<agent-name>' --message '...'`
+- continue a known Session: `vibe agent run --session-id '<session-id>' --message '...'`
+- fork the current caller Session for an alternate path: `vibe agent run --fork-self --message '...'`
+- fork a known Session for an alternate path: `vibe agent run --fork-session '<source-session-id>' --message '...'`
+- create a visible sibling Session in the caller scope: `vibe agent run --agent '<agent-name>' --same-scope --message '...'`
+- recurring task for the current caller Session: `vibe task add --cron '<expr>' --message '...'`
+- one-off task for the current caller Session: `vibe task add --at '<ISO-8601>' --message '...'`
 - immediate rerun: `vibe task run <id>`
-- managed background watch: `vibe watch add --session-id '<session-id>' --message '...' -- <cmd>` (or `--shell '<cmd>'` to pass a single shell string)
+- managed background watch for the current caller Session: `vibe watch add --message '...' -- <cmd>` (or `--shell '<cmd>'` to pass a single shell string)
 - update a watch: `vibe watch update <id> --name '...' --timeout 1200`
 - inspect a run: `vibe runs show <run-id>`
 - cancel a run: `vibe runs cancel <run-id>`
 
-Delivery controls (apply to `vibe agent run --create-session`, `vibe task add`, and `vibe watch add`):
+Session, scope, and delivery controls:
 
-- `--session-id` controls which Agent Session Avibe continues using
-- when you want to keep the current session, use the current Agent Session ID
-- if no usable Agent Session ID is available, confirm the target session first instead of guessing
-- use `--post-to channel` when the task or watch should keep the same Agent Session but publish to the parent channel
-- use `--deliver-key '<key>'` only when delivery must go to a different explicit target than the continued session
-- do not combine `--post-to` and `--deliver-key` in the same command
+- inside an Avibe-injected Agent shell, `vibe task add` and `vibe watch add` may omit `--session-id`; Avibe defaults to the caller Session from `AVIBE_SESSION_ID`
+- `vibe agent run --agent '<agent-name>'` without `--session-id`/fork flags creates a new private background Session for that Agent; add `--same-scope` or `--scope-id <scopes.id>` when the new Session should appear in a visible Workbench project or IM scope
+- use `--session-id` only when you intentionally want to continue that exact existing Agent Session; existing Sessions keep their own cwd, scope, Agent, model, and reasoning settings
+- use `--fork-self` when you want a new Session branched from the current caller context without passing the caller Session ID manually
+- use `--fork-session '<source-session-id>'` only when the source Session is not the current caller Session
+- use `--same-scope` to place a new or forked Session in the caller/source Session's scope
+- use `--scope-id '<scopes.id>'` to place a new or forked Session in a specific existing scope
+- use `--post-to channel` only when the follow-up should keep the same Agent Session but publish to the parent channel; it does not move the Session or change its scope
 - `--message` and `--message-file` are the current user-message flags for task, watch, and agent-run commands
 - `vibe task add` stores the message template and creates Agent Runs when the time trigger fires
 - `vibe agent run --async` queues one Agent Run immediately without storing a task definition
 - `--fork-session` creates a new Agent Session by forking the source Session's native backend context. Use it when work should branch from an existing context without mutating that source Session.
 - fork overrides are intentionally narrow: `--agent`, `--model`, and `--reasoning-effort` can override the forked Session only if the backend stays the same; cross-backend forks are rejected.
-- do not combine `--fork-session` with `--session-id`, `--create-session`, `--deliver-key`, or `--post-to`.
-- `--callback-session-id` on an async Agent Run sends the final result text back into the caller Session as a follow-up Agent message; it is independent from `--post-to` and `--deliver-key`
+- do not combine fork flags with `--session-id`, `--create-session`, or `--create-session-per-run`.
+- async Agent Runs started inside an Avibe-injected Agent shell default their callback to the caller Session; use `--callback-session-id` only for an explicit override
+- use `--no-callback` only when you intentionally want no automatic follow-up and will inspect the run later with `vibe runs show` or `vibe runs list`
 - `vibe watch add` uses `--message` as the instruction template for the Agent Run created after the waiter reaches a reportable state
 
 Legacy compatibility:
 
 - `--session-key` is still accepted for old scripts; do not use it in new examples or instructions unless the user explicitly asks for legacy targeting
+- `--deliver-key` is legacy transport syntax; do not use it in new examples or instructions. Use `--same-scope` or `--scope-id <scopes.id>` for Session placement, and `--post-to channel` only for delivery-location overrides.
 - `--prompt` / `--prompt-file` are deprecated compatibility inputs. Do not use them in new invocations; use `--message` / `--message-file`.
 - `vibe hook send` is deprecated. Do not use it for new one-shot async work; use `vibe agent run --async`.
 
@@ -973,7 +979,7 @@ Watches:
 
 - `vibe watch add`, `vibe watch update <id>`, `vibe watch list [--brief]`, `vibe watch show <id>`, `vibe watch pause <id>`, `vibe watch resume <id>`, `vibe watch remove <id>`
 
-For any subcommand, prefer `<command> --help` before composing a new invocation. The delivery flags shared by harness commands are `--session-id`, `--post-to`, and `--deliver-key`, with command-specific mutual exclusion rules. Use `--message` / `--message-file` for user messages. `vibe task add` and `vibe watch add` take `--name`; only `vibe task add` takes `--cron` / `--at` / `--timezone`; `vibe agent run` takes `--async`; and `vibe watch add` takes its own waiter options (`--shell` or a positional command after `--`, `--cwd`, `--timeout`, `--forever`, `--lifetime-timeout`, `--retry-exit-code`, `--retry-delay`). Do not copy flags between task, watch, and agent-run commands without checking help.
+For any subcommand, prefer `<command> --help` before composing a new invocation. The shared harness concepts are `--session-id` for existing Session continuity, `--same-scope` / `--scope-id` for placing newly-created Sessions, and `--post-to` for delivery-location overrides that do not change Session scope. Use `--message` / `--message-file` for user messages. `vibe task add` and `vibe watch add` take `--name`; only `vibe task add` takes `--cron` / `--at` / `--timezone`; `vibe agent run` takes `--async`, `--fork-self`, `--fork-session`, and callback flags; and `vibe watch add` takes its own waiter options (`--shell` or a positional command after `--`, `--cwd`, `--timeout`, `--forever`, `--lifetime-timeout`, `--retry-exit-code`, `--retry-delay`). Do not copy flags between task, watch, and agent-run commands without checking help.
 
 ## Troubleshooting
 

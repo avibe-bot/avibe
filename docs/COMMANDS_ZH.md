@@ -674,7 +674,7 @@ vibe upgrade
 ### `vibe task add`
 
 ```bash
-vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <表达式> | --at <时间戳>) (--message <文本> | --message-file <文件>) [options]
+vibe task add [--session-id <session_id> | --create-session | --create-session-per-run] (--cron <表达式> | --at <时间戳>) (--message <文本> | --message-file <文件>) [options]
 ```
 
 重要参数：
@@ -683,14 +683,20 @@ vibe task add (--session-id <session_id> | --create-session | --create-session-p
 - `--session-id`
 - `--create-session`
 - `--create-session-per-run`
+- `--same-scope`
+- `--scope-id`
 - `--agent`
+- `--cwd`
 - `--post-to {thread,channel}`
-- `--deliver-key`
 - `--cron`
 - `--at`
 - `--message`
 - `--message-file`
 - `--timezone`
+
+在 Avibe 已注入 caller context 的 Agent shell 内，可以省略 `--session-id`，
+任务目标会默认到调用方 Session。任务需要创建新的可见 Session 时，使用
+`--create-session --same-scope` 或 `--create-session --scope-id <scopes.id>`。
 
 ### `vibe task update`
 
@@ -705,9 +711,11 @@ vibe task update <task_id> [options]
 - `--session-id`
 - `--create-session`
 - `--create-session-per-run`
+- `--same-scope`
+- `--scope-id`
 - `--agent`
+- `--cwd`
 - `--post-to {thread,channel}`
-- `--deliver-key`
 - `--reset-delivery`
 - `--cron`
 - `--at`
@@ -793,7 +801,7 @@ vibe agent models --backend opencode --provider deepseek
 ### `vibe agent run`
 
 ```bash
-vibe agent run (--session-id <session_id> | --create-session | --fork-session <session_id>)? (--message <文本> | --message-file <文件>) [options]
+vibe agent run (--session-id <session_id> | --create-session | --fork-session <session_id> | --fork-self)? (--message <文本> | --message-file <文件>) [options]
 ```
 
 重要参数：
@@ -801,24 +809,33 @@ vibe agent run (--session-id <session_id> | --create-session | --fork-session <s
 - `--agent`
 - `--session-id`
 - `--fork-session`
+- `--fork-self`
 - `--create-session`
-- `--deliver-key`
+- `--same-scope`
+- `--scope-id`
 - `--model`
 - `--reasoning-effort`
+- `--cwd`
+- `--post-to {thread,channel}`
+- `--callback-session-id`
+- `--no-callback`
 - `--async`
+- `--wait-timeout`
 - `--message`
 - `--message-file`
 
-如果不传 `--session-id` 或 `--create-session`，run 会使用 private
-no-delivery session，更适合 sub-agent 调用。`--deliver-key` 只和
-`--create-session` 搭配使用。
+如果不传 `--session-id` 或 fork 参数，run 会为 `--agent` 创建一个新的 private
+background Session。用 `--same-scope` 可以把新建或 fork 后的 Session 放到
+调用方/源 Session 所在 scope；用 `--scope-id <scopes.id>` 可以放到指定现有
+scope。`--cwd` 只对新建空白 Session 生效；已有 Session 会保留自己的 cwd、
+scope、Agent、model 和 reasoning 设置。
 
-`--fork-session <session_id>` 会基于源 Session 的 native backend 上下文创建一个新的
-Agent Session，适合在保留上下文的同时做分支调查或委派工作，而不修改源 Session。
-fork 会保持源 Session 的 backend；只有 backend 不变时，`--agent`、`--model`
-和 `--reasoning-effort` 才能覆盖 fork 后 Session 的 Agent、模型或推理强度。
-不要把 `--fork-session` 和 `--session-id`、`--create-session`、`--deliver-key`
-或 `--post-to` 混用。
+`--fork-self` 会从 `AVIBE_SESSION_ID` 对应的当前调用方 Session fork。
+`--fork-session <session_id>` 则基于另一个源 Session 的 native backend 上下文创建
+新的 Agent Session。fork 默认保持源 Session 的 backend、scope 和 cwd；只有
+backend 不变时，`--agent`、`--model` 和 `--reasoning-effort` 才能覆盖 fork
+后 Session 的 Agent、模型或推理强度。不要把 fork 参数和 `--session-id`、
+`--create-session` 或 `--create-session-per-run` 混用。
 
 ## 5.4 `vibe runs`
 
@@ -831,6 +848,12 @@ fork 会保持源 Session 的 backend；只有 backend 不变时，`--agent`、`
 | `vibe runs list` | 列出最近 run |
 | `vibe runs show <run_id>` | 查看单个 run |
 | `vibe runs cancel <run_id>` | 请求取消 run |
+
+`vibe runs list` 支持 `--session-id <session_id>`、`--current-session`、
+`--status`、`--type`、`--agent`、`--backend`、`--q`、`--brief`、`--page`、
+`--limit`、`--all` 等筛选参数。在 Avibe 已注入 caller context 的 Agent shell
+内，如果只想看调用方 Session 的 run 历史，用 `--current-session`，不需要手动传
+当前 Session ID。
 
 ## 6. 推荐心智模型
 
@@ -866,5 +889,5 @@ vibe
 vibe status
 vibe doctor
 vibe task list --brief
-vibe agent run --async --no-callback --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
+vibe agent run --async --agent release-reviewer --message 'Share the latest build summary.'
 ```

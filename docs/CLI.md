@@ -183,13 +183,14 @@ List and inspect Agent run records.
 
 ```bash
 vibe runs list --session-id sesk8m4q2p7x --brief
+vibe runs list --current-session --brief      # inside an Avibe Agent shell
 vibe runs show run_abc123
 vibe runs show                         # inside an Avibe Agent shell, show the caller Run
 ```
 
 `vibe runs list` keeps its global listing behavior unless a filter such as
-`--session-id` is provided. `vibe runs show` can omit the run id inside an
-Avibe-injected Agent run and defaults to `AVIBE_RUN_ID`.
+`--session-id` or `--current-session` is provided. `vibe runs show` can omit the
+run id inside an Avibe-injected Agent run and defaults to `AVIBE_RUN_ID`.
 
 ### `vibe task`
 
@@ -198,6 +199,7 @@ Create, inspect, update, run, pause, resume, or remove scheduled tasks.
 ```bash
 vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
 vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'   # inside an Avibe Agent shell
+vibe task add --create-session --same-scope --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'
 vibe task list --brief
 vibe task update <task-id> --cron '*/30 * * * *'
 vibe task run <task-id>
@@ -207,18 +209,26 @@ vibe task remove <task-id>
 Use `vibe task add --help` and `vibe task update --help` for the full command surface, including:
 
 - `--session-id` for Agent Session continuity
+- `--create-session` and `--create-session-per-run` for tasks that should use newly-created Sessions
+- `--same-scope` and `--scope-id <scopes.id>` for placing created Sessions
+- `--cwd` for the working directory of Sessions created by the task
 - `--post-to channel` to publish into the parent channel while keeping thread context
-- `--deliver-key` for an explicit delivery target
 - `--cron` and `--at` scheduling
 - `--name`, `--timezone`, and message file support
 
 When `vibe task add` runs inside an Avibe-injected Agent shell, `--session-id`
 may be omitted. Avibe defaults the task target to the caller Session from
 `AVIBE_SESSION_ID` and reports that default in the command output. Explicit
-`--session-id`, session creation flags, and delivery flags still win.
+`--session-id` and session creation flags still win. Use
+`--create-session --same-scope` to create a reusable sibling Session in the
+current Workbench project or IM scope, or `--create-session --scope-id
+<scopes.id>` to place it in a specific existing scope. `--post-to channel`
+changes where the follow-up is posted, not which Session is continued or where
+new Sessions are placed.
 
 `--session-key` remains accepted for older scripts, but new tasks should use
-the Agent Session ID shown in the active Avibe prompt.
+the Agent Session ID shown in the active Avibe prompt. `--deliver-key` is legacy
+transport syntax and should not be used in new task examples.
 
 ### `vibe agent run`
 
@@ -227,29 +237,36 @@ a scheduled task definition.
 
 ```bash
 vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
-vibe agent run --async --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
-vibe agent run --async --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
-vibe agent run --async --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
-vibe agent run --async --no-callback --create-session --deliver-key slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
+vibe agent run --agent release-reviewer --same-scope --message 'Review this project in a visible sibling Session.'
+vibe agent run --async --agent release-reviewer --message 'Run the delegated investigation.'
+vibe agent run --async --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
+vibe agent run --async --fork-self --message 'Explore this alternate fix from the current context.'
+vibe agent run --fork-session sesk8m4q2p7x --agent reviewer --model gpt-5.4 --reasoning-effort high --message 'Review the forked context.'
 ```
 
-Use `--fork-session <session-id>` when a new Agent Session should branch from
-an existing Session's native backend context instead of starting blank. The new
-Session keeps the source backend. `--agent`, `--model`, and
-`--reasoning-effort` can override the forked Session only when the Agent backend
-stays the same; a cross-backend fork is rejected. Do not combine
-`--fork-session` with `--session-id`, `--create-session`, `--deliver-key`, or
-`--post-to`.
+With no `--session-id` or fork flag, `vibe agent run --agent <name>` creates a
+new private background Session for that Agent. Add `--same-scope` when the new
+Session should appear beside the caller/source Session in the current Workbench
+project or IM scope, or use `--scope-id <scopes.id>` for a specific existing
+scope. `--cwd` applies only to new blank Sessions; continuing an existing
+Session does not change its cwd, scope, Agent, model, or reasoning settings.
 
-Async runs need an explicit callback policy unless the command is running inside
-an Avibe-injected Agent environment. Use `--callback-session-id` when the final
-result text should return to a caller Session as a follow-up Agent message; use
-`--no-callback` when you intentionally want to inspect the run later with
-`vibe runs show` or by listing/polling runs. Agent-initiated Harness calls
-default the callback to the current caller Session. The callback is independent
-from ordinary delivery: if the target run also posts to its IM scope, the caller
-Session still receives the result. Process messages such as system notes, tool
-calls, and intermediate assistant updates are not included.
+Use `--fork-self` when a new Agent Session should branch from the current caller
+Session without passing the caller Session ID manually. Use
+`--fork-session <session-id>` when the source is a different known Session. The
+new Session keeps the source backend, scope, and cwd by default. `--agent`,
+`--model`, and `--reasoning-effort` can override the forked Session only when
+the Agent backend stays the same; a cross-backend fork is rejected. Do not
+combine fork flags with `--session-id`, `--create-session`, or
+`--create-session-per-run`.
+
+Async runs started inside an Avibe-injected Agent environment default their
+callback to the current caller Session. Use `--callback-session-id` only for an
+explicit override. Use `--no-callback` when you intentionally want no automatic
+follow-up and will inspect the run later with `vibe runs show` or by
+listing/polling runs. The callback is independent from ordinary delivery:
+process messages such as system notes, tool calls, and intermediate assistant
+updates are not included.
 
 `vibe hook send` is kept only as a deprecated compatibility entrypoint. New
 automation should use `vibe agent run`.
@@ -289,11 +306,13 @@ The waiter command is passed positionally after `--` (or as a single shell
 string via `--shell`). Use `vibe watch add --help` for the full surface,
 including `--timeout` (per-cycle timeout in seconds), `--lifetime-timeout`
 (total wall-clock limit), `--forever`, `--retry-exit-code`, `--retry-delay`,
-`--post-to channel`, `--deliver-key`, and `--name`. Watches share
-`--session-id`, `--post-to`, and `--deliver-key` semantics with `vibe task`
-and `vibe agent run`. `vibe watch remove` hides the watch from management
-views while preserving existing run history in SQLite. Prefer `vibe watch`
-over ad-hoc `nohup` jobs when the
+`--post-to channel`, `--create-session`, `--same-scope`, `--scope-id`, and
+`--name`. Watches share the task targeting model: omit `--session-id` inside an
+Avibe-injected Agent shell to follow up in the caller Session, or use
+`--create-session --same-scope` / `--scope-id` when the watch should create
+Sessions in a visible scope. `vibe watch remove` hides the watch from
+management views while preserving existing run history in SQLite. Prefer
+`vibe watch` over ad-hoc `nohup` jobs when the
 user wants a managed background task with a guaranteed follow-up message.
 
 ### `vibe version`

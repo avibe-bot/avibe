@@ -695,7 +695,7 @@ vibe upgrade
 ### `vibe task add`
 
 ```bash
-vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <expr> | --at <timestamp>) (--message <text> | --message-file <file>) [options]
+vibe task add [--session-id <session_id> | --create-session | --create-session-per-run] (--cron <expr> | --at <timestamp>) (--message <text> | --message-file <file>) [options]
 ```
 
 Important options:
@@ -704,14 +704,21 @@ Important options:
 - `--session-id`
 - `--create-session`
 - `--create-session-per-run`
+- `--same-scope`
+- `--scope-id`
 - `--agent`
+- `--cwd`
 - `--post-to {thread,channel}`
-- `--deliver-key`
 - `--cron`
 - `--at`
 - `--message`
 - `--message-file`
 - `--timezone`
+
+Inside an Avibe-injected Agent shell, omitting `--session-id` defaults the task
+target to the caller Session. Use `--create-session --same-scope` or
+`--create-session --scope-id <scopes.id>` when the task should create a reusable
+Session in a visible scope.
 
 ### `vibe task update`
 
@@ -726,9 +733,11 @@ Important options:
 - `--session-id`
 - `--create-session`
 - `--create-session-per-run`
+- `--same-scope`
+- `--scope-id`
 - `--agent`
+- `--cwd`
 - `--post-to {thread,channel}`
-- `--deliver-key`
 - `--reset-delivery`
 - `--cron`
 - `--at`
@@ -817,7 +826,7 @@ point back to this command.
 ### `vibe agent run`
 
 ```bash
-vibe agent run (--session-id <session_id> | --create-session | --fork-session <session_id>)? (--message <text> | --message-file <file>) [options]
+vibe agent run (--session-id <session_id> | --create-session | --fork-session <session_id> | --fork-self)? (--message <text> | --message-file <file>) [options]
 ```
 
 Important options:
@@ -825,25 +834,35 @@ Important options:
 - `--agent`
 - `--session-id`
 - `--fork-session`
+- `--fork-self`
 - `--create-session`
-- `--deliver-key`
+- `--same-scope`
+- `--scope-id`
 - `--model`
 - `--reasoning-effort`
+- `--cwd`
+- `--post-to {thread,channel}`
+- `--callback-session-id`
+- `--no-callback`
 - `--async`
+- `--wait-timeout`
 - `--message`
 - `--message-file`
 
-If neither `--session-id` nor `--create-session` is provided, the run uses a
-private no-delivery session and is best suited for sub-agent style calls.
-`--deliver-key` is only meaningful with `--create-session`.
+If neither `--session-id` nor a fork flag is provided, the run creates a new
+private background Session for `--agent`. Use `--same-scope` to place a new or
+forked Session in the caller/source Session's scope, or `--scope-id <scopes.id>`
+to place it in a specific existing scope. `--cwd` applies only to new blank
+Sessions; existing Sessions keep their stored cwd, scope, Agent, model, and
+reasoning settings.
 
-`--fork-session <session_id>` creates a new Agent Session by forking the source
-Session's native backend context. It is for alternate investigations or
-delegated work that should keep the source context without mutating the source
-Session. Forks keep the same backend as the source; `--agent`, `--model`, and
-`--reasoning-effort` may override the forked Session only when the backend does
-not change. Do not combine `--fork-session` with `--session-id`,
-`--create-session`, `--deliver-key`, or `--post-to`.
+`--fork-self` forks the current caller Session from `AVIBE_SESSION_ID`.
+`--fork-session <session_id>` creates a new Agent Session by forking another
+source Session's native backend context. Forks keep the same backend, scope, and
+cwd as the source by default; `--agent`, `--model`, and `--reasoning-effort` may
+override the forked Session only when the backend does not change. Do not combine
+fork flags with `--session-id`, `--create-session`, or
+`--create-session-per-run`.
 
 ## 5.4 `vibe runs`
 
@@ -857,6 +876,12 @@ direct Agent Run calls.
 | `vibe runs list` | List recent runs |
 | `vibe runs show <run_id>` | Show one run |
 | `vibe runs cancel <run_id>` | Request cancellation |
+
+`vibe runs list` accepts filters such as `--session-id <session_id>`,
+`--current-session`, `--status`, `--type`, `--agent`, `--backend`, `--q`,
+`--brief`, `--page`, `--limit`, and `--all`. Use `--current-session` inside an
+Avibe-injected Agent shell when you want the run history for the caller Session
+without passing its Session ID manually.
 
 ## 6. Recommended Mental Model
 
@@ -892,5 +917,5 @@ vibe
 vibe status
 vibe doctor
 vibe task list --brief
-vibe agent run --async --no-callback --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
+vibe agent run --async --agent release-reviewer --message 'Share the latest build summary.'
 ```
