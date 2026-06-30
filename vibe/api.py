@@ -1700,6 +1700,30 @@ def _release_one_shot_agent_grant(grant: dict | None, *, reason: str) -> None:
     release_vault_agent_scopes(_grant_scope_payload(grant), reason=reason)
 
 
+def consume_one_shot_grants(grants: list[dict] | tuple[dict, ...] | None, *, reason: str) -> None:
+    """Expire one-shot grants after the caller has committed value delivery."""
+    from storage import vault_service
+
+    if not grants:
+        return
+    seen: set[str] = set()
+    release_scopes: list[dict[str, str]] = []
+    engine = _vault_engine()
+    with engine.begin() as conn:
+        for grant in grants:
+            if not isinstance(grant, dict) or grant.get("one_shot") is not True:
+                continue
+            grant_id = str(grant.get("id") or "")
+            if not grant_id or grant_id in seen:
+                continue
+            seen.add(grant_id)
+            with contextlib.suppress(vault_service.GrantNotActiveError, vault_service.GrantNotFoundError):
+                vault_service.consume_one_shot_grant(conn, grant_id)
+            if bool(grant.get("delivery_ready")) and str(grant.get("delivery_status") or "") != "standard_ready":
+                release_scopes.extend(_grant_scope_payload(grant))
+    release_vault_agent_scopes(release_scopes, reason=reason)
+
+
 def _agent_grant_cached_all(result: dict, expected_count: int) -> bool:
     granted = result.get("granted")
     try:
@@ -1905,6 +1929,10 @@ def create_vault_grant(payload: dict) -> dict:
             )
     except vault_service.SecretNotFoundError as exc:
         raise VaultApiError(f"secret '{exc}' not found", code="secret_not_found", status=404) from exc
+    except vault_service.RequestNotFoundError as exc:
+        raise VaultApiError(f"request '{exc}' not found", code="request_not_found", status=404) from exc
+    except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     except vault_service.InvalidGrantError as exc:
         raise VaultApiError(str(exc), code="invalid_grant") from exc
     if not grantable_members:

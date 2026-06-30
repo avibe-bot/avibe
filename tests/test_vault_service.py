@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from storage import vault_service as vs
 from storage.db import create_sqlite_engine
-from storage.models import metadata, vault_audit, vault_grants, vault_links, vault_requests, vault_secrets
+from storage.models import metadata, vault_audit, vault_grants, vault_groups, vault_links, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
 
 
@@ -1328,6 +1328,41 @@ def test_keypair_is_not_value_requestable_and_always_ask_is_not_pregrantable(vau
     assert sign_req["request_type"] == "sign"
 
 
+def test_always_ask_honors_group_grantability(vault):
+    _create(vault, name="STATIC_KEY", protection="protected", group="locked", policy={"always_ask": True})
+    with vault.begin() as conn:
+        conn.execute(vault_groups.update().where(vault_groups.c.name == "locked").values(grantable=0))
+        req = vs.create_access_request(conn, "STATIC_KEY", requester={"session_id": "ses_1"})
+        request_members = vs.request_grantable_member_metas(conn, "secret", "STATIC_KEY", req["id"])
+        with pytest.raises(vs.NotGrantableError):
+            vs.create_grant(conn, scope_type="secret", scope_ref="STATIC_KEY", created_by_request_id=req["id"])
+
+    assert req["card"]["scope_options"] == []
+    assert request_members == []
+
+
+def test_always_ask_one_shot_card_ttl_is_capped_by_group_policy(vault):
+    _create(vault, name="STATIC_KEY", protection="protected", group="strict", policy={"always_ask": True})
+    with vault.begin() as conn:
+        conn.execute(vault_groups.update().where(vault_groups.c.name == "strict").values(max_grant_ttl_seconds=120))
+        req = vs.create_access_request(conn, "STATIC_KEY", requester={"session_id": "ses_1"})
+        option = req["card"]["scope_options"][0]
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="STATIC_KEY",
+            ttl_seconds=3600,
+            created_by_request_id=req["id"],
+        )
+
+    created_at = datetime.fromisoformat(grant["created_at"])
+    expires_at = datetime.fromisoformat(grant["expires_at"])
+    assert option["one_shot"] is True
+    assert option["default_ttl_seconds"] == 120
+    assert option["ttl_options_seconds"] == []
+    assert int((expires_at - created_at).total_seconds()) == 120
+
+
 def test_standard_always_ask_routes_every_access_through_one_shot_request(vault):
     _create(vault, name="ASK_KEY", protection="standard", policy={"always_ask": True})
     with vault.begin() as conn:
@@ -1353,6 +1388,14 @@ def test_standard_always_ask_routes_every_access_through_one_shot_request(vault)
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
         )
+        still_active = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        vs.consume_one_shot_grant(conn, grant["id"])
         second = vs.resolve_secret_access(
             conn,
             "ASK_KEY",
@@ -1360,15 +1403,17 @@ def test_standard_always_ask_routes_every_access_through_one_shot_request(vault)
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
         )
-        grant_status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
         request_rows = conn.execute(
             select(vault_requests.c.id, vault_requests.c.status).where(vault_requests.c.secret_name == "ASK_KEY")
         ).mappings().all()
+        grant_status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
 
     assert grant["one_shot"] is True
     assert delivered["status"] == "standard"
     assert delivered["grant"]["id"] == grant["id"]
     assert delivered["envelope"] == _sealed()
+    assert still_active["status"] == "standard"
+    assert still_active["grant"]["id"] == grant["id"]
     assert grant_status == "expired"
     assert second["status"] == "approval_required"
     assert second["request"]["id"] != first["request"]["id"]
@@ -1411,6 +1456,15 @@ def test_protected_always_ask_routes_every_access_through_one_shot_request(vault
             delivery={"skill": "deploy"},
             cache=cache,
         )
+        still_active = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1", "skill": "deploy"},
+            delivery={"skill": "deploy"},
+            cache=cache,
+        )
+        vs.consume_one_shot_grant(conn, grant["id"], cache=cache)
         second = vs.resolve_secret_access(
             conn,
             "ASK_KEY",
@@ -1419,14 +1473,16 @@ def test_protected_always_ask_routes_every_access_through_one_shot_request(vault
             delivery={"skill": "deploy"},
             cache=cache,
         )
-        grant_status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
         requests = conn.execute(select(vault_requests).where(vault_requests.c.secret_name == "ASK_KEY")).mappings().all()
+        grant_status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
 
     assert grant["one_shot"] is True
     assert grant["session_id"] == "ses_1"
     assert delivered["status"] == "agent_delivery_ready"
     assert delivered["grant"]["id"] == grant["id"]
     assert delivered["envelope"] == _sealed()
+    assert still_active["status"] == "agent_delivery_ready"
+    assert still_active["grant"]["id"] == grant["id"]
     assert grant_status == "expired"
     assert not cache.has(grant["id"], "ASK_KEY")
     assert second["status"] == "approval_required"

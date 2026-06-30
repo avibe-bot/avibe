@@ -1176,6 +1176,8 @@ def _always_ask_request_member_rows(
     row = _require_row(conn, str(requested_secret))
     if not _secret_access_requestable(row) or not _secret_always_ask(row):
         return []
+    if not _groups_grantable(conn, [str(row.get("group_name") or "")]):
+        return []
     return [row]
 
 
@@ -1242,6 +1244,45 @@ def _ttl_cap_for_members(conn: Connection, member_names: list[str]) -> int:
     return min(caps) if caps else 900
 
 
+def _groups_grantable(conn: Connection, group_names: list[str]) -> bool:
+    names = {name for name in group_names if name}
+    if not names:
+        return False
+    grantable_groups = {
+        row["name"]
+        for row in conn.execute(select(vault_groups).where(vault_groups.c.name.in_(names))).mappings()
+        if int(row.get("grantable") or 0) == 1
+    }
+    return names.issubset(grantable_groups)
+
+
+def _secret_scope_option(
+    conn: Connection,
+    row: dict[str, Any],
+    *,
+    default_ttl_seconds: int,
+    one_shot: bool = False,
+) -> dict[str, Any] | None:
+    secret_name = str(row["name"])
+    if not _groups_grantable(conn, [str(row.get("group_name") or "")]):
+        return None
+    ttl_cap = _ttl_cap_for_members(conn, [secret_name])
+    capped_default = min(default_ttl_seconds, ttl_cap)
+    option = {
+        "scope_type": "secret",
+        "scope_ref": secret_name,
+        "default_ttl_seconds": capped_default,
+        "ttl_options_seconds": [seconds for seconds in GRANT_TTL_OPTIONS_SECONDS if seconds <= ttl_cap],
+        "session_binding_default": True,
+        "member_count": 1,
+        "member_snapshot": [secret_name],
+        "member_versions": [_member_version(row)],
+    }
+    if one_shot:
+        option["one_shot"] = True
+    return option
+
+
 def _scope_option(
     conn: Connection,
     scope_type: str,
@@ -1285,19 +1326,13 @@ def approval_card(
     always_ask = _secret_always_ask(row)
     scope_options: list[dict[str, Any]] = []
     if always_ask:
-        scope_options = [
-            {
-                "scope_type": "secret",
-                "scope_ref": secret_name,
-                "default_ttl_seconds": DEFAULT_GRANT_TTL_SECONDS["secret"],
-                "ttl_options_seconds": list(GRANT_TTL_OPTIONS_SECONDS),
-                "session_binding_default": True,
-                "member_count": 1,
-                "member_snapshot": [secret_name],
-                "member_versions": [_member_version(row)],
-                "one_shot": True,
-            }
-        ]
+        option = _secret_scope_option(
+            conn,
+            row,
+            default_ttl_seconds=DEFAULT_GRANT_TTL_SECONDS["secret"],
+            one_shot=True,
+        )
+        scope_options = [option] if option is not None else []
     if grantable and not always_ask:
         scope_options = [
             option
@@ -2321,28 +2356,33 @@ def find_active_grant_for_secret(
     return find_active_grant_for_secrets(conn, [secret_name], session_id=session_id, cache=cache)
 
 
-def _grant_is_always_ask_for_requested(
+def _grant_is_always_ask_for_members(
     conn: Connection,
     row: dict[str, Any],
-    requested: set[str],
 ) -> bool:
     members = _grant_member_names(row)
-    if set(members) != requested:
+    if len(members) != 1:
         return False
-    if len(requested) != 1:
-        return False
-    return _secret_always_ask(_require_row(conn, next(iter(requested))))
+    return _secret_always_ask(_require_row(conn, members[0]))
 
 
-def _consume_always_ask_grant(
+def consume_one_shot_grant(
     conn: Connection,
-    row: dict[str, Any],
+    grant_id: str,
     *,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
 ) -> None:
+    row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().first()
+    if row is None:
+        raise GrantNotFoundError(grant_id)
+    row_dict = dict(row)
+    if row_dict.get("status") != "active":
+        raise GrantNotActiveError(grant_id)
+    if not _grant_is_always_ask_for_members(conn, row_dict):
+        return
     _expire_grant_rows(
         conn,
-        [row],
+        [row_dict],
         cache=cache,
         reason="grant-expired-always-ask-consumed",
     )
@@ -2395,8 +2435,6 @@ def find_active_grant_for_secrets(
         key=lambda item: (item[2], item[3]),
     )
     payload = _grant_payload(conn, row, cache=cache)
-    if _grant_is_always_ask_for_requested(conn, row, requested):
-        _consume_always_ask_grant(conn, row, cache=cache)
     return payload
 
 

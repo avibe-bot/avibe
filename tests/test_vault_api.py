@@ -955,6 +955,32 @@ def test_fulfill_protected_always_ask_access_uses_one_shot_resident_agent_grant(
     ]
 
 
+def test_always_ask_grant_api_maps_stale_request_preflight_to_json_error(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {
+            "name": "ASK_KEY",
+            "policy": {"always_ask": True},
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        }
+    )
+    requested = api.request_vault_access({"name": "ASK_KEY", "session_id": "ses_1"})
+    api.deny_vault_request(requested["request"]["id"])
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_grant(
+            {
+                "scope_type": "secret",
+                "scope_ref": "ASK_KEY",
+                "session_id": "ses_1",
+                "request_id": requested["request"]["id"],
+            }
+        )
+
+    assert exc.value.code == "invalid_request"
+    assert exc.value.status == 409
+
+
 def test_fulfill_access_request_rejects_dek_or_plaintext_material(monkeypatch, avault_p2):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
