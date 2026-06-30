@@ -10,6 +10,7 @@ import {
   CODE_HIGHLIGHT_MAX_BYTES,
   CSV_MAX_COLS,
   CSV_MAX_ROWS,
+  DOC_PREVIEW_MAX_BYTES,
   JSON_TREE_MAX_BYTES,
   JSON_TREE_MAX_NODES,
   PREVIEW_MAX_BYTES,
@@ -58,6 +59,10 @@ export const FilePreview: React.FC<{ source: PreviewSource; className?: string; 
     return source.url ? <PdfView url={source.url} className={className} /> : <Centered className={className}>{t('preview.failed')}</Centered>;
   if (kind === 'docx' || kind === 'xlsx' || kind === 'pptx') {
     if (!source.url) return <Centered className={className}>{t('preview.failed')}</Centered>;
+    // Office parsers pull the whole file into memory. The File Browser gates by `previewOverlayKind`'s
+    // 25 MB cap, but the chat media proxy enforces no such limit — so refuse an oversized doc here
+    // (when /meta gave a size) before fetching, rather than freezing the tab.
+    if (source.size != null && source.size > DOC_PREVIEW_MAX_BYTES) return <Centered className={className}>{t('preview.tooLarge')}</Centered>;
     if (kind === 'docx') return <DocxView url={source.url} className={className} />;
     if (kind === 'xlsx') return <XlsxView url={source.url} className={className} />;
     return <PptxView url={source.url} className={className} />;
@@ -129,7 +134,11 @@ const HTML_PREVIEW_CSP =
   "default-src 'none'; img-src data:; media-src data:; font-src data:; style-src 'unsafe-inline' data:; base-uri 'none'; form-action 'none'";
 const HtmlView: React.FC<{ html: string; className?: string }> = ({ html, className }) => {
   const { t } = useTranslation();
-  const safeHtml = `<meta http-equiv="Content-Security-Policy" content="${HTML_PREVIEW_CSP}">\n${html}`;
+  // The CSP blocks subresources and sandbox blocks scripts, but neither stops a `<meta
+  // http-equiv="refresh">` from navigating the sandboxed frame to a remote URL the instant the
+  // preview opens (a network/IP leak). Strip those tags so opening a preview never auto-navigates.
+  const noRefresh = html.replace(/<meta\b[^>]*?http-equiv\s*=\s*["']?\s*refresh\b[^>]*>/gi, '');
+  const safeHtml = `<meta http-equiv="Content-Security-Policy" content="${HTML_PREVIEW_CSP}">\n${noRefresh}`;
   return (
     <iframe
       title={t('preview.title')}
@@ -206,13 +215,17 @@ const DocxView: React.FC<{ url: string; className?: string }> = ({ url, classNam
   );
 };
 
-// XLSX → SheetJS parses, then each sheet renders as an HTML table; a tab bar switches sheets.
-// sheet_to_html HTML-escapes cell text, so the injected markup is safe. The render range is clamped
-// (rows × cols) because sheet_to_html mounts every cell into the DOM — a huge sheet would freeze.
+// XLSX → SheetJS parses to plain values, then each VISIBLE sheet renders as a React <table> — NOT
+// dangerouslySetInnerHTML. sheet_to_html injects a cell's `.h` (rich-text HTML) raw, so a crafted
+// workbook could smuggle active markup (e.g. a javascript: link) into the app DOM; rendering parsed
+// values through React escapes everything and removes that XSS surface. Hidden / very-hidden sheets
+// are dropped (Excel keeps them out of view too). The range is clamped (rows × cols) so a huge sheet
+// can't freeze the tab by mounting hundreds of thousands of cells.
+type XlsxSheet = { name: string; rows: string[][]; cols: number; truncated: boolean };
 const XlsxView: React.FC<{ url: string; className?: string }> = ({ url, className }) => {
   const { t } = useTranslation();
   const { status, bytes } = useFileBytes(url);
-  const [sheets, setSheets] = React.useState<{ name: string; html: string; truncated: boolean }[] | null>(null);
+  const [sheets, setSheets] = React.useState<XlsxSheet[] | null>(null);
   const [active, setActive] = React.useState(0);
   const [failed, setFailed] = React.useState(false);
 
@@ -229,22 +242,22 @@ const XlsxView: React.FC<{ url: string; className?: string }> = ({ url, classNam
         const wb = XLSX.read(bytes, { type: 'array' });
         const MAX_ROWS = 1000;
         const MAX_COLS = 60;
-        const out = wb.SheetNames.map((name) => {
-          const ws = wb.Sheets[name];
+        const out: XlsxSheet[] = [];
+        wb.SheetNames.forEach((name, i) => {
+          if (wb.Workbook?.Sheets?.[i]?.Hidden) return; // 1 = hidden, 2 = very hidden → skip
+          const grid = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: false, defval: '', blankrows: true }) as unknown as string[][];
+          let rows = grid;
           let truncated = false;
-          if (ws['!ref']) {
-            const r = XLSX.utils.decode_range(ws['!ref']);
-            if (r.e.r - r.s.r > MAX_ROWS) {
-              r.e.r = r.s.r + MAX_ROWS;
-              truncated = true;
-            }
-            if (r.e.c - r.s.c > MAX_COLS) {
-              r.e.c = r.s.c + MAX_COLS;
-              truncated = true;
-            }
-            ws['!ref'] = XLSX.utils.encode_range(r);
+          if (rows.length > MAX_ROWS) {
+            rows = rows.slice(0, MAX_ROWS);
+            truncated = true;
           }
-          return { name, html: XLSX.utils.sheet_to_html(ws, { editable: false }), truncated };
+          let cols = rows.reduce((m, r) => Math.max(m, r.length), 0);
+          if (cols > MAX_COLS) {
+            cols = MAX_COLS;
+            truncated = true;
+          }
+          out.push({ name, rows, cols, truncated });
         });
         if (alive) setSheets(out);
       } catch {
@@ -259,17 +272,23 @@ const XlsxView: React.FC<{ url: string; className?: string }> = ({ url, classNam
   if (status === 'error' || failed) return <Centered className={className}>{t('preview.failed')}</Centered>;
   if (!sheets) return <Spinner className={className} />;
   if (sheets.length === 0) return <Centered className={className}>{t('preview.empty')}</Centered>;
+  const sheet = sheets[active];
+  const colIdx = Array.from({ length: sheet?.cols ?? 0 }, (_, i) => i);
 
   return (
-    <div className={clsx('flex h-full min-h-0 flex-col bg-white text-neutral-900', className)}>
-      {sheets[active]?.truncated && (
+    <div className={clsx('flex h-full min-h-0 flex-col bg-surface', className)}>
+      {sheet?.truncated && (
         <div className="shrink-0 border-b border-amber-300 bg-amber-50 px-3 py-1 text-[11.5px] text-amber-800">{t('preview.truncated')}</div>
       )}
-      <div
-        className="min-h-0 flex-1 overflow-auto p-2 text-[12px] [&_table]:border-collapse [&_td]:border [&_td]:border-neutral-300 [&_td]:px-2 [&_td]:py-0.5 [&_th]:border [&_th]:border-neutral-300 [&_th]:bg-neutral-100 [&_th]:px-2 [&_th]:py-0.5"
-        // eslint-disable-next-line react/no-danger
-        dangerouslySetInnerHTML={{ __html: sheets[active]?.html ?? '' }}
-      />
+      <div className="vr-fileview-csv min-h-0 flex-1 overflow-auto p-2">
+        <table className="vr-fileview-table">
+          <tbody>
+            {(sheet?.rows ?? []).map((r, ri) => (
+              <tr key={ri}>{colIdx.map((ci) => <td key={ci}>{r[ci] ?? ''}</td>)}</tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       {sheets.length > 1 && (
         <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-t border-border bg-surface-2 px-2 py-1">
           {sheets.map((s, i) => (

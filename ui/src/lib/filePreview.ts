@@ -141,12 +141,23 @@ const DOC_EXT: Record<string, DocPreviewKind> = {
 };
 export const DOC_PREVIEW_MAX_BYTES = IMAGE_PREVIEW_MAX_BYTES; // 25 MB, matches the backend content cap
 
-export function docPreviewKind(name: string, mime?: string | null): DocPreviewKind | null {
-  const ext = extOf(name);
+// Office/PDF content types → kind, so a descriptive-label chat link (whose name carries no real
+// suffix) still classifies via the server-supplied content-type or /meta ext.
+const OFFICE_MIME: Record<string, DocPreviewKind> = {
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/msword': 'docx',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.ms-excel': 'xlsx',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+  'application/vnd.ms-powerpoint': 'pptx',
+  'application/pdf': 'pdf',
+};
+
+export function docPreviewKind(name: string, mime?: string | null, serverExt?: string | null): DocPreviewKind | null {
+  const ext = extOf(name) || (serverExt || '').replace(/^\.+/, '').toLowerCase();
   if (ext in DOC_EXT) return DOC_EXT[ext];
   const m = (mime || '').split(';')[0].trim().toLowerCase();
-  if (m === 'application/pdf') return 'pdf';
-  return null;
+  return OFFICE_MIME[m] ?? null;
 }
 
 // ── Unified preview dispatch ────────────────────────────────────────────────
@@ -177,7 +188,7 @@ export function previewRenderKind(name: string, mime?: string | null, serverExt?
   const ext = extOf(name) || (serverExt || '').replace(/^\.+/, '').toLowerCase();
   const m = (mime || '').split(';')[0].trim().toLowerCase();
   if (HTML_EXT.has(ext) || m === 'text/html') return 'html';
-  const doc = docPreviewKind(name, mime);
+  const doc = docPreviewKind(name, mime, serverExt);
   if (doc) return doc;
   const k = previewKind(name, mime, serverExt);
   if (k === 'markdown') return 'markdown';
