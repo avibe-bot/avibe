@@ -719,7 +719,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   // project list) scrolls; Inbox + Capabilities stay pinned. The Inbox hover
   // popover stays OUT of any overflow box below, so it is never clipped.
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4">
+    <div className="flex min-h-0 flex-1 flex-col gap-2.5">
       {/* Search field — the sidebar's first item (Brand lives in AppShell).
           Field-style button per design.pen XErMu: search glyph + muted
           placeholder + ⌘K pill; opens the ⌘K command palette. */}
@@ -780,7 +780,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         />
       </Popover>
 
-      <div className="flex flex-col gap-2">
+      <div className="flex flex-col gap-1.5">
         <div className="px-1 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
           {t('workbench.capabilitiesLabel')}
         </div>
@@ -791,7 +791,7 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               to={to}
               className={({ isActive }) =>
                 clsx(
-                  'group flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-colors',
+                  'group flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors',
                   isActive
                     ? 'border border-mint/30 bg-mint/[0.08] text-foreground shadow-[0_0_16px_-4px_rgba(91,255,160,0.5)]'
                     : 'border border-transparent text-muted hover:bg-foreground/[0.04] hover:text-foreground',

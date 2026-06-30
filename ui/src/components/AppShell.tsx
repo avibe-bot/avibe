@@ -380,12 +380,15 @@ export const AppShell: React.FC = () => {
           The Apps button no longer floats on top in full-screen (a Dock redesign comes later);
           un-maximize to reach it. */}
       <aside className="fixed inset-y-0 left-0 z-10 hidden w-[240px] flex-col border-r border-border bg-surface md:flex">
-        <div className="flex h-full flex-col justify-between gap-6 px-4 py-5">
+        {/* Workbench packs more rows (search/inbox/capabilities/projects) into the
+            sidebar, so it runs a tighter vertical rhythm than admin — less outer
+            padding and a smaller gap to the bottom cluster — to give the flex-1
+            Projects list more height. Admin keeps the roomier spacing. */}
+        <div className={clsx('flex h-full flex-col justify-between px-4', shellMode === 'workbench' ? 'gap-4 py-4' : 'gap-6 py-5')}>
           {/* Top: Brand + Workspace label + Nav list */}
-          {/* Workbench mounts a search field right under the brand, so use the
-              same gap as the sidebar's own rows (gap-4) for an even rhythm; admin
-              keeps the wider gap-6 to separate the brand from its labelled nav. */}
-          <div className={clsx('flex min-h-0 flex-1 flex-col', shellMode === 'workbench' ? 'gap-4' : 'gap-6')}>
+          {/* Workbench mounts a search field right under the brand; tighter gap to
+              keep the dense nav compact. Admin keeps the wider gap-6. */}
+          <div className={clsx('flex min-h-0 flex-1 flex-col', shellMode === 'workbench' ? 'gap-3' : 'gap-6')}>
             <div className="flex items-center gap-2.5 px-1 py-2">
               <img
                 src={logoImg}
