@@ -221,7 +221,7 @@ def test_hook_send_help_describes_runtime_effects(capsys) -> None:
     assert "`--post-to channel` changes where the message is posted, not which session is continued." in captured.out
     assert "`--message` and `--message-file` provide the one-shot async user message that will be queued immediately." in captured.out
     assert "--session-id" in captured.out
-    assert "vibe agent run --agent release-reviewer --message" in captured.out
+    assert "vibe agent run --agent release-reviewer --no-callback --message" in captured.out
     assert "vibe agent run --agent release-reviewer --no-callback" in captured.out
 
 
@@ -285,6 +285,7 @@ def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
     assert "--fork-self forks this current Session." in captured.out
     assert "Forks keep the same backend, scope, and cwd as the source Session." in captured.out
     assert "vibe agent run --fork-self --message" in captured.out
+    assert "vibe agent run --agent release-reviewer --no-callback --message" in captured.out
     assert "Agent runs are async by default and return their final result to this conversation by default." in captured.out
     assert "Do not combine fork flags with --session-id, --create-session, or --create-session-per-run." in captured.out
 

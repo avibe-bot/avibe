@@ -49,7 +49,7 @@ Web UI 可以是清晰的三个 tab：
 异步 Agent Run（默认）：
 
 ```bash
-vibe agent run --agent release-reviewer --message "Review this diff."
+vibe agent run --agent release-reviewer --no-callback --message "Review this diff."
 ```
 
 同步 Agent Run：

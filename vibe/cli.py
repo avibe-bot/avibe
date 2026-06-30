@@ -341,7 +341,7 @@ def _hook_send_examples_text() -> str:
           `--message` and `--message-file` provide the one-shot async user message that will be queued immediately.
 
         Examples:
-          vibe agent run --agent release-reviewer --message 'The export finished. Share the summary.'
+          vibe agent run --agent release-reviewer --no-callback --message 'The export finished. Share the summary.'
           vibe agent run --agent release-reviewer --no-callback --message 'Run the benchmark; I will inspect the run later.'
         """
     )
@@ -660,8 +660,8 @@ def _agent_run_examples_text() -> str:
           Do not combine fork flags with --session-id, --create-session, or --create-session-per-run.
 
         Examples:
-          vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
-          vibe agent run --agent release-reviewer --same-scope --message 'Review this project in a visible sibling Session.'
+          vibe agent run --agent release-reviewer --no-callback --message 'Review the latest deployment result.'
+          vibe agent run --agent release-reviewer --same-scope --no-callback --message 'Review this project in a visible sibling Session.'
           vibe agent run --sync --agent release-reviewer --message 'Review the latest CI result and print it here.'
           vibe agent run --agent release-reviewer --no-callback --message 'Run a background experiment; I will inspect the run later.'
           vibe agent run --fork-self --message 'Explore this alternate fix from the current context.'

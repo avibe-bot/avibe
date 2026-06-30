@@ -208,7 +208,7 @@ session creation 参数和 delivery 参数仍然优先。
 `--sync`。
 
 ```bash
-vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
+vibe agent run --no-callback --agent release-reviewer --message 'Review the latest deployment result.'
 vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
 vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'

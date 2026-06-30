@@ -226,7 +226,7 @@ Run an Agent directly. Runs are async by default and do not store a scheduled
 task definition. Use `--sync` only when the terminal should wait for completion.
 
 ```bash
-vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
+vibe agent run --no-callback --agent release-reviewer --message 'Review the latest deployment result.'
 vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
 vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'

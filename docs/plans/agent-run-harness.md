@@ -50,7 +50,7 @@ The shared primitive is the run record, not the task.
 Asynchronous Agent Run (default):
 
 ```bash
-vibe agent run --agent release-reviewer --message "Review this diff."
+vibe agent run --agent release-reviewer --no-callback --message "Review this diff."
 ```
 
 Synchronous Agent Run:
