@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { KeyRound, Loader2, Lock, LifeBuoy, RefreshCw, ScanFace, ShieldCheck, Sparkles } from 'lucide-react';
+import { KeyRound, Loader2, Lock, RefreshCw, ScanFace, ShieldCheck, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
@@ -55,6 +55,9 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
   // Progressive disclosure: password fields stay hidden until the user opts out of the
   // recommended passkey path. Resets whenever the panel re-mounts for a new state.
   const [showPassword, setShowPassword] = useState(false);
+  // Passkey-only setup has no password/second-passkey/recovery fallback yet, so a lost
+  // passkey is unrecoverable — gate the recommended action behind an explicit ack.
+  const [ackLoss, setAckLoss] = useState(false);
 
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -142,7 +145,7 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
               <Sparkles className="size-3" />
               {t('vaults.protectedUnlock.recommended')}
             </Badge>
-            <Button type="button" variant="brand" className="w-full" onClick={() => run(vault.setupPasskey)} disabled={busy}>
+            <Button type="button" variant="brand" className="w-full" onClick={() => run(vault.setupPasskey)} disabled={busy || !ackLoss}>
               {busy ? <Loader2 className="size-5 animate-spin" /> : <ScanFace className="size-5" />}
               {t('vaults.protectedUnlock.addPasskey')}
             </Button>
@@ -150,11 +153,16 @@ export const VaultProtectedUnlock: React.FC<{ vault: Vault; secretName?: string;
           </div>
         )}
 
-        {/* Recovery tip — second passkey / recovery code, so a lost device never locks out. */}
+        {/* Unrecoverable acknowledgement — a passkey-only vault has no password/second-passkey/
+            recovery fallback yet, so a lost passkey means the protected secrets are gone. Gate
+            the recommended action behind an explicit ack until a recovery flow exists. */}
         {canUsePasskey && (
-          <div className="flex items-start gap-2 rounded-xl bg-surface-2 p-3">
-            <LifeBuoy className="mt-0.5 size-[15px] shrink-0 text-muted" />
-            <span className="text-[11.5px] leading-snug text-muted-foreground">{t('vaults.protectedUnlock.recoveryTip')}</span>
+          <div className="flex flex-col gap-2 rounded-xl border border-warning/40 bg-warning/10 p-3">
+            <span className="text-[11.5px] leading-snug text-warning">{t('vaults.protectedUnlock.passkeyUnrecoverableWarning')}</span>
+            <label className="flex items-start gap-2 text-[11.5px] leading-snug text-muted-foreground">
+              <input type="checkbox" checked={ackLoss} onChange={(e) => setAckLoss(e.target.checked)} className="mt-0.5 shrink-0" />
+              <span>{t('vaults.protectedUnlock.passkeyAck')}</span>
+            </label>
           </div>
         )}
 

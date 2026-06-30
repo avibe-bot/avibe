@@ -30,7 +30,6 @@ import { Button } from './button';
 import { Combobox } from './combobox';
 import { Input } from './input';
 import { SegmentedRadio } from './segmented';
-import { Switch } from './switch';
 import { TagInput } from './tag-input';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 
@@ -125,7 +124,6 @@ export const VaultSecretForm: React.FC<{
   const [tags, setTags] = useState<string[]>([]);
   const [description, setDescription] = useState('');
   const [allowHosts, setAllowHosts] = useState<string[]>([]);
-  const [alwaysAsk, setAlwaysAsk] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [tagsPending, setTagsPending] = useState(false);
   const [hostsPending, setHostsPending] = useState(false);
@@ -218,24 +216,23 @@ export const VaultSecretForm: React.FC<{
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
     if (!canSubmit) return;
-    // Don't silently drop a half-typed tag/host chip the user can still see. Both inputs
-    // live in the Advanced collapsible, so only enforce the guard while it's open —
-    // collapsing Advanced also clears the pending flags (see the toggle), so a hidden
-    // draft can never block submit.
-    if (advancedOpen && (tagsPending || hostsPending)) {
+    // Don't silently drop a half-typed tag/host chip the user can still see. Tags live in the
+    // create-mode Advanced collapsible; the allowed-hosts input is in Advanced (create) and
+    // always visible in provision mode — guard whichever is on screen. Collapsing Advanced
+    // clears the pending flags, so a hidden draft can never block submit.
+    const hostsVisible = isProvision || advancedOpen;
+    if ((advancedOpen && tagsPending) || (hostsVisible && hostsPending)) {
       setError(t('vaults.dialog.errors.pendingDraft'));
       return;
     }
     setSubmitting(true);
     setError(null);
     try {
-      // `always_ask` is a real backend policy field (storage/vault_service.py:
-      // `_secret_access_grantable` returns False when set) — the secret is then never
-      // granted in advance, even per-key. Keypairs are already never value-grantable, so
-      // the flag is only meaningful for static secrets.
+      // NOTE: the "Always ask before each use" toggle (policy.always_ask) is intentionally
+      // not wired here yet — the backend access flow does not honor it (standard-tier ignores
+      // it; protected-tier rejects it). It returns once backend support lands (PR #722).
       const policy: Record<string, unknown> = {};
       if (allowHosts.length) policy.allowed_hosts = allowHosts;
-      if (alwaysAsk && !isKeypair) policy.always_ask = true;
       const base = {
         name: secretName,
         protection,
@@ -446,6 +443,22 @@ export const VaultSecretForm: React.FC<{
           </div>
         </div>
 
+        {/* Allowed hosts — a provisioned secret used for brokered HTTP fetch needs at least
+            one allowed host, else vibe/cli.py refuses the fetch as proxy_unbound. */}
+        <div className="flex flex-col gap-1.5">
+          <span className={FIELD_LABEL}>{t('vaults.dialog.allowHosts')}</span>
+          <TagInput
+            values={allowHosts}
+            onChange={setAllowHosts}
+            normalize={normalizeHost}
+            placeholder={t('vaults.dialog.allowHostsPlaceholder')}
+            ariaLabel={t('vaults.dialog.allowHosts')}
+            removeLabel={(value) => t('vaults.dialog.removeChip', { value })}
+            onPendingChange={setHostsPending}
+          />
+          <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.allowHostsHelp')}</span>
+        </div>
+
         {gatingNotices}
 
         <div className="mt-1 flex justify-end gap-2">
@@ -650,7 +663,7 @@ export const VaultSecretForm: React.FC<{
         >
           <SlidersHorizontal className="size-3.5 text-muted" />
           <span className="flex-1 text-xs font-semibold text-foreground">{t('vaults.dialog.advanced')}</span>
-          {!advancedOpen && (description || tags.length > 0 || allowHosts.length > 0 || alwaysAsk) && (
+          {!advancedOpen && (description || tags.length > 0 || allowHosts.length > 0) && (
             <span className="size-1.5 rounded-full bg-mint" aria-hidden />
           )}
         </button>
@@ -693,20 +706,6 @@ export const VaultSecretForm: React.FC<{
                 onPendingChange={setHostsPending}
               />
               <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.allowHostsHelp')}</span>
-            </div>
-
-            {/* Always ask before each use → policy.always_ask (static secrets only). */}
-            <div className="flex items-center gap-3">
-              <div className="flex min-w-0 flex-1 flex-col">
-                <span className={FIELD_LABEL}>{t('vaults.dialog.alwaysAsk')}</span>
-                <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.alwaysAskHelp')}</span>
-              </div>
-              <Switch
-                checked={alwaysAsk}
-                onCheckedChange={setAlwaysAsk}
-                disabled={isKeypair}
-                label={t('vaults.dialog.alwaysAsk')}
-              />
             </div>
           </div>
         )}
