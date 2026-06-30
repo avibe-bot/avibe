@@ -200,6 +200,17 @@ export async function readText(path: string): Promise<string> {
   }
 }
 
+// Raw bytes of a file — for the binary document previewers (docx-preview / SheetJS / PptxViewJS),
+// which parse the original .docx/.xlsx/.pptx on the client. Goes through apiFetch so auth + the
+// not-found/permission errors surface the same way as the rest of the file API.
+export async function readArrayBuffer(path: string): Promise<ArrayBuffer> {
+  const res = await apiFetch(contentUrl(path));
+  if (!res.ok) {
+    await parse(res); // throws a FilesApiError
+  }
+  return res.arrayBuffer();
+}
+
 export async function writeFile(
   path: string,
   content: string,

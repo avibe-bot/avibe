@@ -132,6 +132,37 @@ export function isRenderOnlyImage(entry: { kind: string; name: string; size: num
   return entry.kind === 'file' && imageKind(entry.name) === 'raster' && (entry.size == null || entry.size <= IMAGE_PREVIEW_MAX_BYTES);
 }
 
+// Rich documents we can preview client-side (read-only): Office files rendered by lazy-loaded libs
+// (docx-preview / SheetJS / PptxViewJS) and PDF via the browser's built-in viewer. Kept separate
+// from previewKind/imageKind. The parsers pull the whole file into memory, so it's gated by the
+// content cap; an oversized doc (which /api/files/content would reject anyway) falls to download.
+export type DocPreviewKind = 'docx' | 'xlsx' | 'pptx' | 'pdf';
+const DOC_EXT: Record<string, DocPreviewKind> = {
+  docx: 'docx',
+  xlsx: 'xlsx',
+  xlsm: 'xlsx',
+  xls: 'xlsx',
+  csv: 'xlsx',
+  pptx: 'pptx',
+  pdf: 'pdf',
+};
+export const DOC_PREVIEW_MAX_BYTES = IMAGE_PREVIEW_MAX_BYTES; // 25 MB, matches the backend content cap
+
+export function docPreviewKind(name: string, mime?: string | null): DocPreviewKind | null {
+  const ext = extOf(name);
+  if (ext in DOC_EXT) return DOC_EXT[ext];
+  const m = (mime || '').split(';')[0].trim().toLowerCase();
+  if (m === 'application/pdf') return 'pdf';
+  return null;
+}
+
+// A regular file within the content cap that we can render as a rich document (Office / PDF).
+export function previewableDoc(entry: { kind: string; name: string; size: number | null }): DocPreviewKind | null {
+  if (entry.kind !== 'file') return null;
+  if (entry.size != null && entry.size > DOC_PREVIEW_MAX_BYTES) return null;
+  return docPreviewKind(entry.name);
+}
+
 // Shiki language id for the 'code'/'source' kinds; 'text' (no highlight) otherwise.
 export function codeLanguage(name: string, serverExt?: string | null): string {
   const b = baseName(name).toLowerCase();
