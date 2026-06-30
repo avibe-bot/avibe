@@ -240,8 +240,9 @@ a scheduled task definition.
 vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
 vibe agent run --async --agent release-reviewer --no-callback --message 'Run the delegated investigation.'
 vibe agent run --async --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
+vibe agent run --agent release-reviewer --scope-id scope123 --message 'Review this project in a visible sibling Session.'
 
-# Inside an Avibe Agent shell, caller context supplies the current Session and callback target.
+# Inside an Avibe Agent shell, caller context supplies the current Session, scope, and callback target.
 vibe agent run --agent release-reviewer --same-scope --message 'Review this project in a visible sibling Session.'
 vibe agent run --async --agent release-reviewer --message 'Run the delegated investigation.'
 vibe agent run --async --fork-self --message 'Explore this alternate fix from the current context.'
@@ -249,11 +250,12 @@ vibe agent run --fork-session sesk8m4q2p7x --agent reviewer --model gpt-5.4 --re
 ```
 
 With no `--session-id` or fork flag, `vibe agent run --agent <name>` creates a
-new private background Session for that Agent. Add `--same-scope` when the new
-Session should appear beside the caller/source Session in the current Workbench
-project or IM scope, or use `--scope-id <scopes.id>` for a specific existing
-scope. `--cwd` applies only to new blank Sessions; continuing an existing
-Session does not change its cwd, scope, Agent, model, or reasoning settings.
+new private background Session for that Agent. In an Avibe-injected Agent shell,
+add `--same-scope` when the new Session should appear beside the caller/source
+Session in the current Workbench project or IM scope. From a host shell, use
+`--scope-id <scopes.id>` for a specific existing scope. `--cwd` applies only to
+new blank Sessions; continuing an existing Session does not change its cwd,
+scope, Agent, model, or reasoning settings.
 
 Use `--fork-self` when a new Agent Session should branch from the current caller
 Session without passing the caller Session ID manually. Use
