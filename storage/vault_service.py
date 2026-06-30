@@ -320,8 +320,11 @@ def _card_hydration_policy(audience: str | None) -> CardHydrationPolicy:
     )
 
 
+ACTIVE_GRANT_STATUSES = {"active", "reserved"}
+
+
 def _grant_is_active(row: dict[str, Any]) -> bool:
-    if row.get("status") != "active":
+    if row.get("status") not in ACTIVE_GRANT_STATUSES:
         return False
     expires_at = _parse_iso_datetime(row.get("expires_at"))
     return expires_at is None or expires_at > datetime.now(timezone.utc)
@@ -1736,7 +1739,7 @@ def _expire_grant_rows(
     for row in rows:
         conn.execute(
             vault_grants.update()
-            .where(vault_grants.c.id == row["id"], vault_grants.c.status == "active")
+            .where(vault_grants.c.id == row["id"], vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES))
             .values(status="expired", revoked_at=now, agent_ready=0, agent_ready_at=None)
         )
         cache.drop(row["id"])
@@ -1806,7 +1809,7 @@ def agent_release_scopes_after_rows(
         return []
     active_rows = [
         dict(row)
-        for row in conn.execute(select(vault_grants).where(vault_grants.c.status == "active")).mappings()
+        for row in conn.execute(select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES))).mappings()
         if grant_row_has_resident_agent_ready(dict(row))
     ]
     active_by_scope: dict[tuple[str, str], set[str]] = {}
@@ -1840,7 +1843,7 @@ def agent_release_scopes_after_rows(
             .where(
                 vault_grants.c.scope_type == scope_type,
                 vault_grants.c.scope_ref == scope_ref,
-                vault_grants.c.status == "active",
+                vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES),
             )
             .values(agent_ready=0, agent_ready_at=None)
         )
@@ -2353,8 +2356,15 @@ def find_active_grant_for_secret(
     *,
     session_id: str | None = None,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    reserve_one_shot: bool = False,
 ) -> dict[str, Any] | None:
-    return find_active_grant_for_secrets(conn, [secret_name], session_id=session_id, cache=cache)
+    return find_active_grant_for_secrets(
+        conn,
+        [secret_name],
+        session_id=session_id,
+        cache=cache,
+        reserve_one_shot=reserve_one_shot,
+    )
 
 
 def _grant_is_always_ask_for_members(
@@ -2377,7 +2387,7 @@ def consume_one_shot_grant(
     if row is None:
         raise GrantNotFoundError(grant_id)
     row_dict = dict(row)
-    if row_dict.get("status") != "active":
+    if row_dict.get("status") not in ACTIVE_GRANT_STATUSES:
         raise GrantNotActiveError(grant_id)
     if not _grant_is_always_ask_for_members(conn, row_dict):
         return []
@@ -2390,12 +2400,62 @@ def consume_one_shot_grant(
     return agent_release_scopes_after_rows(conn, [row_dict], cache=cache)
 
 
+def release_one_shot_reservation(
+    conn: Connection,
+    grant_id: str,
+    *,
+    cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+) -> dict[str, Any]:
+    row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().first()
+    if row is None:
+        raise GrantNotFoundError(grant_id)
+    row_dict = dict(row)
+    if row_dict.get("status") != "reserved":
+        raise GrantNotActiveError(grant_id)
+    if not _grant_is_always_ask_for_members(conn, row_dict):
+        raise InvalidGrantError("grant is not one-shot")
+    result = conn.execute(
+        vault_grants.update()
+        .where(vault_grants.c.id == grant_id, vault_grants.c.status == "reserved")
+        .values(status="active")
+    )
+    if result.rowcount != 1:
+        raise GrantNotActiveError(grant_id)
+    audit(conn, "grant-reservation-released", grant_id=grant_id, delivery={"scope_type": row_dict["scope_type"], "scope_ref": row_dict["scope_ref"]})
+    row_dict = dict(conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().one())
+    members = _grant_member_names(row_dict)
+    if grant_row_has_resident_agent_ready(row_dict) and members:
+        cache.put(grant_id, members, expires_at=row_dict.get("expires_at"))
+    return _grant_payload(conn, row_dict, cache=cache)
+
+
+def _reserve_one_shot_grant(
+    conn: Connection,
+    row: dict[str, Any],
+    *,
+    cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+) -> dict[str, Any] | None:
+    if row.get("status") != "active" or not _grant_is_always_ask_for_members(conn, row):
+        return _grant_payload(conn, row, cache=cache)
+    result = conn.execute(
+        vault_grants.update()
+        .where(vault_grants.c.id == row["id"], vault_grants.c.status == "active")
+        .values(status="reserved")
+    )
+    if result.rowcount != 1:
+        return None
+    audit(conn, "grant-reserved-one-shot", grant_id=row["id"], delivery={"scope_type": row["scope_type"], "scope_ref": row["scope_ref"]})
+    updated = dict(conn.execute(select(vault_grants).where(vault_grants.c.id == row["id"])).mappings().one())
+    return _grant_payload(conn, updated, cache=cache)
+
+
 def find_active_grant_for_secrets(
     conn: Connection,
     secret_names: list[str],
     *,
     session_id: str | None = None,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    reserve_one_shot: bool = False,
 ) -> dict[str, Any] | None:
     expire_grants(conn, cache=cache)
     requested = {str(name) for name in secret_names if str(name)}
@@ -2437,6 +2497,8 @@ def find_active_grant_for_secrets(
         key=lambda item: (item[2], item[3]),
     )
     payload = _grant_payload(conn, row, cache=cache)
+    if reserve_one_shot and payload.get("one_shot") is True:
+        return _reserve_one_shot_grant(conn, row, cache=cache)
     return payload
 
 
@@ -2449,6 +2511,7 @@ def resolve_secret_access(
     delivery: dict[str, Any] | None = None,
     create_request: bool = True,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+    reserve_one_shot: bool = True,
 ) -> dict[str, Any]:
     """Resolve an agent access attempt without exposing the value.
 
@@ -2468,7 +2531,13 @@ def resolve_secret_access(
     always_ask = _secret_always_ask(row)
     if row.get("protection") == "standard" and not always_ask:
         return {"status": "standard", "secret": _meta_payload(row), "envelope": _row_sealed(row)}
-    grant = find_active_grant_for_secret(conn, name, session_id=effective_session_id, cache=cache)
+    grant = find_active_grant_for_secret(
+        conn,
+        name,
+        session_id=effective_session_id,
+        cache=cache,
+        reserve_one_shot=reserve_one_shot,
+    )
     if grant is not None:
         return {
             "status": "standard" if row.get("protection") == "standard" else "agent_delivery_ready",

@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import contextlib
 import errno
 import getpass
 import json
@@ -4719,6 +4720,31 @@ def _consume_one_shot_grants(grants: list[dict] | tuple[dict, ...] | None, *, re
         logger.debug("failed to consume one-shot vault grants after delivery", exc_info=True)
 
 
+def _release_one_shot_reservations(engine, grants: list[dict] | tuple[dict, ...] | None) -> None:
+    if not grants:
+        return
+    from storage import vault_service
+
+    try:
+        with engine.begin() as conn:
+            seen: set[str] = set()
+            for grant in grants:
+                if not isinstance(grant, dict) or grant.get("one_shot") is not True:
+                    continue
+                grant_id = str(grant.get("id") or "")
+                if not grant_id or grant_id in seen:
+                    continue
+                seen.add(grant_id)
+                with contextlib.suppress(
+                    vault_service.GrantNotActiveError,
+                    vault_service.GrantNotFoundError,
+                    vault_service.InvalidGrantError,
+                ):
+                    vault_service.release_one_shot_reservation(conn, grant_id)
+    except Exception:
+        logger.debug("failed to release one-shot vault grant reservations", exc_info=True)
+
+
 def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: list[str], *, args=None):
     from storage import vault_service
 
@@ -4773,10 +4799,12 @@ def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: l
                 continue
             raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
     if approval_error is not None:
+        _release_one_shot_reservations(engine, one_shot_grants)
         raise approval_error
     protected = [item for item in secrets if item["protected"]]
     standard = [item for item in secrets if not item["protected"]]
     if protected and standard:
+        _release_one_shot_reservations(engine, one_shot_grants)
         raise TaskCliError(
             "mixing protected and standard secrets in one vault run is not wired yet",
             code="mixed_protection_tiers",
@@ -4871,10 +4899,12 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
                 continue
             raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
     if approval_error is not None:
+        _release_one_shot_reservations(engine, one_shot_grants)
         raise approval_error
     protected = [item for item in secrets if item["protected"]]
     standard = [item for item in secrets if not item["protected"]]
     if protected and standard:
+        _release_one_shot_reservations(engine, one_shot_grants)
         raise TaskCliError(
             "mixing protected and standard secrets in one vault inject is not wired yet",
             code="mixed_protection_tiers",
@@ -4959,9 +4989,11 @@ def cmd_vault_run(args):
         else:
             exit_code = api.avault_deliver_run(secrets, command_argv)
     except TaskCliError as exc:
+        _release_one_shot_reservations(engine, one_shot_grants)
         _print_task_error(exc)
         return 1
     except api.AvaultError as exc:
+        _release_one_shot_reservations(engine, one_shot_grants)
         if grant is not None and _agent_missing_grant(exc):
             requester, delivery, _session_id = _vault_cli_delivery_context(args, mode="run", command=command_argv)
             _expire_agent_grant_after_missing(
@@ -4975,10 +5007,7 @@ def cmd_vault_run(args):
             return 1
         _print_task_error(TaskCliError(f"avault deliver failed: {exc}", code="avault_failed", help_command=help_command))
         return 1
-    # One-shot avault exits 70 only on an internal failure before spawning the child, so no
-    # delivery happened there. Resident-agent protected runs raise AvaultError for agent-side
-    # failures; a returned 70 is the child's real exit code and must still be audited.
-    delivered = grant is not None or exit_code != 70
+    delivered = grant is not None or bool(one_shot_grants) or exit_code != 70
     if delivered:
         _consume_one_shot_grants(one_shot_grants, reason="vault-run-one-shot")
         try:
@@ -5311,6 +5340,7 @@ def cmd_vault_fetch(args):
     help_command = "vibe vault fetch --help"
     engine = None
     grant = None
+    one_shot_grant = None
     name = getattr(args, "auth", "")
     host = ""
     method = "GET"
@@ -5458,9 +5488,11 @@ def cmd_vault_fetch(args):
         _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
         return 1
     except TaskCliError as exc:
+        _release_one_shot_reservations(engine, [one_shot_grant] if one_shot_grant is not None else [])
         _print_task_error(exc)
         return 1
     except api.AvaultError as exc:
+        _release_one_shot_reservations(engine, [one_shot_grant] if one_shot_grant is not None else [])
         if engine is not None and isinstance(grant, dict) and _agent_missing_grant(exc):
             grant_id = grant.get("id")
             if grant_id:
@@ -5476,6 +5508,7 @@ def cmd_vault_fetch(args):
         _print_task_error(TaskCliError(f"request failed: {exc}", code="request_failed", help_command=help_command))
         return 1
     except Exception as exc:
+        _release_one_shot_reservations(engine, [one_shot_grant] if one_shot_grant is not None else [])
         _print_task_error(exc, help_command=help_command)
         return 1
 
@@ -5550,6 +5583,7 @@ def cmd_vault_inject(args):
     help_command = "vibe vault inject --help"
     engine = None
     grant = None
+    one_shot_grants: list[dict] = []
     keys: list[str] = []
     try:
         keys = [k.strip() for k in (getattr(args, "keys", None) or "").split(",") if k.strip()]
@@ -5604,9 +5638,11 @@ def cmd_vault_inject(args):
         _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
         return 1
     except TaskCliError as exc:
+        _release_one_shot_reservations(engine, one_shot_grants)
         _print_task_error(exc)
         return 1
     except api.AvaultError as exc:
+        _release_one_shot_reservations(engine, one_shot_grants)
         if engine is not None and isinstance(grant, dict) and _agent_missing_grant(exc):
             requester, delivery, _session_id = _vault_cli_delivery_context(
                 args,
@@ -5626,6 +5662,7 @@ def cmd_vault_inject(args):
         _print_task_error(TaskCliError(f"avault inject failed: {exc}", code="avault_failed", help_command=help_command))
         return 1
     except Exception as exc:
+        _release_one_shot_reservations(engine, one_shot_grants)
         _print_task_error(exc, help_command=help_command)
         return 1
 

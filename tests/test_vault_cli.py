@@ -726,6 +726,25 @@ def test_run_consumes_standard_always_ask_grant_after_delivery(tmp_path, capfd, 
     assert status == "expired"
 
 
+def test_run_consumes_standard_always_ask_grant_when_child_exits_70(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    grant = _set_always_ask_standard_grant("ASK_KEY", session_id="ses_cli")
+    deliver = Mock(return_value=70)
+    monkeypatch.setattr(api, "avault_deliver_run", deliver)
+
+    code = cli.cmd_vault_run(_ns(env=["ASK_KEY"], command_argv=["python3", "-c", "raise SystemExit(70)"], session_id="ses_cli"))
+
+    assert code == 70
+    deliver.assert_called_once_with(
+        [{"name": "ASK_KEY", "env": "ASK_KEY", "envelope": _sealed("ask_key")}],
+        ["python3", "-c", "raise SystemExit(70)"],
+    )
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
+    assert status == "expired"
+
+
 def test_run_rejects_mixed_tiers_before_creating_approval(tmp_path, capfd, monkeypatch):
     _set_secret("STANDARD_KEY", "standard", tmp_path, monkeypatch, capfd)
     with cli._open_vault_engine().begin() as conn:

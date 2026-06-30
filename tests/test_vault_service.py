@@ -1397,6 +1397,7 @@ def test_standard_always_ask_routes_every_access_through_one_shot_request(vault)
             session_id="ses_1",
             requester={"session_id": "ses_1"},
             delivery={"session_id": "ses_1"},
+            create_request=False,
         )
         vs.consume_one_shot_grant(conn, grant["id"])
         second = vs.resolve_secret_access(
@@ -1414,9 +1415,10 @@ def test_standard_always_ask_routes_every_access_through_one_shot_request(vault)
     assert grant["one_shot"] is True
     assert delivered["status"] == "standard"
     assert delivered["grant"]["id"] == grant["id"]
+    assert delivered["grant"]["status"] == "reserved"
     assert delivered["envelope"] == _sealed()
-    assert still_active["status"] == "standard"
-    assert still_active["grant"]["id"] == grant["id"]
+    assert still_active["status"] == "approval_required"
+    assert still_active["request"] is None
     assert grant_status == "expired"
     assert second["status"] == "approval_required"
     assert second["request"]["id"] != first["request"]["id"]
@@ -1466,6 +1468,7 @@ def test_protected_always_ask_routes_every_access_through_one_shot_request(vault
             requester={"session_id": "ses_1", "skill": "deploy"},
             delivery={"skill": "deploy"},
             cache=cache,
+            create_request=False,
         )
         vs.consume_one_shot_grant(conn, grant["id"], cache=cache)
         second = vs.resolve_secret_access(
@@ -1483,13 +1486,64 @@ def test_protected_always_ask_routes_every_access_through_one_shot_request(vault
     assert grant["session_id"] == "ses_1"
     assert delivered["status"] == "agent_delivery_ready"
     assert delivered["grant"]["id"] == grant["id"]
+    assert delivered["grant"]["status"] == "reserved"
     assert delivered["envelope"] == _sealed()
-    assert still_active["status"] == "agent_delivery_ready"
-    assert still_active["grant"]["id"] == grant["id"]
+    assert still_active["status"] == "approval_required"
+    assert still_active["request"] is None
     assert grant_status == "expired"
     assert not cache.has(grant["id"], "ASK_KEY")
     assert second["status"] == "approval_required"
     assert [row["status"] for row in requests] == ["approved", "pending"]
+
+
+def test_one_shot_reservation_can_be_released_before_delivery(vault):
+    _create(vault, name="ASK_KEY", protection="standard", policy={"always_ask": True})
+    with vault.begin() as conn:
+        first = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            session_id="ses_1",
+            created_by_request_id=first["request"]["id"],
+        )
+        reserved = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        missing = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+            create_request=False,
+        )
+        released = vs.release_one_shot_reservation(conn, grant["id"])
+        available = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+
+    assert reserved["grant"]["status"] == "reserved"
+    assert missing["status"] == "approval_required"
+    assert missing["request"] is None
+    assert released["status"] == "active"
+    assert available["status"] == "standard"
+    assert available["grant"]["id"] == grant["id"]
+    assert available["grant"]["status"] == "reserved"
 
 
 def test_grant_creation_does_not_require_python_dek_material(vault):
