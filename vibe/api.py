@@ -5100,7 +5100,7 @@ def avault_sign(
     return {"signature": signature, "recovery_id": payload.get("recovery_id")}
 
 
-def avault_deliver_run(secrets: list[dict], command: list[str]) -> int:
+def avault_deliver_run(secrets: list[dict], command: list[str]) -> dict:
     """Run ``command`` with the secrets injected as env vars, inside avault.
 
     ``secrets`` is ``[{"name": <secret name>, "env": <env var>, "envelope": <Sealed>}]``.
@@ -5108,8 +5108,8 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> int:
     plaintext never returns here. The child inherits this process's stdio so its
     output passes through; the run-secrets JSON (envelopes only, no plaintext)
     goes on avault's stdin to stay out of ``ps``. Returns the child's exit code
-    (``128 + signal`` if signalled), or raises :class:`AvaultError` if avault could
-    not start the child.
+    (``128 + signal`` if signalled) plus whether avault reached the delivery side
+    effect, or raises :class:`AvaultError` if avault could not start the child.
     """
     path = _require_avault_path()
     payload = json.dumps(
@@ -5135,7 +5135,8 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> int:
         # avault exited before reading stdin (e.g. bad request); fall through to wait()
         # which surfaces its exit code.
         pass
-    return proc.wait()
+    exit_code = proc.wait()
+    return {"exit_code": exit_code, "delivered": exit_code != _AVAULT_INTERNAL_ERROR_CODE}
 
 
 def _agent_secret_payload(secret: dict, *, target_field: str) -> dict:

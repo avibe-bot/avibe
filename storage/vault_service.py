@@ -1762,7 +1762,7 @@ def _expire_active_grants_for_secret(
 def active_grant_rows_for_secret(conn: Connection, secret_name: str) -> list[dict[str, Any]]:
     return [
         dict(row)
-        for row in conn.execute(select(vault_grants).where(vault_grants.c.status == "active")).mappings()
+        for row in conn.execute(select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES))).mappings()
         if secret_name in (_loads(row.get("member_snapshot")) or [])
     ]
 
@@ -1775,7 +1775,7 @@ def active_grant_scopes_for_session(conn: Connection, session_id: str) -> list[d
     rows = [
         dict(row)
         for row in conn.execute(
-            select(vault_grants).where(vault_grants.c.status == "active", vault_grants.c.session_id == session_id)
+            select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES), vault_grants.c.session_id == session_id)
         ).mappings()
     ]
     return _unique_grant_scopes(rows)
@@ -1798,7 +1798,7 @@ def agent_release_scopes_after_rows(
     expired_rows = [
         dict(row)
         for row in conn.execute(
-            select(vault_grants).where(vault_grants.c.status == "active", vault_grants.c.expires_at <= now)
+            select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES), vault_grants.c.expires_at <= now)
         ).mappings()
     ]
     if expired_rows:
@@ -1862,7 +1862,7 @@ def expire_grant(
     if row is None:
         raise GrantNotFoundError(grant_id)
     row_dict = dict(row)
-    if row_dict.get("status") == "active":
+    if row_dict.get("status") in ACTIVE_GRANT_STATUSES:
         _expire_grant_rows(conn, [row_dict], cache=cache, reason=reason)
         row_dict = dict(conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().one())
     return _grant_payload(conn, row_dict, cache=cache)
@@ -1910,7 +1910,7 @@ def expire_grants(conn: Connection, *, cache: VaultGrantRuntimeCache = GRANT_RUN
     rows = [
         dict(row)
         for row in conn.execute(
-            select(vault_grants).where(vault_grants.c.status == "active", vault_grants.c.expires_at <= now)
+            select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES), vault_grants.c.expires_at <= now)
         ).mappings()
     ]
     return _expire_grant_rows(conn, rows, cache=cache)
@@ -2251,7 +2251,7 @@ def expire_active_grants(
 ) -> int:
     rows = [
         dict(row)
-        for row in conn.execute(select(vault_grants).where(vault_grants.c.status == "active")).mappings()
+        for row in conn.execute(select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES))).mappings()
     ]
     return _expire_grant_rows(conn, rows, cache=cache, reason=reason)
 
@@ -2266,7 +2266,7 @@ def revoke_grant(
     if row is None:
         raise GrantNotFoundError(grant_id)
     row_dict = dict(row)
-    if row_dict.get("status") != "active":
+    if row_dict.get("status") not in ACTIVE_GRANT_STATUSES:
         raise GrantNotActiveError(grant_id)
     now = _now()
     conn.execute(
@@ -2326,7 +2326,7 @@ def revoke_session_grants(
     rows = [
         dict(row)
         for row in conn.execute(
-            select(vault_grants).where(vault_grants.c.status == "active", vault_grants.c.session_id == session_id)
+            select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES), vault_grants.c.session_id == session_id)
         ).mappings()
     ]
     now = _now()
@@ -2334,7 +2334,7 @@ def revoke_session_grants(
     for row in rows:
         result = conn.execute(
             vault_grants.update()
-            .where(vault_grants.c.id == row["id"], vault_grants.c.status == "active")
+            .where(vault_grants.c.id == row["id"], vault_grants.c.status.in_(ACTIVE_GRANT_STATUSES))
             .values(status="revoked", revoked_at=now, agent_ready=0, agent_ready_at=None)
         )
         if result.rowcount != 1:

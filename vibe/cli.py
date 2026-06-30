@@ -4745,6 +4745,14 @@ def _release_one_shot_reservations(engine, grants: list[dict] | tuple[dict, ...]
         logger.debug("failed to release one-shot vault grant reservations", exc_info=True)
 
 
+def _run_delivery_result(raw_result) -> tuple[int, bool]:
+    if isinstance(raw_result, dict):
+        exit_code = int(raw_result["exit_code"])
+        return exit_code, bool(raw_result.get("delivered", True))
+    exit_code = int(raw_result)
+    return exit_code, exit_code != 70
+
+
 def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: list[str], *, args=None):
     from storage import vault_service
 
@@ -4752,7 +4760,12 @@ def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: l
     metas = _preflight_vault_run_batch(engine, mapping)
     if metas and {str(meta.get("protection") or "standard") for meta in metas.values()} == {"protected"}:
         with engine.begin() as conn:
-            common_grant = vault_service.find_active_grant_for_secrets(conn, list(mapping.values()), session_id=session_id)
+            common_grant = vault_service.find_active_grant_for_secrets(
+                conn,
+                list(mapping.values()),
+                session_id=session_id,
+                reserve_one_shot=True,
+            )
             if common_grant is not None:
                 return common_grant, [common_grant] if common_grant.get("one_shot") is True else [], [
                     {"name": vault_name, "env": env_name, "envelope": vault_service.get_protected_envelope(conn, vault_name)}
@@ -4762,14 +4775,18 @@ def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: l
     grant: dict | None = None
     one_shot_grants: list[dict] = []
     approval_error: TaskCliError | None = None
+    resolved_by_name: dict[str, dict] = {}
     with engine.begin() as conn:
         for env_name, vault_name in mapping.items():
-            resolved = vault_service.resolve_secret_access(
-                conn,
-                vault_name,
-                requester=requester,
-                delivery=delivery,
-            )
+            resolved = resolved_by_name.get(vault_name)
+            if resolved is None:
+                resolved = vault_service.resolve_secret_access(
+                    conn,
+                    vault_name,
+                    requester=requester,
+                    delivery=delivery,
+                )
+                resolved_by_name[vault_name] = resolved
             if resolved["status"] == "approval_required":
                 req = resolved.get("request") or {}
                 approval_error = TaskCliError(
@@ -4852,7 +4869,12 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
     metas = _preflight_vault_inject_batch(engine, names)
     if metas and {str(meta.get("protection") or "standard") for meta in metas.values()} == {"protected"}:
         with engine.begin() as conn:
-            common_grant = vault_service.find_active_grant_for_secrets(conn, names, session_id=session_id)
+            common_grant = vault_service.find_active_grant_for_secrets(
+                conn,
+                names,
+                session_id=session_id,
+                reserve_one_shot=True,
+            )
             if common_grant is not None:
                 return common_grant, [common_grant] if common_grant.get("one_shot") is True else [], [
                     {"name": name, "key": name, "envelope": vault_service.get_protected_envelope(conn, name)}
@@ -4862,14 +4884,18 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
     grant: dict | None = None
     one_shot_grants: list[dict] = []
     approval_error: TaskCliError | None = None
+    resolved_by_name: dict[str, dict] = {}
     with engine.begin() as conn:
         for name in names:
-            resolved = vault_service.resolve_secret_access(
-                conn,
-                name,
-                requester=requester,
-                delivery=delivery,
-            )
+            resolved = resolved_by_name.get(name)
+            if resolved is None:
+                resolved = vault_service.resolve_secret_access(
+                    conn,
+                    name,
+                    requester=requester,
+                    delivery=delivery,
+                )
+                resolved_by_name[name] = resolved
             if resolved["status"] == "approval_required":
                 req = resolved.get("request") or {}
                 approval_error = TaskCliError(
@@ -4986,8 +5012,9 @@ def cmd_vault_run(args):
                     ),
                 )
             exit_code = int(result["exit_code"])
+            delivered = True
         else:
-            exit_code = api.avault_deliver_run(secrets, command_argv)
+            exit_code, delivered = _run_delivery_result(api.avault_deliver_run(secrets, command_argv))
     except TaskCliError as exc:
         _release_one_shot_reservations(engine, one_shot_grants)
         _print_task_error(exc)
@@ -5007,7 +5034,6 @@ def cmd_vault_run(args):
             return 1
         _print_task_error(TaskCliError(f"avault deliver failed: {exc}", code="avault_failed", help_command=help_command))
         return 1
-    delivered = grant is not None or bool(one_shot_grants) or exit_code != 70
     if delivered:
         _consume_one_shot_grants(one_shot_grants, reason="vault-run-one-shot")
         try:
@@ -5017,6 +5043,8 @@ def cmd_vault_run(args):
                 )
         except Exception:
             pass
+    else:
+        _release_one_shot_reservations(engine, one_shot_grants)
     return exit_code
 
 

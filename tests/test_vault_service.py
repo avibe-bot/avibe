@@ -1546,6 +1546,74 @@ def test_one_shot_reservation_can_be_released_before_delivery(vault):
     assert available["grant"]["status"] == "reserved"
 
 
+def test_reserved_one_shot_grants_are_expired_by_ttl_sweep(vault):
+    _create(vault, name="ASK_KEY", protection="standard", policy={"always_ask": True})
+    with vault.begin() as conn:
+        first = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            session_id="ses_1",
+            created_by_request_id=first["request"]["id"],
+        )
+        reserved = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        conn.execute(
+            vault_grants.update()
+            .where(vault_grants.c.id == grant["id"])
+            .values(expires_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat())
+        )
+        vs.expire_grants(conn)
+        status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
+
+    assert reserved["grant"]["status"] == "reserved"
+    assert status == "expired"
+
+
+def test_reserved_one_shot_grants_are_revoked_with_session(vault):
+    _create(vault, name="ASK_KEY", protection="standard", policy={"always_ask": True})
+    with vault.begin() as conn:
+        first = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            session_id="ses_1",
+            created_by_request_id=first["request"]["id"],
+        )
+        reserved = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        count = vs.revoke_session_grants(conn, "ses_1")
+        status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
+
+    assert reserved["grant"]["status"] == "reserved"
+    assert count == 1
+    assert status == "revoked"
+
+
 def test_grant_creation_does_not_require_python_dek_material(vault):
     _create(vault, name="A_KEY", protection="protected")
     with vault.begin() as conn:
