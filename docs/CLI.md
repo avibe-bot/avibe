@@ -199,7 +199,8 @@ Create, inspect, update, run, pause, resume, or remove scheduled tasks.
 ```bash
 vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
 vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'   # inside an Avibe Agent shell
-vibe task add --create-session --same-scope --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'
+vibe task add --create-session --scope-id scope123 --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'
+vibe task add --create-session --same-scope --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'   # inside an Avibe Agent shell
 vibe task list --brief
 vibe task update <task-id> --cron '*/30 * * * *'
 vibe task run <task-id>
