@@ -4711,6 +4711,20 @@ def _resolve_cli_output_path(path: str) -> str:
     return str(output_path)
 
 
+def _preflight_cli_output_path(path: str, *, help_command: str) -> None:
+    output_path = Path(path)
+    parent = output_path.parent
+    if not parent.exists():
+        raise TaskCliError(f"output parent does not exist: {parent}", code="output_unwritable", help_command=help_command)
+    if not parent.is_dir():
+        raise TaskCliError(f"output parent is not a directory: {parent}", code="output_unwritable", help_command=help_command)
+    try:
+        with tempfile.NamedTemporaryFile(dir=str(parent), prefix=f".{output_path.name}.", delete=True):
+            pass
+    except OSError as exc:
+        raise TaskCliError(f"cannot write output file: {exc}", code="output_unwritable", help_command=help_command) from exc
+
+
 def _consume_one_shot_grants(grants: list[dict] | tuple[dict, ...] | None, *, reason: str) -> None:
     from vibe import api
 
@@ -5719,6 +5733,7 @@ def cmd_vault_inject(args):
             raise TaskCliError(f"unknown --format: {fmt!r} (dotenv|json)", code="invalid_format", help_command=help_command)
         engine = _open_vault_engine()
         resolved_out = _resolve_cli_output_path(str(out))
+        _preflight_cli_output_path(resolved_out, help_command=help_command)
         grant, one_shot_grants, secrets = _resolve_vault_inject_delivery(engine, keys, path=resolved_out, fmt=fmt, args=args)
         # avault writes the 0600 file atomically; if the path is unwritable it raises and no
         # delivery is recorded.
