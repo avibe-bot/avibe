@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, Clock, Copy, Folder, History, Inbox, KeyRound, Layers, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, Trash2, Wallet, X } from 'lucide-react';
+import { Check, Clock, Copy, Folder, Globe, History, Inbox, KeyRound, Layers, Link2, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, Trash2, Wallet, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
@@ -38,10 +38,10 @@ const AddSecretDialog: React.FC<{
 
 type ViewMode = 'all' | 'group';
 
-/** First allowed host (for the `proxy · <host>` badge), or null when none is set. */
-const proxyHost = (s: VaultSecret): string | null => {
+/** All allowed proxy-fetch hosts on a secret (for the `proxy · <host> +N` badge). */
+const proxyHosts = (s: VaultSecret): string[] => {
   const hosts = (s.policy as { allowed_hosts?: string[] })?.allowed_hosts;
-  return Array.isArray(hosts) && hosts.length > 0 ? hosts[0] : null;
+  return Array.isArray(hosts) ? hosts : [];
 };
 
 const isAlwaysAsk = (s: VaultSecret): boolean => Boolean((s.policy as { always_ask?: boolean })?.always_ask);
@@ -76,7 +76,12 @@ const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => voi
             </Badge>
           ) : null}
           {isAlwaysAsk(s) ? <Badge variant="destructive">{t('vaults.alwaysAsk')}</Badge> : null}
-          {proxyHost(s) ? <Badge variant="info">{t('vaults.proxyHost', { host: proxyHost(s) })}</Badge> : null}
+          {proxyHosts(s).length > 0 ? (
+            <Badge variant="info">
+              {t('vaults.proxyHost', { host: proxyHosts(s)[0] })}
+              {proxyHosts(s).length > 1 ? ` +${proxyHosts(s).length - 1}` : ''}
+            </Badge>
+          ) : null}
           {s.tags?.map((tag) => (
             <Badge key={tag} variant="outline" className="text-muted">
               {tag}
@@ -157,6 +162,12 @@ const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: Va
       <Icon className="size-3.5 shrink-0" />
       <span className="font-medium">
         {t(`vaults.grants.scope.${g.scope_type}`)} · {g.scope_ref}
+      </span>
+      <span
+        className="flex shrink-0"
+        title={g.session_id ? t('vaults.grants.session.bound') : t('vaults.grants.session.any')}
+      >
+        {g.session_id ? <Link2 className="size-3 opacity-70" /> : <Globe className="size-3 opacity-70" />}
       </span>
       <span className={cn('font-mono tabular-nums', rem.urgent ? 'text-warning' : 'text-mint/80')}>
         {rem.expired ? t('vaults.grants.expired') : chipCountdown(rem)}

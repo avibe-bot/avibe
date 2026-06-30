@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { CheckCircle2, KeyRound } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { badgeVariants } from './badge';
-import { Dialog, DialogContent } from './dialog';
+import { Dialog, DialogContent, DialogTitle } from './dialog';
 import { VaultSecretForm } from './vault-secret-form';
 import { cn } from '@/lib/utils';
 
@@ -37,6 +37,9 @@ export const SecretRequestCard: React.FC<{ name: string }> = ({ name }) => {
       </button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
+          {/* Accessible name for the Radix dialog — the visible title below is styled per
+              design.pen `F4N19`, so keep a screen-reader-only DialogTitle for a11y. */}
+          <DialogTitle className="sr-only">{t('vaults.request.title')}</DialogTitle>
           {/* Header — design.pen `F4N19` (SecureInputCard): cyan key + ask copy. */}
           <div className="flex items-start gap-3 pr-6">
             <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-accent/15 text-accent">

@@ -2199,7 +2199,7 @@
       "setupTitle": "设置受保护密钥",
       "setupSubtitle": "只有你能在浏览器里解锁。机器被偷也打不开它们。",
       "unlockTitle": "解锁以继续",
-      "unlockSubtitle": "{{name}} 受保护——在浏览器里解锁它才能签名",
+      "unlockSubtitle": "{{name}} 受保护——在浏览器里解锁它才能继续",
       "recommended": "推荐",
       "addPasskey": "添加 passkey",
       "passkeyCaption": "Face ID · Touch ID · 安全密钥——最安全的方式",
