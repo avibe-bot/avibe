@@ -3026,7 +3026,6 @@ def _discord_retry_wait(exc: "urllib.error.HTTPError", attempt: int) -> float:
 
 
 def _discord_api_get(bot_token: str, path: str, proxy_url: str | None = None) -> dict:
-    import time
     import urllib.error
     import urllib.request
 
@@ -3070,10 +3069,11 @@ def _discord_api_get(bot_token: str, path: str, proxy_url: str | None = None) ->
                 time.sleep(wait)
                 continue
             raise
-    raise RuntimeError("Discord request exhausted retries")
+    raise RuntimeError("Discord request exhausted retries")  # pragma: no cover
 
 
 async def _discord_api_get_async(bot_token: str, path: str, proxy_url: str | None = None) -> dict:
+    import urllib.error
     import urllib.request
 
     from vibe.proxy import is_socks_proxy, resolve_proxy
@@ -3084,23 +3084,57 @@ async def _discord_api_get_async(bot_token: str, path: str, proxy_url: str | Non
     headers = {"Authorization": f"Bot {bot_token}", "User-Agent": "avibe"}
 
     proxy = resolve_proxy(proxy_url)
-    if proxy and is_socks_proxy(proxy):
-        # urllib has no native SOCKS support; route via aiohttp + aiohttp_socks.
-        return await _discord_api_get_via_aiohttp(url, headers, proxy)
+    use_socks = bool(proxy and is_socks_proxy(proxy))
 
-    if proxy:
+    if proxy and not use_socks:
         opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({"http": proxy, "https": proxy})
         )
     else:
         opener = urllib.request.build_opener()
+
     def _request() -> dict:
         req = urllib.request.Request(url, headers=headers)
         with opener.open(req, timeout=10) as resp:
             payload = resp.read().decode("utf-8")
             return json.loads(payload)
 
-    return await asyncio.to_thread(_request)
+    attempts = 5
+    for attempt in range(attempts):
+        try:
+            if use_socks:
+                # urllib has no native SOCKS support; route via aiohttp + aiohttp_socks.
+                return await _discord_api_get_via_aiohttp(url, headers, proxy)
+            return await asyncio.to_thread(_request)
+        except urllib.error.HTTPError as http_exc:
+            if http_exc.code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
+                wait = _discord_retry_wait(http_exc, attempt)
+                logger.warning(
+                    "Discord rate-limited/transient (%d), retrying after %ss (attempt %d/%d)",
+                    http_exc.code,
+                    wait,
+                    attempt + 1,
+                    attempts,
+                )
+                await asyncio.sleep(wait)
+                continue
+            raise
+        except Exception as exc:
+            # aiohttp (SOCKS path) raises ClientResponseError with a `.status`.
+            status = getattr(exc, "status", None)
+            if status in (429, 500, 502, 503, 504) and attempt < attempts - 1:
+                wait = float(2**attempt)
+                logger.warning(
+                    "Discord rate-limited/transient (%s) via proxy, retrying after %ss (attempt %d/%d)",
+                    status,
+                    wait,
+                    attempt + 1,
+                    attempts,
+                )
+                await asyncio.sleep(wait)
+                continue
+            raise
+    raise RuntimeError("Discord request exhausted retries")  # pragma: no cover
 
 
 def _https_json_request_via_socks(

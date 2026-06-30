@@ -636,7 +636,10 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showUnavailable]);
 
-  const handleRemoveChannel = async (rowPlatform: string, channelId: string) => {
+  const handleRemoveChannel = async (rowPlatform: string, channelId: string, channelName?: string) => {
+    const confirmed = typeof window === 'undefined'
+      || window.confirm(t('channelList.removeChannelConfirm', { name: channelName || channelId }));
+    if (!confirmed) return;
     setRemovingChannelId(channelId);
     try {
       const result = await api.deleteChannel(rowPlatform, channelId);
@@ -1088,7 +1091,10 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     const visibleRows = rawRows
       .filter((r) => {
         const enabled = r.config.enabled === true;
-        if (!showInactive && !enabled) return false;
+        const isUnavailable = r.channel.visibility_status === 'not_returned';
+        // "Show inactive" hides unconfigured rows, but never the unavailable
+        // rows the user explicitly opted to review via "Show unavailable".
+        if (!showInactive && !enabled && !isUnavailable) return false;
         if (!lowerQuery) return true;
         const name = String(r.channel.name || r.channel.id || '').toLowerCase();
         const id = String(r.channel.id || '').toLowerCase();
@@ -1474,7 +1480,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          void handleRemoveChannel(channelPlatform, channel.id);
+                          void handleRemoveChannel(channelPlatform, channel.id, channel.name);
                         }}
                         disabled={removingChannelId === channel.id}
                         className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-[11px] font-medium text-muted hover:border-red-500/50 hover:text-red-500 disabled:opacity-50"

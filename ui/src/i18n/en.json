@@ -1430,6 +1430,7 @@
     "unavailableBadge": "Unavailable",
     "unavailableSince": "No longer returned by the platform since {{at}}",
     "removeChannel": "Remove",
+    "removeChannelConfirm": "Permanently remove \"{{name}}\" and its settings? This cannot be undone.",
     "headerSummary": "All groups · {{active}} active · {{discovered}} discovered",
     "headerSummaryPlatform": "{{platform}} · {{active}} active · {{discovered}} discovered",
     "noChannelsForSearch": "No groups match your search.",

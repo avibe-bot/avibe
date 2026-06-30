@@ -561,7 +561,7 @@ def test_channels_response_hides_not_returned_by_default_and_opts_in(tmp_path: P
         "discord",
         bot_token="x",
         guild_id="G1",
-        parent_id=parent,
+        parent_scope_id=parent,
         include_not_returned=True,
         db_path=db_path,
     )

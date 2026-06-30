@@ -1430,6 +1430,7 @@
     "unavailableBadge": "已失效",
     "unavailableSince": "自 {{at}} 起平台不再返回此群组",
     "removeChannel": "移除",
+    "removeChannelConfirm": "永久移除“{{name}}”及其设置？此操作无法撤销。",
     "headerSummary": "全部群组 · {{active}} 已启用 · {{discovered}} 已发现",
     "headerSummaryPlatform": "{{platform}} · {{active}} 已启用 · {{discovered}} 已发现",
     "noChannelsForSearch": "没有群组匹配你的搜索。",
