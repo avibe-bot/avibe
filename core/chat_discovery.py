@@ -286,6 +286,10 @@ def remember_chat(
 
     normalized_metadata = normalize_metadata(metadata)
     normalized_metadata.setdefault(METADATA_VISIBILITY_STATUS, VISIBILITY_VISIBLE)
+    # Seeing the chat again (e.g. Telegram passive rediscovery) un-dismisses it,
+    # so a removed-but-kept group reappears once it is active again. Without this,
+    # list_chats would hide it forever after a dismissal.
+    normalized_metadata.setdefault(METADATA_DISMISSED_AT, None)
     debounce_payload = (
         name,
         native_type,

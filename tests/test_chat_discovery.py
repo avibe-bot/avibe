@@ -824,6 +824,49 @@ def test_delete_scope_with_history_dismisses_instead_of_deleting(tmp_path: Path)
     assert kept is not None
 
 
+def test_remember_chat_clears_dismissed_on_passive_rediscovery(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+
+    from storage.models import messages
+
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    chat_discovery.remember_chat("telegram", "tg_redisc", name="Gone", db_path=db_path)
+    scope_id = chat_discovery.make_scope_id("telegram", chat_discovery.CHANNEL_SCOPE_TYPE, "tg_redisc")
+
+    now = datetime.now(timezone.utc).isoformat()
+    engine = chat_discovery._engine(db_path)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                messages.insert().values(
+                    id="m_redisc",
+                    scope_id=scope_id,
+                    platform="telegram",
+                    author="user",
+                    type="user",
+                    content_json="{}",
+                    metadata_json="{}",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    finally:
+        engine.dispose()
+
+    # History present → removal dismisses (keeps row hidden).
+    assert chat_discovery.delete_scope("telegram", "tg_redisc", db_path=db_path) == {
+        "removed": False,
+        "dismissed": True,
+    }
+    assert chat_discovery.list_chats("telegram", db_path=db_path) == []
+
+    # Telegram has no live list; a new message flows through remember_chat, which
+    # must clear the dismissal so the group reappears in Group Settings.
+    chat_discovery.remember_chat("telegram", "tg_redisc", name="Active Again", db_path=db_path)
+    assert [c.chat_id for c in chat_discovery.list_chats("telegram", db_path=db_path)] == ["tg_redisc"]
+
+
 def test_refresh_clears_dismissed_flag_on_rediscovery(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path)
