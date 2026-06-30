@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from storage import vault_service as vs
 from storage.db import create_sqlite_engine
-from storage.models import metadata, vault_audit, vault_grants, vault_links, vault_requests, vault_secrets
+from storage.models import metadata, vault_audit, vault_grants, vault_groups, vault_links, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
 
 
@@ -96,6 +96,7 @@ def test_create_persists_no_value_derived_public_meta(vault):
 def test_standard_static_secret_is_agent_access_grantable(vault):
     _create(vault, name="STANDARD_KEY", protection="standard", group="default")
     with vault.begin() as conn:
+        resolved = vs.resolve_secret_access(conn, "STANDARD_KEY", session_id="ses_1")
         request = vs.create_access_request(conn, "STANDARD_KEY", requester={"session_id": "ses_1"})
         grant = vs.create_grant(
             conn,
@@ -117,6 +118,8 @@ def test_standard_static_secret_is_agent_access_grantable(vault):
         release_scopes = vs.agent_release_scopes_after_rows(conn, [dict(row)])
     assert int(row["agent_ready"] or 0) == 0
     assert release_scopes == []
+    assert resolved["status"] == "standard"
+    assert resolved["envelope"] == _sealed()
 
 
 def test_inactive_standard_grants_are_not_delivery_ready(vault):
@@ -1292,7 +1295,7 @@ def test_grant_can_be_intentionally_unbound_from_request_session(vault):
     assert cache.has(grant["id"], "PROTECTED_KEY")
 
 
-def test_keypair_and_always_ask_are_not_grantable(vault):
+def test_keypair_is_not_value_requestable_and_always_ask_is_not_pregrantable(vault):
     _create(
         vault,
         name="ETH_KEY",
@@ -1300,39 +1303,483 @@ def test_keypair_and_always_ask_are_not_grantable(vault):
         kind="keypair",
         signer_kind="local",
         public_meta=PROTECTED_SIGNING_PUBLIC_META,
+        policy={"always_ask": True},
     )
     _create(vault, name="STATIC_KEY", protection="protected", policy={"always_ask": True})
     with vault.begin() as conn:
         with pytest.raises(vs.NotGrantableError):
             vs.create_access_request(conn, "ETH_KEY", requester={"session_id": "ses_1"})
-        with pytest.raises(vs.NotGrantableError):
-            vs.create_access_request(conn, "STATIC_KEY", requester={"session_id": "ses_1"})
+        req = vs.create_access_request(conn, "STATIC_KEY", requester={"session_id": "ses_1"})
+        meta = vs.get_secret_meta(conn, "STATIC_KEY")
+        pregrant_members = vs.grantable_member_metas(conn, "secret", "STATIC_KEY")
         requests = conn.execute(
             select(vault_requests).where(vault_requests.c.secret_name.in_(["ETH_KEY", "STATIC_KEY"]))
         ).mappings().all()
         sign_req = vs.create_sign_request(conn, "ETH_KEY", digest="00" * 32, scheme="ecdsa-secp256k1-recoverable")
 
-    assert requests == []
+    assert meta["access_grantable"] is False
+    assert pregrant_members == []
+    assert [row["secret_name"] for row in requests] == ["STATIC_KEY"]
+    assert req["card"]["one_shot"] is True
+    assert len(req["card"]["scope_options"]) == 1
+    assert req["card"]["scope_options"][0]["scope_type"] == "secret"
+    assert req["card"]["scope_options"][0]["scope_ref"] == "STATIC_KEY"
+    assert req["card"]["scope_options"][0]["member_snapshot"] == ["STATIC_KEY"]
+    assert req["card"]["scope_options"][0]["one_shot"] is True
     assert sign_req["request_type"] == "sign"
+    assert sign_req["card"]["one_shot"] is False
+    assert sign_req["card"]["scope_options"] == []
 
 
-def test_always_ask_access_request_is_rejected_until_one_shot_approval_exists(vault):
+def test_always_ask_honors_group_grantability(vault):
+    _create(vault, name="STATIC_KEY", protection="protected", group="locked", policy={"always_ask": True})
+    with vault.begin() as conn:
+        conn.execute(vault_groups.update().where(vault_groups.c.name == "locked").values(grantable=0))
+        req = vs.create_access_request(conn, "STATIC_KEY", requester={"session_id": "ses_1"})
+        request_members = vs.request_grantable_member_metas(conn, "secret", "STATIC_KEY", req["id"])
+        with pytest.raises(vs.NotGrantableError):
+            vs.create_grant(conn, scope_type="secret", scope_ref="STATIC_KEY", created_by_request_id=req["id"])
+
+    assert req["card"]["scope_options"] == []
+    assert request_members == []
+
+
+def test_always_ask_one_shot_card_ttl_is_capped_by_group_policy(vault):
+    _create(vault, name="STATIC_KEY", protection="protected", group="strict", policy={"always_ask": True})
+    with vault.begin() as conn:
+        conn.execute(vault_groups.update().where(vault_groups.c.name == "strict").values(max_grant_ttl_seconds=120))
+        req = vs.create_access_request(conn, "STATIC_KEY", requester={"session_id": "ses_1"})
+        option = req["card"]["scope_options"][0]
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="STATIC_KEY",
+            ttl_seconds=3600,
+            created_by_request_id=req["id"],
+        )
+
+    created_at = datetime.fromisoformat(grant["created_at"])
+    expires_at = datetime.fromisoformat(grant["expires_at"])
+    assert option["one_shot"] is True
+    assert option["default_ttl_seconds"] == 120
+    assert option["ttl_options_seconds"] == []
+    assert int((expires_at - created_at).total_seconds()) == 120
+
+
+def test_standard_always_ask_routes_every_access_through_one_shot_request(vault):
+    _create(vault, name="ASK_KEY", protection="standard", policy={"always_ask": True})
+    with vault.begin() as conn:
+        first = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        assert first["status"] == "approval_required"
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            session_id="ses_1",
+            created_by_request_id=first["request"]["id"],
+        )
+        delivered = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+            reserve_one_shot=True,
+        )
+        still_active = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+            create_request=False,
+            reserve_one_shot=True,
+        )
+        vs.consume_one_shot_grant(conn, grant["id"])
+        second = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        request_rows = conn.execute(
+            select(vault_requests.c.id, vault_requests.c.status).where(vault_requests.c.secret_name == "ASK_KEY")
+        ).mappings().all()
+        grant_status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
+
+    assert grant["one_shot"] is True
+    assert delivered["status"] == "standard"
+    assert delivered["grant"]["id"] == grant["id"]
+    assert delivered["grant"]["status"] == "reserved"
+    assert delivered["envelope"] == _sealed()
+    assert still_active["status"] == "approval_required"
+    assert still_active["request"] is None
+    assert grant_status == "expired"
+    assert second["status"] == "approval_required"
+    assert second["request"]["id"] != first["request"]["id"]
+    assert [(row["id"], row["status"]) for row in request_rows] == [
+        (first["request"]["id"], "approved"),
+        (second["request"]["id"], "pending"),
+    ]
+
+
+def test_protected_always_ask_routes_every_access_through_one_shot_request(vault):
     _create(vault, name="ASK_KEY", protection="protected", group="crypto", policy={"always_ask": True})
     _create(vault, name="GROUP_KEY", protection="protected", group="crypto")
+    cache = vs.VaultGrantRuntimeCache()
     with vault.begin() as conn:
         conn.execute(vault_links.insert().values(id="ln_ask", secret_name="ASK_KEY", skill_name="deploy", source="user", required=1, created_at="now"))
         conn.execute(vault_links.insert().values(id="ln_group", secret_name="GROUP_KEY", skill_name="deploy", source="user", required=1, created_at="now"))
-        with pytest.raises(vs.NotGrantableError):
-            vs.resolve_secret_access(
-                conn,
-                "ASK_KEY",
-                session_id="ses_1",
-                requester={"session_id": "ses_1", "skill": "deploy"},
-                delivery={"skill": "deploy"},
-            )
+        first = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1", "skill": "deploy"},
+            delivery={"skill": "deploy"},
+            cache=cache,
+        )
+        assert first["status"] == "approval_required"
+        assert first["request"]["card"]["scope_options"][0]["scope_ref"] == "ASK_KEY"
+        assert all(option["scope_ref"] != "crypto" for option in first["request"]["card"]["scope_options"])
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            created_by_request_id=first["request"]["id"],
+            cache=cache,
+        )
+        delivered = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1", "skill": "deploy"},
+            delivery={"skill": "deploy"},
+            cache=cache,
+            reserve_one_shot=True,
+        )
+        still_active = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1", "skill": "deploy"},
+            delivery={"skill": "deploy"},
+            cache=cache,
+            create_request=False,
+            reserve_one_shot=True,
+        )
+        vs.consume_one_shot_grant(conn, grant["id"], cache=cache)
+        second = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1", "skill": "deploy"},
+            delivery={"skill": "deploy"},
+            cache=cache,
+        )
         requests = conn.execute(select(vault_requests).where(vault_requests.c.secret_name == "ASK_KEY")).mappings().all()
+        grant_status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
 
-    assert requests == []
+    assert grant["one_shot"] is True
+    assert grant["session_id"] == "ses_1"
+    assert delivered["status"] == "agent_delivery_ready"
+    assert delivered["grant"]["id"] == grant["id"]
+    assert delivered["grant"]["status"] == "reserved"
+    assert delivered["envelope"] == _sealed()
+    assert still_active["status"] == "approval_required"
+    assert still_active["request"] is None
+    assert grant_status == "expired"
+    assert not cache.has(grant["id"], "ASK_KEY")
+    assert second["status"] == "approval_required"
+    assert [row["status"] for row in requests] == ["approved", "pending"]
+
+
+def test_one_shot_reservation_can_be_released_before_delivery(vault):
+    _create(vault, name="ASK_KEY", protection="standard", policy={"always_ask": True})
+    with vault.begin() as conn:
+        first = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            session_id="ses_1",
+            created_by_request_id=first["request"]["id"],
+        )
+        reserved = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+            reserve_one_shot=True,
+        )
+        missing = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+            create_request=False,
+            reserve_one_shot=True,
+        )
+        released = vs.release_one_shot_reservation(conn, grant["id"])
+        available = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+            reserve_one_shot=True,
+        )
+
+    assert reserved["grant"]["status"] == "reserved"
+    assert missing["status"] == "approval_required"
+    assert missing["request"] is None
+    assert released["status"] == "active"
+    assert available["status"] == "standard"
+    assert available["grant"]["id"] == grant["id"]
+    assert available["grant"]["status"] == "reserved"
+
+
+def test_resolve_secret_access_default_does_not_reserve_one_shot_grant(vault):
+    _create(vault, name="ASK_KEY", protection="standard", policy={"always_ask": True})
+    with vault.begin() as conn:
+        first = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            session_id="ses_1",
+            created_by_request_id=first["request"]["id"],
+        )
+        resolved = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
+
+    assert resolved["status"] == "standard"
+    assert resolved["grant"]["id"] == grant["id"]
+    assert resolved["grant"]["status"] == "active"
+    assert status == "active"
+
+
+def test_non_claiming_lookup_skips_reserved_one_shot_grant(vault):
+    _create(vault, name="ASK_KEY", protection="standard", policy={"always_ask": True})
+    with vault.begin() as conn:
+        first = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            session_id="ses_1",
+            created_by_request_id=first["request"]["id"],
+        )
+        reserved = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+            reserve_one_shot=True,
+        )
+        resolved = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+            create_request=False,
+        )
+
+    assert reserved["grant"]["id"] == grant["id"]
+    assert reserved["grant"]["status"] == "reserved"
+    assert resolved["status"] == "approval_required"
+    assert resolved["request"] is None
+
+
+def test_list_active_grants_includes_reserved_one_shot_grants(vault):
+    _create(vault, name="ASK_KEY", protection="standard", policy={"always_ask": True})
+    with vault.begin() as conn:
+        first = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            session_id="ses_1",
+            created_by_request_id=first["request"]["id"],
+        )
+        vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+            reserve_one_shot=True,
+        )
+        active = vs.list_grants(conn)
+
+    assert [(item["id"], item["status"]) for item in active] == [(grant["id"], "reserved")]
+
+
+def test_delivery_resolver_skips_reserved_one_shot_and_claims_next_active_grant(vault):
+    _create(vault, name="ASK_KEY", protection="standard", policy={"always_ask": True})
+    with vault.begin() as conn:
+        first = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant_1 = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            session_id="ses_1",
+            created_by_request_id=first["request"]["id"],
+        )
+        reserved = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+            reserve_one_shot=True,
+        )
+        second_req = vs.create_access_request(
+            conn,
+            "ASK_KEY",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant_2 = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            session_id="ses_1",
+            created_by_request_id=second_req["id"],
+        )
+        claimed = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+            reserve_one_shot=True,
+        )
+        statuses = {
+            row["id"]: row["status"]
+            for row in conn.execute(select(vault_grants.c.id, vault_grants.c.status).where(vault_grants.c.id.in_([grant_1["id"], grant_2["id"]]))).mappings()
+        }
+
+    assert reserved["grant"]["id"] == grant_1["id"]
+    assert claimed["status"] == "standard"
+    assert claimed["grant"]["id"] == grant_2["id"]
+    assert statuses == {grant_1["id"]: "reserved", grant_2["id"]: "reserved"}
+
+
+def test_reserved_one_shot_grants_are_expired_by_ttl_sweep(vault):
+    _create(vault, name="ASK_KEY", protection="standard", policy={"always_ask": True})
+    with vault.begin() as conn:
+        first = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            session_id="ses_1",
+            created_by_request_id=first["request"]["id"],
+        )
+        reserved = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+            reserve_one_shot=True,
+        )
+        conn.execute(
+            vault_grants.update()
+            .where(vault_grants.c.id == grant["id"])
+            .values(expires_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat())
+        )
+        vs.expire_grants(conn)
+        status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
+
+    assert reserved["grant"]["status"] == "reserved"
+    assert status == "expired"
+
+
+def test_reserved_one_shot_grants_are_revoked_with_session(vault):
+    _create(vault, name="ASK_KEY", protection="standard", policy={"always_ask": True})
+    with vault.begin() as conn:
+        first = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            session_id="ses_1",
+            created_by_request_id=first["request"]["id"],
+        )
+        reserved = vs.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+            reserve_one_shot=True,
+        )
+        count = vs.revoke_session_grants(conn, "ses_1")
+        status = conn.execute(select(vault_grants.c.status).where(vault_grants.c.id == grant["id"])).scalar_one()
+
+    assert reserved["grant"]["status"] == "reserved"
+    assert count == 1
+    assert status == "revoked"
 
 
 def test_grant_creation_does_not_require_python_dek_material(vault):

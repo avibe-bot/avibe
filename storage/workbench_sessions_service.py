@@ -684,6 +684,7 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
     #     then no-ops on that in-flight send), and the saved composer draft.
     from storage.messages_service import clear_draft, clear_pending, clear_queued
     from storage.vault_service import (
+        ACTIVE_GRANT_STATES,
         agent_release_scopes_after_rows,
         expire_session_requests,
         revoke_session_grants,
@@ -696,7 +697,7 @@ def archive_session(conn: Connection, session_id: str) -> dict[str, Any]:
     revoked_vault_grant_rows = [
         dict(row)
         for row in conn.execute(
-            select(vault_grants).where(vault_grants.c.status == "active", vault_grants.c.session_id == session_id)
+            select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATES), vault_grants.c.session_id == session_id)
         ).mappings()
     ]
     expire_session_requests(conn, session_id)

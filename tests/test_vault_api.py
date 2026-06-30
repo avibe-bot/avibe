@@ -908,6 +908,115 @@ def test_fulfill_access_request_relays_only_browser_dek_blindbox(monkeypatch, av
     assert "plaintext-must-not-cross-python-agent-boundary" not in encoded
 
 
+def test_fulfill_protected_always_ask_access_uses_one_shot_resident_agent_grant(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    validate_pubkey = Mock()
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    monkeypatch.setattr(api, "validate_avault_agent_pubkey", validate_pubkey)
+    api.create_vault_secret(
+        {
+            "name": "PROTECTED_ASK",
+            "protection": "protected",
+            "policy": {"always_ask": True},
+            "sealed": {"ciphertext": "ct-protected", "nonce": "n-protected", "wrap_meta": "wm-protected"},
+        }
+    )
+    requested = api.request_vault_access({"name": "PROTECTED_ASK", "session_id": "ses_1"})
+
+    fulfilled = api.fulfill_vault_access_request(
+        requested["request"]["id"],
+        {
+            "session_id": "ses_1",
+            "agent_pubkey": {"public_key": "pk", "fingerprint": "fp"},
+            "deks": [
+                {
+                    "name": "PROTECTED_ASK",
+                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                }
+            ],
+        },
+    )
+
+    assert requested["request"]["card"]["one_shot"] is True
+    assert requested["request"]["card"]["scope_options"][0]["scope_ref"] == "PROTECTED_ASK"
+    assert fulfilled["grant"]["one_shot"] is True
+    assert fulfilled["grant"]["scope_type"] == "secret"
+    assert fulfilled["grant"]["scope_ref"] == "PROTECTED_ASK"
+    assert fulfilled["grant"]["delivery_ready"] is True
+    validate_pubkey.assert_called_once_with({"public_key": "pk", "fingerprint": "fp"})
+    assert agent_grant.call_args.kwargs["deks"] == [
+        {
+            "name": "PROTECTED_ASK",
+            "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+        }
+    ]
+
+
+def test_always_ask_grant_api_maps_stale_request_preflight_to_json_error(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {
+            "name": "ASK_KEY",
+            "policy": {"always_ask": True},
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        }
+    )
+    requested = api.request_vault_access({"name": "ASK_KEY", "session_id": "ses_1"})
+    api.deny_vault_request(requested["request"]["id"])
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_grant(
+            {
+                "scope_type": "secret",
+                "scope_ref": "ASK_KEY",
+                "session_id": "ses_1",
+                "request_id": requested["request"]["id"],
+            }
+        )
+
+    assert exc.value.code == "invalid_request"
+    assert exc.value.status == 409
+
+
+def test_always_ask_grant_api_commits_expired_preflight_request(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {
+            "name": "ASK_KEY",
+            "policy": {"always_ask": True},
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        }
+    )
+    requested = api.request_vault_access({"name": "ASK_KEY", "session_id": "ses_1"})
+    with api._vault_engine().begin() as conn:
+        conn.execute(
+            vault_service.vault_requests.update()
+            .where(vault_service.vault_requests.c.id == requested["request"]["id"])
+            .values(expires_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat())
+        )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_grant(
+            {
+                "scope_type": "secret",
+                "scope_ref": "ASK_KEY",
+                "session_id": "ses_1",
+                "request_id": requested["request"]["id"],
+            }
+        )
+
+    assert exc.value.code == "invalid_request"
+    assert exc.value.status == 409
+    with api._vault_engine().connect() as conn:
+        stored = conn.execute(
+            select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == requested["request"]["id"])
+        ).scalar_one()
+    assert stored == "expired"
+
+
 def test_fulfill_access_request_rejects_dek_or_plaintext_material(monkeypatch, avault_p2):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
@@ -1096,6 +1205,133 @@ def test_revoke_grant_keeps_agent_scope_when_other_active_grant_exists(monkeypat
         assert vault_service.find_active_grant_for_secret(conn, "GRANT_KEY", session_id="ses_2")["id"] == grant_2["id"]
 
 
+def test_consume_one_shot_keeps_agent_scope_when_other_active_grant_exists(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_release = Mock(return_value={"released": True})
+    monkeypatch.setattr(api, "avault_agent_release", agent_release)
+    api.create_vault_secret(
+        {
+            "name": "ASK_KEY",
+            "protection": "protected",
+            "policy": {"always_ask": True},
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+        }
+    )
+    with api._vault_engine().begin() as conn:
+        req_1 = vault_service.create_access_request(
+            conn,
+            "ASK_KEY",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant_1 = vault_service.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            created_by_request_id=req_1["id"],
+        )
+        req_2 = vault_service.create_access_request(
+            conn,
+            "ASK_KEY",
+            requester={"session_id": "ses_2"},
+            delivery={"session_id": "ses_2"},
+        )
+        grant_2 = vault_service.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            created_by_request_id=req_2["id"],
+        )
+
+    api.consume_one_shot_grants([grant_1], reason="test")
+
+    agent_release.assert_not_called()
+    with api._vault_engine().connect() as conn:
+        statuses = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                select(vault_service.vault_grants.c.id, vault_service.vault_grants.c.status).where(
+                    vault_service.vault_grants.c.id.in_([grant_1["id"], grant_2["id"]])
+                )
+            ).mappings()
+        }
+        active = vault_service.find_active_grant_for_secret(conn, "ASK_KEY", session_id="ses_2")
+    assert statuses[grant_1["id"]] == "expired"
+    assert statuses[grant_2["id"]] == "active"
+    assert active["id"] == grant_2["id"]
+    assert active["delivery_ready"] is True
+
+
+def test_forced_agent_grant_cleanup_treats_reserved_grant_as_live(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_release = Mock(return_value={"released": True})
+    monkeypatch.setattr(api, "avault_agent_release", agent_release)
+    api.create_vault_secret(
+        {
+            "name": "ASK_KEY",
+            "protection": "protected",
+            "policy": {"always_ask": True},
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+        }
+    )
+    with api._vault_engine().begin() as conn:
+        req_1 = vault_service.create_access_request(
+            conn,
+            "ASK_KEY",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant_1 = vault_service.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            created_by_request_id=req_1["id"],
+        )
+        req_2 = vault_service.create_access_request(
+            conn,
+            "ASK_KEY",
+            requester={"session_id": "ses_2"},
+            delivery={"session_id": "ses_2"},
+        )
+        grant_2 = vault_service.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ASK_KEY",
+            session_id="ses_2",
+            created_by_request_id=req_2["id"],
+        )
+        reserved = vault_service.resolve_secret_access(
+            conn,
+            "ASK_KEY",
+            session_id="ses_2",
+            requester={"session_id": "ses_2"},
+            delivery={"session_id": "ses_2"},
+            reserve_one_shot=True,
+        )
+
+    assert reserved["grant"]["id"] == grant_2["id"]
+    assert reserved["grant"]["status"] == "reserved"
+
+    api._cleanup_failed_agent_grant(
+        engine=api._vault_engine(),
+        grant=grant_1,
+        reason="test",
+        force_release_scope=True,
+    )
+
+    agent_release.assert_not_called()
+    with api._vault_engine().connect() as conn:
+        statuses = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                select(vault_service.vault_grants.c.id, vault_service.vault_grants.c.status).where(
+                    vault_service.vault_grants.c.id.in_([grant_1["id"], grant_2["id"]])
+                )
+            ).mappings()
+        }
+    assert statuses == {grant_1["id"]: "expired", grant_2["id"]: "reserved"}
+
+
 def test_revoke_grant_releases_scope_when_remaining_members_do_not_cover_cache(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     agent_release = Mock(return_value={"released": True})
@@ -1270,6 +1506,25 @@ def test_agent_deliver_run_reuses_resident_agent_socket(monkeypatch):
 
     assert result == {"exit_code": 7}
     assert seen_timeout == [None]
+
+
+def test_agent_deliver_run_treats_connect_failure_as_pre_handoff(monkeypatch):
+    from vibe.avault_agent import AvaultAgentError
+
+    class FakeManager:
+        def client(self, *, timeout=None):
+            raise AvaultAgentError("failed to connect to avault agent: [Errno 2] No such file or directory")
+
+    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_avault_agent_manager", lambda: FakeManager())
+
+    with pytest.raises(api.AvaultPreHandoffError):
+        api.avault_agent_deliver_run(
+            scope_type="secret",
+            scope_ref="GRANT_KEY",
+            secrets=[{"name": "GRANT_KEY", "env": "GRANT_KEY", "envelope": _sealed()}],
+            command=["python3", "-c", "pass"],
+        )
 
 
 def test_agent_deliver_fetch_uses_finite_timeout(monkeypatch):

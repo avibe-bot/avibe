@@ -1694,6 +1694,34 @@ def _grant_ttl_seconds(grant: dict) -> int:
     return max(1, int(round(approved_lifetime)))
 
 
+def _release_one_shot_agent_grant(grant: dict | None, *, reason: str) -> None:
+    if not isinstance(grant, dict) or grant.get("one_shot") is not True:
+        return
+    release_vault_agent_scopes(_grant_scope_payload(grant), reason=reason)
+
+
+def consume_one_shot_grants(grants: list[dict] | tuple[dict, ...] | None, *, reason: str) -> None:
+    """Expire one-shot grants after the caller has committed value delivery."""
+    from storage import vault_service
+
+    if not grants:
+        return
+    seen: set[str] = set()
+    release_scopes: list[dict[str, str]] = []
+    engine = _vault_engine()
+    with engine.begin() as conn:
+        for grant in grants:
+            if not isinstance(grant, dict) or grant.get("one_shot") is not True:
+                continue
+            grant_id = str(grant.get("id") or "")
+            if not grant_id or grant_id in seen:
+                continue
+            seen.add(grant_id)
+            with contextlib.suppress(vault_service.GrantNotActiveError, vault_service.GrantNotFoundError):
+                release_scopes.extend(vault_service.consume_one_shot_grant(conn, grant_id))
+    release_vault_agent_scopes(release_scopes, reason=reason)
+
+
 def _agent_grant_cached_all(result: dict, expected_count: int) -> bool:
     granted = result.get("granted")
     try:
@@ -1850,7 +1878,7 @@ def _cleanup_failed_agent_grant(
                     active_scope_members: set[str] = set()
                     for active in conn.execute(
                         select(vault_service.vault_grants).where(
-                            vault_service.vault_grants.c.status == "active",
+                            vault_service.vault_grants.c.status.in_(vault_service.ACTIVE_GRANT_STATES),
                             vault_service.vault_grants.c.scope_type == scope["scope_type"],
                             vault_service.vault_grants.c.scope_ref == scope["scope_ref"],
                         )
@@ -1885,14 +1913,35 @@ def create_vault_grant(payload: dict) -> dict:
         ttl_seconds = int(ttl) if ttl is not None else None
     except (TypeError, ValueError) as exc:
         raise VaultApiError("ttl_seconds must be an integer", code="invalid_grant") from exc
+    request_id = payload.get("request_id") or payload.get("created_by_request_id")
+    if not request_id:
+        raise VaultApiError("request_id is required to create a grant", code="missing_request_id")
     engine = _vault_engine()
-    try:
-        with engine.connect() as conn:
-            grantable_members = vault_service.grantable_member_metas(conn, scope_type, scope_ref)
-    except vault_service.SecretNotFoundError as exc:
-        raise VaultApiError(f"secret '{exc}' not found", code="secret_not_found", status=404) from exc
-    except vault_service.InvalidGrantError as exc:
-        raise VaultApiError(str(exc), code="invalid_grant") from exc
+    preflight_error: Exception | None = None
+    with engine.begin() as conn:
+        try:
+            grantable_members = vault_service.request_grantable_member_metas(
+                conn,
+                scope_type,
+                scope_ref,
+                str(request_id),
+            )
+        except (
+            vault_service.SecretNotFoundError,
+            vault_service.RequestNotFoundError,
+            vault_service.InvalidRequestError,
+            vault_service.InvalidGrantError,
+        ) as exc:
+            preflight_error = exc
+            grantable_members = []
+    if isinstance(preflight_error, vault_service.SecretNotFoundError):
+        raise VaultApiError(f"secret '{preflight_error}' not found", code="secret_not_found", status=404) from preflight_error
+    if isinstance(preflight_error, vault_service.RequestNotFoundError):
+        raise VaultApiError(f"request '{preflight_error}' not found", code="request_not_found", status=404) from preflight_error
+    if isinstance(preflight_error, vault_service.InvalidRequestError):
+        raise VaultApiError(str(preflight_error), code="invalid_request", status=409) from preflight_error
+    if isinstance(preflight_error, vault_service.InvalidGrantError):
+        raise VaultApiError(str(preflight_error), code="invalid_grant") from preflight_error
     if not grantable_members:
         raise VaultApiError(f"{scope_type}:{scope_ref} has no grantable static secrets", code="not_grantable", status=409)
     protected_member_names = {str(member["name"]) for member in grantable_members if member.get("protection") == "protected"}
@@ -1903,9 +1952,6 @@ def create_vault_grant(payload: dict) -> dict:
     if needs_agent_deks and provided_names != protected_member_names:
         raise VaultApiError("resident agent DEKs must match the protected grant members", code="invalid_grant")
     expected_member_names = {str(member["name"]) for member in grantable_members} if needs_agent_deks else None
-    request_id = payload.get("request_id") or payload.get("created_by_request_id")
-    if not request_id:
-        raise VaultApiError("request_id is required to create a grant", code="missing_request_id")
     expected_pubkey = payload.get("agent_pubkey") if isinstance(payload.get("agent_pubkey"), dict) else None
     if needs_agent_deks:
         try:
@@ -4838,13 +4884,13 @@ def _version_at_least(current: str | None, minimum: str) -> bool:
 def _require_avault_p2_surface(feature: str) -> None:
     status = avault_status()
     if not status.get("installed"):
-        raise AvaultError(f"avault is required for {feature}")
+        raise AvaultPreHandoffError(f"avault is required for {feature}")
     version = status.get("version")
     if not _version_at_least(version, AVAULT_P2_MIN_VERSION):
         detail = f"{feature} requires avault >= {AVAULT_P2_MIN_VERSION}; installed {version or 'unknown'}"
         if not _managed_avault_release_satisfies_p2():
             detail = f"{detail}; managed avault install is pinned to {AVAULT_VERSION}"
-        raise AvaultError(detail)
+        raise AvaultPreHandoffError(detail)
 
 
 # ---------------------------------------------------------------------------
@@ -4860,14 +4906,13 @@ def _require_avault_p2_surface(feature: str) -> None:
 # avibe's wait must outlast avault's own fetch timeout (10s connect + 30s total).
 _AVAULT_TIMEOUT_SECONDS = 20.0
 _AVAULT_FETCH_TIMEOUT_SECONDS = 60.0
-# avault exits 70 for an internal failure (bad envelope, decrypt error, store error)
-# before any delivery side effect — distinct from a delivered child's own exit code.
-_AVAULT_INTERNAL_ERROR_CODE = 70
-
-
 class AvaultError(Exception):
     """An ``avault`` invocation failed. Messages never carry secret material —
     avault is designed to keep secrets out of its stdout/stderr and errors."""
+
+
+class AvaultPreHandoffError(AvaultError):
+    """avault failed before receiving an envelope or performing delivery."""
 
 
 def _avault_detail(proc: "subprocess.CompletedProcess") -> str:
@@ -4881,7 +4926,7 @@ def _avault_detail(proc: "subprocess.CompletedProcess") -> str:
 def _require_avault_path() -> str:
     path = _resolve_avault_cli_path()
     if not path:
-        raise AvaultError(backend_t("dependencies.avault.missing"))
+        raise AvaultPreHandoffError(backend_t("dependencies.avault.missing"))
     return path
 
 
@@ -4921,7 +4966,7 @@ def _run_avault(
             **isolated_subprocess_kwargs(),
         )
     except FileNotFoundError as exc:
-        raise AvaultError("avault binary not found") from exc
+        raise AvaultPreHandoffError("avault binary not found") from exc
     except subprocess.TimeoutExpired as exc:
         raise AvaultError("avault timed out") from exc
 
@@ -5054,7 +5099,7 @@ def avault_sign(
     return {"signature": signature, "recovery_id": payload.get("recovery_id")}
 
 
-def avault_deliver_run(secrets: list[dict], command: list[str]) -> int:
+def avault_deliver_run(secrets: list[dict], command: list[str]) -> dict:
     """Run ``command`` with the secrets injected as env vars, inside avault.
 
     ``secrets`` is ``[{"name": <secret name>, "env": <env var>, "envelope": <Sealed>}]``.
@@ -5062,8 +5107,9 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> int:
     plaintext never returns here. The child inherits this process's stdio so its
     output passes through; the run-secrets JSON (envelopes only, no plaintext)
     goes on avault's stdin to stay out of ``ps``. Returns the child's exit code
-    (``128 + signal`` if signalled), or raises :class:`AvaultError` if avault could
-    not start the child.
+    (``128 + signal`` if signalled). Delivery is fail-closed: once avault returns
+    an exit code, callers must treat the secret as handed to the child unless a
+    future avault protocol provides a distinct pre-handoff failure signal.
     """
     path = _require_avault_path()
     payload = json.dumps(
@@ -5089,7 +5135,8 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> int:
         # avault exited before reading stdin (e.g. bad request); fall through to wait()
         # which surfaces its exit code.
         pass
-    return proc.wait()
+    exit_code = proc.wait()
+    return {"exit_code": exit_code, "delivered": True}
 
 
 def _agent_secret_payload(secret: dict, *, target_field: str) -> dict:
@@ -5150,14 +5197,19 @@ def avault_agent_release(*, scope_type: str, scope_ref: str) -> dict:
 
 def _agent_release_failure_is_absent(exc: AvaultError) -> bool:
     detail = str(exc).lower()
+    return _avault_agent_error_is_absent(detail)
+
+
+def _avault_agent_error_is_absent(detail: str) -> bool:
+    text = detail.lower()
     return (
-        "failed to connect to avault agent" in detail
+        "failed to connect to avault agent" in text
         and (
-            "no such file" in detail
-            or "connection refused" in detail
-            or "errno 2" in detail
-            or "errno 61" in detail
-            or "errno 111" in detail
+            "no such file" in text
+            or "connection refused" in text
+            or "errno 2" in text
+            or "errno 61" in text
+            or "errno 111" in text
         )
     )
 
@@ -5245,6 +5297,8 @@ def avault_agent_deliver_run(
             secrets=[_agent_secret_payload(secret, target_field="env") for secret in secrets],
         )
     except AvaultAgentError as exc:
+        if _avault_agent_error_is_absent(str(exc)):
+            raise AvaultPreHandoffError(str(exc)) from exc
         raise AvaultError(str(exc)) from exc
     try:
         exit_code = int(result["exit_code"])
@@ -5274,6 +5328,8 @@ def avault_agent_deliver_fetch(
             request=request,
         )
     except AvaultAgentError as exc:
+        if _avault_agent_error_is_absent(str(exc)):
+            raise AvaultPreHandoffError(str(exc)) from exc
         raise AvaultError(str(exc)) from exc
 
 
@@ -5298,6 +5354,8 @@ def avault_agent_deliver_inject(
             secrets=[_agent_secret_payload(secret, target_field="key") for secret in secrets],
         )
     except AvaultAgentError as exc:
+        if _avault_agent_error_is_absent(str(exc)):
+            raise AvaultPreHandoffError(str(exc)) from exc
         raise AvaultError(str(exc)) from exc
     if result.get("ok") is not True:
         raise AvaultError("avault agent inject returned malformed output")

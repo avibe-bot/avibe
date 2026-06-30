@@ -80,6 +80,28 @@ def _set_protected_grant(name: str, *, allow_host: list[str], session_id: str | 
         )
 
 
+def _set_always_ask_grant(name: str, *, allow_host: list[str]) -> dict:
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name=name,
+            sealed=_sealed(name.lower()),
+            policy={"always_ask": True, "allowed_hosts": allow_host},
+        )
+        req = vault_service.create_access_request(
+            conn,
+            name,
+            requester={"source": "cli"},
+            delivery={"mode": "fetch"},
+        )
+        return vault_service.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref=name,
+            created_by_request_id=req["id"],
+        )
+
+
 def test_fetch_passes_bearer_request_to_avault_and_writes_stdout(tmp_path, capfd, monkeypatch):
     from unittest.mock import Mock
 
@@ -368,6 +390,70 @@ def test_fetch_returns_response_even_if_audit_fails(tmp_path, capfd, monkeypatch
     assert code == 0
     assert captured.out == "ok"
     fetch.assert_called_once()
+
+
+def test_fetch_returns_response_even_if_one_shot_cleanup_fails(capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    _set_always_ask_grant("ASK_KEY", allow_host=["api.example.com"])
+    fetch = Mock(return_value={"status": 200, "headers": {}, "body": "ok"})
+    cleanup = Mock(side_effect=RuntimeError("db locked"))
+    monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
+    monkeypatch.setattr(api, "consume_one_shot_grants", cleanup)
+
+    code = cli.cmd_vault_fetch(_ns(auth="ASK_KEY", url="https://api.example.com/x", method="POST"))
+    captured = capfd.readouterr()
+
+    assert code == 0
+    assert captured.out == "ok"
+    fetch.assert_called_once()
+    cleanup.assert_called_once()
+
+
+def test_fetch_consumes_one_shot_grant_when_avault_errors_after_possible_egress(capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    grant = _set_always_ask_grant("ASK_KEY", allow_host=["api.example.com"])
+    fetch = Mock(side_effect=api.AvaultError("timed out after sending request"))
+    monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
+
+    code = cli.cmd_vault_fetch(_ns(auth="ASK_KEY", url="https://api.example.com/x", method="POST"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "request_failed"
+    fetch.assert_called_once()
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(
+            vault_service.vault_grants.select().where(vault_service.vault_grants.c.id == grant["id"])
+        ).mappings().one()["status"]
+    assert status == "expired"
+
+
+def test_fetch_releases_one_shot_grant_when_avault_fails_before_handoff(capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    grant = _set_always_ask_grant("ASK_KEY", allow_host=["api.example.com"])
+    fetch = Mock(side_effect=api.AvaultPreHandoffError("avault is required for vault fetch"))
+    monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
+
+    code = cli.cmd_vault_fetch(_ns(auth="ASK_KEY", url="https://api.example.com/x", method="POST"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "request_failed"
+    fetch.assert_called_once()
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(
+            vault_service.vault_grants.select().where(vault_service.vault_grants.c.id == grant["id"])
+        ).mappings().one()["status"]
+    assert status == "active"
 
 
 def test_host_allowed_is_case_insensitive():

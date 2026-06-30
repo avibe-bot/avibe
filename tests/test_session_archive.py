@@ -97,6 +97,13 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
         vs.create_secret(conn, name="ARCHIVE_OTHER_KEY", protection="protected", sealed=Sealed("ct-other", "nonce-other", "wrap-other"))
         vs.create_secret(
             conn,
+            name="ARCHIVE_RESERVED_KEY",
+            protection="protected",
+            sealed=Sealed("ct-reserved", "nonce-reserved", "wrap-reserved"),
+            policy={"always_ask": True},
+        )
+        vs.create_secret(
+            conn,
             name="ARCHIVE_SIGNING_KEY",
             protection="protected",
             kind="keypair",
@@ -145,7 +152,30 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
             created_by_request_id=req["id"],
             cache=cache,
         )
+        reserved_req = vs.create_access_request(
+            conn,
+            "ARCHIVE_RESERVED_KEY",
+            requester={"session_id": sid},
+            delivery={"session_id": sid, "command": "python reserved.py"},
+        )
+        reserved_grant = vs.create_grant(
+            conn,
+            scope_type="secret",
+            scope_ref="ARCHIVE_RESERVED_KEY",
+            session_id=sid,
+            created_by_request_id=reserved_req["id"],
+            cache=cache,
+        )
+        reserved = vs.resolve_secret_access(
+            conn,
+            "ARCHIVE_RESERVED_KEY",
+            requester={"session_id": sid},
+            delivery={"session_id": sid, "command": "python reserved.py"},
+            reserve_one_shot=True,
+        )
         assert cache.has(grant["id"], "ARCHIVE_KEY")
+        assert reserved["grant"]["status"] == "reserved"
+        assert cache.has(reserved_grant["id"], "ARCHIVE_RESERVED_KEY")
 
     with engine.begin() as conn:
         result = wss.archive_session(conn, sid)
@@ -153,7 +183,10 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
     assert result["status"] == "archived"
     assert result["agent_status"] == "idle"
     assert result["reclaimed"] == {"tasks": 1, "watches": 1, "runs": 2, "queued": 0}
-    assert result["revoked_vault_grant_scopes"] == [{"scope_type": "secret", "scope_ref": "ARCHIVE_KEY"}]
+    assert {(scope["scope_type"], scope["scope_ref"]) for scope in result["revoked_vault_grant_scopes"]} == {
+        ("secret", "ARCHIVE_KEY"),
+        ("secret", "ARCHIVE_RESERVED_KEY"),
+    }
 
     with engine.connect() as conn:
         live_defs = (
@@ -179,8 +212,13 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
         assert page["visibility"] == "offline"
         assert page["offline_at"] is not None
         grant_row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant["id"])).mappings().one()
+        reserved_grant_row = conn.execute(
+            select(vault_grants).where(vault_grants.c.id == reserved_grant["id"])
+        ).mappings().one()
         assert grant_row["status"] == "revoked"
+        assert reserved_grant_row["status"] == "revoked"
         assert not cache.has(grant["id"], "ARCHIVE_KEY")
+        assert not cache.has(reserved_grant["id"], "ARCHIVE_RESERVED_KEY")
         request_statuses = {
             row["id"]: row["status"]
             for row in conn.execute(
