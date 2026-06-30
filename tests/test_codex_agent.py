@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -1110,6 +1111,38 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set_env["AVIBE_CALLER_SOURCE"], "agent_run")
         self.assertEqual(set_env["AVIBE_CALLER_BACKEND"], "codex")
         self.assertEqual(set_env["AVIBE_NATIVE_SESSION_ID"], "thread-parent")
+        self.assertTrue(set_env["BASH_ENV"].endswith("/codex-caller-env/ses-parent.sh"))
+
+    def test_write_caller_env_script_refreshes_reused_thread_run_id(self):
+        agent = object.__new__(CodexAgent)
+        request = SimpleNamespace(
+            base_session_id="session-1",
+            context=SimpleNamespace(
+                platform_specific={
+                    "task_execution_id": "run-one",
+                    "task_trigger_kind": "agent_run",
+                    "agent_session_target": {
+                        "id": "ses-parent",
+                        "agent_backend": "codex",
+                        "native_session_id": "thread-parent",
+                    },
+                },
+            ),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("config.paths.get_runtime_dir", return_value=Path(tmpdir)):
+                script_path = agent._write_caller_env_script(request)
+                self.assertIsNotNone(script_path)
+                first = script_path.read_text()
+                request.context.platform_specific["task_execution_id"] = "run-two"
+                second_path = agent._write_caller_env_script(request)
+                second = second_path.read_text()
+
+        self.assertIn("export AVIBE_RUN_ID=run-one", first)
+        self.assertIn("export AVIBE_SESSION_ID=ses-parent", first)
+        self.assertIn("export AVIBE_RUN_ID=run-two", second)
+        self.assertNotIn("export AVIBE_RUN_ID=run-one", second)
 
     async def test_start_thread_requests_danger_full_access(self):
         agent = object.__new__(CodexAgent)
@@ -2618,6 +2651,53 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         agent.controller.get_codex_overrides.assert_not_called()
+
+    async def test_start_turn_writes_current_caller_env_script_for_reused_threads(self):
+        agent = object.__new__(CodexAgent)
+        agent.controller = SimpleNamespace(get_codex_overrides=Mock(return_value=(None, None, None)))
+        agent.codex_config = SimpleNamespace(default_model=None)
+        agent.ensure_agent_session_id = Mock()
+        agent._build_input = Mock(return_value=[{"type": "text", "text": "hello"}])
+        agent._turn_registry = SimpleNamespace(
+            begin_turn_start=Mock(),
+            get_bootstrapped_turn_id=Mock(return_value=None),
+            finalize_turn_start_response=Mock(return_value=SimpleNamespace()),
+        )
+        request = SimpleNamespace(
+            session_key="channel-1",
+            base_session_id="session-1",
+            composite_session_id="slack:C1:T1",
+            context=SimpleNamespace(
+                platform="slack",
+                platform_specific={
+                    "task_execution_id": "run-two",
+                    "task_trigger_kind": "agent_run",
+                    "agent_session_target": {
+                        "id": "sesk8m4q2p7x",
+                        "agent_backend": "codex",
+                        "native_session_id": "thread-existing",
+                    },
+                },
+            ),
+            subagent_name=None,
+            subagent_model=None,
+            subagent_reasoning_effort=None,
+        )
+        transport = SimpleNamespace(send_request=AsyncMock(return_value={"turn": {"id": "turn-2"}}))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("config.paths.get_runtime_dir", return_value=Path(tmpdir)):
+                await agent._start_turn(transport, request, "thread-existing")
+                env_script = Path(tmpdir) / "codex-caller-env" / "session-1.sh"
+                script_text = env_script.read_text()
+
+        params = transport.send_request.await_args.args[1]
+        self.assertNotIn("config", params)
+        self.assertIn("export AVIBE_SESSION_ID=sesk8m4q2p7x", script_text)
+        self.assertIn("export AVIBE_RUN_ID=run-two", script_text)
+        self.assertIn("export AVIBE_CALLER_SOURCE=agent_run", script_text)
+        self.assertIn("export AVIBE_CALLER_BACKEND=codex", script_text)
+        self.assertIn("export AVIBE_NATIVE_SESSION_ID=thread-existing", script_text)
 
     async def test_start_turn_uses_controller_codex_overrides(self):
         agent = object.__new__(CodexAgent)
