@@ -935,12 +935,11 @@ def _filter_response_chats(
         # only when a caller explicitly opts in (review / manual remove views).
         result = [chat for chat in result if chat.visibility_status != VISIBILITY_NOT_RETURNED]
     if require_member:
-        # Defense-in-depth: also drops not_returned for unfiltered callers.
-        result = [
-            chat
-            for chat in result
-            if chat.is_member is True and chat.visibility_status != VISIBILITY_NOT_RETURNED
-        ]
+        # Keep only member channels for the Slack member-only view. Do NOT re-drop
+        # not_returned here: when the caller opted in (include_not_returned), the
+        # stale member rows are exactly what the review/remove view needs; when
+        # they did not, those rows were already removed above.
+        result = [chat for chat in result if chat.is_member is True]
     return result
 
 

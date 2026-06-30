@@ -349,6 +349,47 @@ def test_slack_member_only_response_excludes_not_returned_member_channels(tmp_pa
     assert [channel["id"] for channel in response["channels"]] == ["C_PRESENT"]
 
 
+def test_slack_member_only_opt_in_exposes_not_returned_member_channels(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    auth_context = _auth_context("slack", bot_token="x")
+    chat_discovery.remember_chat(
+        "slack",
+        "C_GONE_OPTIN",
+        name="gone",
+        metadata={
+            chat_discovery.METADATA_IS_MEMBER: True,
+            chat_discovery.METADATA_VISIBILITY_STATUS: chat_discovery.VISIBILITY_NOT_RETURNED,
+            chat_discovery.METADATA_AUTH_CONTEXT: auth_context,
+        },
+        db_path=db_path,
+    )
+    chat_discovery.remember_chat(
+        "slack",
+        "C_PRESENT_OPTIN",
+        name="present",
+        metadata={
+            chat_discovery.METADATA_IS_MEMBER: True,
+            chat_discovery.METADATA_AUTH_CONTEXT: auth_context,
+        },
+        db_path=db_path,
+    )
+    chat_discovery.set_state_meta(
+        f"channel_refresh.slack.{auth_context}",
+        {"last_attempt_at": "2999-01-01T00:00:00+00:00", "last_success_at": "2999-01-01T00:00:00+00:00", "last_error": None},
+        db_path=db_path,
+    )
+
+    # Member-only view (Slack default) must still surface the stale member row
+    # when the caller opts in, so it can be reviewed/removed without browse-all.
+    response = chat_discovery.channels_response(
+        "slack", require_member=True, include_not_returned=True, bot_token="x", db_path=db_path
+    )
+
+    assert {c["id"] for c in response["channels"]} == {"C_GONE_OPTIN", "C_PRESENT_OPTIN"}
+    assert response["summary"]["not_returned_count"] == 1
+
+
 def test_slack_browse_all_refreshes_after_member_only_cache_hit(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path)

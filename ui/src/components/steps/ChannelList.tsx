@@ -620,6 +620,17 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     config.lark?.has_app_secret,
   ]);
 
+  // Reload the inventory shown by the current view. In the All tab the renderer
+  // uses the per-platform `channels` state for the currently selected platform
+  // and `allChannelsByPlatform` for the rest, so refresh both.
+  const reloadCurrentView = async () => {
+    if (isPage && pageTab === 'all') {
+      await Promise.all([loadAllPlatformsData(false), loadChannels(undefined, false)]);
+    } else {
+      await loadChannels(undefined, false);
+    }
+  };
+
   // Reload when the user toggles "show unavailable" so the request carries the
   // updated include_not_returned flag.
   const showUnavailableInitRef = useRef(true);
@@ -628,11 +639,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
       showUnavailableInitRef.current = false;
       return;
     }
-    if (isPage && pageTab === 'all') {
-      void loadAllPlatformsData(false);
-    } else {
-      void loadChannels(undefined, false);
-    }
+    void reloadCurrentView();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showUnavailable]);
 
@@ -644,11 +651,24 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     try {
       const result = await api.deleteChannel(rowPlatform, channelId);
       if (result?.ok) {
-        if (isPage && pageTab === 'all') {
-          await loadAllPlatformsData(false);
-        } else {
-          await loadChannels(undefined, false);
+        // Drop the removed channel's local settings so a later edit of another
+        // channel doesn't re-persist (and thus recreate) the deleted scope.
+        if (rowPlatform === platform) {
+          setConfigs((prev) => {
+            if (!(channelId in prev)) return prev;
+            const next = { ...prev };
+            delete next[channelId];
+            return next;
+          });
         }
+        setAllConfigsByPlatform((prev) => {
+          const platformConfigs = prev[rowPlatform];
+          if (!platformConfigs || !(channelId in platformConfigs)) return prev;
+          const nextPlatform = { ...platformConfigs };
+          delete nextPlatform[channelId];
+          return { ...prev, [rowPlatform]: nextPlatform };
+        });
+        await reloadCurrentView();
       }
     } catch (e) {
       console.error('Failed to remove channel:', e);
