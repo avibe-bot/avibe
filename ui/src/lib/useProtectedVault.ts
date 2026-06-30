@@ -105,16 +105,18 @@ function withRpId(wrapMeta: string, rpId: string): string {
   return JSON.stringify(meta);
 }
 
-function toUint8(buffer: ArrayBuffer | ArrayBufferView): Uint8Array {
-  return buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+function toUint8(buffer: ArrayBuffer | ArrayBufferView | ArrayLike<number>): Uint8Array {
+  if (buffer instanceof ArrayBuffer) return new Uint8Array(buffer);
+  if (ArrayBuffer.isView(buffer)) return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  return Uint8Array.from(buffer);
 }
 
-function copyUint8(buffer: ArrayBuffer | ArrayBufferView): Uint8Array {
+function copyUint8(buffer: ArrayBuffer | ArrayBufferView | ArrayLike<number>): Uint8Array {
   return new Uint8Array(toUint8(buffer));
 }
 
 export function readPasskeyPrfResult(credential: PublicKeyCredential | null): Uint8Array {
-  const ext = credential?.getClientExtensionResults() as { prf?: { results?: { first?: ArrayBuffer | ArrayBufferView } } } | undefined;
+  const ext = credential?.getClientExtensionResults() as { prf?: { results?: { first?: ArrayBuffer | ArrayBufferView | ArrayLike<number> } } } | undefined;
   const first = ext?.prf?.results?.first;
   if (!first) throw new Error('passkey-prf-unavailable');
   const prfOutput = copyUint8(first);

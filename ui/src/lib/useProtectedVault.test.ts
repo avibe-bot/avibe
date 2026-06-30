@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { readPasskeyPrfResult } from './useProtectedVault';
 
-function passkeyCredential(first?: ArrayBuffer | ArrayBufferView): PublicKeyCredential {
+function passkeyCredential(first?: ArrayBuffer | ArrayBufferView | number[]): PublicKeyCredential {
   return {
     getClientExtensionResults: () => ({
       prf: {
@@ -22,6 +22,12 @@ describe('protected vault WebAuthn PRF result handling', () => {
 
     expect(result.byteLength).toBe(32);
     expect(result).toEqual(new Uint8Array(32).fill(0x22));
+  });
+
+  it('accepts a plain Array PRF output from browser extension passkey providers', () => {
+    const source = Array.from({ length: 32 }, (_, index) => index + 1);
+
+    expect(readPasskeyPrfResult(passkeyCredential(source))).toEqual(Uint8Array.from(source));
   });
 
   it('rejects a present but empty PRF output at the WebAuthn boundary', () => {
