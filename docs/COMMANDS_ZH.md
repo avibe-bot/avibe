@@ -695,9 +695,13 @@ vibe task add (--session-id <session_id> | --create-session | --create-session-p
 - `--timezone`
 
 在普通宿主机 shell 里，必须传一个目标策略：`--session-id`、`--create-session`
-或 `--create-session-per-run`。在 Avibe 已注入 caller context 的 Agent shell 内，
-可以省略目标策略，任务目标会默认到调用方 Session。任务需要创建新的可见 Session 时，
-使用 `--create-session --same-scope` 或 `--create-session --scope-id <scopes.id>`。
+或 `--create-session-per-run`。创建 task Session 时还必须指定 placement：
+在 Agent shell 内使用 `--same-scope`，在任意 shell 内使用
+`--scope-id <scopes.id>`，或使用 legacy `--deliver-key`。在 Avibe 已注入
+caller context 的 Agent shell 内，可以省略目标策略，任务目标会默认到调用方
+Session。任务需要创建新的可见 Session 时，使用 `--create-session --same-scope`
+或 `--create-session --scope-id <scopes.id>`；`--create-session-per-run`
+也使用同样的 placement 参数。
 
 ### `vibe task update`
 
@@ -825,11 +829,13 @@ vibe agent run (--session-id <session_id> | --create-session | --fork-session <s
 - `--message`
 - `--message-file`
 
-如果不传 `--session-id` 或 fork 参数，run 会为 `--agent` 创建一个新的 private
-background Session。用 `--same-scope` 可以把新建或 fork 后的 Session 放到
+如果不传 `--session-id` 或 fork 参数，run 会为 `--agent` 创建一个新
+Session。没有 scope 参数时，这个 Session 是 private/background。用
+`--same-scope` 可以在 Avibe Agent shell 内把新建或 fork 后的 Session 放到
 调用方/源 Session 所在 scope；用 `--scope-id <scopes.id>` 可以放到指定现有
-scope。`--cwd` 只对新建空白 Session 生效；已有 Session 会保留自己的 cwd、
-scope、Agent、model 和 reasoning 设置。
+scope。带 scope 的新 Session 会在该 scope 内可见。`--cwd` 只对新建空白
+Session 生效；已有 Session 会保留自己的 cwd、scope、Agent、model 和
+reasoning 设置。
 
 `--fork-self` 会从 `AVIBE_SESSION_ID` 对应的当前调用方 Session fork。
 `--fork-session <session_id>` 则基于另一个源 Session 的 native backend 上下文创建
@@ -890,5 +896,5 @@ vibe
 vibe status
 vibe doctor
 vibe task list --brief
-vibe agent run --async --agent release-reviewer --no-callback --message 'Share the latest build summary.'
+vibe agent run --async --agent release-reviewer --scope-id avibe::project::proj_123 --no-callback --message 'Share the latest build summary in this project.'
 ```

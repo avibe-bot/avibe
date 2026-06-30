@@ -181,7 +181,7 @@ context 的 Agent run 内可以省略 run id，并默认使用 `AVIBE_RUN_ID`。
 ```bash
 vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
 vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'   # 在 Avibe Agent shell 内
-vibe task add --create-session --scope-id scope123 --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'
+vibe task add --create-session --scope-id avibe::project::proj_123 --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'
 vibe task add --create-session --same-scope --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'   # 在 Avibe Agent shell 内
 vibe task list --brief
 vibe task update <task-id> --cron '*/30 * * * *'
@@ -202,11 +202,12 @@ vibe task remove <task-id>
 当 `vibe task add` 运行在 Avibe 已注入 caller context 的 Agent shell 内时，
 可以省略 `--session-id`。Avibe 会把任务目标默认到 `AVIBE_SESSION_ID`
 对应的调用方 Session，并在命令输出里报告这次默认。显式 `--session-id`
-和 session creation 参数仍然优先。用 `--create-session --same-scope`
-可以在当前 Workbench project 或 IM scope 内创建可复用的 sibling Session；
-用 `--create-session --scope-id <scopes.id>` 可以放到指定的现有 scope。
-`--post-to channel` 只改变 follow-up 的发布位置，不改变要延续的 Session，
-也不改变新建 Session 的 scope。
+和 session creation 参数仍然优先。创建 task Session 时还必须指定 placement：
+用 `--create-session --same-scope` 可以在当前 Workbench project 或 IM scope
+内创建可复用的 sibling Session；用 `--create-session --scope-id <scopes.id>`
+可以放到指定的现有 scope。`--create-session-per-run` 也使用同样的 placement
+参数。`--post-to channel` 只改变 follow-up 的发布位置，不改变要延续的
+Session，也不改变新建 Session 的 scope。
 
 `--session-key` 仍兼容旧脚本，但新任务应使用当前 Avibe prompt
 里展示的 Agent Session ID。`--deliver-key` 是 legacy transport syntax，
@@ -220,20 +221,23 @@ vibe task remove <task-id>
 vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
 vibe agent run --async --agent release-reviewer --no-callback --message 'Run the delegated investigation.'
 vibe agent run --async --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
+vibe agent run --agent release-reviewer --scope-id avibe::project::proj_123 --message 'Review this project in a visible sibling Session.'
 
-# 在 Avibe Agent shell 内，caller context 会提供当前 Session 和默认 callback 目标。
+# 在 Avibe Agent shell 内，caller context 会提供当前 Session、scope 和默认 callback 目标。
 vibe agent run --agent release-reviewer --same-scope --message 'Review this project in a visible sibling Session.'
 vibe agent run --async --agent release-reviewer --message 'Run the delegated investigation.'
 vibe agent run --async --fork-self --message 'Explore this alternate fix from the current context.'
 vibe agent run --fork-session sesk8m4q2p7x --agent reviewer --model gpt-5.4 --reasoning-effort high --message 'Review the forked context.'
 ```
 
-不传 `--session-id` 或 fork 参数时，`vibe agent run --agent <name>` 会为
-该 Agent 创建一个新的 private background Session。加 `--same-scope` 时，新
-Session 会出现在调用方/源 Session 所在的 Workbench project 或 IM scope 内；
-也可以用 `--scope-id <scopes.id>` 放到指定的现有 scope。`--cwd` 只对新建空白
-Session 生效；继续已有 Session 时，不会修改它的 cwd、scope、Agent、model
-或 reasoning 设置。
+不传 `--session-id`、fork 参数或 scope 参数时，`vibe agent run --agent
+<name>` 会为该 Agent 创建一个新的 private background Session。在 Avibe
+Agent shell 内加 `--same-scope` 时，新 Session 会出现在调用方/源 Session
+所在的 Workbench project 或 IM scope 内；在宿主机 shell 里用
+`--scope-id <scopes.id>` 放到指定的现有 scope。带 scope 的新 Session
+会在该 scope 内可见，不再是 private background Session。`--cwd` 只对新建
+空白 Session 生效；继续已有 Session 时，不会修改它的 cwd、scope、Agent、
+model 或 reasoning 设置。
 
 如果新 Agent Session 要从当前调用方 Session 的 native backend 上下文分叉，
 用 `--fork-self`，不需要手动传当前 Session ID。如果源 Session 是另一个已知

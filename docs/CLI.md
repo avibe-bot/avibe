@@ -199,7 +199,7 @@ Create, inspect, update, run, pause, resume, or remove scheduled tasks.
 ```bash
 vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
 vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'   # inside an Avibe Agent shell
-vibe task add --create-session --scope-id scope123 --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'
+vibe task add --create-session --scope-id avibe::project::proj_123 --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'
 vibe task add --create-session --same-scope --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'   # inside an Avibe Agent shell
 vibe task list --brief
 vibe task update <task-id> --cron '*/30 * * * *'
@@ -220,12 +220,13 @@ Use `vibe task add --help` and `vibe task update --help` for the full command su
 When `vibe task add` runs inside an Avibe-injected Agent shell, `--session-id`
 may be omitted. Avibe defaults the task target to the caller Session from
 `AVIBE_SESSION_ID` and reports that default in the command output. Explicit
-`--session-id` and session creation flags still win. Use
-`--create-session --same-scope` to create a reusable sibling Session in the
-current Workbench project or IM scope, or `--create-session --scope-id
-<scopes.id>` to place it in a specific existing scope. `--post-to channel`
-changes where the follow-up is posted, not which Session is continued or where
-new Sessions are placed.
+`--session-id` and session creation flags still win. Created task Sessions must
+also include placement: use `--create-session --same-scope` to create a reusable
+sibling Session in the current Workbench project or IM scope, or
+`--create-session --scope-id <scopes.id>` to place it in a specific existing
+scope. Use the same placement flags with `--create-session-per-run`. `--post-to
+channel` changes where the follow-up is posted, not which Session is continued
+or where new Sessions are placed.
 
 `--session-key` remains accepted for older scripts, but new tasks should use
 the Agent Session ID shown in the active Avibe prompt. `--deliver-key` is legacy
@@ -240,7 +241,7 @@ a scheduled task definition.
 vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
 vibe agent run --async --agent release-reviewer --no-callback --message 'Run the delegated investigation.'
 vibe agent run --async --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
-vibe agent run --agent release-reviewer --scope-id scope123 --message 'Review this project in a visible sibling Session.'
+vibe agent run --agent release-reviewer --scope-id avibe::project::proj_123 --message 'Review this project in a visible sibling Session.'
 
 # Inside an Avibe Agent shell, caller context supplies the current Session, scope, and callback target.
 vibe agent run --agent release-reviewer --same-scope --message 'Review this project in a visible sibling Session.'
@@ -249,13 +250,14 @@ vibe agent run --async --fork-self --message 'Explore this alternate fix from th
 vibe agent run --fork-session sesk8m4q2p7x --agent reviewer --model gpt-5.4 --reasoning-effort high --message 'Review the forked context.'
 ```
 
-With no `--session-id` or fork flag, `vibe agent run --agent <name>` creates a
-new private background Session for that Agent. In an Avibe-injected Agent shell,
-add `--same-scope` when the new Session should appear beside the caller/source
-Session in the current Workbench project or IM scope. From a host shell, use
-`--scope-id <scopes.id>` for a specific existing scope. `--cwd` applies only to
-new blank Sessions; continuing an existing Session does not change its cwd,
-scope, Agent, model, or reasoning settings.
+With no `--session-id`, fork flag, or scope flag, `vibe agent run --agent
+<name>` creates a new private background Session for that Agent. Add
+`--same-scope` inside an Avibe-injected Agent shell when the new Session should
+appear beside the caller/source Session in the current Workbench project or IM
+scope. From a host shell, use `--scope-id <scopes.id>` for a specific existing
+scope. Scoped new Sessions are visible in that scope, not private background
+Sessions. `--cwd` applies only to new blank Sessions; continuing an existing
+Session does not change its cwd, scope, Agent, model, or reasoning settings.
 
 Use `--fork-self` when a new Agent Session should branch from the current caller
 Session without passing the caller Session ID manually. Use

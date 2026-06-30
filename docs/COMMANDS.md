@@ -716,10 +716,13 @@ Important options:
 - `--timezone`
 
 Outside an Avibe-injected Agent shell, one target policy is required:
-`--session-id`, `--create-session`, or `--create-session-per-run`. Inside an
+`--session-id`, `--create-session`, or `--create-session-per-run`. Created task
+Sessions must also include placement: `--same-scope` inside an Agent shell,
+`--scope-id <scopes.id>` from any shell, or the legacy `--deliver-key`. Inside an
 Agent shell, omitting the target policy defaults the task target to the caller
 Session. Use `--create-session --same-scope` or `--create-session --scope-id
-<scopes.id>` when the task should create a reusable Session in a visible scope.
+<scopes.id>` when the task should create a reusable Session in a visible scope;
+use the same placement flags with `--create-session-per-run`.
 
 ### `vibe task update`
 
@@ -851,11 +854,12 @@ Important options:
 - `--message-file`
 
 If neither `--session-id` nor a fork flag is provided, the run creates a new
-private background Session for `--agent`. Use `--same-scope` to place a new or
-forked Session in the caller/source Session's scope, or `--scope-id <scopes.id>`
-to place it in a specific existing scope. `--cwd` applies only to new blank
-Sessions; existing Sessions keep their stored cwd, scope, Agent, model, and
-reasoning settings.
+Session for `--agent`. With no scope flag that Session is private/background.
+Use `--same-scope` inside an Avibe-injected Agent shell to place a new or forked
+Session in the caller/source Session's scope, or `--scope-id <scopes.id>` to
+place it in a specific existing scope. Scoped new Sessions are visible in that
+scope. `--cwd` applies only to new blank Sessions; existing Sessions keep their
+stored cwd, scope, Agent, model, and reasoning settings.
 
 `--fork-self` forks the current caller Session from `AVIBE_SESSION_ID`.
 `--fork-session <session_id>` creates a new Agent Session by forking another
@@ -918,5 +922,5 @@ vibe
 vibe status
 vibe doctor
 vibe task list --brief
-vibe agent run --async --agent release-reviewer --no-callback --message 'Share the latest build summary.'
+vibe agent run --async --agent release-reviewer --scope-id avibe::project::proj_123 --no-callback --message 'Share the latest build summary in this project.'
 ```
