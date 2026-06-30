@@ -515,6 +515,221 @@ def test_discord_cached_payload_preserves_numeric_channel_type(tmp_path: Path, m
     assert cached["channels"][0]["native_type"] == "0"
 
 
+def _seed_not_returned_discord(db_path: Path) -> None:
+    auth_context = _auth_context("discord", bot_token="x")
+    parent = chat_discovery.make_scope_id("discord", chat_discovery.GUILD_SCOPE_TYPE, "G1")
+    # Parent guild scope must exist before channels can reference it (FK).
+    chat_discovery._remember_guild("discord", "G1", db_path=db_path)
+    chat_discovery.remember_chat(
+        "discord",
+        "C_PRESENT",
+        name="present",
+        metadata={chat_discovery.METADATA_AUTH_CONTEXT: auth_context},
+        parent_id=parent,
+        db_path=db_path,
+    )
+    chat_discovery.remember_chat(
+        "discord",
+        "C_GONE",
+        name="gone",
+        metadata={
+            chat_discovery.METADATA_AUTH_CONTEXT: auth_context,
+            chat_discovery.METADATA_VISIBILITY_STATUS: chat_discovery.VISIBILITY_NOT_RETURNED,
+            chat_discovery.METADATA_LAST_MISSING_AT: "2026-01-01T00:00:00+00:00",
+        },
+        parent_id=parent,
+        db_path=db_path,
+    )
+
+
+def test_channels_response_hides_not_returned_by_default_and_opts_in(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    _seed_not_returned_discord(db_path)
+    # Mark already fetched so no live refresh is attempted.
+    chat_discovery.set_state_meta(
+        f"channel_refresh.discord.guild.G1.{_auth_context('discord', bot_token='x')}",
+        {"last_attempt_at": "2999-01-01T00:00:00+00:00", "last_success_at": "2999-01-01T00:00:00+00:00", "last_error": None},
+        db_path=db_path,
+    )
+
+    parent = chat_discovery.make_scope_id("discord", chat_discovery.GUILD_SCOPE_TYPE, "G1")
+    hidden = chat_discovery.channels_response(
+        "discord", bot_token="x", guild_id="G1", parent_scope_id=parent, db_path=db_path
+    )
+    shown = chat_discovery.channels_response(
+        "discord",
+        bot_token="x",
+        guild_id="G1",
+        parent_id=parent,
+        include_not_returned=True,
+        db_path=db_path,
+    )
+
+    assert [c["id"] for c in hidden["channels"]] == ["C_PRESENT"]
+    assert {c["id"] for c in shown["channels"]} == {"C_PRESENT", "C_GONE"}
+    # Summary always counts the full inventory regardless of the view.
+    assert hidden["summary"]["discovered_count"] == 2
+    assert hidden["summary"]["not_returned_count"] == 1
+    assert shown["summary"]["not_returned_count"] == 1
+
+
+def test_all_not_returned_does_not_trigger_refresh_each_call(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    auth_context = _auth_context("slack", bot_token="x")
+    chat_discovery.remember_chat(
+        "slack",
+        "C_STALE_GUARD",
+        name="gone",
+        metadata={
+            chat_discovery.METADATA_AUTH_CONTEXT: auth_context,
+            chat_discovery.METADATA_IS_MEMBER: True,
+            chat_discovery.METADATA_VISIBILITY_STATUS: chat_discovery.VISIBILITY_NOT_RETURNED,
+        },
+        db_path=db_path,
+    )
+    # last_success recent (TTL not elapsed) but last_attempt old (backoff would
+    # allow). Old `not chats` guard would refresh; the success-based guard must not.
+    chat_discovery.set_state_meta(
+        f"channel_refresh.slack.{auth_context}",
+        {"last_attempt_at": "2000-01-01T00:00:00+00:00", "last_success_at": "2999-01-01T00:00:00+00:00", "last_error": None},
+        db_path=db_path,
+    )
+
+    from vibe import api
+
+    calls = 0
+
+    def fake_live(_token: str, browse_all: bool = False) -> dict:
+        nonlocal calls
+        calls += 1
+        return {"ok": True, "channels": [], "is_member_only": not browse_all}
+
+    monkeypatch.setattr(api, "list_channels_live", fake_live)
+
+    first = chat_discovery.channels_response("slack", bot_token="x", db_path=db_path)
+    second = chat_discovery.channels_response("slack", bot_token="x", db_path=db_path)
+
+    assert calls == 0
+    assert first["channels"] == []
+    assert second["channels"] == []
+    assert first["summary"]["not_returned_count"] == 1
+
+
+def test_refresh_skips_not_returned_marking_when_lark_truncated(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    auth_context = _auth_context("lark", app_id="a", app_secret="s", domain="feishu")
+    chat_discovery.remember_chat(
+        "lark",
+        "oc_keep",
+        name="keep",
+        metadata={chat_discovery.METADATA_AUTH_CONTEXT: auth_context},
+        db_path=db_path,
+    )
+
+    from vibe import api
+
+    # Live result is truncated and does NOT include oc_keep — it must NOT be
+    # marked not_returned because the inventory is incomplete.
+    monkeypatch.setattr(
+        api,
+        "lark_list_chats_live",
+        lambda _app_id, _app_secret, _domain="feishu": {
+            "ok": True,
+            "channels": [{"id": "oc_new", "name": "new", "chat_type": "group"}],
+            "truncated": True,
+        },
+    )
+
+    result = chat_discovery.refresh_platform(
+        "lark", force=True, app_id="a", app_secret="s", domain="feishu", db_path=db_path
+    )
+    chats = {c.chat_id: c for c in chat_discovery.list_chats("lark", db_path=db_path)}
+
+    assert result.ok is True
+    assert chats["oc_keep"].visibility_status != chat_discovery.VISIBILITY_NOT_RETURNED
+    assert chats["oc_new"].visibility_status == chat_discovery.VISIBILITY_VISIBLE
+
+
+def test_background_refresh_skips_marking_when_lark_truncated(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    auth_context = _auth_context("lark", app_id="a", app_secret="s", domain="feishu")
+    chat_discovery.remember_chat(
+        "lark",
+        "oc_keepbg",
+        name="keep",
+        metadata={chat_discovery.METADATA_AUTH_CONTEXT: auth_context},
+        db_path=db_path,
+    )
+    # Stale cache so channels_response schedules a background refresh.
+    chat_discovery.set_state_meta(
+        f"channel_refresh.lark.{auth_context}",
+        {"last_attempt_at": "2000-01-01T00:00:00+00:00", "last_success_at": "2000-01-01T00:00:00+00:00", "last_error": None},
+        db_path=db_path,
+    )
+
+    from vibe import api
+
+    monkeypatch.setattr(
+        api,
+        "lark_list_chats_live",
+        lambda _app_id, _app_secret, _domain="feishu": {
+            "ok": True,
+            "channels": [{"id": "oc_newbg", "name": "new", "chat_type": "group"}],
+            "truncated": True,
+        },
+    )
+
+    class InlineThread:
+        def __init__(self, *args, target=None, **kwargs):
+            self._target = target
+
+        def start(self):
+            if self._target:
+                self._target()
+
+    monkeypatch.setattr(chat_discovery.threading, "Thread", InlineThread)
+
+    try:
+        chat_discovery.channels_response(
+            "lark", app_id="a", app_secret="s", domain="feishu", db_path=db_path
+        )
+    finally:
+        with chat_discovery._scheduled_refreshes_lock:
+            chat_discovery._scheduled_refreshes.clear()
+
+    chats = {c.chat_id: c for c in chat_discovery.list_chats("lark", db_path=db_path)}
+    assert chats["oc_keepbg"].visibility_status != chat_discovery.VISIBILITY_NOT_RETURNED
+
+
+def test_delete_scope_removes_scope_and_settings(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path)
+    chat_discovery.remember_chat("telegram", "999", name="Gone", db_path=db_path)
+    service = SQLiteSettingsService(db_path)
+    try:
+        service.save_state(SettingsState(channels={"telegram::999": ChannelSettings(enabled=True)}))
+    finally:
+        service.close()
+
+    assert any(c.chat_id == "999" for c in chat_discovery.list_chats("telegram", db_path=db_path))
+
+    removed = chat_discovery.delete_scope("telegram", "999", db_path=db_path)
+    assert removed is True
+    assert chat_discovery.list_chats("telegram", db_path=db_path) == []
+    # Settings row is gone too (no orphan).
+    reloaded = SQLiteSettingsService(db_path)
+    try:
+        assert "telegram::999" not in reloaded.load_state().channels
+    finally:
+        reloaded.close()
+    # Deleting a missing scope is a no-op.
+    assert chat_discovery.delete_scope("telegram", "999", db_path=db_path) is False
+
+
 def test_malformed_legacy_discovered_chats_does_not_break_channel_response(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path)
