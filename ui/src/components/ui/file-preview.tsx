@@ -190,7 +190,7 @@ function sanitizeRenderedLinks(root: HTMLElement) {
 
 // Fetch the file bytes once per URL. Shared by the Office views; their parsers want an ArrayBuffer.
 function useFileBytes(url: string) {
-  const [state, setState] = React.useState<{ status: 'loading' | 'ready' | 'error'; bytes: ArrayBuffer | null }>({ status: 'loading', bytes: null });
+  const [state, setState] = React.useState<{ status: 'loading' | 'ready' | 'error' | 'toolarge'; bytes: ArrayBuffer | null }>({ status: 'loading', bytes: null });
   React.useEffect(() => {
     let alive = true;
     setState({ status: 'loading', bytes: null });
@@ -198,7 +198,19 @@ function useFileBytes(url: string) {
       try {
         const res = await apiFetch(url, { headers: { Accept: '*/*' } });
         if (!res.ok) throw new Error(`http ${res.status}`);
+        // The dispatch checks the /meta size, but that can be stale (the media token serves a mutable
+        // path). Re-check the actual response: refuse by Content-Length before reading, then guard the
+        // final byte length too — mirroring the text preview's size checks.
+        const len = Number(res.headers.get('content-length'));
+        if (Number.isFinite(len) && len > DOC_PREVIEW_MAX_BYTES) {
+          if (alive) setState({ status: 'toolarge', bytes: null });
+          return;
+        }
         const bytes = await res.arrayBuffer();
+        if (bytes.byteLength > DOC_PREVIEW_MAX_BYTES) {
+          if (alive) setState({ status: 'toolarge', bytes: null });
+          return;
+        }
         if (alive) setState({ status: 'ready', bytes });
       } catch {
         if (alive) setState({ status: 'error', bytes: null });
@@ -245,6 +257,7 @@ const DocxView: React.FC<{ url: string; className?: string }> = ({ url, classNam
     };
   }, [status, bytes]);
 
+  if (status === 'toolarge') return <Centered className={className}>{t('preview.tooLarge')}</Centered>;
   if (status === 'error' || render === 'error') return <Centered className={className}>{t('preview.failed')}</Centered>;
   return (
     <div className={clsx('relative h-full min-h-0 overflow-auto bg-neutral-200 p-4', className)}>
@@ -320,6 +333,7 @@ const XlsxView: React.FC<{ url: string; className?: string }> = ({ url, classNam
     };
   }, [status, bytes]);
 
+  if (status === 'toolarge') return <Centered className={className}>{t('preview.tooLarge')}</Centered>;
   if (status === 'error' || failed) return <Centered className={className}>{t('preview.failed')}</Centered>;
   if (!sheets) return <Spinner className={className} />;
   if (sheets.length === 0) return <Centered className={className}>{t('preview.empty')}</Centered>;
@@ -408,6 +422,7 @@ const PptxView: React.FC<{ url: string; className?: string }> = ({ url, classNam
     void viewerRef.current.goToSlide(next, canvasRef.current);
   };
 
+  if (status === 'toolarge') return <Centered className={className}>{t('preview.tooLarge')}</Centered>;
   if (status === 'error' || failed) return <Centered className={className}>{t('preview.failed')}</Centered>;
   return (
     <div className={clsx('flex h-full min-h-0 flex-col bg-[#0c0c0f]', className)}>
