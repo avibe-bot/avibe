@@ -5,7 +5,7 @@ import clsx from 'clsx';
 
 import { useWindowCloseGuard, useWindowManager } from '../../context/WindowManagerContext';
 import { contentUrl, downloadFile, fileMeta, joinPath, parentDir, writeFile, type FsEntry } from '../../lib/filesApi';
-import { imageKind, isEditableFile, isRenderOnlyImage } from '../../lib/filePreview';
+import { imageKind, isEditableFile, isEditableMeta, isRenderOnlyImage } from '../../lib/filePreview';
 import { FileTree } from './FileTree';
 import { FilePreview } from './FilePreview';
 import { FilePicker, type FilePickerMode } from './FilePicker';
@@ -176,21 +176,23 @@ export const EditorApp: React.FC<{ windowId?: string; params?: Record<string, un
         openImage(path, entry.name);
         return;
       }
-      if (!isEditableFile(entry)) {
-        downloadFile(path);
-        return;
-      }
-      // Fetch fresh metadata: gives the save-baseline mtime AND re-validates (the file may have
-      // grown past the cap or become a symlink since it was listed) → download if no longer editable.
+      // Fetch fresh metadata (also content-sniffs `text`) and decide by CONTENT, not just the
+      // extension — an extensionless / unknown-type TEXT file opens in the editor, while a
+      // symlink / oversized / binary file downloads. Meta also gives the save-baseline mtime.
       try {
         const m = await fileMeta(path);
-        if (!isEditableFile(m)) {
+        if (isEditableMeta(m)) {
+          openFile(path, entry.name, m.mtime);
+        } else {
           downloadFile(path);
-          return;
         }
-        openFile(path, entry.name, m.mtime);
       } catch {
-        openFile(path, entry.name, entry.mtime);
+        // Metadata fetch failed — fall back to the name-only guess so a known text type still opens.
+        if (isEditableFile(entry)) {
+          openFile(path, entry.name, entry.mtime);
+        } else {
+          downloadFile(path);
+        }
       }
     },
     [openFile, openImage],

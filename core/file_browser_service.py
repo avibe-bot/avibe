@@ -433,6 +433,9 @@ def metadata(raw_path: str) -> dict[str, Any]:
     kind = _kind_from_mode(stat_result.st_mode)
     size = stat_result.st_size if stat.S_ISREG(stat_result.st_mode) else None
     mime = _guess_mime(path) if kind == "file" else None
+    # Content sniff so the editor can open extensionless / unknown-type text files instead of forcing
+    # a download. Name/extension alone can't tell a text `LICENSE` from a binary blob.
+    text = kind == "file" and _looks_like_text(path)
     return {
         "ok": True,
         "name": path.name,
@@ -441,6 +444,7 @@ def metadata(raw_path: str) -> dict[str, Any]:
         "size": size,
         "mtime": _mtime_seconds(stat_result),
         "mime": mime,
+        "text": text,
     }
 
 
@@ -981,6 +985,31 @@ def _match_globs(rel_posix: str, patterns: list[str]) -> bool:
         if any(fnmatch.fnmatch(rel_posix, form) for form in forms) or fnmatch.fnmatch(name, pat):
             return True
     return False
+
+
+def _looks_like_text(path: Path) -> bool:
+    """Sniff whether a regular file is text (editable) by CONTENT, independent of name/extension.
+
+    Mirrors the search reader's binary check: a NUL byte in the first chunk, or a head that decodes
+    to mostly replacement characters, marks it binary. This lets extensionless text files (LICENSE,
+    README, notes, config) open in the editor while true binaries (images, executables, archives)
+    stay on the download path. Reads at most the sniff window, so it's cheap even for huge files.
+    """
+    try:
+        if path.is_symlink() or not path.is_file():
+            return False
+        with open(path, "rb") as handle:
+            head = handle.read(_BINARY_SNIFF_BYTES)
+    except OSError:
+        return False
+    if not head:
+        return True  # an empty file is editable
+    if b"\x00" in head:
+        return False
+    # Decode leniently and require almost no replacement characters: real text has none (or a single
+    # multibyte char split at the sniff boundary), while binary content produces many.
+    decoded = head.decode("utf-8", errors="replace")
+    return decoded.count("�") <= max(1, len(decoded) // 100)
 
 
 def _read_file_text(path: Path, *, lossy: bool) -> tuple[str | None, float | None]:

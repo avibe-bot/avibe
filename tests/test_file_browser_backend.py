@@ -1233,3 +1233,30 @@ def test_startup_reconcile_skips_tmux_when_env_set(monkeypatch):
     out_with_skip = api.reconcile_startup_dependencies()
 
     assert out_with_skip["tmux"] == {"ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_TMUX"}
+
+
+def test_metadata_text_sniff_distinguishes_text_from_binary(tmp_path):
+    # Extensionless text file → text=True, so the editor opens it instead of downloading.
+    license_file = tmp_path / "LICENSE"
+    license_file.write_text("MIT License\n\nPermission is hereby granted, free of charge...\n", encoding="utf-8")
+    assert fs.metadata(str(license_file))["text"] is True
+
+    # An empty file is editable.
+    empty = tmp_path / "notes"
+    empty.write_bytes(b"")
+    assert fs.metadata(str(empty))["text"] is True
+
+    # Binary content (NUL bytes) → not text → stays on the download path.
+    blob = tmp_path / "image"  # no extension, but binary
+    blob.write_bytes(b"\x89PNG\r\n\x00\x00\x00\rIHDR" + bytes(64))
+    assert fs.metadata(str(blob))["text"] is False
+
+    # A known-extension text file still reports text.
+    code = tmp_path / "script.py"
+    code.write_text("print('hi')\n", encoding="utf-8")
+    assert fs.metadata(str(code))["text"] is True
+
+    # Directories carry no text flag.
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    assert fs.metadata(str(sub))["text"] is False

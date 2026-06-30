@@ -28,6 +28,9 @@ export type FsMeta = {
   size: number | null;
   mtime: number | null;
   mime: string | null;
+  /** Content sniff: true when the file decodes as text, so an extensionless / unknown-type file
+   *  still opens in the editor instead of downloading. Absent on older backends → treated as unknown. */
+  text?: boolean;
 };
 
 export type Favorite = { key: string; path: string };
@@ -54,10 +57,26 @@ export function fileBrowserErrorMessage(error: unknown, t: (key: string) => stri
 }
 
 async function parse<T>(res: Response): Promise<T> {
-  const data = await res.json().catch(() => ({}) as Record<string, unknown>);
-  if (!res.ok || (data as { ok?: boolean }).ok === false) {
-    const err = (data as { error?: { code?: string; message?: string } }).error || {};
+  // Read the body as text first so a non-JSON response (an upstream HTML/error page, a truncated
+  // body, an empty 2xx) is distinguishable from a real payload — rather than silently collapsing to
+  // `{}` that callers would treat as valid data and then crash dereferencing (e.g. `data.results.map`).
+  const raw = await res.text();
+  let data: unknown;
+  if (raw) {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      data = undefined;
+    }
+  }
+  if (!res.ok || (data as { ok?: boolean } | undefined)?.ok === false) {
+    const err = (data as { error?: { code?: string; message?: string } } | undefined)?.error || {};
     throw new FilesApiError(err.code || String(res.status), err.message || 'Request failed');
+  }
+  if (data === undefined) {
+    // 2xx but the body was empty or not valid JSON (truncated / upstream error page). Surface it as
+    // a failure so the caller shows an error state instead of feeding a malformed object to the UI.
+    throw new FilesApiError('invalid_response', 'The server returned an unexpected response.');
   }
   return data as T;
 }

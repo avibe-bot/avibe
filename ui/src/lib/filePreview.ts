@@ -90,6 +90,18 @@ export function isEditableFile(entry: { kind: string; size: number | null; name:
   return entry.kind === 'file' && previewKind(entry.name) != null && (entry.size == null || entry.size <= PREVIEW_MAX_BYTES);
 }
 
+// Content-aware editability, decided AFTER fetching `/api/files/meta` (which sniffs file content).
+// A regular file within the size cap opens in the editor when it's a known text/code type by name
+// (`previewKind`) OR the backend sniffed its content as text (`meta.text`) — so extensionless /
+// unknown-type text files (LICENSE, README, a `notes` file) edit instead of downloading, while true
+// binaries (no text kind, sniffed non-text) still download. The name-only `isEditableFile` stays the
+// cheap pre-fetch guess for listings; this is the authoritative open decision.
+export function isEditableMeta(meta: { kind: string; size: number | null; name: string; text?: boolean }): boolean {
+  if (meta.kind !== 'file') return false;
+  if (meta.size != null && meta.size > PREVIEW_MAX_BYTES) return false;
+  return previewKind(meta.name) != null || meta.text === true;
+}
+
 // Raster image extensions an <img> tag can render directly. SVG is handled separately because it's
 // ALSO editable text (it keeps its 'source' previewKind), so it can be both edited and rendered.
 const RASTER_IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'ico', 'apng']);

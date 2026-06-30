@@ -374,9 +374,10 @@ export const EditorSearchView: React.FC<Props> = ({ root, focusNonce, onOpenFold
 
       {notice && <div className="mx-3 mb-1 rounded border border-gold/30 bg-gold/[0.08] px-2 py-1 text-[11px] text-gold">{notice}</div>}
 
-      {/* Results tree */}
+      {/* Results tree. `?? []` is defense-in-depth: parse() now rejects a non-JSON response so
+          `data` is always a valid SearchResponse or null, but never crash the panel on a stray shape. */}
       <div className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">
-        {data?.results.map((file) => (
+        {(data?.results ?? []).map((file) => (
           <FileGroup
             key={file.path}
             file={file}
@@ -415,7 +416,7 @@ const FileGroup: React.FC<{
       </button>
       {!collapsed && (
         <div className="flex flex-col gap-px pl-2.5">
-          {file.matches.map((m, i) => (
+          {(file.matches ?? []).map((m, i) => (
             <MatchRow key={`${m.line}:${m.col}:${i}`} match={m} previewer={previewer} onClick={() => onJump(file.path, m.line, m.col, m.end)} />
           ))}
         </div>

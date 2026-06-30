@@ -729,7 +729,8 @@
         "createFolderFailed": "无法创建文件夹。",
         "loadFailed": "无法加载这个文件。",
         "saveFailed": "无法保存这个文件。",
-        "deleteFailed": "无法删除这个项目。"
+        "deleteFailed": "无法删除这个项目。",
+        "invalid_response": "服务器返回了异常响应，请重试。"
       }
     },
     "terminal": {

@@ -729,7 +729,8 @@
         "createFolderFailed": "Couldn't create the folder.",
         "loadFailed": "Couldn't load this file.",
         "saveFailed": "Couldn't save this file.",
-        "deleteFailed": "Couldn't delete this item."
+        "deleteFailed": "Couldn't delete this item.",
+        "invalid_response": "The server returned an unexpected response. Try again."
       }
     },
     "terminal": {

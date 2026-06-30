@@ -27,7 +27,7 @@ import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
-import { isEditableFile, isRenderOnlyImage } from '../../lib/filePreview';
+import { isEditableFile, isEditableMeta, isRenderOnlyImage } from '../../lib/filePreview';
 import {
   contentUrl,
   downloadFile,
@@ -191,29 +191,31 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       setPreview({ path: full, name: e.name });
       return;
     }
-    // Non-editable (symlink / binary / oversized — gated by the listing entry's kind+size) or
-    // mobile (the editor window layer is hidden below md): download. This branch MUST run
-    // synchronously, before any await, or the click's user activation is lost and Safari/iOS block
-    // the popup.
+    // Mobile has no editor window layer (windows are md+), so a non-image file just downloads.
     const desktop = window.matchMedia('(min-width: 768px)').matches;
-    if (!isEditableFile(e) || !desktop) {
+    if (!desktop) {
       downloadFile(full);
       return;
     }
-    // Editable + desktop → editor window. Fetch CURRENT metadata: it gives the save-baseline mtime
-    // AND re-validates the open (the file may have grown past the cap or become a symlink since it
-    // was listed) — if it's no longer editable, download instead. Safe to await: opening an internal
-    // window needs no user activation, and the rare changed-since-listing download is acceptable.
+    // Desktop: fetch CURRENT metadata (which content-sniffs `text`) and decide by CONTENT, not just
+    // the extension — so an extensionless / unknown-type TEXT file (LICENSE, README, a `notes` file)
+    // opens in the editor instead of downloading, while a symlink / oversized / binary file
+    // downloads. Awaiting is safe: opening an internal window needs no user activation, and the
+    // anchor download (the binary branch) isn't a popup, so it survives the await.
     try {
       const m = await fileMeta(full);
-      if (!isEditableFile(m)) {
+      if (isEditableMeta(m)) {
+        wm.openApp('editor', { title: e.name, params: { path: full, filename: e.name, mtime: m.mtime } });
+      } else {
         downloadFile(full);
-        return;
       }
-      wm.openApp('editor', { title: e.name, params: { path: full, filename: e.name, mtime: m.mtime } });
     } catch {
-      // Metadata fetch failed — open with the listing mtime as the baseline.
-      wm.openApp('editor', { title: e.name, params: { path: full, filename: e.name, mtime: e.mtime } });
+      // Metadata fetch failed — fall back to the name-only guess so a known text type still opens.
+      if (isEditableFile(e)) {
+        wm.openApp('editor', { title: e.name, params: { path: full, filename: e.name, mtime: e.mtime } });
+      } else {
+        downloadFile(full);
+      }
     }
   };
 
