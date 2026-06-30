@@ -237,9 +237,12 @@ a scheduled task definition.
 
 ```bash
 vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
+vibe agent run --async --agent release-reviewer --no-callback --message 'Run the delegated investigation.'
+vibe agent run --async --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
+
+# Inside an Avibe Agent shell, caller context supplies the current Session and callback target.
 vibe agent run --agent release-reviewer --same-scope --message 'Review this project in a visible sibling Session.'
 vibe agent run --async --agent release-reviewer --message 'Run the delegated investigation.'
-vibe agent run --async --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
 vibe agent run --async --fork-self --message 'Explore this alternate fix from the current context.'
 vibe agent run --fork-session sesk8m4q2p7x --agent reviewer --model gpt-5.4 --reasoning-effort high --message 'Review the forked context.'
 ```
@@ -258,7 +261,7 @@ new Session keeps the source backend, scope, and cwd by default. `--agent`,
 `--model`, and `--reasoning-effort` can override the forked Session only when
 the Agent backend stays the same; a cross-backend fork is rejected. Do not
 combine fork flags with `--session-id`, `--create-session`, or
-`--create-session-per-run`.
+`--create-session-per-run`, or with `--post-to`.
 
 Async runs started inside an Avibe-injected Agent environment default their
 callback to the current caller Session. Use `--callback-session-id` only for an
@@ -309,8 +312,10 @@ including `--timeout` (per-cycle timeout in seconds), `--lifetime-timeout`
 `--post-to channel`, `--create-session`, `--same-scope`, `--scope-id`, and
 `--name`. Watches share the task targeting model: omit `--session-id` inside an
 Avibe-injected Agent shell to follow up in the caller Session, or use
-`--create-session --same-scope` / `--scope-id` when the watch should create
-Sessions in a visible scope. `vibe watch remove` hides the watch from
+`--create-session --same-scope` / `--create-session --scope-id <scopes.id>`
+when the watch should create Sessions in a visible scope. For per-trigger
+Sessions, use the same placement flags with `--create-session-per-run`.
+`vibe watch remove` hides the watch from
 management views while preserving existing run history in SQLite. Prefer
 `vibe watch` over ad-hoc `nohup` jobs when the
 user wants a managed background task with a guaranteed follow-up message.

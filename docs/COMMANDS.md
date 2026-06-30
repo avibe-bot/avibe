@@ -695,7 +695,7 @@ vibe upgrade
 ### `vibe task add`
 
 ```bash
-vibe task add [--session-id <session_id> | --create-session | --create-session-per-run] (--cron <expr> | --at <timestamp>) (--message <text> | --message-file <file>) [options]
+vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <expr> | --at <timestamp>) (--message <text> | --message-file <file>) [options]
 ```
 
 Important options:
@@ -715,10 +715,11 @@ Important options:
 - `--message-file`
 - `--timezone`
 
-Inside an Avibe-injected Agent shell, omitting `--session-id` defaults the task
-target to the caller Session. Use `--create-session --same-scope` or
-`--create-session --scope-id <scopes.id>` when the task should create a reusable
-Session in a visible scope.
+Outside an Avibe-injected Agent shell, one target policy is required:
+`--session-id`, `--create-session`, or `--create-session-per-run`. Inside an
+Agent shell, omitting the target policy defaults the task target to the caller
+Session. Use `--create-session --same-scope` or `--create-session --scope-id
+<scopes.id>` when the task should create a reusable Session in a visible scope.
 
 ### `vibe task update`
 
@@ -862,7 +863,7 @@ source Session's native backend context. Forks keep the same backend, scope, and
 cwd as the source by default; `--agent`, `--model`, and `--reasoning-effort` may
 override the forked Session only when the backend does not change. Do not combine
 fork flags with `--session-id`, `--create-session`, or
-`--create-session-per-run`.
+`--create-session-per-run`, or with `--post-to`.
 
 ## 5.4 `vibe runs`
 
@@ -917,5 +918,5 @@ vibe
 vibe status
 vibe doctor
 vibe task list --brief
-vibe agent run --async --agent release-reviewer --message 'Share the latest build summary.'
+vibe agent run --async --agent release-reviewer --no-callback --message 'Share the latest build summary.'
 ```

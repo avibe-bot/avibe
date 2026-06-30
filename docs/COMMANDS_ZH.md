@@ -674,7 +674,7 @@ vibe upgrade
 ### `vibe task add`
 
 ```bash
-vibe task add [--session-id <session_id> | --create-session | --create-session-per-run] (--cron <表达式> | --at <时间戳>) (--message <文本> | --message-file <文件>) [options]
+vibe task add (--session-id <session_id> | --create-session | --create-session-per-run) (--cron <表达式> | --at <时间戳>) (--message <文本> | --message-file <文件>) [options]
 ```
 
 重要参数：
@@ -694,9 +694,10 @@ vibe task add [--session-id <session_id> | --create-session | --create-session-p
 - `--message-file`
 - `--timezone`
 
-在 Avibe 已注入 caller context 的 Agent shell 内，可以省略 `--session-id`，
-任务目标会默认到调用方 Session。任务需要创建新的可见 Session 时，使用
-`--create-session --same-scope` 或 `--create-session --scope-id <scopes.id>`。
+在普通宿主机 shell 里，必须传一个目标策略：`--session-id`、`--create-session`
+或 `--create-session-per-run`。在 Avibe 已注入 caller context 的 Agent shell 内，
+可以省略目标策略，任务目标会默认到调用方 Session。任务需要创建新的可见 Session 时，
+使用 `--create-session --same-scope` 或 `--create-session --scope-id <scopes.id>`。
 
 ### `vibe task update`
 
@@ -835,7 +836,7 @@ scope、Agent、model 和 reasoning 设置。
 新的 Agent Session。fork 默认保持源 Session 的 backend、scope 和 cwd；只有
 backend 不变时，`--agent`、`--model` 和 `--reasoning-effort` 才能覆盖 fork
 后 Session 的 Agent、模型或推理强度。不要把 fork 参数和 `--session-id`、
-`--create-session` 或 `--create-session-per-run` 混用。
+`--create-session` 或 `--create-session-per-run` 混用，也不要和 `--post-to` 混用。
 
 ## 5.4 `vibe runs`
 
@@ -889,5 +890,5 @@ vibe
 vibe status
 vibe doctor
 vibe task list --brief
-vibe agent run --async --agent release-reviewer --message 'Share the latest build summary.'
+vibe agent run --async --agent release-reviewer --no-callback --message 'Share the latest build summary.'
 ```

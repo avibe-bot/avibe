@@ -777,7 +777,7 @@ Preferred CLI shape:
 - continue a known Session: `vibe agent run --session-id '<session-id>' --message '...'`
 - fork the current caller Session for an alternate path: `vibe agent run --fork-self --message '...'`
 - fork a known Session for an alternate path: `vibe agent run --fork-session '<source-session-id>' --message '...'`
-- create a visible sibling Session in the caller scope: `vibe agent run --agent '<agent-name>' --same-scope --message '...'`
+- create a visible sibling Session in the caller scope from an Avibe Agent shell: `vibe agent run --agent '<agent-name>' --same-scope --message '...'`
 - recurring task for the current caller Session: `vibe task add --cron '<expr>' --message '...'`
 - one-off task for the current caller Session: `vibe task add --at '<ISO-8601>' --message '...'`
 - immediate rerun: `vibe task run <id>`
@@ -789,7 +789,7 @@ Preferred CLI shape:
 Session, scope, and delivery controls:
 
 - inside an Avibe-injected Agent shell, `vibe task add` and `vibe watch add` may omit `--session-id`; Avibe defaults to the caller Session from `AVIBE_SESSION_ID`
-- `vibe agent run --agent '<agent-name>'` without `--session-id`/fork flags creates a new private background Session for that Agent; add `--same-scope` or `--scope-id <scopes.id>` when the new Session should appear in a visible Workbench project or IM scope
+- `vibe agent run --agent '<agent-name>'` without `--session-id`/fork flags creates a new private background Session for that Agent; add `--same-scope` from an Avibe Agent shell, or `--scope-id <scopes.id>` from any shell, when the new Session should appear in a visible Workbench project or IM scope
 - use `--session-id` only when you intentionally want to continue that exact existing Agent Session; existing Sessions keep their own cwd, scope, Agent, model, and reasoning settings
 - use `--fork-self` when you want a new Session branched from the current caller context without passing the caller Session ID manually
 - use `--fork-session '<source-session-id>'` only when the source Session is not the current caller Session
@@ -801,7 +801,7 @@ Session, scope, and delivery controls:
 - `vibe agent run --async` queues one Agent Run immediately without storing a task definition
 - `--fork-session` creates a new Agent Session by forking the source Session's native backend context. Use it when work should branch from an existing context without mutating that source Session.
 - fork overrides are intentionally narrow: `--agent`, `--model`, and `--reasoning-effort` can override the forked Session only if the backend stays the same; cross-backend forks are rejected.
-- do not combine fork flags with `--session-id`, `--create-session`, or `--create-session-per-run`.
+- do not combine fork flags with `--session-id`, `--create-session`, `--create-session-per-run`, or `--post-to`.
 - async Agent Runs started inside an Avibe-injected Agent shell default their callback to the caller Session; use `--callback-session-id` only for an explicit override
 - use `--no-callback` only when you intentionally want no automatic follow-up and will inspect the run later with `vibe runs show` or `vibe runs list`
 - `vibe watch add` uses `--message` as the instruction template for the Agent Run created after the waiter reaches a reportable state
