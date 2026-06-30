@@ -4766,6 +4766,11 @@ def _mixed_grants_error(message: str) -> TaskCliError:
     return TaskCliError(message, code="mixed_grants")
 
 
+def _raise_after_releasing_one_shot_reservations(engine, grants, exc):
+    _release_one_shot_reservations(engine, grants)
+    raise exc
+
+
 def _consume_after_possible_use(grants: list[dict] | tuple[dict, ...] | None, *, reason: str) -> None:
     """Fail closed for one-shot grants after handoff to avault/resident agent."""
     _consume_one_shot_grants(_unique_one_shot_grants(grants), reason=reason)
@@ -4810,48 +4815,51 @@ def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: l
     approval_error: TaskCliError | None = None
     pre_delivery_error: TaskCliError | None = None
     resolved_by_name: dict[str, dict] = {}
-    with engine.begin() as conn:
-        for env_name, vault_name in mapping.items():
-            resolved = resolved_by_name.get(vault_name)
-            if resolved is None:
-                resolved = vault_service.resolve_secret_access(
-                    conn,
-                    vault_name,
-                    requester=requester,
-                    delivery=delivery,
-                    reserve_one_shot=True,
-                )
-                resolved_by_name[vault_name] = resolved
-            if resolved["status"] == "approval_required":
-                req = resolved.get("request") or {}
-                approval_error = TaskCliError(
-                    f"secret '{vault_name}' needs approval before protected delivery",
-                    code="approval_required",
-                    details={"request_id": req.get("id")},
-                )
-                break
-            if resolved["status"] == "standard":
-                current_grant = resolved.get("grant")
-                if isinstance(current_grant, dict) and current_grant.get("one_shot") is True:
-                    one_shot_grants.append(current_grant)
-                secrets.append({"name": vault_name, "env": env_name, "envelope": resolved["envelope"], "protected": False})
-                continue
-            if resolved["status"] == "agent_delivery_ready":
-                current_grant = resolved["grant"]
-                if grant is None:
-                    grant = current_grant
-                elif grant["scope_type"] != current_grant["scope_type"] or grant["scope_ref"] != current_grant["scope_ref"]:
-                    if current_grant.get("one_shot") is True:
-                        one_shot_grants.append(current_grant)
-                    pre_delivery_error = _mixed_grants_error(
-                        "protected vault run currently requires all protected secrets to share one active grant",
+    try:
+        with engine.begin() as conn:
+            for env_name, vault_name in mapping.items():
+                resolved = resolved_by_name.get(vault_name)
+                if resolved is None:
+                    resolved = vault_service.resolve_secret_access(
+                        conn,
+                        vault_name,
+                        requester=requester,
+                        delivery=delivery,
+                        reserve_one_shot=True,
+                    )
+                    resolved_by_name[vault_name] = resolved
+                if resolved["status"] == "approval_required":
+                    req = resolved.get("request") or {}
+                    approval_error = TaskCliError(
+                        f"secret '{vault_name}' needs approval before protected delivery",
+                        code="approval_required",
+                        details={"request_id": req.get("id")},
                     )
                     break
-                if current_grant.get("one_shot") is True:
-                    one_shot_grants.append(current_grant)
-                secrets.append({"name": vault_name, "env": env_name, "envelope": resolved["envelope"], "protected": True})
-                continue
-            raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
+                if resolved["status"] == "standard":
+                    current_grant = resolved.get("grant")
+                    if isinstance(current_grant, dict) and current_grant.get("one_shot") is True:
+                        one_shot_grants.append(current_grant)
+                    secrets.append({"name": vault_name, "env": env_name, "envelope": resolved["envelope"], "protected": False})
+                    continue
+                if resolved["status"] == "agent_delivery_ready":
+                    current_grant = resolved["grant"]
+                    if grant is None:
+                        grant = current_grant
+                    elif grant["scope_type"] != current_grant["scope_type"] or grant["scope_ref"] != current_grant["scope_ref"]:
+                        if current_grant.get("one_shot") is True:
+                            one_shot_grants.append(current_grant)
+                        pre_delivery_error = _mixed_grants_error(
+                            "protected vault run currently requires all protected secrets to share one active grant",
+                        )
+                        break
+                    if current_grant.get("one_shot") is True:
+                        one_shot_grants.append(current_grant)
+                    secrets.append({"name": vault_name, "env": env_name, "envelope": resolved["envelope"], "protected": True})
+                    continue
+                raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
+    except Exception as exc:
+        _raise_after_releasing_one_shot_reservations(engine, one_shot_grants, exc)
     if approval_error is not None:
         _release_one_shot_reservations(engine, one_shot_grants)
         raise approval_error
@@ -4927,48 +4935,51 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
     approval_error: TaskCliError | None = None
     pre_delivery_error: TaskCliError | None = None
     resolved_by_name: dict[str, dict] = {}
-    with engine.begin() as conn:
-        for name in names:
-            resolved = resolved_by_name.get(name)
-            if resolved is None:
-                resolved = vault_service.resolve_secret_access(
-                    conn,
-                    name,
-                    requester=requester,
-                    delivery=delivery,
-                    reserve_one_shot=True,
-                )
-                resolved_by_name[name] = resolved
-            if resolved["status"] == "approval_required":
-                req = resolved.get("request") or {}
-                approval_error = TaskCliError(
-                    f"secret '{name}' needs approval before protected delivery",
-                    code="approval_required",
-                    details={"request_id": req.get("id")},
-                )
-                break
-            if resolved["status"] == "standard":
-                current_grant = resolved.get("grant")
-                if isinstance(current_grant, dict) and current_grant.get("one_shot") is True:
-                    one_shot_grants.append(current_grant)
-                secrets.append({"name": name, "key": name, "envelope": resolved["envelope"], "protected": False})
-                continue
-            if resolved["status"] == "agent_delivery_ready":
-                current_grant = resolved["grant"]
-                if grant is None:
-                    grant = current_grant
-                elif grant["scope_type"] != current_grant["scope_type"] or grant["scope_ref"] != current_grant["scope_ref"]:
-                    if current_grant.get("one_shot") is True:
-                        one_shot_grants.append(current_grant)
-                    pre_delivery_error = _mixed_grants_error(
-                        "protected vault inject currently requires all protected secrets to share one active grant",
+    try:
+        with engine.begin() as conn:
+            for name in names:
+                resolved = resolved_by_name.get(name)
+                if resolved is None:
+                    resolved = vault_service.resolve_secret_access(
+                        conn,
+                        name,
+                        requester=requester,
+                        delivery=delivery,
+                        reserve_one_shot=True,
+                    )
+                    resolved_by_name[name] = resolved
+                if resolved["status"] == "approval_required":
+                    req = resolved.get("request") or {}
+                    approval_error = TaskCliError(
+                        f"secret '{name}' needs approval before protected delivery",
+                        code="approval_required",
+                        details={"request_id": req.get("id")},
                     )
                     break
-                if current_grant.get("one_shot") is True:
-                    one_shot_grants.append(current_grant)
-                secrets.append({"name": name, "key": name, "envelope": resolved["envelope"], "protected": True})
-                continue
-            raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
+                if resolved["status"] == "standard":
+                    current_grant = resolved.get("grant")
+                    if isinstance(current_grant, dict) and current_grant.get("one_shot") is True:
+                        one_shot_grants.append(current_grant)
+                    secrets.append({"name": name, "key": name, "envelope": resolved["envelope"], "protected": False})
+                    continue
+                if resolved["status"] == "agent_delivery_ready":
+                    current_grant = resolved["grant"]
+                    if grant is None:
+                        grant = current_grant
+                    elif grant["scope_type"] != current_grant["scope_type"] or grant["scope_ref"] != current_grant["scope_ref"]:
+                        if current_grant.get("one_shot") is True:
+                            one_shot_grants.append(current_grant)
+                        pre_delivery_error = _mixed_grants_error(
+                            "protected vault inject currently requires all protected secrets to share one active grant",
+                        )
+                        break
+                    if current_grant.get("one_shot") is True:
+                        one_shot_grants.append(current_grant)
+                    secrets.append({"name": name, "key": name, "envelope": resolved["envelope"], "protected": True})
+                    continue
+                raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
+    except Exception as exc:
+        _raise_after_releasing_one_shot_reservations(engine, one_shot_grants, exc)
     if approval_error is not None:
         _release_one_shot_reservations(engine, one_shot_grants)
         raise approval_error

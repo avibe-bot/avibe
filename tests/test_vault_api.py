@@ -1508,6 +1508,25 @@ def test_agent_deliver_run_reuses_resident_agent_socket(monkeypatch):
     assert seen_timeout == [None]
 
 
+def test_agent_deliver_run_treats_connect_failure_as_pre_handoff(monkeypatch):
+    from vibe.avault_agent import AvaultAgentError
+
+    class FakeManager:
+        def client(self, *, timeout=None):
+            raise AvaultAgentError("failed to connect to avault agent: [Errno 2] No such file or directory")
+
+    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_avault_agent_manager", lambda: FakeManager())
+
+    with pytest.raises(api.AvaultPreHandoffError):
+        api.avault_agent_deliver_run(
+            scope_type="secret",
+            scope_ref="GRANT_KEY",
+            secrets=[{"name": "GRANT_KEY", "env": "GRANT_KEY", "envelope": _sealed()}],
+            command=["python3", "-c", "pass"],
+        )
+
+
 def test_agent_deliver_fetch_uses_finite_timeout(monkeypatch):
     seen_timeout = []
 

@@ -2218,7 +2218,9 @@ def list_grants(
 ) -> list[dict[str, Any]]:
     expire_grants(conn, cache=cache)
     query = select(vault_grants).order_by(vault_grants.c.created_at.desc(), vault_grants.c.id.desc())
-    if status is not None:
+    if status == "active":
+        query = query.where(vault_grants.c.status.in_(ACTIVE_GRANT_STATES))
+    elif status is not None:
         query = query.where(vault_grants.c.status == status)
     if session_id is not None:
         query = query.where(or_(vault_grants.c.session_id.is_(None), vault_grants.c.session_id == session_id))
@@ -2480,7 +2482,7 @@ def find_active_grant_for_secrets(
         if not requested.issubset(member_set):
             continue
         payload = _grant_payload(conn, row, cache=cache)
-        if reserve_one_shot and payload.get("one_shot") is True and row.get("status") != "active":
+        if payload.get("one_shot") is True and row.get("status") != "active":
             continue
         standard_only = all(_require_row(conn, name).get("protection") == "standard" for name in requested)
         candidates.append((

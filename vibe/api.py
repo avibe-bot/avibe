@@ -5197,14 +5197,19 @@ def avault_agent_release(*, scope_type: str, scope_ref: str) -> dict:
 
 def _agent_release_failure_is_absent(exc: AvaultError) -> bool:
     detail = str(exc).lower()
+    return _avault_agent_error_is_absent(detail)
+
+
+def _avault_agent_error_is_absent(detail: str) -> bool:
+    text = detail.lower()
     return (
-        "failed to connect to avault agent" in detail
+        "failed to connect to avault agent" in text
         and (
-            "no such file" in detail
-            or "connection refused" in detail
-            or "errno 2" in detail
-            or "errno 61" in detail
-            or "errno 111" in detail
+            "no such file" in text
+            or "connection refused" in text
+            or "errno 2" in text
+            or "errno 61" in text
+            or "errno 111" in text
         )
     )
 
@@ -5292,6 +5297,8 @@ def avault_agent_deliver_run(
             secrets=[_agent_secret_payload(secret, target_field="env") for secret in secrets],
         )
     except AvaultAgentError as exc:
+        if _avault_agent_error_is_absent(str(exc)):
+            raise AvaultPreHandoffError(str(exc)) from exc
         raise AvaultError(str(exc)) from exc
     try:
         exit_code = int(result["exit_code"])
@@ -5321,6 +5328,8 @@ def avault_agent_deliver_fetch(
             request=request,
         )
     except AvaultAgentError as exc:
+        if _avault_agent_error_is_absent(str(exc)):
+            raise AvaultPreHandoffError(str(exc)) from exc
         raise AvaultError(str(exc)) from exc
 
 
@@ -5345,6 +5354,8 @@ def avault_agent_deliver_inject(
             secrets=[_agent_secret_payload(secret, target_field="key") for secret in secrets],
         )
     except AvaultAgentError as exc:
+        if _avault_agent_error_is_absent(str(exc)):
+            raise AvaultPreHandoffError(str(exc)) from exc
         raise AvaultError(str(exc)) from exc
     if result.get("ok") is not True:
         raise AvaultError("avault agent inject returned malformed output")

@@ -960,6 +960,26 @@ def test_run_releases_standard_always_ask_grant_when_avault_fails_before_handoff
     assert status == "active"
 
 
+def test_run_releases_one_shot_grant_when_later_resolution_aborts_before_handoff(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    grant = _set_always_ask_standard_grant("ASK_KEY", session_id="ses_cli")
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="ETH_KEY", sealed=_sealed("eth"), kind="keypair", signer_kind="local")
+    deliver = Mock()
+    monkeypatch.setattr(api, "avault_deliver_run", deliver)
+
+    code = cli.cmd_vault_run(_ns(env=["ASK_KEY", "ETH_KEY"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "keypair_not_value_deliverable"
+    deliver.assert_not_called()
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
+    assert status == "active"
+
+
 def test_inject_consumes_standard_always_ask_grant_when_avault_errors_after_handoff(tmp_path, capfd, monkeypatch):
     from vibe import api
 
@@ -991,6 +1011,26 @@ def test_inject_releases_standard_always_ask_grant_when_avault_fails_before_hand
     assert code == 1
     assert json.loads(captured.err)["code"] == "avault_failed"
     deliver.assert_called_once()
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
+    assert status == "active"
+
+
+def test_inject_releases_one_shot_grant_when_later_resolution_aborts_before_handoff(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    grant = _set_always_ask_standard_grant("ASK_KEY", session_id="ses_cli")
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="ETH_KEY", sealed=_sealed("eth"), kind="keypair", signer_kind="local")
+    deliver = Mock()
+    monkeypatch.setattr(api, "avault_deliver_inject", deliver)
+
+    code = cli.cmd_vault_inject(_ns(keys="ASK_KEY,ETH_KEY", out=str(tmp_path / "out.env"), format="dotenv", session_id="ses_cli"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "keypair_not_value_deliverable"
+    deliver.assert_not_called()
     with cli._open_vault_engine().connect() as conn:
         status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
     assert status == "active"
