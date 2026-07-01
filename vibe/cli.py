@@ -324,23 +324,23 @@ def _hook_send_examples_text() -> str:
         """\
         Deprecated:
           `vibe hook send` is a compatibility entrypoint.
-          New automation should use `vibe agent run --async`.
+          New automation should use `vibe agent run`.
 
         Session target:
           Use --session-id with the target Agent Session ID, for example sesk8m4q2p7x.
 
         Guidance:
-          If this is your first time creating an async one-shot run, use `vibe agent run --async --help`.
+          If this is your first time creating an async one-shot run, use `vibe agent run --help`.
           `vibe hook send` queues one deprecated asynchronous compatibility turn without persisting a scheduled task.
           `--session-id` chooses which Agent Session Avibe will continue using for that one async turn.
           Keep the current session id when the hook should continue in the same session.
           If no session id is available, trigger this from an active Avibe conversation instead of guessing.
-          For new async one-shot work, prefer `vibe agent run --async`.
+          For new async one-shot work, prefer `vibe agent run`.
           `--message` and `--message-file` provide the one-shot async user message that will be queued immediately.
 
         Examples:
-          vibe agent run --async --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
-          vibe agent run --async --session-id sesk8m4q2p7x --no-callback --message 'Run the benchmark; I will inspect the run later.'
+          vibe agent run --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
+          vibe agent run --session-id sesk8m4q2p7x --no-callback --message 'Run the benchmark; I will inspect the run later.'
         """
     )
 
@@ -643,10 +643,11 @@ def _agent_run_examples_text() -> str:
           --cwd only applies to new Sessions; existing Sessions keep their own cwd.
 
         Callback:
-          From an Avibe Agent shell, async runs return their final result to this conversation by default.
+          Agent runs are async by default. From an Avibe Agent shell, they return their final result to this conversation by default.
           From a normal terminal, pass --callback-session-id or --no-callback for async runs.
           Pass --no-callback only when you intentionally want no automatic follow-up.
           Pass --callback-session-id only when the final result should return somewhere else.
+          Pass --sync when the CLI should wait for the run result in the terminal.
 
         Forking:
           --fork-self forks this current Session.
@@ -655,12 +656,17 @@ def _agent_run_examples_text() -> str:
           --agent, --model, and --reasoning-effort may override the forked Session's Agent/model/effort.
           Do not combine fork flags with --session-id or --create-session.
 
-        Examples:
+        Avibe Agent shell examples:
           vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
           vibe agent run --agent release-reviewer --same-scope --message 'Review this project in a visible sibling Session.'
-          vibe agent run --async --agent release-reviewer --callback-session-id sescaller456 --message 'Review the latest CI result and report back.'
-          vibe agent run --async --agent release-reviewer --no-callback --message 'Run a background experiment; I will inspect the run later.'
-          vibe agent run --async --fork-self --message 'Explore this alternate fix from the current context.'
+
+        Normal terminal examples:
+          vibe agent run --sync --agent release-reviewer --message 'Review the latest CI result and print it here.'
+          vibe agent run --agent release-reviewer --callback-session-id sescaller456 --message 'Review the latest CI result and report back.'
+          vibe agent run --agent release-reviewer --no-callback --message 'Run a background experiment; I will inspect the run later.'
+
+        Fork examples:
+          vibe agent run --fork-self --message 'Explore this alternate fix from the current context.'
           vibe agent run --fork-session sesk8m4q2p7x --agent reviewer --model gpt-5.4 --reasoning-effort high --message 'Review the forked context.'
         """
     )
@@ -2640,7 +2646,11 @@ def cmd_hook_send(args):
             session_key=session_key,
             post_to=args.post_to,
             deliver_key=args.deliver_key,
-            deprecation_warning="vibe hook send is deprecated; use vibe agent run --async instead.",
+            deprecation_warning=(
+                "vibe hook send is deprecated; use `vibe agent run --session-id <session-id> "
+                "--no-callback --message ...` for the same fire-and-forget behavior, or pass "
+                "`--callback-session-id <session-id>` when the async run should report back."
+            ),
             run={
                 "id": request.id,
                 "status": "queued",
@@ -3029,11 +3039,18 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
     scope_id = (getattr(args, "scope_id", None) or "").strip()
     deliver_key = (getattr(args, "deliver_key", None) or "").strip()
     agent_name = (getattr(args, "agent", None) or "").strip()
-    if bool(getattr(args, "async_run", False)) and getattr(args, "wait_timeout", None) is not None:
+    if bool(getattr(args, "async_run", False)) and bool(getattr(args, "sync_run", False)):
         raise TaskCliError(
-            "use --async or --wait-timeout, not both",
+            "use either --async or --sync, not both",
             code="conflicting_wait_policy",
-            hint="--async returns immediately. Remove --wait-timeout, or run synchronously without --async.",
+            hint="Agent runs are async by default. Pass --sync only when the CLI should wait.",
+            help_command=help_command,
+        )
+    if _agent_run_is_async(args) and getattr(args, "wait_timeout", None) is not None:
+        raise TaskCliError(
+            "use --sync with --wait-timeout",
+            code="conflicting_wait_policy",
+            hint="Agent runs are async by default. Pass --sync when the CLI should wait, or remove --wait-timeout.",
             help_command=help_command,
         )
     if (getattr(args, "callback_session_id", None) or "").strip() and bool(getattr(args, "no_callback", False)):
@@ -3390,10 +3407,14 @@ def _agent_run_source_from_caller(caller_context) -> tuple[str, Optional[str], O
     return "agent", caller_context.session_id, caller_context.run_id, metadata
 
 
+def _agent_run_is_async(args) -> bool:
+    return not bool(getattr(args, "sync_run", False))
+
+
 def _resolve_callback_session_id(args, caller_context, *, target_session_id: Optional[str] = None):
     explicit_callback = (getattr(args, "callback_session_id", None) or "").strip() or None
     no_callback = bool(getattr(args, "no_callback", False))
-    is_async = bool(getattr(args, "async_run", False))
+    is_async = _agent_run_is_async(args)
     if explicit_callback:
         return explicit_callback, {
             "code": "callback_explicit",
@@ -3595,6 +3616,7 @@ def _reserve_definition_session(
 def cmd_agent_run(args):
     try:
         caller_context = caller_context_from_env()
+        run_async = _agent_run_is_async(args)
         message = _resolve_message_input(
             args,
             help_command="vibe agent run --help",
@@ -3736,7 +3758,7 @@ def cmd_agent_run(args):
             source_actor=source_actor,
             parent_run_id=parent_run_id,
             callback_session_id=callback_session_id,
-            callback_active=bool(args.async_run),
+            callback_active=run_async,
             metadata=provenance_metadata or None,
         )
         resolved_scope_id = _scope_id_payload_from_session(session_id)
@@ -3751,7 +3773,7 @@ def cmd_agent_run(args):
             "scope_id": resolved_scope_id,
             "deliver_key": legacy_deliver_key,
             "callback_session_id": callback_session_id,
-            "async": bool(args.async_run),
+            "async": run_async,
             "caller_context": caller_context.to_metadata() if caller_context else None,
             "callback_notice": callback_notice,
             "run": {
@@ -3771,7 +3793,7 @@ def cmd_agent_run(args):
             payload["forked_from_session_id"] = fork_result.fork.source_session_id
         if fork_result:
             payload["run"]["forked_from_session_id"] = fork_result.fork.source_session_id
-        if not args.async_run:
+        if not run_async:
             run_payload = _wait_for_run_result(request_store, request.id, wait_timeout=args.wait_timeout)
             if callback_session_id and _sync_run_detached(run_payload):
                 request_store.mark_callback_pending(request.id)
@@ -8652,7 +8674,7 @@ def build_parser():
     agent_run_parser = agent_subparsers.add_parser(
         "run",
         help="Run an Avibe Agent",
-        description="Run an Avibe Agent turn. Use --async to queue it as a background run.",
+        description="Run an Avibe Agent turn. Runs are async by default; use --sync to wait for the result.",
         epilog=_agent_run_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe agent run --help",
@@ -8682,7 +8704,14 @@ def build_parser():
         action="store_true",
         help="For async runs, intentionally skip automatic callback delivery and inspect the run later.",
     )
-    agent_run_parser.add_argument("--async", dest="async_run", action="store_true", help="Queue the run and return immediately")
+    agent_wait_group = agent_run_parser.add_mutually_exclusive_group()
+    agent_wait_group.add_argument(
+        "--async",
+        dest="async_run",
+        action="store_true",
+        help="Queue the run and return immediately (default; kept for compatibility)",
+    )
+    agent_wait_group.add_argument("--sync", dest="sync_run", action="store_true", help="Wait for the run result before exiting")
     agent_run_parser.add_argument("--wait-timeout", type=float, help="Maximum seconds the CLI waits for a synchronous run result")
     agent_message_group = agent_run_parser.add_mutually_exclusive_group(required=True)
     agent_message_group.add_argument("--message")
@@ -9366,21 +9395,21 @@ def build_parser():
     hook_parser = subparsers.add_parser(
         "hook",
         help="Deprecated compatibility one-shot async hooks",
-        description="Deprecated compatibility entrypoint. Use 'vibe agent run --async' for new one-shot asynchronous turns.",
+        description="Deprecated compatibility entrypoint. Use 'vibe agent run' for new one-shot asynchronous turns.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe hook --help",
-        error_hint="Use 'vibe agent run --async --help' for the current async Agent Run command shape.",
+        error_hint="Use 'vibe agent run --help' for the current async Agent Run command shape.",
     )
     hook_subparsers = hook_parser.add_subparsers(dest="hook_command", metavar="{send}")
     hook_subparsers.required = True
     hook_send_parser = hook_subparsers.add_parser(
         "send",
         help="Deprecated compatibility async send",
-        description="Deprecated compatibility entrypoint. Use 'vibe agent run --async' for new one-shot asynchronous Agent Runs.",
+        description="Deprecated compatibility entrypoint. Use 'vibe agent run' for new one-shot asynchronous Agent Runs.",
         epilog=_hook_send_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe hook send --help",
-        error_hint="Use 'vibe agent run --async' for new async Agent Runs.",
+        error_hint="Use 'vibe agent run' for new async Agent Runs.",
     )
     hook_send_parser.add_argument(
         "--session-id",

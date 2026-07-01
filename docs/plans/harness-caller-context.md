@@ -44,7 +44,7 @@ table.
 
 ## CLI Semantics
 
-`vibe agent run --async`:
+`vibe agent run` (async by default):
 
 - explicit `--callback-session-id` wins;
 - explicit `--no-callback` means intentional no callback and prints tracking

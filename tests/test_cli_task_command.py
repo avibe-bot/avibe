@@ -216,12 +216,12 @@ def test_hook_send_help_describes_runtime_effects(capsys) -> None:
     assert exc.value.code == 0
     captured = capsys.readouterr()
     assert "`vibe hook send` is a compatibility entrypoint." in captured.out
-    assert "New automation should use `vibe agent run --async`." in captured.out
+    assert "New automation should use `vibe agent run`." in captured.out
     assert "`vibe hook send` queues one deprecated asynchronous compatibility turn" in captured.out
     assert "--post-to" not in captured.out
     assert "`--message` and `--message-file` provide the one-shot async user message that will be queued immediately." in captured.out
     assert "--session-id" in captured.out
-    assert "vibe agent run --async --session-id sesk8m4q2p7x --no-callback --message" in captured.out
+    assert "vibe agent run --session-id sesk8m4q2p7x --no-callback --message" in captured.out
 
 
 def test_task_list_help_mentions_completed_one_shots_hidden_by_default(capsys) -> None:
@@ -264,7 +264,7 @@ def test_hook_send_help_includes_examples_and_threadless_guidance(capsys) -> Non
     assert "--post-to" not in captured.out
     assert "--deliver-key" not in captured.out
     assert "--session-id" in captured.out
-    assert "vibe agent run --async --session-id sesk8m4q2p7x --no-callback" in captured.out
+    assert "vibe agent run --session-id sesk8m4q2p7x --no-callback" in captured.out
 
 
 def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
@@ -277,26 +277,77 @@ def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
     captured = capsys.readouterr()
     assert "--fork-session FORK_SESSION" in captured.out
     assert "--fork-self" in captured.out
+    assert "--sync" in captured.out
     assert "--same-scope" in captured.out
     assert "--scope-id" in captured.out
     assert "--deliver-key" not in captured.out
+    assert "Avibe Agent shell examples:" in captured.out
+    assert "Normal terminal examples:" in captured.out
     assert "--fork-self forks this current Session." in captured.out
     assert "Forks keep the same backend, scope, and cwd as the source Session." in captured.out
-    assert "vibe agent run --async --fork-self --message" in captured.out
+    assert "vibe agent run --fork-self --message" in captured.out
+    assert "Agent runs are async by default. From an Avibe Agent shell, they return their final result to this conversation by default." in captured.out
     assert "vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'" in captured.out
     assert (
         "vibe agent run --agent release-reviewer --same-scope --message 'Review this project in a visible sibling Session.'"
         in captured.out
     )
-    assert "vibe agent run --agent release-reviewer --no-callback --message" not in captured.out
+    assert (
+        "vibe agent run --agent release-reviewer --no-callback --message 'Review the latest deployment result.'"
+        not in captured.out
+    )
     assert "vibe agent run --agent release-reviewer --same-scope --no-callback --message" not in captured.out
-    assert "From an Avibe Agent shell, async runs return their final result to this conversation by default." in captured.out
     assert "From a normal terminal, pass --callback-session-id or --no-callback for async runs." in captured.out
+    assert "Review the latest CI result and print it here." in captured.out
     assert "Review the latest CI result and report back." in captured.out
     assert "--callback-session-id sescaller456 --message 'Review the latest CI result and report back.'" in captured.out
     assert "--no-callback --message 'Review the latest CI result and report back.'" not in captured.out
     assert "Do not combine fork flags with --session-id or --create-session." in captured.out
     assert "--create-session-per-run" not in captured.out
+
+
+def test_agent_run_rejects_async_and_sync_together(capsys) -> None:
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["agent", "run", "--async", "--sync", "--message", "hello"])
+
+    assert exc.value.code == 2
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["code"] == "invalid_arguments"
+    assert "not allowed with argument --async" in payload["error"]
+
+
+def test_agent_run_runtime_rejects_async_and_sync_together() -> None:
+    args = SimpleNamespace(
+        agent="worker",
+        session_id=None,
+        fork_session=None,
+        fork_self=False,
+        create_session=False,
+        create_session_per_run=False,
+        same_scope=False,
+        scope_id=None,
+        deliver_key=None,
+        model=None,
+        reasoning_effort=None,
+        cwd=None,
+        post_to=None,
+        callback_session_id=None,
+        no_callback=True,
+        async_run=True,
+        sync_run=True,
+        wait_timeout=None,
+        message="hello",
+        message_file=None,
+        prompt=None,
+        prompt_file=None,
+    )
+
+    result, payload = _capture_stderr_json(cli.cmd_agent_run, args)
+
+    assert result == 1
+    assert payload["code"] == "conflicting_wait_policy"
 
 
 def test_task_add_parse_error_is_structured_json(capsys) -> None:
@@ -1300,6 +1351,22 @@ def test_hook_send_rejects_invalid_session_key_with_hint() -> None:
     assert payload["help_command"] == "vibe hook send --help"
 
 
+def test_hook_send_deprecation_warning_names_callback_policy(tmp_path: Path, capsys) -> None:
+    args = _parse_hook_send(["--session-key", "slack::channel::C123", "--message", "hello"])
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._task_request_store", return_value=cli.TaskExecutionStore(tmp_path / "task_requests")),
+    ):
+        result = cli.cmd_hook_send(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "vibe hook send is deprecated" in payload["deprecation_warning"]
+    assert "--no-callback" in payload["deprecation_warning"]
+    assert "--callback-session-id <session-id>" in payload["deprecation_warning"]
+
+
 def test_hook_send_rejects_conflicting_delivery_target_flags(capsys) -> None:
     parser = cli.build_parser()
 
@@ -1703,7 +1770,7 @@ def test_agent_run_rejects_cross_backend_agent_for_existing_session(tmp_path: Pa
         )
     finally:
         service.close()
-    args = _parse_agent_run(["--agent", "codex-worker", "--session-id", session_id, "--message", "hello"])
+    args = _parse_agent_run(["--agent", "codex-worker", "--sync", "--session-id", session_id, "--message", "hello"])
 
     with (
         patch("vibe.cli._agent_store", return_value=agent_store),
@@ -1776,7 +1843,7 @@ def test_agent_run_rejects_different_same_backend_agent_for_existing_session(tmp
         )
     finally:
         service.close()
-    args = _parse_agent_run(["--agent", "other-worker", "--session-id", session_id, "--message", "hello"])
+    args = _parse_agent_run(["--agent", "other-worker", "--sync", "--session-id", session_id, "--message", "hello"])
 
     with (
         patch("vibe.cli._agent_store", return_value=agent_store),
@@ -1909,13 +1976,14 @@ def test_agent_run_existing_session_uses_session_agent_when_agent_omitted(tmp_pa
     assert queued["agent_name"] == "worker"
 
 
-def test_agent_run_rejects_async_wait_timeout_combo() -> None:
-    args = _parse_agent_run(["--agent", "worker", "--async", "--wait-timeout", "5", "--message", "hello"])
+def test_agent_run_rejects_default_async_wait_timeout_combo() -> None:
+    args = _parse_agent_run(["--agent", "worker", "--wait-timeout", "5", "--message", "hello"])
 
     result, payload = _capture_stderr_json(cli.cmd_agent_run, args)
 
     assert result == 1
     assert payload["code"] == "conflicting_wait_policy"
+    assert "--sync" in payload["hint"]
 
 
 def test_agent_create_accepts_effort_alias(tmp_path: Path, capsys) -> None:

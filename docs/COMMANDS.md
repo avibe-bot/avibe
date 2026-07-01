@@ -830,12 +830,17 @@ Important options:
 - `--scope-id`
 - `--model`
 - `--reasoning-effort`
-- `--async`
+- `--sync`
 - `--message`
 - `--message-file`
 
 If neither `--session-id` nor a creation policy is provided, the run uses a
 private no-delivery session and is best suited for sub-agent style calls.
+
+Runs are asynchronous by default: the command queues the run, returns a payload
+with `run_id` / `session_id`, and uses the callback policy to deliver the final
+result later. Use `--sync` only when the terminal should wait for completion.
+`--async` is still accepted for older scripts but is no longer required.
 
 `--fork-session <session_id>` creates a new Agent Session by forking the source
 Session's native backend context. It is for alternate investigations or
@@ -869,7 +874,7 @@ Use the right command family for the job:
 - Want to control the local daemon or troubleshoot installation:
   - use `vibe`, `vibe status`, `vibe doctor`, `vibe upgrade`
 - Want asynchronous automation:
-  - use `vibe task ...`, `vibe watch ...`, or `vibe agent run --async ...`
+  - use `vibe task ...`, `vibe watch ...`, or `vibe agent run ...`
 
 ## 7. Quick Examples
 
@@ -892,5 +897,5 @@ vibe
 vibe status
 vibe doctor
 vibe task list --brief
-vibe agent run --async --no-callback --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
+vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
 ```
