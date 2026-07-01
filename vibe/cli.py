@@ -657,8 +657,8 @@ def _agent_run_examples_text() -> str:
           Do not combine fork flags with --session-id or --create-session.
 
         Examples:
-          vibe agent run --agent release-reviewer --no-callback --message 'Review the latest deployment result.'
-          vibe agent run --agent release-reviewer --same-scope --no-callback --message 'Review this project in a visible sibling Session.'
+          vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
+          vibe agent run --agent release-reviewer --same-scope --message 'Review this project in a visible sibling Session.'
           vibe agent run --sync --agent release-reviewer --message 'Review the latest CI result and print it here.'
           vibe agent run --agent release-reviewer --callback-session-id sescaller456 --message 'Review the latest CI result and report back.'
           vibe agent run --agent release-reviewer --no-callback --message 'Run a background experiment; I will inspect the run later.'
@@ -1360,7 +1360,7 @@ def _resolve_caller_session_id(args, *, purpose: str, help_command: str) -> tupl
         raise TaskCliError(
             f"{purpose} id is required outside an Avibe Agent environment.",
             code="missing_session_target",
-            hint="Run this command from an Avibe Agent shell, or pass --session-id for the target Session.",
+            hint="Run this command from an Avibe Agent shell, or pass the target Session ID positionally.",
             help_command=help_command,
         )
     return session_id, notice
