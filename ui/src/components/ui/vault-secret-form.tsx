@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, FormEvent } from 'react';
+import type { FormEvent } from 'react';
 import {
   Asterisk,
   Check,
@@ -208,7 +208,7 @@ export const VaultSecretForm: React.FC<{
     [],
   );
 
-  const staticValueReady = staticSource === 'file' ? selectedFile != null : Boolean(value);
+  const staticValueReady = staticSource === 'file' ? selectedFile != null && selectedFile.size > 0 : Boolean(value);
   const valueReady = isKeypair ? signingKey != null : staticValueReady;
   const canSubmit =
     Boolean(secretName && valueReady) &&
@@ -232,6 +232,11 @@ export const VaultSecretForm: React.FC<{
   const chooseFile = (file: File | null) => {
     if (!file) {
       clearSelectedFile();
+      return;
+    }
+    if (file.size === 0) {
+      clearSelectedFile();
+      setError(t('vaults.dialog.errors.fileEmpty'));
       return;
     }
     if (file.size > MAX_SECRET_FILE_BYTES) {
@@ -398,10 +403,6 @@ export const VaultSecretForm: React.FC<{
     }
   };
 
-  const valueTextSecurityStyle = {
-    WebkitTextSecurity: showValue ? 'none' : 'disc',
-  } as CSSProperties;
-
   const valueField = (
     <div className="flex flex-col gap-2">
       <div className="self-start">
@@ -418,17 +419,30 @@ export const VaultSecretForm: React.FC<{
       </div>
       {staticSource === 'text' ? (
         <div className="flex items-start gap-2">
-          <Textarea
-            value={value}
-            onChange={(event) => setValue(event.target.value)}
-            placeholder={t('vaults.dialog.valuePlaceholder')}
-            autoFocus={isProvision}
-            required
-            spellCheck={false}
-            autoComplete="off"
-            style={valueTextSecurityStyle}
-            className="min-h-[96px] min-w-0 flex-1 resize-y font-mono text-xs leading-relaxed"
-          />
+          {showValue ? (
+            <Textarea
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
+              placeholder={t('vaults.dialog.valuePlaceholder')}
+              autoFocus={isProvision}
+              required
+              spellCheck={false}
+              autoComplete="off"
+              className="min-h-[96px] min-w-0 flex-1 resize-y font-mono text-xs leading-relaxed"
+            />
+          ) : (
+            <Input
+              type="password"
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
+              placeholder={t('vaults.dialog.valuePlaceholder')}
+              autoFocus={isProvision}
+              required
+              spellCheck={false}
+              autoComplete="off"
+              className="h-24 min-w-0 flex-1 font-mono text-xs"
+            />
+          )}
           <Button
             type="button"
             variant="ghost"

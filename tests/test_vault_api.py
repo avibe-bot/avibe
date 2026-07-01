@@ -139,6 +139,43 @@ def test_create_rejects_plaintext_value_even_with_sealed_payload(monkeypatch):
     blind_box.assert_not_called()
 
 
+def test_create_rejects_nested_plaintext_value_fields(monkeypatch):
+    from unittest.mock import Mock
+
+    blind_box = Mock()
+    monkeypatch.setattr(api, "avault_seal_blind_box", blind_box)
+
+    with pytest.raises(api.VaultApiError) as standard_exc:
+        api.create_vault_secret(
+            {
+                "name": "NESTED_STANDARD",
+                "blind_box": {
+                    "scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1",
+                    "enc": "enc",
+                    "ct": "ct",
+                    "value": "secret",
+                },
+            }
+        )
+    assert standard_exc.value.code == "plaintext_value_rejected"
+
+    with pytest.raises(api.VaultApiError) as protected_exc:
+        api.create_vault_secret(
+            {
+                "name": "NESTED_PROTECTED",
+                "protection": "protected",
+                "sealed": {
+                    "ciphertext": "ct",
+                    "nonce": "n",
+                    "wrap_meta": "wm",
+                    "value": "secret",
+                },
+            }
+        )
+    assert protected_exc.value.code == "plaintext_value_rejected"
+    blind_box.assert_not_called()
+
+
 def test_create_with_policy_persists_allowed_hosts(monkeypatch):
     from unittest.mock import Mock
 

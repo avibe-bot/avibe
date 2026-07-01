@@ -2353,6 +2353,7 @@
         "authHeaderInvalid": "Enter a valid HTTP header name.",
         "authHeaderForbidden": "Host cannot be used as the credential header.",
         "authQueryInvalid": "Enter a valid query parameter name.",
+        "fileEmpty": "Choose a non-empty file.",
         "fileTooLarge": "Choose a file up to {{size}}.",
         "fileReadFailed": "Couldn't read that file.",
         "secretExists": "A secret with this name already exists."

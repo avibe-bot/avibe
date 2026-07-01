@@ -99,6 +99,46 @@ def test_rest_create_rejects_plaintext_value_in_mixed_payloads(monkeypatch):
     seal.assert_not_called()
 
 
+def test_rest_create_rejects_nested_plaintext_value_fields(monkeypatch):
+    seal = Mock()
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    client = app.test_client()
+
+    standard = client.post(
+        "/api/vault/secrets",
+        json={
+            "name": "NESTED_REST",
+            "blind_box": {
+                "scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1",
+                "enc": "enc",
+                "ct": "ct",
+                "value": "secret",
+            },
+        },
+        headers=csrf_headers(client),
+    )
+    protected = client.post(
+        "/api/vault/secrets",
+        json={
+            "name": "NESTED_PROTECTED_REST",
+            "protection": "protected",
+            "sealed": {
+                "ciphertext": "ct",
+                "nonce": "n",
+                "wrap_meta": "wm",
+                "value": "secret",
+            },
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert standard.status_code == 400
+    assert standard.get_json()["code"] == "plaintext_value_rejected"
+    assert protected.status_code == 400
+    assert protected.get_json()["code"] == "plaintext_value_rejected"
+    seal.assert_not_called()
+
+
 def test_rest_agent_pubkey_route(monkeypatch):
     monkeypatch.setattr(api, "avault_agent_pubkey", Mock(return_value={"public_key": "pk", "fingerprint": "fp"}))
     client = app.test_client()

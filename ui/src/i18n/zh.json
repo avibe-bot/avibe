@@ -2352,6 +2352,7 @@
         "authHeaderInvalid": "请输入有效的 HTTP Header 名称。",
         "authHeaderForbidden": "不能把 Host 用作认证 Header。",
         "authQueryInvalid": "请输入有效的 Query 参数名。",
+        "fileEmpty": "请选择非空文件。",
         "fileTooLarge": "请选择不超过 {{size}} 的文件。",
         "fileReadFailed": "读取文件失败。",
         "secretExists": "同名密钥已存在。"

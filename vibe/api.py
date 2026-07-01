@@ -1363,6 +1363,20 @@ def get_vault_vmk() -> dict:
     return {"ok": True, "exists": wrap_meta is not None, "wrap_meta": wrap_meta}
 
 
+def _reject_plaintext_value_fields(payload: object) -> None:
+    if isinstance(payload, dict):
+        if "value" in payload:
+            raise VaultApiError(
+                "vault create does not accept plaintext value fields",
+                code="plaintext_value_rejected",
+            )
+        for item in payload.values():
+            _reject_plaintext_value_fields(item)
+    elif isinstance(payload, list):
+        for item in payload:
+            _reject_plaintext_value_fields(item)
+
+
 def _sealed_from_payload(payload: dict):
     from storage.vault_crypto import Sealed
 
@@ -1390,11 +1404,7 @@ def create_vault_secret(payload: dict) -> dict:
 
     if not isinstance(payload, dict):
         raise VaultApiError("payload must be an object", code="invalid_payload")
-    if "value" in payload:
-        raise VaultApiError(
-            "vault create does not accept plaintext value fields",
-            code="plaintext_value_rejected",
-        )
+    _reject_plaintext_value_fields(payload)
     name = str(payload.get("name") or "").strip()
     if not vault_crypto.is_valid_secret_name(name):
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
