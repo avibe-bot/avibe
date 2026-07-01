@@ -1404,20 +1404,14 @@ def create_vault_secret(payload: dict) -> dict:
         signer_kind = str(signer_kind)
     if protection == "standard":
         blind_box = payload.get("blind_box")
-        value = payload.get("value")
         if isinstance(blind_box, dict):
             try:
                 sealed = avault_seal_blind_box(name, blind_box)
             except AvaultError as exc:
                 raise VaultApiError(f"avault blind-box seal failed: {exc}", code="avault_failed") from exc
-        elif isinstance(value, str) and value:
-            try:
-                sealed = avault_seal(name, value.encode("utf-8"))
-            except AvaultError as exc:
-                raise VaultApiError(f"avault seal failed: {exc}", code="avault_failed") from exc
         else:
             raise VaultApiError(
-                "standard create requires a browser blind_box or value fallback",
+                "standard create requires a browser blind_box",
                 code="blind_box_required",
             )
     elif protection == "protected":
@@ -5075,27 +5069,6 @@ def _run_avault(
 def _envelope_payload(sealed) -> dict:
     """Serialize a stored envelope for an avault stdin request (no plaintext)."""
     return {"ciphertext": sealed.ciphertext, "nonce": sealed.nonce, "wrap_meta": sealed.wrap_meta}
-
-
-def avault_seal(name: str, value: bytes):
-    """Seal a value under the machine key via avault; return a :class:`Sealed`.
-
-    ``value`` is piped straight to avault's stdin and never persisted or logged here.
-    """
-    from storage.vault_crypto import Sealed
-
-    proc = _run_avault(["seal", "--name", name], stdin=value)
-    if proc.returncode != 0:
-        raise AvaultError(_avault_detail(proc) or "avault seal failed")
-    try:
-        payload = json.loads(proc.stdout)
-        return Sealed(
-            ciphertext=payload["ciphertext"],
-            nonce=payload["nonce"],
-            wrap_meta=payload["wrap_meta"],
-        )
-    except (ValueError, KeyError, TypeError) as exc:
-        raise AvaultError("avault seal returned malformed output") from exc
 
 
 def avault_pubkey() -> dict:

@@ -97,18 +97,16 @@ def test_create_list_delete_roundtrip(monkeypatch):
     assert api.get_vault_secrets()["secrets"] == []
 
 
-def test_standard_rest_create_uses_plaintext_fallback_when_pinned_avault_lacks_blind_box(monkeypatch):
+def test_standard_rest_create_rejects_plaintext_value(monkeypatch):
     from unittest.mock import Mock
 
-    seal = Mock(return_value=_sealed("fallback"))
-    blind_box = Mock(side_effect=api.AvaultError(f"blind-box seal requires avault >= {api.AVAULT_P2_MIN_VERSION}"))
-    monkeypatch.setattr(api, "avault_seal", seal)
+    blind_box = Mock()
     monkeypatch.setattr(api, "avault_seal_blind_box", blind_box)
 
-    created = api.create_vault_secret({"name": "OPENAI_API_KEY", "value": "secret"})
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_secret({"name": "OPENAI_API_KEY", "value": "secret"})
 
-    assert created["secret"]["name"] == "OPENAI_API_KEY"
-    seal.assert_called_once_with("OPENAI_API_KEY", b"secret")
+    assert exc.value.code == "blind_box_required"
     blind_box.assert_not_called()
 
 

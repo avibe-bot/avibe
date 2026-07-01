@@ -59,16 +59,9 @@ PROTECTED_SIGNING_PUBLIC_META = {
 }
 
 
-def _set_secret(name: str, value: str, tmp_path, monkeypatch, capfd, *, sealed: Sealed | None = None):
-    from vibe import api
-
-    vf = tmp_path / f"{name}.txt"
-    vf.write_text(value)
-    seal_mock = Mock(return_value=sealed or _sealed())
-    monkeypatch.setattr(api, "avault_seal", seal_mock)
-    assert cli.cmd_vault_set(_ns(name=name, from_file=str(vf))) == 0
-    capfd.readouterr()
-    return seal_mock
+def _create_standard_secret(name: str, *, sealed: Sealed | None = None, **kwargs):
+    with cli._open_vault_engine().begin() as conn:
+        return vault_service.create_secret(conn, name=name, sealed=sealed or _sealed(), **kwargs)
 
 
 def _set_protected_grant(name: str, *, session_id: str | None = None) -> dict:
@@ -169,30 +162,14 @@ def test_parse_env_specs(specs, expected):
     assert cli._parse_env_specs(specs) == expected
 
 
-def test_set_seals_with_avault_without_value_derived_metadata(tmp_path, capfd, monkeypatch):
-    from unittest.mock import Mock
-
-    from vibe import api
-
-    vf = tmp_path / "value.txt"
-    vf.write_text("sk-ant-abcd1234")
-    seal = Mock(return_value=_sealed("saved"))
-    monkeypatch.setattr(api, "avault_seal", seal)
-
-    assert cli.cmd_vault_set(_ns(name="OPENAI_API_KEY", from_file=str(vf), description="key")) == 0
-    payload = json.loads(capfd.readouterr().out)
-    secret = payload["secret"]
-    assert secret["name"] == "OPENAI_API_KEY"
-    assert "preview" not in secret
-    assert "sk-ant-abcd1234" not in json.dumps(payload)
-    assert "1234" not in json.dumps(payload)
-    seal.assert_called_once_with("OPENAI_API_KEY", b"sk-ant-abcd1234")
-    with cli._open_vault_engine().connect() as conn:
-        assert vault_service.get_envelope(conn, "OPENAI_API_KEY") == _sealed("saved")
+def test_vault_parser_does_not_expose_plaintext_set_command():
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["vault", "set", "OPENAI_API_KEY", "--stdin"])
 
 
 def test_discover_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
-    _set_secret("STANDARD_KEY", "secret", tmp_path, monkeypatch, capfd)
+    _create_standard_secret("STANDARD_KEY")
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(
             conn,
@@ -244,7 +221,7 @@ def test_discover_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
 
 
 def test_access_request_cli_uses_caller_session(tmp_path, capfd, monkeypatch):
-    _set_secret("STANDARD_KEY", "secret", tmp_path, monkeypatch, capfd)
+    _create_standard_secret("STANDARD_KEY")
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses_cli")
 
     assert cli.cmd_vault_access(_ns(name="STANDARD_KEY", command="python sync.py")) == 0
@@ -391,51 +368,12 @@ def test_vault_await_wait_keeps_waiting_from_signing_status(capfd, monkeypatch):
     assert payload["result"] == {"type": "signature", "signature": {"signature": "ab" * 64, "recovery_id": 1}}
 
 
-def test_set_rejects_invalid_name_before_avault(tmp_path, capfd, monkeypatch):
-    from unittest.mock import Mock
-
-    from vibe import api
-
-    vf = tmp_path / "v.txt"
-    vf.write_text("x")
-    seal = Mock(return_value=_sealed())
-    monkeypatch.setattr(api, "avault_seal", seal)
-
-    code = cli.cmd_vault_set(_ns(name="lower_bad", from_file=str(vf)))
-    captured = capfd.readouterr()
-    assert code == 1
-    assert json.loads(captured.err)["code"] == "invalid_name"
-    seal.assert_not_called()
-
-
-def test_set_requires_one_value_source(capfd):
-    code = cli.cmd_vault_set(_ns(name="NO_SOURCE"))
-    captured = capfd.readouterr()
-    assert code == 1
-    assert json.loads(captured.err)["code"] == "missing_value_source"
-
-
-def test_set_maps_avault_failure(tmp_path, capfd, monkeypatch):
-    from unittest.mock import Mock
-
-    from vibe import api
-
-    vf = tmp_path / "v.txt"
-    vf.write_text("x")
-    monkeypatch.setattr(api, "avault_seal", Mock(side_effect=api.AvaultError("boom")))
-
-    code = cli.cmd_vault_set(_ns(name="FAIL_KEY", from_file=str(vf)))
-    captured = capfd.readouterr()
-    assert code == 1
-    assert json.loads(captured.err)["code"] == "avault_failed"
-
-
 def test_run_calls_avault_with_env_mapping_and_records_delivery(tmp_path, capfd, monkeypatch):
     from unittest.mock import Mock
 
     from vibe import api
 
-    _set_secret("SRC_KEY", "secret-RUNVAL-42", tmp_path, monkeypatch, capfd, sealed=_sealed("run"))
+    _create_standard_secret("SRC_KEY", sealed=_sealed("run"))
     deliver = Mock(return_value=0)
     monkeypatch.setattr(api, "avault_deliver_run", deliver)
 
@@ -1131,7 +1069,7 @@ def test_expire_agent_grant_after_missing_does_not_reserve_replacement_grant(tmp
 
 
 def test_run_rejects_mixed_tiers_before_creating_approval(tmp_path, capfd, monkeypatch):
-    _set_secret("STANDARD_KEY", "standard", tmp_path, monkeypatch, capfd)
+    _create_standard_secret("STANDARD_KEY")
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))
 
@@ -1277,7 +1215,7 @@ def test_run_records_delivery_when_legacy_avault_returns_70(tmp_path, capfd, mon
 
     from vibe import api
 
-    _set_secret("NODELIVER_KEY", "secret", tmp_path, monkeypatch, capfd)
+    _create_standard_secret("NODELIVER_KEY")
     monkeypatch.setattr(api, "avault_deliver_run", Mock(return_value=70))
 
     assert cli.cmd_vault_run(_ns(env=["NODELIVER_KEY"], command_argv=["python3", "-c", "pass"])) == 70
@@ -1308,7 +1246,7 @@ def test_run_bad_command_does_not_call_avault_or_deliver(tmp_path, capfd, monkey
 
     from vibe import api
 
-    _set_secret("NODELIVER_KEY", "v", tmp_path, monkeypatch, capfd)
+    _create_standard_secret("NODELIVER_KEY")
     deliver = Mock(return_value=0)
     monkeypatch.setattr(api, "avault_deliver_run", deliver)
 
@@ -1357,29 +1295,9 @@ def test_request_creates_pending(capfd):
 
 
 def test_request_for_existing_secret_returns_fulfilled(tmp_path, capfd, monkeypatch):
-    _set_secret("HAVE_KEY", "v", tmp_path, monkeypatch, capfd)
+    _create_standard_secret("HAVE_KEY")
     assert cli.cmd_vault_request(_ns(name="HAVE_KEY", wait=30)) == 0
     assert json.loads(capfd.readouterr().out)["status"] == "fulfilled"
-
-
-def test_from_file_preserves_trailing_newline(tmp_path):
-    vf = tmp_path / "key.pem"
-    vf.write_text("-----BEGIN-----\nabc\n-----END-----\n")
-    value = cli._read_secret_value(_ns(from_file=str(vf)), help_command="x")
-    assert value == "-----BEGIN-----\nabc\n-----END-----\n"
-
-
-def test_from_file_preserves_crlf(tmp_path):
-    vf = tmp_path / "win.pem"
-    vf.write_bytes(b"line1\r\nline2\r\n")
-    assert cli._read_secret_value(_ns(from_file=str(vf)), help_command="x") == "line1\r\nline2\r\n"
-
-
-def test_stdin_strips_only_one_trailing_newline(monkeypatch):
-    monkeypatch.setattr("sys.stdin", io.StringIO("tok\n"))
-    assert cli._read_secret_value(_ns(stdin=True), help_command="x") == "tok"
-    monkeypatch.setattr("sys.stdin", io.StringIO("tok\n\n"))
-    assert cli._read_secret_value(_ns(stdin=True), help_command="x") == "tok\n"
 
 
 def test_key_export_calls_avault_and_audits(tmp_path, capfd, monkeypatch):

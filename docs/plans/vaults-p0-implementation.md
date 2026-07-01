@@ -185,7 +185,8 @@ value ops must go through the daemon.)
 ## 6. CLI — `vibe/cli.py` (argparse `vault` subparser)
 
 ```
-vibe vault set NAME [--group G] [--tag t]... [--protected(P1)] --stdin | --from-file f
+# Removed: the agent-facing CLI no longer accepts plaintext create (`vibe vault set`).
+# Create flows enter through browser-side sealed/blind-box payloads.
 vibe vault list [--group G] [--skill S(P1)] [--json]
 vibe vault rm NAME
 vibe vault run --env NAME[,N2] [--env LOCAL=NAME] [--env-skill S(P1)] -- cmd...   # M1, promoted

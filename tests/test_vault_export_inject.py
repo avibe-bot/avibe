@@ -37,16 +37,9 @@ def _sealed(suffix: str = "1") -> Sealed:
     return Sealed(ciphertext=f"ct-{suffix}", nonce=f"n-{suffix}", wrap_meta=f"wm-{suffix}")
 
 
-def _set(name, value, tmp_path, monkeypatch, capfd, *, sealed: Sealed | None = None):
-    from unittest.mock import Mock
-
-    from vibe import api
-
-    vf = tmp_path / f"{name}.txt"
-    vf.write_text(value)
-    monkeypatch.setattr(api, "avault_seal", Mock(return_value=sealed or _sealed(name.lower())))
-    assert cli.cmd_vault_set(_ns(name=name, from_file=str(vf))) == 0
-    capfd.readouterr()
+def _create_standard_secret(name: str, *, sealed: Sealed | None = None):
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name=name, sealed=sealed or _sealed(name.lower()))
 
 
 def _set_protected_grant(name: str, *, session_id: str | None = None) -> dict:
@@ -82,8 +75,8 @@ def test_inject_calls_avault_and_records_delivery(tmp_path, capfd, monkeypatch, 
 
     from vibe import api
 
-    _set("A_KEY", "alpha-1", tmp_path, monkeypatch, capfd, sealed=_sealed("a"))
-    _set("B_KEY", "beta-2", tmp_path, monkeypatch, capfd, sealed=_sealed("b"))
+    _create_standard_secret("A_KEY", sealed=_sealed("a"))
+    _create_standard_secret("B_KEY", sealed=_sealed("b"))
     inject = Mock(return_value=None)
     monkeypatch.setattr(api, "avault_deliver_inject", inject)
     out = tmp_path / f"secrets.{fmt}"
@@ -210,7 +203,7 @@ def test_inject_rejects_unavailable_formats_before_avault(tmp_path, capfd, monke
 
     from vibe import api
 
-    _set("A_KEY", "alpha-1", tmp_path, monkeypatch, capfd)
+    _create_standard_secret("A_KEY")
     inject = Mock(return_value=None)
     monkeypatch.setattr(api, "avault_deliver_inject", inject)
 
@@ -226,7 +219,7 @@ def test_inject_unknown_format_rejected_before_avault(tmp_path, capfd, monkeypat
 
     from vibe import api
 
-    _set("K", "v", tmp_path, monkeypatch, capfd)
+    _create_standard_secret("K")
     inject = Mock(return_value=None)
     monkeypatch.setattr(api, "avault_deliver_inject", inject)
 
@@ -241,7 +234,7 @@ def test_inject_dedupes_repeated_keys(tmp_path, capfd, monkeypatch):
 
     from vibe import api
 
-    _set("A_KEY", "alpha-1", tmp_path, monkeypatch, capfd, sealed=_sealed("a"))
+    _create_standard_secret("A_KEY", sealed=_sealed("a"))
     inject = Mock(return_value=None)
     monkeypatch.setattr(api, "avault_deliver_inject", inject)
 
@@ -258,7 +251,7 @@ def test_inject_payload_does_not_leak_value(tmp_path, capfd, monkeypatch):
 
     from vibe import api
 
-    _set("SECRET_KEY", "topsecret-INJECT", tmp_path, monkeypatch, capfd)
+    _create_standard_secret("SECRET_KEY")
     monkeypatch.setattr(api, "avault_deliver_inject", Mock(return_value=None))
 
     cli.cmd_vault_inject(_ns(keys="SECRET_KEY", out=str(tmp_path / "s.env"), format="dotenv"))
@@ -271,7 +264,7 @@ def test_inject_does_not_record_delivery_when_avault_fails(tmp_path, capfd, monk
 
     from vibe import api
 
-    _set("A_KEY", "alpha-1", tmp_path, monkeypatch, capfd)
+    _create_standard_secret("A_KEY")
     monkeypatch.setattr(api, "avault_deliver_inject", Mock(side_effect=api.AvaultError("boom")))
 
     code = cli.cmd_vault_inject(_ns(keys="A_KEY", out=str(tmp_path / "fail.env"), format="dotenv"))
@@ -287,7 +280,7 @@ def test_inject_succeeds_even_if_audit_fails(tmp_path, capfd, monkeypatch):
 
     from vibe import api
 
-    _set("A_KEY", "alpha-1", tmp_path, monkeypatch, capfd)
+    _create_standard_secret("A_KEY")
     monkeypatch.setattr(api, "avault_deliver_inject", Mock(return_value=None))
 
     def _boom(*a, **k):

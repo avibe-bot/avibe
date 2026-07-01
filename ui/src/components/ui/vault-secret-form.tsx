@@ -86,10 +86,6 @@ function avaultP2Ready(dep: DependencyItem | null): boolean {
   return dep?.status === 'ready' && versionAtLeast(dep.version, AVAULT_P2_MIN_VERSION);
 }
 
-function avaultInstalled(dep: DependencyItem | null): boolean {
-  return Boolean(dep?.installed);
-}
-
 /** Shared field label — 13px medium, matches design.pen create-dialog field labels. */
 const FIELD_LABEL = 'text-[13px] font-medium text-foreground';
 
@@ -163,7 +159,6 @@ export const VaultSecretForm: React.FC<{
   }, [protection]);
 
   const p2Ready = useMemo(() => avaultP2Ready(avaultDep), [avaultDep]);
-  const standardCreateReady = useMemo(() => avaultInstalled(avaultDep), [avaultDep]);
   const secretName = (fixedName ?? name).trim().toUpperCase();
   const protectedCreateReady = protectedVault.status === 'unlocked';
   const isKeypair = kind === 'keypair';
@@ -194,15 +189,10 @@ export const VaultSecretForm: React.FC<{
   );
 
   const valueReady = isKeypair ? signingKey != null : Boolean(value);
-  // Standard signing keys are blind-boxed to avault, so they need the P2 surface;
-  // protected signing keys are sealed under the browser VMK and signed locally, so they
-  // only need the vault unlocked (gated below via protectedCreateReady).
-  const keypairRequirementsMet = !isKeypair || protection === 'protected' || p2Ready;
   const canSubmit =
     Boolean(secretName && valueReady) &&
-    keypairRequirementsMet &&
     !submitting &&
-    ((protection === 'standard' && standardCreateReady) || (protection === 'protected' && protectedCreateReady));
+    ((protection === 'standard' && p2Ready) || (protection === 'protected' && protectedCreateReady));
 
   const handleExistingSecret = () => {
     if (treatExistingAsFulfilled) {
@@ -256,8 +246,7 @@ export const VaultSecretForm: React.FC<{
       const plaintext: Uint8Array | string = isKeypair && signingKey ? signingKey.privateKey : value;
       let cryptoFields:
         | { sealed: ProtectedRecordEnvelope }
-        | { blind_box: Awaited<ReturnType<typeof sealBlindBox>> }
-        | { value: string };
+        | { blind_box: Awaited<ReturnType<typeof sealBlindBox>> };
       let establishingVmk = false;
       if (protection === 'protected') {
         // Browser-sealed under the session VMK; the daemon stores it opaquely (no avault, no
@@ -265,13 +254,9 @@ export const VaultSecretForm: React.FC<{
         const sealed = await protectedVault.sealValue(secretName, plaintext);
         cryptoFields = { sealed: sealed.envelope };
         establishingVmk = sealed.establishingVmk;
-      } else if (p2Ready) {
+      } else {
         const pubkey = await api.getVaultPubkey();
         cryptoFields = { blind_box: await sealBlindBox(plaintext, pubkey, standardCreateBlindBoxContext(secretName)) };
-      } else {
-        // Plain-value fallback exists only for static secrets; signing keys require
-        // the avault P2 surface (gated by canSubmit), so plaintext is a string here.
-        cryptoFields = { value };
       }
       const created = await api.createVaultSecret(
         { ...base, ...cryptoFields, ...(establishingVmk ? { establishing_vmk: true } : {}) },
@@ -385,17 +370,12 @@ export const VaultSecretForm: React.FC<{
           {t('vaults.dialog.checkingAvault')}
         </div>
       )}
-      {protection === 'standard' && !isKeypair && !checkingAvault && !p2Ready && (
+      {protection === 'standard' && !checkingAvault && !p2Ready && (
         <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
-          {standardCreateReady
-            ? t('vaults.dialog.p2UnavailableStandardFallback', {
-                version: AVAULT_P2_MIN_VERSION,
-                installed: avaultDep?.version ?? 'unknown',
-              })
-            : t('vaults.dialog.p2Unavailable', {
-                version: AVAULT_P2_MIN_VERSION,
-                installed: avaultDep?.version ?? 'unknown',
-              })}
+          {t('vaults.dialog.p2Unavailable', {
+            version: AVAULT_P2_MIN_VERSION,
+            installed: avaultDep?.version ?? 'unknown',
+          })}
         </div>
       )}
       {error && (

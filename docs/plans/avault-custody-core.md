@@ -37,7 +37,7 @@ Two **trust roots**, chosen per secret:
 P0 ships the **standard tier** in Python:
 
 - Envelope encryption in `storage/vault_crypto.py`: a random per-secret DEK encrypts the value (AES-256-GCM); the DEK is wrapped under a 32-byte **machine key** at `~/.avibe/state/vault/machine.key` (mode 0600).
-- Short-lived CLI processes (`vibe vault set/list/run/fetch/request/export/inject/key`) do direct-DB + direct-crypto; no daemon.
+- Short-lived CLI processes (`vibe vault list/run/fetch/request/export/inject/key`) do direct-DB + direct-crypto; no daemon. The old agent-facing `vibe vault set` plaintext-create command has been removed; create now enters through browser-side sealed/blind-box payloads.
 - Delivery modes: `run` (child env) and `fetch` (brokered HTTP); `export`/`inject` are help-only.
 - The core invariant: **the model handles secret _names_; the platform handles secret _values_.** `$<NAME>` dynamic-ask wakes the agent with a name only; `vault_secrets` is denylisted in `data query`.
 
@@ -447,8 +447,8 @@ Every standard-tier crypto call lives in two modules — and **the long-lived da
 
 | Path | Code | Crypto today | Plaintext destination |
 |---|---|---|---|
-| Create (REST) | `vibe/api.py:create_vault_secret` → `vault_service.create_secret` → `seal_standard` | seal (daemon) | — (stores ciphertext) |
-| Create (CLI) | `cmd_vault_set` → `create_secret` → `seal_standard` | seal | — |
+| Create (REST) | `vibe/api.py:create_vault_secret` → browser blind-box → `avault seal --blind-box` → `vault_service.create_secret` | blind-box seal (avault) | avault subprocess only |
+| Create (CLI) | removed from the agent-facing CLI | — | — |
 | Rotate | `vault_service.rotate_secret` → `seal_standard` | seal | — (unused in P0) |
 | Run | `cmd_vault_run` → `resolve` → `subprocess.Popen(env=…)` | open ×N | child env (1 child, N vars) |
 | Export | `cmd_vault_export` → `resolve` → stdout | open ×N | shell (`eval $(…)`) |

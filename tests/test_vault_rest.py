@@ -51,9 +51,9 @@ def test_rest_create_accepts_blind_box(monkeypatch):
     seal.assert_called_once_with("REST_KEY", blind_box)
 
 
-def test_rest_create_accepts_standard_value_fallback(monkeypatch):
-    seal = Mock(return_value=_sealed("rest-fallback"))
-    monkeypatch.setattr(api, "avault_seal", seal)
+def test_rest_create_rejects_standard_plaintext_value(monkeypatch):
+    seal = Mock()
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
     client = app.test_client()
 
     response = client.post(
@@ -62,9 +62,9 @@ def test_rest_create_accepts_standard_value_fallback(monkeypatch):
         headers=csrf_headers(client),
     )
 
-    assert response.status_code == 200
-    assert response.get_json()["secret"]["name"] == "REST_FALLBACK"
-    seal.assert_called_once_with("REST_FALLBACK", b"secret")
+    assert response.status_code == 400
+    assert response.get_json()["code"] == "blind_box_required"
+    seal.assert_not_called()
 
 
 def test_rest_agent_pubkey_route(monkeypatch):
