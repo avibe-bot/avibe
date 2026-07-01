@@ -1626,7 +1626,7 @@ def _insert_agent_session(
 def test_run_migrations_session_anchor_unique_strips_dedups_and_reattaches(tmp_path: Path) -> None:
     # Build the pre-0011 schema, seed the exact legacy states 0011 must handle,
     # then upgrade to head and assert the three guarantees: OpenCode cwd anchors
-    # collapse to the bare base (cwd kept on workdir), claude/codex subagent
+    # collapse to the bare base, claude/codex subagent
     # anchors are PRESERVED, duplicate (scope, anchor) rows dedup to the most
     # recent, and the loser's transcript is reattached to the survivor first.
     db_path = tmp_path / "vibe.sqlite"
@@ -1644,12 +1644,11 @@ def test_run_migrations_session_anchor_unique_strips_dedups_and_reattaches(tmp_p
             conn, row_id="ses_sub0000001", scope_id="sc1", anchor="cl-base:reviewer",
             workdir="reviewer", backend="claude", native="sub-native", last_active="2026-06-01T08:00:00",
         )
-        # Windows OpenCode cwd composite (drive-letter colon) -> bare base, cwd
-        # re-derived onto workdir. The old last-colon backfill stored a wrong
-        # workdir ("\\repo\\x"); the migration corrects it. (Codex P2 #095.)
+        # Windows OpenCode cwd composite (drive-letter colon) -> bare base,
+        # without deriving workdir from the anchor suffix.
         _insert_agent_session(
             conn, row_id="ses_oswin00001", scope_id="sc1", anchor="win-base:C:\\repo\\x",
-            workdir="\\repo\\x", backend="opencode", native="win-native2", last_active="2026-06-01T08:00:00",
+            workdir=None, backend="opencode", native="win-native2", last_active="2026-06-01T08:00:00",
         )
         # Duplicate group: a bare row + a cwd composite that strips onto it. The
         # later last_active row survives; the loser carries a transcript.
@@ -1679,12 +1678,13 @@ def test_run_migrations_session_anchor_unique_strips_dedups_and_reattaches(tmp_p
             r[0]: (r[1], r[2])
             for r in conn.execute("select id, session_anchor, workdir from agent_sessions")
         }
-        # OpenCode cwd stripped to bare base; cwd retained on workdir.
+        # OpenCode cwd stripped to bare base; existing workdir retained, but not
+        # derived from the anchor suffix.
         assert rows["ses_oc0000001"] == ("oc-base", "/repo/x")
         # Subagent anchor preserved (Codex P2: do not collapse base:<subagent>).
         assert rows["ses_sub0000001"] == ("cl-base:reviewer", "reviewer")
-        # Windows drive-letter cwd stripped to bare base; full cwd on workdir.
-        assert rows["ses_oswin00001"] == ("win-base", "C:\\repo\\x")
+        # Windows drive-letter cwd stripped to bare base; workdir remains empty.
+        assert rows["ses_oswin00001"] == ("win-base", None)
         # Dedup kept the most-recently-active row; the loser is gone.
         assert "ses_win0000001" in rows
         assert "ses_lose000001" not in rows
@@ -1768,9 +1768,9 @@ def test_ensure_sqlite_state_imports_json_once(tmp_path: Path) -> None:
     assert user_settings == ("admin", None, None)
     assert re.fullmatch(r"ses[23456789abcdefghjkmnpqrstuvwxyz]{10}", agent_session[0])
     assert agent_session[1] == "slack::channel::C123"
-    # OpenCode ``base:/cwd`` composite is normalised to the bare anchor on import
-    # (the cwd stays on the ``workdir`` column), matching the migration + the
-    # bare-anchor read path. (Codex P2: composite anchors were unreadable.)
+    # Legacy composite anchors are normalised to the bare anchor on import, but
+    # workdir is snapshotted from scope settings rather than inferred from the
+    # anchor suffix.
     assert agent_session[2] == "slack_1774074591.762089"
     assert agent_session[3] == "/repo"
     assert agent_session[4] == "codex-session-1"
@@ -1824,9 +1824,10 @@ def test_ensure_sqlite_state_collapses_multi_backend_anchor_on_import(tmp_path: 
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("select session_anchor, workdir from agent_sessions").fetchall()
         # All three backends collapsed to ONE bare-anchor row — no IntegrityError,
-        # no leftover ``slack_T1:/repo`` composite.
+        # no leftover ``slack_T1:/repo`` composite, and no anchor-derived workdir.
         assert len(rows) == 1
         assert rows[0][0] == "slack_T1"
+        assert rows[0][1] is None
         index = conn.execute(
             "select name from sqlite_master where type = 'index' and name = 'uq_agent_sessions_scope_anchor'"
         ).fetchone()

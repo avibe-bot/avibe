@@ -363,11 +363,11 @@ def test_watch_add_create_per_run_scope_id_records_session_scope_metadata(tmp_pa
     assert payload["watch"]["deliver_key"] is None
     assert payload["watch"]["cwd"] == str(invoke_dir)
     assert payload["watch"]["metadata"]["session_scope_id"] == "avibe::project::proj-scope-watch"
-    assert payload["watch"]["metadata"]["session_workdir"] == str(invoke_dir)
+    assert "session_workdir" not in payload["watch"]["metadata"]
     assert payload["watch"]["agent_name"] == "project-agent"
 
 
-def test_watch_add_create_session_scope_id_uses_invocation_cwd(tmp_path: Path, capsys) -> None:
+def test_watch_add_create_session_scope_id_snapshots_scope_workdir(tmp_path: Path, capsys) -> None:
     db_path = tmp_path / "state" / "vibe.sqlite"
     agent_store = cli.VibeAgentStore(db_path)
     agent_store.create(name="project-agent", backend="codex")
@@ -426,9 +426,9 @@ def test_watch_add_create_session_scope_id_uses_invocation_cwd(tmp_path: Path, c
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     target = cli.resolve_session_id_target(payload["watch"]["session_id"], db_path=db_path)
-    assert target.workdir == str(invoke_dir)
+    assert target.workdir == str(tmp_path)
     assert payload["watch"]["cwd"] == str(invoke_dir)
-    assert payload["watch"]["metadata"]["session_workdir"] == str(invoke_dir)
+    assert "session_workdir" not in payload["watch"]["metadata"]
 
 
 def test_watch_add_defaults_target_to_caller_session(tmp_path: Path, capsys) -> None:
@@ -1140,7 +1140,7 @@ def test_watch_update_allows_cwd_for_already_reserved_create_once_watch(tmp_path
     payload = json.loads(capsys.readouterr().out)
     assert payload["watch"]["session_id"] == "sesExisting"
     assert payload["watch"]["cwd"] == str(new_cwd)
-    assert payload["watch"]["metadata"]["session_workdir"] == str(new_cwd)
+    assert "session_workdir" not in payload["watch"]["metadata"]
 
 
 def test_watch_update_rejects_deprecated_prompt_argument(tmp_path: Path) -> None:

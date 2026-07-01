@@ -1022,7 +1022,7 @@ def test_agent_run_fork_self_uses_caller_session_and_inherits_scope(tmp_path: Pa
     assert row["workdir"] == str(tmp_path)
 
 
-def test_agent_run_create_same_scope_uses_invocation_workdir(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_agent_run_create_same_scope_snapshots_scope_workdir(tmp_path: Path, capsys, monkeypatch) -> None:
     from sqlalchemy import select
 
     from storage.db import create_sqlite_engine
@@ -1063,7 +1063,61 @@ def test_agent_run_create_same_scope_uses_invocation_workdir(tmp_path: Path, cap
     finally:
         engine.dispose()
     assert row["scope_id"] == "avibe::project::proj_fork_cli"
-    assert row["workdir"] == str(invoke_dir)
+    assert row["workdir"] == str(tmp_path)
+
+
+def test_agent_run_create_scope_id_snapshots_scope_workdir(tmp_path: Path, capsys, monkeypatch) -> None:
+    from sqlalchemy import select
+
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions
+
+    state_home = tmp_path / "home"
+    invoke_dir = tmp_path / "invoke"
+    invoke_dir.mkdir()
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
+        ensure_sqlite_state()
+        db_path = state_home / "state" / "vibe.sqlite"
+        _seed_bound_session(db_path, tmp_path)
+        agent_store = cli.VibeAgentStore(db_path)
+        agent_store.create(name="worker", backend="codex")
+        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        args = _parse_agent_run(
+            [
+                "--agent",
+                "worker",
+                "--scope-id",
+                "avibe::project::proj_fork_cli",
+                "--async",
+                "--no-callback",
+                "--message",
+                "hi",
+            ]
+        )
+        monkeypatch.chdir(invoke_dir)
+
+        with (
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch("vibe.cli._task_request_store", return_value=request_store),
+            patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        ):
+            result = cli.cmd_agent_run(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["scope_id"] == "avibe::project::proj_fork_cli"
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(agent_sessions).where(agent_sessions.c.id == payload["session_id"])
+            ).mappings().one()
+    finally:
+        engine.dispose()
+    assert row["scope_id"] == "avibe::project::proj_fork_cli"
+    assert row["workdir"] == str(tmp_path)
 
 
 def test_agent_run_create_scope_id_requires_existing_scope(tmp_path: Path, capsys) -> None:
@@ -1295,17 +1349,19 @@ def test_agent_run_cwd_rejected_with_existing_session(capsys) -> None:
     assert payload["code"] == "cwd_with_existing_session"
 
 
-def test_resolve_run_cwd_deliver_key_defaults_to_invocation_cwd(monkeypatch, tmp_path: Path) -> None:
-    """Without --cwd, every blank session reservation snapshots the caller cwd.
-    An explicit --cwd still wins."""
+def test_resolve_run_cwd_defaults_by_session_target(monkeypatch, tmp_path: Path) -> None:
+    """Without --cwd, private sessions snapshot the caller cwd, while scoped
+    sessions leave cwd unset so creation snapshots the selected scope workdir."""
 
     from types import SimpleNamespace
 
     monkeypatch.chdir(tmp_path)
-    args = SimpleNamespace(cwd=None, deliver_key="slack::channel::C123")
+    args = SimpleNamespace(cwd=None)
     assert cli._resolve_run_cwd(args, session_policy="create", help_command="x") == str(tmp_path)
+    assert cli._resolve_run_cwd(args, session_policy="create", scoped_session=True, help_command="x") is None
+
     args = SimpleNamespace(cwd=str(tmp_path), deliver_key="slack::channel::C123")
-    assert cli._resolve_run_cwd(args, session_policy="create", help_command="x") == str(tmp_path)
+    assert cli._resolve_run_cwd(args, session_policy="create", scoped_session=True, help_command="x") == str(tmp_path)
 
 
 def test_runs_list_current_session_filters_from_caller_env(tmp_path: Path, capsys) -> None:

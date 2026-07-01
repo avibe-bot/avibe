@@ -13,6 +13,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
 from config import paths
+from config.v2_config import V2Config
 from config.v2_sessions import ActivePollInfo, SessionState
 from config.v2_settings import _split_scoped_key
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
@@ -20,6 +21,8 @@ from storage.agent_session_rows import (
     create_agent_session_row,
     decode_session_value,
     encode_session_value,
+    normalize_workdir,
+    snapshot_scope_workdir,
 )
 from storage.models import agent_sessions, metadata, runtime_records, scopes, state_meta
 from storage.settings_service import make_scope_id, upsert_scope
@@ -172,9 +175,7 @@ class SQLiteSessionsService:
                 agent_name=agent_name,
                 model=model,
                 reasoning_effort=reasoning_effort,
-                # Explicit caller workdir (e.g. the CLI's invocation cwd) wins;
-                # None keeps the scope-settings snapshot fallback.
-                workdir=workdir,
+                workdir=_new_session_workdir(conn, scope_id, workdir),
                 metadata={"legacy_scope_key": str(scope_key), **dict(metadata or {})},
                 now=now,
                 require_workdir=False,
@@ -695,10 +696,10 @@ class SQLiteSessionsService:
                     for thread_id, native_session_id in thread_map.items():
                         thread_key = str(thread_id)
                         # Normalise OpenCode ``base:/cwd`` composites to the bare
-                        # anchor (cwd kept on the workdir column) so imported rows
-                        # match the bare-anchor read path; subagent ``base:<name>``
-                        # anchors are preserved. Mirrors migration 20260601_0011,
-                        # which never sees JSON-imported rows (it runs first).
+                        # anchor so imported rows match the bare-anchor read path;
+                        # subagent ``base:<name>`` anchors are preserved. Workdir is
+                        # snapshotted from scope settings, never inferred from the
+                        # legacy anchor suffix.
                         base_anchor = _base_session_anchor(thread_key)
                         dedup_key = (scope_id, base_anchor)
                         if dedup_key in seen_anchor_rows:
@@ -728,7 +729,7 @@ class SQLiteSessionsService:
                             model=None,
                             reasoning_effort=None,
                             session_anchor=base_anchor,
-                            workdir=_workdir_from_anchor(thread_key),
+                            workdir=snapshot_scope_workdir(conn, scope_id),
                             native_session_id=encoded_session_id,
                             title=None,
                             status="active",
@@ -745,7 +746,6 @@ class SQLiteSessionsService:
                                     "agent_backend": stmt.excluded.agent_backend,
                                     "agent_variant": stmt.excluded.agent_variant,
                                     "session_anchor": stmt.excluded.session_anchor,
-                                    "workdir": stmt.excluded.workdir,
                                     "native_session_id": stmt.excluded.native_session_id,
                                     "status": stmt.excluded.status,
                                     "metadata_json": stmt.excluded.metadata_json,
@@ -1277,13 +1277,6 @@ def _session_row_key(
     return (scope_id, agent_variant, session_anchor, native_session_id)
 
 
-def _workdir_from_anchor(anchor: str) -> str | None:
-    if ":" not in anchor:
-        return None
-    suffix = anchor.rsplit(":", 1)[1]
-    return suffix or None
-
-
 # An ABSOLUTE cwd suffix: POSIX ``/...``, Windows drive ``C:\`` / ``C:/``, or UNC
 # ``\\...``. OpenCode's cwd is always absolute (``get_cwd`` -> ``os.path.abspath``),
 # so this cleanly separates a cwd composite from a claude/codex subagent name.
@@ -1293,13 +1286,13 @@ _ABS_CWD_PREFIX = re.compile(r"(/|[A-Za-z]:[\\/]|\\\\)")
 def _base_session_anchor(anchor: str) -> str:
     """Strip an OpenCode ``base:<abs-cwd>`` suffix back to the bare base anchor.
 
-    The cwd now lives only on the ``workdir`` column; the anchor is the bare thread
-    identity. Split on the FIRST ``:`` and drop the suffix iff it is an absolute
-    path — POSIX ``/...``, Windows ``C:\\...`` / ``C:/...``, or UNC ``\\\\...``. A
-    non-path suffix is a claude/codex subagent name (``base:reviewer``) and is
-    preserved. Splitting on the first colon also collapses a double-nested cwd
-    (``base:/p:/p``) in one pass and tolerates the drive-letter colon in Windows
-    paths (which a last-colon split would mangle into ``base:C``).
+    The anchor is the bare thread identity. Split on the FIRST ``:`` and drop the
+    suffix iff it is an absolute path — POSIX ``/...``, Windows ``C:\\...`` /
+    ``C:/...``, or UNC ``\\\\...``. A non-path suffix is a claude/codex subagent
+    name (``base:reviewer``) and is preserved. Splitting on the first colon also
+    collapses a double-nested cwd (``base:/p:/p``) in one pass and tolerates the
+    drive-letter colon in Windows paths (which a last-colon split would mangle
+    into ``base:C``).
 
     The Python twin of the alembic ``session_anchor`` strip (migration
     20260601_0011) for the legacy-JSON import path: ``ensure_sqlite_state`` runs
@@ -1334,3 +1327,18 @@ def _float(value: Any) -> float:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _runtime_default_workdir() -> str | None:
+    try:
+        config = V2Config.load()
+        return normalize_workdir(config.runtime.default_cwd)
+    except FileNotFoundError:
+        return normalize_workdir(Path.home() / "work")
+    except Exception:
+        logger.debug("Unable to load runtime default workdir", exc_info=True)
+        return None
+
+
+def _new_session_workdir(conn: Connection, scope_id: str | None, explicit_workdir: str | None) -> str | None:
+    return normalize_workdir(explicit_workdir) or snapshot_scope_workdir(conn, scope_id) or _runtime_default_workdir()

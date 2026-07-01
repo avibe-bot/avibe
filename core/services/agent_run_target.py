@@ -130,13 +130,10 @@ def resolve_agent_run_target(
                         session_key=session_key,
                         fallback_anchor=anchor,
                         workdir=_authoritative_session_workdir(
-                            conn,
                             row,
-                            controller=controller,
                             platform=platform,
                             settings_key=settings_key,
                             session_key=session_key,
-                            fallback_anchor=anchor,
                             source="agent_session",
                         ),
                         source=source,
@@ -173,13 +170,10 @@ def resolve_agent_run_target(
                         session_key=session_key,
                         fallback_anchor=anchor,
                         workdir=_authoritative_session_workdir(
-                            conn,
                             existing,
-                            controller=controller,
                             platform=platform,
                             settings_key=settings_key,
                             session_key=session_key,
-                            fallback_anchor=anchor,
                             source="existing_session",
                         ),
                         source=source,
@@ -543,61 +537,33 @@ def _scope_row(conn, scope_id: str) -> Optional[dict[str, Any]]:
     return dict(row) if row is not None else None
 
 
-def _scope_workdir(conn, scope_id: Any) -> Optional[str]:
-    if not scope_id:
-        return None
-    value = conn.execute(
-        select(scope_settings.c.workdir).where(scope_settings.c.scope_id == str(scope_id))
-    ).scalar_one_or_none()
-    return _normalize_workdir(value)
-
-
 def _authoritative_session_workdir(
-    conn,
     row: dict[str, Any],
     *,
-    controller: Any,
     platform: str,
     settings_key: str,
     session_key: str,
-    fallback_anchor: str,
     source: str,
 ) -> str:
-    """Return ``agent_sessions.workdir`` and repair legacy blanks once.
+    """Return the existing Session's stored workdir, without fallback."""
 
-    New sessions must be created with a workdir snapshot. This function exists
-    for old rows only: if the stored workdir is missing or is a legacy
-    anchor-derived placeholder, choose a migration value and write it back.
-    """
-
-    session_id = _optional_str(row.get("id"))
-    stored = _session_row_workdir(row, fallback_anchor=fallback_anchor)
-    if stored:
-        return _resolve_workdir(
-            stored,
-            controller=controller,
-            platform=platform,
-            settings_key=settings_key,
-            session_key=session_key,
-            source=source,
-        )
-
-    repaired = _resolve_workdir(
-        _scope_workdir(conn, row.get("scope_id")),
-        controller=controller,
+    session_id = _optional_str(row.get("id")) or "<unknown>"
+    try:
+        stored = _normalize_workdir(row.get("workdir"))
+    except OSError as exc:
+        raise RuntimeError(f"agent session {session_id} has invalid workdir") from exc
+    if not stored:
+        raise RuntimeError(f"agent session {session_id} is missing workdir")
+    ensured = _ensure_workdir(
+        stored,
         platform=platform,
         settings_key=settings_key,
         session_key=session_key,
-        source=f"{source}_legacy_repair",
+        source=source,
     )
-    if session_id:
-        conn.execute(
-            agent_sessions.update()
-            .where(agent_sessions.c.id == session_id)
-            .values(workdir=repaired)
-        )
-        logger.warning("Repaired legacy agent session workdir session_id=%s workdir=%s", session_id, repaired)
-    return repaired
+    if not ensured:
+        raise RuntimeError(f"agent session {session_id} workdir is not usable: {stored}")
+    return ensured
 
 
 def _target_from_session_row(
@@ -667,25 +633,6 @@ def _unpersisted_target(
         model=agent_target.model if agent_target else None,
         reasoning_effort=agent_target.reasoning_effort if agent_target else None,
     )
-
-
-def _session_row_workdir(row: dict[str, Any], *, fallback_anchor: str) -> Optional[str]:
-    workdir = _normalize_workdir(row.get("workdir"))
-    if not workdir:
-        return None
-    native_session_id = _optional_str(row.get("native_session_id"))
-    anchor = str(row.get("session_anchor") or fallback_anchor)
-    placeholder = _normalize_workdir(_workdir_from_anchor(anchor))
-    if not native_session_id and placeholder and workdir == placeholder:
-        return None
-    return workdir
-
-
-def _workdir_from_anchor(anchor: str) -> Optional[str]:
-    if ":" not in anchor:
-        return None
-    suffix = anchor.rsplit(":", 1)[1]
-    return suffix or None
 
 
 def _normalize_workdir(value: Any) -> Optional[str]:
