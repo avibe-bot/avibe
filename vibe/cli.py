@@ -339,8 +339,8 @@ def _hook_send_examples_text() -> str:
           `--message` and `--message-file` provide the one-shot async user message that will be queued immediately.
 
         Examples:
-          vibe agent run --agent release-reviewer --no-callback --message 'The export finished. Share the summary.'
-          vibe agent run --agent release-reviewer --no-callback --message 'Run the benchmark; I will inspect the run later.'
+          vibe agent run --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
+          vibe agent run --session-id sesk8m4q2p7x --no-callback --message 'Run the benchmark; I will inspect the run later.'
         """
     )
 
@@ -529,10 +529,10 @@ def _show_path_examples_text() -> str:
         src/styles.css, index.html, and a sample api/health.ts handler.
 
         First-run workflow:
-          1. Run: vibe show path
+          1. Run: vibe show path --session-id sesk8m4q2p7x
           2. Write or update src/App.tsx in the returned path.
           3. Share the active URL if the command output includes one.
-          4. Run `vibe show update --visibility public` only when the user asks for a shareable public link.
+          4. Run `vibe show update --session-id sesk8m4q2p7x --visibility public` only when the user asks for a shareable public link.
         """
     )
 
@@ -654,12 +654,13 @@ def _agent_run_examples_text() -> str:
           --fork-session <session-id> creates a new Avibe Agent Session and asks the native backend to fork the source native session on the first turn.
           Forks keep the same backend, scope, and cwd as the source Session. Passing --agent is allowed only when that Agent uses the same backend.
           --agent, --model, and --reasoning-effort may override the forked Session's Agent/model/effort.
-          Do not combine fork flags with --session-id, --create-session, or --create-session-per-run.
+          Do not combine fork flags with --session-id or --create-session.
 
         Examples:
           vibe agent run --agent release-reviewer --no-callback --message 'Review the latest deployment result.'
           vibe agent run --agent release-reviewer --same-scope --no-callback --message 'Review this project in a visible sibling Session.'
           vibe agent run --sync --agent release-reviewer --message 'Review the latest CI result and print it here.'
+          vibe agent run --agent release-reviewer --callback-session-id sescaller456 --message 'Review the latest CI result and report back.'
           vibe agent run --agent release-reviewer --no-callback --message 'Run a background experiment; I will inspect the run later.'
           vibe agent run --fork-self --message 'Explore this alternate fix from the current context.'
           vibe agent run --fork-session sesk8m4q2p7x --agent reviewer --model gpt-5.4 --reasoning-effort high --message 'Review the forked context.'
@@ -8675,7 +8676,7 @@ def build_parser():
     agent_run_parser.add_argument("--fork-session", help="Existing Agent Session ID to fork into a new Session")
     agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork this current Agent Session")
     agent_run_parser.add_argument("--create-session", action="store_true", help="Create a new Avibe Session ID before running")
-    agent_run_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID for each definition run")
+    agent_run_parser.add_argument("--create-session-per-run", action="store_true", help=argparse.SUPPRESS)
     agent_run_parser.add_argument("--same-scope", action="store_true", help="Place a new or forked Session in the caller/source Session scope")
     agent_run_parser.add_argument("--scope-id", help="Existing scopes.id that should own the new or forked Session")
     agent_run_parser.add_argument("--deliver-key", help=argparse.SUPPRESS)

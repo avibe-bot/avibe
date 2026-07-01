@@ -238,8 +238,7 @@ an existing Session's native backend context instead of starting blank. The new
 Session keeps the source backend. `--agent`, `--model`, and
 `--reasoning-effort` can override the forked Session only when the Agent backend
 stays the same; a cross-backend fork is rejected. Do not combine
-`--fork-session` with `--session-id`, `--create-session`, or
-`--create-session-per-run`.
+`--fork-session` with `--session-id` or `--create-session`.
 
 Async runs need an explicit callback policy unless the command is running inside
 an Avibe-injected Agent environment. Use `--callback-session-id` when the final
@@ -291,7 +290,8 @@ including `--timeout` (per-cycle timeout in seconds), `--lifetime-timeout`
 (total wall-clock limit), `--forever`, `--retry-exit-code`, `--retry-delay`,
 `--name`, and session creation flags. Watches share `--session-id`,
 `--create-session`, `--create-session-per-run`, `--same-scope`, and `--scope-id`
-semantics with `vibe task` and `vibe agent run`. `vibe watch remove` hides the watch from management
+semantics with `vibe task`; direct `vibe agent run` uses `--create-session`
+for one-shot session creation. `vibe watch remove` hides the watch from management
 views while preserving existing run history in SQLite. Prefer `vibe watch`
 over ad-hoc `nohup` jobs when the
 user wants a managed background task with a guaranteed follow-up message.

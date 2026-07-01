@@ -826,7 +826,6 @@ Important options:
 - `--session-id`
 - `--fork-session`
 - `--create-session`
-- `--create-session-per-run`
 - `--same-scope`
 - `--scope-id`
 - `--model`
@@ -848,8 +847,8 @@ Session's native backend context. It is for alternate investigations or
 delegated work that should keep the source context without mutating the source
 Session. Forks keep the same backend as the source; `--agent`, `--model`, and
 `--reasoning-effort` may override the forked Session only when the backend does
-not change. Do not combine `--fork-session` with `--session-id`,
-`--create-session`, or `--create-session-per-run`.
+not change. Do not combine `--fork-session` with `--session-id` or
+`--create-session`.
 
 ## 5.4 `vibe runs`
 
