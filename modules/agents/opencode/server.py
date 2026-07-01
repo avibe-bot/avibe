@@ -125,7 +125,10 @@ class OpenCodeServerManager:
                     request_timeout_seconds=request_timeout_seconds,
                     resource_governor=resource_governor,
                 )
-            elif (
+                return cls._instance
+            if resource_governor is not None:
+                cls._instance.resource_governor = resource_governor
+            if (
                 cls._instance.binary != binary
                 or cls._instance.port != port
                 or cls._instance.request_timeout_seconds != request_timeout_seconds
@@ -137,8 +140,6 @@ class OpenCodeServerManager:
                     f"ignoring new params binary={binary}, port={port}, "
                     f"request_timeout_seconds={request_timeout_seconds}"
                 )
-            elif resource_governor is not None:
-                cls._instance.resource_governor = resource_governor
             return cls._instance
 
     @classmethod

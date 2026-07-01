@@ -1,10 +1,13 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
 from core.resource_governance import (
     MIB,
     AgentResourceGovernor,
+    config_from_controller,
     derive_agent_limits,
     tenant_memory_limit_bytes,
 )
@@ -51,6 +54,28 @@ def test_tenant_memory_limit_walks_to_parent_cap(tmp_path: Path) -> None:
     (child / "memory.max").write_text("max\n", encoding="utf-8")
 
     assert tenant_memory_limit_bytes(child, root) == 2 * 1024 * MIB
+
+
+def test_config_from_controller_reads_v2_runtime_resource_governance() -> None:
+    v2_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(
+            default_cwd=".",
+            resource_governance={
+                "mode": "disabled",
+                "agent_group_name": "custom-agents",
+            },
+        ),
+    )
+    controller = SimpleNamespace(config=v2_config)
+
+    assert config_from_controller(controller) == {
+        "mode": "disabled",
+        "agent_group_name": "custom-agents",
+    }
 
 
 def test_governor_disabled_mode_does_not_create_group(tmp_path: Path) -> None:
@@ -138,6 +163,7 @@ def test_governor_configures_group_and_moves_pid(tmp_path: Path, monkeypatch: py
         path.write_text(f"{value}\n", encoding="utf-8")
 
     monkeypatch.setattr("core.resource_governance._write_cgroup_value", fake_write_cgroup_value)
+    monkeypatch.setattr("core.resource_governance._runtime_process_tree_pids", lambda pid=None: {1001, 1002})
 
     assert governor.apply_to_pid(4321, label="test") is True
 
@@ -193,6 +219,39 @@ def test_governor_falls_back_when_runtime_leaf_cannot_be_created(tmp_path: Path)
 
     assert governor.apply_to_pid(4321, label="test") is False
     assert governor.group_path is None
+
+
+def test_governor_falls_back_when_base_has_foreign_member_pids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "cgroup"
+    base = root / "service"
+    base.mkdir(parents=True)
+    (base / "memory.max").write_text(str(512 * MIB), encoding="utf-8")
+    (base / "cgroup.procs").write_text("1001\n2002\n", encoding="utf-8")
+
+    governor = AgentResourceGovernor({"mode": "auto"}, root=root, base_cgroup=base)
+    runtime_group = base / "avibe-runtime"
+    original_mkdir = Path.mkdir
+    writes: list[str] = []
+
+    def mkdir_with_runtime_file(path: Path, *args, **kwargs):
+        result = original_mkdir(path, *args, **kwargs)
+        if path == runtime_group:
+            (runtime_group / "cgroup.procs").write_text("", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(Path, "mkdir", mkdir_with_runtime_file)
+    monkeypatch.setattr("core.resource_governance._runtime_process_tree_pids", lambda pid=None: {1001})
+    monkeypatch.setattr(
+        "core.resource_governance._write_cgroup_value",
+        lambda path, value: writes.append(value),
+    )
+
+    assert governor.apply_to_pid(4321, label="test") is False
+    assert governor.group_path is None
+    assert writes == []
 
 
 def test_governor_falls_back_when_subtree_control_enable_fails(

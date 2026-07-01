@@ -196,6 +196,11 @@ def _cgroup_member_pids(cgroup: Path) -> list[int]:
     return pids
 
 
+def _runtime_process_tree_pids(pid: int | None = None) -> set[int]:
+    root_pid = pid or os.getpid()
+    return {root_pid, *_descendant_pids(root_pid)}
+
+
 def _descendant_pids(pid: int) -> list[int]:
     pending = [pid]
     descendants: list[int] = []
@@ -372,6 +377,10 @@ class AgentResourceGovernor:
             pids = [pid for pid in _cgroup_member_pids(base) if pid > 0]
             if not pids:
                 return
+            runtime_pids = _runtime_process_tree_pids()
+            foreign_pids = [pid for pid in pids if pid not in runtime_pids]
+            if foreign_pids:
+                raise OSError(f"runtime cgroup has non-Avibe member pids: {base}")
             moved = False
             for pid in pids:
                 try:
@@ -433,9 +442,26 @@ class AgentResourceGovernor:
 
 
 def config_from_controller(controller: Any) -> dict[str, Any]:
-    runtime_config = getattr(getattr(controller, "config", None), "resource_governance", None)
+    return config_from_runtime(getattr(controller, "config", None))
+
+
+def config_from_runtime(config: Any) -> dict[str, Any]:
+    runtime_config = getattr(config, "resource_governance", None)
     if isinstance(runtime_config, dict):
         return runtime_config
+    nested_runtime = getattr(config, "runtime", None)
+    nested_config = getattr(nested_runtime, "resource_governance", None)
+    if isinstance(nested_config, dict):
+        return nested_config
+    if isinstance(config, dict):
+        direct = config.get("resource_governance")
+        if isinstance(direct, dict):
+            return direct
+        runtime = config.get("runtime")
+        if isinstance(runtime, dict):
+            nested = runtime.get("resource_governance")
+            if isinstance(nested, dict):
+                return nested
     return {"mode": "auto"}
 
 

@@ -1330,6 +1330,27 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls, [(1357, "opencode serve")])
 
+    async def test_get_instance_attaches_resource_governor_when_existing_params_differ(self):
+        first = OpenCodeServerManager(binary="/old/opencode", port=4096, request_timeout_seconds=60)
+        governor = types.SimpleNamespace(apply_to_pid=lambda pid, label="agent": True)
+        previous = OpenCodeServerManager._instance
+        OpenCodeServerManager._instance = first
+
+        try:
+            manager = await OpenCodeServerManager.get_instance(
+                binary="/new/opencode",
+                port=4100,
+                request_timeout_seconds=15,
+                resource_governor=governor,
+            )
+        finally:
+            OpenCodeServerManager._instance = previous
+
+        self.assertIs(manager, first)
+        self.assertIs(first.resource_governor, governor)
+        self.assertEqual(first.binary, "/old/opencode")
+        self.assertEqual(first.port, 4096)
+
     async def test_pending_detach_defers_runtime_reload_until_old_port_cleanup(self):
         manager = OpenCodeServerManager(binary="/old/opencode", port=4096, request_timeout_seconds=60)
         terminated = []

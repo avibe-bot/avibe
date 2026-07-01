@@ -2556,11 +2556,13 @@ class AgentAuthService:
         try:
             from config.v2_compat import to_app_config
             from config.v2_config import V2Config
+            from core.resource_governance import AgentResourceGovernor, config_from_runtime
             from modules.agents.opencode import OpenCodeServerManager
         except ImportError:
             return None
         try:
-            compat = to_app_config(V2Config.load())
+            v2_config = V2Config.load()
+            compat = to_app_config(v2_config)
         except Exception as err:  # noqa: BLE001
             logger.warning("V2Config.load failed in web OAuth path: %s", err)
             return None
@@ -2572,6 +2574,7 @@ class AgentAuthService:
                 binary=opencode_cfg.binary,
                 port=opencode_cfg.port,
                 request_timeout_seconds=opencode_cfg.request_timeout_seconds,
+                resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
             )
             await server.ensure_running()
             return server

@@ -3232,12 +3232,14 @@ async def opencode_options_async(cwd: str) -> dict:
     server = None
     try:
         from config.v2_compat import to_app_config
+        from core.resource_governance import AgentResourceGovernor, config_from_runtime
         from modules.agents.opencode import (
             OpenCodeServerManager,
             build_reasoning_effort_options,
         )
 
-        config = to_app_config(V2Config.load())
+        v2_config = V2Config.load()
+        config = to_app_config(v2_config)
         if not config.opencode:
             return {"ok": False, "error": "opencode disabled"}
         opencode_config = config.opencode
@@ -3269,6 +3271,7 @@ async def opencode_options_async(cwd: str) -> dict:
             binary=opencode_config.binary,
             port=opencode_config.port,
             request_timeout_seconds=opencode_config.request_timeout_seconds,
+            resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
         )
         await asyncio.wait_for(server.ensure_running(), timeout=timeout_seconds)
         agents = await asyncio.wait_for(server.get_available_agents(expanded_cwd), timeout=timeout_seconds)
@@ -7535,9 +7538,11 @@ async def _opencode_get_server():
     into a UI-friendly error.
     """
     from config.v2_compat import to_app_config
+    from core.resource_governance import AgentResourceGovernor, config_from_runtime
     from modules.agents.opencode import OpenCodeServerManager
 
-    config = to_app_config(V2Config.load())
+    v2_config = V2Config.load()
+    config = to_app_config(v2_config)
     if not config.opencode:
         return None
     opencode_config = config.opencode
@@ -7545,6 +7550,7 @@ async def _opencode_get_server():
         binary=opencode_config.binary,
         port=opencode_config.port,
         request_timeout_seconds=opencode_config.request_timeout_seconds,
+        resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
     )
     await server.ensure_running()
     return server

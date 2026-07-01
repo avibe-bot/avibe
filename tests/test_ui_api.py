@@ -107,6 +107,127 @@ def test_opencode_options_closes_server_http_session(monkeypatch):
     assert fake_manager.closed_loop is not None
 
 
+def test_opencode_options_passes_resource_governor_from_v2_runtime(monkeypatch):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+
+    captured_kwargs = {}
+
+    class _FakeManager:
+        async def ensure_running(self):
+            return "http://127.0.0.1:4096"
+
+        async def get_available_agents(self, directory):
+            return []
+
+        async def get_available_models(self, directory):
+            return {"providers": []}
+
+        async def get_providers(self):
+            return {"all": [], "connected": []}
+
+        async def get_default_config(self, directory):
+            return {}
+
+        async def close_http_session(self, *, loop=None):
+            pass
+
+    class _FakeServerManager:
+        @staticmethod
+        async def get_instance(**kwargs):
+            captured_kwargs.update(kwargs)
+            return _FakeManager()
+
+    v2_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(
+            default_cwd=".",
+            resource_governance={
+                "mode": "enabled",
+                "agent_group_name": "ui-agents",
+            },
+        ),
+    )
+    monkeypatch.setattr(api, "_OPENCODE_OPTIONS_CACHE", {})
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+    monkeypatch.setattr(
+        opencode_module,
+        "build_reasoning_effort_options",
+        lambda models, model_key: [{"value": "__default__"}],
+    )
+
+    result = asyncio.run(api.opencode_options_async("~/workspace"))
+
+    assert result["ok"] is True
+    governor = captured_kwargs["resource_governor"]
+    assert governor.mode == "enabled"
+    assert governor.config["agent_group_name"] == "ui-agents"
+
+
+def test_opencode_get_server_passes_resource_governor_from_v2_runtime(monkeypatch):
+    import config.v2_compat as v2_compat
+    import modules.agents.opencode as opencode_module
+
+    captured_kwargs = {}
+    fake_manager = SimpleNamespace(ensure_running=AsyncMock())
+
+    class _FakeServerManager:
+        @staticmethod
+        async def get_instance(**kwargs):
+            captured_kwargs.update(kwargs)
+            return fake_manager
+
+    v2_config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(),
+        agents=AgentsConfig(),
+        runtime=RuntimeConfig(
+            default_cwd=".",
+            resource_governance={
+                "mode": "enabled",
+                "agent_group_name": "provider-ui-agents",
+            },
+        )
+    )
+    monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: v2_config))
+    monkeypatch.setattr(
+        v2_compat,
+        "to_app_config",
+        lambda config: SimpleNamespace(
+            opencode=SimpleNamespace(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=10,
+            )
+        ),
+    )
+    monkeypatch.setattr(opencode_module, "OpenCodeServerManager", _FakeServerManager)
+
+    server = asyncio.run(api._opencode_get_server())
+
+    assert server is fake_manager
+    fake_manager.ensure_running.assert_awaited_once()
+    governor = captured_kwargs["resource_governor"]
+    assert governor.mode == "enabled"
+    assert governor.config["agent_group_name"] == "provider-ui-agents"
+
+
 def test_opencode_options_filters_unconfigured_provider_models(monkeypatch, tmp_path):
     import config.v2_compat as v2_compat
     import modules.agents.opencode as opencode_module
