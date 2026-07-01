@@ -230,7 +230,7 @@ vibe agent run --sync --agent release-reviewer --message 'Review the latest depl
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
 vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
-vibe agent run --no-callback --create-session --same-scope --agent release-reviewer --message 'Post the deployment summary.'
+vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
 ```
 
 Use `--fork-session <session-id>` when a new Agent Session should branch from
