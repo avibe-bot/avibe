@@ -110,6 +110,14 @@ class OpenCodeServerManager:
             self._lock_loop = current_loop
         return self._lock
 
+    def _maybe_update_resource_governor(self, resource_governor: Any | None) -> None:
+        if resource_governor is None:
+            return
+        if is_controller_resource_governor(resource_governor) or not is_controller_resource_governor(
+            self.resource_governor
+        ):
+            self.resource_governor = resource_governor
+
     @classmethod
     async def get_instance(
         cls,
@@ -127,11 +135,7 @@ class OpenCodeServerManager:
                     resource_governor=resource_governor,
                 )
                 return cls._instance
-            if resource_governor is not None and (
-                is_controller_resource_governor(resource_governor)
-                or not is_controller_resource_governor(cls._instance.resource_governor)
-            ):
-                cls._instance.resource_governor = resource_governor
+            cls._instance._maybe_update_resource_governor(resource_governor)
             if (
                 cls._instance.binary != binary
                 or cls._instance.port != port
@@ -156,6 +160,7 @@ class OpenCodeServerManager:
     ) -> Optional["OpenCodeServerManager"]:
         with cls._class_lock:
             if cls._instance is not None:
+                cls._instance._maybe_update_resource_governor(resource_governor)
                 return cls._instance
 
             pid_file = paths.get_logs_dir() / "opencode_server.json"

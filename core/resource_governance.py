@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 DEFAULT_GROUP_NAME = "avibe-agents"
 DEFAULT_RUNTIME_GROUP_NAME = "avibe-runtime"
-DEFAULT_AGENT_CPU_WEIGHT = 150
-DEFAULT_AGENT_IO_WEIGHT = 100
+DEFAULT_AGENT_CPU_WEIGHT = 50
+DEFAULT_AGENT_IO_WEIGHT = 50
 DEFAULT_AGENT_PIDS_MAX = 512
 DEFAULT_AGENT_OOM_SCORE_ADJ = 500
 MIN_AGENT_MEMORY_MAX_BYTES = 512 * 1024 * 1024
@@ -270,11 +270,13 @@ class AgentResourceGovernor:
     def apply_to_pid(self, pid: int | None, *, label: str = "agent") -> bool:
         if not isinstance(pid, int) or pid <= 0:
             return False
-        group = self._ensure_group()
+        descendant_pids = _descendant_pids(pid)
+        known_agent_pids = {pid, *descendant_pids}
+        group = self._ensure_group(known_agent_pids=known_agent_pids)
         if group is None:
             return False
         moved = self._move_pid(group, pid, label=label)
-        for child_pid in _descendant_pids(pid):
+        for child_pid in descendant_pids:
             self._move_pid(group, child_pid, label=f"{label} child", warn=False)
         return moved
 
@@ -288,7 +290,7 @@ class AgentResourceGovernor:
             log("Agent resource governance could not move %s pid=%s into cgroup: %s", label, pid, exc)
             return False
 
-    def _ensure_group(self) -> Path | None:
+    def _ensure_group(self, *, known_agent_pids: set[int] | None = None) -> Path | None:
         if self._group is not None:
             return self._group
         if self.mode == "disabled":
@@ -314,7 +316,7 @@ class AgentResourceGovernor:
         group = base / group_name
         runtime_group = base / runtime_group_name
         try:
-            self._prepare_base_cgroup(base, runtime_group, root)
+            self._prepare_base_cgroup(base, runtime_group, group, root, known_agent_pids=known_agent_pids)
             self._enable_subtree_controllers(base)
             group.mkdir(exist_ok=True)
             limits = derive_agent_limits(tenant_memory_limit_bytes(base, root), self.config)
@@ -358,7 +360,15 @@ class AgentResourceGovernor:
             return cgroup.parent
         return cgroup
 
-    def _prepare_base_cgroup(self, base: Path, runtime_group: Path, root: Path) -> None:
+    def _prepare_base_cgroup(
+        self,
+        base: Path,
+        runtime_group: Path,
+        agent_group: Path,
+        root: Path,
+        *,
+        known_agent_pids: set[int] | None = None,
+    ) -> None:
         try:
             is_root = base.resolve() == root.resolve()
         except OSError:
@@ -371,27 +381,53 @@ class AgentResourceGovernor:
         runtime_group.mkdir(exist_ok=True)
         if not (runtime_group / "cgroup.procs").exists():
             raise OSError(f"runtime cgroup.procs is unavailable in {runtime_group}")
-        self._move_base_processes_to_runtime_leaf(base, runtime_group)
+        self._move_base_processes_to_runtime_leaf(
+            base,
+            runtime_group,
+            agent_group,
+            known_agent_pids=known_agent_pids,
+        )
 
-    def _move_base_processes_to_runtime_leaf(self, base: Path, runtime_group: Path) -> None:
+    def _move_base_processes_to_runtime_leaf(
+        self,
+        base: Path,
+        runtime_group: Path,
+        agent_group: Path,
+        *,
+        known_agent_pids: set[int] | None = None,
+    ) -> None:
+        known_agent_pids = known_agent_pids or set()
+        agent_group_ready = False
         for _ in range(3):
             pids = [pid for pid in _cgroup_member_pids(base) if pid > 0]
             if not pids:
                 return
             runtime_pids = _runtime_process_tree_pids()
-            foreign_pids = [pid for pid in pids if pid not in runtime_pids]
+            managed_pids = runtime_pids | known_agent_pids
+            foreign_pids = [pid for pid in pids if pid not in managed_pids]
             if foreign_pids:
                 raise OSError(f"runtime cgroup has non-Avibe member pids: {base}")
             moved = False
             for pid in pids:
+                target_group = runtime_group
+                target_label = "Avibe runtime"
+                if pid in known_agent_pids:
+                    if not agent_group_ready:
+                        agent_group.mkdir(exist_ok=True)
+                        if not (agent_group / "cgroup.procs").exists():
+                            raise OSError(f"agent cgroup.procs is unavailable in {agent_group}")
+                        agent_group_ready = True
+                    target_group = agent_group
+                    target_label = "known agent"
                 try:
-                    _write_cgroup_value(runtime_group / "cgroup.procs", str(pid))
+                    _write_cgroup_value(target_group / "cgroup.procs", str(pid))
                     moved = True
                 except OSError as exc:
                     logger.debug(
-                        "Failed to move Avibe runtime pid=%s into runtime cgroup %s: %s",
+                        "Failed to move %s pid=%s into cgroup %s: %s",
+                        target_label,
                         pid,
-                        runtime_group,
+                        target_group,
                         exc,
                     )
             if not moved:

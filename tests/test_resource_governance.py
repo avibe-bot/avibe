@@ -20,8 +20,8 @@ def test_derive_agent_limits_uses_single_aggregate_budget() -> None:
 
     assert limits.memory_max == 2785 * MIB
     assert limits.memory_high == 2367 * MIB
-    assert limits.cpu_weight == 150
-    assert limits.io_weight == 100
+    assert limits.cpu_weight == 50
+    assert limits.io_weight == 50
     assert limits.pids_max == 512
 
 
@@ -184,8 +184,8 @@ def test_governor_configures_group_and_moves_pid(tmp_path: Path, monkeypatch: py
     assert (group / "memory.max").read_text(encoding="utf-8").strip() == str(1382 * MIB)
     assert (group / "memory.high").read_text(encoding="utf-8").strip() == str(1174 * MIB)
     assert (group / "memory.oom.group").read_text(encoding="utf-8").strip() == "1"
-    assert (group / "cpu.weight").read_text(encoding="utf-8").strip() == "150"
-    assert (group / "io.weight").read_text(encoding="utf-8").strip() == "default 100"
+    assert (group / "cpu.weight").read_text(encoding="utf-8").strip() == "50"
+    assert (group / "io.weight").read_text(encoding="utf-8").strip() == "default 50"
     assert (group / "pids.max").read_text(encoding="utf-8").strip() == "512"
 
 
@@ -263,6 +263,60 @@ def test_governor_falls_back_when_base_has_foreign_member_pids(
     assert governor.apply_to_pid(4321, label="test") is False
     assert governor.group_path is None
     assert writes == []
+
+
+def test_governor_allows_known_agent_pids_during_base_migration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "cgroup"
+    base = root / "service"
+    base.mkdir(parents=True)
+    (base / "memory.max").write_text(str(512 * MIB), encoding="utf-8")
+    (base / "cgroup.procs").write_text("1001\n5001\n5002\n", encoding="utf-8")
+    (base / "cgroup.controllers").write_text("cpu io pids\n", encoding="utf-8")
+    (base / "cgroup.subtree_control").write_text("", encoding="utf-8")
+
+    governor = AgentResourceGovernor({"mode": "enabled"}, root=root, base_cgroup=base)
+    group = base / "avibe-agents"
+    runtime_group = base / "avibe-runtime"
+    original_mkdir = Path.mkdir
+    runtime_writes: list[str] = []
+    agent_writes: list[str] = []
+
+    def mkdir_with_controller_files(path: Path, *args, **kwargs):
+        result = original_mkdir(path, *args, **kwargs)
+        if path == group:
+            for name in ("cpu.weight", "io.weight", "pids.max", "cgroup.procs"):
+                (group / name).write_text("", encoding="utf-8")
+        if path == runtime_group:
+            (runtime_group / "cgroup.procs").write_text("", encoding="utf-8")
+        return result
+
+    def fake_write_cgroup_value(path: Path, value: str) -> None:
+        if path == runtime_group / "cgroup.procs":
+            runtime_writes.append(value)
+        elif path == group / "cgroup.procs":
+            agent_writes.append(value)
+        else:
+            path.write_text(f"{value}\n", encoding="utf-8")
+            return
+        remaining = [pid for pid in _base_members() if pid != value]
+        (base / "cgroup.procs").write_text("\n".join(remaining) + ("\n" if remaining else ""), encoding="utf-8")
+
+    def _base_members() -> list[str]:
+        text = (base / "cgroup.procs").read_text(encoding="utf-8")
+        return [pid for pid in text.split() if pid]
+
+    monkeypatch.setattr(Path, "mkdir", mkdir_with_controller_files)
+    monkeypatch.setattr("core.resource_governance._runtime_process_tree_pids", lambda pid=None: {1001})
+    monkeypatch.setattr("core.resource_governance._descendant_pids", lambda pid: [5002])
+    monkeypatch.setattr("core.resource_governance._write_cgroup_value", fake_write_cgroup_value)
+
+    assert governor.apply_to_pid(5001, label="test") is True
+    assert runtime_writes == ["1001"]
+    assert agent_writes == ["5001", "5002", "5001", "5002"]
+    assert governor.group_path == group
 
 
 def test_governor_falls_back_when_subtree_control_enable_fails(

@@ -1407,6 +1407,34 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(manager, first)
         self.assertIs(first.resource_governor, controller_governor)
 
+    async def test_get_instance_if_managed_server_exists_allows_controller_governor_takeover(self):
+        from core.resource_governance import mark_controller_resource_governor
+
+        ui_governor = types.SimpleNamespace(apply_to_pid=lambda pid, label="agent": True)
+        controller_governor = types.SimpleNamespace(apply_to_pid=lambda pid, label="agent": True)
+        mark_controller_resource_governor(controller_governor)
+        first = OpenCodeServerManager(
+            binary="opencode",
+            port=4096,
+            request_timeout_seconds=60,
+            resource_governor=ui_governor,
+        )
+        previous = OpenCodeServerManager._instance
+        OpenCodeServerManager._instance = first
+
+        try:
+            manager = await OpenCodeServerManager.get_instance_if_managed_server_exists(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=60,
+                resource_governor=controller_governor,
+            )
+        finally:
+            OpenCodeServerManager._instance = previous
+
+        self.assertIs(manager, first)
+        self.assertIs(first.resource_governor, controller_governor)
+
     async def test_pending_detach_defers_runtime_reload_until_old_port_cleanup(self):
         manager = OpenCodeServerManager(binary="/old/opencode", port=4096, request_timeout_seconds=60)
         terminated = []
