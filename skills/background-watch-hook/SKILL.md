@@ -130,9 +130,11 @@ Use the current Avibe context:
 
 - Inside an Avibe-injected Agent shell, omitting the target continues this conversation.
 - Use `--session-id <id>` only when the follow-up should continue a different existing Agent Session.
-- Use `--create-session --same-scope` when each follow-up should run in a visible sibling Session under the same Workbench project or IM scope.
-- Use `--create-session --scope-id <scopes.id>` when each follow-up should run in a specific existing scope.
-- If `--cwd` is omitted while creating a Session, Avibe follows the caller Session cwd.
+- Use `--create-session --same-scope` when follow-ups should run in one visible sibling Session under the same Workbench project or IM scope.
+- For `--forever` watches that need a separate visible Session for each event, use `--create-session-per-run --same-scope`.
+- Use `--create-session --scope-id <scopes.id>` when follow-ups should run in one Session under a specific existing scope.
+- For separate visible Sessions in a specific existing scope, use `--create-session-per-run --scope-id <scopes.id>`.
+- If `--cwd` is omitted while creating a Session, Avibe uses the command's current working directory.
 
 ## Timeout And Lifecycle
 

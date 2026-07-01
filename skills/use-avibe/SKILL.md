@@ -772,8 +772,8 @@ Agents should prefer these managed harness commands over ad-hoc detached shells 
 
 Preferred CLI shape:
 
-- delegate to another Agent in a private/background Session: `vibe agent run --agent '<agent-name>' --message '...'`
-- delegate to a visible sibling Session in the same scope: `vibe agent run --agent '<agent-name>' --same-scope --message '...'`
+- delegate to another Agent in a private/background Session from an Avibe Agent shell: `vibe agent run --agent '<agent-name>' --message '...'`
+- delegate to a visible sibling Session in the same scope from an Avibe Agent shell: `vibe agent run --agent '<agent-name>' --same-scope --message '...'`
 - wait for an Agent result in the terminal: `vibe agent run --sync --agent '<agent-name>' --message '...'`
 - continue a specific existing Session: `vibe agent run --session-id '<session-id>' --message '...'`
 - fork this Session for an alternate path: `vibe agent run --fork-self --message '...'`
@@ -794,7 +794,7 @@ Targeting and callbacks:
 - Use `--session-id <id>` only when the command should operate on a different existing Agent Session.
 - When `vibe agent run --session-id <id>` targets an existing Session, it sends a new message into that Session. It does not change that Session's cwd, scope, Agent, model, or reasoning settings.
 - When `vibe agent run` creates a new Session, the default placement is private/background. Add `--same-scope` for a visible sibling Session in the same Workbench project or IM scope, or `--scope-id <scopes.id>` for a specific existing scope.
-- When a task, watch, fork, or new Agent run creates a Session and `--cwd` is omitted, Avibe follows the caller or source Session cwd.
+- When a task, watch, or new Agent run creates a Session and `--cwd` is omitted, Avibe uses the command's current working directory. Forks keep the source Session cwd by default.
 - Async Agent runs return the final result to this conversation by default. Pass `--no-callback` only when you will inspect the run later with `vibe runs`. Pass `--callback-session-id <id>` only when the final result should return to a different Session.
 - `--message` and `--message-file` are the user-message flags for task, watch, and agent-run commands.
 - `vibe task add` stores the message template and creates Agent Runs when the time trigger fires.
