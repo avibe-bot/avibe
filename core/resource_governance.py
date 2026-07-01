@@ -20,6 +20,7 @@ DEFAULT_AGENT_OOM_SCORE_ADJ = 500
 MIN_AGENT_MEMORY_MAX_BYTES = 512 * 1024 * 1024
 MIB = 1024 * 1024
 AGENT_CONTROLLERS = ("memory", "cpu", "io", "pids")
+CONTROLLER_GOVERNOR_ATTR = "_avibe_controller_owned_resource_governor"
 
 
 @dataclass(frozen=True)
@@ -465,10 +466,20 @@ def config_from_runtime(config: Any) -> dict[str, Any]:
     return {"mode": "auto"}
 
 
+def mark_controller_resource_governor(governor: Any) -> None:
+    setattr(governor, CONTROLLER_GOVERNOR_ATTR, True)
+
+
+def is_controller_resource_governor(governor: Any) -> bool:
+    return bool(getattr(governor, CONTROLLER_GOVERNOR_ATTR, False))
+
+
 def governor_from_controller(controller: Any) -> AgentResourceGovernor:
     existing = getattr(controller, "_agent_resource_governor", None)
     if isinstance(existing, AgentResourceGovernor):
+        mark_controller_resource_governor(existing)
         return existing
     governor = AgentResourceGovernor(config_from_controller(controller))
+    mark_controller_resource_governor(governor)
     setattr(controller, "_agent_resource_governor", governor)
     return governor

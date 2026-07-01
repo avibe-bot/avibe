@@ -9,6 +9,8 @@ from core.resource_governance import (
     AgentResourceGovernor,
     config_from_controller,
     derive_agent_limits,
+    is_controller_resource_governor,
+    governor_from_controller,
     tenant_memory_limit_bytes,
 )
 
@@ -76,6 +78,15 @@ def test_config_from_controller_reads_v2_runtime_resource_governance() -> None:
         "mode": "disabled",
         "agent_group_name": "custom-agents",
     }
+
+
+def test_governor_from_controller_marks_long_lived_governor() -> None:
+    controller = SimpleNamespace(config=SimpleNamespace(resource_governance={"mode": "auto"}))
+
+    governor = governor_from_controller(controller)
+
+    assert is_controller_resource_governor(governor) is True
+    assert governor_from_controller(controller) is governor
 
 
 def test_governor_disabled_mode_does_not_create_group(tmp_path: Path) -> None:

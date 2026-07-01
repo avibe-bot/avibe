@@ -25,6 +25,7 @@ import aiohttp
 
 from config import paths
 from core.process_isolation import isolated_subprocess_kwargs, terminate_process_tree
+from core.resource_governance import is_controller_resource_governor
 from modules.agents.opencode.caller_context import ensure_plugin_installed, server_environment
 from modules.agents.opencode.config_reconciler import OpenCodeConfigReconciler
 from vibe import runtime
@@ -126,7 +127,10 @@ class OpenCodeServerManager:
                     resource_governor=resource_governor,
                 )
                 return cls._instance
-            if resource_governor is not None:
+            if resource_governor is not None and (
+                is_controller_resource_governor(resource_governor)
+                or not is_controller_resource_governor(cls._instance.resource_governor)
+            ):
                 cls._instance.resource_governor = resource_governor
             if (
                 cls._instance.binary != binary
