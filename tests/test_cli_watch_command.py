@@ -65,7 +65,7 @@ def test_watch_help_describes_session_id_guidance(capsys) -> None:
     assert exc.value.code == 0
     captured = capsys.readouterr()
     assert "managed background watchers" in captured.out
-    assert "vibe watch add --name 'Wait for export' --message" in captured.out
+    assert "vibe watch add --session-id sesk8m4q2p7x --name 'Wait for export' --message" in captured.out
     assert "{add,update,list,show,pause,resume,remove}" in captured.out
 
 
@@ -79,11 +79,15 @@ def test_watch_add_help_mentions_shell_and_lifetime_timeout(capsys) -> None:
     captured = capsys.readouterr()
     assert "Pass either --shell '<command>' or a command after '--'." in captured.out
     assert "--lifetime-timeout" in captured.out
-    assert "vibe watch add --message 'The export finished. Inspect it and continue.'" in captured.out
+    assert "vibe watch add --session-id sesk8m4q2p7x --message 'The export finished. Inspect it and continue.'" in captured.out
     assert "watches follow up in this conversation by default" in captured.out
     assert "Prefer --message or --message-file for follow-up instructions" in captured.out
     assert "Terminal failures also send a follow-up and disable the watch." in captured.out
     assert "If this is your first time using this command, read this whole help entry before creating a watch." in captured.out
+    assert "--same-scope" in captured.out
+    assert "--scope-id" in captured.out
+    assert "--post-to" not in captured.out
+    assert "--deliver-key" not in captured.out
 
 
 def test_watch_add_parser_keeps_top_level_command_name() -> None:

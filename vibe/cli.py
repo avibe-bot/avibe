@@ -260,11 +260,11 @@ def _task_examples_text() -> str:
     return dedent(
         """\
         Examples:
-          vibe task add --cron '0 * * * *' --message 'Share the hourly summary in this caller Session.'
+          vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
           vibe task update 12ab34cd56ef --cron '*/30 * * * *' --name 'Half-hour summary'
           vibe task run 12ab34cd56ef
-          vibe task add --post-to channel --cron '*/5 * * * *' --message 'Tell a new joke each time.'
-          vibe task add --at '2026-03-31T09:00:00+08:00' --message-file briefing.md
+          vibe task add --create-session --scope-id slack::channel::C123 --cron '*/5 * * * *' --message 'Tell a new joke each time.'
+          vibe task add --create-session --scope-id slack::channel::C123 --at '2026-03-31T09:00:00+08:00' --message-file briefing.md
         """
     )
 
@@ -279,9 +279,8 @@ def _task_add_examples_text() -> str:
         Guidance:
           If this is your first time using this command, read this whole help entry before creating a task.
           `--session-id` chooses which Agent Session Avibe will continue using when the task runs.
-          `--post-to channel` changes where the message is posted, not which session is continued.
-          Use --create-session with --same-scope to create a reusable sibling Session in the current Workbench project or IM scope.
           Use --create-session with --scope-id <scopes.id> to create a reusable Session in a specific existing scope.
+          Use --create-session with --same-scope only from an Avibe Agent shell, where the caller Session scope is available.
           Use --cwd only for Sessions created by this task; existing target Sessions keep their own cwd.
           `--message` and `--message-file` provide the stored user message that will be sent each time the task runs.
           Use --cron for recurring jobs and --at for one-shot jobs.
@@ -289,9 +288,9 @@ def _task_add_examples_text() -> str:
           --timezone controls how --cron and naive --at timestamps are interpreted.
 
         Examples:
-          vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'
-          vibe task add --post-to channel --cron '*/5 * * * *' --message 'Tell a new joke each time.'
-          vibe task add --create-session --same-scope --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'
+          vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
+          vibe task add --create-session --scope-id slack::channel::C123 --cron '*/5 * * * *' --message 'Tell a new joke each time.'
+          vibe task add --create-session --scope-id slack::channel::C123 --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'
         """
     )
 
@@ -305,8 +304,8 @@ def _task_update_examples_text() -> str:
           vibe task update 12ab34cd56ef --name 'Morning summary'
           vibe task update 12ab34cd56ef --cron '*/30 * * * *'
           vibe task update 12ab34cd56ef --message 'Send a shorter summary.'
-          vibe task update 12ab34cd56ef --session-id sesk8m4q2p7x --post-to channel
-          vibe task update 12ab34cd56ef --create-session --same-scope
+          vibe task update 12ab34cd56ef --session-id sesk8m4q2p7x
+          vibe task update 12ab34cd56ef --create-session --scope-id slack::channel::C123
           vibe task update 12ab34cd56ef --reset-delivery
 
         Guidance:
@@ -336,13 +335,12 @@ def _hook_send_examples_text() -> str:
           `--session-id` chooses which Agent Session Avibe will continue using for that one async turn.
           Keep the current session id when the hook should continue in the same session.
           If no session id is available, trigger this from an active Avibe conversation instead of guessing.
-          `--post-to channel` changes where the message is posted, not which session is continued.
           For new async one-shot work, prefer `vibe agent run`.
           `--message` and `--message-file` provide the one-shot async user message that will be queued immediately.
 
         Examples:
-          vibe agent run --agent release-reviewer --no-callback --message 'The export finished. Share the summary.'
-          vibe agent run --agent release-reviewer --no-callback --message 'Run the benchmark; I will inspect the run later.'
+          vibe agent run --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
+          vibe agent run --session-id sesk8m4q2p7x --no-callback --message 'Run the benchmark; I will inspect the run later.'
         """
     )
 
@@ -351,9 +349,9 @@ def _watch_examples_text() -> str:
     return dedent(
         """\
         Examples:
-          vibe watch add --name 'Wait for export' --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
-          vibe watch add --post-to channel --message 'The CI job finished. Inspect the result.' -- python3 scripts/wait_for_ci.py --build 42
-          vibe watch add --forever --retry-exit-code 75 --retry-delay 60 --message 'The log pattern appeared. Continue from the result below.' --shell 'bash scripts/wait_for_log_pattern.sh'
+          vibe watch add --session-id sesk8m4q2p7x --name 'Wait for export' --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
+          vibe watch add --create-session --scope-id slack::channel::C123 --message 'The CI job finished. Inspect the result.' -- python3 scripts/wait_for_ci.py --build 42
+          vibe watch add --session-id sesk8m4q2p7x --forever --retry-exit-code 75 --retry-delay 60 --message 'The log pattern appeared. Continue from the result below.' --shell 'bash scripts/wait_for_log_pattern.sh'
           vibe watch list --brief
           vibe watch show 12ab34cd56ef
           vibe watch pause 12ab34cd56ef
@@ -531,10 +529,10 @@ def _show_path_examples_text() -> str:
         src/styles.css, index.html, and a sample api/health.ts handler.
 
         First-run workflow:
-          1. Run: vibe show path
+          1. Run: vibe show path --session-id sesk8m4q2p7x
           2. Write or update src/App.tsx in the returned path.
           3. Share the active URL if the command output includes one.
-          4. Run `vibe show update --visibility public` only when the user asks for a shareable public link.
+          4. Run `vibe show update --session-id sesk8m4q2p7x --visibility public` only when the user asks for a shareable public link.
         """
     )
 
@@ -618,9 +616,8 @@ def _watch_add_examples_text() -> str:
           If this is your first time using this command, read this whole help entry before creating a watch.
           Use a watch when a script should wait in the background and send a follow-up when it detects an event or reaches a terminal failure.
           `--session-id` chooses which Agent Session Avibe will continue using for follow-up messages from the watch.
-          `--post-to channel` changes where the follow-up is posted, not which session is continued.
-          Use --create-session with --same-scope to create a reusable sibling Session in the current Workbench project or IM scope.
           Use --create-session with --scope-id <scopes.id> to create a reusable Session in a specific existing scope.
+          Use --create-session with --same-scope only from an Avibe Agent shell, where the caller Session scope is available.
           Prefer --message or --message-file for follow-up instructions; --prefix is legacy-compatible.
           Terminal failures also send a follow-up and disable the watch.
           In forever mode, failures are retried only when the waiter exits with an allowed `--retry-exit-code`.
@@ -628,9 +625,9 @@ def _watch_add_examples_text() -> str:
           --timeout applies to each cycle. --lifetime-timeout applies only to the whole forever watch lifetime.
 
         Examples:
-          vibe watch add --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
-          vibe watch add --post-to channel --message 'The export finished.' -- bash -lc 'sleep 120; echo done'
-          vibe watch add --forever --timeout 600 --lifetime-timeout 86400 --retry-exit-code 75 --retry-delay 30 --message 'PR #153 changed. Inspect it and continue.' -- uv run --no-project scripts/wait_pr.py --repo avibe-bot/avibe --pr 153
+          vibe watch add --session-id sesk8m4q2p7x --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
+          vibe watch add --create-session --scope-id slack::channel::C123 --message 'The export finished.' -- bash -lc 'sleep 120; echo done'
+          vibe watch add --session-id sesk8m4q2p7x --forever --timeout 600 --lifetime-timeout 86400 --retry-exit-code 75 --retry-delay 30 --message 'PR #153 changed. Inspect it and continue.' -- uv run --no-project scripts/wait_pr.py --repo avibe-bot/avibe --pr 153
         """
     )
 
@@ -646,8 +643,8 @@ def _agent_run_examples_text() -> str:
           --cwd only applies to new Sessions; existing Sessions keep their own cwd.
 
         Callback:
-          Agent runs are async by default and return their final result to this conversation by default.
-          Outside an Avibe Agent shell, pass --callback-session-id or --no-callback for async runs.
+          Agent runs are async by default. From an Avibe Agent shell, they return their final result to this conversation by default.
+          From a normal terminal, pass --callback-session-id or --no-callback for async runs.
           Pass --no-callback only when you intentionally want no automatic follow-up.
           Pass --callback-session-id only when the final result should return somewhere else.
           Pass --sync when the CLI should wait for the run result in the terminal.
@@ -657,13 +654,18 @@ def _agent_run_examples_text() -> str:
           --fork-session <session-id> creates a new Avibe Agent Session and asks the native backend to fork the source native session on the first turn.
           Forks keep the same backend, scope, and cwd as the source Session. Passing --agent is allowed only when that Agent uses the same backend.
           --agent, --model, and --reasoning-effort may override the forked Session's Agent/model/effort.
-          Do not combine fork flags with --session-id, --create-session, or --create-session-per-run.
+          Do not combine fork flags with --session-id or --create-session.
 
-        Examples:
-          vibe agent run --agent release-reviewer --no-callback --message 'Review the latest deployment result.'
-          vibe agent run --agent release-reviewer --same-scope --no-callback --message 'Review this project in a visible sibling Session.'
+        Avibe Agent shell examples:
+          vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
+          vibe agent run --agent release-reviewer --same-scope --message 'Review this project in a visible sibling Session.'
+
+        Normal terminal examples:
           vibe agent run --sync --agent release-reviewer --message 'Review the latest CI result and print it here.'
+          vibe agent run --agent release-reviewer --callback-session-id sescaller456 --message 'Review the latest CI result and report back.'
           vibe agent run --agent release-reviewer --no-callback --message 'Run a background experiment; I will inspect the run later.'
+
+        Fork examples:
           vibe agent run --fork-self --message 'Explore this alternate fix from the current context.'
           vibe agent run --fork-session sesk8m4q2p7x --agent reviewer --model gpt-5.4 --reasoning-effort high --message 'Review the forked context.'
         """
@@ -1305,7 +1307,7 @@ def _resolve_session_target_args(
             "one of --session-id or --session-key is required",
             code="missing_session_target",
             hint="Run from an Avibe Agent shell to continue this conversation by default, or pass --session-id for the target Session.",
-            example="vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'",
+            example="vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'",
             help_command=help_command,
         )
     return session_id or None, session_key
@@ -1362,7 +1364,7 @@ def _resolve_caller_session_id(args, *, purpose: str, help_command: str) -> tupl
         raise TaskCliError(
             f"{purpose} id is required outside an Avibe Agent environment.",
             code="missing_session_target",
-            hint="Run this command from an Avibe Agent shell, or pass --session-id for the target Session.",
+            hint="Run this command from an Avibe Agent shell, or pass the target Session ID positionally.",
             help_command=help_command,
         )
     return session_id, notice
@@ -1519,7 +1521,7 @@ def _resolve_definition_scope_key(args, *, caller_context, help_command: str) ->
         )
     if legacy_deliver_key and (raw_scope_id or same_scope):
         raise TaskCliError(
-            "use either legacy --deliver-key or the new scope placement flags, not both",
+            "use either the legacy delivery target or the new scope placement flags, not both",
             code="conflicting_scope_target",
             hint="Use --scope-id or --same-scope for new Agent-facing commands.",
             help_command=help_command,
@@ -1605,9 +1607,9 @@ def _validate_delivery_args(
 ):
     if post_to and deliver_key:
         raise TaskCliError(
-            "use either --post-to or --deliver-key, not both",
+            "use only one delivery override",
             code="conflicting_delivery_target",
-            hint="Use --post-to for the common thread/channel delivery choice, or --deliver-key for an explicit delivery target.",
+            hint="Prefer --scope-id or --same-scope for new Agent-facing commands.",
             help_command=help_command,
         )
 
@@ -1620,7 +1622,7 @@ def _validate_delivery_args(
         delivery_target = _parse_validated_session_key(deliver_key, help_command=help_command)
         if delivery_target.platform != session_target.platform:
             raise TaskCliError(
-                "--deliver-key must use the same platform as the session target",
+                "legacy delivery target must use the same platform as the session target",
                 code="invalid_delivery_target",
                 hint="Keep session memory and delivery on the same IM platform. Change only the channel, user, or thread target.",
                 help_command=help_command,
@@ -1631,9 +1633,9 @@ def _validate_delivery_args(
             )
     elif post_to == "thread" and not session_target.thread_id:
         raise TaskCliError(
-            "--post-to thread requires a thread-bound session target or an explicit --deliver-key",
+            "thread delivery override requires a thread-bound session target or explicit delivery target",
             code="invalid_delivery_target",
-            hint="Use a thread-bound Agent Session ID or --deliver-key with a thread target.",
+            hint="Use a thread-bound Agent Session ID, or keep delivery following the Session target.",
             help_command=help_command,
             details={"session_id": session_id, "session_key": session_key, "post_to": post_to},
         )
@@ -1652,7 +1654,7 @@ def _validate_delivery_override_for_target(
         delivery_target = _parse_validated_session_key(deliver_key, help_command=help_command)
         if delivery_target.platform != session_target.platform:
             raise TaskCliError(
-                "--deliver-key must use the same platform as the session target",
+                "legacy delivery target must use the same platform as the session target",
                 code="invalid_delivery_target",
                 hint="Keep session memory and delivery on the same IM platform. Change only the channel, user, or thread target.",
                 help_command=help_command,
@@ -1663,7 +1665,7 @@ def _validate_delivery_override_for_target(
             )
     elif post_to == "thread" and not session_target.thread_id:
         raise TaskCliError(
-            "--post-to thread requires a thread-bound session target",
+            "thread delivery override requires a thread-bound session target",
             code="invalid_delivery_target",
             hint="Use a thread-bound Agent Session ID, or keep delivery following the created Session target.",
             help_command=help_command,
@@ -2045,7 +2047,7 @@ def cmd_task_add(args):
         message = _resolve_prompt_input(
             args,
             help_command="vibe task add --help",
-            example_command="vibe task add --cron '0 * * * *'",
+            example_command="vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *'",
         )
         session_id, session_key = _resolve_session_target_args(
             args,
@@ -2262,7 +2264,7 @@ def cmd_task_update(args):
             raise TaskCliError(
                 "use either --reset-delivery or a new delivery flag, not both",
                 code="conflicting_delivery_target",
-                hint="Pass --reset-delivery to clear delivery overrides, or pass --post-to/--scope-id/--same-scope to replace them.",
+                hint="Pass --reset-delivery to clear delivery overrides, or pass --scope-id/--same-scope to replace placement.",
                 help_command="vibe task update --help",
             )
         caller_context = caller_context_from_env()
@@ -3063,7 +3065,7 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
         )
     if deliver_key and (same_scope or scope_id):
         raise TaskCliError(
-            "use either legacy --deliver-key or the new scope placement flags, not both",
+            "use either the legacy delivery target or the new scope placement flags, not both",
             code="conflicting_scope_placement",
             hint="Use --scope-id or --same-scope for new Agent-facing commands.",
             help_command=help_command,
@@ -3637,7 +3639,7 @@ def cmd_agent_run(args):
             raise TaskCliError(
                 "delivery options require an explicit Session target",
                 code="delivery_target_without_session_policy",
-                hint="Use --same-scope or --scope-id for new Session placement. Use --post-to only with an existing target.",
+                hint="Use --same-scope or --scope-id for new Session placement.",
                 help_command="vibe agent run --help",
             )
         if session_policy == "fork" and args.post_to:
@@ -5978,7 +5980,7 @@ def cmd_watch_add(args):
         message = _resolve_optional_message_input(
             args,
             help_command="vibe watch add --help",
-            example_command="vibe watch add --message 'Continue when the waiter finishes.'",
+            example_command="vibe watch add --session-id sesk8m4q2p7x --message 'Continue when the waiter finishes.'",
             legacy_prefix=prefix,
         )
 
@@ -6099,7 +6101,7 @@ def cmd_watch_update(args):
             raise TaskCliError(
                 "use either --reset-delivery or a new delivery flag, not both",
                 code="conflicting_delivery_target",
-                hint="Pass --reset-delivery to clear delivery overrides, or pass --post-to/--scope-id/--same-scope to replace them.",
+                hint="Pass --reset-delivery to clear delivery overrides, or pass --scope-id/--same-scope to replace placement.",
                 help_command="vibe watch update --help",
             )
         caller_context = caller_context_from_env()
@@ -8678,7 +8680,7 @@ def build_parser():
     agent_run_parser.add_argument("--fork-session", help="Existing Agent Session ID to fork into a new Session")
     agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork this current Agent Session")
     agent_run_parser.add_argument("--create-session", action="store_true", help="Create a new Avibe Session ID before running")
-    agent_run_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID for each definition run")
+    agent_run_parser.add_argument("--create-session-per-run", action="store_true", help=argparse.SUPPRESS)
     agent_run_parser.add_argument("--same-scope", action="store_true", help="Place a new or forked Session in the caller/source Session scope")
     agent_run_parser.add_argument("--scope-id", help="Existing scopes.id that should own the new or forked Session")
     agent_run_parser.add_argument("--deliver-key", help=argparse.SUPPRESS)
@@ -8691,7 +8693,7 @@ def build_parser():
             "invoked from. Invalid with --session-id (an existing session keeps its own working directory)."
         ),
     )
-    agent_run_parser.add_argument("--post-to", choices=("thread", "channel"))
+    agent_run_parser.add_argument("--post-to", choices=("thread", "channel"), help=argparse.SUPPRESS)
     agent_run_parser.add_argument("--callback-session-id", help="Caller Session ID to receive the completed async run result")
     agent_run_parser.add_argument(
         "--no-callback",
@@ -9242,7 +9244,7 @@ def build_parser():
     delivery_group.add_argument(
         "--post-to",
         choices=("thread", "channel"),
-        help="Delivery location override. This changes where the message is posted, not which session is continued.",
+        help=argparse.SUPPRESS,
     )
     delivery_group.add_argument(
         "--deliver-key",
@@ -9288,7 +9290,7 @@ def build_parser():
     update_delivery_group.add_argument(
         "--post-to",
         choices=("thread", "channel"),
-        help="Replace the delivery location override",
+        help=argparse.SUPPRESS,
     )
     update_delivery_group.add_argument(
         "--deliver-key",
@@ -9418,7 +9420,7 @@ def build_parser():
     hook_delivery_group.add_argument(
         "--post-to",
         choices=("thread", "channel"),
-        help="Delivery location override. This changes where the message is posted, not which session is continued.",
+        help=argparse.SUPPRESS,
     )
     hook_delivery_group.add_argument(
         "--deliver-key",
@@ -9473,7 +9475,7 @@ def build_parser():
     watch_delivery_group.add_argument(
         "--post-to",
         choices=("thread", "channel"),
-        help="Delivery location override. This changes where the follow-up is posted, not which session is continued.",
+        help=argparse.SUPPRESS,
     )
     watch_delivery_group.add_argument(
         "--deliver-key",
@@ -9561,7 +9563,7 @@ def build_parser():
     watch_update_delivery_group.add_argument(
         "--post-to",
         choices=("thread", "channel"),
-        help="Delivery location override. This changes where the follow-up is posted, not which session is continued.",
+        help=argparse.SUPPRESS,
     )
     watch_update_delivery_group.add_argument(
         "--deliver-key",

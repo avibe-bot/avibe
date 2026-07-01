@@ -151,6 +151,7 @@ def test_get_requires_session_without_caller(monkeypatch, tmp_path, capsys):
     assert code == 1
     assert payload["code"] == "missing_session_target"
     assert payload["help_command"] == "vibe session get --help"
+    assert payload["hint"] == "Run this command from an Avibe Agent shell, or pass the target Session ID positionally."
 
 
 def test_get_archived_is_not_found(monkeypatch, tmp_path, capsys):
@@ -210,6 +211,7 @@ def test_update_requires_session_without_caller(monkeypatch, tmp_path, capsys):
     assert code == 1
     assert payload["code"] == "missing_session_target"
     assert payload["help_command"] == "vibe session update --help"
+    assert payload["hint"] == "Run this command from an Avibe Agent shell, or pass the target Session ID positionally."
 
 
 def test_update_empty_title_clears(monkeypatch, tmp_path, capsys):
