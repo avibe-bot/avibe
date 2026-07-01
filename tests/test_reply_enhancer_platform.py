@@ -343,7 +343,7 @@ class ReplyEnhancerPlatformTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("`vibe watch add` creates a managed monitor", prompt)
         self.assertIn("product signals, business events, files, logs, CI/reviews/deploys", prompt)
         self.assertIn("Use `vibe agent run --agent <agent-name> --message ...` when one Agent delegates work", prompt)
-        self.assertIn("Async runs return their final result to this conversation by default", prompt)
+        self.assertIn("From this Avibe Agent shell, async runs return their final result to this conversation by default", prompt)
         self.assertIn("Add `--same-scope` when the new Session should live under the same Workbench project or IM scope", prompt)
         self.assertIn("Use `vibe agent run --fork-self --message ...` when work should branch from this current Session", prompt)
         self.assertIn("Forks keep the source Session backend, scope, and cwd by default", prompt)

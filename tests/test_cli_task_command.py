@@ -285,7 +285,10 @@ def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
     assert "Forks keep the same backend, scope, and cwd as the source Session." in captured.out
     assert "vibe agent run --async --fork-self --message" in captured.out
     assert "vibe agent run --agent release-reviewer --no-callback --message" in captured.out
-    assert "Async runs return their final result to this conversation by default." in captured.out
+    assert "From an Avibe Agent shell, async runs return their final result to this conversation by default." in captured.out
+    assert "From a normal terminal, pass --callback-session-id or --no-callback for async runs." in captured.out
+    assert "Review the latest CI result and report back." in captured.out
+    assert "--no-callback --message 'Review the latest CI result and report back.'" not in captured.out
     assert "Do not combine fork flags with --session-id, --create-session, or --create-session-per-run." in captured.out
 
 

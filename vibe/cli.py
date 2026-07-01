@@ -263,8 +263,8 @@ def _task_examples_text() -> str:
           vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
           vibe task update 12ab34cd56ef --cron '*/30 * * * *' --name 'Half-hour summary'
           vibe task run 12ab34cd56ef
-          vibe task add --create-session --same-scope --cron '*/5 * * * *' --message 'Tell a new joke each time.'
-          vibe task add --create-session --same-scope --at '2026-03-31T09:00:00+08:00' --message-file briefing.md
+          vibe task add --create-session --scope-id slack::channel::C123 --cron '*/5 * * * *' --message 'Tell a new joke each time.'
+          vibe task add --create-session --scope-id slack::channel::C123 --at '2026-03-31T09:00:00+08:00' --message-file briefing.md
         """
     )
 
@@ -279,8 +279,8 @@ def _task_add_examples_text() -> str:
         Guidance:
           If this is your first time using this command, read this whole help entry before creating a task.
           `--session-id` chooses which Agent Session Avibe will continue using when the task runs.
-          Use --create-session with --same-scope to create a reusable sibling Session in the current Workbench project or IM scope.
           Use --create-session with --scope-id <scopes.id> to create a reusable Session in a specific existing scope.
+          Use --create-session with --same-scope only from an Avibe Agent shell, where the caller Session scope is available.
           Use --cwd only for Sessions created by this task; existing target Sessions keep their own cwd.
           `--message` and `--message-file` provide the stored user message that will be sent each time the task runs.
           Use --cron for recurring jobs and --at for one-shot jobs.
@@ -289,8 +289,8 @@ def _task_add_examples_text() -> str:
 
         Examples:
           vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
-          vibe task add --create-session --same-scope --cron '*/5 * * * *' --message 'Tell a new joke each time.'
-          vibe task add --create-session --same-scope --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'
+          vibe task add --create-session --scope-id slack::channel::C123 --cron '*/5 * * * *' --message 'Tell a new joke each time.'
+          vibe task add --create-session --scope-id slack::channel::C123 --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'
         """
     )
 
@@ -305,7 +305,7 @@ def _task_update_examples_text() -> str:
           vibe task update 12ab34cd56ef --cron '*/30 * * * *'
           vibe task update 12ab34cd56ef --message 'Send a shorter summary.'
           vibe task update 12ab34cd56ef --session-id sesk8m4q2p7x
-          vibe task update 12ab34cd56ef --create-session --same-scope
+          vibe task update 12ab34cd56ef --create-session --scope-id slack::channel::C123
           vibe task update 12ab34cd56ef --reset-delivery
 
         Guidance:
@@ -350,7 +350,7 @@ def _watch_examples_text() -> str:
         """\
         Examples:
           vibe watch add --session-id sesk8m4q2p7x --name 'Wait for export' --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
-          vibe watch add --create-session --same-scope --message 'The CI job finished. Inspect the result.' -- python3 scripts/wait_for_ci.py --build 42
+          vibe watch add --create-session --scope-id slack::channel::C123 --message 'The CI job finished. Inspect the result.' -- python3 scripts/wait_for_ci.py --build 42
           vibe watch add --session-id sesk8m4q2p7x --forever --retry-exit-code 75 --retry-delay 60 --message 'The log pattern appeared. Continue from the result below.' --shell 'bash scripts/wait_for_log_pattern.sh'
           vibe watch list --brief
           vibe watch show 12ab34cd56ef
@@ -616,8 +616,8 @@ def _watch_add_examples_text() -> str:
           If this is your first time using this command, read this whole help entry before creating a watch.
           Use a watch when a script should wait in the background and send a follow-up when it detects an event or reaches a terminal failure.
           `--session-id` chooses which Agent Session Avibe will continue using for follow-up messages from the watch.
-          Use --create-session with --same-scope to create a reusable sibling Session in the current Workbench project or IM scope.
           Use --create-session with --scope-id <scopes.id> to create a reusable Session in a specific existing scope.
+          Use --create-session with --same-scope only from an Avibe Agent shell, where the caller Session scope is available.
           Prefer --message or --message-file for follow-up instructions; --prefix is legacy-compatible.
           Terminal failures also send a follow-up and disable the watch.
           In forever mode, failures are retried only when the waiter exits with an allowed `--retry-exit-code`.
@@ -626,7 +626,7 @@ def _watch_add_examples_text() -> str:
 
         Examples:
           vibe watch add --session-id sesk8m4q2p7x --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
-          vibe watch add --create-session --same-scope --message 'The export finished.' -- bash -lc 'sleep 120; echo done'
+          vibe watch add --create-session --scope-id slack::channel::C123 --message 'The export finished.' -- bash -lc 'sleep 120; echo done'
           vibe watch add --session-id sesk8m4q2p7x --forever --timeout 600 --lifetime-timeout 86400 --retry-exit-code 75 --retry-delay 30 --message 'PR #153 changed. Inspect it and continue.' -- uv run --no-project scripts/wait_pr.py --repo avibe-bot/avibe --pr 153
         """
     )
@@ -643,7 +643,8 @@ def _agent_run_examples_text() -> str:
           --cwd only applies to new Sessions; existing Sessions keep their own cwd.
 
         Callback:
-          Async runs return their final result to this conversation by default.
+          From an Avibe Agent shell, async runs return their final result to this conversation by default.
+          From a normal terminal, pass --callback-session-id or --no-callback for async runs.
           Pass --no-callback only when you intentionally want no automatic follow-up.
           Pass --callback-session-id only when the final result should return somewhere else.
 
@@ -657,7 +658,7 @@ def _agent_run_examples_text() -> str:
         Examples:
           vibe agent run --agent release-reviewer --no-callback --message 'Review the latest deployment result.'
           vibe agent run --agent release-reviewer --same-scope --no-callback --message 'Review this project in a visible sibling Session.'
-          vibe agent run --async --agent release-reviewer --no-callback --message 'Review the latest CI result and report back.'
+          vibe agent run --async --agent release-reviewer --message 'Review the latest CI result and report back.'
           vibe agent run --async --agent release-reviewer --no-callback --message 'Run a background experiment; I will inspect the run later.'
           vibe agent run --async --fork-self --message 'Explore this alternate fix from the current context.'
           vibe agent run --fork-session sesk8m4q2p7x --agent reviewer --model gpt-5.4 --reasoning-effort high --message 'Review the forked context.'
