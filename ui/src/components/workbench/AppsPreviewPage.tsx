@@ -3,7 +3,7 @@ import { Download, Pencil } from 'lucide-react';
 
 import { useWindowManager } from '../../context/WindowManagerContext';
 import { previewKind } from '../../lib/filePreview';
-import { contentUrl, downloadFile } from '../../lib/filesApi';
+import { contentUrl, downloadFile, fileMeta } from '../../lib/filesApi';
 import { Button } from '../ui/button';
 import { FilePreview } from '../ui/file-preview';
 
@@ -21,6 +21,20 @@ export const AppsPreviewPage: React.FC<{ windowId?: string; params?: Record<stri
   // Office docs have no editor form, so previewKind is null and the button is hidden.
   const editable = name ? previewKind(name) != null : false;
 
+  // Open the editable file in the Editor, first fetching its current mtime so the editor's save
+  // carries a conflict baseline — matching the File Browser's Files→editor path. Without it, a
+  // change or deletion between opening and saving would be silently overwritten. Best-effort: if the
+  // meta fetch fails, still open (the editor re-reads on save), just without the baseline.
+  const openInEditor = async () => {
+    let mtime: number | null | undefined;
+    try {
+      mtime = (await fileMeta(path)).mtime;
+    } catch {
+      mtime = undefined;
+    }
+    wm.openApp('editor', { title: name, params: { path, filename: name, mtime } });
+  };
+
   if (!path) {
     return <div className="grid h-full w-full place-items-center bg-surface text-[12px] text-muted">{t('apps.preview.empty')}</div>;
   }
@@ -34,7 +48,7 @@ export const AppsPreviewPage: React.FC<{ windowId?: string; params?: Record<stri
             size="sm"
             variant="ghost"
             className="h-7 gap-1.5 px-2 text-[12px] text-muted"
-            onClick={() => wm.openApp('editor', { title: name, params: { path, filename: name } })}
+            onClick={() => void openInEditor()}
           >
             <Pencil className="size-3.5" /> {t('apps.preview.openInEditor')}
           </Button>
