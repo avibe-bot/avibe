@@ -182,7 +182,7 @@ def test_task_help_describes_session_id_guidance(capsys) -> None:
     assert exc.value.code == 0
     captured = capsys.readouterr()
     assert "Create, inspect, and control scheduled Agent messages for Avibe." in captured.out
-    assert "vibe task add --cron '0 * * * *' --message" in captured.out
+    assert "vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message" in captured.out
     assert "{add,update,list,show,pause,resume,run,remove}" in captured.out
     assert "rm (remove)" not in captured.out
     assert "\n    ls" not in captured.out

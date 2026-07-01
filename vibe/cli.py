@@ -260,11 +260,11 @@ def _task_examples_text() -> str:
     return dedent(
         """\
         Examples:
-          vibe task add --cron '0 * * * *' --message 'Share the hourly summary in this caller Session.'
+          vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
           vibe task update 12ab34cd56ef --cron '*/30 * * * *' --name 'Half-hour summary'
           vibe task run 12ab34cd56ef
-          vibe task add --post-to channel --cron '*/5 * * * *' --message 'Tell a new joke each time.'
-          vibe task add --at '2026-03-31T09:00:00+08:00' --message-file briefing.md
+          vibe task add --session-id sesk8m4q2p7x --post-to channel --cron '*/5 * * * *' --message 'Tell a new joke each time.'
+          vibe task add --create-session --same-scope --at '2026-03-31T09:00:00+08:00' --message-file briefing.md
         """
     )
 
@@ -289,8 +289,8 @@ def _task_add_examples_text() -> str:
           --timezone controls how --cron and naive --at timestamps are interpreted.
 
         Examples:
-          vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'
-          vibe task add --post-to channel --cron '*/5 * * * *' --message 'Tell a new joke each time.'
+          vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
+          vibe task add --session-id sesk8m4q2p7x --post-to channel --cron '*/5 * * * *' --message 'Tell a new joke each time.'
           vibe task add --create-session --same-scope --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'
         """
     )
@@ -351,9 +351,9 @@ def _watch_examples_text() -> str:
     return dedent(
         """\
         Examples:
-          vibe watch add --name 'Wait for export' --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
-          vibe watch add --post-to channel --message 'The CI job finished. Inspect the result.' -- python3 scripts/wait_for_ci.py --build 42
-          vibe watch add --forever --retry-exit-code 75 --retry-delay 60 --message 'The log pattern appeared. Continue from the result below.' --shell 'bash scripts/wait_for_log_pattern.sh'
+          vibe watch add --session-id sesk8m4q2p7x --name 'Wait for export' --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
+          vibe watch add --session-id sesk8m4q2p7x --post-to channel --message 'The CI job finished. Inspect the result.' -- python3 scripts/wait_for_ci.py --build 42
+          vibe watch add --session-id sesk8m4q2p7x --forever --retry-exit-code 75 --retry-delay 60 --message 'The log pattern appeared. Continue from the result below.' --shell 'bash scripts/wait_for_log_pattern.sh'
           vibe watch list --brief
           vibe watch show 12ab34cd56ef
           vibe watch pause 12ab34cd56ef
@@ -628,9 +628,9 @@ def _watch_add_examples_text() -> str:
           --timeout applies to each cycle. --lifetime-timeout applies only to the whole forever watch lifetime.
 
         Examples:
-          vibe watch add --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
-          vibe watch add --post-to channel --message 'The export finished.' -- bash -lc 'sleep 120; echo done'
-          vibe watch add --forever --timeout 600 --lifetime-timeout 86400 --retry-exit-code 75 --retry-delay 30 --message 'PR #153 changed. Inspect it and continue.' -- uv run --no-project scripts/wait_pr.py --repo avibe-bot/avibe --pr 153
+          vibe watch add --session-id sesk8m4q2p7x --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
+          vibe watch add --session-id sesk8m4q2p7x --post-to channel --message 'The export finished.' -- bash -lc 'sleep 120; echo done'
+          vibe watch add --session-id sesk8m4q2p7x --forever --timeout 600 --lifetime-timeout 86400 --retry-exit-code 75 --retry-delay 30 --message 'PR #153 changed. Inspect it and continue.' -- uv run --no-project scripts/wait_pr.py --repo avibe-bot/avibe --pr 153
         """
     )
 
@@ -1305,7 +1305,7 @@ def _resolve_session_target_args(
             "one of --session-id or --session-key is required",
             code="missing_session_target",
             hint="Run from an Avibe Agent shell to continue this conversation by default, or pass --session-id for the target Session.",
-            example="vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'",
+            example="vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'",
             help_command=help_command,
         )
     return session_id or None, session_key
@@ -2045,7 +2045,7 @@ def cmd_task_add(args):
         message = _resolve_prompt_input(
             args,
             help_command="vibe task add --help",
-            example_command="vibe task add --cron '0 * * * *'",
+            example_command="vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *'",
         )
         session_id, session_key = _resolve_session_target_args(
             args,
@@ -5978,7 +5978,7 @@ def cmd_watch_add(args):
         message = _resolve_optional_message_input(
             args,
             help_command="vibe watch add --help",
-            example_command="vibe watch add --message 'Continue when the waiter finishes.'",
+            example_command="vibe watch add --session-id sesk8m4q2p7x --message 'Continue when the waiter finishes.'",
             legacy_prefix=prefix,
         )
 
