@@ -1319,6 +1319,17 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.port, 4100)
         self.assertEqual(manager.request_timeout_seconds, 15)
 
+    def test_apply_resource_governance_moves_managed_server_pid(self):
+        calls = []
+        governor = types.SimpleNamespace(
+            apply_to_pid=lambda pid, label="agent": calls.append((pid, label)) or True
+        )
+        manager = OpenCodeServerManager(binary="opencode", port=4096, resource_governor=governor)
+
+        manager._apply_resource_governance(1357)
+
+        self.assertEqual(calls, [(1357, "opencode serve")])
+
     async def test_pending_detach_defers_runtime_reload_until_old_port_cleanup(self):
         manager = OpenCodeServerManager(binary="/old/opencode", port=4096, request_timeout_seconds=60)
         terminated = []

@@ -161,6 +161,37 @@ def test_session_handler_passes_configured_claude_cli_path(monkeypatch, tmp_path
     assert getattr(client, "_vibe_runtime_session_key") == f"slack_C123:{tmp_path}"
 
 
+def test_session_handler_moves_claude_process_into_agent_cgroup(monkeypatch, tmp_path: Path) -> None:
+    calls: list[tuple[int, str]] = []
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self._transport = type("Transport", (), {"_process": type("Process", (), {"pid": 9753})()})()
+
+        async def connect(self) -> None:
+            return None
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+
+    monkeypatch.setattr(
+        session_handler_module,
+        "governor_from_controller",
+        lambda _controller: type(
+            "Governor",
+            (),
+            {"apply_to_pid": lambda self, pid, label="agent": calls.append((pid, label)) or True},
+        )(),
+    )
+
+    _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
+
+    assert calls == [(9753, "claude")]
+
+
 def test_session_handler_keeps_sdk_default_for_default_claude_binary(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 

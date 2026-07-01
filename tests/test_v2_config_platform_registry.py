@@ -73,6 +73,24 @@ def test_setup_state_uses_setup_completed_flag() -> None:
     assert config.setup_state()["needs_setup"] is False
 
 
+def test_runtime_resource_governance_round_trips_through_payload() -> None:
+    config = _base_config(
+        runtime=RuntimeConfig(
+            default_cwd=".",
+            resource_governance={
+                "mode": "enabled",
+                "agent_memory_max_bytes": 1536 * 1024 * 1024,
+            },
+        )
+    )
+
+    payload = api.config_to_payload(config, include_secrets=True)
+    restored = V2Config.from_payload(payload)
+
+    assert payload["runtime"]["resource_governance"]["mode"] == "enabled"
+    assert restored.runtime.resource_governance == config.runtime.resource_governance
+
+
 def test_from_payload_migrates_legacy_setup_completed_true() -> None:
     # A payload that predates the flag (no ``setup_completed`` key) but has a
     # mode plus a credentialed enabled platform migrates to completed=True.

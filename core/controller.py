@@ -368,6 +368,9 @@ class Controller:
 
     def _sync_config_references(self, new_config) -> None:
         self.config = new_config
+        governor = getattr(self, "_agent_resource_governor", None)
+        if governor is not None:
+            governor.update_config(getattr(new_config, "resource_governance", {"mode": "auto"}))
         self.processing_indicator.config = new_config
         self.audio_asr_service.config = new_config
         for handler_name in ("command_handler", "settings_handler", "message_handler", "session_handler"):
@@ -513,6 +516,10 @@ class Controller:
                 self.config.include_time_info = v2_config.include_time_info
                 self.config.include_user_info = v2_config.include_user_info
                 self.config.reply_enhancements = v2_config.reply_enhancements
+                self.config.resource_governance = v2_config.runtime.resource_governance
+                governor = getattr(self, "_agent_resource_governor", None)
+                if governor is not None:
+                    governor.update_config(self.config.resource_governance)
                 self.config.audio_asr = v2_config.audio_asr
                 self.config.remote_access = v2_config.remote_access
                 audio_asr_service = getattr(self, "audio_asr_service", None)

@@ -950,6 +950,7 @@ def config_to_payload(config: V2Config, *, include_secrets: bool = False) -> dic
         "runtime": {
             "default_cwd": config.runtime.default_cwd,
             "log_level": config.runtime.log_level,
+            "resource_governance": config.runtime.resource_governance,
         },
         "agents": {
             "opencode": config.agents.opencode.__dict__,

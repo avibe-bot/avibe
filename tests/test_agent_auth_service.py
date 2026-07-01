@@ -1501,6 +1501,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             binary="/old/opencode",
             port=4096,
             request_timeout_seconds=60,
+            resource_governor=agent.controller._agent_resource_governor,
         )
         live_server.refresh_global_config.assert_not_awaited()
         live_server.detach_after_deferred_refresh.assert_awaited_once()
@@ -1546,6 +1547,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             binary="/opencode",
             port=4096,
             request_timeout_seconds=60,
+            resource_governor=agent.controller._agent_resource_governor,
         )
         self.assertIs(agent.opencode_config, new_config)
         self.assertIs(agent.controller.config.opencode, new_config)

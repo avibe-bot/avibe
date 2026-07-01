@@ -33,6 +33,7 @@ from modules.agents.opencode.message_processor import (
 )
 from modules.agents.opencode.utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 from modules.im import InlineButton, InlineKeyboard, MessageContext
+from core.resource_governance import governor_from_controller
 from vibe.i18n import t as i18n_t
 from vibe.opencode_config import remove_opencode_provider_api_key
 
@@ -1092,6 +1093,10 @@ class AgentAuthService:
 
         client = ClaudeSDKClient(options=ClaudeAgentOptions(**option_kwargs))
         await client.connect()
+        governor_from_controller(self.controller).apply_to_pid(
+            get_claude_client_pid(client),
+            label="claude auth",
+        )
         return client
 
     async def _send_claude_control_request(
