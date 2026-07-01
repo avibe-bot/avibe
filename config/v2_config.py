@@ -91,6 +91,10 @@ class SlackConfig(BaseIMConfig):
     team_name: Optional[str] = None
     app_id: Optional[str] = None
     require_mention: bool = False
+    # Global default for the per-channel require_bind gate (allowed users).
+    # False=any channel member may drive the agent, True=only bound users.
+    # Channels whose per-channel require_bind is None inherit this value.
+    require_bind: bool = False
     disable_link_unfurl: bool = False
 
     def validate(self) -> None:
@@ -110,6 +114,8 @@ class DiscordConfig(BaseIMConfig):
     guild_allowlist: Optional[List[str]] = None
     guild_denylist: Optional[List[str]] = None
     require_mention: bool = False
+    # Global default for the per-channel require_bind gate (allowed users).
+    require_bind: bool = False
     # Auto-archive duration (minutes) for threads created by vibe-remote.
     # Discord only accepts 60, 1440, 4320, or 10080 (1h / 1d / 3d / 7d).
     # Defaults to 10080 (7d) to match Discord's longest native inactivity window
@@ -133,6 +139,8 @@ class DiscordConfig(BaseIMConfig):
 class TelegramConfig(BaseIMConfig):
     bot_token: str = ""
     require_mention: bool = True
+    # Global default for the per-channel require_bind gate (allowed users).
+    require_bind: bool = False
     forum_auto_topic: bool = True
     use_webhook: bool = False
     webhook_url: Optional[str] = None
@@ -151,6 +159,8 @@ class LarkConfig(BaseIMConfig):
     app_id: str = ""
     app_secret: str = ""
     require_mention: bool = False
+    # Global default for the per-channel require_bind gate (allowed users).
+    require_bind: bool = False
     domain: str = "feishu"  # "feishu" for domestic (open.feishu.cn), "lark" for international (open.larksuite.com)
 
     def validate(self) -> None:
@@ -171,6 +181,7 @@ class WeChatConfig(BaseIMConfig):
     base_url: str = "https://ilinkai.weixin.qq.com"
     cdn_base_url: str = "https://novac2c.cdn.weixin.qq.com/c2c"
     require_mention: bool = False  # unused for WeChat DM-only, kept for interface compat
+    require_bind: bool = False  # unused for WeChat DM-only, kept for interface compat
 
     def validate(self) -> None:
         # bot_token can be empty during setup wizard (filled after QR login)

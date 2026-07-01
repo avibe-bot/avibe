@@ -2,7 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
-  AtSign,
   CheckSquare,
   ChevronDown,
   ChevronUp,
@@ -1082,6 +1081,70 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     );
   }
 
+  // Toggle a platform-level group default (require_mention / require_bind).
+  // The default seeds newly-enabled groups (copy-on-enable). A per-group value
+  // always overrides it.
+  //
+  // require_mention still inherits at runtime for groups whose value is unset
+  // (null), so before flipping that default we snapshot already-enabled null
+  // groups with the OLD default — the change then only affects groups enabled
+  // from now on, never existing ones. require_bind is seed-only (null = "anyone"
+  // at runtime), so flipping it never affects existing groups and needs no
+  // snapshot.
+  const savePlatformFlag = async (
+    key: string,
+    field: 'require_mention' | 'require_bind',
+  ) => {
+    const currentConfig = configRef.current;
+    const current = !!(currentConfig as any)[key]?.[field];
+
+    if (field === 'require_mention') {
+      // Fetch the target platform's authoritative settings before snapshotting.
+      // In-memory maps (configs / allConfigsByPlatform[key]) can be stale or
+      // empty right after a tab switch, and saving those back would clobber the
+      // target platform's channel settings.
+      let platformConfigs: Record<string, ChannelConfig>;
+      try {
+        const settings = await api.getSettings(key);
+        platformConfigs = (settings.channels || {}) as Record<string, ChannelConfig>;
+      } catch {
+        showToast(t('channelList.settingsSaveFailed'), 'error');
+        return;
+      }
+      let changed = false;
+      const nextPlatformConfigs = { ...platformConfigs };
+      for (const [cid, cfg] of Object.entries(platformConfigs)) {
+        if (cfg?.enabled === true && (cfg.require_mention === null || cfg.require_mention === undefined)) {
+          nextPlatformConfigs[cid] = { ...cfg, require_mention: current };
+          changed = true;
+        }
+      }
+      if (changed) {
+        try {
+          await api.saveSettings({ channels: nextPlatformConfigs }, key);
+        } catch {
+          showToast(t('channelList.settingsSaveFailed'), 'error');
+          return;
+        }
+        setAllConfigsByPlatform((prev) => ({ ...prev, [key]: nextPlatformConfigs }));
+        if (key === platform) setConfigs(nextPlatformConfigs);
+      }
+    }
+
+    const updated = {
+      ...currentConfig,
+      [key]: { ...(currentConfig as any)[key], [field]: !current },
+    };
+    const version = applyConfig(updated);
+    const saved = await saveLatestConfig();
+    if (saved) {
+      showToast(t('common.saved'), 'success');
+    } else {
+      if (configVersionRef.current === version) applyConfig(currentConfig);
+      showToast(t('channelList.settingsSaveFailed'), 'error');
+    }
+  };
+
   // ====================================================================
   // PAGE MODE: redesigned layout (matches design.pen frame A7h8Wv)
   // - Header with title + 240px search + Rescan
@@ -1227,6 +1290,36 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               );
             })}
           </div>
+
+          {/* Group defaults for the selected platform — compact switch row.
+              These seed newly-enabled groups (copy-on-enable); a per-group value
+              overrides. Hidden on "All channels" since defaults are per-platform. */}
+          {pageTab !== 'all' && (
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border border-border bg-surface-2/40 px-4 py-2.5">
+              <span
+                className="text-[11px] font-medium uppercase tracking-[0.14em] text-muted"
+                title={t('channelList.groupDefaultsHint') as string}
+              >
+                {t('channelList.groupDefaultsTitle')}
+              </span>
+              <label className="inline-flex items-center gap-2 text-[13px] text-foreground">
+                <span>{t('channelList.requireMention')}</span>
+                <ToggleSwitch
+                  enabled={!!(config as any)[pageTab]?.require_mention}
+                  onClick={() => savePlatformFlag(pageTab, 'require_mention')}
+                />
+              </label>
+              {pageTab !== 'wechat' && (
+                <label className="inline-flex items-center gap-2 text-[13px] text-foreground">
+                  <span>{t('channelList.requireBind')}</span>
+                  <ToggleSwitch
+                    enabled={!!(config as any)[pageTab]?.require_bind}
+                    onClick={() => savePlatformFlag(pageTab, 'require_bind')}
+                  />
+                </label>
+              )}
+            </div>
+          )}
 
           {/* Discord guild picker — only on Discord tab */}
           {pageTab === 'discord' && (
@@ -1403,6 +1496,27 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                 void updateConfigForPlatform(channelPlatform, channel.id, patch);
               };
 
+              // Enabling a group snapshots the current platform group defaults
+              // into this group as explicit booleans (copy-on-enable), but only
+              // for values not already explicitly set — preserving any prior
+              // per-group override. Later changes to the platform default do not
+              // retro-affect already-enabled groups.
+              const toggleEnabled = () => {
+                if (channelEnabled) {
+                  updateRow({ enabled: false });
+                  return;
+                }
+                const platformDefaults = (config as any)[channelPlatform] || {};
+                const patch: Partial<ChannelConfig> = { enabled: true };
+                if (rawConfig.require_mention === null || rawConfig.require_mention === undefined) {
+                  patch.require_mention = !!platformDefaults.require_mention;
+                }
+                if (rawConfig.require_bind === null || rawConfig.require_bind === undefined) {
+                  patch.require_bind = !!platformDefaults.require_bind;
+                }
+                updateRow(patch);
+              };
+
               const backendModel = channelConfig.routing.model || (
                 effectiveBackend === 'claude'
                   ? channelConfig.routing.claude_model
@@ -1442,7 +1556,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                     <span onClick={(e) => e.stopPropagation()}>
                       <ToggleSwitch
                         enabled={channelEnabled}
-                        onClick={() => updateRow({ enabled: !channelEnabled })}
+                        onClick={toggleEnabled}
                       />
                     </span>
 
@@ -1627,49 +1741,6 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
         </div>
       )}
 
-      {/* Platform-level require @mention toggle (page mode only) */}
-      {isPage && (
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 rounded-xl border border-border bg-surface-2/40 p-3 shadow-[0_18px_40px_-30px_rgba(0,0,0,0.8)]">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-            <AtSign size={14} className="text-accent" />
-            <span className="font-medium text-foreground">{t('dashboard.requireMention')}</span>
-            <span className="text-xs text-muted">{t('dashboard.requireMentionHint')}</span>
-          </div>
-          <button
-            onClick={async () => {
-              const key = platform as 'slack' | 'discord' | 'telegram' | 'lark' | 'wechat';
-              const currentConfig = configRef.current;
-              const current = !!(currentConfig as any)[key]?.require_mention;
-              const updated = {
-                ...currentConfig,
-                [key]: { ...(currentConfig as any)[key], require_mention: !current },
-              };
-              const version = applyConfig(updated);
-              const saved = await saveLatestConfig();
-              if (saved) {
-                showToast(t('common.saved'), 'success');
-              } else if (configVersionRef.current === version) {
-                applyConfig(currentConfig);
-                showToast(t('channelList.settingsSaveFailed'), 'error');
-              } else {
-                showToast(t('channelList.settingsSaveFailed'), 'error');
-              }
-            }}
-            className={clsx(
-              'relative inline-flex h-6 w-11 items-center rounded-full transition-colors',
-              (config as any)[platform]?.require_mention ? 'bg-accent' : 'bg-border-strong'
-            )}
-          >
-            <span
-              className={clsx(
-                'inline-block h-4 w-4 rounded-full bg-background transition-transform shadow-sm',
-                (config as any)[platform]?.require_mention ? 'translate-x-6' : 'translate-x-1'
-              )}
-            />
-          </button>
-        </div>
-      )}
-
       <div className="mb-4 space-y-3 rounded-2xl border border-border bg-surface-2/40 p-4 shadow-[0_18px_40px_-30px_rgba(0,0,0,0.8)]">
         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -1835,7 +1906,23 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               <div className="flex items-center justify-between gap-2">
                 <div className="flex min-w-0 flex-1 items-center gap-3">
                   <button
-                    onClick={() => updateConfig(channel.id, { enabled: !channelConfig.enabled })}
+                    onClick={() => {
+                      if (channelConfig.enabled) {
+                        updateConfig(channel.id, { enabled: false });
+                        return;
+                      }
+                      // Copy-on-enable: snapshot platform group defaults into
+                      // unset per-group values (preserve any prior override).
+                      const platformDefaults = (config as any)[platform] || {};
+                      const patch: Partial<ChannelConfig> = { enabled: true };
+                      if (rawConfig.require_mention === null || rawConfig.require_mention === undefined) {
+                        patch.require_mention = !!platformDefaults.require_mention;
+                      }
+                      if (rawConfig.require_bind === null || rawConfig.require_bind === undefined) {
+                        patch.require_bind = !!platformDefaults.require_bind;
+                      }
+                      updateConfig(channel.id, patch);
+                    }}
                     className={clsx('shrink-0', channelConfig.enabled ? 'text-accent' : 'text-muted')}
                   >
                     {channelConfig.enabled ? <CheckSquare size={20} /> : <Square size={20} />}

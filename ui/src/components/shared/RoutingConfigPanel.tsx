@@ -3,7 +3,7 @@ import { Bot, FolderOpen, HelpCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { Input } from '@/components/ui/input';
-import { Button } from '@/components/ui/button';
+import { ToggleSwitch } from '../settings/SettingsPrimitives';
 import { AgentRoutePicker } from '../workbench/AgentRoutePicker';
 import type { VibeAgentBrief } from '../../context/ApiContext';
 
@@ -42,7 +42,7 @@ export interface RoutingConfigPanelProps {
   onChange: (patch: Partial<RoutingConfigValue>) => void;
   onBrowseDirectory: () => void;
   globalConfig: any;
-  /** Show the require-@mention segmented control (Inherit / On / Off). */
+  /** Show the require-@mention and bound-only on/off switches (channels only). */
   showRequireMention?: boolean;
   /** Platform key used to derive inherited @mention default (e.g., 'slack', 'discord'). */
   inheritsFromKey?: string;
@@ -142,106 +142,43 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
           </div>
         </div>
 
-        {/* Require @mention (channels only) */}
+        {/* Require @mention (channels only). Simple on/off switch. When the
+            per-group value is unset (null), the switch reflects the platform
+            group default; toggling writes an explicit boolean for this group. */}
         {showRequireMention && (() => {
-          const current: 'inherit' | 'on' | 'off' =
+          const effective =
             value.require_mention === null || value.require_mention === undefined
-              ? 'inherit'
-              : value.require_mention
-                ? 'on'
-                : 'off';
-          const setMention = (next: 'inherit' | 'on' | 'off') => {
-            onChange({ require_mention: next === 'inherit' ? null : next === 'on' });
-          };
-          const inheritedOn = !!(globalConfig as any)?.[inheritsFromKey || '']?.require_mention;
-          const segs: { id: 'inherit' | 'on' | 'off'; label: string }[] = [
-            {
-              id: 'inherit',
-              label: `${t('common.inherit')} (${
-                inheritedOn ? t('channelList.mentionStatusOn') : t('channelList.mentionStatusOff')
-              })`,
-            },
-            { id: 'on', label: t('channelList.requireMentionOn') },
-            { id: 'off', label: t('channelList.requireMentionOff') },
-          ];
+              ? !!(globalConfig as any)?.[inheritsFromKey || '']?.require_mention
+              : value.require_mention;
           return (
             <div className="space-y-1">
               <label className="text-xs font-medium uppercase text-muted">{t('channelList.requireMention')}</label>
-              <div
-                role="radiogroup"
-                aria-label={t('channelList.requireMention') as string}
-                className="flex h-9 items-stretch gap-0.5 rounded-md border border-border bg-foreground/[0.03] p-0.5"
-              >
-                {segs.map((seg) => {
-                  const active = current === seg.id;
-                  return (
-                    <button
-                      key={seg.id}
-                      type="button"
-                      role="radio"
-                      aria-checked={active}
-                      onClick={() => setMention(seg.id)}
-                      className={clsx(
-                        // The "inherit" label carries the inherited state in
-                        // parentheses, so it needs more room than on/off to
-                        // avoid wrapping.
-                        'whitespace-nowrap rounded-[4px] px-2 text-[12px] transition-colors',
-                        seg.id === 'inherit' ? 'flex-[1.6]' : 'flex-1',
-                        active
-                          ? 'border border-mint/30 bg-mint-soft font-bold text-mint'
-                          : 'font-medium text-muted hover:text-foreground'
-                      )}
-                    >
-                      {seg.label}
-                    </button>
-                  );
-                })}
+              <div className="flex h-9 items-center">
+                <ToggleSwitch
+                  enabled={effective}
+                  onClick={() => onChange({ require_mention: !effective })}
+                />
               </div>
             </div>
           );
         })()}
 
         {/* Require bind (channels only): when On, only bound users can drive the
-            agent here; unbound members are silently ignored. */}
+            agent here; unbound members are silently ignored. Unlike @mention,
+            this does NOT inherit the platform default at runtime — the default
+            only seeds newly-enabled groups (copy-on-enable), so an unset value
+            means "anyone" and the switch shows off. Toggling writes an explicit
+            boolean for this group. */}
         {showRequireMention && (() => {
-          const on = value.require_bind === true;
-          const setBind = (next: boolean) => {
-            onChange({ require_bind: next ? true : null });
-          };
-          const segs: { id: 'off' | 'on'; label: string }[] = [
-            { id: 'off', label: t('channelList.requireBindOff') },
-            { id: 'on', label: t('channelList.requireBindOn') },
-          ];
+          const effective = value.require_bind === true;
           return (
             <div className="space-y-1">
               <label className="text-xs font-medium uppercase text-muted">{t('channelList.requireBind')}</label>
-              <div
-                role="radiogroup"
-                aria-label={t('channelList.requireBind') as string}
-                className="flex h-9 items-stretch gap-0.5 rounded-md border border-border bg-foreground/[0.03] p-0.5"
-              >
-                {segs.map((seg) => {
-                  const active = (seg.id === 'on') === on;
-                  return (
-                    <Button
-                      key={seg.id}
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      role="radio"
-                      aria-checked={active}
-                      onClick={() => setBind(seg.id === 'on')}
-                      className={clsx(
-                        'h-auto flex-1 rounded-[4px] px-2.5 text-[12px] shadow-none focus-visible:ring-1',
-                        active
-                          ? 'border border-mint/30 bg-mint-soft font-bold text-mint'
-                          : 'font-medium text-muted hover:text-foreground'
-                      )}
-                    >
-                      {seg.label}
-                    </Button>
-                  );
-                })}
+              <div className="flex h-9 items-center">
+                <ToggleSwitch
+                  enabled={effective}
+                  onClick={() => onChange({ require_bind: !effective })}
+                />
               </div>
             </div>
           );
