@@ -221,8 +221,7 @@ def test_hook_send_help_describes_runtime_effects(capsys) -> None:
     assert "--post-to" not in captured.out
     assert "`--message` and `--message-file` provide the one-shot async user message that will be queued immediately." in captured.out
     assert "--session-id" in captured.out
-    assert "vibe agent run --async --agent release-reviewer --no-callback --message" in captured.out
-    assert "vibe agent run --async --agent release-reviewer --no-callback" in captured.out
+    assert "vibe agent run --async --session-id sesk8m4q2p7x --no-callback --message" in captured.out
 
 
 def test_task_list_help_mentions_completed_one_shots_hidden_by_default(capsys) -> None:
@@ -265,7 +264,7 @@ def test_hook_send_help_includes_examples_and_threadless_guidance(capsys) -> Non
     assert "--post-to" not in captured.out
     assert "--deliver-key" not in captured.out
     assert "--session-id" in captured.out
-    assert "vibe agent run --async --agent release-reviewer --no-callback" in captured.out
+    assert "vibe agent run --async --session-id sesk8m4q2p7x --no-callback" in captured.out
 
 
 def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
@@ -288,8 +287,10 @@ def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
     assert "From an Avibe Agent shell, async runs return their final result to this conversation by default." in captured.out
     assert "From a normal terminal, pass --callback-session-id or --no-callback for async runs." in captured.out
     assert "Review the latest CI result and report back." in captured.out
+    assert "--callback-session-id sescaller456 --message 'Review the latest CI result and report back.'" in captured.out
     assert "--no-callback --message 'Review the latest CI result and report back.'" not in captured.out
-    assert "Do not combine fork flags with --session-id, --create-session, or --create-session-per-run." in captured.out
+    assert "Do not combine fork flags with --session-id or --create-session." in captured.out
+    assert "--create-session-per-run" not in captured.out
 
 
 def test_task_add_parse_error_is_structured_json(capsys) -> None:

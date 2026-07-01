@@ -802,7 +802,6 @@ vibe agent run (--session-id <session_id> | --create-session | --fork-session <s
 - `--session-id`
 - `--fork-session`
 - `--create-session`
-- `--create-session-per-run`
 - `--same-scope`
 - `--scope-id`
 - `--model`
@@ -818,8 +817,7 @@ no-delivery session，更适合 sub-agent 调用。
 Agent Session，适合在保留上下文的同时做分支调查或委派工作，而不修改源 Session。
 fork 会保持源 Session 的 backend；只有 backend 不变时，`--agent`、`--model`
 和 `--reasoning-effort` 才能覆盖 fork 后 Session 的 Agent、模型或推理强度。
-不要把 `--fork-session` 和 `--session-id`、`--create-session`
-或 `--create-session-per-run` 混用。
+不要把 `--fork-session` 和 `--session-id` 或 `--create-session` 混用。
 
 ## 5.4 `vibe runs`
 
