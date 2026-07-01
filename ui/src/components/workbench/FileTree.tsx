@@ -29,6 +29,8 @@ import {
   writeFile,
   type FsEntry,
 } from '../../lib/filesApi';
+import { ContextMenu, ContextMenuItem } from '../ui/context-menu';
+import { InlineNameInput } from '../ui/inline-name-input';
 
 // Icon + accent per file extension (matches the explorer in design dnYPx).
 const EXT: Record<string, { Icon: typeof FileIcon; color: string }> = {
@@ -76,43 +78,6 @@ const useTree = (): TreeCtx => {
   const c = useContext(Ctx);
   if (!c) throw new Error('FileTree context missing');
   return c;
-};
-
-// Shared inline name editor for both new-entry and rename rows: autofocus, select (rename keeps the
-// name so it can be tweaked), Enter commits, Esc/blur cancels.
-const InlineNameInput: React.FC<{ initial: string; placeholder?: string; onCommit: (v: string) => void; onCancel: () => void }> = ({
-  initial,
-  placeholder,
-  onCommit,
-  onCancel,
-}) => {
-  const [value, setValue] = useState(initial);
-  // Cancel on blur UNLESS we just committed (Enter), else committing also fires blur → double-fire.
-  const committed = useRef(false);
-  return (
-    <input
-      autoFocus
-      value={value}
-      placeholder={placeholder}
-      onFocus={(e) => e.currentTarget.select()}
-      onChange={(e) => setValue(e.target.value)}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          committed.current = true;
-          onCommit(value);
-        } else if (e.key === 'Escape') {
-          e.preventDefault();
-          committed.current = true;
-          onCancel();
-        }
-      }}
-      onBlur={() => {
-        if (!committed.current) onCancel();
-      }}
-      className="min-w-0 flex-1 rounded border border-cyan bg-surface px-1 py-0 text-[12.5px] text-foreground placeholder:text-muted focus:outline-none"
-    />
-  );
 };
 
 const Row: React.FC<{
@@ -278,21 +243,6 @@ const Dir: React.FC<{ path: string; name: string; depth: number }> = ({ path, na
   );
 };
 
-const MenuItem: React.FC<{ icon: React.ReactNode; label: string; danger?: boolean; onClick: () => void }> = ({ icon, label, danger, onClick }) => (
-  <button
-    type="button"
-    role="menuitem"
-    onClick={onClick}
-    className={clsx(
-      'flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition',
-      danger ? 'text-destructive hover:bg-destructive/[0.1]' : 'text-foreground hover:bg-cyan-soft',
-    )}
-  >
-    <span className="grid size-4 shrink-0 place-items-center">{icon}</span>
-    {label}
-  </button>
-);
-
 // The VS-Code-style explorer tree (design dnYPx): a root folder whose subfolders lazily expand via
 // listDir. Reused by the Editor IDE; emits file opens upward. Owns inline new-file/new-folder/rename
 // + delete via a right-click menu, and re-lists the affected folder after each mutation.
@@ -379,15 +329,6 @@ export const FileTree: React.FC<{
   }, []);
   const closeMenu = useCallback(() => setMenu(null), []);
 
-  useEffect(() => {
-    if (!menu) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setMenu(null);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [menu]);
-
   const removeEntry = useCallback(
     async (dir: string, entry: FsEntry) => {
       setMenu(null);
@@ -410,13 +351,9 @@ export const FileTree: React.FC<{
     [activePath, showHidden, onOpenFile, versionOf, edit, startEdit, cancelEdit, commitEdit, openMenu],
   );
 
-  // Clamp the menu inside the viewport (the tree scrolls, so a cursor-positioned fixed menu near the
-  // bottom/right edge would otherwise overflow). Width/height are estimates — good enough to nudge.
-  const MENU_W = 196;
+  // Item count drives the menu's vertical clamp: file → Open+Rename+Delete (3); dir → +New File/
+  // Folder inside (4... actually Open/New×2/Rename/Delete); blank → New File/Folder (2).
   const menuItemCount = menu ? (menu.entry ? (menu.entry.kind === 'dir' ? 4 : 3) : 2) : 0;
-  const MENU_H = menuItemCount * 34 + 12;
-  const menuX = menu ? Math.min(menu.x, window.innerWidth - MENU_W - 8) : 0;
-  const menuY = menu ? Math.min(menu.y, window.innerHeight - MENU_H - 8) : 0;
 
   return (
     <Ctx.Provider value={ctx}>
@@ -435,65 +372,58 @@ export const FileTree: React.FC<{
       </div>
 
       {menu && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={closeMenu} onContextMenu={(e) => { e.preventDefault(); closeMenu(); }} aria-hidden />
-          <div
-            role="menu"
-            style={{ left: menuX, top: menuY, width: MENU_W }}
-            className="fixed z-50 rounded-lg border border-border bg-surface-3 p-1 shadow-[0_12px_30px_-8px_rgba(0,0,0,0.7)]"
-          >
-            {menu.entry && menu.entry.kind === 'file' && (
-              <MenuItem
-                icon={<FileText className="size-3.5 text-cyan" />}
-                label={t('apps.fileBrowser.open')}
+        <ContextMenu x={menu.x} y={menu.y} onClose={closeMenu} itemCount={menuItemCount}>
+          {menu.entry && menu.entry.kind === 'file' && (
+            <ContextMenuItem
+              icon={<FileText className="size-3.5 text-cyan" />}
+              label={t('apps.fileBrowser.open')}
+              onClick={() => {
+                const e = menu.entry as FsEntry;
+                onOpenFile(joinPath(menu.dir, e.name), e);
+                closeMenu();
+              }}
+            />
+          )}
+          {(!menu.entry || menu.entry.kind === 'dir') && (
+            <>
+              <ContextMenuItem
+                icon={<FilePlus className="size-3.5 text-mint" />}
+                label={t('apps.fileBrowser.newFile')}
                 onClick={() => {
-                  const e = menu.entry as FsEntry;
-                  onOpenFile(joinPath(menu.dir, e.name), e);
+                  startEdit({ dir: menu.entry ? joinPath(menu.dir, menu.entry.name) : menu.dir, mode: 'new-file' });
                   closeMenu();
                 }}
               />
-            )}
-            {(!menu.entry || menu.entry.kind === 'dir') && (
-              <>
-                <MenuItem
-                  icon={<FilePlus className="size-3.5 text-mint" />}
-                  label={t('apps.fileBrowser.newFile')}
-                  onClick={() => {
-                    startEdit({ dir: menu.entry ? joinPath(menu.dir, menu.entry.name) : menu.dir, mode: 'new-file' });
-                    closeMenu();
-                  }}
-                />
-                <MenuItem
-                  icon={<FolderPlus className="size-3.5 text-gold" />}
-                  label={t('apps.fileBrowser.newFolder')}
-                  onClick={() => {
-                    startEdit({ dir: menu.entry ? joinPath(menu.dir, menu.entry.name) : menu.dir, mode: 'new-folder' });
-                    closeMenu();
-                  }}
-                />
-              </>
-            )}
-            {menu.entry && (
-              <>
-                <MenuItem
-                  icon={<Pencil className="size-3.5" />}
-                  label={t('apps.fileBrowser.rename')}
-                  onClick={() => {
-                    const e = menu.entry as FsEntry;
-                    startEdit({ dir: menu.dir, mode: 'rename', target: e.name });
-                    closeMenu();
-                  }}
-                />
-                <MenuItem
-                  icon={<Trash2 className="size-3.5" />}
-                  label={t('apps.fileBrowser.delete')}
-                  danger
-                  onClick={() => removeEntry(menu.dir, menu.entry as FsEntry)}
-                />
-              </>
-            )}
-          </div>
-        </>
+              <ContextMenuItem
+                icon={<FolderPlus className="size-3.5 text-gold" />}
+                label={t('apps.fileBrowser.newFolder')}
+                onClick={() => {
+                  startEdit({ dir: menu.entry ? joinPath(menu.dir, menu.entry.name) : menu.dir, mode: 'new-folder' });
+                  closeMenu();
+                }}
+              />
+            </>
+          )}
+          {menu.entry && (
+            <>
+              <ContextMenuItem
+                icon={<Pencil className="size-3.5" />}
+                label={t('apps.fileBrowser.rename')}
+                onClick={() => {
+                  const e = menu.entry as FsEntry;
+                  startEdit({ dir: menu.dir, mode: 'rename', target: e.name });
+                  closeMenu();
+                }}
+              />
+              <ContextMenuItem
+                icon={<Trash2 className="size-3.5" />}
+                label={t('apps.fileBrowser.delete')}
+                danger
+                onClick={() => removeEntry(menu.dir, menu.entry as FsEntry)}
+              />
+            </>
+          )}
+        </ContextMenu>
       )}
     </Ctx.Provider>
   );

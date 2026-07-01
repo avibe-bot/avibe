@@ -712,6 +712,8 @@
       "favorites": "Favorites",
       "noMatches": "No matches",
       "itemCount": "{{count}} items",
+      "searchCount": "{{count}} results",
+      "searchTruncated": "Showing the first results only.",
       "projects": "Projects",
       "system": "System",
       "showHidden": "Show hidden files",
@@ -738,6 +740,11 @@
         "loadFailed": "Couldn't load this file.",
         "saveFailed": "Couldn't save this file.",
         "deleteFailed": "Couldn't delete this item.",
+        "renameFailed": "Couldn't rename this item.",
+        "moveFailed": "Couldn't move this item.",
+        "searchFailed": "Couldn't search this folder.",
+        "invalid_query": "Enter something to search for.",
+        "invalid_move": "That move isn't allowed.",
         "invalid_response": "The server returned an unexpected response. Try again."
       }
     },

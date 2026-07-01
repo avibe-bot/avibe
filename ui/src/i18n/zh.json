@@ -712,6 +712,8 @@
       "favorites": "收藏",
       "noMatches": "无匹配项",
       "itemCount": "{{count}} 项",
+      "searchCount": "{{count}} 个结果",
+      "searchTruncated": "结果较多，仅显示部分。",
       "projects": "项目",
       "system": "系统",
       "showHidden": "显示隐藏文件",
@@ -738,6 +740,11 @@
         "loadFailed": "无法加载这个文件。",
         "saveFailed": "无法保存这个文件。",
         "deleteFailed": "无法删除这个项目。",
+        "renameFailed": "无法重命名这个项目。",
+        "moveFailed": "无法移动这个项目。",
+        "searchFailed": "无法搜索这个文件夹。",
+        "invalid_query": "请输入搜索内容。",
+        "invalid_move": "不允许这样移动。",
         "invalid_response": "服务器返回了异常响应，请重试。"
       }
     },
