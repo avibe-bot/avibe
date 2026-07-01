@@ -13,6 +13,16 @@
     "retry": "重试",
     "reload": "刷新页面"
   },
+  "preview": {
+    "title": "预览",
+    "unsupported": "此文件无法预览。",
+    "failed": "无法加载此文件预览。",
+    "tooLarge": "文件过大，无法预览，请直接下载。",
+    "truncated": "文件较大，仅显示开头部分。",
+    "empty": "此文件为空。",
+    "csvTruncated": "仅显示前 {{count}} 行",
+    "csvColsTruncated": "显示前 {{shown}} 列，共 {{total}} 列"
+  },
   "common": {
     "back": "返回",
     "continue": "继续",
@@ -626,7 +636,6 @@
       "lineCol": "行 {{line}}，列 {{col}}",
       "spaces": "空格：{{n}}",
       "plainText": "纯文本",
-      "imagePreview": "图片预览",
       "source": "源码",
       "preview": "预览",
       "empty": "未打开文件",
@@ -676,8 +685,13 @@
       "maximize": "最大化",
       "restore": "还原"
     },
+    "preview": {
+      "label": "预览",
+      "openInEditor": "用编辑器打开",
+      "empty": "没有可预览的文件。"
+    },
     "fileBrowser": {
-      "label": "文件浏览器",
+      "label": "文件",
       "desc": "浏览、查看、编辑这台机器上的文件。",
       "placeholder": "文件浏览器正在搭建中。很快你就能在这里浏览整机文件、打开文件、直接编辑并保存。",
       "tagline": "整机 · 查看与编辑",
@@ -696,7 +710,6 @@
       "rename": "重命名",
       "delete": "删除",
       "confirmDelete": "删除“{{name}}”？此操作无法撤销。",
-      "previewFailed": "无法加载此图片。",
       "searchPlaceholder": "搜索",
       "colName": "名称",
       "colSize": "大小",
@@ -704,6 +717,8 @@
       "favorites": "收藏",
       "noMatches": "无匹配项",
       "itemCount": "{{count}} 项",
+      "searchCount": "{{count}} 个结果",
+      "searchTruncated": "结果较多，仅显示部分。",
       "projects": "项目",
       "system": "系统",
       "showHidden": "显示隐藏文件",
@@ -730,6 +745,11 @@
         "loadFailed": "无法加载这个文件。",
         "saveFailed": "无法保存这个文件。",
         "deleteFailed": "无法删除这个项目。",
+        "renameFailed": "无法重命名这个项目。",
+        "moveFailed": "无法移动这个项目。",
+        "searchFailed": "无法搜索这个文件夹。",
+        "invalid_query": "请输入搜索内容。",
+        "invalid_move": "不允许这样移动。",
         "invalid_response": "服务器返回了异常响应，请重试。"
       }
     },
@@ -775,12 +795,12 @@
     }
   },
   "appShell": {
-    "title": "Avibe OS",
-    "subtitle": "Agent操作系统 · 工作台",
+    "title": "Avibe",
+    "subtitle": "Agent OS · 工作台",
     "workspaceLabel": "设置",
     "moreSettings": "更多设置",
     "openControlPanel": "设置",
-    "backToWorkbench": "返回工作台",
+    "backToWorkbench": "工作台",
     "newSession": "新建",
     "navigationLabel": "控制台",
     "statusLabel": "服务状态",
@@ -1427,6 +1447,11 @@
     "filterPlaceholder": "搜索群组…",
     "rescan": "重新扫描",
     "showInactive": "显示未启用",
+    "showUnavailable": "显示已失效",
+    "unavailableBadge": "已失效",
+    "unavailableSince": "自 {{at}} 起平台不再返回此群组",
+    "removeChannel": "移除",
+    "removeChannelConfirm": "永久移除“{{name}}”及其设置？此操作无法撤销。",
     "headerSummary": "全部群组 · {{active}} 已启用 · {{discovered}} 已发现",
     "headerSummaryPlatform": "{{platform}} · {{active}} 已启用 · {{discovered}} 已发现",
     "noChannelsForSearch": "没有群组匹配你的搜索。",
@@ -2145,12 +2170,7 @@
       "previous": "上一张",
       "next": "下一张",
       "zoomIn": "放大",
-      "zoomOut": "缩小",
-      "loading": "加载中…",
-      "error": "无法加载该文件。",
-      "tooLarge": "文件过大，无法预览，请直接下载。",
-      "csvTruncated": "仅显示前 {{count}} 行",
-      "csvColsTruncated": "显示前 {{shown}} 列，共 {{total}} 列"
+      "zoomOut": "缩小"
     },
     "queue": {
       "title": "排队中 · {{count}}",

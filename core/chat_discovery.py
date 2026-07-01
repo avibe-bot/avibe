@@ -16,7 +16,7 @@ from sqlalchemy import Connection, and_, select
 from config import paths
 from storage.db import create_sqlite_engine
 from storage.migrations import run_migrations
-from storage.models import scope_settings, scopes, state_meta
+from storage.models import agent_events, media_objects, messages, scope_settings, scopes, state_meta
 from storage.settings_service import make_scope_id, upsert_scope
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,10 @@ METADATA_CHANNEL_POSITION = "channel_position"
 METADATA_CHANNEL_CATEGORY_ID = "channel_category_id"
 METADATA_CHAT_MODE = "chat_mode"
 METADATA_AUTH_CONTEXT = "auth_context"
+# Set when a user removes a stale channel that still owns history (messages /
+# events / media). The scope row is kept so the CASCADE FKs do not wipe history;
+# this flag hides it from every discovery listing. Cleared on rediscovery.
+METADATA_DISMISSED_AT = "dismissed_at"
 
 _STICKY_TRUE_KEYS = {METADATA_IS_FORUM, METADATA_SUPPORTS_TOPICS}
 _DEBOUNCE_SECONDS = 60.0
@@ -282,6 +286,10 @@ def remember_chat(
 
     normalized_metadata = normalize_metadata(metadata)
     normalized_metadata.setdefault(METADATA_VISIBILITY_STATUS, VISIBILITY_VISIBLE)
+    # Seeing the chat again (e.g. Telegram passive rediscovery) un-dismisses it,
+    # so a removed-but-kept group reappears once it is active again. Without this,
+    # list_chats would hide it forever after a dismissal.
+    normalized_metadata.setdefault(METADATA_DISMISSED_AT, None)
     debounce_payload = (
         name,
         native_type,
@@ -386,6 +394,10 @@ def list_chats(
                 metadata = _json_loads(row["metadata_json"], {})
                 if auth_context is not None and metadata.get(METADATA_AUTH_CONTEXT) != auth_context:
                     continue
+                if metadata.get(METADATA_DISMISSED_AT):
+                    # User removed this stale entry but history kept the row alive;
+                    # never surface it in any discovery listing.
+                    continue
                 visibility = str(metadata.get(METADATA_VISIBILITY_STATUS) or VISIBILITY_UNKNOWN)
                 if visibility == VISIBILITY_NOT_RETURNED and not include_not_returned:
                     continue
@@ -451,7 +463,9 @@ def refresh_platform(
             engine.dispose()
 
         try:
-            rows, refreshed_parent = _fetch_platform_channels(platform, db_path=db_path, **kwargs)
+            rows, refreshed_parent, fetch_complete = _fetch_platform_channels(
+                platform, db_path=db_path, **kwargs
+            )
         except Exception as exc:
             error = str(exc)
             logger.warning("Failed to refresh %s channel inventory: %s", platform, error, exc_info=True)
@@ -480,6 +494,9 @@ def refresh_platform(
                             METADATA_VISIBILITY_STATUS: VISIBILITY_VISIBLE,
                             METADATA_LAST_REFRESHED_AT: success_at,
                             METADATA_LAST_MISSING_AT: None,
+                            # A channel that reappears on the platform is no longer
+                            # dismissed — surface it again.
+                            METADATA_DISMISSED_AT: None,
                             METADATA_AUTH_CONTEXT: auth_context,
                         },
                     )
@@ -496,15 +513,21 @@ def refresh_platform(
                         metadata=metadata,
                         now=success_at,
                     )
-                _mark_not_returned(
-                    conn,
-                    platform,
-                    seen_ids,
-                    refreshed_at=success_at,
-                    parent_scope_id=refreshed_parent,
-                    auth_context=auth_context,
-                    require_member=platform == "slack" and not bool(kwargs.get("browse_all", False)),
-                )
+                if fetch_complete:
+                    _mark_not_returned(
+                        conn,
+                        platform,
+                        seen_ids,
+                        refreshed_at=success_at,
+                        parent_scope_id=refreshed_parent,
+                        auth_context=auth_context,
+                        require_member=platform == "slack" and not bool(kwargs.get("browse_all", False)),
+                    )
+                else:
+                    logger.warning(
+                        "Skipping not_returned marking for %s: live inventory was incomplete/truncated",
+                        platform,
+                    )
                 state = RefreshState(last_attempt_at=now, last_success_at=success_at, last_error=None)
                 _write_refresh_state(conn, platform, state, now=success_at, refresh_scope=refresh_scope)
                 if platform == "slack" and bool(kwargs.get("browse_all", False)) and auth_context:
@@ -588,6 +611,7 @@ def channels_response(
     force: bool = False,
     include_private: bool = True,
     require_member: bool = False,
+    include_not_returned: bool = False,
     parent_scope_id: str | None = None,
     db_path: Path | None = None,
     **refresh_kwargs: Any,
@@ -614,13 +638,22 @@ def channels_response(
         auth_context=auth_context,
         db_path=db_path,
     )
-    chats = _filter_response_chats(all_chats, include_private=include_private, require_member=require_member)
+    chats = _filter_response_chats(
+        all_chats,
+        include_private=include_private,
+        require_member=require_member,
+        include_not_returned=include_not_returned,
+    )
     state = refresh_state(platform, refresh_scope=refresh_scope, db_path=db_path)
     refreshing = False
     error = state.last_error
 
     cache_requires_refresh = _response_cache_requires_refresh(platform, state, refresh_kwargs)
-    if can_refresh and (force or not chats or cache_requires_refresh):
+    # Trigger an initial refresh only when we have never successfully fetched.
+    # Do NOT key off an empty filtered ``chats`` list: once stale channels are
+    # hidden, an all-deleted install would otherwise refresh on every request and
+    # bypass the per-platform TTL guard (which lives inside ``refresh_platform``).
+    if can_refresh and (force or state.last_success_at is None or cache_requires_refresh):
         result = refresh_platform(platform, force=force, db_path=db_path, **refresh_kwargs)
         state = result.refresh_state
         error = result.error or state.last_error
@@ -631,7 +664,12 @@ def channels_response(
             auth_context=auth_context,
             db_path=db_path,
         )
-        chats = _filter_response_chats(all_chats, include_private=include_private, require_member=require_member)
+        chats = _filter_response_chats(
+            all_chats,
+            include_private=include_private,
+            require_member=require_member,
+            include_not_returned=include_not_returned,
+        )
     elif can_refresh and should_refresh(platform, refresh_scope=refresh_scope, db_path=db_path):
         refreshing = _schedule_refresh(platform, db_path=db_path, **refresh_kwargs)
 
@@ -648,7 +686,15 @@ def channels_response(
     }
 
 
-def _fetch_platform_channels(platform: str, **kwargs: Any) -> tuple[list[dict[str, Any]], str | None]:
+def _fetch_platform_channels(
+    platform: str, **kwargs: Any
+) -> tuple[list[dict[str, Any]], str | None, bool]:
+    """Fetch the live channel inventory for a platform.
+
+    Returns ``(rows, parent_scope_id, fetch_complete)``. ``fetch_complete`` is
+    ``False`` when the live list was truncated/partial (e.g. Lark page cap), in
+    which case the caller must NOT mark unseen channels ``not_returned``.
+    """
     from vibe import api
 
     if platform == "slack":
@@ -673,7 +719,7 @@ def _fetch_platform_channels(platform: str, **kwargs: Any) -> tuple[list[dict[st
                     },
                 }
             )
-        return rows, None
+        return rows, None, True
 
     if platform == "discord":
         guild_id = str(kwargs.get("guild_id") or "").strip()
@@ -701,7 +747,7 @@ def _fetch_platform_channels(platform: str, **kwargs: Any) -> tuple[list[dict[st
                     },
                 }
             )
-        return rows, parent_scope_id
+        return rows, parent_scope_id, True
 
     if platform == "lark":
         result = api.lark_list_chats_live(
@@ -722,7 +768,10 @@ def _fetch_platform_channels(platform: str, **kwargs: Any) -> tuple[list[dict[st
                     "metadata": {METADATA_CHAT_MODE: chat.get("chat_mode") or chat.get("chat_type")},
                 }
             )
-        return rows, None
+        # A truncated page-cap result is an incomplete inventory: never use it to
+        # mark unseen chats not_returned.
+        fetch_complete = not bool(result.get("truncated", False))
+        return rows, None, fetch_complete
 
     raise RuntimeError(f"Unsupported active refresh platform: {platform}")
 
@@ -767,6 +816,68 @@ def _mark_not_returned(
             .where(scopes.c.id == row["id"])
             .values(metadata_json=_json_dumps(metadata), updated_at=refreshed_at)
         )
+
+
+def _scope_has_history(conn: Connection, scope_id: str) -> bool:
+    """True if the scope owns rows whose FK to scopes is ON DELETE CASCADE.
+
+    ``messages``, ``agent_events`` and ``media_objects`` cascade-delete with the
+    scope row, so deleting a scope that owns any of them would destroy stored
+    chat history/traces/media — not just the discovery entry.
+    """
+    for table in (messages, agent_events, media_objects):
+        exists = conn.execute(
+            select(table.c.scope_id).where(table.c.scope_id == scope_id).limit(1)
+        ).first()
+        if exists is not None:
+            return True
+    return False
+
+
+def delete_scope(
+    platform: str,
+    native_id: str,
+    *,
+    scope_type: str = CHANNEL_SCOPE_TYPE,
+    db_path: Path | None = None,
+) -> dict[str, bool]:
+    """Remove a discovered scope and its settings without destroying history.
+
+    The user-facing intent is "clear this stale entry", not "purge all stored
+    messages". Because ``messages`` / ``agent_events`` / ``media_objects`` FK the
+    scope with ON DELETE CASCADE, a hard delete would wipe that history. So:
+
+    - the ``scope_settings`` row is always deleted (the user's config);
+    - if the scope owns no cascading history, the ``scopes`` row is physically
+      deleted (clean removal);
+    - otherwise the ``scopes`` row is kept and stamped ``dismissed_at`` so it is
+      hidden from every discovery listing while its history stays intact.
+
+    Returns ``{"removed": bool, "dismissed": bool}``.
+    """
+    scope_id = make_scope_id(platform, scope_type, native_id)
+    engine = _engine(db_path)
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(select(scopes).where(scopes.c.id == scope_id)).mappings().one_or_none()
+            if row is None:
+                return {"removed": False, "dismissed": False}
+            conn.execute(scope_settings.delete().where(scope_settings.c.scope_id == scope_id))
+            if _scope_has_history(conn, scope_id):
+                metadata = _json_loads(row["metadata_json"], {})
+                metadata[METADATA_DISMISSED_AT] = _utc_now_iso()
+                conn.execute(
+                    scopes.update()
+                    .where(scopes.c.id == scope_id)
+                    .values(metadata_json=_json_dumps(metadata), updated_at=_utc_now_iso())
+                )
+                return {"removed": False, "dismissed": True}
+            # No cascading history — safe to physically delete. Child scopes keep
+            # their rows (parent_scope_id is ON DELETE SET NULL).
+            result = conn.execute(scopes.delete().where(scopes.c.id == scope_id))
+            return {"removed": bool(result.rowcount), "dismissed": False}
+    finally:
+        engine.dispose()
 
 
 def _scope_row(conn: Connection, platform: str, scope_type: str, native_id: str):
@@ -850,6 +961,9 @@ def _summary(all_chats: list[ChannelInfo], visible_chats: list[ChannelInfo], *, 
     return {
         "discovered_count": len(all_chats),
         "visible_count": len(visible_chats),
+        "not_returned_count": sum(
+            1 for chat in all_chats if chat.visibility_status == VISIBILITY_NOT_RETURNED
+        ),
         "hidden_private_count": 0 if include_private else sum(1 for chat in all_chats if chat.is_private),
         "forum_count": sum(1 for chat in visible_chats if bool(chat.metadata.get(METADATA_SUPPORTS_TOPICS))),
     }
@@ -860,16 +974,22 @@ def _filter_response_chats(
     *,
     include_private: bool,
     require_member: bool,
+    include_not_returned: bool = False,
 ) -> list[ChannelInfo]:
     result = chats
     if not include_private:
         result = [chat for chat in result if not chat.is_private]
+    if not include_not_returned:
+        # Hide channels that the platform no longer returns (deleted / inaccessible)
+        # by default, across all platforms. They remain in storage and are exposed
+        # only when a caller explicitly opts in (review / manual remove views).
+        result = [chat for chat in result if chat.visibility_status != VISIBILITY_NOT_RETURNED]
     if require_member:
-        result = [
-            chat
-            for chat in result
-            if chat.is_member is True and chat.visibility_status != VISIBILITY_NOT_RETURNED
-        ]
+        # Keep only member channels for the Slack member-only view. Do NOT re-drop
+        # not_returned here: when the caller opted in (include_not_returned), the
+        # stale member rows are exactly what the review/remove view needs; when
+        # they did not, those rows were already removed above.
+        result = [chat for chat in result if chat.is_member is True]
     return result
 
 

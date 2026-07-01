@@ -18,8 +18,10 @@ import {
   Image as ImageIcon,
   Loader2,
   Monitor,
+  Pencil,
   RefreshCw,
   Search,
+  Trash2,
   X,
   type LucideIcon,
 } from 'lucide-react';
@@ -27,9 +29,10 @@ import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
-import { isEditableFile, isEditableMeta, isRenderOnlyImage } from '../../lib/filePreview';
+import { isEditableFile, isEditableMeta, previewWindowKind } from '../../lib/filePreview';
 import {
   contentUrl,
+  deletePath,
   downloadFile,
   fileBrowserErrorMessage,
   fileMeta,
@@ -37,15 +40,22 @@ import {
   joinPath,
   listDir,
   makeDir,
+  movePath,
+  parentDir,
   pathCrumbs,
+  renamePath,
+  searchNames,
   systemFavorites,
   writeFile,
   type Favorite,
   type FsEntry,
   type FsListing,
+  type NameHit,
 } from '../../lib/filesApi';
 import { Button } from '../ui/button';
-import { FilePreview } from './FilePreview';
+import { ContextMenu, ContextMenuItem } from '../ui/context-menu';
+import { FilePreview } from '../ui/file-preview';
+import { InlineNameInput } from '../ui/inline-name-input';
 
 // A code-file extension → its accent + glyph (mirrors design nknn2's colored type icons).
 const EXT_ICON: Record<string, { Icon: LucideIcon; color: string }> = {
@@ -79,6 +89,11 @@ const FAV_ICON: Record<string, LucideIcon> = {
   root: HardDrive,
 };
 
+// One row in the listing OR the recursive-search results. `full` is the absolute path; `dir` is its
+// parent (where rename/delete/move resolve); `rel` (search hits only) is the path relative to the
+// search root, so a nested hit can show the folder it lives in.
+type RowItem = { entry: FsEntry; full: string; dir: string; rel?: string };
+
 function formatSize(n: number | null): string {
   if (n == null) return '—';
   if (n < 1024) return `${n} B`;
@@ -97,10 +112,19 @@ function formatMtime(seconds: number | null): string {
   return `${date} ${time}`;
 }
 
-// Whole-machine Finder: favorites/projects rail + a Name/Size/Modified list + a toolbar
-// (breadcrumb, search, New File/Folder) + a status bar. A pure directory browser — it does
-// not edit files; double-clicking a text/code file opens it in the Editor window. Backend
-// contract: ui/src/lib/filesApi.ts → /api/files/*. Design: design.pen `nknn2`.
+// The folder an entry lives in, relative to the search root (for search-result rows). Empty for a
+// direct child of the search root (rel is just the name).
+function relFolder(rel: string | undefined): string {
+  if (!rel || !rel.includes('/')) return '';
+  return rel.slice(0, rel.lastIndexOf('/'));
+}
+
+// Whole-machine Finder: favorites/projects rail + a Name/Size/Modified list + a toolbar (breadcrumb,
+// search, New File/Folder) + a status bar. Right-click a row for Open/Download/Rename/Delete, or
+// blank space for New File/Folder; drag a row onto a folder (row, rail, or breadcrumb) to move it;
+// the search box does a recursive file/folder NAME search under the current folder. Double-clicking a
+// text/code file opens it in the Editor window. Backend contract: ui/src/lib/filesApi.ts →
+// /api/files/*. Design: design.pen `nknn2`.
 export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: string }> = ({ windowed = false }) => {
   const { t } = useTranslation();
   const wm = useWindowManager();
@@ -177,81 +201,142 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showHidden]);
 
-  // Open: dir → navigate; raster image → in-window preview overlay; editable text/code file (within
-  // the size cap) → Editor window; anything else → raw download.
-  const open = async (e: FsEntry) => {
-    const full = joinPath(cwd, e.name);
-    if (e.kind === 'dir') {
-      navigate(full);
+  // ---- Recursive name search (backend: /api/files/search_names) --------------------------------
+  // A non-empty query switches the listing to recursive file/folder NAME results under `cwd`. The
+  // search is debounced and abortable so fast typing doesn't pile up stale requests.
+  const [searchResults, setSearchResults] = useState<NameHit[] | null>(null);
+  const [searchTruncated, setSearchTruncated] = useState(false);
+  const [searchBusy, setSearchBusy] = useState(false);
+  const searchSeq = useRef(0);
+  const searchAbort = useRef<AbortController | null>(null);
+  const inSearch = query.trim().length > 0;
+
+  const runSearch = useCallback(
+    (raw: string) => {
+      const q = raw.trim();
+      searchAbort.current?.abort();
+      if (!q || !cwd) {
+        setSearchResults(null);
+        setSearchBusy(false);
+        return;
+      }
+      const ac = new AbortController();
+      searchAbort.current = ac;
+      const seq = ++searchSeq.current;
+      setSearchBusy(true);
+      searchNames(cwd, q, showHidden, ac.signal)
+        .then((r) => {
+          if (seq !== searchSeq.current) return;
+          setSearchResults(r.results);
+          setSearchTruncated(r.truncated);
+        })
+        .catch((e: unknown) => {
+          if (seq !== searchSeq.current || (e as { name?: string })?.name === 'AbortError') return;
+          setSearchResults([]);
+          setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.searchFailed')));
+        })
+        .finally(() => {
+          if (seq === searchSeq.current) setSearchBusy(false);
+        });
+    },
+    [cwd, showHidden, t],
+  );
+
+  // Debounce the search as the user types; also re-fires when cwd/showHidden change (runSearch
+  // identity changes), so switching folders re-scopes an active search.
+  useEffect(() => {
+    const q = query.trim();
+    if (!q) {
+      searchAbort.current?.abort();
+      setSearchResults(null);
+      setSearchBusy(false);
       return;
     }
-    // A raster image has no editable text form (it would otherwise just download) — preview it in an
-    // overlay instead. Works on mobile too (the overlay is in-window, unlike the desktop-only editor).
-    if (isRenderOnlyImage(e)) {
-      setPreview({ path: full, name: e.name });
+    const id = window.setTimeout(() => runSearch(query), 220);
+    return () => window.clearTimeout(id);
+  }, [query, runSearch]);
+
+  useEffect(() => () => searchAbort.current?.abort(), []);
+
+  // After a mutation: re-list the current folder, and re-run the search if one is active.
+  const refreshAll = useCallback(() => {
+    if (cwd) navigate(cwd);
+    if (query.trim()) runSearch(query);
+  }, [cwd, navigate, query, runSearch]);
+
+  // Open: dir → navigate (and leave search); image / PDF / Office / Markdown → the standalone Preview
+  // window (desktop) or the in-page overlay (mobile, which has no window layer); editable text/code
+  // file (within the size cap) → Editor window; anything else → download.
+  const openItem = async (item: RowItem) => {
+    if (item.entry.kind === 'dir') {
+      setQuery('');
+      navigate(item.full);
       return;
     }
-    // Mobile has no editor window layer (windows are md+), so a non-image file just downloads.
     const desktop = window.matchMedia('(min-width: 768px)').matches;
-    if (!desktop) {
-      downloadFile(full);
+    if (previewWindowKind(item.entry)) {
+      // Desktop opens a real, resizable Preview window (a dedicated app); mobile has no window layer,
+      // so it falls back to the in-page overlay so the file can still be viewed.
+      if (desktop) wm.openApp('preview', { title: item.entry.name, params: { path: item.full, name: item.entry.name } });
+      else setPreview({ path: item.full, name: item.entry.name });
       return;
     }
-    // Desktop: fetch CURRENT metadata (which content-sniffs `text`) and decide by CONTENT, not just
-    // the extension — so an extensionless / unknown-type TEXT file (LICENSE, README, a `notes` file)
-    // opens in the editor instead of downloading, while a symlink / oversized / binary file
-    // downloads. Awaiting is safe: opening an internal window needs no user activation, and the
-    // anchor download (the binary branch) isn't a popup, so it survives the await.
+    // Mobile has no editor window layer (windows are md+), so a non-previewable file just downloads.
+    if (!desktop) {
+      downloadFile(item.full);
+      return;
+    }
+    // Desktop: fetch CURRENT metadata (content-sniffs `text`) and decide by CONTENT, not just the
+    // extension — so an extensionless TEXT file opens in the editor while a binary file downloads.
     try {
-      const m = await fileMeta(full);
+      const m = await fileMeta(item.full);
       if (isEditableMeta(m)) {
-        wm.openApp('editor', { title: e.name, params: { path: full, filename: e.name, mtime: m.mtime } });
+        wm.openApp('editor', { title: item.entry.name, params: { path: item.full, filename: item.entry.name, mtime: m.mtime } });
       } else {
-        downloadFile(full);
+        downloadFile(item.full);
       }
     } catch {
-      // Metadata fetch failed — fall back to the name-only guess so a known text type still opens.
-      if (isEditableFile(e)) {
-        wm.openApp('editor', { title: e.name, params: { path: full, filename: e.name, mtime: e.mtime } });
+      if (isEditableFile(item.entry)) {
+        wm.openApp('editor', { title: item.entry.name, params: { path: item.full, filename: item.entry.name, mtime: item.entry.mtime } });
       } else {
-        downloadFile(full);
+        downloadFile(item.full);
       }
     }
   };
 
-  // New File / New Folder: an inline editable row in the listing (mirrors FilePicker), not a
-  // window.prompt. null = not creating. Enter creates, Esc/blur cancels.
-  const [newEntry, setNewEntry] = useState<{ kind: 'file' | 'folder'; value: string } | null>(null);
+  // New File / New Folder: an inline editable row in the listing (mirrors FilePicker). Starting one
+  // clears any active search so the create row is visible in the current folder.
+  const [newEntry, setNewEntry] = useState<{ kind: 'file' | 'folder' } | null>(null);
   const startNewEntry = useCallback((kind: 'file' | 'folder') => {
     setError(null);
-    setNewEntry({ kind, value: '' });
+    setQuery('');
+    setNewEntry({ kind });
   }, []);
-  const newEntryRef = useRef<{ kind: 'file' | 'folder'; value: string } | null>(null);
-  newEntryRef.current = newEntry;
-  const commitNewEntry = useCallback(async () => {
-    const session = newEntryRef.current;
-    if (!session) return;
-    const name = session.value.trim();
-    if (name === '') {
-      setNewEntry(null);
-      return;
-    }
-    if (!isPlainEntryName(name)) {
-      setError(t('apps.fileBrowser.errors.invalid_name'));
-      return;
-    }
-    try {
-      // create-only on files: the backend atomically refuses a name clash, so a typo can't clobber.
-      if (session.kind === 'folder') await makeDir(joinPath(cwd, name));
-      else await writeFile(joinPath(cwd, name), '', undefined, true);
-      setNewEntry(null);
-      navigate(cwd);
-    } catch (e: unknown) {
-      setError(
-        fileBrowserErrorMessage(e, t, t(session.kind === 'folder' ? 'apps.fileBrowser.errors.createFolderFailed' : 'apps.fileBrowser.errors.saveFailed')),
-      );
-    }
-  }, [cwd, navigate, t]);
+  const commitNewEntry = useCallback(
+    async (kind: 'file' | 'folder', value: string) => {
+      const name = value.trim();
+      if (name === '') {
+        setNewEntry(null);
+        return;
+      }
+      if (!isPlainEntryName(name)) {
+        setError(t('apps.fileBrowser.errors.invalid_name'));
+        return;
+      }
+      try {
+        // create-only on files: the backend atomically refuses a name clash, so a typo can't clobber.
+        if (kind === 'folder') await makeDir(joinPath(cwd, name));
+        else await writeFile(joinPath(cwd, name), '', undefined, true);
+        setNewEntry(null);
+        refreshAll();
+      } catch (e: unknown) {
+        setError(
+          fileBrowserErrorMessage(e, t, t(kind === 'folder' ? 'apps.fileBrowser.errors.createFolderFailed' : 'apps.fileBrowser.errors.saveFailed')),
+        );
+      }
+    },
+    [cwd, refreshAll, t],
+  );
 
   // New File: on DESKTOP open the Editor rooted at the current dir with a fresh untitled buffer
   // (richer creation + editing flow; first save lands in cwd). On mobile the editor window layer is
@@ -265,16 +350,112 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     }
   }, [cwd, wm, t, startNewEntry]);
 
+  // ---- Rename (inline) + Delete ----------------------------------------------------------------
+  const [rename, setRename] = useState<{ full: string } | null>(null);
+  const startRename = useCallback((item: RowItem) => {
+    setError(null);
+    setRename({ full: item.full });
+  }, []);
+  const commitRename = useCallback(
+    async (item: RowItem, value: string) => {
+      const name = value.trim();
+      if (name === '' || name === item.entry.name) {
+        setRename(null);
+        return;
+      }
+      if (!isPlainEntryName(name)) {
+        setError(t('apps.fileBrowser.errors.invalid_name'));
+        return;
+      }
+      try {
+        await renamePath(item.full, name);
+        setRename(null);
+        setError(null);
+        refreshAll();
+      } catch (e: unknown) {
+        setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.renameFailed')));
+      }
+    },
+    [refreshAll, t],
+  );
+
+  const removeItem = useCallback(
+    async (item: RowItem) => {
+      setMenu(null);
+      if (!window.confirm(t('apps.fileBrowser.confirmDelete', { name: item.entry.name }))) return;
+      try {
+        await deletePath(item.full, item.entry.kind === 'dir');
+        setError(null);
+        setSelected((s) => (s === item.full ? null : s));
+        refreshAll();
+      } catch (e: unknown) {
+        setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.deleteFailed')));
+      }
+    },
+    [t, refreshAll],
+  );
+
+  // ---- Context menu ----------------------------------------------------------------------------
+  // `item` is null for blank space (offers New File/Folder only).
+  const [menu, setMenu] = useState<{ x: number; y: number; item: RowItem | null } | null>(null);
+  const openMenu = useCallback((ev: React.MouseEvent, item: RowItem | null) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    setMenu({ x: ev.clientX, y: ev.clientY, item });
+  }, []);
+  const closeMenu = useCallback(() => setMenu(null), []);
+
+  // ---- Drag-and-drop move ----------------------------------------------------------------------
+  // The dragged row is held in a ref (no re-render mid-drag); `dropTarget` (a folder path) drives the
+  // hover highlight. Folders — rows, rail favorites/projects, and breadcrumbs — are drop targets.
+  const dragRef = useRef<RowItem | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const moveInto = useCallback(
+    async (destDir: string) => {
+      const item = dragRef.current;
+      dragRef.current = null;
+      setDropTarget(null);
+      // No-op if it's already in that folder or dropped onto itself; the backend also refuses moving
+      // a folder into its own subtree, which surfaces as an error below.
+      if (!item || item.dir === destDir || item.full === destDir) return;
+      try {
+        await movePath(item.full, joinPath(destDir, item.entry.name));
+        setError(null);
+        refreshAll();
+      } catch (e: unknown) {
+        setError(fileBrowserErrorMessage(e, t, t('apps.fileBrowser.errors.moveFailed')));
+      }
+    },
+    [t, refreshAll],
+  );
+  // Drop-target props for any folder (row / rail / breadcrumb). Only active while a drag is in flight
+  // and never onto the dragged item itself.
+  const dropProps = (destDir: string) => ({
+    onDragOver: (e: React.DragEvent) => {
+      if (!dragRef.current || dragRef.current.full === destDir) return;
+      e.preventDefault();
+      setDropTarget((d) => (d === destDir ? d : destDir));
+    },
+    onDragLeave: () => setDropTarget((d) => (d === destDir ? null : d)),
+    onDrop: (e: React.DragEvent) => {
+      e.preventDefault();
+      void moveInto(destDir);
+    },
+  });
+
   const projectFavs = useMemo(
     () => (projects || []).filter((p) => !!p.folder_path).map((p) => ({ label: p.display_name, path: p.folder_path as string })),
     [projects],
   );
   const crumbs = cwd ? pathCrumbs(cwd) : [];
-  const entries = useMemo(() => {
-    const all = listing?.entries ?? [];
-    const q = query.trim().toLowerCase();
-    const filtered = q ? all.filter((e) => e.name.toLowerCase().includes(q)) : all;
-    return [...filtered].sort((a, b) => {
+
+  // Rows come from the recursive search when a query is active (backend walk order: shallow first),
+  // otherwise from the current-folder listing (dirs-first, then the active column sort).
+  const rows = useMemo<RowItem[]>(() => {
+    if (query.trim()) {
+      return (searchResults ?? []).map((h) => ({ entry: h as FsEntry, full: h.path, dir: parentDir(h.path), rel: h.rel }));
+    }
+    const all = [...(listing?.entries ?? [])].sort((a, b) => {
       // Folders always group before files, regardless of column/direction (Finder-like).
       if (a.kind !== b.kind) return a.kind === 'dir' ? -1 : 1;
       if (!sort) return a.name.localeCompare(b.name);
@@ -285,11 +466,14 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
       if (r === 0) r = a.name.localeCompare(b.name);
       return sort.dir === 'asc' ? r : -r;
     });
-  }, [listing, query, sort]);
-  const selectedEntry = useMemo(
-    () => (selected ? entries.find((e) => joinPath(cwd, e.name) === selected) ?? null : null),
-    [entries, cwd, selected],
-  );
+    return all.map((e) => ({ entry: e, full: joinPath(cwd, e.name), dir: cwd }));
+  }, [query, searchResults, listing, sort, cwd]);
+
+  const selectedEntry = useMemo(() => (selected ? rows.find((r) => r.full === selected)?.entry ?? null : null), [rows, selected]);
+
+  const showInitialSpinner = inSearch ? searchBusy && searchResults === null : loading && !listing;
+  const showEmpty = inSearch ? !searchBusy && (searchResults?.length ?? 0) === 0 : !!listing && rows.length === 0 && newEntry === null;
+  const menuItemCount = menu ? (menu.item ? (menu.item.entry.kind === 'dir' ? 3 : 4) : 2) : 0;
 
   return (
     <div className={windowed ? 'relative flex h-full w-full flex-col bg-surface' : 'relative flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-3 md:h-[calc(100vh-8rem)]'}>
@@ -304,16 +488,23 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
         {/* Toolbar: breadcrumb (left) + search + New File / New Folder (right) */}
         <div className="flex items-center gap-2 border-b border-border bg-surface-2/60 px-3 py-2">
           <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
-            <Button type="button" size="icon" variant="ghost" className="size-7 shrink-0 text-muted" aria-label={t('apps.fileBrowser.refresh')} onClick={() => cwd && navigate(cwd)}>
-              <RefreshCw className={clsx('size-3.5', loading && 'animate-spin')} />
+            <Button type="button" size="icon" variant="ghost" className="size-7 shrink-0 text-muted" aria-label={t('apps.fileBrowser.refresh')} onClick={() => cwd && refreshAll()}>
+              <RefreshCw className={clsx('size-3.5', (loading || searchBusy) && 'animate-spin')} />
             </Button>
             {crumbs.map((c, i) => (
               <span key={c.path} className="flex shrink-0 items-center">
                 {i > 0 && <ChevronRight className="size-3 shrink-0 text-muted" />}
                 <button
                   type="button"
-                  onClick={() => navigate(c.path)}
-                  className="max-w-[140px] truncate rounded px-1.5 py-0.5 text-[12.5px] text-muted transition hover:bg-foreground/[0.06] hover:text-foreground"
+                  onClick={() => {
+                    setQuery('');
+                    navigate(c.path);
+                  }}
+                  {...dropProps(c.path)}
+                  className={clsx(
+                    'max-w-[140px] truncate rounded px-1.5 py-0.5 text-[12.5px] text-muted transition hover:bg-foreground/[0.06] hover:text-foreground',
+                    dropTarget === c.path && 'bg-cyan-soft text-foreground ring-1 ring-inset ring-cyan',
+                  )}
                 >
                   {c.label}
                 </button>
@@ -321,13 +512,18 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
             ))}
           </div>
           <label className="flex items-center gap-1.5 rounded-lg border border-border bg-surface px-2 py-1">
-            <Search className="size-3.5 shrink-0 text-muted" />
+            {searchBusy ? <Loader2 className="size-3.5 shrink-0 animate-spin text-muted" /> : <Search className="size-3.5 shrink-0 text-muted" />}
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder={t('apps.fileBrowser.searchPlaceholder')}
               className="w-28 bg-transparent text-[12px] text-foreground placeholder:text-muted focus:outline-none"
             />
+            {query && (
+              <button type="button" onClick={() => setQuery('')} className="shrink-0 text-muted transition hover:text-foreground" aria-label={t('common.close')}>
+                <X className="size-3" strokeWidth={2.5} />
+              </button>
+            )}
           </label>
           <Button type="button" size="sm" variant="brand" className="h-7 shrink-0 gap-1.5 px-2.5 text-[12px]" disabled={!cwd || newEntry !== null} onClick={onNewFile}>
             <FilePlus className="size-3.5" /> {t('apps.fileBrowser.newFile')}
@@ -340,7 +536,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
         {error && <div className="border-b border-destructive/40 bg-destructive/[0.06] px-3 py-1.5 text-[11.5px] text-destructive">{error}</div>}
 
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          {/* Rail: Favorites THEN Projects (design nknn2 order). */}
+          {/* Rail: Favorites THEN Projects (design nknn2 order). Folders here are drop targets too. */}
           <aside className="hidden w-[196px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-border bg-surface-2/40 p-2 md:flex">
             {sysFavs.length > 0 && <RailTitle>{t('apps.fileBrowser.favorites')}</RailTitle>}
             {sysFavs.map((f) => {
@@ -351,13 +547,29 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                   icon={<Icon className="size-3.5 text-muted" />}
                   label={f.path.split('/').filter(Boolean).pop() || f.path}
                   active={cwd === f.path}
-                  onClick={() => navigate(f.path)}
+                  dropActive={dropTarget === f.path}
+                  dropProps={dropProps(f.path)}
+                  onClick={() => {
+                    setQuery('');
+                    navigate(f.path);
+                  }}
                 />
               );
             })}
             {projectFavs.length > 0 && <RailTitle>{t('apps.fileBrowser.projects')}</RailTitle>}
             {projectFavs.map((f) => (
-              <RailRow key={f.path} icon={<Folder className="size-3.5 text-cyan" />} label={f.label} active={cwd === f.path} onClick={() => navigate(f.path)} />
+              <RailRow
+                key={f.path}
+                icon={<Folder className="size-3.5 text-cyan" />}
+                label={f.label}
+                active={cwd === f.path}
+                dropActive={dropTarget === f.path}
+                dropProps={dropProps(f.path)}
+                onClick={() => {
+                  setQuery('');
+                  navigate(f.path);
+                }}
+              />
             ))}
           </aside>
 
@@ -377,68 +589,110 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 {sort?.col === 'modified' && (sort.dir === 'asc' ? <ChevronUp className="size-3 shrink-0" /> : <ChevronDown className="size-3 shrink-0" />)}
               </button>
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto py-1">
-              {loading && !listing && (
+            {/* Right-clicking blank space offers New File / New Folder in the current folder. */}
+            <div className="min-h-0 flex-1 overflow-y-auto py-1" onContextMenu={(e) => openMenu(e, null)}>
+              {showInitialSpinner && (
                 <div className="grid place-items-center py-8"><Loader2 className="size-4 animate-spin text-muted" /></div>
               )}
-              {newEntry !== null && (
-                <div className="flex items-center px-3 py-1.5">
+              {!inSearch && newEntry !== null && (
+                // Stop the contextmenu here so right-clicking the input shows the browser's native
+                // menu (paste) instead of our blank-space New menu from the container below.
+                <div className="flex items-center px-3 py-1.5" onContextMenu={(e) => e.stopPropagation()}>
                   <span className="flex min-w-0 flex-1 items-center gap-2">
                     {newEntry.kind === 'folder' ? <Folder className="size-4 shrink-0 text-cyan" /> : <FileIcon className="size-4 shrink-0 text-muted" />}
-                    <input
-                      autoFocus
-                      value={newEntry.value}
-                      onChange={(ev) => setNewEntry((s) => (s ? { ...s, value: ev.target.value } : s))}
-                      onKeyDown={(ev) => {
-                        if (ev.key === 'Enter') {
-                          ev.preventDefault();
-                          void commitNewEntry();
-                        } else if (ev.key === 'Escape') {
-                          ev.preventDefault();
-                          setNewEntry(null);
-                        }
-                      }}
-                      onBlur={() => setNewEntry(null)}
+                    <InlineNameInput
+                      initial=""
                       placeholder={t(newEntry.kind === 'folder' ? 'apps.fileBrowser.newFolderPlaceholder' : 'apps.fileBrowser.newFilePrompt')}
+                      onCommit={(v) => void commitNewEntry(newEntry.kind, v)}
+                      onCancel={() => setNewEntry(null)}
                       className="min-w-0 flex-1 rounded border border-cyan bg-surface px-1.5 py-0.5 text-[12.5px] text-foreground placeholder:text-muted focus:outline-none"
                     />
                   </span>
                 </div>
               )}
-              {listing && entries.length === 0 && newEntry === null && (
-                <div className="px-3 py-8 text-center text-[12px] text-muted">{query ? t('apps.fileBrowser.noMatches') : t('apps.fileBrowser.empty')}</div>
+              {showEmpty && (
+                <div className="px-3 py-8 text-center text-[12px] text-muted">{inSearch ? t('apps.fileBrowser.noMatches') : t('apps.fileBrowser.empty')}</div>
               )}
-              {entries.map((e) => {
-                const { Icon, color } = entryIcon(e);
-                const full = joinPath(cwd, e.name);
+              {rows.map((item) => {
+                const { Icon, color } = entryIcon(item.entry);
+                const isDir = item.entry.kind === 'dir';
+                const folder = relFolder(item.rel);
+                if (rename?.full === item.full) {
+                  return (
+                    <div key={item.full} className="flex items-center px-3 py-1.5" onContextMenu={(e) => e.stopPropagation()}>
+                      <span className="flex min-w-0 flex-1 items-center gap-2">
+                        <Icon className="size-4 shrink-0" style={{ color }} />
+                        <InlineNameInput
+                          initial={item.entry.name}
+                          onCommit={(v) => void commitRename(item, v)}
+                          onCancel={() => setRename(null)}
+                          className="min-w-0 flex-1 rounded border border-cyan bg-surface px-1.5 py-0.5 text-[12.5px] text-foreground placeholder:text-muted focus:outline-none"
+                        />
+                      </span>
+                    </div>
+                  );
+                }
                 return (
                   <button
-                    key={e.name}
+                    key={item.full}
                     type="button"
+                    draggable
+                    onDragStart={(e) => {
+                      dragRef.current = item;
+                      e.dataTransfer.effectAllowed = 'move';
+                      try {
+                        e.dataTransfer.setData('text/plain', item.full);
+                      } catch {
+                        // Some browsers throw if setData is called outside a real drag; harmless.
+                      }
+                    }}
+                    onDragEnd={() => {
+                      dragRef.current = null;
+                      setDropTarget(null);
+                    }}
+                    onDragOver={(e) => {
+                      if (!isDir || !dragRef.current || dragRef.current.full === item.full) return;
+                      e.preventDefault();
+                      setDropTarget((d) => (d === item.full ? d : item.full));
+                    }}
+                    onDragLeave={() => {
+                      if (isDir) setDropTarget((d) => (d === item.full ? null : d));
+                    }}
+                    onDrop={(e) => {
+                      if (!isDir) return;
+                      e.preventDefault();
+                      void moveInto(item.full);
+                    }}
                     // Mouse: single-click selects, double-click opens. Touch (coarse pointer) has no
                     // double-click, so a single tap opens. Keyboard: Enter/Space opens/navigates.
                     onClick={() => {
-                      if (window.matchMedia('(pointer: coarse)').matches) open(e);
-                      else setSelected(full);
+                      if (window.matchMedia('(pointer: coarse)').matches) void openItem(item);
+                      else setSelected(item.full);
                     }}
-                    onDoubleClick={() => open(e)}
+                    onDoubleClick={() => void openItem(item)}
                     onKeyDown={(ev) => {
                       if (ev.key === 'Enter' || ev.key === ' ') {
                         ev.preventDefault();
-                        open(e);
+                        void openItem(item);
                       }
                     }}
+                    onContextMenu={(e) => openMenu(e, item)}
                     className={clsx(
                       'flex w-full items-center px-3 py-1.5 text-left text-[12.5px] transition',
-                      selected === full ? 'bg-cyan-soft text-foreground' : 'text-foreground hover:bg-foreground/[0.04]',
+                      dropTarget === item.full
+                        ? 'bg-cyan-soft text-foreground ring-1 ring-inset ring-cyan'
+                        : selected === item.full
+                          ? 'bg-cyan-soft text-foreground'
+                          : 'text-foreground hover:bg-foreground/[0.04]',
                     )}
                   >
                     <span className="flex min-w-0 flex-1 items-center gap-2">
                       <Icon className="size-4 shrink-0" style={{ color }} />
-                      <span className="truncate">{e.name}</span>
+                      <span className="truncate">{item.entry.name}</span>
+                      {folder && <span className="min-w-0 shrink truncate text-[11px] text-muted">{folder}</span>}
                     </span>
-                    <span className="w-20 shrink-0 text-right font-mono text-[11px] text-muted">{e.kind === 'dir' ? '—' : formatSize(e.size)}</span>
-                    <span className="w-36 shrink-0 pl-4 font-mono text-[11px] text-muted">{formatMtime(e.mtime)}</span>
+                    <span className="w-20 shrink-0 text-right font-mono text-[11px] text-muted">{isDir ? '—' : formatSize(item.entry.size)}</span>
+                    <span className="w-36 shrink-0 pl-4 font-mono text-[11px] text-muted">{formatMtime(item.entry.mtime)}</span>
                   </button>
                 );
               })}
@@ -459,18 +713,21 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 {selectedEntry.kind !== 'dir' && selectedEntry.size != null ? ` · ${formatSize(selectedEntry.size)}` : ''}
               </span>
             )}
-            <span className="shrink-0">{t('apps.fileBrowser.itemCount', { count: entries.length })}</span>
-            {listing?.truncated && <span className="shrink-0">· {t('apps.fileBrowser.listTruncated', { count: listing.limit ?? entries.length })}</span>}
+            <span className="shrink-0">
+              {inSearch ? t('apps.fileBrowser.searchCount', { count: rows.length }) : t('apps.fileBrowser.itemCount', { count: rows.length })}
+            </span>
+            {!inSearch && listing?.truncated && <span className="shrink-0">· {t('apps.fileBrowser.listTruncated', { count: listing.limit ?? rows.length })}</span>}
+            {inSearch && searchTruncated && <span className="shrink-0">· {t('apps.fileBrowser.searchTruncated')}</span>}
           </span>
         </div>
       </div>
 
-      {/* In-window image preview overlay (Finder-style quick look). In-window, not a portaled
-          Dialog, so it stays inside the window's dark data-theme scope and bounds. */}
+      {/* MOBILE-ONLY quick-look overlay: on mobile there's no window layer, so a previewable file
+          opens here in-page instead of the standalone Preview window (desktop uses the window). */}
       {preview && (
         <div className="absolute inset-0 z-20 flex flex-col bg-surface">
           <div className="flex items-center gap-2 border-b border-border bg-surface-2/60 px-3 py-2">
-            <ImageIcon className="size-4 shrink-0 text-muted" />
+            <FileText className="size-4 shrink-0 text-muted" />
             <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">{preview.name}</span>
             <Button
               type="button"
@@ -487,9 +744,67 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
             </Button>
           </div>
           <div className="min-h-0 flex-1">
-            <FilePreview kind="image" src={contentUrl(preview.path)} name={preview.name} />
+            <FilePreview source={{ url: contentUrl(preview.path), name: preview.name }} />
           </div>
         </div>
+      )}
+
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} onClose={closeMenu} itemCount={menuItemCount}>
+          {menu.item ? (
+            <>
+              <ContextMenuItem
+                icon={menu.item.entry.kind === 'dir' ? <Folder className="size-3.5 text-cyan" /> : <FileText className="size-3.5 text-cyan" />}
+                label={t('apps.fileBrowser.open')}
+                onClick={() => {
+                  const it = menu.item as RowItem;
+                  closeMenu();
+                  void openItem(it);
+                }}
+              />
+              {menu.item.entry.kind !== 'dir' && (
+                <ContextMenuItem
+                  icon={<Download className="size-3.5 text-mint" />}
+                  label={t('apps.fileBrowser.download')}
+                  onClick={() => {
+                    const it = menu.item as RowItem;
+                    closeMenu();
+                    downloadFile(it.full);
+                  }}
+                />
+              )}
+              <ContextMenuItem
+                icon={<Pencil className="size-3.5" />}
+                label={t('apps.fileBrowser.rename')}
+                onClick={() => {
+                  const it = menu.item as RowItem;
+                  closeMenu();
+                  startRename(it);
+                }}
+              />
+              <ContextMenuItem icon={<Trash2 className="size-3.5" />} label={t('apps.fileBrowser.delete')} danger onClick={() => void removeItem(menu.item as RowItem)} />
+            </>
+          ) : (
+            <>
+              <ContextMenuItem
+                icon={<FilePlus className="size-3.5 text-mint" />}
+                label={t('apps.fileBrowser.newFile')}
+                onClick={() => {
+                  closeMenu();
+                  startNewEntry('file');
+                }}
+              />
+              <ContextMenuItem
+                icon={<FolderPlus className="size-3.5 text-gold" />}
+                label={t('apps.fileBrowser.newFolder')}
+                onClick={() => {
+                  closeMenu();
+                  startNewEntry('folder');
+                }}
+              />
+            </>
+          )}
+        </ContextMenu>
       )}
     </div>
   );
@@ -499,13 +814,29 @@ const RailTitle: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <div className="px-1 pb-0.5 pt-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.16em] text-muted">{children}</div>
 );
 
-const RailRow: React.FC<{ icon: React.ReactNode; label: string; active: boolean; onClick: () => void }> = ({ icon, label, active, onClick }) => (
+const RailRow: React.FC<{
+  icon: React.ReactNode;
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  dropActive?: boolean;
+  dropProps?: {
+    onDragOver: (e: React.DragEvent) => void;
+    onDragLeave: () => void;
+    onDrop: (e: React.DragEvent) => void;
+  };
+}> = ({ icon, label, active, onClick, dropActive, dropProps }) => (
   <button
     type="button"
     onClick={onClick}
+    {...dropProps}
     className={clsx(
       'flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition',
-      active ? 'bg-cyan-soft text-foreground' : 'text-muted hover:bg-foreground/[0.04] hover:text-foreground',
+      dropActive
+        ? 'bg-cyan-soft text-foreground ring-1 ring-inset ring-cyan'
+        : active
+          ? 'bg-cyan-soft text-foreground'
+          : 'text-muted hover:bg-foreground/[0.04] hover:text-foreground',
     )}
   >
     <span className="shrink-0">{icon}</span>

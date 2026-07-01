@@ -7,8 +7,8 @@ import { useTheme } from '../../context/ThemeContext';
 import { useWindowCloseGuard } from '../../context/WindowManagerContext';
 import { Button } from '../ui/button';
 import { fileBrowserErrorMessage, readText, writeFile } from '../../lib/filesApi';
-import { imageKind, previewKind } from '../../lib/filePreview';
-import { FilePreview } from './FilePreview';
+import { editorPreviewKind } from '../../lib/filePreview';
+import { FilePreview } from '../ui/file-preview';
 
 // Monaco (the VS Code kernel) is heavy; lazy-load it so it stays out of the main
 // bundle and only loads when a file is actually opened for editing.
@@ -120,15 +120,11 @@ export const FileEditorPane: React.FC<{
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Markdown / SVG can be previewed (rendered) as well as edited, VS-Code-style. `mode` toggles the
-  // body between the Monaco source and the rendered FilePreview, using the LIVE buffer so the
+  // Markdown / SVG / HTML can be previewed (rendered) as well as edited, VS-Code-style. `mode` toggles
+  // the body between the Monaco source and the rendered FilePreview, using the LIVE buffer so the
   // preview reflects unsaved edits.
   const [mode, setMode] = useState<'source' | 'preview'>('source');
-  const previewable: 'markdown' | 'svg' | null = useMemo(() => {
-    if (previewKind(filename) === 'markdown') return 'markdown';
-    if (imageKind(filename) === 'svg') return 'svg';
-    return null;
-  }, [filename]);
+  const previewable = useMemo(() => editorPreviewKind(filename), [filename]);
   // A new file may not be previewable — never strand the body in a preview mode it can't render.
   useEffect(() => {
     if (!previewable) setMode('source');
@@ -310,10 +306,8 @@ export const FileEditorPane: React.FC<{
       <div className={clsx('min-h-0 flex-1', loading && 'grid place-items-center')}>
         {loading ? (
           <Loader2 className="size-5 animate-spin text-muted" />
-        ) : text === null ? null : mode === 'preview' && previewable === 'markdown' ? (
-          <FilePreview kind="markdown" content={text} />
-        ) : mode === 'preview' && previewable === 'svg' ? (
-          <FilePreview kind="image" src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(text)}`} name={filename} />
+        ) : text === null ? null : mode === 'preview' && previewable ? (
+          <FilePreview source={{ text, name: filename }} />
         ) : (
           <Suspense fallback={<div className="p-4 text-[12px] text-muted">{t('common.loading')}</div>}>
             <MonacoEditor

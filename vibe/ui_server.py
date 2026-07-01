@@ -3619,6 +3619,7 @@ def slack_channels():
             payload.get("bot_token", ""),
             browse_all=payload.get("browse_all", False),
             force=payload.get("force", False) or request.args.get("force") == "1",
+            include_not_returned=bool(payload.get("include_not_returned", False)),
         )
     )
 
@@ -3653,6 +3654,25 @@ def discord_channels():
             payload.get("bot_token", ""),
             payload.get("guild_id", ""),
             force=payload.get("force", False) or request.args.get("force") == "1",
+            include_not_returned=bool(payload.get("include_not_returned", False)),
+        )
+    )
+
+
+@app.route("/api/channels/delete", methods=["POST"])
+def channels_delete():
+    from vibe import api
+
+    payload = request.json or {}
+    # Channel-only by design: forward the requested scope_type so a non-channel
+    # request is explicitly rejected at this boundary (api.delete_channel_scope
+    # returns an error for anything other than "channel") rather than silently
+    # deleting the channel scope that happens to share the id.
+    return jsonify(
+        api.delete_channel_scope(
+            payload.get("platform", ""),
+            payload.get("id", ""),
+            scope_type=payload.get("scope_type", "channel"),
         )
     )
 
@@ -3674,7 +3694,12 @@ def telegram_chats():
     from vibe import api
 
     payload = request.json or {}
-    return jsonify(api.telegram_list_chats(include_private=payload.get("include_private", False)))
+    return jsonify(
+        api.telegram_list_chats(
+            include_private=payload.get("include_private", False),
+            include_not_returned=bool(payload.get("include_not_returned", False)),
+        )
+    )
 
 
 @app.route("/api/lark/auth_test", methods=["POST"])
@@ -3702,6 +3727,7 @@ def lark_chats():
             payload.get("app_secret", ""),
             payload.get("domain", "feishu"),
             force=payload.get("force", False) or request.args.get("force") == "1",
+            include_not_returned=bool(payload.get("include_not_returned", False)),
         )
     )
 
@@ -5511,6 +5537,27 @@ async def files_search(starlette_request: FastAPIRequest):
                     whole_word=args.get("word") == "1",
                     include=args.get("include") or "",
                     exclude=args.get("exclude") or "",
+                )
+            )
+        except Exception as exc:
+            return _file_browser_error_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.get("/api/files/search_names", include_in_schema=False)
+async def files_search_names(starlette_request: FastAPIRequest):
+    async def handler():
+        from core import file_browser_service
+
+        args = request.args
+        try:
+            return jsonify(
+                await asyncio.to_thread(
+                    file_browser_service.search_names,
+                    args.get("root") or "",
+                    args.get("query") or "",
+                    show_hidden=args.get("show_hidden") == "1",
                 )
             )
         except Exception as exc:

@@ -2788,7 +2788,12 @@ def slack_auth_test(bot_token: str, proxy_url: str | None = None) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-def list_channels(bot_token: str, browse_all: bool = False, force: bool = False) -> dict:
+def list_channels(
+    bot_token: str,
+    browse_all: bool = False,
+    force: bool = False,
+    include_not_returned: bool = False,
+) -> dict:
     from core import chat_discovery
 
     bot_token = bot_token or _stored_platform_secret("slack", "bot_token")
@@ -2798,6 +2803,7 @@ def list_channels(bot_token: str, browse_all: bool = False, force: bool = False)
         browse_all=browse_all,
         require_member=not browse_all,
         force=force,
+        include_not_returned=include_not_returned,
     )
 
 
@@ -2909,12 +2915,40 @@ async def telegram_auth_test_async(bot_token: str, proxy_url: str | None = None)
         return {"ok": False, "error": str(exc)}
 
 
-def telegram_list_chats(include_private: bool = False) -> dict:
+def delete_channel_scope(platform: str, native_id: str, scope_type: str = "channel") -> dict:
+    """Permanently remove a discovered channel/chat scope and its settings.
+
+    Restricted to ``channel`` scopes: this endpoint exists only to clear stale
+    discovered chats. Deleting other scope types (e.g. ``project``) would bypass
+    their dedicated lifecycle (project archival preserves the scope for sessions),
+    so any non-channel scope type is rejected.
+    """
+    from core import chat_discovery
+
+    platform = str(platform or "").strip()
+    native_id = str(native_id or "").strip()
+    scope_type = str(scope_type or "channel").strip()
+    if not platform or not native_id:
+        return {"ok": False, "error": "platform and id are required"}
+    if scope_type != "channel":
+        return {"ok": False, "error": "only channel scopes can be removed here"}
+    try:
+        outcome = chat_discovery.delete_scope(platform, native_id, scope_type="channel")
+    except Exception as exc:
+        logger.warning("Failed to delete %s scope %s: %s", platform, native_id, exc, exc_info=True)
+        return {"ok": False, "error": str(exc)}
+    # ``dismissed`` means history was preserved and the entry was hidden instead
+    # of physically deleted; ``removed`` means the scope row was deleted outright.
+    return {"ok": True, **outcome}
+
+
+def telegram_list_chats(include_private: bool = False, include_not_returned: bool = False) -> dict:
     from core import chat_discovery
 
     return chat_discovery.channels_response(
         "telegram",
         include_private=include_private,
+        include_not_returned=include_not_returned,
     )
 
 
@@ -2933,7 +2967,9 @@ async def discord_list_guilds_async(bot_token: str) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-def discord_list_channels(bot_token: str, guild_id: str, force: bool = False) -> dict:
+def discord_list_channels(
+    bot_token: str, guild_id: str, force: bool = False, include_not_returned: bool = False
+) -> dict:
     guild_id = str(guild_id or "").strip()
     if not guild_id:
         return {
@@ -2959,6 +2995,7 @@ def discord_list_channels(bot_token: str, guild_id: str, force: bool = False) ->
         guild_id=guild_id,
         parent_scope_id=parent_scope_id,
         force=force,
+        include_not_returned=include_not_returned,
     )
 
 
@@ -2991,7 +3028,16 @@ def opencode_options(cwd: str) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
+def _discord_retry_wait(exc: "urllib.error.HTTPError", attempt: int) -> float:
+    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+    try:
+        return max(float(retry_after), float(2**attempt)) if retry_after else float(2**attempt)
+    except (TypeError, ValueError):
+        return float(2**attempt)
+
+
 def _discord_api_get(bot_token: str, path: str, proxy_url: str | None = None) -> dict:
+    import urllib.error
     import urllib.request
 
     from vibe.proxy import is_socks_proxy, resolve_proxy
@@ -3002,22 +3048,43 @@ def _discord_api_get(bot_token: str, path: str, proxy_url: str | None = None) ->
     headers = {"Authorization": f"Bot {bot_token}", "User-Agent": "avibe"}
 
     proxy = resolve_proxy(proxy_url)
-    if proxy and is_socks_proxy(proxy):
-        return _https_json_request_via_socks(proxy, url, headers=headers)
 
-    if proxy:
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({"http": proxy, "https": proxy})
-        )
-    else:
-        opener = urllib.request.build_opener()
-    req = urllib.request.Request(url, headers=headers)
-    with opener.open(req, timeout=10) as resp:
-        payload = resp.read().decode("utf-8")
-        return json.loads(payload)
+    def _request() -> dict:
+        if proxy and is_socks_proxy(proxy):
+            return _https_json_request_via_socks(proxy, url, headers=headers)
+        if proxy:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+            )
+        else:
+            opener = urllib.request.build_opener()
+        req = urllib.request.Request(url, headers=headers)
+        with opener.open(req, timeout=10) as resp:
+            payload = resp.read().decode("utf-8")
+            return json.loads(payload)
+
+    attempts = 5
+    for attempt in range(attempts):
+        try:
+            return _request()
+        except urllib.error.HTTPError as http_exc:
+            if http_exc.code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
+                wait = _discord_retry_wait(http_exc, attempt)
+                logger.warning(
+                    "Discord rate-limited/transient (%d), retrying after %ss (attempt %d/%d)",
+                    http_exc.code,
+                    wait,
+                    attempt + 1,
+                    attempts,
+                )
+                time.sleep(wait)
+                continue
+            raise
+    raise RuntimeError("Discord request exhausted retries")  # pragma: no cover
 
 
 async def _discord_api_get_async(bot_token: str, path: str, proxy_url: str | None = None) -> dict:
+    import urllib.error
     import urllib.request
 
     from vibe.proxy import is_socks_proxy, resolve_proxy
@@ -3028,23 +3095,57 @@ async def _discord_api_get_async(bot_token: str, path: str, proxy_url: str | Non
     headers = {"Authorization": f"Bot {bot_token}", "User-Agent": "avibe"}
 
     proxy = resolve_proxy(proxy_url)
-    if proxy and is_socks_proxy(proxy):
-        # urllib has no native SOCKS support; route via aiohttp + aiohttp_socks.
-        return await _discord_api_get_via_aiohttp(url, headers, proxy)
+    use_socks = bool(proxy and is_socks_proxy(proxy))
 
-    if proxy:
+    if proxy and not use_socks:
         opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({"http": proxy, "https": proxy})
         )
     else:
         opener = urllib.request.build_opener()
+
     def _request() -> dict:
         req = urllib.request.Request(url, headers=headers)
         with opener.open(req, timeout=10) as resp:
             payload = resp.read().decode("utf-8")
             return json.loads(payload)
 
-    return await asyncio.to_thread(_request)
+    attempts = 5
+    for attempt in range(attempts):
+        try:
+            if use_socks:
+                # urllib has no native SOCKS support; route via aiohttp + aiohttp_socks.
+                return await _discord_api_get_via_aiohttp(url, headers, proxy)
+            return await asyncio.to_thread(_request)
+        except urllib.error.HTTPError as http_exc:
+            if http_exc.code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
+                wait = _discord_retry_wait(http_exc, attempt)
+                logger.warning(
+                    "Discord rate-limited/transient (%d), retrying after %ss (attempt %d/%d)",
+                    http_exc.code,
+                    wait,
+                    attempt + 1,
+                    attempts,
+                )
+                await asyncio.sleep(wait)
+                continue
+            raise
+        except Exception as exc:
+            # aiohttp (SOCKS path) raises ClientResponseError with a `.status`.
+            status = getattr(exc, "status", None)
+            if status in (429, 500, 502, 503, 504) and attempt < attempts - 1:
+                wait = float(2**attempt)
+                logger.warning(
+                    "Discord rate-limited/transient (%s) via proxy, retrying after %ss (attempt %d/%d)",
+                    status,
+                    wait,
+                    attempt + 1,
+                    attempts,
+                )
+                await asyncio.sleep(wait)
+                continue
+            raise
+    raise RuntimeError("Discord request exhausted retries")  # pragma: no cover
 
 
 def _https_json_request_via_socks(
@@ -9087,7 +9188,13 @@ async def lark_auth_test_async(
         return {"ok": False, "error": str(exc)}
 
 
-def lark_list_chats(app_id: str, app_secret: str, domain: str = "feishu", force: bool = False) -> dict:
+def lark_list_chats(
+    app_id: str,
+    app_secret: str,
+    domain: str = "feishu",
+    force: bool = False,
+    include_not_returned: bool = False,
+) -> dict:
     from core import chat_discovery
 
     app_id = app_id or _stored_platform_field("lark", "app_id")
@@ -9099,12 +9206,40 @@ def lark_list_chats(app_id: str, app_secret: str, domain: str = "feishu", force:
         app_secret=app_secret,
         domain=domain,
         force=force,
+        include_not_returned=include_not_returned,
     )
 
 
 def lark_list_chats_live(app_id: str, app_secret: str, domain: str = "feishu") -> dict:
     """List Lark/Feishu group chats the bot has joined (with pagination)."""
+    import time
+    import urllib.error
     import urllib.request
+
+    def _get_with_retry(req: "urllib.request.Request", *, attempts: int = 5) -> dict:
+        for attempt in range(attempts):
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    return json.loads(resp.read().decode())
+            except urllib.error.HTTPError as http_exc:
+                # Retry on rate-limit / transient server errors with backoff.
+                if http_exc.code in (429, 500, 502, 503, 504) and attempt < attempts - 1:
+                    retry_after = http_exc.headers.get("Retry-After") if http_exc.headers else None
+                    try:
+                        wait = max(int(retry_after), 2**attempt) if retry_after else 2**attempt
+                    except (TypeError, ValueError):
+                        wait = 2**attempt
+                    logger.warning(
+                        "Lark rate-limited/transient (%d), retrying after %ds (attempt %d/%d)",
+                        http_exc.code,
+                        wait,
+                        attempt + 1,
+                        attempts,
+                    )
+                    time.sleep(wait)
+                    continue
+                raise
+        raise RuntimeError("Lark request exhausted retries")
 
     try:
         token = _lark_tenant_token(app_id, app_secret, domain)
@@ -9117,13 +9252,19 @@ def lark_list_chats_live(app_id: str, app_secret: str, domain: str = "feishu") -
         seen_page_tokens: set = set()
         max_pages = 50  # safety cap to prevent infinite loop
         page = 0
-        while page < max_pages:
+        # `truncated` marks an INCOMPLETE inventory. Any early/abnormal exit while
+        # the server still reports more pages must set it, so the caller never
+        # marks the unseen chats not_returned from a partial list.
+        truncated = False
+        while True:
+            if page >= max_pages:
+                truncated = True
+                break
             url = f"{base}/open-apis/im/v1/chats?page_size=100"
             if page_token:
                 url = f"{url}&page_token={page_token}"
             req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                result = json.loads(resp.read().decode())
+            result = _get_with_retry(req)
             if result.get("code") != 0:
                 return {"ok": False, "error": result.get("msg", "Unknown error")}
             data = result.get("data", {})
@@ -9138,14 +9279,21 @@ def lark_list_chats_live(app_id: str, app_secret: str, domain: str = "feishu") -
                 }
                 for c in items
             )
+            has_more = bool(data.get("has_more"))
             page_token = data.get("page_token") or ""
-            if not data.get("has_more") or not page_token:
+            if not has_more:
+                break
+            if not page_token:
+                # Server claims more pages but gave no cursor — cannot continue.
+                truncated = True
                 break
             if page_token in seen_page_tokens:
-                break  # server returned the same token — avoid loop
+                # Server returned a repeated cursor — avoid an infinite loop, but
+                # the remaining pages are unreachable, so the list is incomplete.
+                truncated = True
+                break
             seen_page_tokens.add(page_token)
             page += 1
-        truncated = page >= max_pages
         return {"ok": True, "channels": channels, "truncated": truncated}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}

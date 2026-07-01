@@ -20,6 +20,18 @@ export type FsListing = {
   limit?: number;
 };
 
+// A recursive name-search hit (`/api/files/search_names`): an entry plus its absolute `path` and
+// `rel` (path relative to the search root) so the UI can show where it lives and open/navigate to it.
+export type NameHit = FsEntry & { path: string; rel: string };
+export type NameSearchResponse = {
+  ok: true;
+  root: string;
+  query: string;
+  results: NameHit[];
+  truncated: boolean;
+  limit: number | null;
+};
+
 export type FsMeta = {
   ok: true;
   name: string;
@@ -248,6 +260,19 @@ export async function renamePath(path: string, newName: string): Promise<{ ok: t
   );
 }
 
+// Move an entry from `src` to the absolute `dst` (used by drag-and-drop into a folder). The backend
+// is symlink-safe, refuses to move a folder into itself, and — with overwrite=false (the default) —
+// refuses to clobber an existing destination (errors.exists), which the UI surfaces to the user.
+export async function movePath(src: string, dst: string, overwrite = false): Promise<{ ok: true }> {
+  return parse(
+    await apiFetch('/api/files/move', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ src, dst, overwrite: overwrite || undefined }),
+    }),
+  );
+}
+
 // Cross-file search + replace (backend: file_browser_service.search/replace/undo_replace).
 // col/end are full-line UTF-16 offsets (the editor jump target); preview_col/preview_end index
 // into `text` (the possibly windowed preview) for the row highlight.
@@ -281,6 +306,14 @@ export async function searchFiles(root: string, query: string, opts: SearchOptio
   if (opts.include) params.set('include', opts.include);
   if (opts.exclude) params.set('exclude', opts.exclude);
   return parse<SearchResponse>(await apiFetch(`/api/files/search?${params.toString()}`, { signal }));
+}
+
+// Recursive file/folder NAME search under `root` (backend: file_browser_service.search_names).
+// Distinct from searchFiles, which greps file contents. `signal` lets the caller abort a stale
+// in-flight search as the user keeps typing.
+export async function searchNames(root: string, query: string, showHidden = false, signal?: AbortSignal): Promise<NameSearchResponse> {
+  const params = new URLSearchParams({ root, query, show_hidden: showHidden ? '1' : '0' });
+  return parse<NameSearchResponse>(await apiFetch(`/api/files/search_names?${params.toString()}`, { signal }));
 }
 
 export async function replaceInFiles(

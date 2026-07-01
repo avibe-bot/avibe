@@ -105,15 +105,23 @@ function withRpId(wrapMeta: string, rpId: string): string {
   return JSON.stringify(meta);
 }
 
-function toUint8(buffer: ArrayBuffer | ArrayBufferView): Uint8Array {
-  return buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+function toUint8(buffer: ArrayBuffer | ArrayBufferView | ArrayLike<number>): Uint8Array {
+  if (buffer instanceof ArrayBuffer) return new Uint8Array(buffer);
+  if (ArrayBuffer.isView(buffer)) return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  return Uint8Array.from(buffer);
 }
 
-function passkeyResult(credential: PublicKeyCredential | null): Uint8Array {
-  const ext = credential?.getClientExtensionResults() as { prf?: { results?: { first?: ArrayBuffer } } } | undefined;
+function copyUint8(buffer: ArrayBuffer | ArrayBufferView | ArrayLike<number>): Uint8Array {
+  return new Uint8Array(toUint8(buffer));
+}
+
+export function readPasskeyPrfResult(credential: PublicKeyCredential | null): Uint8Array {
+  const ext = credential?.getClientExtensionResults() as { prf?: { results?: { first?: ArrayBuffer | ArrayBufferView | ArrayLike<number> } } } | undefined;
   const first = ext?.prf?.results?.first;
   if (!first) throw new Error('passkey-prf-unavailable');
-  return toUint8(first);
+  const prfOutput = copyUint8(first);
+  if (prfOutput.byteLength === 0) throw new Error('passkey-prf-unavailable');
+  return prfOutput;
 }
 
 type PasskeyEntry = { credentialId?: string; prfSalt: Uint8Array };
@@ -144,7 +152,7 @@ async function assertPasskeyPrf(entries: PasskeyEntry[]): Promise<{ prfOutput: U
     },
   })) as PublicKeyCredential | null;
   if (!assertion) throw new Error('passkey-cancelled');
-  const prfOutput = passkeyResult(assertion);
+  const prfOutput = readPasskeyPrfResult(assertion);
   const usedId = bytesToBase64(toUint8(assertion.rawId));
   const used = entries.find((entry) => entry.credentialId === usedId);
   return { prfOutput, prfSalt: used?.prfSalt ?? entries[0].prfSalt };

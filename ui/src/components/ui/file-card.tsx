@@ -8,7 +8,7 @@ import { apiFetch } from '@/lib/apiFetch';
 import { isProxyMediaUrl } from '@/lib/mediaProxy';
 import { handleMediaDownloadClick, mediaDownloadHref } from '@/lib/downloadMedia';
 import { useFileViewer } from '@/components/ui/file-viewer';
-import { previewKind, formatBytes } from '@/lib/filePreview';
+import { previewRenderKind, formatBytes } from '@/lib/filePreview';
 import { cn } from '@/lib/utils';
 
 // Download card for an agent-reply file that was rewritten to the same-origin
@@ -74,7 +74,9 @@ export const FileCard: React.FC<{ href: string; children?: React.ReactNode }> = 
   // viewer's network to a third-party host), so those keep a plain "open in new
   // tab" eye instead.
   const proxy = isProxyMediaUrl(href);
-  const previewable = previewKind(meta?.name || label, meta?.content_type, meta?.ext) !== null;
+  // Gate the preview eye with the shared render classifier (not just the text-only previewKind) so the
+  // chat offers in-app preview for every kind the kernel can render — PDF / Office / image included.
+  const previewable = previewRenderKind(meta?.name || label, meta?.content_type, meta?.ext) !== null;
 
   return (
     <span className="my-1 inline-flex min-w-[240px] max-w-full items-center gap-3 rounded-[10px] border border-border bg-surface-2 px-3 py-2.5 align-middle no-underline">

@@ -1,5 +1,5 @@
 import { Suspense, lazy } from 'react';
-import { CodeXml, Folder, SquareTerminal } from 'lucide-react';
+import { CodeXml, Eye, Folder, SquareTerminal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { LucideIcon } from 'lucide-react';
 
@@ -9,7 +9,7 @@ import type { LucideIcon } from 'lucide-react';
 // so opening the workbench doesn't pull file-browser / xterm code into the main
 // bundle — each loads only when its window first opens.
 
-export type AppId = 'files' | 'terminal' | 'editor';
+export type AppId = 'files' | 'terminal' | 'editor' | 'preview';
 
 export interface AppDefinition {
   id: AppId;
@@ -42,6 +42,9 @@ const TerminalBody = lazy(() =>
 );
 const EditorBody = lazy(() =>
   import('../components/workbench/EditorApp').then((m) => ({ default: m.EditorApp })),
+);
+const PreviewBody = lazy(() =>
+  import('../components/workbench/AppsPreviewPage').then((m) => ({ default: m.AppsPreviewPage })),
 );
 
 export const APP_REGISTRY: Record<AppId, AppDefinition> = {
@@ -85,6 +88,23 @@ export const APP_REGISTRY: Record<AppId, AppDefinition> = {
       </Suspense>
     ),
   },
+  // On-demand viewer opened by the File Browser (double-click an image/PDF/Office/Markdown file).
+  // Deliberately NOT in APP_LIST, so it has no permanent Dock tile — it only appears while a preview
+  // window is open (and in the Dock's minimized strip if minimized). No lockTheme: images and docs
+  // should render on the workbench's own light/dark, not be forced dark.
+  preview: {
+    id: 'preview',
+    titleKey: 'apps.preview.label',
+    icon: Eye,
+    accent: '--gold',
+    defaultSize: { width: 900, height: 640 },
+    Component: ({ windowId, params }) => (
+      <Suspense fallback={<Loading />}>
+        <PreviewBody windowId={windowId} params={params} />
+      </Suspense>
+    ),
+  },
 };
 
+// Dock launcher tiles — the resident apps. `preview` is intentionally excluded (opened on demand).
 export const APP_LIST: AppDefinition[] = [APP_REGISTRY.files, APP_REGISTRY.terminal, APP_REGISTRY.editor];

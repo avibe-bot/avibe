@@ -347,3 +347,88 @@ def test_search_root_must_be_directory(tmp_path):
     f = _write(tmp_path, "a.txt", "x\n")
     with pytest.raises(FileBrowserError):
         fbs.search(str(f), "x")
+
+
+# ---------------------------------------------------------------------------
+# Recursive name search (search_names): matches file AND folder names by name,
+# recursively, unlike the content search above.
+# ---------------------------------------------------------------------------
+
+
+def _names(result: dict) -> set[str]:
+    return {entry["rel"] for entry in result["results"]}
+
+
+def test_search_names_matches_files_and_dirs_recursively(tmp_path):
+    _write(tmp_path, "report.txt", "x")
+    _write(tmp_path, "sub/report-2.md", "x")
+    (tmp_path / "reports").mkdir()  # a DIRECTORY whose name matches — content search would miss this
+    _write(tmp_path, "sub/deep/nope.txt", "x")
+
+    result = fbs.search_names(str(tmp_path), "report")
+
+    assert _names(result) == {"report.txt", "sub/report-2.md", "reports"}
+    kinds = {entry["rel"]: entry["kind"] for entry in result["results"]}
+    assert kinds["reports"] == "dir"
+    assert kinds["report.txt"] == "file"
+    assert result["truncated"] is False
+
+
+def test_search_names_case_insensitive_substring(tmp_path):
+    _write(tmp_path, "ReadMe.md", "x")
+    _write(tmp_path, "notes/read_later.txt", "x")
+    assert _names(fbs.search_names(str(tmp_path), "read")) == {"ReadMe.md", "notes/read_later.txt"}
+
+
+def test_search_names_prunes_noise_dirs(tmp_path):
+    # A match buried in node_modules must not surface, and the walk must not descend into it.
+    _write(tmp_path, "node_modules/pkg/target.js", "x")
+    _write(tmp_path, "src/target.ts", "x")
+    assert _names(fbs.search_names(str(tmp_path), "target")) == {"src/target.ts"}
+
+
+def test_search_names_honors_show_hidden(tmp_path):
+    _write(tmp_path, ".secret-target", "x")
+    _write(tmp_path, ".hidden/target.txt", "x")
+    _write(tmp_path, "target.txt", "x")
+
+    visible = fbs.search_names(str(tmp_path), "target")
+    assert _names(visible) == {"target.txt"}
+
+    # show_hidden descends into .hidden/ and matches dotfiles; the .hidden dir itself doesn't match
+    # "target", so it isn't a result — but its matching child now is.
+    hidden = fbs.search_names(str(tmp_path), "target", show_hidden=True)
+    assert _names(hidden) == {".secret-target", ".hidden/target.txt", "target.txt"}
+
+
+def test_search_names_empty_query_rejected(tmp_path):
+    _write(tmp_path, "a.txt", "x")
+    with pytest.raises(FileBrowserError) as exc:
+        fbs.search_names(str(tmp_path), "   ")
+    assert exc.value.code == "invalid_query"
+
+
+def test_search_names_truncates_at_cap(tmp_path):
+    for i in range(6):
+        _write(tmp_path, f"match-{i}.txt", "x")
+    result = fbs.search_names(str(tmp_path), "match", max_results=3)
+    assert len(result["results"]) == 3
+    assert result["truncated"] is True
+    assert result["limit"] == 3
+
+
+def test_search_names_exactly_at_cap_not_truncated(tmp_path):
+    # Exactly max_results matches: everything is returned, so truncated must stay False (matches the
+    # content search's before-record cap check; the naive after-append check would false-positive).
+    for i in range(3):
+        _write(tmp_path, f"match-{i}.txt", "x")
+    result = fbs.search_names(str(tmp_path), "match", max_results=3)
+    assert len(result["results"]) == 3
+    assert result["truncated"] is False
+    assert result["limit"] is None
+
+
+def test_search_names_root_must_be_directory(tmp_path):
+    f = _write(tmp_path, "a.txt", "x")
+    with pytest.raises(FileBrowserError):
+        fbs.search_names(str(f), "a")

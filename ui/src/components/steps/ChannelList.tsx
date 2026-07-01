@@ -12,6 +12,7 @@ import {
   MessageSquare,
   RefreshCw,
   Square,
+  Trash2,
   Users,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -152,6 +153,10 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedChannelId, setExpandedChannelId] = useState<string | null>(null);
   const [showInactive, setShowInactive] = useState(true);
+  // When true, also fetch channels the platform no longer returns (deleted /
+  // inaccessible) so the user can review and remove them.
+  const [showUnavailable, setShowUnavailable] = useState(false);
+  const [removingChannelId, setRemovingChannelId] = useState<string | null>(null);
   // All-channels aggregation: keyed by platform
   const [allChannelsByPlatform, setAllChannelsByPlatform] = useState<Record<string, any[]>>({});
   const [allConfigsByPlatform, setAllConfigsByPlatform] = useState<Record<string, Record<string, ChannelConfig>>>({});
@@ -486,7 +491,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     const loadingKey = beginChannelLoading(isAll);
     try {
       if (platform === 'lark') {
-        const result = await api.larkChats(larkAppId, larkAppSecret, larkDomain, force);
+        const result = await api.larkChats(larkAppId, larkAppSecret, larkDomain, force, showUnavailable);
         if (channelRequestVersionRef.current !== requestVersion) return;
         recordRefreshMeta(platform, result);
         if (result.ok) {
@@ -494,7 +499,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
           if (result.refreshing) scheduleRefreshFollowup(platform, isAll);
         }
       } else if (platform === 'telegram') {
-        const result = await api.telegramChats(false);
+        const result = await api.telegramChats(false, showUnavailable);
         if (channelRequestVersionRef.current !== requestVersion) return;
         recordRefreshMeta(platform, result);
         if (result.ok) {
@@ -505,7 +510,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
         if (!selectedGuild) {
           return;
         }
-        const result = await api.discordChannels(botToken, selectedGuild, force);
+        const result = await api.discordChannels(botToken, selectedGuild, force, showUnavailable);
         if (channelRequestVersionRef.current !== requestVersion) return;
         recordRefreshMeta(platform, result);
         if (result.ok) {
@@ -514,7 +519,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
           if (result.refreshing) scheduleRefreshFollowup(platform, isAll);
         }
       } else {
-        const result = await api.slackChannels(botToken, isAll, force);
+        const result = await api.slackChannels(botToken, isAll, force, showUnavailable);
         if (channelRequestVersionRef.current !== requestVersion) return;
         recordRefreshMeta(platform, result);
         if (result.ok) {
@@ -614,6 +619,63 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     config.telegram?.has_bot_token,
     config.lark?.has_app_secret,
   ]);
+
+  // Reload the inventory shown by the current view. In the All tab the renderer
+  // uses the per-platform `channels` state for the currently selected platform
+  // and `allChannelsByPlatform` for the rest, so refresh both.
+  const reloadCurrentView = async () => {
+    if (isPage && pageTab === 'all') {
+      await Promise.all([loadAllPlatformsData(false), loadChannels(undefined, false)]);
+    } else {
+      await loadChannels(undefined, false);
+    }
+  };
+
+  // Reload when the user toggles "show unavailable" so the request carries the
+  // updated include_not_returned flag.
+  const showUnavailableInitRef = useRef(true);
+  useEffect(() => {
+    if (showUnavailableInitRef.current) {
+      showUnavailableInitRef.current = false;
+      return;
+    }
+    void reloadCurrentView();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showUnavailable]);
+
+  const handleRemoveChannel = async (rowPlatform: string, channelId: string, channelName?: string) => {
+    const confirmed = typeof window === 'undefined'
+      || window.confirm(t('channelList.removeChannelConfirm', { name: channelName || channelId }));
+    if (!confirmed) return;
+    setRemovingChannelId(channelId);
+    try {
+      const result = await api.deleteChannel(rowPlatform, channelId);
+      if (result?.ok) {
+        // Drop the removed channel's local settings so a later edit of another
+        // channel doesn't re-persist (and thus recreate) the deleted scope.
+        if (rowPlatform === platform) {
+          setConfigs((prev) => {
+            if (!(channelId in prev)) return prev;
+            const next = { ...prev };
+            delete next[channelId];
+            return next;
+          });
+        }
+        setAllConfigsByPlatform((prev) => {
+          const platformConfigs = prev[rowPlatform];
+          if (!platformConfigs || !(channelId in platformConfigs)) return prev;
+          const nextPlatform = { ...platformConfigs };
+          delete nextPlatform[channelId];
+          return { ...prev, [rowPlatform]: nextPlatform };
+        });
+        await reloadCurrentView();
+      }
+    } catch (e) {
+      console.error('Failed to remove channel:', e);
+    } finally {
+      setRemovingChannelId(null);
+    }
+  };
 
   useEffect(() => {
     if (config.agents?.claude?.enabled) {
@@ -798,14 +860,14 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               const appSecret = config.lark?.app_secret || '';
               const domain = config.lark?.domain || 'feishu';
               if (appId && hasChannelCredentials('lark')) {
-                const result = await api.larkChats(appId, appSecret, domain, force);
+                const result = await api.larkChats(appId, appSecret, domain, force, showUnavailable);
                 recordRefreshMeta(p, result);
                 refreshing = Boolean(result.refreshing);
                 if (result.ok) channelsList = result.channels || [];
               }
             } else if (p === 'telegram') {
               if (hasChannelCredentials('telegram')) {
-                const result = await api.telegramChats(false);
+                const result = await api.telegramChats(false, showUnavailable);
                 if (result.ok) channelsList = result.channels || [];
               }
             } else if (p === 'discord') {
@@ -813,7 +875,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               const guildId = allowlist[0] || selectedGuildIdsRef.current[0] || selectedGuild;
               const token = config.discord?.bot_token || '';
               if (guildId && hasChannelCredentials('discord')) {
-                const result = await api.discordChannels(token, guildId, force);
+                const result = await api.discordChannels(token, guildId, force, showUnavailable);
                 recordRefreshMeta(p, result);
                 refreshing = Boolean(result.refreshing);
                 if (result.ok) {
@@ -822,7 +884,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               }
             } else if (p === 'slack') {
               if (hasChannelCredentials('slack')) {
-                const result = await api.slackChannels(config.slack?.bot_token || '', false, force);
+                const result = await api.slackChannels(config.slack?.bot_token || '', false, force, showUnavailable);
                 recordRefreshMeta(p, result);
                 refreshing = Boolean(result.refreshing);
                 if (result.ok) channelsList = result.channels || [];
@@ -1049,7 +1111,10 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     const visibleRows = rawRows
       .filter((r) => {
         const enabled = r.config.enabled === true;
-        if (!showInactive && !enabled) return false;
+        const isUnavailable = r.channel.visibility_status === 'not_returned';
+        // "Show inactive" hides unconfigured rows, but never the unavailable
+        // rows the user explicitly opted to review via "Show unavailable".
+        if (!showInactive && !enabled && !isUnavailable) return false;
         if (!lowerQuery) return true;
         const name = String(r.channel.name || r.channel.id || '').toLowerCase();
         const id = String(r.channel.id || '').toLowerCase();
@@ -1278,13 +1343,22 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                     discovered: summary.total,
                   })}
             </div>
-            <label className="inline-flex cursor-pointer items-center gap-2">
-              <span className="text-[12px] text-muted">{t('channelList.showInactive')}</span>
-              <ToggleSwitch
-                enabled={showInactive}
-                onClick={() => setShowInactive(!showInactive)}
-              />
-            </label>
+            <div className="flex items-center gap-4">
+              <label className="inline-flex cursor-pointer items-center gap-2">
+                <span className="text-[12px] text-muted">{t('channelList.showUnavailable')}</span>
+                <ToggleSwitch
+                  enabled={showUnavailable}
+                  onClick={() => setShowUnavailable(!showUnavailable)}
+                />
+              </label>
+              <label className="inline-flex cursor-pointer items-center gap-2">
+                <span className="text-[12px] text-muted">{t('channelList.showInactive')}</span>
+                <ToggleSwitch
+                  enabled={showInactive}
+                  onClick={() => setShowInactive(!showInactive)}
+                />
+              </label>
+            </div>
           </div>
 
           {/* Channel rows — design.pen JrNBe / M8FRiG / KywfU */}
@@ -1305,6 +1379,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
               const def = defaultConfig();
               const defaultAgent = agentByName[defaultAgentName || ''] || null;
               const channelEnabled = rawConfig.enabled === true;
+              const isUnavailable = channel.visibility_status === 'not_returned';
               const channelConfig = {
                 ...def,
                 ...rawConfig,
@@ -1392,22 +1467,49 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                     </span>
 
                     {/* Status badge */}
-                    <span
-                      className={clsx(
-                        'inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium',
-                        channelEnabled
-                          ? 'border-mint/40 bg-mint-soft text-mint'
-                          : 'border-border bg-foreground/[0.04] text-muted'
-                      )}
-                    >
+                    {isUnavailable ? (
+                      <span
+                        className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-500"
+                        title={channel.metadata?.last_missing_at ? t('channelList.unavailableSince', { at: channel.metadata.last_missing_at }) : undefined}
+                      >
+                        <span className="size-1.5 rounded-full bg-amber-500" />
+                        {t('channelList.unavailableBadge')}
+                      </span>
+                    ) : (
                       <span
                         className={clsx(
-                          'size-1.5 rounded-full',
-                          channelEnabled ? 'bg-mint shadow-[0_0_6px_rgba(91,255,160,0.7)]' : 'bg-muted'
+                          'inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium',
+                          channelEnabled
+                            ? 'border-mint/40 bg-mint-soft text-mint'
+                            : 'border-border bg-foreground/[0.04] text-muted'
                         )}
-                      />
-                      {channelEnabled ? t('common.enabled') : t('common.disabled')}
-                    </span>
+                      >
+                        <span
+                          className={clsx(
+                            'size-1.5 rounded-full',
+                            channelEnabled ? 'bg-mint shadow-[0_0_6px_rgba(91,255,160,0.7)]' : 'bg-muted'
+                          )}
+                        />
+                        {channelEnabled ? t('common.enabled') : t('common.disabled')}
+                      </span>
+                    )}
+
+                    {/* Remove (only for channels no longer on the platform) */}
+                    {isUnavailable && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleRemoveChannel(channelPlatform, channel.id, channel.name);
+                        }}
+                        disabled={removingChannelId === channel.id}
+                        className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-[11px] font-medium text-muted hover:border-red-500/50 hover:text-red-500 disabled:opacity-50"
+                        title={t('channelList.removeChannel')}
+                      >
+                        <Trash2 size={12} />
+                        {t('channelList.removeChannel')}
+                      </button>
+                    )}
 
                     {/* Chevron */}
                     {expanded ? (

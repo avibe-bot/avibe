@@ -927,6 +927,7 @@ SEARCH_MAX_MATCHES = 1000
 SEARCH_MAX_FILES = 200
 SEARCH_LINE_PREVIEW_CHARS = 400
 SEARCH_PREVIEW_CONTEXT = 60
+SEARCH_NAME_MAX_RESULTS = 500
 _BINARY_SNIFF_BYTES = 8192
 
 # Directories never worth searching — VCS metadata, dependency/build output,
@@ -1180,6 +1181,94 @@ def search(
         "total_files": len(results),
         "truncated": truncated,
         "truncated_reason": reason,
+    }
+
+
+def _name_search_hit(path: Path, root: Path) -> dict[str, Any] | None:
+    """Build one name-search result row for ``path`` (no-follow stat), or None if it vanished.
+
+    Mirrors ``_entry_payload`` but adds the absolute ``path`` and the ``rel`` path from ``root`` so
+    the UI can render the containing folder and navigate/open the hit directly.
+    """
+    try:
+        st = path.lstat()
+    except OSError:
+        return None
+    kind = _kind_from_mode(st.st_mode)
+    size = st.st_size if stat.S_ISREG(st.st_mode) else None
+    try:
+        rel = path.relative_to(root).as_posix()
+    except ValueError:
+        rel = path.name
+    return {
+        "name": path.name,
+        "kind": kind,
+        "size": size,
+        "mtime": _mtime_seconds(st),
+        "ext": _extension(path) if kind != "dir" else "",
+        "path": str(path),
+        "rel": rel,
+    }
+
+
+def search_names(
+    raw_root: str,
+    query: str,
+    *,
+    show_hidden: bool = False,
+    max_results: int = SEARCH_NAME_MAX_RESULTS,
+) -> dict[str, Any]:
+    """Recursively find entries under ``root`` whose NAME matches ``query``.
+
+    Case-insensitive substring match over both file AND directory names — the file-browser
+    counterpart to the content ``search`` above (which greps file *contents* and never returns
+    directories). Prunes the same heavy noise trees (.git / node_modules / build output) so a search
+    can't stall descending into them, and skips dotfiles/dirs unless ``show_hidden``. Results come
+    back in walk order (shallow first, a rough relevance signal) and are bounded by ``max_results``;
+    ``truncated`` is set when the cap is hit so the UI can say results were limited.
+    """
+    root = _require_directory(raw_root)
+    needle = query.strip().lower()
+    if not needle:
+        raise FileBrowserError("invalid_query", "Search query is required", 400)
+
+    results: list[dict[str, Any]] = []
+    truncated = False
+    # os.walk swallows per-directory errors by default, so an unreadable subtree is silently skipped
+    # (the search keeps going) rather than aborting the whole walk.
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        # Prune in place: drop noise trees and (unless show_hidden) hidden dirs so os.walk never
+        # descends into them. The retained dir names are still candidates to MATCH below.
+        dirnames[:] = sorted(
+            d for d in dirnames if d not in SEARCH_SKIP_DIRS and (show_hidden or not d.startswith("."))
+        )
+        base = Path(dirpath)
+        # Directories first, then files, each alphabetically — mirrors the listing's grouping.
+        for name in list(dirnames) + sorted(filenames):
+            if not show_hidden and name.startswith("."):
+                continue
+            if needle not in name.lower():
+                continue
+            # Check the cap BEFORE recording (mirrors the content search): flagging truncated only on
+            # a match BEYOND the cap means a result set of exactly max_results isn't falsely marked
+            # truncated (which would make the UI claim results were limited when they weren't).
+            if len(results) >= max_results:
+                truncated = True
+                break
+            hit = _name_search_hit(base / name, root)
+            if hit is None:
+                continue
+            results.append(hit)
+        if truncated:
+            break
+
+    return {
+        "ok": True,
+        "root": str(root),
+        "query": query,
+        "results": results,
+        "truncated": truncated,
+        "limit": max_results if truncated else None,
     }
 
 

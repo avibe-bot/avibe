@@ -54,6 +54,8 @@ const CAPABILITY_NAV: CapabilityNavItem[] = [
   { to: '/vaults', i18nKey: 'workbench.nav.vaults', icon: KeyRound },
 ];
 
+const CAPS_COLLAPSED_KEY = 'vibe-remote:caps-collapsed';
+
 // 360px floating popover that opens when the user hovers the Inbox entry.
 // Mirrors design.pen KmQ1L — header + a few session cards + footer "open full
 // inbox" link. Pure presentational; data comes from <WorkbenchInboxProvider>.
@@ -669,6 +671,25 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   const [popoverOpen, setPopoverOpen] = useState(false);
   const closeTimer = useRef<number | null>(null);
   const [showNewProject, setShowNewProject] = useState(false);
+  // Capabilities section is collapsible to free room for Projects; the choice is
+  // remembered (best-effort localStorage, same convention as the other toggles).
+  const [capsCollapsed, setCapsCollapsed] = useState<boolean>(() => {
+    try {
+      return window.localStorage.getItem(CAPS_COLLAPSED_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const toggleCaps = () =>
+    setCapsCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(CAPS_COLLAPSED_KEY, next ? '1' : '0');
+      } catch {
+        /* best-effort */
+      }
+      return next;
+    });
 
   // Small open/close delays so the popover doesn't flicker as the cursor
   // brushes through the inbox row on its way somewhere else, and survives
@@ -719,23 +740,9 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
   // project list) scrolls; Inbox + Capabilities stay pinned. The Inbox hover
   // popover stays OUT of any overflow box below, so it is never clipped.
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4">
-      {/* Search field — the sidebar's first item (Brand lives in AppShell).
-          Field-style button per design.pen XErMu: search glyph + muted
-          placeholder + ⌘K pill; opens the ⌘K command palette. */}
-      <Button
-        type="button"
-        variant="ghost"
-        onClick={onOpenSearch}
-        className="h-auto w-full justify-start gap-2 rounded-lg border border-border-strong bg-foreground/[0.03] px-3 py-2.5 text-left font-normal transition hover:bg-foreground/[0.05]"
-      >
-        <Search className="size-3.5 shrink-0 text-muted" />
-        <span className="flex-1 truncate text-[13px] text-muted">{t('workbench.search.entry')}</span>
-        <kbd className="shrink-0 rounded-[5px] border border-border bg-foreground/[0.06] px-1.5 py-0.5 font-mono text-[11px] font-medium leading-none text-muted">
-          ⌘K
-        </kbd>
-      </Button>
-
+    <div className="flex min-h-0 flex-1 flex-col gap-2.5">
+      {/* Search moved to a compact icon in the Projects header (left of the add
+          button) to reclaim this full row for the Projects list. ⌘K still works. */}
       {/* Inbox entry — hover opens the floating popover (portaled above the chat). */}
       <Popover open={popoverOpen} onOpenChange={(open) => { if (!open) setPopoverOpen(false); }}>
         <PopoverAnchor asChild>
@@ -780,18 +787,25 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
         />
       </Popover>
 
-      <div className="flex flex-col gap-2">
-        <div className="px-1 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
-          {t('workbench.capabilitiesLabel')}
-        </div>
-        <nav className="flex flex-col gap-0.5">
+      <div className="flex flex-col gap-1.5">
+        <button
+          type="button"
+          onClick={toggleCaps}
+          aria-expanded={!capsCollapsed}
+          className="group flex items-center gap-1 px-1 font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted transition-colors hover:text-foreground"
+        >
+          <span className="flex-1 text-left">{t('workbench.capabilitiesLabel')}</span>
+          <ChevronDown className={clsx('size-3.5 shrink-0 transition-transform', capsCollapsed && '-rotate-90')} />
+        </button>
+        {!capsCollapsed && (
+          <nav className="flex flex-col gap-0.5">
           {CAPABILITY_NAV.map(({ to, i18nKey, icon: Icon }) => (
             <NavLink
               key={to}
               to={to}
               className={({ isActive }) =>
                 clsx(
-                  'group flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-colors',
+                  'group flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors',
                   isActive
                     ? 'border border-mint/30 bg-mint/[0.08] text-foreground shadow-[0_0_16px_-4px_rgba(91,255,160,0.5)]'
                     : 'border border-transparent text-muted hover:bg-foreground/[0.04] hover:text-foreground',
@@ -806,7 +820,8 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
               )}
             </NavLink>
           ))}
-        </nav>
+          </nav>
+        )}
       </div>
 
       {/* Projects section — design.pen b8wX2. Header row carries the
@@ -817,18 +832,32 @@ export const WorkbenchSidebar: React.FC<{ onOpenSearch?: () => void }> = ({ onOp
           <span className="font-mono text-[10px] font-bold uppercase tracking-[0.18em] text-muted">
             {t('workbench.projectsLabel')}
           </span>
-          {/* Borderless ghost icon button (design-system Button) — bumped from
-              a 22px bordered box to a roomier 28px tap target. */}
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="size-7 shrink-0 text-muted hover:text-foreground"
-            aria-label={t('workbench.addProject')}
-            onClick={() => setShowNewProject(true)}
-          >
-            <FolderPlus className="size-4" />
-          </Button>
+          {/* Borderless ghost icon buttons (design-system Button) — search +
+              add, grouped on the right. Search moved here from a full-width
+              row above to reclaim that space for the Projects list; ⌘K still
+              works. Both are roomy 28px tap targets. */}
+          <div className="flex items-center gap-0.5">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-7 shrink-0 text-muted hover:text-foreground"
+              aria-label={t('workbench.search.entry')}
+              onClick={onOpenSearch}
+            >
+              <Search className="size-4" />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-7 shrink-0 text-muted hover:text-foreground"
+              aria-label={t('workbench.addProject')}
+              onClick={() => setShowNewProject(true)}
+            >
+              <FolderPlus className="size-4" />
+            </Button>
+          </div>
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pr-0.5">

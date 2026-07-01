@@ -66,11 +66,17 @@ function extOf(name: string): string {
   return i > 0 ? b.slice(i + 1).toLowerCase() : '';
 }
 
+// The extension to classify by. The server-supplied ext wins when present: for chat media the `name`
+// can be an arbitrary Markdown label (`[report.pdf](…/report.docx)`) while serverExt/mime are the real
+// type — so trusting the label's suffix would route to the wrong renderer. Falls back to the name's
+// own extension when no serverExt is given (File Browser / editor, which pass real filenames).
+function effectiveExt(name: string, serverExt?: string | null): string {
+  return (serverExt || '').replace(/^\.+/, '').toLowerCase() || extOf(name);
+}
+
 export function previewKind(name: string, mime?: string | null, serverExt?: string | null): PreviewKind | null {
   const b = baseName(name).toLowerCase();
-  // Prefer the name's own extension; fall back to the server-supplied ext when
-  // the link label is descriptive (e.g. "[view results](…/results.yaml)").
-  const ext = extOf(name) || (serverExt || '').replace(/^\.+/, '').toLowerCase();
+  const ext = effectiveExt(name, serverExt);
   const m = (mime || '').split(';')[0].trim().toLowerCase();
 
   if (MARKDOWN_EXT.has(ext)) return 'markdown';
@@ -116,26 +122,128 @@ export type ImageKind = 'raster' | 'svg';
 // ``previewKind`` (which classifies EDITABLE text): images have no text kind, and SVG is both an
 // image (renderable here) and source (editable in Monaco), so ``previewKind('x.svg') === 'source'``
 // must stay true while this still reports it as an image.
-export function imageKind(name: string, mime?: string | null): ImageKind | null {
-  const ext = extOf(name);
+export function imageKind(name: string, mime?: string | null, serverExt?: string | null): ImageKind | null {
+  const ext = effectiveExt(name, serverExt);
   const m = (mime || '').split(';')[0].trim().toLowerCase();
   if (ext === 'svg' || m === 'image/svg+xml') return 'svg';
   if (RASTER_IMAGE_EXT.has(ext) || (m.startsWith('image/') && m !== 'image/svg+xml')) return 'raster';
   return null;
 }
 
-// Whether a file should preview as RENDERED (not edited) when opened from the File Browser: a raster
-// image (no editable text form) within the content cap is the only such case. SVG/Markdown stay
-// editable, gaining a preview TOGGLE inside the editor instead. A directory, symlink, or oversized
-// image (which `/api/files/content` would reject) is never previewed here — it falls to download.
-export function isRenderOnlyImage(entry: { kind: string; name: string; size: number | null }): boolean {
-  return entry.kind === 'file' && imageKind(entry.name) === 'raster' && (entry.size == null || entry.size <= IMAGE_PREVIEW_MAX_BYTES);
+// Rich documents we can preview client-side (read-only): Office files rendered by lazy-loaded libs
+// (docx-preview / SheetJS / PptxViewJS) and PDF via the browser's built-in viewer. Kept separate
+// from previewKind/imageKind. The parsers pull the whole file into memory, so it's gated by the
+// content cap; an oversized doc (which /api/files/content would reject anyway) falls to download.
+export type DocPreviewKind = 'docx' | 'xlsx' | 'pptx' | 'pdf';
+// NB: csv is intentionally NOT here — it renders as a CSV table (papaparse), lighter than loading
+// SheetJS, and matches the chat viewer. ``previewRenderKind`` maps csv → 'csv'.
+const DOC_EXT: Record<string, DocPreviewKind> = {
+  docx: 'docx',
+  xlsx: 'xlsx',
+  xlsm: 'xlsx',
+  xls: 'xlsx',
+  pptx: 'pptx',
+  pdf: 'pdf',
+};
+export const DOC_PREVIEW_MAX_BYTES = IMAGE_PREVIEW_MAX_BYTES; // 25 MB, matches the backend content cap
+
+// Office/PDF content types → kind, so a descriptive-label chat link (whose name carries no real
+// suffix) still classifies via the server-supplied content-type. Limited to formats our renderers
+// actually read: the OOXML types + PDF, plus legacy .xls (SheetJS reads BIFF). Legacy binary .doc
+// (application/msword) and .ppt (application/vnd.ms-powerpoint) are intentionally absent — docx-preview
+// and PptxViewJS only load OOXML, so advertising them would open a broken preview instead of download.
+const OFFICE_MIME: Record<string, DocPreviewKind> = {
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+  'application/vnd.ms-excel': 'xlsx',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+  'application/pdf': 'pdf',
+};
+
+export function docPreviewKind(name: string, mime?: string | null, serverExt?: string | null): DocPreviewKind | null {
+  const ext = effectiveExt(name, serverExt);
+  if (ext in DOC_EXT) return DOC_EXT[ext];
+  const m = (mime || '').split(';')[0].trim().toLowerCase();
+  return OFFICE_MIME[m] ?? null;
+}
+
+// ── Unified preview dispatch ────────────────────────────────────────────────
+// HOW a file renders in the shared <FilePreview> kernel (one classifier for the File Browser, the
+// editor preview, and the chat viewer). Combines imageKind (raster/svg) + html + docPreviewKind
+// (office/pdf) + previewKind (text). 'code' is the catch-all for highlightable text — including
+// non-HTML markup (xml/vue/svelte) and plain text (highlights to nothing). Order matters: images and
+// HTML are decided before the text classifier so an .svg renders as an image, not edited source.
+export type PreviewRenderKind =
+  | 'image'
+  | 'svg'
+  | 'html'
+  | 'pdf'
+  | 'docx'
+  | 'xlsx'
+  | 'pptx'
+  | 'markdown'
+  | 'json'
+  | 'csv'
+  | 'code';
+
+const HTML_EXT = new Set(['html', 'htm']);
+
+export function previewRenderKind(name: string, mime?: string | null, serverExt?: string | null): PreviewRenderKind | null {
+  const img = imageKind(name, mime, serverExt);
+  if (img === 'raster') return 'image';
+  if (img === 'svg') return 'svg';
+  const ext = effectiveExt(name, serverExt);
+  const m = (mime || '').split(';')[0].trim().toLowerCase();
+  if (HTML_EXT.has(ext) || m === 'text/html') return 'html';
+  const doc = docPreviewKind(name, mime, serverExt);
+  if (doc) return doc;
+  const k = previewKind(name, mime, serverExt);
+  if (k === 'markdown') return 'markdown';
+  if (k === 'json') return 'json';
+  if (k === 'csv') return 'csv';
+  if (k === 'code' || k === 'source' || k === 'text') return 'code';
+  return null;
+}
+
+// The renderable EDITABLE-text kinds the in-editor Source ⇄ Preview toggle offers: Markdown, SVG, and
+// HTML all have a meaningful rendered form while staying editable in Monaco. Everything else (code,
+// json, csv, plain text) has no distinct render, so the toggle is hidden.
+export type EditorPreviewKind = 'markdown' | 'svg' | 'html';
+export function editorPreviewKind(name: string): EditorPreviewKind | null {
+  if (previewKind(name) === 'markdown') return 'markdown';
+  if (imageKind(name) === 'svg') return 'svg';
+  if (HTML_EXT.has(extOf(name))) return 'html';
+  return null;
+}
+
+// What opens in the File Browser's read-only PREVIEW overlay (vs. the editor): a non-editable rich
+// file — raster image, PDF, or Office doc — within the content cap. Editable text (incl. svg / html /
+// markdown / code / json / csv) opens in the editor instead, which carries its own preview toggle.
+export type PreviewOverlayKind = 'image' | 'pdf' | 'docx' | 'xlsx' | 'pptx';
+export function previewOverlayKind(entry: { kind: string; name: string; size: number | null }): PreviewOverlayKind | null {
+  if (entry.kind !== 'file') return null;
+  if (entry.size != null && entry.size > DOC_PREVIEW_MAX_BYTES) return null;
+  const rk = previewRenderKind(entry.name);
+  return rk === 'image' || rk === 'pdf' || rk === 'docx' || rk === 'xlsx' || rk === 'pptx' ? rk : null;
+}
+
+// What opens in the standalone Preview WINDOW: everything previewOverlayKind covers (image / PDF /
+// Office) PLUS Markdown, which renders to a read-only document view. Editable code / plain-text /
+// json / csv / svg / html still open in the editor (which carries its own preview toggle). The File
+// Browser routes a double-click here on desktop (a real window) and to an in-page overlay on mobile.
+export type PreviewWindowKind = PreviewOverlayKind | 'markdown';
+export function previewWindowKind(entry: { kind: string; name: string; size: number | null }): PreviewWindowKind | null {
+  const overlay = previewOverlayKind(entry);
+  if (overlay) return overlay;
+  if (entry.kind !== 'file') return null;
+  if (entry.size != null && entry.size > PREVIEW_MAX_BYTES) return null;
+  return previewRenderKind(entry.name) === 'markdown' ? 'markdown' : null;
 }
 
 // Shiki language id for the 'code'/'source' kinds; 'text' (no highlight) otherwise.
 export function codeLanguage(name: string, serverExt?: string | null): string {
   const b = baseName(name).toLowerCase();
-  const ext = extOf(name) || (serverExt || '').replace(/^\.+/, '').toLowerCase();
+  const ext = effectiveExt(name, serverExt);
   return SOURCE_LANG[ext] || CODE_LANG[ext] || NAME_LANG[b] || 'text';
 }
 
