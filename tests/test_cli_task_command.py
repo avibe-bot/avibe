@@ -182,7 +182,7 @@ def test_task_help_describes_session_id_guidance(capsys) -> None:
     assert exc.value.code == 0
     captured = capsys.readouterr()
     assert "Create, inspect, and control scheduled Agent messages for Avibe." in captured.out
-    assert "vibe task add --cron '0 * * * *' --message" in captured.out
+    assert "vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message" in captured.out
     assert "{add,update,list,show,pause,resume,run,remove}" in captured.out
     assert "rm (remove)" not in captured.out
     assert "\n    ls" not in captured.out
@@ -221,7 +221,7 @@ def test_hook_send_help_describes_runtime_effects(capsys) -> None:
     assert "`--post-to channel` changes where the message is posted, not which session is continued." in captured.out
     assert "`--message` and `--message-file` provide the one-shot async user message that will be queued immediately." in captured.out
     assert "--session-id" in captured.out
-    assert "vibe agent run --async --agent release-reviewer --message" in captured.out
+    assert "vibe agent run --async --agent release-reviewer --no-callback --message" in captured.out
     assert "vibe agent run --async --agent release-reviewer --no-callback" in captured.out
 
 
@@ -284,6 +284,7 @@ def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
     assert "--fork-self forks this current Session." in captured.out
     assert "Forks keep the same backend, scope, and cwd as the source Session." in captured.out
     assert "vibe agent run --async --fork-self --message" in captured.out
+    assert "vibe agent run --agent release-reviewer --no-callback --message" in captured.out
     assert "Async runs return their final result to this conversation by default." in captured.out
     assert "Do not combine fork flags with --session-id, --create-session, or --create-session-per-run." in captured.out
 
