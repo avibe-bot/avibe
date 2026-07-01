@@ -1351,6 +1351,22 @@ def test_hook_send_rejects_invalid_session_key_with_hint() -> None:
     assert payload["help_command"] == "vibe hook send --help"
 
 
+def test_hook_send_deprecation_warning_names_callback_policy(tmp_path: Path, capsys) -> None:
+    args = _parse_hook_send(["--session-key", "slack::channel::C123", "--message", "hello"])
+
+    with (
+        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
+        patch("vibe.cli._task_request_store", return_value=cli.TaskExecutionStore(tmp_path / "task_requests")),
+    ):
+        result = cli.cmd_hook_send(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "vibe hook send is deprecated" in payload["deprecation_warning"]
+    assert "--no-callback" in payload["deprecation_warning"]
+    assert "--callback-session-id <session-id>" in payload["deprecation_warning"]
+
+
 def test_hook_send_rejects_conflicting_delivery_target_flags(capsys) -> None:
     parser = cli.build_parser()
 

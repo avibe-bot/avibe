@@ -2646,7 +2646,11 @@ def cmd_hook_send(args):
             session_key=session_key,
             post_to=args.post_to,
             deliver_key=args.deliver_key,
-            deprecation_warning="vibe hook send is deprecated; use vibe agent run instead.",
+            deprecation_warning=(
+                "vibe hook send is deprecated; use `vibe agent run --session-id <session-id> "
+                "--no-callback --message ...` for the same fire-and-forget behavior, or pass "
+                "`--callback-session-id <session-id>` when the async run should report back."
+            ),
             run={
                 "id": request.id,
                 "status": "queued",
