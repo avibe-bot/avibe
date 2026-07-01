@@ -4131,11 +4131,8 @@ def cmd_session_update(args):
 
 
 # ----- vault: secret management (design: docs/plans/vaults.md) -----
-# P0 standard-tier ops run direct-DB + direct-crypto here, matching sibling CLI
-# commands (session/task/data): the machine key is a local file, so the CLI reading
-# it is the same trust boundary as the daemon, and there is no approval to
-# orchestrate. Protected-tier resolve/sign (P1) will route through the daemon UDS,
-# because that is where the unlock factor, approval, and in-memory grants live.
+# The agent-facing CLI is value-free: it can discover, request, approve/wait, and
+# deliver existing vault material, but it never accepts plaintext secrets for create.
 
 
 def _open_vault_engine():
@@ -4218,79 +4215,6 @@ def _parse_env_specs(specs) -> dict:
                 raise TaskCliError(f"invalid env var name: {local!r} (use [A-Za-z_][A-Za-z0-9_]*)", code="invalid_env_name", help_command="vibe vault run --help")
             mapping[local] = vault_name
     return mapping
-
-
-def _read_secret_value(args, *, help_command: str) -> str:
-    """Read a secret value from --stdin or --from-file. Argv values are rejected by
-    design (shell history / agent-context leakage)."""
-    from_file = getattr(args, "from_file", None)
-    use_stdin = bool(getattr(args, "stdin", False))
-    if bool(from_file) == use_stdin:  # neither, or both
-        raise TaskCliError(
-            "provide the value via exactly one of --stdin or --from-file",
-            code="missing_value_source",
-            help_command=help_command,
-        )
-    if from_file:
-        try:
-            # Stored byte-exact: read bytes and decode (NOT read_text, which does universal
-            # newline translation). A trailing newline and CRLF/CR endings are significant for
-            # Windows-created PEM/SSH keys and many tokens, so --from-file is preserved verbatim.
-            value = Path(from_file).read_bytes().decode("utf-8")
-        except OSError as exc:
-            raise TaskCliError(f"cannot read --from-file: {exc}", code="value_file_unreadable", help_command=help_command) from exc
-    else:
-        # Interactive/piped stdin: drop a single trailing newline (the Enter keypress / heredoc
-        # terminator) the user didn't intend as part of the secret.
-        value = sys.stdin.read()
-        if value.endswith("\n"):
-            value = value[:-1]
-    if not value:
-        raise TaskCliError("secret value is empty", code="empty_value", help_command=help_command)
-    return value
-
-
-def cmd_vault_set(args):
-    from storage import vault_crypto, vault_service
-    from vibe import api
-
-    help_command = "vibe vault set --help"
-    try:
-        value = _read_secret_value(args, help_command=help_command)
-        # Validate the name before sealing so an invalid name doesn't spend an avault call.
-        if not vault_crypto.is_valid_secret_name(args.name):
-            raise vault_service.InvalidSecretNameError(args.name)
-        tags = list(getattr(args, "tag", None) or []) or None
-        policy = _build_secret_policy(args)
-        # Seal via avault BEFORE opening a DB transaction (never hold a txn across a subprocess).
-        # The plaintext goes only to avault's stdin; Avibe keeps only the ciphertext envelope
-        # and non-value-derived metadata.
-        sealed = api.avault_seal(args.name, value.encode("utf-8"))
-        engine = _open_vault_engine()
-        with engine.begin() as conn:
-            meta = vault_service.create_secret(
-                conn,
-                name=args.name,
-                sealed=sealed,
-                group=getattr(args, "group", None) or vault_service.DEFAULT_GROUP,
-                tags=tags,
-                description=getattr(args, "description", None),
-                policy=policy,
-            )
-        _print_cli_payload("vault_secret", saved=True, secret=meta)
-        return 0
-    except vault_service.InvalidSecretNameError:
-        _print_task_error(TaskCliError(f"invalid secret name: {args.name!r} (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name", help_command=help_command))
-        return 1
-    except vault_service.SecretExistsError:
-        _print_task_error(TaskCliError(f"secret '{args.name}' already exists (remove it first to replace)", code="secret_exists", help_command=help_command))
-        return 1
-    except api.AvaultError as exc:
-        _print_task_error(TaskCliError(f"avault seal failed: {exc}", code="avault_failed", help_command=help_command))
-        return 1
-    except Exception as exc:
-        _print_task_error(exc, help_command=help_command)
-        return 1
 
 
 def cmd_vault_list(args):
@@ -5390,28 +5314,6 @@ def cmd_vault_await(args):
         return 1
 
 
-def _build_secret_policy(args) -> dict | None:
-    """Assemble the non-secret policy (allowed hosts + auth scheme) for the brokered
-    ``fetch`` mode from ``set`` flags. Returns None when nothing is configured."""
-    policy: dict = {}
-    hosts = [h.strip() for h in (getattr(args, "allow_host", None) or []) if h.strip()]
-    if hosts:
-        policy["allowed_hosts"] = hosts
-    auth_header = getattr(args, "auth_header", None)
-    auth_query = getattr(args, "auth_query", None)
-    if auth_header and auth_query:
-        raise TaskCliError("use at most one of --auth-header / --auth-query", code="invalid_auth", help_command="vibe vault set --help")
-    if auth_header:
-        # A stored auth-header policy is applied at fetch egress, so it must obey the same
-        # authority-override guard as --header (otherwise --auth-header Host bypasses it).
-        _reject_forbidden_header(auth_header, help_command="vibe vault set --help")
-        policy["auth"] = {"type": "header", "name": auth_header}
-    elif auth_query:
-        policy["auth"] = {"type": "query", "name": auth_query}
-    # No auth key => fetch defaults to Authorization: Bearer <value>.
-    return policy or None
-
-
 def _host_allowed(host, allowed) -> bool:
     """Exact host match, or a leading-dot entry (``.github.com``) matching subdomains.
 
@@ -5552,7 +5454,7 @@ def cmd_vault_fetch(args):
             if not allowed:
                 raise TaskCliError(
                     f"secret '{name}' has no allowed_hosts; it cannot be used via fetch "
-                    f"(set them with: vibe vault set {name} --allow-host <host>)",
+                    "(configure allowed hosts in the Vaults UI)",
                     code="proxy_unbound",
                     help_command=help_command,
                 )
@@ -8813,32 +8715,9 @@ def build_parser():
     )
     vault_subparsers = vault_parser.add_subparsers(
         dest="vault_command",
-        metavar="{set,list,discover,rm,run,fetch,access,sign,await,request,export,inject,key}",
+        metavar="{list,discover,rm,run,fetch,access,sign,await,request,export,inject,key}",
     )
     vault_subparsers.required = True
-
-    vault_set_parser = vault_subparsers.add_parser(
-        "set",
-        help="Store a secret (value from --stdin or --from-file, never argv)",
-        description="Create a secret. The value is read from --stdin or --from-file so it never lands in shell history or an agent's argv.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        error_help_command="vibe vault set --help",
-    )
-    vault_set_parser.add_argument("name", help="Secret name, ENV-style (^[A-Z][A-Z0-9_]*$)")
-    vault_set_parser.add_argument("--stdin", action="store_true", help="Read the value from standard input")
-    vault_set_parser.add_argument("--from-file", help="Read the value from this file")
-    vault_set_parser.add_argument("--group", help="Group (organizational label). Defaults to 'default'.")
-    vault_set_parser.add_argument("--tag", action="append", help="Tag for filtering (repeatable)")
-    vault_set_parser.add_argument("--description", help="Human description shown in the Vaults page")
-    vault_set_parser.add_argument(
-        "--allow-host",
-        action="append",
-        metavar="HOST",
-        help="Allow this host for 'vibe vault fetch' (repeatable; '.example.com' matches subdomains). Required to use the secret via fetch.",
-    )
-    vault_set_parser.add_argument("--auth-header", metavar="NAME", help="For fetch: attach the value as this header (default: Authorization: Bearer <value>)")
-    vault_set_parser.add_argument("--auth-query", metavar="NAME", help="For fetch: attach the value as this query parameter")
-    _add_json_noop(vault_set_parser)
 
     vault_list_parser = vault_subparsers.add_parser(
         "list",
@@ -9781,8 +9660,6 @@ def main():
             sys.exit(cmd_session_update(args))
         parser.error("session command is required")
     if args.command == "vault":
-        if args.vault_command == "set":
-            sys.exit(cmd_vault_set(args))
         if args.vault_command == "list":
             sys.exit(cmd_vault_list(args))
         if args.vault_command == "discover":

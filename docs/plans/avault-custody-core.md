@@ -37,7 +37,7 @@ Two **trust roots**, chosen per secret:
 P0 ships the **standard tier** in Python:
 
 - Envelope encryption in `storage/vault_crypto.py`: a random per-secret DEK encrypts the value (AES-256-GCM); the DEK is wrapped under a 32-byte **machine key** at `~/.avibe/state/vault/machine.key` (mode 0600).
-- Short-lived CLI processes (`vibe vault set/list/run/fetch/request/export/inject/key`) do direct-DB + direct-crypto; no daemon.
+- Short-lived CLI processes (`vibe vault list/run/fetch/request/export/inject/key`) do direct-DB + direct-crypto; no daemon. The old agent-facing `vibe vault set` plaintext-create command has been removed; create now enters through browser-side sealed/blind-box payloads.
 - Delivery modes: `run` (child env) and `fetch` (brokered HTTP); `export`/`inject` are help-only.
 - The core invariant: **the model handles secret _names_; the platform handles secret _values_.** `$<NAME>` dynamic-ask wakes the agent with a name only; `vault_secrets` is denylisted in `data query`.
 
@@ -153,7 +153,8 @@ This makes "does a byte touch Python?" the wrong question. Python carries only b
 | Standard deliver | — | the DB ciphertext | unwrap with machine key → inject → returns **exit code** |
 | Protected deliver | passkey unlock → releases the per-record **DEK**, sealed to `avault` | a blind box | open → decrypt DB ciphertext → deliver → returns **result** |
 
-In every row Python holds only ciphertext or a blind box. (The standard-create row can instead accept a transient plaintext POST; see §11.3.)
+In every row Python holds only ciphertext or a blind box. Standard create no longer
+accepts a plaintext POST in Avibe; browser blind-box create is the product boundary.
 
 ---
 
@@ -325,9 +326,13 @@ For a **long-lived master key** every one of these is exposed for the whole daem
 
 `Zeroizing<…>` buffers wiped on deterministic `Drop`; constant-time comparison (`subtle`); `mlock` + `PR_SET_DUMPABLE(0)` on the key pages; tight control over copies. `avault` holds keys for the minimum window and wipes them.
 
-### 11.3 The honest residual on standard-create
+### 11.3 Removed residual on standard-create
 
-If standard-create takes a **plaintext POST** (no blind box), the value exists as one transient `bytes` in one Python request — un-zeroizable, briefly swappable. It is bounded (single value, single request, not reused) and the daemon is **in-boundary for the standard tier anyway** (it can ask `avault` to decrypt any standard secret). So it is an acceptable, minimized residual — or eliminated entirely by the **blind-box create** (§7.1), which is the recommended default.
+The older plan allowed standard-create to accept a transient plaintext POST and
+pipe it into `avault`. That path has been removed from Avibe. Standard create now
+requires the browser to seal a blind box to `avault`'s public key; text and
+file-backed secrets are both read and sealed in the browser. If the payload
+contains a plaintext `value` field, the API rejects it before invoking `avault`.
 
 ### 11.4 The other honest caveat — pubkey integrity
 
@@ -352,7 +357,9 @@ The blind box assumes the browser gets `avault`'s **genuine** public key. A full
 1. **CLI one-shot (P1):** the daemon spawns `avault seal/open/...`; it reads the master key, uses it, wipes it on `Drop`, exits. The common path is `askill`-shaped, and the per-op window already gets Rust hygiene.
 2. **Resident agent (P2):** `avault agent` listens on a unix socket, holds the grant DEK-set for the TTL, and is the signing oracle. The daemon authorizes via `SO_PEERCRED`. Only grant-caching and signing pay this cost.
 
-**Ingest without Python reading plaintext:** for the CLI `set` path, pass stdin's **file descriptor** straight to the `avault` subprocess (Python never `read()`s the bytes). For the web path, the browser uses the blind box (§7.1).
+**Ingest without Python reading plaintext:** the browser uses the blind box (§7.1).
+The old agent-facing CLI `set` ingest path has been removed instead of being kept
+as an fd-forwarding special case.
 
 ---
 
@@ -429,7 +436,8 @@ All settled; the authoritative record is **`avault/docs/DESIGN.md` §16**. Summa
 
 ## 17. Honest residuals (collected)
 
-- **Standard-create transient plaintext** in Python if not using the blind box — bounded, acceptable, or eliminated by blind-box create (§11.3).
+- **Standard-create transient plaintext** — removed from Avibe; standard create
+  requires browser blind-box payloads (§11.3).
 - **`avault` pubkey distribution integrity** — in-boundary for standard; needs pin/attest for protected (§11.4).
 - **Standard tier ≠ machine-compromise resistance** — it is at-rest + use-gating + no-LLM-exposure, not "safe if the box is owned" (§4.1).
 - **Browser JS hygiene** is best-effort (wipeable typed arrays, non-extractable WebCrypto keys), not a secure enclave; exposure is one operation while the user is present (§8.3).
@@ -447,8 +455,8 @@ Every standard-tier crypto call lives in two modules — and **the long-lived da
 
 | Path | Code | Crypto today | Plaintext destination |
 |---|---|---|---|
-| Create (REST) | `vibe/api.py:create_vault_secret` → `vault_service.create_secret` → `seal_standard` | seal (daemon) | — (stores ciphertext) |
-| Create (CLI) | `cmd_vault_set` → `create_secret` → `seal_standard` | seal | — |
+| Create (REST) | `vibe/api.py:create_vault_secret` → browser blind-box → `avault seal --blind-box` → `vault_service.create_secret` | blind-box seal (avault) | avault subprocess only |
+| Create (CLI) | removed from the agent-facing CLI | — | — |
 | Rotate | `vault_service.rotate_secret` → `seal_standard` | seal | — (unused in P0) |
 | Run | `cmd_vault_run` → `resolve` → `subprocess.Popen(env=…)` | open ×N | child env (1 child, N vars) |
 | Export | `cmd_vault_export` → `resolve` → stdout | open ×N | shell (`eval $(…)`) |
@@ -480,7 +488,10 @@ All keep the invariant: plaintext flows only *into* avault; out comes an exit co
 
 ### 18.4 The Avibe rework (after P1.1)
 
-- **`vault_service.create_secret` / `rotate_secret`** → spawn `avault seal --name <N>`, value on **stdin** (the daemon's transient POST plaintext piped straight through; never logged/persisted), parse `{ciphertext,nonce,wrap_meta}`, store. **Removes the daemon's only crypto + its only `machine.key` read.**
+- **`vault_service.create_secret` / `rotate_secret`** → create receives an already
+  sealed browser blind box and spawns `avault seal --blind-box`; protected create
+  receives a browser-sealed envelope. No Avibe product endpoint accepts a
+  plaintext `value` field for create.
 - **`cmd_vault_run`** → `avault deliver run` (multi-secret); envelopes from the DB on stdin. Drop `resolve()` + `Popen` here.
 - **`cmd_vault_export` / `cmd_vault_inject`** → `avault deliver export|inject`.
 - **`cmd_vault_fetch`** → `avault deliver fetch` (policy/host-allowlist check stays in Python *before* the call).

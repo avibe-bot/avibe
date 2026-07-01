@@ -6,11 +6,14 @@ import {
   Copy,
   Eye,
   EyeOff,
+  FileText,
   Loader2,
   RefreshCw,
   Server,
   ShieldCheck,
   SlidersHorizontal,
+  UploadCloud,
+  X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -31,12 +34,18 @@ import { Combobox } from './combobox';
 import { Input } from './input';
 import { SegmentedRadio } from './segmented';
 import { TagInput } from './tag-input';
+import { Textarea } from './textarea';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 
 type VaultKind = 'static' | 'keypair';
+type FetchAuthMode = 'bearer' | 'header' | 'query';
+type StaticSecretSource = 'text' | 'file';
 
 const AVAULT_P2_MIN_VERSION = '0.1.3';
 const DEFAULT_GROUP = 'default';
+const MAX_SECRET_FILE_BYTES = 1024 * 1024;
+const HTTP_HEADER_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const QUERY_PARAM_RE = /^[A-Za-z0-9._~-]+$/;
 
 // Accept only what the brokered fetch matcher (`_host_allowed` in vibe/cli.py) can
 // actually match against `urlsplit(url).hostname`: a bare hostname (`api.example.com`,
@@ -59,6 +68,12 @@ function normalizeHost(raw: string): string | null {
   return new RegExp(`^${label}(?:\\.${label})*$`).test(core) ? host : null;
 }
 type VaultProtection = 'standard' | 'protected';
+
+function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
 
 function versionAtLeast(current: string | null | undefined, minimum: string): boolean {
   if (!current) return false;
@@ -86,10 +101,6 @@ function avaultP2Ready(dep: DependencyItem | null): boolean {
   return dep?.status === 'ready' && versionAtLeast(dep.version, AVAULT_P2_MIN_VERSION);
 }
 
-function avaultInstalled(dep: DependencyItem | null): boolean {
-  return Boolean(dep?.installed);
-}
-
 /** Shared field label — 13px medium, matches design.pen create-dialog field labels. */
 const FIELD_LABEL = 'text-[13px] font-medium text-foreground';
 
@@ -114,6 +125,8 @@ export const VaultSecretForm: React.FC<{
   const api = useApi();
   const [name, setName] = useState(fixedName ?? '');
   const [value, setValue] = useState('');
+  const [staticSource, setStaticSource] = useState<StaticSecretSource>('text');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [kind, setKind] = useState<VaultKind>('static');
   const [signingSource, setSigningSource] = useState<'generate' | 'import'>('generate');
   const [importHex, setImportHex] = useState('');
@@ -124,6 +137,8 @@ export const VaultSecretForm: React.FC<{
   const [tags, setTags] = useState<string[]>([]);
   const [description, setDescription] = useState('');
   const [allowHosts, setAllowHosts] = useState<string[]>([]);
+  const [fetchAuthMode, setFetchAuthMode] = useState<FetchAuthMode>('bearer');
+  const [fetchAuthName, setFetchAuthName] = useState('');
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [tagsPending, setTagsPending] = useState(false);
   const [hostsPending, setHostsPending] = useState(false);
@@ -163,11 +178,11 @@ export const VaultSecretForm: React.FC<{
   }, [protection]);
 
   const p2Ready = useMemo(() => avaultP2Ready(avaultDep), [avaultDep]);
-  const standardCreateReady = useMemo(() => avaultInstalled(avaultDep), [avaultDep]);
   const secretName = (fixedName ?? name).trim().toUpperCase();
   const protectedCreateReady = protectedVault.status === 'unlocked';
   const isKeypair = kind === 'keypair';
   const isProvision = Boolean(fixedName);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Hold the latest key material in a ref too, so the unmount cleanup can zero
   // the *current* private key (a [] effect would capture a stale value).
@@ -193,16 +208,12 @@ export const VaultSecretForm: React.FC<{
     [],
   );
 
-  const valueReady = isKeypair ? signingKey != null : Boolean(value);
-  // Standard signing keys are blind-boxed to avault, so they need the P2 surface;
-  // protected signing keys are sealed under the browser VMK and signed locally, so they
-  // only need the vault unlocked (gated below via protectedCreateReady).
-  const keypairRequirementsMet = !isKeypair || protection === 'protected' || p2Ready;
+  const staticValueReady = staticSource === 'file' ? selectedFile != null && selectedFile.size > 0 : Boolean(value);
+  const valueReady = isKeypair ? signingKey != null : staticValueReady;
   const canSubmit =
     Boolean(secretName && valueReady) &&
-    keypairRequirementsMet &&
     !submitting &&
-    ((protection === 'standard' && standardCreateReady) || (protection === 'protected' && protectedCreateReady));
+    ((protection === 'standard' && p2Ready) || (protection === 'protected' && protectedCreateReady));
 
   const handleExistingSecret = () => {
     if (treatExistingAsFulfilled) {
@@ -213,9 +224,46 @@ export const VaultSecretForm: React.FC<{
     setError(t('vaults.dialog.errors.secretExists'));
   };
 
+  const clearSelectedFile = () => {
+    setSelectedFile(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const chooseFile = (file: File | null) => {
+    if (!file) {
+      clearSelectedFile();
+      return;
+    }
+    if (file.size === 0) {
+      clearSelectedFile();
+      setError(t('vaults.dialog.errors.fileEmpty'));
+      return;
+    }
+    if (file.size > MAX_SECRET_FILE_BYTES) {
+      clearSelectedFile();
+      setError(t('vaults.dialog.errors.fileTooLarge', { size: humanSize(MAX_SECRET_FILE_BYTES) }));
+      return;
+    }
+    setError(null);
+    setSelectedFile(file);
+    setValue('');
+  };
+
+  const switchStaticSource = (next: StaticSecretSource) => {
+    if (next === staticSource) return;
+    setStaticSource(next);
+    setError(null);
+    if (next === 'file') {
+      setValue('');
+    } else {
+      clearSelectedFile();
+    }
+  };
+
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
     if (!canSubmit) return;
+    let fileBytesToWipe: Uint8Array | null = null;
     // Don't silently drop a half-typed tag/host chip the user can still see. Tags live in the
     // create-mode Advanced collapsible; the allowed-hosts input is in Advanced (create) and
     // always visible in provision mode — guard whichever is on screen. Collapsing Advanced
@@ -225,6 +273,31 @@ export const VaultSecretForm: React.FC<{
       setError(t('vaults.dialog.errors.pendingDraft'));
       return;
     }
+    const normalizedFetchAuthName = fetchAuthName.trim();
+    if (fetchAuthMode === 'header') {
+      if (!normalizedFetchAuthName) {
+        setError(t('vaults.dialog.errors.authNameRequired'));
+        return;
+      }
+      if (!HTTP_HEADER_TOKEN_RE.test(normalizedFetchAuthName)) {
+        setError(t('vaults.dialog.errors.authHeaderInvalid'));
+        return;
+      }
+      if (normalizedFetchAuthName.toLowerCase() === 'host') {
+        setError(t('vaults.dialog.errors.authHeaderForbidden'));
+        return;
+      }
+    }
+    if (fetchAuthMode === 'query') {
+      if (!normalizedFetchAuthName) {
+        setError(t('vaults.dialog.errors.authNameRequired'));
+        return;
+      }
+      if (!QUERY_PARAM_RE.test(normalizedFetchAuthName)) {
+        setError(t('vaults.dialog.errors.authQueryInvalid'));
+        return;
+      }
+    }
     setSubmitting(true);
     setError(null);
     try {
@@ -233,6 +306,11 @@ export const VaultSecretForm: React.FC<{
       // it; protected-tier rejects it). It returns once backend support lands (PR #722).
       const policy: Record<string, unknown> = {};
       if (allowHosts.length) policy.allowed_hosts = allowHosts;
+      if (fetchAuthMode === 'header') {
+        policy.auth = { type: 'header', name: normalizedFetchAuthName };
+      } else if (fetchAuthMode === 'query') {
+        policy.auth = { type: 'query', name: normalizedFetchAuthName };
+      }
       const base = {
         name: secretName,
         protection,
@@ -253,11 +331,22 @@ export const VaultSecretForm: React.FC<{
       // For a signing key the sealed value is the raw 32-byte private key (avault
       // opens it back into a 32-byte signing key); for a static secret it is the
       // entered string.
-      const plaintext: Uint8Array | string = isKeypair && signingKey ? signingKey.privateKey : value;
+      let plaintext: Uint8Array | string;
+      if (isKeypair && signingKey) {
+        plaintext = signingKey.privateKey;
+      } else if (staticSource === 'file' && selectedFile) {
+        try {
+          fileBytesToWipe = new Uint8Array(await selectedFile.arrayBuffer());
+        } catch (err) {
+          throw new Error(t('vaults.dialog.errors.fileReadFailed'), { cause: err });
+        }
+        plaintext = fileBytesToWipe;
+      } else {
+        plaintext = value;
+      }
       let cryptoFields:
         | { sealed: ProtectedRecordEnvelope }
-        | { blind_box: Awaited<ReturnType<typeof sealBlindBox>> }
-        | { value: string };
+        | { blind_box: Awaited<ReturnType<typeof sealBlindBox>> };
       let establishingVmk = false;
       if (protection === 'protected') {
         // Browser-sealed under the session VMK; the daemon stores it opaquely (no avault, no
@@ -265,13 +354,9 @@ export const VaultSecretForm: React.FC<{
         const sealed = await protectedVault.sealValue(secretName, plaintext);
         cryptoFields = { sealed: sealed.envelope };
         establishingVmk = sealed.establishingVmk;
-      } else if (p2Ready) {
+      } else {
         const pubkey = await api.getVaultPubkey();
         cryptoFields = { blind_box: await sealBlindBox(plaintext, pubkey, standardCreateBlindBoxContext(secretName)) };
-      } else {
-        // Plain-value fallback exists only for static secrets; signing keys require
-        // the avault P2 surface (gated by canSubmit), so plaintext is a string here.
-        cryptoFields = { value };
       }
       const created = await api.createVaultSecret(
         { ...base, ...cryptoFields, ...(establishingVmk ? { establishing_vmk: true } : {}) },
@@ -293,8 +378,12 @@ export const VaultSecretForm: React.FC<{
       }
       if (protection === 'protected') protectedVault.afterCreated();
       setValue('');
+      setStaticSource('text');
+      clearSelectedFile();
       applySigningKey(null);
       setImportHex('');
+      setFetchAuthMode('bearer');
+      setFetchAuthName('');
       onCreated(secretName, 'created');
     } catch (err: unknown) {
       if (err instanceof Error && err.message.includes('fingerprint mismatch')) {
@@ -309,30 +398,122 @@ export const VaultSecretForm: React.FC<{
         setError(err instanceof Error ? err.message : String(err));
       }
     } finally {
+      fileBytesToWipe?.fill(0);
       setSubmitting(false);
     }
   };
 
   const valueField = (
-    <div className="flex items-center gap-2">
-      <Input
-        type={showValue ? 'text' : 'password'}
-        value={value}
-        onChange={(event) => setValue(event.target.value)}
-        placeholder={t('vaults.dialog.valuePlaceholder')}
-        autoFocus={isProvision}
-        required
-        className="min-w-0 flex-1 font-mono"
-      />
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        onClick={() => setShowValue((current) => !current)}
-        aria-label={showValue ? t('vaults.dialog.hideValue') : t('vaults.dialog.showValue')}
-      >
-        {showValue ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-      </Button>
+    <div className="flex flex-col gap-2">
+      <div className="self-start">
+        <SegmentedRadio<StaticSecretSource>
+          value={staticSource}
+          onChange={switchStaticSource}
+          disabled={submitting}
+          ariaLabel={t('vaults.dialog.valueSource')}
+          options={[
+            { id: 'text', label: t('vaults.dialog.valueSourceText') },
+            { id: 'file', label: t('vaults.dialog.valueSourceFile') },
+          ]}
+        />
+      </div>
+      {staticSource === 'text' ? (
+        <div className="flex items-start gap-2">
+          {showValue ? (
+            <Textarea
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
+              placeholder={t('vaults.dialog.valuePlaceholder')}
+              autoFocus={isProvision}
+              required
+              spellCheck={false}
+              autoComplete="off"
+              className="min-h-[96px] min-w-0 flex-1 resize-y font-mono text-xs leading-relaxed"
+            />
+          ) : (
+            <Input
+              type="password"
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
+              placeholder={t('vaults.dialog.valuePlaceholder')}
+              autoFocus={isProvision}
+              required
+              spellCheck={false}
+              autoComplete="off"
+              className="h-24 min-w-0 flex-1 font-mono text-xs"
+            />
+          )}
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            onClick={() => setShowValue((current) => !current)}
+            aria-label={showValue ? t('vaults.dialog.hideValue') : t('vaults.dialog.showValue')}
+          >
+            {showValue ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+          </Button>
+        </div>
+      ) : (
+        <div className="rounded-[10px] border border-dashed border-border-strong bg-surface p-3">
+          <input
+            ref={fileInputRef}
+            type="file"
+            className="hidden"
+            onChange={(event) => chooseFile(event.target.files?.[0] ?? null)}
+          />
+          {selectedFile ? (
+            <div className="flex items-center gap-2.5">
+              <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-mint/40 bg-mint-soft text-mint">
+                <FileText className="size-4" />
+              </span>
+              <div className="flex min-w-0 flex-1 flex-col">
+                <span className="truncate font-mono text-[12px] text-foreground">{selectedFile.name}</span>
+                <span className="text-[10.5px] text-muted">{humanSize(selectedFile.size)}</span>
+              </div>
+              <Button type="button" variant="ghost" size="icon" onClick={() => fileInputRef.current?.click()} aria-label={t('vaults.dialog.replaceSecretFile')}>
+                <RefreshCw className="size-4" />
+              </Button>
+              <Button type="button" variant="ghost" size="icon" onClick={clearSelectedFile} aria-label={t('vaults.dialog.clearSecretFile')}>
+                <X className="size-4" />
+              </Button>
+            </div>
+          ) : (
+            <button type="button" onClick={() => fileInputRef.current?.click()} className="flex w-full flex-col items-center gap-1.5 py-3 text-center">
+              <UploadCloud className="size-6 text-muted" />
+              <span className="text-[12px] text-muted">{t('vaults.dialog.chooseSecretFile')}</span>
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
+  const fetchAuthPolicyFields = (
+    <div className="flex flex-col gap-1.5">
+      <span className={FIELD_LABEL}>{t('vaults.dialog.fetchAuth')}</span>
+      <div className="flex flex-col gap-2">
+        <SegmentedRadio<FetchAuthMode>
+          value={fetchAuthMode}
+          onChange={setFetchAuthMode}
+          disabled={submitting}
+          ariaLabel={t('vaults.dialog.fetchAuth')}
+          options={[
+            { id: 'bearer', label: t('vaults.dialog.fetchAuthBearer') },
+            { id: 'header', label: t('vaults.dialog.fetchAuthHeader') },
+            { id: 'query', label: t('vaults.dialog.fetchAuthQuery') },
+          ]}
+        />
+        {fetchAuthMode !== 'bearer' && (
+          <Input
+            value={fetchAuthName}
+            onChange={(event) => setFetchAuthName(event.target.value)}
+            placeholder={t('vaults.dialog.fetchAuthNamePlaceholder')}
+            autoComplete="off"
+            disabled={submitting}
+          />
+        )}
+      </div>
+      <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.fetchAuthHelp')}</span>
     </div>
   );
 
@@ -385,17 +566,12 @@ export const VaultSecretForm: React.FC<{
           {t('vaults.dialog.checkingAvault')}
         </div>
       )}
-      {protection === 'standard' && !isKeypair && !checkingAvault && !p2Ready && (
+      {protection === 'standard' && !checkingAvault && !p2Ready && (
         <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
-          {standardCreateReady
-            ? t('vaults.dialog.p2UnavailableStandardFallback', {
-                version: AVAULT_P2_MIN_VERSION,
-                installed: avaultDep?.version ?? 'unknown',
-              })
-            : t('vaults.dialog.p2Unavailable', {
-                version: AVAULT_P2_MIN_VERSION,
-                installed: avaultDep?.version ?? 'unknown',
-              })}
+          {t('vaults.dialog.p2Unavailable', {
+            version: AVAULT_P2_MIN_VERSION,
+            installed: avaultDep?.version ?? 'unknown',
+          })}
         </div>
       )}
       {error && (
@@ -458,6 +634,7 @@ export const VaultSecretForm: React.FC<{
           />
           <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.allowHostsHelp')}</span>
         </div>
+        {fetchAuthPolicyFields}
 
         {gatingNotices}
 
@@ -490,6 +667,9 @@ export const VaultSecretForm: React.FC<{
               applySigningKey(null);
               setImportHex('');
               setSigningError(null);
+            } else {
+              setValue('');
+              clearSelectedFile();
             }
           }}
           disabled={submitting}
@@ -663,7 +843,7 @@ export const VaultSecretForm: React.FC<{
         >
           <SlidersHorizontal className="size-3.5 text-muted" />
           <span className="flex-1 text-xs font-semibold text-foreground">{t('vaults.dialog.advanced')}</span>
-          {!advancedOpen && (description || tags.length > 0 || allowHosts.length > 0) && (
+          {!advancedOpen && (description || tags.length > 0 || allowHosts.length > 0 || fetchAuthMode !== 'bearer') && (
             <span className="size-1.5 rounded-full bg-mint" aria-hidden />
           )}
         </button>
@@ -707,6 +887,7 @@ export const VaultSecretForm: React.FC<{
               />
               <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.allowHostsHelp')}</span>
             </div>
+            {fetchAuthPolicyFields}
           </div>
         )}
       </div>
