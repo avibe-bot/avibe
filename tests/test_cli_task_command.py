@@ -565,9 +565,9 @@ def test_task_add_create_per_run_scope_id_records_session_scope_metadata(tmp_pat
     payload = json.loads(capsys.readouterr().out)
     assert payload["task"]["session_policy"] == "create_per_run"
     assert payload["task"]["deliver_key"] is None
-    assert payload["task"]["cwd"] == str(invoke_dir)
+    assert payload["task"]["cwd"] is None
     assert payload["task"]["metadata"]["session_scope_id"] == "avibe::project::proj-scope-task"
-    assert payload["task"]["metadata"]["session_workdir"] == str(invoke_dir)
+    assert "session_workdir" not in payload["task"]["metadata"]
     assert payload["task"]["agent_name"] == "project-agent"
 
 
@@ -632,10 +632,10 @@ def test_task_add_create_session_scope_id_supports_project_scope(tmp_path: Path,
     assert payload["task"]["session_policy"] == "create_once"
     target = cli.resolve_session_id_target(payload["task"]["session_id"], db_path=db_path)
     assert target.session_key.session_scope == "avibe::project::proj-once-task"
-    assert target.workdir == str(invoke_dir)
-    assert payload["task"]["cwd"] == str(invoke_dir)
+    assert target.workdir == str(tmp_path)
+    assert payload["task"]["cwd"] is None
     assert payload["task"]["metadata"]["session_scope_id"] == "avibe::project::proj-once-task"
-    assert payload["task"]["metadata"]["session_workdir"] == str(invoke_dir)
+    assert "session_workdir" not in payload["task"]["metadata"]
 
 
 def test_task_add_create_session_scope_id_uses_unique_definition_anchors(tmp_path: Path, capsys) -> None:

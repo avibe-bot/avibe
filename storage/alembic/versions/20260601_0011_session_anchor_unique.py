@@ -5,10 +5,10 @@ backend, keyed by ``(scope_id, session_anchor)`` (see
 docs/plans/session-anchor-backend-pin.md):
 
 1. OpenCode used to fold the working directory into ``session_anchor``
-   (``base:/path``) to rotate a session per cwd. The cwd now lives only in the
-   ``workdir`` column (it is a per-request OpenCode param), so strip the
-   ``:<cwd>`` suffix back to the bare base anchor. Only ABSOLUTE-path suffixes
-   are stripped, so claude/codex ``base:<subagent>`` anchors are preserved.
+   (``base:/path``) to rotate a session per cwd. Current runtime never trusts
+   that suffix as cwd, so strip the ``:<cwd>`` suffix back to the bare base
+   anchor without deriving ``workdir`` from it. Only ABSOLUTE-path suffixes are
+   stripped, so claude/codex ``base:<subagent>`` anchors are preserved.
 2. With anchors normalised, an IM thread that toggled backends (or had a cwd
    suffix) can have several rows for one ``(scope_id, session_anchor)``. Reattach
    the loser rows' transcripts to the survivor, then keep the most-recently-active
@@ -43,8 +43,8 @@ _UNIQUE_INDEX = "uq_agent_sessions_scope_anchor"
 _ABS_CWD_PREFIX = re.compile(r"(/|[A-Za-z]:[\\/]|\\\\)")
 
 
-def _split_anchor_cwd(anchor: str) -> tuple[str, str | None]:
-    """Split ``base:<abs-cwd>`` into ``(bare_base, cwd)``; passthrough otherwise.
+def _strip_anchor_cwd(anchor: str) -> str:
+    """Strip ``base:<abs-cwd>`` to ``bare_base``; passthrough otherwise.
 
     Splits on the FIRST ``:`` and only strips when the suffix is an absolute path,
     so an OpenCode cwd composite (POSIX/Windows/UNC, even double-nested
@@ -53,8 +53,8 @@ def _split_anchor_cwd(anchor: str) -> tuple[str, str | None]:
     drive-letter colon that a last-colon split would mangle into ``base:C``."""
     base, sep, suffix = anchor.partition(":")
     if sep and base and _ABS_CWD_PREFIX.match(suffix):
-        return base, suffix
-    return anchor, None
+        return base
+    return anchor
 
 
 def _tables(bind) -> set[str]:
@@ -86,22 +86,22 @@ def upgrade() -> None:
         return
 
     # 1. Strip the ``:<cwd>`` suffix OpenCode folded into the anchor back to the
-    #    bare base, and move the cwd onto the ``workdir`` column. Done row-by-row in
+    #    bare base. Do not derive ``workdir`` from that suffix. Done row-by-row in
     #    Python (not SQL): only an ABSOLUTE-path suffix is a cwd, and recognising
     #    POSIX + Windows (``C:\``) + UNC absolute paths — and tolerating the Windows
     #    drive-letter colon — is not expressible in portable SQLite string ops. A
     #    claude/codex SUBAGENT anchor (``base:reviewer``) is NOT a path and is
     #    preserved; collapsing it would let the dedup below delete the subagent's
     #    native binding (lost context). avibe anchors (no ``:``) never match.
-    rows = bind.exec_driver_sql("select id, session_anchor, workdir from agent_sessions").fetchall()
-    for row_id, anchor, workdir in rows:
+    rows = bind.exec_driver_sql("select id, session_anchor from agent_sessions").fetchall()
+    for row_id, anchor in rows:
         if anchor is None:
             continue
-        bare, cwd = _split_anchor_cwd(str(anchor))
+        bare = _strip_anchor_cwd(str(anchor))
         if bare != anchor:
             bind.exec_driver_sql(
-                "update agent_sessions set session_anchor = ?, workdir = ? where id = ?",
-                (bare, cwd if cwd is not None else workdir, row_id),
+                "update agent_sessions set session_anchor = ? where id = ?",
+                (bare, row_id),
             )
 
     # 2. Reattach transcripts before dedup deletes the loser rows. messages.session_id

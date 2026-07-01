@@ -2048,6 +2048,7 @@ def cmd_task_add(args):
             explicit_cwd=getattr(args, "cwd", None),
             existing_cwd=None,
             session_policy=session_policy,
+            scoped_session=_has_modern_scope_target(args),
             help_command="vibe task add --help",
         )
         agent = _resolve_agent_for_target(
@@ -2425,10 +2426,17 @@ def cmd_task_update(args):
                 explicit_cwd=explicit_cwd,
                 existing_cwd=None,
                 session_policy=session_policy,
+                scoped_session=_has_modern_scope_target(args),
                 help_command="vibe task update --help",
             )
         elif getattr(args, "create_session", False) or getattr(args, "create_session_per_run", False):
-            cwd = task.cwd or os.getcwd()
+            cwd = _resolve_definition_session_cwd(
+                explicit_cwd=None,
+                existing_cwd=task.cwd,
+                session_policy=session_policy,
+                scoped_session=_has_modern_scope_target(args) or bool(str(metadata.get("session_scope_id") or "").strip()),
+                help_command="vibe task update --help",
+            )
         else:
             cwd = task.cwd
         scope_key = requested_scope_key or str(metadata.get("session_scope_id") or "").strip() or _legacy_scope_key_from_target(deliver_key)
@@ -3311,12 +3319,18 @@ def _validate_definition_delivery_target(
     )
 
 
-def _resolve_run_cwd(args, *, session_policy: str, help_command: str) -> Optional[str]:
+def _resolve_run_cwd(
+    args,
+    *,
+    session_policy: str,
+    scoped_session: bool = False,
+    help_command: str,
+) -> Optional[str]:
     """Working directory for a session this run RESERVES.
 
     An explicit ``--cwd`` must exist and always wins for blank session creation.
-    Without it, new blank sessions follow the CLI invocation's cwd, including
-    private/background and same-scope/scope-id placements.
+    Without it, scoped sessions snapshot the scope's default workdir, while
+    private/background sessions follow the CLI invocation's cwd.
     Existing and forked sessions keep their own cwd, so ``--cwd`` is an error.
     """
     raw = (getattr(args, "cwd", None) or "").strip()
@@ -3335,10 +3349,12 @@ def _resolve_run_cwd(args, *, session_policy: str, help_command: str) -> Optiona
             raise TaskCliError(
                 f"--cwd directory does not exist: {resolved}",
                 code="cwd_not_found",
-                hint="Point --cwd to an existing directory, or omit it to use the invocation directory.",
+                hint="Point --cwd to an existing directory, or omit it to use the session target's default workdir.",
                 help_command=help_command,
             )
         return resolved
+    if scoped_session:
+        return None
     return os.getcwd()
 
 
@@ -3347,6 +3363,7 @@ def _resolve_definition_session_cwd(
     explicit_cwd: Optional[str],
     existing_cwd: Optional[str],
     session_policy: str,
+    scoped_session: bool = False,
     help_command: str,
 ) -> Optional[str]:
     raw = (explicit_cwd or "").strip()
@@ -3361,7 +3378,15 @@ def _resolve_definition_session_cwd(
         return None
     if raw:
         return _resolve_existing_cwd(raw, help_command=help_command, code="cwd_not_found", label="task")
-    return existing_cwd or os.getcwd()
+    if existing_cwd:
+        return existing_cwd
+    if scoped_session:
+        return None
+    return os.getcwd()
+
+
+def _has_modern_scope_target(args) -> bool:
+    return bool((getattr(args, "scope_id", None) or "").strip()) or bool(getattr(args, "same_scope", False))
 
 
 def _session_creation_metadata_from_caller(caller_context) -> dict:
@@ -3630,7 +3655,6 @@ def cmd_agent_run(args):
             )
         session_id = (args.session_id or "").strip() or None
         session_key = ""
-        run_cwd = _resolve_run_cwd(args, session_policy=session_policy, help_command="vibe agent run --help")
         scope_key = _resolve_agent_run_scope_key(args, caller_context=caller_context, source_session_id=source_session_id)
         legacy_reservation_target = None
         if not scope_key and (args.deliver_key or "").strip():
@@ -3639,6 +3663,12 @@ def cmd_agent_run(args):
             # internal placement field.
             legacy_reservation_target = _parse_validated_session_key(args.deliver_key, help_command="vibe agent run --help")
             scope_key = legacy_reservation_target.session_scope
+        run_cwd = _resolve_run_cwd(
+            args,
+            session_policy=session_policy,
+            scoped_session=bool(scope_key),
+            help_command="vibe agent run --help",
+        )
         agent = _agent_store().require_enabled(agent_name) if agent_name else None
         fork_result = None
         session_metadata = _session_creation_metadata_from_caller(caller_context)
@@ -5930,11 +5960,22 @@ def cmd_watch_add(args):
         )
         agent_name = agent.name if agent else None
         cwd = _resolve_watch_cwd(args.cwd, help_command="vibe watch add --help", default_to_invocation=True)
+        session_workdir = (
+            _resolve_definition_session_cwd(
+                explicit_cwd=getattr(args, "cwd", None),
+                existing_cwd=None,
+                session_policy=session_policy,
+                scoped_session=_has_modern_scope_target(args),
+                help_command="vibe watch add --help",
+            )
+            if session_policy != "existing"
+            else None
+        )
         if session_policy == "create_once":
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
                 deliver_key=scope_key or "",
-                workdir=cwd,
+                workdir=session_workdir,
                 help_command="vibe watch add --help",
             )
         session_target, delivery_target = _validate_definition_delivery_target(
@@ -5983,7 +6024,7 @@ def cmd_watch_add(args):
             deliver_key=args.deliver_key,
             agent_name=agent_name,
             session_policy=session_policy,
-            metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=cwd),
+            metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=session_workdir),
         )
         runtime_store = _watch_runtime_store()
         watch, runtime_entry = _wait_for_watch_startup(store, runtime_store, watch.id)
@@ -6223,6 +6264,22 @@ def cmd_watch_update(args):
             next_schedule_type="watch",
             help_command="vibe watch update --help",
         )
+        creates_future_session = session_policy == "create_per_run" or (
+            session_policy == "create_once" and (bool(getattr(args, "create_session", False)) or not session_id)
+        )
+        session_workdir = (
+            _resolve_definition_session_cwd(
+                explicit_cwd=getattr(args, "cwd", None),
+                existing_cwd=None
+                if getattr(args, "clear_cwd", False)
+                else (str(metadata.get("session_workdir") or "").strip() or None),
+                session_policy=session_policy,
+                scoped_session=_has_modern_scope_target(args) or bool(str(metadata.get("session_scope_id") or "").strip()),
+                help_command="vibe watch update --help",
+            )
+            if creates_future_session
+            else None
+        )
         scope_key = requested_scope_key or str(metadata.get("session_scope_id") or "").strip() or _legacy_scope_key_from_target(deliver_key)
         if session_policy in {"create_once", "create_per_run"} and not scope_key:
             raise TaskCliError(
@@ -6253,12 +6310,12 @@ def cmd_watch_update(args):
             session_id = _reserve_definition_session(
                 agent_name=agent_name,
                 deliver_key=scope_key,
-                workdir=cwd,
+                workdir=session_workdir,
                 help_command="vibe watch update --help",
             )
             session_key = ""
-        if cwd:
-            metadata["session_workdir"] = cwd
+        if session_workdir:
+            metadata["session_workdir"] = session_workdir
         else:
             metadata.pop("session_workdir", None)
         session_target, delivery_target = _validate_definition_update_delivery_target(
@@ -8668,8 +8725,9 @@ def build_parser():
     agent_run_parser.add_argument(
         "--cwd",
         help=(
-            "Working directory for the NEW session. Defaults to the directory the command is "
-            "invoked from. Invalid with --session-id (an existing session keeps its own working directory)."
+            "Working directory for the NEW session. Private sessions default to the invocation "
+            "directory; scoped sessions default to the scope workdir. Invalid with --session-id "
+            "(an existing session keeps its own working directory)."
         ),
     )
     agent_run_parser.add_argument("--post-to", choices=("thread", "channel"))

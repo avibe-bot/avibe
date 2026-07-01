@@ -62,8 +62,8 @@ to fork into a different scope.
 | Operation | Default cwd |
 | --- | --- |
 | create private/background session | caller shell cwd |
-| create with `--same-scope` | caller shell cwd |
-| create with `--scope-id` | caller shell cwd |
+| create with `--same-scope` | selected scope workdir |
+| create with `--scope-id` | selected scope workdir |
 | fork self/session | source session cwd |
 | continue existing session | existing session cwd |
 | explicit `--cwd` | wins for blank create only |
