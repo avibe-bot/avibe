@@ -180,6 +180,59 @@ def test_require_bind_off_allows_any_channel_member():
     assert result.allowed is True
 
 
+def test_require_bind_default_denies_when_channel_inherits():
+    # Per-channel value unset (None) inherits the platform global default (True).
+    store = _Store()
+    store.settings.channels["C1"] = SimpleNamespace(enabled=True, require_bind=None)
+
+    result = check_auth(
+        user_id="U-stranger",
+        channel_id="C1",
+        is_dm=False,
+        action="",
+        store=store,
+        require_bind_default=True,
+    )
+
+    assert result.allowed is False
+    assert result.denial == "not_bound_channel"
+
+
+def test_require_bind_channel_override_off_wins_over_default_on():
+    # Explicit per-channel False overrides a global default of True.
+    store = _Store()
+    store.settings.channels["C1"] = SimpleNamespace(enabled=True, require_bind=False)
+
+    result = check_auth(
+        user_id="U-stranger",
+        channel_id="C1",
+        is_dm=False,
+        action="",
+        store=store,
+        require_bind_default=True,
+    )
+
+    assert result.allowed is True
+
+
+def test_require_bind_channel_override_on_wins_over_default_off():
+    # Explicit per-channel True is enforced even when the global default is False.
+    store = _Store()
+    store.settings.channels["C1"] = SimpleNamespace(enabled=True, require_bind=True)
+
+    result = check_auth(
+        user_id="U-stranger",
+        channel_id="C1",
+        is_dm=False,
+        action="",
+        store=store,
+        require_bind_default=False,
+    )
+
+    assert result.allowed is False
+    assert result.denial == "not_bound_channel"
+
+
 def test_admin_guard_denies_non_admin_for_auth_setup_callback():
     store = _Store()
     store.settings.channels["C1"] = SimpleNamespace(enabled=True)

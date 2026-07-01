@@ -82,6 +82,7 @@ def check_auth(
     action: str = "",
     settings_manager: object | None = None,
     store: "SettingsStore | None" = None,
+    require_bind_default: bool = False,
 ) -> AuthResult:
     """Run the centralized authorization pipeline.
 
@@ -132,11 +133,16 @@ def check_auth(
         if not ch or not ch.enabled:
             return AuthResult(allowed=False, denial="unauthorized_channel", is_dm=False)
 
-        # 2b. Optional per-channel require_bind gate: when enabled, only bound
-        # users may drive the agent in this channel. Unbound senders are denied
-        # with a denial type that maps to no message (silent ignore), so other
+        # 2b. Optional require_bind gate: when enabled, only bound users may
+        # drive the agent in this channel. Unbound senders are denied with a
+        # denial type that maps to no message (silent ignore), so other
         # members' chatter does not trigger the bot or spam the channel.
-        if getattr(ch, "require_bind", None):
+        # Per-channel override wins; None inherits the platform global default.
+        channel_require_bind = getattr(ch, "require_bind", None)
+        effective_require_bind = (
+            channel_require_bind if channel_require_bind is not None else require_bind_default
+        )
+        if effective_require_bind:
             if not _is_enabled_user(store, user_id, platform):
                 return AuthResult(allowed=False, denial="not_bound_channel", is_dm=False)
 

@@ -491,6 +491,44 @@ class SettingsManager:
             return channel_settings.require_mention
         return None
 
+    # ---------------------------------------------
+    # Per-channel require_bind management
+    # ---------------------------------------------
+    def get_require_bind(self, channel_id: Union[int, str], global_default: bool = False) -> bool:
+        """Get effective require_bind value for a channel.
+
+        Returns the per-channel override when set, otherwise falls back to the
+        platform global default. Mirrors get_require_mention.
+        """
+        self._reload_if_changed()
+        key = str(channel_id)
+        channel_settings = self.store.get_channels_for_platform(self.platform).get(key)
+
+        if channel_settings is not None and channel_settings.require_bind is not None:
+            return channel_settings.require_bind
+
+        return global_default
+
+    def set_require_bind(self, channel_id: Union[int, str], value: Optional[bool]):
+        """Set per-channel require_bind override.
+
+        value: True=bound only, False=anyone, None=use global default.
+        """
+        key = str(channel_id)
+        channel_settings = self.store.get_channel(key, platform=self.platform)
+        channel_settings.require_bind = value
+        self.store.update_channel(key, channel_settings, platform=self.platform)
+        logger.info(f"Updated require_bind for channel {key}: {value}")
+
+    def get_require_bind_override(self, channel_id: Union[int, str]) -> Optional[bool]:
+        """Get the raw per-channel require_bind override (may be None)."""
+        self._reload_if_changed()
+        key = str(channel_id)
+        channel_settings = self.store.get_channels_for_platform(self.platform).get(key)
+        if channel_settings is not None:
+            return channel_settings.require_bind
+        return None
+
 
 class MultiSettingsManager:
     """Route settings operations to per-platform managers using scoped keys."""
@@ -672,3 +710,15 @@ class MultiSettingsManager:
     def get_require_mention_override(self, settings_key: Union[int, str]) -> Optional[bool]:
         manager, raw = self._resolve(settings_key)
         return manager.get_require_mention_override(raw)
+
+    def get_require_bind(self, settings_key: Union[int, str], global_default: bool = False) -> bool:
+        manager, raw = self._resolve(settings_key)
+        return manager.get_require_bind(raw, global_default=global_default)
+
+    def set_require_bind(self, settings_key: Union[int, str], value: Optional[bool]):
+        manager, raw = self._resolve(settings_key)
+        return manager.set_require_bind(raw, value)
+
+    def get_require_bind_override(self, settings_key: Union[int, str]) -> Optional[bool]:
+        manager, raw = self._resolve(settings_key)
+        return manager.get_require_bind_override(raw)

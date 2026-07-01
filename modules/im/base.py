@@ -292,6 +292,7 @@ class BaseIMClient(ABC):
             platform=getattr(settings_manager, "platform", None),
             action=resolved_action,
             settings_manager=settings_manager,
+            require_bind_default=bool(getattr(getattr(self, "config", None), "require_bind", False)),
         )
 
     def build_auth_denial_text(self, denial: str, channel_id: Optional[str] = None) -> Optional[str]:
