@@ -256,6 +256,7 @@ class AgentResourceGovernor:
 
     def update_config(self, config: dict[str, Any] | None) -> None:
         self.config = config or {}
+        self._base = None
         self._group = None
         self._limits = None
         self._disabled_reason = None
@@ -301,6 +302,9 @@ class AgentResourceGovernor:
             str(self.config.get("runtime_group_name") or DEFAULT_RUNTIME_GROUP_NAME).strip()
             or DEFAULT_RUNTIME_GROUP_NAME
         )
+        if runtime_group_name == group_name:
+            self._disabled_reason = "runtime-and-agent-cgroup-collide"
+            return None
         group = base / group_name
         runtime_group = base / runtime_group_name
         try:
@@ -330,20 +334,23 @@ class AgentResourceGovernor:
         return group
 
     def _base_cgroup(self, root: Path) -> Path | None:
+        runtime_group_name = (
+            str(self.config.get("runtime_group_name") or DEFAULT_RUNTIME_GROUP_NAME).strip()
+            or DEFAULT_RUNTIME_GROUP_NAME
+        )
         if self.base_cgroup is not None:
-            return self.base_cgroup
+            return self._parent_if_runtime_leaf(self.base_cgroup, runtime_group_name)
         if self._base is not None:
             return self._base
         current = current_cgroup_path(root)
         if current is None:
             return None
-        runtime_group_name = (
-            str(self.config.get("runtime_group_name") or DEFAULT_RUNTIME_GROUP_NAME).strip()
-            or DEFAULT_RUNTIME_GROUP_NAME
-        )
-        if current.name == runtime_group_name and current.parent != current:
-            return current.parent
-        return current
+        return self._parent_if_runtime_leaf(current, runtime_group_name)
+
+    def _parent_if_runtime_leaf(self, cgroup: Path, runtime_group_name: str) -> Path:
+        if cgroup.name == runtime_group_name and cgroup.parent != cgroup:
+            return cgroup.parent
+        return cgroup
 
     def _prepare_base_cgroup(self, base: Path, runtime_group: Path, root: Path) -> None:
         try:
@@ -352,6 +359,9 @@ class AgentResourceGovernor:
             is_root = False
         if is_root:
             return
+        # cgroup v2 rejects enabling domain controllers in a non-root cgroup
+        # that still has member processes. Keep Avibe in a runtime leaf and
+        # create the agent cgroup as a sibling under the now-empty parent.
         runtime_group.mkdir(exist_ok=True)
         if not (runtime_group / "cgroup.procs").exists():
             raise OSError(f"runtime cgroup.procs is unavailable in {runtime_group}")
@@ -376,6 +386,9 @@ class AgentResourceGovernor:
                     )
             if not moved:
                 break
+        remaining = _cgroup_member_pids(base)
+        if remaining:
+            raise OSError(f"runtime cgroup still has member pids after migration: {base}")
 
     def _enable_subtree_controllers(self, base: Path) -> None:
         available = set((_read_text(base / "cgroup.controllers") or "").split())
@@ -384,8 +397,8 @@ class AgentResourceGovernor:
             return
         try:
             _write_cgroup_value(base / "cgroup.subtree_control", " ".join(f"+{controller}" for controller in requested))
-        except OSError:
-            logger.debug("Failed to enable delegated cgroup controllers under %s", base, exc_info=True)
+        except OSError as exc:
+            raise OSError(f"failed to enable delegated cgroup controllers under {base}: {exc}") from exc
 
     def _configure_group(self, group: Path, limits: AgentResourceLimits) -> None:
         if not (group / "cgroup.procs").exists():

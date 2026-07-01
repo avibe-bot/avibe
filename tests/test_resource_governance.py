@@ -163,12 +163,15 @@ def test_governor_falls_back_when_memory_controller_is_missing(
 
     governor = AgentResourceGovernor({"mode": "auto"}, root=root, base_cgroup=base)
     group = base / "avibe-agents"
+    runtime_group = base / "avibe-runtime"
     original_mkdir = Path.mkdir
 
     def mkdir_with_minimal_files(path: Path, *args, **kwargs):
         result = original_mkdir(path, *args, **kwargs)
         if path == group:
             (group / "cgroup.procs").write_text("", encoding="utf-8")
+        if path == runtime_group:
+            (runtime_group / "cgroup.procs").write_text("", encoding="utf-8")
         return result
 
     monkeypatch.setattr(Path, "mkdir", mkdir_with_minimal_files)
@@ -190,6 +193,72 @@ def test_governor_falls_back_when_runtime_leaf_cannot_be_created(tmp_path: Path)
 
     assert governor.apply_to_pid(4321, label="test") is False
     assert governor.group_path is None
+
+
+def test_governor_falls_back_when_subtree_control_enable_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "cgroup"
+    base = root / "service"
+    base.mkdir(parents=True)
+    (base / "memory.max").write_text(str(2 * 1024 * MIB), encoding="utf-8")
+    (base / "cgroup.controllers").write_text("memory cpu io pids\n", encoding="utf-8")
+    (base / "cgroup.subtree_control").write_text("", encoding="utf-8")
+
+    governor = AgentResourceGovernor({"mode": "auto"}, root=root, base_cgroup=base)
+    runtime_group = base / "avibe-runtime"
+    original_mkdir = Path.mkdir
+
+    def mkdir_with_runtime_file(path: Path, *args, **kwargs):
+        result = original_mkdir(path, *args, **kwargs)
+        if path == runtime_group:
+            (runtime_group / "cgroup.procs").write_text("", encoding="utf-8")
+        return result
+
+    def fake_write_cgroup_value(path: Path, value: str) -> None:
+        if path == base / "cgroup.subtree_control":
+            raise OSError("busy")
+        path.write_text(f"{value}\n", encoding="utf-8")
+
+    monkeypatch.setattr(Path, "mkdir", mkdir_with_runtime_file)
+    monkeypatch.setattr("core.resource_governance._write_cgroup_value", fake_write_cgroup_value)
+
+    assert governor.apply_to_pid(4321, label="test") is False
+    assert governor.group_path is None
+    assert not (base / "avibe-agents").exists()
+
+
+def test_governor_uses_parent_when_current_cgroup_is_runtime_leaf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "cgroup"
+    base = root / "service"
+    runtime_group = base / "avibe-runtime"
+    runtime_group.mkdir(parents=True)
+    (base / "memory.max").write_text(str(512 * MIB), encoding="utf-8")
+    (base / "cgroup.controllers").write_text("cpu io pids\n", encoding="utf-8")
+    (base / "cgroup.subtree_control").write_text("", encoding="utf-8")
+    (runtime_group / "cgroup.procs").write_text("", encoding="utf-8")
+
+    governor = AgentResourceGovernor({"mode": "enabled"}, root=root, base_cgroup=runtime_group)
+    group = base / "avibe-agents"
+    original_mkdir = Path.mkdir
+
+    def mkdir_with_controller_files(path: Path, *args, **kwargs):
+        result = original_mkdir(path, *args, **kwargs)
+        if path == group:
+            for name in ("cpu.weight", "io.weight", "pids.max", "cgroup.procs"):
+                (group / name).write_text("", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(Path, "mkdir", mkdir_with_controller_files)
+
+    assert governor.apply_to_pid(4321, label="test") is True
+    assert governor.group_path == group
+    assert not (runtime_group / "avibe-agents").exists()
+    assert (base / "cgroup.subtree_control").read_text(encoding="utf-8") == "+cpu +io +pids\n"
 
 
 def test_governor_moves_existing_descendant_pids(
