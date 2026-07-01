@@ -456,8 +456,8 @@ approval with `{group, gmk, ttl, session_binding}` / revoke; §9.5),
 Internal UDS `/internal/vault/*`: `resolve`, `provision`, `sign`, `fetch`,
 `requests/{id}/wait`.
 
-CLI `vibe vault …`: `set NAME [--protected] [--group G] [--tag t] --stdin|--from-file f`
-· `list [--skill S] [--group G] [--tag t] [--json]` · `rm` · `run` (promoted) ·
+CLI `vibe vault …`: create/set is intentionally not exposed to agents; values
+enter through browser-side sealed/blind-box payloads. `list [--skill S] [--group G] [--tag t] [--json]` · `rm` · `run` (promoted) ·
 `fetch` (promoted) · `sign` (promoted) · `request` · `link/unlink --skill S NAME` ·
 `audit` · `key export/import` · `import 1password [--vault V]` (§13.5) · `export` /
 `inject` (help-only, not promoted). No `vibe vault get`; no command prints a value.

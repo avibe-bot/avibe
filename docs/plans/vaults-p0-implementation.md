@@ -197,8 +197,9 @@ vibe vault export --env NAME[,N2]                                               
 vibe vault inject --keys A,B --out f [--format dotenv|json|yaml|toml] [--ttl 10m]  # M2
 ```
 
-`set` rejects argv values (shell history / agent context) — `--stdin`/`--from-file`
-only. No `vibe vault get`; no command prints a value.
+`set` has been removed from the agent-facing CLI. Create flows enter through the
+browser, which sends sealed/blind-box payloads instead of plaintext values. No
+`vibe vault get`; no command prints a value.
 
 ## 7. Reply enhancer — `core/reply_enhancer.py`
 
@@ -235,11 +236,12 @@ stay queryable.
 1. `feat(vault): schema + machine-key crypto + data query denylist`. **[done — 58832ae3]**
 2. `feat(vault): data service` — `storage/vault_service.py` (CRUD + standard-tier
    resolve + provision + audit). **[done — 7093ad5c]**
-3. `feat(vault): CLI set/list/rm/run/request` — direct-DB + direct-crypto (standard
-   tier; UDS deferred to P1, §5). End-to-end verified: `run` injects to child env with
-   **no stdout leak**. **[done — 2026-06-21]**
-3b. `feat(vault): fetch` — M4 brokered HTTP + domain binding (`set --allow-host` +
-   `--auth-header`/`--auth-query`; secret attached at egress, refused for non-allowed
+3. `feat(vault): CLI list/rm/run/request` — direct-DB + direct-crypto (standard
+   tier; UDS deferred to P1, §5). The original P0 CLI create path was later removed:
+   agent-facing CLI commands no longer accept plaintext create. End-to-end verified:
+   `run` injects to child env with **no stdout leak**. **[done — 2026-06-21]**
+3b. `feat(vault): fetch` — M4 brokered HTTP + domain binding (browser-created
+   `allowed_hosts` + `auth` policy; secret attached at egress, refused for non-allowed
    hosts before decrypt; response body passed through, never the secret).
    **[done — 2026-06-21]**
 3c. `feat(vault): export/inject delivery` — help-only `export` (eval stream) +
@@ -261,8 +263,9 @@ stay queryable.
 - **Unit**: crypto round-trip + wrong-key auth-fail; name regex; `data query`
   denylist (assert `SELECT * FROM vault_secrets` is denied, others allowed);
   reply_enhancer `$<NAME>` extraction + fence guard.
-- **CLI**: `set` (stdin) → `run` injects env to child, value absent from stdout;
-  `request --wait` blocks then returns on fulfill.
+- **CLI**: create/set is intentionally absent from agent-facing commands; `run`
+  injects env to child with value absent from stdout; `request --wait` blocks then
+  returns on fulfill.
 - **API**: reads return masked previews, never plaintext; CSRF on mutations.
 - **Scenario** (`tests/scenarios/`): agent emits `$<KEY>` → card → fulfill →
   name-only wake-up → `vault run` succeeds. Surface a scenario ID.

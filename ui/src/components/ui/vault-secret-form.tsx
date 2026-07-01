@@ -34,9 +34,12 @@ import { TagInput } from './tag-input';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 
 type VaultKind = 'static' | 'keypair';
+type FetchAuthMode = 'bearer' | 'header' | 'query';
 
 const AVAULT_P2_MIN_VERSION = '0.1.3';
 const DEFAULT_GROUP = 'default';
+const HTTP_HEADER_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const QUERY_PARAM_RE = /^[A-Za-z0-9._~-]+$/;
 
 // Accept only what the brokered fetch matcher (`_host_allowed` in vibe/cli.py) can
 // actually match against `urlsplit(url).hostname`: a bare hostname (`api.example.com`,
@@ -120,6 +123,8 @@ export const VaultSecretForm: React.FC<{
   const [tags, setTags] = useState<string[]>([]);
   const [description, setDescription] = useState('');
   const [allowHosts, setAllowHosts] = useState<string[]>([]);
+  const [fetchAuthMode, setFetchAuthMode] = useState<FetchAuthMode>('bearer');
+  const [fetchAuthName, setFetchAuthName] = useState('');
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [tagsPending, setTagsPending] = useState(false);
   const [hostsPending, setHostsPending] = useState(false);
@@ -215,6 +220,31 @@ export const VaultSecretForm: React.FC<{
       setError(t('vaults.dialog.errors.pendingDraft'));
       return;
     }
+    const normalizedFetchAuthName = fetchAuthName.trim();
+    if (fetchAuthMode === 'header') {
+      if (!normalizedFetchAuthName) {
+        setError(t('vaults.dialog.errors.authNameRequired'));
+        return;
+      }
+      if (!HTTP_HEADER_TOKEN_RE.test(normalizedFetchAuthName)) {
+        setError(t('vaults.dialog.errors.authHeaderInvalid'));
+        return;
+      }
+      if (normalizedFetchAuthName.toLowerCase() === 'host') {
+        setError(t('vaults.dialog.errors.authHeaderForbidden'));
+        return;
+      }
+    }
+    if (fetchAuthMode === 'query') {
+      if (!normalizedFetchAuthName) {
+        setError(t('vaults.dialog.errors.authNameRequired'));
+        return;
+      }
+      if (!QUERY_PARAM_RE.test(normalizedFetchAuthName)) {
+        setError(t('vaults.dialog.errors.authQueryInvalid'));
+        return;
+      }
+    }
     setSubmitting(true);
     setError(null);
     try {
@@ -223,6 +253,11 @@ export const VaultSecretForm: React.FC<{
       // it; protected-tier rejects it). It returns once backend support lands (PR #722).
       const policy: Record<string, unknown> = {};
       if (allowHosts.length) policy.allowed_hosts = allowHosts;
+      if (fetchAuthMode === 'header') {
+        policy.auth = { type: 'header', name: normalizedFetchAuthName };
+      } else if (fetchAuthMode === 'query') {
+        policy.auth = { type: 'query', name: normalizedFetchAuthName };
+      }
       const base = {
         name: secretName,
         protection,
@@ -280,6 +315,8 @@ export const VaultSecretForm: React.FC<{
       setValue('');
       applySigningKey(null);
       setImportHex('');
+      setFetchAuthMode('bearer');
+      setFetchAuthName('');
       onCreated(secretName, 'created');
     } catch (err: unknown) {
       if (err instanceof Error && err.message.includes('fingerprint mismatch')) {
@@ -318,6 +355,35 @@ export const VaultSecretForm: React.FC<{
       >
         {showValue ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
       </Button>
+    </div>
+  );
+
+  const fetchAuthPolicyFields = (
+    <div className="flex flex-col gap-1.5">
+      <span className={FIELD_LABEL}>{t('vaults.dialog.fetchAuth')}</span>
+      <div className="flex flex-col gap-2">
+        <SegmentedRadio<FetchAuthMode>
+          value={fetchAuthMode}
+          onChange={setFetchAuthMode}
+          disabled={submitting}
+          ariaLabel={t('vaults.dialog.fetchAuth')}
+          options={[
+            { id: 'bearer', label: t('vaults.dialog.fetchAuthBearer') },
+            { id: 'header', label: t('vaults.dialog.fetchAuthHeader') },
+            { id: 'query', label: t('vaults.dialog.fetchAuthQuery') },
+          ]}
+        />
+        {fetchAuthMode !== 'bearer' && (
+          <Input
+            value={fetchAuthName}
+            onChange={(event) => setFetchAuthName(event.target.value)}
+            placeholder={t('vaults.dialog.fetchAuthNamePlaceholder')}
+            autoComplete="off"
+            disabled={submitting}
+          />
+        )}
+      </div>
+      <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.fetchAuthHelp')}</span>
     </div>
   );
 
@@ -438,6 +504,7 @@ export const VaultSecretForm: React.FC<{
           />
           <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.allowHostsHelp')}</span>
         </div>
+        {fetchAuthPolicyFields}
 
         {gatingNotices}
 
@@ -643,7 +710,7 @@ export const VaultSecretForm: React.FC<{
         >
           <SlidersHorizontal className="size-3.5 text-muted" />
           <span className="flex-1 text-xs font-semibold text-foreground">{t('vaults.dialog.advanced')}</span>
-          {!advancedOpen && (description || tags.length > 0 || allowHosts.length > 0) && (
+          {!advancedOpen && (description || tags.length > 0 || allowHosts.length > 0 || fetchAuthMode !== 'bearer') && (
             <span className="size-1.5 rounded-full bg-mint" aria-hidden />
           )}
         </button>
@@ -687,6 +754,7 @@ export const VaultSecretForm: React.FC<{
               />
               <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.allowHostsHelp')}</span>
             </div>
+            {fetchAuthPolicyFields}
           </div>
         )}
       </div>

@@ -1390,6 +1390,11 @@ def create_vault_secret(payload: dict) -> dict:
 
     if not isinstance(payload, dict):
         raise VaultApiError("payload must be an object", code="invalid_payload")
+    if "value" in payload:
+        raise VaultApiError(
+            "vault create does not accept plaintext value fields",
+            code="plaintext_value_rejected",
+        )
     name = str(payload.get("name") or "").strip()
     if not vault_crypto.is_valid_secret_name(name):
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")

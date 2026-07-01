@@ -2316,6 +2316,12 @@
       "allowHosts": "Allowed hosts (for proxy fetch)",
       "allowHostsPlaceholder": "api.github.com, .example.com",
       "allowHostsHelp": "Only needed when this secret is used through the brokered HTTP proxy; '.example.com' matches subdomains.",
+      "fetchAuth": "Fetch auth placement",
+      "fetchAuthBearer": "Bearer",
+      "fetchAuthHeader": "Header",
+      "fetchAuthQuery": "Query",
+      "fetchAuthNamePlaceholder": "X-Api-Key or api_key",
+      "fetchAuthHelp": "Defaults to Authorization: Bearer <value>. Use Header or Query for APIs that expect another credential placement.",
       "alwaysAsk": "Always ask before each use",
       "alwaysAskHelp": "Never granted in advance, even per-key",
       "tags": "Tags",
@@ -2337,6 +2343,10 @@
         "invalidPrivateKey": "That isn't a valid secp256k1 private key. It must be 32 bytes (64 hex characters).",
         "fingerprintMismatch": "The avault public key fingerprint changed. Verify the local avault install before saving this secret.",
         "pendingDraft": "Press Enter to add the value in the input, or clear it, before saving.",
+        "authNameRequired": "Enter a header or query parameter name.",
+        "authHeaderInvalid": "Enter a valid HTTP header name.",
+        "authHeaderForbidden": "Host cannot be used as the credential header.",
+        "authQueryInvalid": "Enter a valid query parameter name.",
         "secretExists": "A secret with this name already exists."
       }
     },

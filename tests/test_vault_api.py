@@ -106,7 +106,36 @@ def test_standard_rest_create_rejects_plaintext_value(monkeypatch):
     with pytest.raises(api.VaultApiError) as exc:
         api.create_vault_secret({"name": "OPENAI_API_KEY", "value": "secret"})
 
-    assert exc.value.code == "blind_box_required"
+    assert exc.value.code == "plaintext_value_rejected"
+    blind_box.assert_not_called()
+
+
+def test_create_rejects_plaintext_value_even_with_sealed_payload(monkeypatch):
+    from unittest.mock import Mock
+
+    blind_box = Mock()
+    monkeypatch.setattr(api, "avault_seal_blind_box", blind_box)
+
+    with pytest.raises(api.VaultApiError) as standard_exc:
+        api.create_vault_secret(
+            {
+                "name": "MIXED_KEY",
+                "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                "value": "secret",
+            }
+        )
+    assert standard_exc.value.code == "plaintext_value_rejected"
+
+    with pytest.raises(api.VaultApiError) as protected_exc:
+        api.create_vault_secret(
+            {
+                "name": "PROTECTED_MIXED",
+                "protection": "protected",
+                "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+                "value": "secret",
+            }
+        )
+    assert protected_exc.value.code == "plaintext_value_rejected"
     blind_box.assert_not_called()
 
 
@@ -154,7 +183,7 @@ def test_rest_plaintext_value_rejected_before_avault(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", seal)
     with pytest.raises(api.VaultApiError) as exc:
         api.create_vault_secret({"name": "NO_PLAINTEXT", "protection": "protected", "value": "secret"})
-    assert exc.value.code == "invalid_envelope"
+    assert exc.value.code == "plaintext_value_rejected"
     seal.assert_not_called()
 
 
