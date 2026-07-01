@@ -70,6 +70,7 @@ def test_governor_update_config_resets_cached_group(tmp_path: Path, monkeypatch:
 
     governor = AgentResourceGovernor({"mode": "enabled"}, root=root, base_cgroup=base)
     group = base / "avibe-agents"
+    runtime_group = base / "avibe-runtime"
     original_mkdir = Path.mkdir
 
     def mkdir_with_controller_files(path: Path, *args, **kwargs):
@@ -77,6 +78,8 @@ def test_governor_update_config_resets_cached_group(tmp_path: Path, monkeypatch:
         if path == group:
             for name in ("cpu.weight", "io.weight", "pids.max", "cgroup.procs"):
                 (group / name).write_text("", encoding="utf-8")
+        if path == runtime_group:
+            (runtime_group / "cgroup.procs").write_text("", encoding="utf-8")
         return result
 
     monkeypatch.setattr(Path, "mkdir", mkdir_with_controller_files)
@@ -98,10 +101,13 @@ def test_governor_configures_group_and_moves_pid(tmp_path: Path, monkeypatch: py
     (base / "memory.max").write_text(str(2 * 1024 * MIB), encoding="utf-8")
     (base / "cgroup.controllers").write_text("memory cpu io pids\n", encoding="utf-8")
     (base / "cgroup.subtree_control").write_text("", encoding="utf-8")
+    (base / "cgroup.procs").write_text("1001\n1002\n", encoding="utf-8")
 
     governor = AgentResourceGovernor({"mode": "enabled"}, root=root, base_cgroup=base)
     group = base / "avibe-agents"
+    runtime_group = base / "avibe-runtime"
     original_mkdir = Path.mkdir
+    runtime_writes: list[str] = []
 
     def mkdir_with_controller_files(path: Path, *args, **kwargs):
         result = original_mkdir(path, *args, **kwargs)
@@ -116,12 +122,26 @@ def test_governor_configures_group_and_moves_pid(tmp_path: Path, monkeypatch: py
                 "cgroup.procs",
             ):
                 (group / name).write_text("", encoding="utf-8")
+        if path == runtime_group:
+            (runtime_group / "cgroup.procs").write_text("", encoding="utf-8")
         return result
 
     monkeypatch.setattr(Path, "mkdir", mkdir_with_controller_files)
 
+    def fake_write_cgroup_value(path: Path, value: str) -> None:
+        if path == runtime_group / "cgroup.procs":
+            runtime_writes.append(value)
+            if value in {"1001", "1002"}:
+                remaining = "1002\n" if value == "1001" else ""
+                (base / "cgroup.procs").write_text(remaining, encoding="utf-8")
+            return
+        path.write_text(f"{value}\n", encoding="utf-8")
+
+    monkeypatch.setattr("core.resource_governance._write_cgroup_value", fake_write_cgroup_value)
+
     assert governor.apply_to_pid(4321, label="test") is True
 
+    assert runtime_writes == ["1001", "1002"]
     assert (base / "cgroup.subtree_control").read_text(encoding="utf-8") == "+memory +cpu +io +pids\n"
     assert (group / "cgroup.procs").read_text(encoding="utf-8") == "4321\n"
     assert (group / "memory.max").read_text(encoding="utf-8").strip() == str(1382 * MIB)
@@ -157,6 +177,21 @@ def test_governor_falls_back_when_memory_controller_is_missing(
     assert governor.group_path is None
 
 
+def test_governor_falls_back_when_runtime_leaf_cannot_be_created(tmp_path: Path) -> None:
+    root = tmp_path / "cgroup"
+    base = root / "service"
+    base.mkdir(parents=True)
+    (base / "memory.max").write_text(str(2 * 1024 * MIB), encoding="utf-8")
+    (base / "cgroup.controllers").write_text("memory cpu io pids\n", encoding="utf-8")
+    (base / "cgroup.subtree_control").write_text("", encoding="utf-8")
+    (base / "cgroup.procs").write_text("1001\n", encoding="utf-8")
+
+    governor = AgentResourceGovernor({"mode": "auto"}, root=root, base_cgroup=base)
+
+    assert governor.apply_to_pid(4321, label="test") is False
+    assert governor.group_path is None
+
+
 def test_governor_moves_existing_descendant_pids(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -168,6 +203,7 @@ def test_governor_moves_existing_descendant_pids(
 
     governor = AgentResourceGovernor({"mode": "enabled"}, root=root, base_cgroup=base)
     group = base / "avibe-agents"
+    runtime_group = base / "avibe-runtime"
     original_mkdir = Path.mkdir
     writes: list[str] = []
 
@@ -176,6 +212,8 @@ def test_governor_moves_existing_descendant_pids(
         if path == group:
             for name in ("cpu.weight", "io.weight", "pids.max", "cgroup.procs"):
                 (group / name).write_text("", encoding="utf-8")
+        if path == runtime_group:
+            (runtime_group / "cgroup.procs").write_text("", encoding="utf-8")
         return result
 
     def fake_write_cgroup_value(path: Path, value: str) -> None:

@@ -18,7 +18,10 @@ real constrained child cgroup, it falls back to legacy process startup.
 ## Design
 
 - Add a V2 runtime config block for resource governance, defaulting to `auto`.
-- Create one shared `avibe-agents` cgroup under the current service cgroup.
+- Create an `avibe-runtime` leaf for Avibe's own direct service processes, then
+  create one sibling `avibe-agents` cgroup for constrained agent work. This keeps
+  the parent cgroup free of internal processes before enabling cgroup v2 domain
+  controllers.
 - Set aggregate limits on that group:
   - `memory.high` as a soft throttle
   - `memory.max` as a hard agent-domain cap

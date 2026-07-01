@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 DEFAULT_GROUP_NAME = "avibe-agents"
+DEFAULT_RUNTIME_GROUP_NAME = "avibe-runtime"
 DEFAULT_AGENT_CPU_WEIGHT = 150
 DEFAULT_AGENT_IO_WEIGHT = 100
 DEFAULT_AGENT_PIDS_MAX = 512
@@ -182,6 +183,19 @@ def _write_cgroup_value(path: Path, value: str) -> None:
     path.write_text(f"{value}\n", encoding="utf-8")
 
 
+def _cgroup_member_pids(cgroup: Path) -> list[int]:
+    text = _read_text(cgroup / "cgroup.procs")
+    if not text:
+        return []
+    pids: list[int] = []
+    for raw_pid in text.split():
+        try:
+            pids.append(int(raw_pid))
+        except ValueError:
+            continue
+    return pids
+
+
 def _descendant_pids(pid: int) -> list[int]:
     pending = [pid]
     descendants: list[int] = []
@@ -222,6 +236,7 @@ class AgentResourceGovernor:
         self.config = config or {}
         self.root = root
         self.base_cgroup = base_cgroup
+        self._base: Path | None = None
         self._group: Path | None = None
         self._limits: AgentResourceLimits | None = None
         self._disabled_reason: str | None = None
@@ -276,13 +291,20 @@ class AgentResourceGovernor:
         if root is None:
             self._disabled_reason = "no-cgroup-v2"
             return None
-        base = self.base_cgroup or current_cgroup_path(root)
+        base = self._base_cgroup(root)
         if base is None:
             self._disabled_reason = "unknown-current-cgroup"
             return None
+        self._base = base
         group_name = str(self.config.get("agent_group_name") or DEFAULT_GROUP_NAME).strip() or DEFAULT_GROUP_NAME
+        runtime_group_name = (
+            str(self.config.get("runtime_group_name") or DEFAULT_RUNTIME_GROUP_NAME).strip()
+            or DEFAULT_RUNTIME_GROUP_NAME
+        )
         group = base / group_name
+        runtime_group = base / runtime_group_name
         try:
+            self._prepare_base_cgroup(base, runtime_group, root)
             self._enable_subtree_controllers(base)
             group.mkdir(exist_ok=True)
             limits = derive_agent_limits(tenant_memory_limit_bytes(base, root), self.config)
@@ -306,6 +328,54 @@ class AgentResourceGovernor:
             limits.pids_max,
         )
         return group
+
+    def _base_cgroup(self, root: Path) -> Path | None:
+        if self.base_cgroup is not None:
+            return self.base_cgroup
+        if self._base is not None:
+            return self._base
+        current = current_cgroup_path(root)
+        if current is None:
+            return None
+        runtime_group_name = (
+            str(self.config.get("runtime_group_name") or DEFAULT_RUNTIME_GROUP_NAME).strip()
+            or DEFAULT_RUNTIME_GROUP_NAME
+        )
+        if current.name == runtime_group_name and current.parent != current:
+            return current.parent
+        return current
+
+    def _prepare_base_cgroup(self, base: Path, runtime_group: Path, root: Path) -> None:
+        try:
+            is_root = base.resolve() == root.resolve()
+        except OSError:
+            is_root = False
+        if is_root:
+            return
+        runtime_group.mkdir(exist_ok=True)
+        if not (runtime_group / "cgroup.procs").exists():
+            raise OSError(f"runtime cgroup.procs is unavailable in {runtime_group}")
+        self._move_base_processes_to_runtime_leaf(base, runtime_group)
+
+    def _move_base_processes_to_runtime_leaf(self, base: Path, runtime_group: Path) -> None:
+        for _ in range(3):
+            pids = [pid for pid in _cgroup_member_pids(base) if pid > 0]
+            if not pids:
+                return
+            moved = False
+            for pid in pids:
+                try:
+                    _write_cgroup_value(runtime_group / "cgroup.procs", str(pid))
+                    moved = True
+                except OSError as exc:
+                    logger.debug(
+                        "Failed to move Avibe runtime pid=%s into runtime cgroup %s: %s",
+                        pid,
+                        runtime_group,
+                        exc,
+                    )
+            if not moved:
+                break
 
     def _enable_subtree_controllers(self, base: Path) -> None:
         available = set((_read_text(base / "cgroup.controllers") or "").split())
