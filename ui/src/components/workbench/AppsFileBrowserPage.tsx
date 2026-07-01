@@ -29,7 +29,7 @@ import clsx from 'clsx';
 
 import { useWorkbenchProjectsTree } from '../../context/WorkbenchProjectsContext';
 import { useWindowManager } from '../../context/WindowManagerContext';
-import { isEditableFile, isEditableMeta, previewOverlayKind, type PreviewOverlayKind } from '../../lib/filePreview';
+import { isEditableFile, isEditableMeta, previewWindowKind } from '../../lib/filePreview';
 import {
   contentUrl,
   deletePath,
@@ -148,7 +148,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
   // Quick-look image preview: a raster image opens in an in-window overlay (Finder-style) instead
   // of downloading. Kept in-window (not a portaled Dialog) so it stays inside the window's dark
   // data-theme scope and bounds.
-  const [preview, setPreview] = useState<{ path: string; name: string; kind: PreviewOverlayKind } | null>(null);
+  const [preview, setPreview] = useState<{ path: string; name: string } | null>(null);
   useEffect(() => {
     if (!preview) return;
     const onKey = (ev: KeyboardEvent) => {
@@ -264,21 +264,24 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
     if (query.trim()) runSearch(query);
   }, [cwd, navigate, query, runSearch]);
 
-  // Open: dir → navigate (and leave search); raster image / PDF / Office doc → in-window preview
-  // overlay; editable text/code file (within the size cap) → Editor window; anything else → download.
+  // Open: dir → navigate (and leave search); image / PDF / Office / Markdown → the standalone Preview
+  // window (desktop) or the in-page overlay (mobile, which has no window layer); editable text/code
+  // file (within the size cap) → Editor window; anything else → download.
   const openItem = async (item: RowItem) => {
     if (item.entry.kind === 'dir') {
       setQuery('');
       navigate(item.full);
       return;
     }
-    const overlay = previewOverlayKind(item.entry);
-    if (overlay) {
-      setPreview({ path: item.full, name: item.entry.name, kind: overlay });
+    const desktop = window.matchMedia('(min-width: 768px)').matches;
+    if (previewWindowKind(item.entry)) {
+      // Desktop opens a real, resizable Preview window (a dedicated app); mobile has no window layer,
+      // so it falls back to the in-page overlay so the file can still be viewed.
+      if (desktop) wm.openApp('preview', { title: item.entry.name, params: { path: item.full, name: item.entry.name } });
+      else setPreview({ path: item.full, name: item.entry.name });
       return;
     }
     // Mobile has no editor window layer (windows are md+), so a non-previewable file just downloads.
-    const desktop = window.matchMedia('(min-width: 768px)').matches;
     if (!desktop) {
       downloadFile(item.full);
       return;
@@ -719,12 +722,12 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
         </div>
       </div>
 
-      {/* In-window image preview overlay (Finder-style quick look). In-window, not a portaled
-          Dialog, so it stays inside the window's dark data-theme scope and bounds. */}
+      {/* MOBILE-ONLY quick-look overlay: on mobile there's no window layer, so a previewable file
+          opens here in-page instead of the standalone Preview window (desktop uses the window). */}
       {preview && (
         <div className="absolute inset-0 z-20 flex flex-col bg-surface">
           <div className="flex items-center gap-2 border-b border-border bg-surface-2/60 px-3 py-2">
-            {preview.kind === 'image' ? <ImageIcon className="size-4 shrink-0 text-muted" /> : <FileText className="size-4 shrink-0 text-muted" />}
+            <FileText className="size-4 shrink-0 text-muted" />
             <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">{preview.name}</span>
             <Button
               type="button"

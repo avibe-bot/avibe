@@ -685,8 +685,13 @@
       "maximize": "最大化",
       "restore": "还原"
     },
+    "preview": {
+      "label": "预览",
+      "openInEditor": "用编辑器打开",
+      "empty": "没有可预览的文件。"
+    },
     "fileBrowser": {
-      "label": "文件浏览器",
+      "label": "文件",
       "desc": "浏览、查看、编辑这台机器上的文件。",
       "placeholder": "文件浏览器正在搭建中。很快你就能在这里浏览整机文件、打开文件、直接编辑并保存。",
       "tagline": "整机 · 查看与编辑",

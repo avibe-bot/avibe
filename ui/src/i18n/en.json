@@ -685,8 +685,13 @@
       "maximize": "Maximize",
       "restore": "Restore"
     },
+    "preview": {
+      "label": "Preview",
+      "openInEditor": "Open in Editor",
+      "empty": "No file to preview."
+    },
     "fileBrowser": {
-      "label": "File Browser",
+      "label": "Files",
       "desc": "Browse, view, and edit files on this machine.",
       "placeholder": "The File Browser is being built. You'll be able to browse the whole machine, open files, and edit and save them right here.",
       "tagline": "Whole machine · view and edit",

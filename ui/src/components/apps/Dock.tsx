@@ -149,9 +149,11 @@ export const Dock: React.FC = () => {
 
         {minimized.length > 0 && <div className="mx-1 h-11 w-px shrink-0 self-center bg-border-strong" />}
 
-        {/* Minimized windows: an icon + the window's title so several open windows are
-            distinguishable at a glance (a true live thumbnail isn't practical — the editor/terminal
-            render to canvas — so the title carries the identification). */}
+        {/* Minimized windows render as a small window-style thumbnail (a mini titlebar with traffic
+            lights + the app icon) with the title stacked BELOW it — matching the app tiles' layout so
+            the whole row stays vertically consistent, and so a title never stretches the tile wide.
+            (A true live thumbnail isn't practical — editor/terminal render to canvas — so the icon +
+            title carry the identification.) */}
         {minimized.map((w) => {
           const def = APP_REGISTRY[w.appId];
           const Icon = def.icon;
@@ -163,10 +165,20 @@ export const Dock: React.FC = () => {
               title={label}
               aria-label={t('apps.window.restore', { defaultValue: 'Restore' })}
               onClick={() => wm.restore(w.id)}
-              className="flex h-10 w-[136px] shrink-0 items-center gap-2 self-center rounded-lg border border-border-strong bg-surface px-2.5 text-left transition hover:border-foreground/30"
+              className="group/min flex w-[64px] shrink-0 flex-col items-center gap-1"
             >
-              <Icon className="size-4 shrink-0" style={{ color: `var(${def.accent})` }} />
-              <span className="min-w-0 flex-1 truncate text-[11px] text-foreground">{label}</span>
+              <span className="flex h-9 w-14 flex-col overflow-hidden rounded-md border border-border-strong bg-surface shadow-sm transition group-hover/min:border-foreground/40">
+                {/* Faux window titlebar with the three traffic lights. */}
+                <span className="flex h-2.5 shrink-0 items-center gap-[3px] border-b border-border/70 bg-surface-2 px-1">
+                  <span className="size-1 rounded-full" style={{ backgroundColor: '#ff5f57' }} />
+                  <span className="size-1 rounded-full" style={{ backgroundColor: '#febc2e' }} />
+                  <span className="size-1 rounded-full" style={{ backgroundColor: '#28c840' }} />
+                </span>
+                <span className="grid flex-1 place-items-center">
+                  <Icon className="size-4" style={{ color: `var(${def.accent})` }} />
+                </span>
+              </span>
+              <span className="max-w-full truncate text-[10px] leading-tight text-muted">{label}</span>
             </button>
           );
         })}
