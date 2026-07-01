@@ -346,7 +346,7 @@ prefix parsing.
 
 ### Background New Sessions
 
-For `--create-session --deliver-key <scope-id>`:
+For `--create-session --scope-id <scope-id>`:
 
 1. Resolve `scope_id`.
 2. Resolve scope's Vibe Agent.
@@ -471,8 +471,8 @@ decision. Existing users may need to select/import/create Vibe Agents again.
 - `agent-run-harness.md`: `vibe agent run` is the direct/manual execution
   surface. It consumes Vibe Agent definitions from this catalog instead of
   accepting backend/model/effort overrides.
-- Delivery targeting is owned by `agent-run-harness.md`: `--deliver-key`
-  becomes `scopes.id`, not a legacy session key.
+- Scope placement is owned by `agent-run-harness.md`: `--scope-id` uses
+  `scopes.id`, not a legacy session key.
 
 ## Implementation Slices
 

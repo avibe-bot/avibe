@@ -4,7 +4,7 @@
 
 The Harness CLI used to expose backend and transport details directly to
 agents. In particular, `vibe agent run`, `vibe task`, and `vibe watch` relied on
-explicit session ids, delivery keys, and post targets even when Avibe already
+explicit session ids and legacy delivery-target syntax even when Avibe already
 knows the calling Agent Session through `AVIBE_SESSION_ID`.
 
 That made agents carry routing details in prompts instead of using the runtime
@@ -19,10 +19,9 @@ context as a first-class API.
 - Scope placement is a session-level decision. It decides where a newly-created
   session lives: a private/background scope, the caller/source scope, or a
   specific `scopes.id`.
-- Message delivery overrides are not scope placement. `post-to` remains a reply
-  delivery override; it does not move a session.
-- `deliver-key` is legacy transport syntax and should leave the agent-facing
-  CLI surface. New commands should use `--scope-id` or `--same-scope`.
+- Message delivery overrides are not scope placement. Legacy transport
+  overrides should leave the agent-facing CLI surface.
+- New commands should use `--scope-id` or `--same-scope`.
 
 ## `vibe agent run` Defaults
 
@@ -98,8 +97,8 @@ runs, the route is only recorded for future detach-to-async behavior.
 
 ## Migration
 
-This batch removes `deliver-key` from recommended agent-facing help, prompt
-injection, and examples. Internal persistence can keep legacy field names until
-a later database cleanup. The CLI may continue accepting hidden legacy
-`--deliver-key` for compatibility, but new code paths write placement through
-`scope_id` semantics.
+This batch removes legacy delivery-target syntax from recommended agent-facing
+help, prompt injection, and examples. Internal persistence can keep legacy field
+names until a later database cleanup. The CLI may continue accepting hidden
+legacy placement input for compatibility, but new code paths write placement
+through `scope_id` semantics.

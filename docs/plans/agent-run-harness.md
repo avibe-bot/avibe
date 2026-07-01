@@ -65,12 +65,12 @@ Continue an existing session:
 vibe agent run --session-id sesk8m4q2p7x --message "Continue the investigation."
 ```
 
-Create a new session and deliver to a scope:
+Create a new session in a scope:
 
 ```bash
 vibe agent run \
   --create-session \
-  --deliver-key slack::channel::C123 \
+  --scope-id slack::channel::C123 \
   --message "Start a fresh incident triage."
 ```
 
@@ -82,13 +82,14 @@ Rules:
   `--message` / `--message-file`.
 - Exactly one message source is required.
 - `--session-id` continues a conversation by public Vibe Session ID.
-- `--create-session` reserves a new Vibe Session ID. With `--deliver-key`, the
-  session also has a delivery Scope; without `--deliver-key`, a direct Agent Run
+- `--create-session` reserves a new Vibe Session ID. With `--scope-id`, the
+  session is placed in that Scope; without scope placement, a direct Agent Run
   creates a private/no-delivery session for agent harness or sub-agent usage and
   requires explicit `--agent`, then returns `session_id` for later continuation.
 - `--agent <name>` selects the Vibe Agent for this run. If omitted, resolve the
-  Agent from the session or delivery Scope defaults.
-- `--deliver-key <scope-id>` sends the result to an IM scope.
+  Agent from the session or placement Scope defaults.
+- `--same-scope` places a new Session in the caller/source Scope.
+- `--scope-id <scope-id>` places a new Session in a specific existing Scope.
 - `--async` returns after the run is queued.
 - Without `--async`, the command waits for completion and prints the result.
 
@@ -138,7 +139,7 @@ Create a one-shot managed task:
 vibe task add \
   --at "2026-06-01T09:00:00+08:00" \
   --create-session \
-  --deliver-key slack::channel::C123 \
+  --scope-id slack::channel::C123 \
   --message-file request.md
 ```
 
@@ -195,7 +196,7 @@ vibe watch add \
   --retry-exit-code 75 \
   --retry-delay 60 \
   --create-session-per-run \
-  --deliver-key slack::channel::C123 \
+  --scope-id slack::channel::C123 \
   --message "A CI event finished. Review the waiter output." \
   -- python3 scripts/wait_for_ci.py
 ```
@@ -252,9 +253,8 @@ RunSpec
     session_id
     scope_id
   delivery_target:
-    mode: none | scope | post_to
+    mode: none | scope
     scope_id
-    post_to
   message:
     text
     payload_json
@@ -279,7 +279,7 @@ Background commands must keep three identities separate:
 
 ### Scope ID
 
-`--deliver-key` should mean `scopes.id`. It is not a session key.
+`--scope-id` uses `scopes.id`. It is not a session key.
 
 Example shape:
 
@@ -296,7 +296,7 @@ lark::channel::oc_...
 ```
 
 No separate thread anchor parameter is needed. If thread becomes a first-class
-Scope later, the same `--deliver-key <scope-id>` mechanism covers it.
+Scope later, the same `--scope-id <scope-id>` mechanism covers it.
 
 ### Session Policies
 
@@ -309,23 +309,23 @@ Existing session:
 Create one reusable session:
 
 ```bash
---create-session --deliver-key <scope-id>
+--create-session --scope-id <scope-id>
 ```
 
 Create a fresh session for every trigger execution:
 
 ```bash
---create-session-per-run --deliver-key <scope-id>
+--create-session-per-run --scope-id <scope-id>
 ```
 
 Rules:
 
 - `--session-id`, `--create-session`, and `--create-session-per-run` are
   mutually exclusive.
-- `vibe agent run --create-session` may omit `--deliver-key` to create a
+- `vibe agent run --create-session` may omit scope placement to create a
   private/no-delivery Session, but it must explicitly pass `--agent`. Managed
   task/watch definitions that use `--create-session` or `--create-session-per-run`
-  require `--deliver-key`.
+  require `--same-scope` or `--scope-id`.
 - `--create-session` reserves a Vibe Session ID immediately. Runtime binds
   backend-native state on the first execution.
 - `--create-session-per-run` stores a policy on `run_definitions`; every
@@ -345,27 +345,23 @@ Rules:
 | `--session-id` + `--create-session` | Reject | Reject | Reject | A run has one Session policy. |
 | `--session-id` + `--create-session-per-run` | Reject | Reject | Reject | `existing` conflicts with `create_per_run`. |
 | `--create-session` + `--create-session-per-run` | Reject | Reject | Reject | `create_once` conflicts with `create_per_run`. |
-| `--create-session` without `--deliver-key` | Allow only with `--agent` | Reject | Reject | Direct Agent Runs may create private/no-delivery Sessions, but the Agent must be explicit; managed definitions need a Scope when creating Sessions. |
-| `--create-session-per-run` without `--deliver-key` | N/A | Reject | Reject | Every per-run Session needs a Scope. |
+| `--create-session` without scope placement | Allow only with `--agent` | Reject | Reject | Direct Agent Runs may create private/no-delivery Sessions, but the Agent must be explicit; managed definitions need a Scope when creating Sessions. |
+| `--create-session-per-run` without scope placement | N/A | Reject | Reject | Every per-run Session needs a Scope. |
 | `--create-session-per-run` + `task add --at` | N/A | Reject | N/A | One-shot tasks run once; use `--create-session`. |
-| `--deliver-key` + `--post-to` | Reject | Reject | Reject | One is an explicit Scope; the other is a shortcut. |
 | `--agent` + `--session-id` | Allow if backend matches | Allow if backend matches | Allow if backend matches | `--agent` only overrides this run/definition and does not mutate the Session; reject if Agent backend differs from Session backend. |
-| `--agent` + `--deliver-key` | Allow | Allow | Allow | `--agent` overrides the Scope default Agent; `--deliver-key` controls delivery. |
+| `--agent` + `--scope-id` | Allow | Allow | Allow | `--agent` overrides the Scope default Agent; `--scope-id` controls placement. |
 | `--async` + `--wait-timeout` | Reject | N/A | N/A | `--wait-timeout` only controls synchronous CLI waiting and does not control async run lifetime. |
 
 ### Delivery Policies
 
-For newly created sessions that should deliver to IM,
-`--deliver-key <scope-id>` is required because the CLI cannot infer an IM
-context safely. Direct `vibe agent run --create-session` without `--deliver-key`
-does not deliver to IM; it returns run/session output only.
+For newly created sessions that should live in an existing Scope, use
+`--same-scope` or `--scope-id <scope-id>` because the CLI cannot infer a safe IM
+or Workbench placement outside an injected caller context. Direct
+`vibe agent run --create-session` without scope placement creates a
+private/no-delivery Session and returns run/session output only.
 
-For existing sessions:
-
-- default delivery comes from the session;
-- `--post-to thread|channel` remains a convenience shortcut;
-- `--deliver-key <scope-id>` is the explicit delivery override;
-- `--post-to` and `--deliver-key` are mutually exclusive.
+For existing sessions, ordinary delivery comes from the Session's stored Scope.
+New help and docs should not teach one-off transport override flags.
 
 ### Runtime Target Resolution
 
@@ -375,8 +371,8 @@ Runtime target resolution is:
 1. If `--agent <name>` is provided, load that Vibe Agent.
 2. Otherwise, if `--session-id` is provided, use the session's current Agent
    identity.
-3. Otherwise, resolve `--deliver-key` to a Scope and load the Scope's selected
-   Vibe Agent.
+3. Otherwise, resolve `--same-scope` or `--scope-id` to a Scope and load the
+   Scope's selected Vibe Agent.
 4. If no Scope Agent exists, use the configured system default Agent.
 5. If both `--agent` and `--session-id` are provided, verify that the Agent
    backend matches the Session backend; reject on mismatch because cross-backend
@@ -423,9 +419,9 @@ details:
 | `agent_name` | New | Vibe Agent selected for future runs. | Make task/watch Agent selection explicit; if omitted, store the resolved Scope/session default. |
 | `session_policy` | New | `existing`, `create_once`, or `create_per_run`. | Persist the lifecycle semantics for Session reuse/creation. |
 | `session_id` | Existing | Existing or reserved Vibe Session ID when policy uses one. | Let future executions continue the same Vibe Session. |
-| `legacy_session_key` | Existing, compatibility | Legacy target from old records and commands. | Migration/display only; new writes prefer `session_id` / `deliver_key`. |
-| `deliver_key` | Existing, revised semantics | Delivery Scope ID. Domain/API name can be `delivery_scope_id` or `scope_id`. | Decouple delivery target from Session identity while keeping migration small. |
-| `post_to` | Existing | Delivery shortcut such as `thread` or `channel`. | Cover common delivery overrides without requiring full Scope IDs. |
+| `legacy_session_key` | Existing, compatibility | Legacy target from old records and commands. | Migration/display only; new writes prefer `session_id` / `scope_id`. |
+| `scope_id` | Target field | Session placement Scope ID. | Decouple placement from Session identity and make Scope selection explicit. |
+| legacy delivery fields | Existing, compatibility | Old delivery override columns. | Preserve old records and hidden compatibility inputs only; do not expose them in help, docs, prompts, or new examples. |
 | `prompt` | Existing, compatibility | Legacy message template field. | Read/write compatibility during migration; target schema uses `message`. |
 | `message` | New | Stored Agent message template. | Align storage with `--message` and separate user message from Agent system prompt. |
 | `message_payload_json` | New | Optional structured message payload. | Support webhook/API structured input without overloading text. |
@@ -526,8 +522,8 @@ Field details:
 | `session_policy` | New | Session resolution policy used for this run. | Explain how `session_id` was obtained. |
 | `session_id` | Existing | Actual Vibe Session ID used by this run. | Continue conversation and query history by session. |
 | `legacy_session_key` | Existing, compatibility | Legacy target for old imported runs. | Migration/display only. |
-| `deliver_key` | Existing, revised semantics | Delivery Scope ID snapshot. | Audit delivery target and query runs by Scope. |
-| `post_to` | Existing | Delivery shortcut snapshot. | Preserve thread/channel shortcut semantics. |
+| `scope_id` | Target field | Scope placement snapshot. | Audit placement and query runs by Scope. |
+| legacy delivery fields | Existing, compatibility | Old delivery override snapshots. | Preserve old run history only; new user-facing contracts should prefer Scope placement and Session callback fields. |
 | `prompt` | Existing, compatibility | Legacy message field. | Read compatibility for old runs; target schema uses `message`. |
 | `message` | New | Actual message sent to the Agent. | Align with `--message` and separate user message from system prompt. |
 | `message_payload_json` | New | Optional structured payload. | Support webhook/API structured input. |
@@ -679,7 +675,7 @@ Task/Watch definition creation success:
     "agent_name": "release-reviewer",
     "session_policy": "create_once",
     "session_id": "sesnew12345",
-    "deliver_key": "slack::channel::C123",
+    "scope_id": "slack::channel::C123",
     "next_run_at": "2026-06-01T09:00:00+08:00"
   },
   "warnings": []

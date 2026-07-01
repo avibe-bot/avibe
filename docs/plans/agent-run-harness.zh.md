@@ -64,12 +64,12 @@ vibe agent run --agent release-reviewer --async --message-file request.md
 vibe agent run --session-id sesk8m4q2p7x --message "Continue the investigation."
 ```
 
-创建新 Session 并投递到 Scope：
+在 Scope 中创建新 Session：
 
 ```bash
 vibe agent run \
   --create-session \
-  --deliver-key slack::channel::C123 \
+  --scope-id slack::channel::C123 \
   --message "Start a fresh incident triage."
 ```
 
@@ -80,13 +80,14 @@ vibe agent run \
   传了它们，应拒绝命令，并明确提示改用 `--message` / `--message-file`。
 - 必须且只能指定一个 message source。
 - `--session-id` 通过公开 Vibe Session ID 继续对话。
-- `--create-session` 会预留一个新的 Vibe Session ID。带 `--deliver-key`
-  时，这个 Session 同时绑定 delivery Scope；不带 `--deliver-key` 时，direct
+- `--create-session` 会预留一个新的 Vibe Session ID。带 `--scope-id`
+  时，这个 Session 会放到指定 Scope；不带 scope placement 时，direct
   Agent Run 是 private/no-delivery Session，用于 agent harness/sub-agent
   场景，必须显式传 `--agent`，并在输出里返回 `session_id` 供后续继续对话。
 - `--agent <name>` 为这次 run 选择 Vibe Agent。如果不传，则从 session 或
-  delivery Scope 的默认配置解析 Agent。
-- `--deliver-key <scope-id>` 把结果发送到 IM Scope。
+  placement Scope 的默认配置解析 Agent。
+- `--same-scope` 把新 Session 放到 caller/source Scope。
+- `--scope-id <scope-id>` 把新 Session 放到指定已有 Scope。
 - `--async` 表示排队后立即返回。
 - 不带 `--async` 时，命令等待完成并打印结果。
 
@@ -133,7 +134,7 @@ vibe task add \
 vibe task add \
   --at "2026-06-01T09:00:00+08:00" \
   --create-session \
-  --deliver-key slack::channel::C123 \
+  --scope-id slack::channel::C123 \
   --message-file request.md
 ```
 
@@ -188,7 +189,7 @@ vibe watch add \
   --retry-exit-code 75 \
   --retry-delay 60 \
   --create-session-per-run \
-  --deliver-key slack::channel::C123 \
+  --scope-id slack::channel::C123 \
   --message "A CI event finished. Review the waiter output." \
   -- python3 scripts/wait_for_ci.py
 ```
@@ -243,9 +244,8 @@ RunSpec
     session_id
     scope_id
   delivery_target:
-    mode: none | scope | post_to
+    mode: none | scope
     scope_id
-    post_to
   message:
     text
     payload_json
@@ -270,7 +270,7 @@ RunSpec
 
 ### Scope ID
 
-`--deliver-key` 应该表示 `scopes.id`。它不是 session key。
+`--scope-id` 使用 `scopes.id`。它不是 session key。
 
 格式示例：
 
@@ -287,7 +287,7 @@ lark::channel::oc_...
 ```
 
 不需要单独的 thread anchor 参数。如果未来 thread 成为一等 Scope，同样可以
-通过 `--deliver-key <scope-id>` 覆盖。
+通过 `--scope-id <scope-id>` 覆盖。
 
 ### Session Policies
 
@@ -300,22 +300,22 @@ lark::channel::oc_...
 创建一个可复用的新 Session：
 
 ```bash
---create-session --deliver-key <scope-id>
+--create-session --scope-id <scope-id>
 ```
 
 每次 trigger 执行都创建一个新 Session：
 
 ```bash
---create-session-per-run --deliver-key <scope-id>
+--create-session-per-run --scope-id <scope-id>
 ```
 
 规则：
 
 - `--session-id`、`--create-session`、`--create-session-per-run` 互斥。
-- `vibe agent run --create-session` 可以不带 `--deliver-key`，表示创建
+- `vibe agent run --create-session` 可以不带 scope placement，表示创建
   private/no-delivery Session，但必须显式传 `--agent`；managed task/watch
   definitions 中使用 `--create-session` 或 `--create-session-per-run` 时必须带
-  `--deliver-key`。
+  `--same-scope` 或 `--scope-id`。
 - `--create-session` 立即预留一个 Vibe Session ID。runtime 第一次执行时绑定
   backend-native 状态。
 - `--create-session-per-run` 在 `run_definitions` 上保存策略；每次执行都创建
@@ -334,26 +334,22 @@ lark::channel::oc_...
 | `--session-id` + `--create-session` | 拒绝 | 拒绝 | 拒绝 | 一个 run 只能有一种 Session policy。 |
 | `--session-id` + `--create-session-per-run` | 拒绝 | 拒绝 | 拒绝 | `existing` 和 `create_per_run` 生命周期冲突。 |
 | `--create-session` + `--create-session-per-run` | 拒绝 | 拒绝 | 拒绝 | `create_once` 和 `create_per_run` 生命周期冲突。 |
-| `--create-session` without `--deliver-key` | 仅允许同时传 `--agent` | 拒绝 | 拒绝 | Direct Agent Run 可创建 private/no-delivery Session，但 Agent 必须显式；managed definitions 创建 Session 需要 Scope。 |
-| `--create-session-per-run` without `--deliver-key` | 不适用 | 拒绝 | 拒绝 | 每次创建新 Session 都需要 Scope。 |
+| `--create-session` without scope placement | 仅允许同时传 `--agent` | 拒绝 | 拒绝 | Direct Agent Run 可创建 private/no-delivery Session，但 Agent 必须显式；managed definitions 创建 Session 需要 Scope。 |
+| `--create-session-per-run` without scope placement | 不适用 | 拒绝 | 拒绝 | 每次创建新 Session 都需要 Scope。 |
 | `--create-session-per-run` + `task add --at` | 不适用 | 拒绝 | 不适用 | one-shot task 只有一次执行，使用 `--create-session`。 |
-| `--deliver-key` + `--post-to` | 拒绝 | 拒绝 | 拒绝 | 一个是显式 Scope，一个是 shortcut。 |
 | `--agent` + `--session-id` | backend 一致时允许 | backend 一致时允许 | backend 一致时允许 | `--agent` 只覆盖该次 run/definition，不修改 Session；若 Agent backend 和 Session backend 不同则拒绝。 |
-| `--agent` + `--deliver-key` | 允许 | 允许 | 允许 | `--agent` 覆盖 Scope 默认 Agent；`--deliver-key` 决定 delivery。 |
+| `--agent` + `--scope-id` | 允许 | 允许 | 允许 | `--agent` 覆盖 Scope 默认 Agent；`--scope-id` 决定 placement。 |
 | `--async` + `--wait-timeout` | 拒绝 | 不适用 | 不适用 | `--wait-timeout` 只控制同步 CLI 等待，不控制 async run 生命周期。 |
 
 ### Delivery Policies
 
-创建需要投递到 IM 的新 Session 时，必须提供 `--deliver-key <scope-id>`，因为
-CLI 不能安全推断当前 IM 上下文。Direct `vibe agent run --create-session`
-不带 `--deliver-key` 时不做 IM 投递，只返回 run/session 输出。
+创建需要放进已有 Scope 的新 Session 时，使用 `--same-scope` 或
+`--scope-id <scope-id>`，因为 CLI 在没有 injected caller context 时不能安全推断
+IM 或 Workbench placement。Direct `vibe agent run --create-session` 不带 scope
+placement 时创建 private/no-delivery Session，只返回 run/session 输出。
 
-对于已有 Session：
-
-- 默认 delivery 来自 Session 自身；
-- `--post-to thread|channel` 继续作为便利快捷方式；
-- `--deliver-key <scope-id>` 是显式 delivery override；
-- `--post-to` 和 `--deliver-key` 互斥。
+对于已有 Session，常规 delivery 来自 Session 保存的 Scope。新的 help 和 docs
+不再教学一次性的 transport override flags。
 
 ### Runtime Target Resolution
 
@@ -361,7 +357,8 @@ CLI 不能安全推断当前 IM 上下文。Direct `vibe agent run --create-sess
 
 1. 如果传了 `--agent <name>`，加载这个 Vibe Agent。
 2. 否则，如果传了 `--session-id`，使用该 Session 当前的 Agent identity。
-3. 否则，把 `--deliver-key` 解析为 Scope，并读取 Scope 选择的 Vibe Agent。
+3. 否则，把 `--same-scope` 或 `--scope-id` 解析为 Scope，并读取 Scope 选择的
+   Vibe Agent。
 4. 如果 Scope 没有选择 Agent，则使用系统默认 Agent。
 5. 如果同时传了 `--agent` 和 `--session-id`，校验 Agent backend 和 Session
    backend 一致；不一致时拒绝，因为跨 backend 无法保持上下文连续。
@@ -403,9 +400,9 @@ Session 后续默认 Agent。
 | `agent_name` | 新增 | 这个 definition 创建 runs 时使用的 Vibe Agent 名称。 | 让 task/watch 明确选择 Agent；不传 `--agent` 时写入从 Scope/session 解析出的默认 Agent。 |
 | `session_policy` | 新增 | `existing`、`create_once`、`create_per_run`。 | 把“继续已有 Session / 复用新 Session / 每次新 Session”的生命周期语义落成可查询字段。 |
 | `session_id` | 现有 | `existing` 或 `create_once` policy 下的 Vibe Session ID。 | 保存已有或预留的 Session ID，后续执行能继续同一个 Vibe Session。 |
-| `legacy_session_key` | 现有，兼容 | 旧 `session_key` target。 | 只服务旧记录和旧命令迁移；新写入优先使用 `session_id` / `deliver_key`。 |
-| `deliver_key` | 现有，改义 | Delivery Scope ID。domain/API 层可叫 `delivery_scope_id` 或 `scope_id`。 | 让投递目标和 Session 身份分离；当前保留列名以降低迁移成本。 |
-| `post_to` | 现有 | `thread` / `channel` 这类 delivery shortcut。 | 覆盖最常见的投递调整，不需要用户手写完整 Scope ID。 |
+| `legacy_session_key` | 现有，兼容 | 旧 `session_key` target。 | 只服务旧记录和旧命令迁移；新写入优先使用 `session_id` / `scope_id`。 |
+| `scope_id` | 目标字段 | Session placement Scope ID。 | 让 placement 和 Session 身份分离，并显式表达 Scope 选择。 |
+| legacy delivery fields | 现有，兼容 | 旧 delivery override 列。 | 只保留旧记录和隐藏兼容输入；不要暴露在 help、docs、prompt 或新示例里。 |
 | `prompt` | 现有，兼容 | 旧消息模板字段。 | 迁移期读写兼容；目标 schema 用 `message` 表达同一语义。 |
 | `message` | 新增 | 保存的 Agent message template。 | 配合 CLI `--message`，避免和 Agent `system_prompt` 混淆。 |
 | `message_payload_json` | 新增 | 可选结构化消息 payload。 | 为 webhook/API 触发保留结构化输入，不把文本 message 和 payload 混在一起。 |
@@ -501,8 +498,8 @@ Definition 表的迁移优先级：
 | `session_policy` | 新增 | 本次 run 使用的 session resolution policy。 | 解释 `session_id` 是复用、预留还是 per-run 创建出来的。 |
 | `session_id` | 现有 | 本次 run 实际使用的 Vibe Session ID。 | 支持继续对话、按 session 查历史。 |
 | `legacy_session_key` | 现有，兼容 | 旧导入 runs 的兼容 target。 | 只用于迁移和兼容展示。 |
-| `deliver_key` | 现有，改义 | Delivery Scope ID snapshot。 | 记录结果投递目标，支持按 Scope 查 runs。 |
-| `post_to` | 现有 | Delivery shortcut snapshot。 | 保留 thread/channel 这类快捷投递语义。 |
+| `scope_id` | 目标字段 | Scope placement snapshot。 | 记录 placement，支持按 Scope 查 runs。 |
+| legacy delivery fields | 现有，兼容 | 旧 delivery override snapshot。 | 只保留旧 run history；新的 user-facing contract 应优先使用 Scope placement 和 Session callback 字段。 |
 | `prompt` | 现有，兼容 | 旧消息字段。 | 迁移期兼容旧 run；目标 schema 用 `message`。 |
 | `message` | 新增 | 发送给 Agent 的实际消息。 | 与 `--message` 对齐，并和 Agent system prompt 分离。 |
 | `message_payload_json` | 新增 | 可选结构化 payload。 | 支持 webhook/API 传结构化输入。 |
@@ -645,7 +642,7 @@ Task/Watch definition 创建成功：
     "agent_name": "release-reviewer",
     "session_policy": "create_once",
     "session_id": "sesnew12345",
-    "deliver_key": "slack::channel::C123",
+    "scope_id": "slack::channel::C123",
     "next_run_at": "2026-06-01T09:00:00+08:00"
   },
   "warnings": []
