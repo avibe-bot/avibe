@@ -684,8 +684,8 @@ vibe task add (--session-id <session_id> | --create-session | --create-session-p
 - `--create-session`
 - `--create-session-per-run`
 - `--agent`
-- `--post-to {thread,channel}`
-- `--deliver-key`
+- `--same-scope`
+- `--scope-id`
 - `--cron`
 - `--at`
 - `--message`
@@ -706,8 +706,8 @@ vibe task update <task_id> [options]
 - `--create-session`
 - `--create-session-per-run`
 - `--agent`
-- `--post-to {thread,channel}`
-- `--deliver-key`
+- `--same-scope`
+- `--scope-id`
 - `--reset-delivery`
 - `--cron`
 - `--at`
@@ -802,16 +802,17 @@ vibe agent run (--session-id <session_id> | --create-session | --fork-session <s
 - `--session-id`
 - `--fork-session`
 - `--create-session`
-- `--deliver-key`
+- `--create-session-per-run`
+- `--same-scope`
+- `--scope-id`
 - `--model`
 - `--reasoning-effort`
 - `--sync`
 - `--message`
 - `--message-file`
 
-如果不传 `--session-id` 或 `--create-session`，run 会使用 private
-no-delivery session，更适合 sub-agent 调用。`--deliver-key` 只和
-`--create-session` 搭配使用。
+如果不传 `--session-id` 或创建策略，run 会使用 private
+no-delivery session，更适合 sub-agent 调用。
 
 Run 默认异步：命令会队列化 run，立即返回包含 `run_id` / `session_id` 的
 payload，并按 callback 策略稍后投递最终结果。只有终端需要等待完成时才使用
@@ -821,8 +822,8 @@ payload，并按 callback 策略稍后投递最终结果。只有终端需要等
 Agent Session，适合在保留上下文的同时做分支调查或委派工作，而不修改源 Session。
 fork 会保持源 Session 的 backend；只有 backend 不变时，`--agent`、`--model`
 和 `--reasoning-effort` 才能覆盖 fork 后 Session 的 Agent、模型或推理强度。
-不要把 `--fork-session` 和 `--session-id`、`--create-session`、`--deliver-key`
-或 `--post-to` 混用。
+不要把 `--fork-session` 和 `--session-id`、`--create-session`
+或 `--create-session-per-run` 混用。
 
 ## 5.4 `vibe runs`
 

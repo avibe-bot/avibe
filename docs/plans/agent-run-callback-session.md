@@ -95,7 +95,8 @@ Validation:
 - Archived sessions are invalid.
 - Callback to the same Session is allowed but should be documented as a loop
   risk for automation authors.
-- `--callback-session-id` is orthogonal to `--post-to` and `--deliver-key`.
+- `--callback-session-id` is orthogonal to target Session selection and scope
+  placement.
 
 Output payload should include:
 
@@ -110,9 +111,9 @@ Output payload should include:
 
 ### Internal/API Payload
 
-Carry `callback_session_id` through the same run-spec path as `session_id`,
-`post_to`, and `deliver_key`, so CLI, future UI/API creation, and persisted run
-history do not drift.
+Carry `callback_session_id` through the same run-spec path as `session_id` and
+scope placement, so CLI, future UI/API creation, and persisted run history do
+not drift.
 
 ## Data Model
 

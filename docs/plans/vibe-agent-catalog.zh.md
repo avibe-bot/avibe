@@ -328,7 +328,7 @@ Session = one ongoing conversation/run under that scope and Agent.
 
 ### Background New Sessions
 
-对于 `--create-session --deliver-key <scope-id>`：
+对于 `--create-session --scope-id <scope-id>`：
 
 1. 解析 `scope_id`。
 2. 解析 Scope 的 Vibe Agent。
@@ -449,7 +449,7 @@ agent_sessions.agent_id / agent_name snapshot fields
 - `agent-run-harness.md`：`vibe agent run` 是 direct/manual execution 入口。
   它消费本 catalog 里的 Vibe Agent 定义，而不是接受 backend/model/effort
   override 参数。
-- Delivery targeting 由 `agent-run-harness.md` 负责：`--deliver-key` 变成
+- Scope placement 由 `agent-run-harness.md` 负责：`--scope-id` 使用
   `scopes.id`，不是 legacy session key。
 
 ## 实施切片

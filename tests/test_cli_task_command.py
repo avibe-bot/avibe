@@ -199,7 +199,7 @@ def test_task_add_help_includes_examples_and_threadless_guidance(capsys) -> None
     assert "If this is your first time using this command, read this whole help entry before creating a task." in captured.out
     assert "`--session-id` chooses which Agent Session Avibe will continue using when the task runs." in captured.out
     assert "tasks continue this conversation by default" in captured.out
-    assert "--post-to" in captured.out
+    assert "--post-to" not in captured.out
     assert "--same-scope" in captured.out
     assert "--scope-id" in captured.out
     assert "--deliver-key" not in captured.out
@@ -218,7 +218,7 @@ def test_hook_send_help_describes_runtime_effects(capsys) -> None:
     assert "`vibe hook send` is a compatibility entrypoint." in captured.out
     assert "New automation should use `vibe agent run`." in captured.out
     assert "`vibe hook send` queues one deprecated asynchronous compatibility turn" in captured.out
-    assert "`--post-to channel` changes where the message is posted, not which session is continued." in captured.out
+    assert "--post-to" not in captured.out
     assert "`--message` and `--message-file` provide the one-shot async user message that will be queued immediately." in captured.out
     assert "--session-id" in captured.out
     assert "vibe agent run --agent release-reviewer --no-callback --message" in captured.out
@@ -262,7 +262,7 @@ def test_hook_send_help_includes_examples_and_threadless_guidance(capsys) -> Non
     assert exc.value.code == 0
     captured = capsys.readouterr()
     assert "`vibe hook send` queues one deprecated asynchronous compatibility turn" in captured.out
-    assert "--post-to" in captured.out
+    assert "--post-to" not in captured.out
     assert "--deliver-key" not in captured.out
     assert "--session-id" in captured.out
     assert "vibe agent run --agent release-reviewer --no-callback" in captured.out

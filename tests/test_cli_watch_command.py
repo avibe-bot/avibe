@@ -84,6 +84,10 @@ def test_watch_add_help_mentions_shell_and_lifetime_timeout(capsys) -> None:
     assert "Prefer --message or --message-file for follow-up instructions" in captured.out
     assert "Terminal failures also send a follow-up and disable the watch." in captured.out
     assert "If this is your first time using this command, read this whole help entry before creating a watch." in captured.out
+    assert "--same-scope" in captured.out
+    assert "--scope-id" in captured.out
+    assert "--post-to" not in captured.out
+    assert "--deliver-key" not in captured.out
 
 
 def test_watch_add_parser_keeps_top_level_command_name() -> None:

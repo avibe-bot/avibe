@@ -705,8 +705,8 @@ Important options:
 - `--create-session`
 - `--create-session-per-run`
 - `--agent`
-- `--post-to {thread,channel}`
-- `--deliver-key`
+- `--same-scope`
+- `--scope-id`
 - `--cron`
 - `--at`
 - `--message`
@@ -727,8 +727,8 @@ Important options:
 - `--create-session`
 - `--create-session-per-run`
 - `--agent`
-- `--post-to {thread,channel}`
-- `--deliver-key`
+- `--same-scope`
+- `--scope-id`
 - `--reset-delivery`
 - `--cron`
 - `--at`
@@ -826,16 +826,17 @@ Important options:
 - `--session-id`
 - `--fork-session`
 - `--create-session`
-- `--deliver-key`
+- `--create-session-per-run`
+- `--same-scope`
+- `--scope-id`
 - `--model`
 - `--reasoning-effort`
 - `--sync`
 - `--message`
 - `--message-file`
 
-If neither `--session-id` nor `--create-session` is provided, the run uses a
+If neither `--session-id` nor a creation policy is provided, the run uses a
 private no-delivery session and is best suited for sub-agent style calls.
-`--deliver-key` is only meaningful with `--create-session`.
 
 Runs are asynchronous by default: the command queues the run, returns a payload
 with `run_id` / `session_id`, and uses the callback policy to deliver the final
@@ -848,7 +849,7 @@ delegated work that should keep the source context without mutating the source
 Session. Forks keep the same backend as the source; `--agent`, `--model`, and
 `--reasoning-effort` may override the forked Session only when the backend does
 not change. Do not combine `--fork-session` with `--session-id`,
-`--create-session`, `--deliver-key`, or `--post-to`.
+`--create-session`, or `--create-session-per-run`.
 
 ## 5.4 `vibe runs`
 
