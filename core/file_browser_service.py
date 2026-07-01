@@ -1249,13 +1249,16 @@ def search_names(
                 continue
             if needle not in name.lower():
                 continue
+            # Check the cap BEFORE recording (mirrors the content search): flagging truncated only on
+            # a match BEYOND the cap means a result set of exactly max_results isn't falsely marked
+            # truncated (which would make the UI claim results were limited when they weren't).
+            if len(results) >= max_results:
+                truncated = True
+                break
             hit = _name_search_hit(base / name, root)
             if hit is None:
                 continue
             results.append(hit)
-            if len(results) >= max_results:
-                truncated = True
-                break
         if truncated:
             break
 

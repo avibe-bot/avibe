@@ -592,7 +592,9 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 <div className="grid place-items-center py-8"><Loader2 className="size-4 animate-spin text-muted" /></div>
               )}
               {!inSearch && newEntry !== null && (
-                <div className="flex items-center px-3 py-1.5">
+                // Stop the contextmenu here so right-clicking the input shows the browser's native
+                // menu (paste) instead of our blank-space New menu from the container below.
+                <div className="flex items-center px-3 py-1.5" onContextMenu={(e) => e.stopPropagation()}>
                   <span className="flex min-w-0 flex-1 items-center gap-2">
                     {newEntry.kind === 'folder' ? <Folder className="size-4 shrink-0 text-cyan" /> : <FileIcon className="size-4 shrink-0 text-muted" />}
                     <InlineNameInput
@@ -614,7 +616,7 @@ export const AppsFileBrowserPage: React.FC<{ windowed?: boolean; windowId?: stri
                 const folder = relFolder(item.rel);
                 if (rename?.full === item.full) {
                   return (
-                    <div key={item.full} className="flex items-center px-3 py-1.5">
+                    <div key={item.full} className="flex items-center px-3 py-1.5" onContextMenu={(e) => e.stopPropagation()}>
                       <span className="flex min-w-0 flex-1 items-center gap-2">
                         <Icon className="size-4 shrink-0" style={{ color }} />
                         <InlineNameInput

@@ -417,6 +417,17 @@ def test_search_names_truncates_at_cap(tmp_path):
     assert result["limit"] == 3
 
 
+def test_search_names_exactly_at_cap_not_truncated(tmp_path):
+    # Exactly max_results matches: everything is returned, so truncated must stay False (matches the
+    # content search's before-record cap check; the naive after-append check would false-positive).
+    for i in range(3):
+        _write(tmp_path, f"match-{i}.txt", "x")
+    result = fbs.search_names(str(tmp_path), "match", max_results=3)
+    assert len(result["results"]) == 3
+    assert result["truncated"] is False
+    assert result["limit"] is None
+
+
 def test_search_names_root_must_be_directory(tmp_path):
     f = _write(tmp_path, "a.txt", "x")
     with pytest.raises(FileBrowserError):
