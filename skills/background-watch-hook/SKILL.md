@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Use `vibe watch` to run a managed Harness waiter that returns to the same conversation later. Best for reviews, CI, files, logs, and other wait-now-continue-later workflows.
-version: 0.7.0
+version: 0.8.0
 ---
 
 # Background Watch Hook
@@ -36,15 +36,13 @@ Prefer `vibe watch` when the wait should be inspectable, pausable, resumable, or
 
 Use `vibe watch add` first. Most tasks only need:
 
-1. the target Agent Session ID
-2. a short action-oriented message
-3. a blocking waiter command
+1. a short action-oriented message
+2. a blocking waiter command
 
 Generic shape:
 
 ```bash
 vibe watch add \
-  --session-id "<session-id>" \
   --message "<what the next Agent Run should do>" \
   --name "<optional label>" \
   -- \
@@ -62,10 +60,11 @@ Use `--forever` when the same waiter should re-arm after each detected event ins
 
 ## `vibe watch` Parameters To Remember
 
-- `--session-id`: which Agent Session the follow-up should continue
 - `--message`: the instruction template for the follow-up Agent Run created from waiter output
-- `--prefix`: legacy alias for older watch instructions; prefer `--message` in new watches
 - `--name`: optional label for later management
+- `--session-id`: only when the follow-up should continue a different explicit Agent Session
+- `--create-session --same-scope`: create a visible sibling Session for the follow-up instead of continuing this conversation
+- `--create-session --scope-id <scopes.id>`: create the follow-up Session in a specific existing scope
 - `--forever`: re-arm after each detected event
 - `--timeout`: per-cycle timeout
 - `--lifetime-timeout`: whole-watch lifetime cap, mainly for forever watches
@@ -98,8 +97,7 @@ Delay:
 
 ```bash
 vibe watch add \
-  --session-id "sesk8m4q2p7x" \
-  --name "Delay callback" \
+  --name "Delay follow-up" \
   --message "The delayed check completed. Continue from the result below." \
   -- \
   bash -lc 'sleep 120; echo "Timer finished after 120 seconds."'
@@ -109,7 +107,6 @@ File appears:
 
 ```bash
 vibe watch add \
-  --session-id "sesk8m4q2p7x" \
   --name "Wait for export file" \
   --message "The export file is ready. Inspect it and continue." \
   -- \
@@ -120,7 +117,6 @@ Log match:
 
 ```bash
 vibe watch add \
-  --session-id "sesk8m4q2p7x" \
   --name "Watch app log" \
   --message "The expected log pattern appeared. Inspect the event and continue." \
   --forever \
@@ -132,10 +128,11 @@ vibe watch add \
 
 Use the current Avibe context:
 
-- `--session-id` controls which Agent Session Avibe will continue using
-- use the current Agent Session ID when the follow-up should continue the same session
-- if no usable Agent Session ID is available, confirm the target session first instead of guessing
-- `--post-to channel` only when the follow-up should keep the same Agent Session but publish in the parent channel
+- Inside an Avibe-injected Agent shell, omitting the target continues this conversation.
+- Use `--session-id <id>` only when the follow-up should continue a different existing Agent Session.
+- Use `--create-session --same-scope` when each follow-up should run in a visible sibling Session under the same Workbench project or IM scope.
+- Use `--create-session --scope-id <scopes.id>` when each follow-up should run in a specific existing scope.
+- If `--cwd` is omitted while creating a Session, Avibe follows the caller Session cwd.
 
 ## Timeout And Lifecycle
 
@@ -173,7 +170,6 @@ One-shot watch:
 
 ```bash
 vibe watch add \
-  --session-id "sesk8m4q2p7x" \
   --name "Watch PR 151 reviews" \
   --message "PR #151 has new review activity. Fetch the latest review state, summarize actionable items, and continue handling them if needed." \
   -- \
@@ -187,7 +183,6 @@ Catch up on existing activity first:
 
 ```bash
 vibe watch add \
-  --session-id "sesk8m4q2p7x" \
   --name "Catch up PR 151 reviews" \
   --message "PR #151 already has review activity. Fetch the latest review state and continue handling it if needed." \
   -- \
@@ -201,7 +196,6 @@ Stay armed for future activity:
 
 ```bash
 vibe watch add \
-  --session-id "sesk8m4q2p7x" \
   --name "Monitor PR 151 reviews" \
   --forever \
   --timeout 21600 \
@@ -227,7 +221,6 @@ New PRs in a repository:
 
 ```bash
 vibe watch add \
-  --session-id "sesk8m4q2p7x" \
   --name "Watch new PRs" \
   --message "The repository has new pull requests. Review the new PRs and continue as needed." \
   -- \
@@ -248,7 +241,6 @@ GitHub Actions for a pushed commit:
 
 ```bash
 vibe watch add \
-  --session-id "sesk8m4q2p7x" \
   --name "Watch CI" \
   --message "GitHub Actions finished. Inspect the result below and continue with the deployment or fix failures." \
   -- \
