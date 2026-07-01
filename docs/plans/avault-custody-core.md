@@ -330,7 +330,8 @@ For a **long-lived master key** every one of these is exposed for the whole daem
 
 The older plan allowed standard-create to accept a transient plaintext POST and
 pipe it into `avault`. That path has been removed from Avibe. Standard create now
-requires the browser to seal a blind box to `avault`'s public key; if the payload
+requires the browser to seal a blind box to `avault`'s public key; text and
+file-backed secrets are both read and sealed in the browser. If the payload
 contains a plaintext `value` field, the API rejects it before invoking `avault`.
 
 ### 11.4 The other honest caveat — pubkey integrity

@@ -2279,6 +2279,12 @@
       "name": "Name",
       "value": "Value",
       "valuePlaceholder": "Paste the secret value",
+      "valueSource": "Value source",
+      "valueSourceText": "Text",
+      "valueSourceFile": "File",
+      "chooseSecretFile": "Choose a file",
+      "replaceSecretFile": "Replace file",
+      "clearSecretFile": "Clear file",
       "provisionValueHelp": "Submitted over TLS — never enters the chat or the model context",
       "storeAs": "Store as",
       "showValue": "Show value",
@@ -2347,6 +2353,8 @@
         "authHeaderInvalid": "Enter a valid HTTP header name.",
         "authHeaderForbidden": "Host cannot be used as the credential header.",
         "authQueryInvalid": "Enter a valid query parameter name.",
+        "fileTooLarge": "Choose a file up to {{size}}.",
+        "fileReadFailed": "Couldn't read that file.",
         "secretExists": "A secret with this name already exists."
       }
     },
