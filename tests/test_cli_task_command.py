@@ -281,6 +281,8 @@ def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
     assert "--same-scope" in captured.out
     assert "--scope-id" in captured.out
     assert "--deliver-key" not in captured.out
+    assert "Avibe Agent shell examples:" in captured.out
+    assert "Normal terminal examples:" in captured.out
     assert "--fork-self forks this current Session." in captured.out
     assert "Forks keep the same backend, scope, and cwd as the source Session." in captured.out
     assert "vibe agent run --fork-self --message" in captured.out

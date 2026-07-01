@@ -656,12 +656,16 @@ def _agent_run_examples_text() -> str:
           --agent, --model, and --reasoning-effort may override the forked Session's Agent/model/effort.
           Do not combine fork flags with --session-id or --create-session.
 
-        Examples:
+        Avibe Agent shell examples:
           vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
           vibe agent run --agent release-reviewer --same-scope --message 'Review this project in a visible sibling Session.'
+
+        Normal terminal examples:
           vibe agent run --sync --agent release-reviewer --message 'Review the latest CI result and print it here.'
           vibe agent run --agent release-reviewer --callback-session-id sescaller456 --message 'Review the latest CI result and report back.'
           vibe agent run --agent release-reviewer --no-callback --message 'Run a background experiment; I will inspect the run later.'
+
+        Fork examples:
           vibe agent run --fork-self --message 'Explore this alternate fix from the current context.'
           vibe agent run --fork-session sesk8m4q2p7x --agent reviewer --model gpt-5.4 --reasoning-effort high --message 'Review the forked context.'
         """
