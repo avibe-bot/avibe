@@ -463,7 +463,7 @@ class DiscordBot(BaseIMClient):
                         platform_specific={"is_dm": True},
                     )
                     view = _DiscordButtonView(self, context, keyboard, owner_id=str(uid))
-                message = await dm_channel.send(content=text, view=view)
+                message = await dm_channel.send(content=text, view=view, suppress_embeds=True)
                 return str(message.id)
             except Exception as e:
                 logger.error("Failed to send DM to Discord user %s: %s", user_id, e)
@@ -512,7 +512,7 @@ class DiscordBot(BaseIMClient):
             target = await self._resolve_target(context)
             if target is None:
                 raise RuntimeError("Discord channel not found")
-            message = await target.send(content=content)
+            message = await target.send(content=content, suppress_embeds=True)
             if self.settings_manager and context.thread_id:
                 try:
                     if self.sessions:
@@ -543,7 +543,7 @@ class DiscordBot(BaseIMClient):
                 if _PersistentStartView.is_all_static(keyboard)
                 else _DiscordButtonView(self, context, keyboard)
             )
-            message = await target.send(content=content, view=view)
+            message = await target.send(content=content, view=view, suppress_embeds=True)
             if self.settings_manager and context.thread_id:
                 try:
                     if self.sessions:
@@ -578,7 +578,7 @@ class DiscordBot(BaseIMClient):
                         if _PersistentStartView.is_all_static(keyboard)
                         else _DiscordButtonView(self, context, keyboard)
                     )
-                await msg.edit(content=content, view=view)
+                await msg.edit(content=content, view=view, suppress=True)
                 return True
             except Exception as err:
                 logger.debug("Failed to edit Discord message: %s", err)
