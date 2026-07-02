@@ -490,6 +490,21 @@ def test_request_specific_create_treats_fulfilled_replay_as_existing(vault):
             vs.create_secret(conn, name="ASKED_KEY", sealed=_sealed("second"), provision_request_id=req["id"])
 
 
+def test_fulfilled_replay_settles_stale_same_name_pending_requests(vault):
+    with vault.begin() as conn:
+        req = vs.create_provision_request(conn, "ASKED_KEY")
+        vs.create_secret(conn, name="ASKED_KEY", sealed=_sealed("first"), provision_request_id=req["id"])
+        stale = vs.create_provision_request(conn, "ASKED_KEY")
+        conn.execute(vault_requests.update().where(vault_requests.c.id == stale["id"]).values(status="pending"))
+
+        with pytest.raises(vs.SecretExistsError):
+            vs.create_secret(conn, name="ASKED_KEY", sealed=_sealed("second"), provision_request_id=req["id"])
+
+        stale_status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == stale["id"])).scalar_one()
+
+    assert stale_status == "fulfilled"
+
+
 def test_request_specific_create_rejects_mismatched_provision_name(vault):
     with vault.begin() as conn:
         req = vs.create_provision_request(conn, "OTHER_KEY")
