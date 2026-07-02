@@ -20,11 +20,13 @@ export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> =
   const [requestSpec, setRequestSpec] = useState<VaultRequestSpec | null>(null);
   const [resolvedRequest, setResolvedRequest] = useState<VaultRequest | null>(null);
   const [requestLoaded, setRequestLoaded] = useState(false);
+  const [requestAmbiguous, setRequestAmbiguous] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     let alive = true;
     setRequestLoaded(false);
+    setRequestAmbiguous(false);
     const loadRequest = requestId
       ? api.getVaultProvisionRequestById(requestId, { handleError: false })
       : api.getVaultProvisionRequest(name, { handleError: false });
@@ -33,11 +35,13 @@ export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> =
         if (!alive) return;
         setResolvedRequest(res.request ?? null);
         setRequestSpec(((res.request?.card as { spec?: VaultRequestSpec } | null)?.spec ?? null) as VaultRequestSpec | null);
+        setRequestAmbiguous(!requestId && Boolean('ambiguous' in res && res.ambiguous));
       })
       .catch(() => {
         if (!alive) return;
         setResolvedRequest(null);
         setRequestSpec(null);
+        setRequestAmbiguous(false);
       })
       .finally(() => {
         if (alive) setRequestLoaded(true);
@@ -87,7 +91,11 @@ export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> =
             </div>
           </div>
           {requestLoaded ? (
-            resolvedRequest || requestId ? (
+            requestAmbiguous ? (
+              <div className="rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">
+                {t('vaults.request.ambiguousProvision')}
+              </div>
+            ) : (
               <VaultSecretForm
                 fixedName={name}
                 provisionRequestId={resolvedRequest?.id ?? requestId ?? null}
@@ -100,10 +108,6 @@ export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> =
                 }}
                 treatExistingAsFulfilled
               />
-            ) : (
-              <div className="rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">
-                {t('vaults.request.ambiguousProvision')}
-              </div>
             )
           ) : (
             <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">

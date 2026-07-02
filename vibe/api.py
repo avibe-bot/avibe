@@ -1465,8 +1465,11 @@ def create_vault_secret(payload: dict) -> dict:
     except vault_service.InvalidSecretNameError as exc:
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name") from exc
     except vault_service.SecretExistsError as exc:
-        with engine.begin() as conn:
-            vault_service.fulfill_pending_provision_requests_for_secret(conn, name)
+        try:
+            with engine.begin() as conn:
+                vault_service.fulfill_pending_provision_requests_for_secret(conn, name)
+        except Exception:
+            logger.warning("failed to settle pending provision requests for existing secret %s", name, exc_info=True)
         raise VaultApiError(f"secret '{name}' already exists", code="secret_exists", status=409) from exc
     except vault_service.VaultAlreadyInitializedError as exc:
         raise VaultApiError(str(exc), code="vault_already_initialized", status=409) from exc
@@ -1517,8 +1520,8 @@ def get_vault_provision_request_by_name(name: str) -> dict:
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
     engine = _vault_engine()
     with engine.begin() as conn:
-        request = vault_service.find_pending_provision_request(conn, requested_name)
-    return {"ok": True, "request": request}
+        request, ambiguous = vault_service.resolve_pending_provision_request_by_name(conn, requested_name)
+    return {"ok": True, "request": request, "ambiguous": ambiguous}
 
 
 def get_vault_provision_request(request_id: str) -> dict:

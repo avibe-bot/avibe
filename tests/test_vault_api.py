@@ -219,6 +219,7 @@ def test_get_provision_request_by_name_returns_pending_spec():
 
     assert result["request"]["id"] == req["id"]
     assert result["request"]["card"]["spec"]["group"] == "github"
+    assert result["ambiguous"] is False
 
 
 def test_get_provision_request_returns_request_id_match():
@@ -248,6 +249,7 @@ def test_get_provision_request_by_name_returns_none_when_ambiguous():
     result = api.get_vault_provision_request_by_name("GH_TOKEN")
 
     assert result["request"] is None
+    assert result["ambiguous"] is True
 
 
 def test_create_secret_with_provision_request_id_fulfills_sibling_requests(monkeypatch):

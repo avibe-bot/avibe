@@ -978,12 +978,10 @@ def create_secret(
         if provision_row.get("status") == "expired":
             raise InvalidRequestError("provision request has expired")
         if provision_row.get("status") == "fulfilled" and existing_secret:
-            fulfill_pending_provision_requests_for_secret(conn, name)
             raise SecretExistsError(name)
         if provision_row.get("status") != "pending":
             raise InvalidRequestError("provision request is not pending")
     if existing_secret:
-        fulfill_pending_provision_requests_for_secret(conn, name)
         raise SecretExistsError(name)
 
     if establishing_vmk and protection == "protected":
@@ -1962,7 +1960,7 @@ def list_requests(
     ]
 
 
-def find_pending_provision_request(conn: Connection, name: str) -> dict[str, Any] | None:
+def resolve_pending_provision_request_by_name(conn: Connection, name: str) -> tuple[dict[str, Any] | None, bool]:
     _expire_pending_requests(conn)
     rows = list(
         conn.execute(
@@ -1976,9 +1974,14 @@ def find_pending_provision_request(conn: Connection, name: str) -> dict[str, Any
             .limit(2)
         ).mappings()
     )
-    if len(rows) != 1:
-        return None
-    return _request_row_payload(dict(rows[0]), conn=conn, audience=REQUEST_AUDIENCE_UI)
+    if len(rows) == 1:
+        return _request_row_payload(dict(rows[0]), conn=conn, audience=REQUEST_AUDIENCE_UI), False
+    return None, len(rows) > 1
+
+
+def find_pending_provision_request(conn: Connection, name: str) -> dict[str, Any] | None:
+    request, _ambiguous = resolve_pending_provision_request_by_name(conn, name)
+    return request
 
 
 def get_pending_provision_request(conn: Connection, request_id: str) -> dict[str, Any] | None:
