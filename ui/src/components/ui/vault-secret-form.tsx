@@ -141,11 +141,13 @@ export const VaultSecretForm: React.FC<{
   const [tags, setTags] = useState<string[]>(requestSpec?.tags ?? []);
   const [description, setDescription] = useState(requestSpec?.description ?? '');
   const [allowHosts, setAllowHosts] = useState<string[]>(requestSpec?.policy?.allowed_hosts ?? []);
+  const [linkedSkills, setLinkedSkills] = useState<string[]>(requestSpec?.links?.skills ?? []);
   const [fetchAuthMode, setFetchAuthMode] = useState<FetchAuthMode>(requestSpec?.policy?.auth?.type ?? 'bearer');
   const [fetchAuthName, setFetchAuthName] = useState(requestSpec?.policy?.auth?.name ?? '');
   const [advancedOpen, setAdvancedOpen] = useState(Boolean(requestSpec?.description || requestSpec?.tags?.length || requestSpec?.policy));
   const [tagsPending, setTagsPending] = useState(false);
   const [hostsPending, setHostsPending] = useState(false);
+  const [skillsPending, setSkillsPending] = useState(false);
   const [protection, setProtection] = useState<VaultProtection>(requestSpec?.protection ?? defaultProtection);
   const [showValue, setShowValue] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -189,6 +191,7 @@ export const VaultSecretForm: React.FC<{
     if (requestSpec.description) setDescription(requestSpec.description);
     if (requestSpec.tags) setTags(requestSpec.tags);
     if (requestSpec.policy?.allowed_hosts) setAllowHosts(requestSpec.policy.allowed_hosts);
+    if (requestSpec.links?.skills) setLinkedSkills(requestSpec.links.skills);
     if (requestSpec.policy?.auth?.type) setFetchAuthMode(requestSpec.policy.auth.type);
     if (requestSpec.policy?.auth?.name) setFetchAuthName(requestSpec.policy.auth.name);
     if (requestSpec.description || requestSpec.tags?.length || requestSpec.policy) setAdvancedOpen(true);
@@ -199,6 +202,7 @@ export const VaultSecretForm: React.FC<{
   const protectedCreateReady = protectedVault.status === 'unlocked';
   const isKeypair = kind === 'keypair';
   const isProvision = Boolean(fixedName);
+  const showLinkedSkills = isProvision && Boolean(requestSpec?.links?.skills?.length || linkedSkills.length);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Hold the latest key material in a ref too, so the unmount cleanup can zero
@@ -287,7 +291,7 @@ export const VaultSecretForm: React.FC<{
     // never block submit.
     const tagsVisible = isProvision || advancedOpen;
     const hostsVisible = isProvision || advancedOpen;
-    if ((tagsVisible && tagsPending) || (hostsVisible && hostsPending)) {
+    if ((tagsVisible && tagsPending) || (hostsVisible && hostsPending) || (showLinkedSkills && skillsPending)) {
       setError(t('vaults.dialog.errors.pendingDraft'));
       return;
     }
@@ -336,7 +340,7 @@ export const VaultSecretForm: React.FC<{
         description: description.trim() || undefined,
         tags: tags.length ? tags : undefined,
         policy: Object.keys(policy).length ? policy : undefined,
-        links: requestSpec?.links?.skills?.length ? { skills: requestSpec.links.skills } : undefined,
+        links: linkedSkills.length ? { skills: linkedSkills } : undefined,
         provision_request_id: provisionRequestId || undefined,
         ...(isKeypair && signingKey
           ? {
@@ -678,6 +682,21 @@ export const VaultSecretForm: React.FC<{
           />
           <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.tagsHelp')}</span>
         </div>
+
+        {showLinkedSkills && (
+          <div className="flex flex-col gap-1.5">
+            <span className={FIELD_LABEL}>{t('vaults.dialog.linkedSkills')}</span>
+            <TagInput
+              values={linkedSkills}
+              onChange={setLinkedSkills}
+              placeholder={t('vaults.dialog.linkedSkillsPlaceholder')}
+              ariaLabel={t('vaults.dialog.linkedSkills')}
+              removeLabel={(value) => t('vaults.dialog.removeChip', { value })}
+              onPendingChange={setSkillsPending}
+            />
+            <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.linkedSkillsHelp')}</span>
+          </div>
+        )}
 
         {/* Allowed hosts — a provisioned secret used for brokered HTTP fetch needs at least
             one allowed host, else vibe/cli.py refuses the fetch as proxy_unbound. */}

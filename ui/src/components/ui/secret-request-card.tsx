@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2, KeyRound } from 'lucide-react';
+import { CheckCircle2, KeyRound, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { badgeVariants } from './badge';
 import { Dialog, DialogContent, DialogTitle } from './dialog';
 import { VaultSecretForm } from './vault-secret-form';
-import { useApi, type VaultRequestSpec } from '@/context/ApiContext';
+import { useApi, type VaultRequest, type VaultRequestSpec } from '@/context/ApiContext';
 import { cn } from '@/lib/utils';
 
 /**
@@ -18,10 +18,13 @@ export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> =
   const [open, setOpen] = useState(false);
   const [fulfilled, setFulfilled] = useState(false);
   const [requestSpec, setRequestSpec] = useState<VaultRequestSpec | null>(null);
+  const [resolvedRequest, setResolvedRequest] = useState<VaultRequest | null>(null);
+  const [requestLoaded, setRequestLoaded] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     let alive = true;
+    setRequestLoaded(false);
     const loadRequest = requestId
       ? api.getVaultProvisionRequestById(requestId, { handleError: false })
       : api.getVaultProvisionRequest(name, { handleError: false });
@@ -29,10 +32,16 @@ export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> =
       .then((res) => {
         if (!alive) return;
         const card = (res.request?.card ?? null) as { spec?: VaultRequestSpec } | null;
+        setResolvedRequest(res.request ?? null);
         setRequestSpec(card?.spec ?? null);
       })
       .catch(() => {
-        if (alive) setRequestSpec(null);
+        if (!alive) return;
+        setResolvedRequest(null);
+        setRequestSpec(null);
+      })
+      .finally(() => {
+        if (alive) setRequestLoaded(true);
       });
     return () => {
       alive = false;
@@ -73,17 +82,24 @@ export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> =
               <span className="text-xs text-muted-foreground">{t('vaults.request.help')}</span>
             </div>
           </div>
-          <VaultSecretForm
-            fixedName={name}
-            provisionRequestId={requestId ?? null}
-            requestSpec={requestSpec}
-            onCancel={() => setOpen(false)}
-            onCreated={() => {
-              setFulfilled(true);
-              setOpen(false);
-            }}
-            treatExistingAsFulfilled
-          />
+          {requestLoaded ? (
+            <VaultSecretForm
+              fixedName={name}
+              provisionRequestId={resolvedRequest?.id ?? requestId ?? null}
+              requestSpec={requestSpec}
+              onCancel={() => setOpen(false)}
+              onCreated={() => {
+                setFulfilled(true);
+                setOpen(false);
+              }}
+              treatExistingAsFulfilled
+            />
+          ) : (
+            <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">
+              <Loader2 className="size-4 animate-spin" />
+              {t('common.loading')}
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </>
