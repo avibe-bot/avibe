@@ -2384,8 +2384,6 @@ class BindReservedWorkbenchSessionTests(unittest.TestCase):
             vibe_agent_id=None,
             vibe_agent_name=None,
             vibe_agent_backend=None,
-            model=None,
-            reasoning_effort=None,
         ):
             calls.update(
                 session_id=agent_session_id,
@@ -2394,20 +2392,12 @@ class BindReservedWorkbenchSessionTests(unittest.TestCase):
                 vibe_agent_id=vibe_agent_id,
                 vibe_agent_name=vibe_agent_name,
                 vibe_agent_backend=vibe_agent_backend,
-                model=model,
-                reasoning_effort=reasoning_effort,
             )
             return agent_session_id  # the reserved row exists → rowcount 1
 
         agent = _FakeBaseAgent(SimpleNamespace(bind_agent_session_by_id=bind_by_id))
         ctx = self._ctx("ses_workbench")
-        ctx.platform_specific["resolved_vibe_agent"] = {
-            "id": "agent-codex",
-            "name": "codex",
-            "backend": "codex",
-            "model": "gpt-5.5",
-            "reasoning_effort": "xhigh",
-        }
+        ctx.platform_specific["resolved_vibe_agent"] = {"id": "agent-codex", "name": "codex", "backend": "codex"}
         ret = agent._bind_reserved_workbench_session(ctx, "claude-native-123", working_path="/tmp/x")
         self.assertEqual(ret, "ses_workbench")
         self.assertEqual(ctx.platform_specific["agent_session_id"], "ses_workbench")
@@ -2420,8 +2410,6 @@ class BindReservedWorkbenchSessionTests(unittest.TestCase):
                 "vibe_agent_id": "agent-codex",
                 "vibe_agent_name": "codex",
                 "vibe_agent_backend": "codex",
-                "model": "gpt-5.5",
-                "reasoning_effort": "xhigh",
             },
         )
 

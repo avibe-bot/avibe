@@ -195,8 +195,6 @@ class OpenCodeSessionManager:
                     vibe_agent_id=request.vibe_agent_id,
                     vibe_agent_name=request.vibe_agent_name,
                     vibe_agent_backend=request.vibe_agent_backend,
-                    model=request.vibe_agent_model,
-                    reasoning_effort=request.vibe_agent_reasoning_effort,
                 )
                 if agent_session_id:
                     self._set_request_agent_session_id(request, agent_session_id)

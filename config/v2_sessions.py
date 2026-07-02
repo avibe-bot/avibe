@@ -429,6 +429,20 @@ class SessionsStore:
             agent_map[thread_id] = session_id
         return agent_session_id
 
+    def materialize_agent_session_route(
+        self,
+        agent_session_id: str,
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> bool:
+        self._ensure_service()
+        return self._service.materialize_agent_session_route(
+            agent_session_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+
     def bind_agent_session_by_id(
         self,
         agent_session_id: str,
@@ -438,8 +452,6 @@ class SessionsStore:
         vibe_agent_id: str | None = None,
         vibe_agent_name: str | None = None,
         vibe_agent_backend: str | None = None,
-        model: str | None = None,
-        reasoning_effort: str | None = None,
     ) -> Optional[str]:
         self._ensure_service()
         bound_id = self._service.bind_agent_session_by_id(
@@ -449,8 +461,6 @@ class SessionsStore:
             vibe_agent_id=vibe_agent_id,
             vibe_agent_name=vibe_agent_name,
             vibe_agent_backend=vibe_agent_backend,
-            model=model,
-            reasoning_effort=reasoning_effort,
         )
         if bound_id:
             self.load()

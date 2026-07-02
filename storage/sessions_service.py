@@ -342,6 +342,41 @@ class SQLiteSessionsService:
             conn.execute(agent_sessions.update().where(agent_sessions.c.id == row_id).values(**values))
             return row_id
 
+    def materialize_agent_session_route(
+        self,
+        session_id: str,
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> bool:
+        """Pin the model / effort a turn is about to run with into EMPTY columns.
+
+        A session created on an inherited default carries NULLs (dispatch
+        resolves the live Agent default); the first turn pins the resolved
+        values — same lifecycle as the backend pin on native bind. Called at
+        dispatch time (turn START), so a user's later explicit header pick —
+        including an explicit clear back to NULL — happens after this write and
+        is never undone by it. COALESCE keeps the fill-if-empty atomic against
+        a concurrent pick. Returns True when a row was updated."""
+        values: dict[str, Any] = {}
+        if model:
+            values["model"] = func.coalesce(func.nullif(agent_sessions.c.model, ""), model)
+        if reasoning_effort:
+            values["reasoning_effort"] = func.coalesce(
+                func.nullif(agent_sessions.c.reasoning_effort, ""), reasoning_effort
+            )
+        if not values:
+            return False
+        values["updated_at"] = _utc_now_iso()
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                agent_sessions.update()
+                .where(agent_sessions.c.id == str(session_id))
+                .where(agent_sessions.c.status != "archived")
+                .values(**values)
+            )
+            return bool(result.rowcount)
+
     def bind_agent_session_by_id(
         self,
         *,
@@ -351,8 +386,6 @@ class SQLiteSessionsService:
         vibe_agent_id: str | None = None,
         vibe_agent_name: str | None = None,
         vibe_agent_backend: str | None = None,
-        model: str | None = None,
-        reasoning_effort: str | None = None,
     ) -> str | None:
         """Bind a backend-native session id to an already-reserved Vibe session row."""
         now = _utc_now_iso()
@@ -369,18 +402,6 @@ class SQLiteSessionsService:
         if vibe_agent_backend is not None:
             values["agent_backend"] = vibe_agent_backend or ""
             values["agent_variant"] = vibe_agent_backend or "default"
-        # Materialize the model / effort the turn actually ran with, but only
-        # into EMPTY columns: a session created on an inherited default carries
-        # NULLs (dispatch resolves the live Agent default), and once the first
-        # turn runs the route is pinned — same lifecycle as the backend pin
-        # above. COALESCE keeps this atomic so a user's explicit header pick
-        # (update_session) is never overwritten by a late bind.
-        if model:
-            values["model"] = func.coalesce(func.nullif(agent_sessions.c.model, ""), model)
-        if reasoning_effort:
-            values["reasoning_effort"] = func.coalesce(
-                func.nullif(agent_sessions.c.reasoning_effort, ""), reasoning_effort
-            )
         with self.engine.begin() as conn:
             # Never resurrect an archived (terminal) session. ``bind_agent_session_by_id``
             # targets an explicit row, bypassing the ``status != 'archived'`` lookup

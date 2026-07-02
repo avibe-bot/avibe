@@ -290,17 +290,37 @@ class MessageHandler(BaseHandler):
                 session_target.get("reasoning_effort") if isinstance(session_target, dict) else None
             ) or resolved_target.get("reasoning_effort")
             # The model / effort this turn ACTUALLY runs with — the same
-            # precedence the request is built on below. Carried in
-            # ``resolved_vibe_agent`` so the native-bind path can materialize
-            # them onto a session row whose route was inherited (empty) at
-            # create time; otherwise the row keeps NULLs forever and the chat
-            # header shows an agent with no model / effort.
+            # precedence the request is built on below.
             effective_model = session_target_model or scope_model_override or (
                 vibe_agent.model if vibe_agent else None
             )
             effective_reasoning_effort = session_target_reasoning or scope_reasoning_override or (
                 vibe_agent.reasoning_effort if vibe_agent else None
             )
+            # Materialize the resolved route into EMPTY workbench session
+            # columns NOW, at turn start. A session created on an inherited
+            # default carries NULLs (dispatch resolves the live Agent default);
+            # without pinning, the chat header shows an agent with no model /
+            # effort after the first message. Pinning at turn START — not at
+            # native bind — means any later explicit header pick in this turn
+            # (including an explicit clear to NULL) lands after this write and
+            # is never undone by it. IM (scope/anchor) rows never carry
+            # ``agent_session_target`` and are untouched: their model semantics
+            # stay with channel routing.
+            if isinstance(session_target, dict) and session_target.get("id") and (
+                (effective_model and not session_target.get("model"))
+                or (effective_reasoning_effort and not session_target.get("reasoning_effort"))
+            ):
+                materialize = getattr(self.sessions, "materialize_agent_session_route", None)
+                if callable(materialize):
+                    try:
+                        materialize(
+                            str(session_target["id"]),
+                            model=effective_model,
+                            reasoning_effort=effective_reasoning_effort,
+                        )
+                    except Exception:
+                        logger.debug("Session route materialization failed; dispatch continues", exc_info=True)
 
             matched_prefix = None
             subagent_message = None
@@ -439,8 +459,6 @@ class MessageHandler(BaseHandler):
                     "id": vibe_agent.id,
                     "name": vibe_agent.name,
                     "backend": vibe_agent.backend,
-                    "model": effective_model,
-                    "reasoning_effort": effective_reasoning_effort,
                 }
                 context.platform_specific = spec
 
