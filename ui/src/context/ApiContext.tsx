@@ -136,6 +136,7 @@ export type VaultCreatePayload = {
   policy?: Record<string, unknown>;
   public_meta?: Record<string, unknown>;
   links?: { skills?: string[] };
+  provision_request_id?: string;
   /** Set on the first protected secret so the daemon atomically guards single VMK init. */
   establishing_vmk?: boolean;
 };

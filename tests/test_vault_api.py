@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy import select
 
 from storage import vault_service
-from storage.models import vault_links, vault_secrets
+from storage.models import vault_links, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
 from vibe import api
 
@@ -248,6 +248,35 @@ def test_get_provision_request_by_name_returns_none_when_ambiguous():
     result = api.get_vault_provision_request_by_name("GH_TOKEN")
 
     assert result["request"] is None
+
+
+def test_create_secret_with_provision_request_id_fulfills_only_that_request(monkeypatch):
+    seal = Mock(return_value=_sealed("api"))
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    with api._vault_engine().begin() as conn:
+        old_req = vault_service.create_provision_request(conn, "GH_TOKEN", spec={"group": "old"})
+        new_req = vault_service.create_provision_request(conn, "GH_TOKEN", spec={"group": "new"})
+
+    created = api.create_vault_secret(
+        {
+            "name": "GH_TOKEN",
+            "group": "new",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            "provision_request_id": new_req["id"],
+        }
+    )
+
+    assert created["secret"]["group"] == "new"
+    with api._vault_engine().connect() as conn:
+        rows = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                select(vault_requests.c.id, vault_requests.c.status).where(
+                    vault_requests.c.id.in_([old_req["id"], new_req["id"]])
+                )
+            ).mappings()
+        }
+    assert rows == {old_req["id"]: "pending", new_req["id"]: "fulfilled"}
 
 
 def test_duplicate_name_conflict(monkeypatch):

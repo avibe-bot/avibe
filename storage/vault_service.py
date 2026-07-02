@@ -929,6 +929,7 @@ def create_secret(
     policy: dict[str, Any] | None = None,
     public_meta: dict[str, Any] | None = None,
     establishing_vmk: bool = False,
+    provision_request_id: str | None = None,
 ) -> dict[str, Any]:
     """Create a secret from a caller-supplied encrypted envelope; return masked metadata.
 
@@ -948,6 +949,20 @@ def create_secret(
         raise VaultServiceError(f"invalid vault secret kind: {kind!r}")
     if kind != "keypair" and signer_kind is not None:
         raise VaultServiceError("signer_kind is only valid for keypair secrets")
+    provision_row: dict[str, Any] | None = None
+    if provision_request_id:
+        _expire_pending_requests(conn)
+        provision_row = _load_request_for_transition(
+            conn,
+            provision_request_id,
+            request_type="provision",
+            allowed_statuses={"pending"},
+            wrong_type_message="secret create must complete a provision request",
+            wrong_status_message="provision request is not pending",
+            expired_message="provision request has expired",
+        )
+        if provision_row.get("secret_name") != name:
+            raise InvalidRequestError("provision request secret name does not match")
     if conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name)).first() is not None:
         raise SecretExistsError(name)
 
@@ -994,18 +1009,26 @@ def create_secret(
         # SecretExistsError → 409 so the racing already-fulfilled ask is handled, not a 500.
         raise SecretExistsError(name) from exc
     audit(conn, "created", secret_name=name)
-    # Any pending dynamic-ask (provision) request for this name is now satisfied,
-    # regardless of which create path stored it (CLI / API / inline card) — so a
-    # `vibe vault request --wait` resolves instead of timing out.
-    conn.execute(
-        vault_requests.update()
-        .where(
-            vault_requests.c.request_type == "provision",
-            vault_requests.c.secret_name == name,
-            vault_requests.c.status == "pending",
+    if provision_row is not None:
+        result = conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id == provision_row["id"], vault_requests.c.status == "pending")
+            .values(status="fulfilled", decided_at=_now())
         )
-        .values(status="fulfilled", decided_at=_now())
-    )
+        if result.rowcount != 1:
+            raise InvalidRequestError("provision request is not pending")
+    else:
+        # A manual create not tied to a specific request still satisfies existing name-only
+        # dynamic asks and keeps the original `$<NAME>` behavior working.
+        conn.execute(
+            vault_requests.update()
+            .where(
+                vault_requests.c.request_type == "provision",
+                vault_requests.c.secret_name == name,
+                vault_requests.c.status == "pending",
+            )
+            .values(status="fulfilled", decided_at=_now())
+        )
     return _meta_payload(_require_row(conn, name))
 
 
@@ -1293,11 +1316,7 @@ def fulfill_provision(
         sealed=sealed,
         group=group,
         description=description,
-    )
-    conn.execute(
-        vault_requests.update()
-        .where(vault_requests.c.id == request_id)
-        .values(status="fulfilled", decided_at=_now())
+        provision_request_id=request_id,
     )
     return meta
 

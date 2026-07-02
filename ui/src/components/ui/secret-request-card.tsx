@@ -75,6 +75,7 @@ export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> =
           </div>
           <VaultSecretForm
             fixedName={name}
+            provisionRequestId={requestId ?? null}
             requestSpec={requestSpec}
             onCancel={() => setOpen(false)}
             onCreated={() => {

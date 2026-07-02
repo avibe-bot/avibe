@@ -1453,6 +1453,7 @@ def create_vault_secret(payload: dict) -> dict:
                 policy=policy,
                 public_meta=public_meta,
                 establishing_vmk=establishing_vmk,
+                provision_request_id=str(payload.get("provision_request_id") or "") or None,
             )
             if links and isinstance(links.get("skills"), list):
                 vault_service.link_secret_to_skills(

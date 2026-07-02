@@ -35,6 +35,7 @@ const AddSecretDialog: React.FC<{
         </DialogHeader>
         <VaultSecretForm
           fixedName={fixedName}
+          provisionRequestId={request?.id ?? null}
           requestSpec={requestSpec}
           onCancel={onClose}
           onCreated={onCreated}

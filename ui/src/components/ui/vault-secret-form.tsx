@@ -110,6 +110,7 @@ export const VaultSecretForm: React.FC<{
   onCreated: (name: string, reason?: 'created' | 'already_exists') => void;
   className?: string;
   defaultProtection?: VaultProtection;
+  provisionRequestId?: string | null;
   requestSpec?: VaultRequestSpec | null;
   treatExistingAsFulfilled?: boolean;
   groups?: string[];
@@ -119,6 +120,7 @@ export const VaultSecretForm: React.FC<{
   onCreated,
   className,
   defaultProtection = 'standard',
+  provisionRequestId,
   requestSpec,
   treatExistingAsFulfilled = false,
   groups = [],
@@ -335,6 +337,7 @@ export const VaultSecretForm: React.FC<{
         tags: tags.length ? tags : undefined,
         policy: Object.keys(policy).length ? policy : undefined,
         links: requestSpec?.links?.skills?.length ? { skills: requestSpec.links.skills } : undefined,
+        provision_request_id: provisionRequestId || undefined,
         ...(isKeypair && signingKey
           ? {
               kind: 'keypair',

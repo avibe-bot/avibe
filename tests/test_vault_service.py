@@ -457,6 +457,43 @@ def test_create_fulfills_pending_provision_request(vault):
     assert status == "fulfilled"
 
 
+def test_request_specific_create_fulfills_only_that_provision_request(vault):
+    with vault.begin() as conn:
+        old_req = vs.create_provision_request(conn, "ASKED_KEY", spec={"group": "old"})
+        new_req = vs.create_provision_request(conn, "ASKED_KEY", spec={"group": "new"})
+        meta = vs.create_secret(
+            conn,
+            name="ASKED_KEY",
+            sealed=_sealed("new"),
+            group="new",
+            provision_request_id=new_req["id"],
+        )
+
+    assert meta["group"] == "new"
+    with vault.connect() as conn:
+        rows = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                select(vault_requests.c.id, vault_requests.c.status).where(
+                    vault_requests.c.id.in_([old_req["id"], new_req["id"]])
+                )
+            ).mappings()
+        }
+    assert rows == {old_req["id"]: "pending", new_req["id"]: "fulfilled"}
+
+
+def test_request_specific_create_rejects_mismatched_provision_name(vault):
+    with vault.begin() as conn:
+        req = vs.create_provision_request(conn, "OTHER_KEY")
+        with pytest.raises(vs.InvalidRequestError, match="provision request secret name does not match"):
+            vs.create_secret(
+                conn,
+                name="ASKED_KEY",
+                sealed=_sealed("asked"),
+                provision_request_id=req["id"],
+            )
+
+
 def test_request_for_existing_secret_is_born_fulfilled(vault):
     _create(vault, name="ALREADY")
     with vault.begin() as conn:
