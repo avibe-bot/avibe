@@ -160,7 +160,7 @@ create_secret(name, value, *, group, tags, protection, policy)   # validates nam
 list_secrets(*, group=None, skill=None) -> [masked]              # never returns values; masked preview
 rotate_secret(name, new_value) / delete_secret(name)
 resolve(names, *, mode, requester) -> {name: value}              # P0: standard only (machine key); audit 'delivered'
-create_provision_request(name, *, reason, skill, requester) -> request
+create_provision_request(name, *, reason, spec, requester) -> request
 fulfill_provision(request_id, value, *, protection)              # store secret; mark fulfilled; wake-up (name only)
 audit(event, **fields)
 ```
@@ -191,7 +191,7 @@ vibe vault list [--group G] [--skill S(P1)] [--json]
 vibe vault rm NAME
 vibe vault run --env NAME[,N2] [--env LOCAL=NAME] [--env-skill S(P1)] -- cmd...   # M1, promoted
 vibe vault fetch --auth NAME [curl-like args]                                     # M4, promoted
-vibe vault request NAME [--reason s] [--skill s] [--wait s | --no-wait]           # dynamic ask
+vibe vault request NAME [--reason s] [--spec file|- | --spec-json json] [--wait s | --no-wait]  # dynamic ask
 # help-only (NOT in agent-facing guidance):
 vibe vault export --env NAME[,N2]                                                 # M1', eval "$(...)"
 vibe vault inject --keys A,B --out f [--format dotenv|json|yaml|toml] [--ttl 10m]  # M2

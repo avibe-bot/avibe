@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { CheckCircle2, KeyRound } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { badgeVariants } from './badge';
 import { Dialog, DialogContent, DialogTitle } from './dialog';
 import { VaultSecretForm } from './vault-secret-form';
+import { useApi, type VaultRequestSpec } from '@/context/ApiContext';
 import { cn } from '@/lib/utils';
 
 /**
@@ -13,8 +14,28 @@ import { cn } from '@/lib/utils';
  */
 export const SecretRequestCard: React.FC<{ name: string }> = ({ name }) => {
   const { t } = useTranslation();
+  const api = useApi();
   const [open, setOpen] = useState(false);
   const [fulfilled, setFulfilled] = useState(false);
+  const [requestSpec, setRequestSpec] = useState<VaultRequestSpec | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    api
+      .getVaultProvisionRequest(name, { handleError: false })
+      .then((res) => {
+        if (!alive) return;
+        const card = (res.request?.card ?? null) as { spec?: VaultRequestSpec } | null;
+        setRequestSpec(card?.spec ?? null);
+      })
+      .catch(() => {
+        if (alive) setRequestSpec(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [api, name, open]);
 
   if (fulfilled) {
     return (
@@ -52,6 +73,7 @@ export const SecretRequestCard: React.FC<{ name: string }> = ({ name }) => {
           </div>
           <VaultSecretForm
             fixedName={name}
+            requestSpec={requestSpec}
             onCancel={() => setOpen(false)}
             onCreated={() => {
               setFulfilled(true);

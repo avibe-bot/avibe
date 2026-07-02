@@ -191,6 +191,36 @@ def test_create_with_policy_persists_allowed_hosts(monkeypatch):
     assert secret["policy"]["allowed_hosts"] == ["api.github.com"]
 
 
+def test_create_with_links_persists_skill_link(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {
+            "name": "GH_PAT",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            "links": {"skills": ["github-pr-review"]},
+        }
+    )
+    with api._vault_engine().connect() as conn:
+        rows = conn.execute(select(vault_links.c.skill_name).where(vault_links.c.secret_name == "GH_PAT")).scalars().all()
+    assert rows == ["github-pr-review"]
+
+
+def test_get_provision_request_by_name_returns_pending_spec():
+    with api._vault_engine().begin() as conn:
+        req = vault_service.create_provision_request(
+            conn,
+            "GH_TOKEN",
+            spec={"group": "github", "links": {"skills": ["github-pr-review"]}},
+        )
+
+    result = api.get_vault_provision_request_by_name("GH_TOKEN")
+
+    assert result["request"]["id"] == req["id"]
+    assert result["request"]["card"]["spec"]["group"] == "github"
+
+
 def test_duplicate_name_conflict(monkeypatch):
     from unittest.mock import Mock
 

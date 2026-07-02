@@ -35,7 +35,8 @@ def _ns(**kw):
         env=None,
         command_argv=None,
         reason=None,
-        skill=None,
+        spec=None,
+        spec_json=None,
         wait=None,
         no_wait=False,
         json=False,
@@ -1292,6 +1293,38 @@ def test_request_creates_pending(capfd):
     assert payload["secret_name"] == "WANTED_KEY"
     assert payload["status"] == "pending"
     assert payload["request_id"].startswith("vrq_")
+
+
+def test_request_accepts_spec_path(tmp_path, capfd):
+    spec_path = tmp_path / "request-spec.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "group": "github",
+                "tags": ["github"],
+                "protection": "protected",
+                "policy": {"allowed_hosts": ["api.github.com"], "auth": {"type": "bearer"}},
+                "links": {"skills": ["github-pr-review"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = cli.cmd_vault_request(_ns(name="GITHUB_TOKEN", reason="need PR status", spec=str(spec_path)))
+    payload = json.loads(capfd.readouterr().out)
+
+    assert code == 0
+    assert payload["request"]["card"]["spec"]["group"] == "github"
+    assert payload["request"]["card"]["spec"]["policy"]["allowed_hosts"] == ["api.github.com"]
+    assert payload["request"]["card"]["spec"]["links"] == {"skills": ["github-pr-review"]}
+
+
+def test_request_rejects_spec_with_plaintext_value(capfd):
+    code = cli.cmd_vault_request(_ns(name="BAD_KEY", spec_json='{"policy":{"value":"secret"}}'))
+    payload = json.loads(capfd.readouterr().err)
+
+    assert code == 1
+    assert payload["code"] == "invalid_spec"
 
 
 def test_request_for_existing_secret_returns_fulfilled(tmp_path, capfd, monkeypatch):

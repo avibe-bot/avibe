@@ -41,6 +41,28 @@ SUPPORTED_SIGNATURE_SCHEMES = {
 REQUEST_AUDIENCE_AGENT = "agent"
 REQUEST_AUDIENCE_UI = "ui"
 REQUEST_AUDIENCES = {REQUEST_AUDIENCE_AGENT, REQUEST_AUDIENCE_UI}
+PROVISION_SPEC_FORBIDDEN_KEYS = {
+    "value",
+    "sealed",
+    "envelope",
+    "blind_box",
+    "ciphertext",
+    "nonce",
+    "wrap_meta",
+    "private_key",
+    "secret",
+}
+PROVISION_SPEC_ALLOWED_KEYS = {
+    "kind",
+    "protection",
+    "group",
+    "description",
+    "tags",
+    "policy",
+    "links",
+}
+PROVISION_SPEC_ALLOWED_POLICY_KEYS = {"allowed_hosts", "auth"}
+PROVISION_SPEC_ALLOWED_AUTH_KEYS = {"type", "name"}
 
 
 @dataclass(frozen=True)
@@ -222,6 +244,127 @@ def _loads(raw: str | None) -> Any:
 def _public_meta(raw: str | None) -> dict[str, Any]:
     payload = _loads(raw)
     return payload if isinstance(payload, dict) else {}
+
+
+def _reject_provision_spec_secret_fields(value: Any, *, path: str = "spec") -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key) in PROVISION_SPEC_FORBIDDEN_KEYS:
+                raise VaultServiceError(f"{path}.{key} is not allowed in vault request spec")
+            _reject_provision_spec_secret_fields(item, path=f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _reject_provision_spec_secret_fields(item, path=f"{path}[{index}]")
+
+
+def _string_list(value: Any, *, field: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise VaultServiceError(f"{field} must be an array of strings")
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise VaultServiceError(f"{field} must be an array of strings")
+        stripped = item.strip()
+        if stripped:
+            out.append(stripped)
+    return out
+
+
+def normalize_provision_spec(spec: Any) -> dict[str, Any]:
+    """Return non-secret creation hints for a provision request.
+
+    The request spec is agent-provided metadata only. It can pre-fill the browser
+    form and propose skill links, but it must never carry plaintext or sealed
+    value material.
+    """
+
+    if spec is None:
+        return {}
+    if not isinstance(spec, dict):
+        raise VaultServiceError("vault request spec must be a JSON object")
+    _reject_provision_spec_secret_fields(spec)
+    extra_keys = set(spec) - PROVISION_SPEC_ALLOWED_KEYS
+    if extra_keys:
+        raise VaultServiceError(f"unsupported vault request spec fields: {', '.join(sorted(extra_keys))}")
+
+    normalized: dict[str, Any] = {}
+    kind = spec.get("kind")
+    if kind is not None:
+        kind = str(kind).strip().lower()
+        if kind != "static":
+            raise VaultServiceError("spec.kind currently supports only 'static' for provision requests")
+        normalized["kind"] = kind
+
+    protection = spec.get("protection")
+    if protection is not None:
+        protection = str(protection).strip().lower()
+        if protection not in {"standard", "protected"}:
+            raise VaultServiceError("spec.protection must be 'standard' or 'protected'")
+        normalized["protection"] = protection
+
+    group = spec.get("group")
+    if group is not None:
+        group = str(group).strip()
+        if group:
+            normalized["group"] = group
+
+    description = spec.get("description")
+    if description is not None:
+        description = str(description).strip()
+        if description:
+            normalized["description"] = description
+
+    tags = _string_list(spec.get("tags"), field="spec.tags") if "tags" in spec else []
+    if tags:
+        normalized["tags"] = tags
+
+    policy = spec.get("policy")
+    if policy is not None:
+        if not isinstance(policy, dict):
+            raise VaultServiceError("spec.policy must be an object")
+        extra_policy_keys = set(policy) - PROVISION_SPEC_ALLOWED_POLICY_KEYS
+        if extra_policy_keys:
+            raise VaultServiceError(f"unsupported spec.policy fields: {', '.join(sorted(extra_policy_keys))}")
+        normalized_policy: dict[str, Any] = {}
+        allowed_hosts = _string_list(policy.get("allowed_hosts"), field="spec.policy.allowed_hosts") if "allowed_hosts" in policy else []
+        if allowed_hosts:
+            normalized_policy["allowed_hosts"] = allowed_hosts
+        auth = policy.get("auth")
+        if auth is not None:
+            if not isinstance(auth, dict):
+                raise VaultServiceError("spec.policy.auth must be an object")
+            extra_auth_keys = set(auth) - PROVISION_SPEC_ALLOWED_AUTH_KEYS
+            if extra_auth_keys:
+                raise VaultServiceError(f"unsupported spec.policy.auth fields: {', '.join(sorted(extra_auth_keys))}")
+            auth_type = str(auth.get("type") or "bearer").strip().lower()
+            if auth_type not in {"bearer", "header", "query"}:
+                raise VaultServiceError("spec.policy.auth.type must be bearer, header, or query")
+            normalized_auth: dict[str, Any] = {"type": auth_type}
+            auth_name = str(auth.get("name") or "").strip()
+            if auth_type in {"header", "query"}:
+                if not auth_name:
+                    raise VaultServiceError("spec.policy.auth.name is required for header/query auth")
+                normalized_auth["name"] = auth_name
+            elif auth_name:
+                normalized_auth["name"] = auth_name
+            normalized_policy["auth"] = normalized_auth
+        if normalized_policy:
+            normalized["policy"] = normalized_policy
+
+    links = spec.get("links")
+    if links is not None:
+        if not isinstance(links, dict):
+            raise VaultServiceError("spec.links must be an object")
+        extra_link_keys = set(links) - {"skills"}
+        if extra_link_keys:
+            raise VaultServiceError(f"unsupported spec.links fields: {', '.join(sorted(extra_link_keys))}")
+        skills = _string_list(links.get("skills"), field="spec.links.skills") if "skills" in links else []
+        if skills:
+            normalized["links"] = {"skills": skills}
+
+    return normalized
 
 
 def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
@@ -832,6 +975,27 @@ def create_secret(
     return _meta_payload(_require_row(conn, name))
 
 
+def link_secret_to_skills(conn: Connection, secret_name: str, skills: list[str], *, source: str = "agent") -> None:
+    if not skills:
+        return
+    _require_row(conn, secret_name)
+    now = _now()
+    for skill in dict.fromkeys(item.strip() for item in skills if item and item.strip()):
+        try:
+            conn.execute(
+                vault_links.insert().values(
+                    id=_id("vln"),
+                    secret_name=secret_name,
+                    skill_name=skill,
+                    source=source,
+                    required=1,
+                    created_at=now,
+                )
+            )
+        except IntegrityError:
+            pass
+
+
 def get_secret_meta(conn: Connection, name: str) -> dict[str, Any]:
     return _meta_payload(_require_row(conn, name))
 
@@ -1033,7 +1197,7 @@ def create_provision_request(
     name: str,
     *,
     reason: str | None = None,
-    skill: str | None = None,
+    spec: dict[str, Any] | None = None,
     requester: Any = None,
     message_id: str | None = None,
 ) -> dict[str, Any]:
@@ -1047,12 +1211,13 @@ def create_provision_request(
     now = _now()
     already = conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name)).first() is not None
     status = "fulfilled" if already else "pending"
-    card = _secure_input_card(name, request_id=request_id, reason=reason, skill=skill)
+    normalized_spec = normalize_provision_spec(spec)
+    card = _secure_input_card(name, request_id=request_id, reason=reason, spec=normalized_spec)
     delivery_payload: dict[str, Any] = {"card": card}
     if reason:
         delivery_payload["reason"] = reason
-    if skill:
-        delivery_payload["skill"] = skill
+    if normalized_spec:
+        delivery_payload["spec"] = normalized_spec
     conn.execute(
         vault_requests.insert().values(
             id=request_id,
@@ -1108,18 +1273,21 @@ def _secure_input_card(
     *,
     request_id: str,
     reason: str | None = None,
-    skill: str | None = None,
+    spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    normalized_spec = normalize_provision_spec(spec)
+    card = {
         "card_type": "secure_input",
         "request_id": request_id,
         "secret_name": name,
         "reason": reason,
-        "skill": skill,
         "protection_options": ["standard", "protected"],
-        "default_protection": "protected",
+        "default_protection": normalized_spec.get("protection") or "protected",
         "value": None,
     }
+    if normalized_spec:
+        card["spec"] = normalized_spec
+    return card
 
 
 def _grant_member_rows(conn: Connection, scope_type: str, scope_ref: str) -> list[dict[str, Any]]:
@@ -1726,6 +1894,27 @@ def list_requests(
         _request_row_payload(dict(row), conn=conn, audience=REQUEST_AUDIENCE_UI)
         for row in conn.execute(query).mappings()
     ]
+
+
+def find_pending_provision_request(conn: Connection, name: str) -> dict[str, Any] | None:
+    _expire_pending_requests(conn)
+    row = (
+        conn.execute(
+            select(vault_requests)
+            .where(
+                vault_requests.c.status == "pending",
+                vault_requests.c.request_type == "provision",
+                vault_requests.c.secret_name == name,
+            )
+            .order_by(vault_requests.c.created_at.desc(), vault_requests.c.id.desc())
+            .limit(1)
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        return None
+    return _request_row_payload(dict(row), conn=conn, audience=REQUEST_AUDIENCE_UI)
 
 
 def _expire_grant_rows(

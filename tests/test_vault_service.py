@@ -480,14 +480,45 @@ def test_provision_request_and_fulfill(vault):
 
 def test_provision_request_carries_secure_input_card_without_value(vault):
     with vault.begin() as conn:
-        req = vs.create_provision_request(conn, "NEW_CARD_KEY", reason="deploy", skill="release")
+        req = vs.create_provision_request(
+            conn,
+            "NEW_CARD_KEY",
+            reason="deploy",
+            spec={
+                "kind": "static",
+                "protection": "protected",
+                "group": "github",
+                "description": "GitHub token",
+                "tags": ["github", "deploy"],
+                "policy": {"allowed_hosts": ["api.github.com"], "auth": {"type": "bearer"}},
+                "links": {"skills": ["release"]},
+            },
+        )
     assert req["card"]["card_type"] == "secure_input"
     assert req["card"]["secret_name"] == "NEW_CARD_KEY"
     assert req["card"]["value"] is None
+    assert req["card"]["spec"]["group"] == "github"
+    assert req["card"]["spec"]["links"] == {"skills": ["release"]}
     with vault.connect() as conn:
         listed = vs.list_requests(conn)
     assert listed[0]["card"]["default_protection"] == "protected"
+    assert listed[0]["card"]["spec"]["policy"]["allowed_hosts"] == ["api.github.com"]
     assert "secret-value" not in json.dumps(listed)
+
+
+def test_provision_request_spec_rejects_secret_material(vault):
+    with vault.begin() as conn:
+        with pytest.raises(vs.VaultServiceError):
+            vs.create_provision_request(conn, "BAD_CARD_KEY", spec={"policy": {"value": "secret"}})
+
+
+def test_create_secret_can_link_to_requested_skill(vault):
+    _create(vault, name="LINKED_KEY")
+    with vault.begin() as conn:
+        vs.link_secret_to_skills(conn, "LINKED_KEY", ["release"])
+    with vault.connect() as conn:
+        rows = conn.execute(select(vault_links.c.skill_name).where(vault_links.c.secret_name == "LINKED_KEY")).scalars().all()
+    assert rows == ["release"]
 
 
 def test_create_grant_freezes_scope_members_and_keeps_key_material_out_of_python(vault):

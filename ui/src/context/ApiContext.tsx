@@ -58,6 +58,19 @@ export type VaultRequest = {
   card?: Record<string, unknown> | null;
 };
 
+export type VaultRequestSpec = {
+  kind?: 'static';
+  protection?: 'standard' | 'protected';
+  group?: string;
+  description?: string;
+  tags?: string[];
+  policy?: {
+    allowed_hosts?: string[];
+    auth?: { type?: 'bearer' | 'header' | 'query'; name?: string };
+  };
+  links?: { skills?: string[] };
+};
+
 export type VaultGrant = {
   id: string;
   scope_type: 'secret' | 'skill' | 'group';
@@ -122,6 +135,7 @@ export type VaultCreatePayload = {
   signer_kind?: string | null;
   policy?: Record<string, unknown>;
   public_meta?: Record<string, unknown>;
+  links?: { skills?: string[] };
   /** Set on the first protected secret so the daemon atomically guards single VMK init. */
   establishing_vmk?: boolean;
 };
@@ -336,6 +350,7 @@ export type ApiContextType = {
   getVaultAgentPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
+  getVaultProvisionRequest: (name: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; request: VaultRequest | null }>;
   getVaultRequests: (params?: { status?: string; type?: string; limit?: number }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; requests: VaultRequest[] }>;
   denyVaultRequest: (requestId: string) => Promise<{ ok: boolean; request?: VaultRequest; code?: string; message?: string }>;
   fulfillVaultAccessRequest: (requestId: string, payload: VaultAccessFulfillmentPayload) => Promise<{ ok: boolean; request_id?: string; grant?: VaultGrant; result?: { type: string; grant?: VaultGrant }; code?: string; message?: string }>;
@@ -2049,6 +2064,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getVaultAgentPubkey: () => getCachedJson('/api/vault/agent/pubkey', 1500),
     createVaultSecret: (payload, opts) => postJson('/api/vault/secrets', payload, opts),
     deleteVaultSecret: (name) => deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}`),
+    getVaultProvisionRequest: (name, opts) =>
+      getCachedJson(`/api/vault/provision-requests/${encodeURIComponent(name)}`, 1500, opts),
     getVaultRequests: (params, opts) => {
       const search = new URLSearchParams();
       if (params?.status) search.set('status', params.status);

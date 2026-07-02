@@ -1412,6 +1412,7 @@ def create_vault_secret(payload: dict) -> dict:
     tags = payload.get("tags") if isinstance(payload.get("tags"), list) else None
     policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else None
     public_meta = payload.get("public_meta") if isinstance(payload.get("public_meta"), dict) else None
+    links = payload.get("links") if isinstance(payload.get("links"), dict) else None
     protection = str(payload.get("protection") or "standard").strip().lower()
     establishing_vmk = bool(payload.get("establishing_vmk"))
     kind = str(payload.get("kind") or "static").strip().lower()
@@ -1453,6 +1454,13 @@ def create_vault_secret(payload: dict) -> dict:
                 public_meta=public_meta,
                 establishing_vmk=establishing_vmk,
             )
+            if links and isinstance(links.get("skills"), list):
+                vault_service.link_secret_to_skills(
+                    conn,
+                    name,
+                    [str(skill) for skill in links["skills"] if isinstance(skill, str)],
+                    source="agent",
+                )
     except vault_service.InvalidSecretNameError as exc:
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name") from exc
     except vault_service.SecretExistsError as exc:
@@ -1496,6 +1504,18 @@ def get_vault_requests(*, status: Optional[str] = "pending", request_type: Optio
     with engine.begin() as conn:
         requests = vault_service.list_requests(conn, status=status, request_type=request_type, limit=limit)
     return {"ok": True, "requests": requests}
+
+
+def get_vault_provision_request_by_name(name: str) -> dict:
+    from storage import vault_crypto, vault_service
+
+    requested_name = str(name or "").strip()
+    if not vault_crypto.is_valid_secret_name(requested_name):
+        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
+    engine = _vault_engine()
+    with engine.begin() as conn:
+        request = vault_service.find_pending_provision_request(conn, requested_name)
+    return {"ok": True, "request": request}
 
 
 def _vault_request_result(conn, request: dict) -> dict | None:

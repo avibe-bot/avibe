@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { ApiError, useApi, type DependencyItem } from '@/context/ApiContext';
+import { ApiError, useApi, type DependencyItem, type VaultRequestSpec } from '@/context/ApiContext';
 import { cn } from '@/lib/utils';
 import {
   generateSigningKey,
@@ -110,6 +110,7 @@ export const VaultSecretForm: React.FC<{
   onCreated: (name: string, reason?: 'created' | 'already_exists') => void;
   className?: string;
   defaultProtection?: VaultProtection;
+  requestSpec?: VaultRequestSpec | null;
   treatExistingAsFulfilled?: boolean;
   groups?: string[];
 }> = ({
@@ -118,6 +119,7 @@ export const VaultSecretForm: React.FC<{
   onCreated,
   className,
   defaultProtection = 'standard',
+  requestSpec,
   treatExistingAsFulfilled = false,
   groups = [],
 }) => {
@@ -127,22 +129,22 @@ export const VaultSecretForm: React.FC<{
   const [value, setValue] = useState('');
   const [staticSource, setStaticSource] = useState<StaticSecretSource>('text');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [kind, setKind] = useState<VaultKind>('static');
+  const [kind, setKind] = useState<VaultKind>(requestSpec?.kind ?? 'static');
   const [signingSource, setSigningSource] = useState<'generate' | 'import'>('generate');
   const [importHex, setImportHex] = useState('');
   const [signingKey, setSigningKey] = useState<SigningKeyMaterial | null>(null);
   const [signingError, setSigningError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [group, setGroup] = useState(DEFAULT_GROUP);
-  const [tags, setTags] = useState<string[]>([]);
-  const [description, setDescription] = useState('');
-  const [allowHosts, setAllowHosts] = useState<string[]>([]);
-  const [fetchAuthMode, setFetchAuthMode] = useState<FetchAuthMode>('bearer');
-  const [fetchAuthName, setFetchAuthName] = useState('');
-  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [group, setGroup] = useState(requestSpec?.group ?? DEFAULT_GROUP);
+  const [tags, setTags] = useState<string[]>(requestSpec?.tags ?? []);
+  const [description, setDescription] = useState(requestSpec?.description ?? '');
+  const [allowHosts, setAllowHosts] = useState<string[]>(requestSpec?.policy?.allowed_hosts ?? []);
+  const [fetchAuthMode, setFetchAuthMode] = useState<FetchAuthMode>(requestSpec?.policy?.auth?.type ?? 'bearer');
+  const [fetchAuthName, setFetchAuthName] = useState(requestSpec?.policy?.auth?.name ?? '');
+  const [advancedOpen, setAdvancedOpen] = useState(Boolean(requestSpec?.description || requestSpec?.tags?.length || requestSpec?.policy));
   const [tagsPending, setTagsPending] = useState(false);
   const [hostsPending, setHostsPending] = useState(false);
-  const [protection, setProtection] = useState<VaultProtection>(defaultProtection);
+  const [protection, setProtection] = useState<VaultProtection>(requestSpec?.protection ?? defaultProtection);
   const [showValue, setShowValue] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [checkingAvault, setCheckingAvault] = useState(true);
@@ -176,6 +178,19 @@ export const VaultSecretForm: React.FC<{
     // protectedVault.refresh is stable (useCallback); only re-check when the tier changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [protection]);
+
+  useEffect(() => {
+    if (!requestSpec) return;
+    if (requestSpec.kind) setKind(requestSpec.kind);
+    if (requestSpec.protection) setProtection(requestSpec.protection);
+    if (requestSpec.group) setGroup(requestSpec.group);
+    if (requestSpec.description) setDescription(requestSpec.description);
+    if (requestSpec.tags) setTags(requestSpec.tags);
+    if (requestSpec.policy?.allowed_hosts) setAllowHosts(requestSpec.policy.allowed_hosts);
+    if (requestSpec.policy?.auth?.type) setFetchAuthMode(requestSpec.policy.auth.type);
+    if (requestSpec.policy?.auth?.name) setFetchAuthName(requestSpec.policy.auth.name);
+    if (requestSpec.description || requestSpec.tags?.length || requestSpec.policy) setAdvancedOpen(true);
+  }, [requestSpec]);
 
   const p2Ready = useMemo(() => avaultP2Ready(avaultDep), [avaultDep]);
   const secretName = (fixedName ?? name).trim().toUpperCase();
@@ -318,6 +333,7 @@ export const VaultSecretForm: React.FC<{
         description: description.trim() || undefined,
         tags: tags.length ? tags : undefined,
         policy: Object.keys(policy).length ? policy : undefined,
+        links: requestSpec?.links?.skills?.length ? { skills: requestSpec.links.skills } : undefined,
         ...(isKeypair && signingKey
           ? {
               kind: 'keypair',

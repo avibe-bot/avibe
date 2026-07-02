@@ -5167,13 +5167,14 @@ def cmd_vault_request(args):
         name = args.name
         if not vault_crypto.is_valid_secret_name(name):
             raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name", help_command=help_command)
+        spec = _load_vault_request_spec(args, help_command=help_command)
         engine = _open_vault_engine()
         with engine.begin() as conn:
             req = vault_service.create_provision_request(
                 conn,
                 name,
                 reason=getattr(args, "reason", None),
-                skill=getattr(args, "skill", None),
+                spec=spec,
                 requester={"source": "cli", "pid": os.getpid()},
             )
         if req.get("status") == "fulfilled":
@@ -5183,17 +5184,21 @@ def cmd_vault_request(args):
                 request_id=req["id"],
                 secret_name=name,
                 status="fulfilled",
+                request=req,
                 message=f"'{name}' is already in the vault — use it via: vibe vault run --env {name} -- <command>",
             )
             return 0
         wait_seconds = getattr(args, "wait", None)
         if wait_seconds:
-            if _wait_for_provision(req["id"], timeout=float(wait_seconds)):
+            waited = _wait_for_provision(req["id"], timeout=float(wait_seconds))
+            if waited:
+                fulfilled_request = waited.get("request") or req
                 _print_cli_payload(
                     "vault_request",
                     request_id=req["id"],
                     secret_name=name,
                     status="fulfilled",
+                    request=fulfilled_request,
                     message=f"'{name}' is now available — use it via: vibe vault run --env {name} -- <command>",
                 )
                 return 0
@@ -5211,6 +5216,7 @@ def cmd_vault_request(args):
             request_id=req["id"],
             secret_name=name,
             status="pending",
+            request=req,
             message=(
                 f"Recorded a request for '{name}'. The user fulfills it by adding a secret named "
                 f"{name} on the Vaults page (Add secret) — saving it marks this request fulfilled. "
@@ -5220,6 +5226,9 @@ def cmd_vault_request(args):
         return 0
     except TaskCliError as exc:
         _print_task_error(exc)
+        return 1
+    except vault_service.VaultServiceError as exc:
+        _print_task_error(TaskCliError(str(exc), code="invalid_spec", help_command=help_command))
         return 1
     except Exception as exc:
         _print_task_error(exc, help_command=help_command)
@@ -5342,6 +5351,42 @@ def cmd_vault_await(args):
     except Exception as exc:
         _print_task_error(exc, help_command=help_command)
         return 1
+
+
+def _load_vault_request_spec(args, *, help_command: str) -> dict | None:
+    spec_sources = [
+        value
+        for value in (
+            getattr(args, "spec_json", None),
+            getattr(args, "spec", None),
+        )
+        if value
+    ]
+    if len(spec_sources) > 1:
+        raise TaskCliError("use only one of --spec-json or --spec", code="invalid_spec", help_command=help_command)
+
+    raw: str | None = None
+    if getattr(args, "spec_json", None):
+        raw = str(args.spec_json)
+    elif getattr(args, "spec", None):
+        spec_arg = str(args.spec)
+        if spec_arg == "-":
+            raw = sys.stdin.read()
+        else:
+            try:
+                raw = Path(spec_arg).read_text(encoding="utf-8")
+            except OSError as exc:
+                raise TaskCliError(f"cannot read --spec: {exc}", code="spec_unreadable", help_command=help_command) from exc
+
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        raise TaskCliError(f"invalid request spec JSON: {exc}", code="invalid_spec", help_command=help_command) from exc
+    if not isinstance(parsed, dict):
+        raise TaskCliError("request spec must be a JSON object", code="invalid_spec", help_command=help_command)
+    return parsed
 
 
 def _host_allowed(host, allowed) -> bool:
@@ -8978,7 +9023,8 @@ def build_parser():
     )
     vault_request_parser.add_argument("name", help="Secret name being requested")
     vault_request_parser.add_argument("--reason", help="Why the secret is needed (shown to the user)")
-    vault_request_parser.add_argument("--skill", help="Skill that needs it (shown to the user)")
+    vault_request_parser.add_argument("--spec", help="Read non-secret creation hints from this JSON file, or '-' for stdin")
+    vault_request_parser.add_argument("--spec-json", help="Inline JSON object with non-secret creation hints")
     vault_request_parser.add_argument("--wait", type=float, metavar="SECONDS", help="Block until fulfilled, up to SECONDS")
     vault_request_parser.add_argument("--no-wait", action="store_true", help="Return immediately (default)")
     _add_json_noop(vault_request_parser)
