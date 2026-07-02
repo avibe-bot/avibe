@@ -128,6 +128,33 @@ class MessageDispatcherPlatformLimitTests(unittest.IsolatedAsyncioTestCase):
         persist.assert_called_once()
         self.assertEqual(persist.call_args.args[1], "toolcall")
 
+    async def test_toolcall_delivery_override_to_wechat_is_persisted_but_never_delivered(self):
+        controller = _StubController("slack")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "delivery_override": {
+                    "platform": "wechat",
+                    "user_id": "wechat-user",
+                    "channel_id": "wechat-user",
+                }
+            },
+        )
+
+        with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
+            message_id = await dispatcher.emit_agent_message(context, "toolcall", "exec_command")
+
+        self.assertIsNone(message_id)
+        self.assertEqual(controller.im_client.sent, [])
+        persist.assert_called_once()
+        persisted_context = persist.call_args.args[0]
+        self.assertEqual(persisted_context.platform, "wechat")
+        self.assertEqual(persisted_context.channel_id, "wechat-user")
+        self.assertEqual(persist.call_args.args[1], "toolcall")
+
     def test_result_split_boundary_never_exceeds_platform_limit(self):
         dispatcher = ConsolidatedMessageDispatcher(_StubController("wechat"))
 

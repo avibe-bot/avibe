@@ -1549,10 +1549,10 @@ class ConsolidatedMessageDispatcher:
         # requirement: the process log is complete even when a channel hides it).
         persist_agent_message(target_context, canonical_type, persist_text)
 
-        if canonical_type == "toolcall" and not self._supports_toolcall_delivery(context):
+        if canonical_type == "toolcall" and not self._supports_toolcall_delivery(target_context):
             logger.info(
                 "Skipping toolcall delivery for platform %s; persisted local process log only.",
-                self._get_platform(context),
+                self._get_platform(target_context),
             )
             return None
 
