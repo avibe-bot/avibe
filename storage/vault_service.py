@@ -950,20 +950,21 @@ def create_secret(
     if kind != "keypair" and signer_kind is not None:
         raise VaultServiceError("signer_kind is only valid for keypair secrets")
     provision_row: dict[str, Any] | None = None
+    existing_secret = conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name)).first() is not None
     if provision_request_id:
         _expire_pending_requests(conn)
-        provision_row = _load_request_for_transition(
-            conn,
-            provision_request_id,
-            request_type="provision",
-            allowed_statuses={"pending"},
-            wrong_type_message="secret create must complete a provision request",
-            wrong_status_message="provision request is not pending",
-            expired_message="provision request has expired",
-        )
+        provision_row = _load_request_row(conn, provision_request_id)
+        if provision_row.get("request_type") != "provision":
+            raise InvalidRequestError("secret create must complete a provision request")
         if provision_row.get("secret_name") != name:
             raise InvalidRequestError("provision request secret name does not match")
-    if conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name)).first() is not None:
+        if provision_row.get("status") == "expired":
+            raise InvalidRequestError("provision request has expired")
+        if provision_row.get("status") == "fulfilled" and existing_secret:
+            raise SecretExistsError(name)
+        if provision_row.get("status") != "pending":
+            raise InvalidRequestError("provision request is not pending")
+    if existing_secret:
         raise SecretExistsError(name)
 
     if establishing_vmk and protection == "protected":

@@ -482,6 +482,14 @@ def test_request_specific_create_fulfills_only_that_provision_request(vault):
     assert rows == {old_req["id"]: "pending", new_req["id"]: "fulfilled"}
 
 
+def test_request_specific_create_treats_fulfilled_replay_as_existing(vault):
+    with vault.begin() as conn:
+        req = vs.create_provision_request(conn, "ASKED_KEY")
+        vs.create_secret(conn, name="ASKED_KEY", sealed=_sealed("first"), provision_request_id=req["id"])
+        with pytest.raises(vs.SecretExistsError):
+            vs.create_secret(conn, name="ASKED_KEY", sealed=_sealed("second"), provision_request_id=req["id"])
+
+
 def test_request_specific_create_rejects_mismatched_provision_name(vault):
     with vault.begin() as conn:
         req = vs.create_provision_request(conn, "OTHER_KEY")
