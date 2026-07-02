@@ -31,9 +31,8 @@ export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> =
     loadRequest
       .then((res) => {
         if (!alive) return;
-        const card = (res.request?.card ?? null) as { spec?: VaultRequestSpec } | null;
         setResolvedRequest(res.request ?? null);
-        setRequestSpec(card?.spec ?? null);
+        setRequestSpec(((res.request?.card as { spec?: VaultRequestSpec } | null)?.spec ?? null) as VaultRequestSpec | null);
       })
       .catch(() => {
         if (!alive) return;
@@ -56,6 +55,11 @@ export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> =
       </span>
     );
   }
+  const requestCard = (resolvedRequest?.card ?? null) as { default_protection?: unknown } | null;
+  const defaultProtection =
+    requestCard?.default_protection === 'standard' || requestCard?.default_protection === 'protected'
+      ? requestCard.default_protection
+      : undefined;
 
   return (
     <>
@@ -87,6 +91,7 @@ export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> =
               fixedName={name}
               provisionRequestId={resolvedRequest?.id ?? requestId ?? null}
               requestSpec={requestSpec}
+              defaultProtection={defaultProtection}
               onCancel={() => setOpen(false)}
               onCreated={() => {
                 setFulfilled(true);

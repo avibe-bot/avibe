@@ -457,7 +457,7 @@ def test_create_fulfills_pending_provision_request(vault):
     assert status == "fulfilled"
 
 
-def test_request_specific_create_fulfills_only_that_provision_request(vault):
+def test_request_specific_create_uses_target_spec_and_fulfills_sibling_requests(vault):
     with vault.begin() as conn:
         old_req = vs.create_provision_request(conn, "ASKED_KEY", spec={"group": "old"})
         new_req = vs.create_provision_request(conn, "ASKED_KEY", spec={"group": "new"})
@@ -479,7 +479,7 @@ def test_request_specific_create_fulfills_only_that_provision_request(vault):
                 )
             ).mappings()
         }
-    assert rows == {old_req["id"]: "pending", new_req["id"]: "fulfilled"}
+    assert rows == {old_req["id"]: "fulfilled", new_req["id"]: "fulfilled"}
 
 
 def test_request_specific_create_treats_fulfilled_replay_as_existing(vault):

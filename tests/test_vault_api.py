@@ -250,7 +250,7 @@ def test_get_provision_request_by_name_returns_none_when_ambiguous():
     assert result["request"] is None
 
 
-def test_create_secret_with_provision_request_id_fulfills_only_that_request(monkeypatch):
+def test_create_secret_with_provision_request_id_fulfills_sibling_requests(monkeypatch):
     seal = Mock(return_value=_sealed("api"))
     monkeypatch.setattr(api, "avault_seal_blind_box", seal)
     with api._vault_engine().begin() as conn:
@@ -276,7 +276,7 @@ def test_create_secret_with_provision_request_id_fulfills_only_that_request(monk
                 )
             ).mappings()
         }
-    assert rows == {old_req["id"]: "pending", new_req["id"]: "fulfilled"}
+    assert rows == {old_req["id"]: "fulfilled", new_req["id"]: "fulfilled"}
 
 
 def test_create_secret_with_fulfilled_provision_request_returns_secret_exists(monkeypatch):

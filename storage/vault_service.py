@@ -1010,26 +1010,27 @@ def create_secret(
         # SecretExistsError → 409 so the racing already-fulfilled ask is handled, not a 500.
         raise SecretExistsError(name) from exc
     audit(conn, "created", secret_name=name)
+    decided_at = _now()
     if provision_row is not None:
         result = conn.execute(
             vault_requests.update()
             .where(vault_requests.c.id == provision_row["id"], vault_requests.c.status == "pending")
-            .values(status="fulfilled", decided_at=_now())
+            .values(status="fulfilled", decided_at=decided_at)
         )
         if result.rowcount != 1:
             raise InvalidRequestError("provision request is not pending")
-    else:
-        # A manual create not tied to a specific request still satisfies existing name-only
-        # dynamic asks and keeps the original `$<NAME>` behavior working.
-        conn.execute(
-            vault_requests.update()
-            .where(
-                vault_requests.c.request_type == "provision",
-                vault_requests.c.secret_name == name,
-                vault_requests.c.status == "pending",
-            )
-            .values(status="fulfilled", decided_at=_now())
+    # Once the secret exists, every same-name pending provision ask is satisfied. A
+    # request-specific create still uses only that request's spec for the secret metadata,
+    # but sibling waiters should not keep timing out or resurfacing stale rows.
+    conn.execute(
+        vault_requests.update()
+        .where(
+            vault_requests.c.request_type == "provision",
+            vault_requests.c.secret_name == name,
+            vault_requests.c.status == "pending",
         )
+        .values(status="fulfilled", decided_at=decided_at)
+    )
     return _meta_payload(_require_row(conn, name))
 
 

@@ -19,7 +19,12 @@ const AddSecretDialog: React.FC<{
   request?: VaultRequest | null;
 }> = ({ onClose, onCreated, groups, request }) => {
   const { t } = useTranslation();
-  const requestSpec = ((request?.card as { spec?: VaultRequestSpec } | null)?.spec ?? null) as VaultRequestSpec | null;
+  const requestCard = (request?.card ?? null) as { default_protection?: unknown; spec?: VaultRequestSpec } | null;
+  const requestSpec = (requestCard?.spec ?? null) as VaultRequestSpec | null;
+  const defaultProtection =
+    requestCard?.default_protection === 'standard' || requestCard?.default_protection === 'protected'
+      ? requestCard.default_protection
+      : undefined;
   const fixedName = request?.secret_name ?? undefined;
 
   return (
@@ -37,6 +42,7 @@ const AddSecretDialog: React.FC<{
           fixedName={fixedName}
           provisionRequestId={request?.id ?? null}
           requestSpec={requestSpec}
+          defaultProtection={defaultProtection}
           onCancel={onClose}
           onCreated={onCreated}
           groups={groups}
