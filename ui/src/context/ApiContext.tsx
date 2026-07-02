@@ -351,6 +351,7 @@ export type ApiContextType = {
   createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
   getVaultProvisionRequest: (name: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; request: VaultRequest | null }>;
+  getVaultProvisionRequestById: (requestId: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; request: VaultRequest | null }>;
   getVaultRequests: (params?: { status?: string; type?: string; limit?: number }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; requests: VaultRequest[] }>;
   denyVaultRequest: (requestId: string) => Promise<{ ok: boolean; request?: VaultRequest; code?: string; message?: string }>;
   fulfillVaultAccessRequest: (requestId: string, payload: VaultAccessFulfillmentPayload) => Promise<{ ok: boolean; request_id?: string; grant?: VaultGrant; result?: { type: string; grant?: VaultGrant }; code?: string; message?: string }>;
@@ -2066,6 +2067,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     deleteVaultSecret: (name) => deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}`),
     getVaultProvisionRequest: (name, opts) =>
       getCachedJson(`/api/vault/provision-requests/${encodeURIComponent(name)}`, 1500, opts),
+    getVaultProvisionRequestById: (requestId, opts) =>
+      getCachedJson(`/api/vault/provision-requests/by-id/${encodeURIComponent(requestId)}`, 1500, opts),
     getVaultRequests: (params, opts) => {
       const search = new URLSearchParams();
       if (params?.status) search.set('status', params.status);

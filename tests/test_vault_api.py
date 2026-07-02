@@ -221,6 +221,35 @@ def test_get_provision_request_by_name_returns_pending_spec():
     assert result["request"]["card"]["spec"]["group"] == "github"
 
 
+def test_get_provision_request_returns_request_id_match():
+    with api._vault_engine().begin() as conn:
+        old_req = vault_service.create_provision_request(
+            conn,
+            "GH_TOKEN",
+            spec={"group": "old"},
+        )
+        vault_service.create_provision_request(
+            conn,
+            "GH_TOKEN",
+            spec={"group": "new"},
+        )
+
+    result = api.get_vault_provision_request(old_req["id"])
+
+    assert result["request"]["id"] == old_req["id"]
+    assert result["request"]["card"]["spec"]["group"] == "old"
+
+
+def test_get_provision_request_by_name_returns_none_when_ambiguous():
+    with api._vault_engine().begin() as conn:
+        vault_service.create_provision_request(conn, "GH_TOKEN", spec={"group": "old"})
+        vault_service.create_provision_request(conn, "GH_TOKEN", spec={"group": "new"})
+
+    result = api.get_vault_provision_request_by_name("GH_TOKEN")
+
+    assert result["request"] is None
+
+
 def test_duplicate_name_conflict(monkeypatch):
     from unittest.mock import Mock
 

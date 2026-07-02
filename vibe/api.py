@@ -1518,6 +1518,18 @@ def get_vault_provision_request_by_name(name: str) -> dict:
     return {"ok": True, "request": request}
 
 
+def get_vault_provision_request(request_id: str) -> dict:
+    from storage import vault_service
+
+    requested_id = str(request_id or "").strip()
+    if not requested_id:
+        raise VaultApiError("request_id is required", code="missing_request_id")
+    engine = _vault_engine()
+    with engine.begin() as conn:
+        request = vault_service.get_pending_provision_request(conn, requested_id)
+    return {"ok": True, "request": request}
+
+
 def _vault_request_result(conn, request: dict) -> dict | None:
     from storage import vault_service
 

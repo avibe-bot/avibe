@@ -2364,8 +2364,10 @@
       "reviewTitle": "审阅请求",
       "review": "审阅",
       "waiting": "等待批准",
+      "waitingForValue": "等待填写",
       "access": "使用密钥",
       "sign": "签名",
+      "provision": "填写密钥",
       "approved": "已批准访问",
       "signed": "已返回签名",
       "denied": "已拒绝请求"

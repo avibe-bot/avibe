@@ -20,6 +20,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy import or_, select
 from sqlalchemy.engine import Connection
@@ -272,6 +273,36 @@ def _string_list(value: Any, *, field: str) -> list[str]:
     return out
 
 
+def _normalize_allowed_host(value: str, *, field: str) -> str:
+    raw = value.strip().lower()
+    if not raw:
+        raise VaultServiceError(f"{field} must contain non-empty host strings")
+    leading_dot = raw.startswith(".")
+    hostish = raw[1:] if leading_dot else raw
+    if "://" in hostish:
+        host = urlsplit(hostish).hostname or ""
+    elif hostish.startswith("[") or "/" in hostish or "?" in hostish or "#" in hostish or hostish.count(":") == 1:
+        host = urlsplit(f"//{hostish}").hostname or ""
+    else:
+        host = hostish
+    if not host or any(ch.isspace() for ch in host) or "/" in host or "*" in host:
+        raise VaultServiceError(f"{field} entries must be hostnames, URLs, or host:port values")
+    return f".{host}" if leading_dot else host
+
+
+def _allowed_host_list(value: Any, *, field: str) -> list[str]:
+    return list(dict.fromkeys(_normalize_allowed_host(item, field=field) for item in _string_list(value, field=field)))
+
+
+def _optional_string(value: Any, *, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise VaultServiceError(f"{field} must be a string")
+    stripped = value.strip()
+    return stripped or None
+
+
 def normalize_provision_spec(spec: Any) -> dict[str, Any]:
     """Return non-secret creation hints for a provision request.
 
@@ -292,29 +323,29 @@ def normalize_provision_spec(spec: Any) -> dict[str, Any]:
     normalized: dict[str, Any] = {}
     kind = spec.get("kind")
     if kind is not None:
-        kind = str(kind).strip().lower()
+        if not isinstance(kind, str):
+            raise VaultServiceError("spec.kind must be a string")
+        kind = kind.strip().lower()
         if kind != "static":
             raise VaultServiceError("spec.kind currently supports only 'static' for provision requests")
         normalized["kind"] = kind
 
     protection = spec.get("protection")
     if protection is not None:
-        protection = str(protection).strip().lower()
+        if not isinstance(protection, str):
+            raise VaultServiceError("spec.protection must be a string")
+        protection = protection.strip().lower()
         if protection not in {"standard", "protected"}:
             raise VaultServiceError("spec.protection must be 'standard' or 'protected'")
         normalized["protection"] = protection
 
-    group = spec.get("group")
-    if group is not None:
-        group = str(group).strip()
-        if group:
-            normalized["group"] = group
+    group = _optional_string(spec.get("group"), field="spec.group") if "group" in spec else None
+    if group:
+        normalized["group"] = group
 
-    description = spec.get("description")
-    if description is not None:
-        description = str(description).strip()
-        if description:
-            normalized["description"] = description
+    description = _optional_string(spec.get("description"), field="spec.description") if "description" in spec else None
+    if description:
+        normalized["description"] = description
 
     tags = _string_list(spec.get("tags"), field="spec.tags") if "tags" in spec else []
     if tags:
@@ -328,7 +359,7 @@ def normalize_provision_spec(spec: Any) -> dict[str, Any]:
         if extra_policy_keys:
             raise VaultServiceError(f"unsupported spec.policy fields: {', '.join(sorted(extra_policy_keys))}")
         normalized_policy: dict[str, Any] = {}
-        allowed_hosts = _string_list(policy.get("allowed_hosts"), field="spec.policy.allowed_hosts") if "allowed_hosts" in policy else []
+        allowed_hosts = _allowed_host_list(policy.get("allowed_hosts"), field="spec.policy.allowed_hosts") if "allowed_hosts" in policy else []
         if allowed_hosts:
             normalized_policy["allowed_hosts"] = allowed_hosts
         auth = policy.get("auth")
@@ -338,11 +369,14 @@ def normalize_provision_spec(spec: Any) -> dict[str, Any]:
             extra_auth_keys = set(auth) - PROVISION_SPEC_ALLOWED_AUTH_KEYS
             if extra_auth_keys:
                 raise VaultServiceError(f"unsupported spec.policy.auth fields: {', '.join(sorted(extra_auth_keys))}")
-            auth_type = str(auth.get("type") or "bearer").strip().lower()
+            raw_auth_type = auth.get("type") or "bearer"
+            if not isinstance(raw_auth_type, str):
+                raise VaultServiceError("spec.policy.auth.type must be a string")
+            auth_type = raw_auth_type.strip().lower()
             if auth_type not in {"bearer", "header", "query"}:
                 raise VaultServiceError("spec.policy.auth.type must be bearer, header, or query")
             normalized_auth: dict[str, Any] = {"type": auth_type}
-            auth_name = str(auth.get("name") or "").strip()
+            auth_name = _optional_string(auth.get("name"), field="spec.policy.auth.name") if "name" in auth else None
             if auth_type in {"header", "query"}:
                 if not auth_name:
                     raise VaultServiceError("spec.policy.auth.name is required for header/query auth")
@@ -1898,7 +1932,7 @@ def list_requests(
 
 def find_pending_provision_request(conn: Connection, name: str) -> dict[str, Any] | None:
     _expire_pending_requests(conn)
-    row = (
+    rows = list(
         conn.execute(
             select(vault_requests)
             .where(
@@ -1907,6 +1941,24 @@ def find_pending_provision_request(conn: Connection, name: str) -> dict[str, Any
                 vault_requests.c.secret_name == name,
             )
             .order_by(vault_requests.c.created_at.desc(), vault_requests.c.id.desc())
+            .limit(2)
+        ).mappings()
+    )
+    if len(rows) != 1:
+        return None
+    return _request_row_payload(dict(rows[0]), conn=conn, audience=REQUEST_AUDIENCE_UI)
+
+
+def get_pending_provision_request(conn: Connection, request_id: str) -> dict[str, Any] | None:
+    _expire_pending_requests(conn)
+    row = (
+        conn.execute(
+            select(vault_requests)
+            .where(
+                vault_requests.c.id == request_id,
+                vault_requests.c.status == "pending",
+                vault_requests.c.request_type == "provision",
+            )
             .limit(1)
         )
         .mappings()

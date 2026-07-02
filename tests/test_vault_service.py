@@ -506,10 +506,70 @@ def test_provision_request_carries_secure_input_card_without_value(vault):
     assert "secret-value" not in json.dumps(listed)
 
 
+def test_provision_request_spec_normalizes_allowed_hosts(vault):
+    with vault.begin() as conn:
+        req = vs.create_provision_request(
+            conn,
+            "HOST_KEY",
+            spec={"policy": {"allowed_hosts": ["https://api.github.com/v1", "api.github.com:443", ".Example.com"]}},
+        )
+
+    assert req["card"]["spec"]["policy"]["allowed_hosts"] == ["api.github.com", ".example.com"]
+
+
 def test_provision_request_spec_rejects_secret_material(vault):
     with vault.begin() as conn:
         with pytest.raises(vs.VaultServiceError):
             vs.create_provision_request(conn, "BAD_CARD_KEY", spec={"policy": {"value": "secret"}})
+
+
+def test_provision_request_spec_rejects_object_valued_scalar_fields(vault):
+    with vault.begin() as conn:
+        with pytest.raises(vs.VaultServiceError, match="spec.description must be a string"):
+            vs.create_provision_request(conn, "BAD_DESC_KEY", spec={"description": {"text": "not allowed"}})
+        with pytest.raises(vs.VaultServiceError, match="spec.policy.auth.name must be a string"):
+            vs.create_provision_request(
+                conn,
+                "BAD_AUTH_KEY",
+                spec={"policy": {"auth": {"type": "header", "name": {"header": "X-Api-Key"}}}},
+            )
+
+
+def test_get_pending_provision_request_resolves_by_request_id(vault):
+    with vault.begin() as conn:
+        conn.execute(
+            vault_requests.insert(),
+            [
+                {
+                    "id": "vrq_old",
+                    "request_type": "provision",
+                    "secret_name": "DUP_KEY",
+                    "requester": None,
+                    "delivery": json.dumps({"card": vs._secure_input_card("DUP_KEY", request_id="vrq_old", spec={"group": "old"})}),
+                    "status": "pending",
+                    "message_id": None,
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                },
+                {
+                    "id": "vrq_new",
+                    "request_type": "provision",
+                    "secret_name": "DUP_KEY",
+                    "requester": None,
+                    "delivery": json.dumps({"card": vs._secure_input_card("DUP_KEY", request_id="vrq_new", spec={"group": "new"})}),
+                    "status": "pending",
+                    "message_id": None,
+                    "created_at": "2026-01-01T00:00:01+00:00",
+                },
+            ],
+        )
+
+    with vault.begin() as conn:
+        old_lookup = vs.get_pending_provision_request(conn, "vrq_old")
+        ambiguous_by_name = vs.find_pending_provision_request(conn, "DUP_KEY")
+
+    assert old_lookup["id"] == "vrq_old"
+    assert old_lookup["card"]["spec"]["group"] == "old"
+    assert ambiguous_by_name is None
 
 
 def test_create_secret_can_link_to_requested_skill(vault):

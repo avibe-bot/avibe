@@ -5119,21 +5119,24 @@ def cmd_vault_run(args):
     return exit_code
 
 
-def _wait_for_provision(request_id: str, *, timeout: float, poll_interval: float = 2.0) -> bool:
-    from storage.models import vault_requests
+def _wait_for_provision(request_id: str, *, timeout: float, poll_interval: float = 2.0) -> dict | None:
+    from storage import vault_service
 
     deadline = time.monotonic() + timeout
     engine = _open_vault_engine()
     while time.monotonic() < deadline:
-        with engine.connect() as conn:
-            row = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == request_id)).first()
-        if row and row[0] == "fulfilled":
-            return True
+        with engine.begin() as conn:
+            try:
+                request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+            except vault_service.RequestNotFoundError:
+                raise
+        if request.get("status") == "fulfilled":
+            return request
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         time.sleep(min(poll_interval, remaining))
-    return False
+    return None
 
 
 def _wait_for_vault_request(request_id: str, *, timeout: float, poll_interval: float = 2.0) -> dict | None:
@@ -5192,13 +5195,12 @@ def cmd_vault_request(args):
         if wait_seconds:
             waited = _wait_for_provision(req["id"], timeout=float(wait_seconds))
             if waited:
-                fulfilled_request = waited.get("request") or req
                 _print_cli_payload(
                     "vault_request",
                     request_id=req["id"],
                     secret_name=name,
                     status="fulfilled",
-                    request=fulfilled_request,
+                    request=waited,
                     message=f"'{name}' is now available — use it via: vibe vault run --env {name} -- <command>",
                 )
                 return 0

@@ -1333,6 +1333,18 @@ def test_request_for_existing_secret_returns_fulfilled(tmp_path, capfd, monkeypa
     assert json.loads(capfd.readouterr().out)["status"] == "fulfilled"
 
 
+def test_request_wait_outputs_fulfilled_request(capfd, monkeypatch):
+    def wait_mock(request_id, *, timeout, poll_interval=2.0):
+        return {"id": request_id, "status": "fulfilled", "request_type": "provision", "secret_name": "WAIT_KEY"}
+
+    monkeypatch.setattr(cli, "_wait_for_provision", wait_mock)
+
+    assert cli.cmd_vault_request(_ns(name="WAIT_KEY", wait=30)) == 0
+    payload = json.loads(capfd.readouterr().out)
+    assert payload["status"] == "fulfilled"
+    assert payload["request"]["status"] == "fulfilled"
+
+
 def test_key_export_calls_avault_and_audits(tmp_path, capfd, monkeypatch):
     from unittest.mock import Mock
 

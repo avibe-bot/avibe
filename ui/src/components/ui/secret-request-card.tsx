@@ -12,7 +12,7 @@ import { cn } from '@/lib/utils';
  * asked for a secret; this card is self-contained so it can live inline inside the
  * markdown renderer. Browser-side sealing is required before the UI can submit values.
  */
-export const SecretRequestCard: React.FC<{ name: string }> = ({ name }) => {
+export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> = ({ name, requestId }) => {
   const { t } = useTranslation();
   const api = useApi();
   const [open, setOpen] = useState(false);
@@ -22,8 +22,10 @@ export const SecretRequestCard: React.FC<{ name: string }> = ({ name }) => {
   useEffect(() => {
     if (!open) return;
     let alive = true;
-    api
-      .getVaultProvisionRequest(name, { handleError: false })
+    const loadRequest = requestId
+      ? api.getVaultProvisionRequestById(requestId, { handleError: false })
+      : api.getVaultProvisionRequest(name, { handleError: false });
+    loadRequest
       .then((res) => {
         if (!alive) return;
         const card = (res.request?.card ?? null) as { spec?: VaultRequestSpec } | null;
@@ -35,7 +37,7 @@ export const SecretRequestCard: React.FC<{ name: string }> = ({ name }) => {
     return () => {
       alive = false;
     };
-  }, [api, name, open]);
+  }, [api, name, open, requestId]);
 
   if (fulfilled) {
     return (

@@ -2365,8 +2365,10 @@
       "reviewTitle": "Review request",
       "review": "Review",
       "waiting": "Waiting for approval",
+      "waitingForValue": "Waiting for value",
       "access": "Use secret",
       "sign": "Sign",
+      "provision": "Provide secret",
       "approved": "Access approved",
       "signed": "Signature returned",
       "denied": "Request denied"
