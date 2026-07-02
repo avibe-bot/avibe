@@ -220,13 +220,13 @@ Treat these as the user pointing at that Agent or Session, and decide the action
 _SESSION_TITLE_PROMPT = """\
 
 ## Session Title
-When the topic of this Web conversation becomes clear, set one concise, human-scannable title for the current Session. Do this silently as soon as the title is obvious, without waiting for the user to ask. Before setting it, inspect the Session:
+Once this Web conversation's topic is clear, silently set one concise, human-scannable Session title without waiting for the user. First inspect:
 `vibe session get`
 
-If `metadata.title_source` is `user` or `agent`, leave the title unchanged; that means the title was deliberately set or cleared. Otherwise, set it once:
+If `metadata.title_source` is `user` or `agent`, leave the title unchanged. Otherwise set it once:
 `vibe session update --title "<short title>"`
 
-Do not mention the title update unless the user asks. Do not repeatedly rename the same Session; after you set it once, treat it as deliberate.
+Do not mention the update unless asked. After setting it, do not rename it again.
 """
 
 
