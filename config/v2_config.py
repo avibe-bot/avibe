@@ -227,6 +227,10 @@ class AudioAsrConfig:
 class RuntimeConfig:
     default_cwd: str
     log_level: str = "INFO"
+    # Linux/cgroup v2 best-effort resource governance for aggregate agent
+    # workload. "auto" enables it only when Avibe can create and write the
+    # delegated cgroup; unsupported systems silently fall back to legacy spawn.
+    resource_governance: dict = field(default_factory=lambda: {"mode": "auto"})
 
 
 @dataclass
@@ -725,6 +729,7 @@ class V2Config:
             "runtime": {
                 "default_cwd": self.runtime.default_cwd,
                 "log_level": self.runtime.log_level,
+                "resource_governance": self.runtime.resource_governance,
             },
             "agents": {
                 "opencode": self.agents.opencode.__dict__,

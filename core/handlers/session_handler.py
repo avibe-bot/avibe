@@ -31,6 +31,7 @@ from config.v2_config import (
 )
 from core.avibe_cloud import avibe_cloud_url_available
 from core.caller_context import caller_env_for_platform_payload
+from core.resource_governance import governor_from_controller
 from core.services.session_fork import pending_native_fork_source
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 
@@ -919,6 +920,10 @@ class SessionHandler(BaseHandler):
         # Connect the client
         try:
             await client.connect()
+            governor_from_controller(self.controller).apply_to_pid(
+                get_claude_client_pid(client),
+                label="claude",
+            )
         except Exception as exc:
             stderr_text = "\n".join(claude_stderr_lines)
             match = CLAUDE_NO_CONVERSATION_RE.search(stderr_text) or CLAUDE_NO_CONVERSATION_RE.search(str(exc))

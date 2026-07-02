@@ -1501,6 +1501,7 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             binary="/old/opencode",
             port=4096,
             request_timeout_seconds=60,
+            resource_governor=agent.controller._agent_resource_governor,
         )
         live_server.refresh_global_config.assert_not_awaited()
         live_server.detach_after_deferred_refresh.assert_awaited_once()
@@ -1546,9 +1547,47 @@ class AgentAuthServiceTests(_IsolatedClaudeConfigDirMixin, unittest.IsolatedAsyn
             binary="/opencode",
             port=4096,
             request_timeout_seconds=60,
+            resource_governor=agent.controller._agent_resource_governor,
         )
         self.assertIs(agent.opencode_config, new_config)
         self.assertIs(agent.controller.config.opencode, new_config)
+
+    async def test_web_opencode_server_uses_v2_runtime_resource_governance(self):
+        from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
+        from modules.agents.opencode.server import OpenCodeServerManager
+
+        controller = _StubController()
+        service = AgentAuthService(controller)
+        v2_config = V2Config(
+            mode="self_host",
+            version="v2",
+            slack=SlackConfig(),
+            agents=AgentsConfig(),
+            runtime=RuntimeConfig(
+                default_cwd=".",
+                resource_governance={
+                    "mode": "enabled",
+                    "agent_group_name": "web-oauth-agents",
+                },
+            ),
+        )
+        server = SimpleNamespace(ensure_running=AsyncMock())
+
+        with (
+            patch("config.v2_config.V2Config.load", return_value=v2_config),
+            patch.object(
+                OpenCodeServerManager,
+                "get_instance",
+                AsyncMock(return_value=server),
+            ) as get_instance,
+        ):
+            result = await service._opencode_server()
+
+        self.assertIs(result, server)
+        server.ensure_running.assert_awaited_once()
+        governor = get_instance.await_args.kwargs["resource_governor"]
+        self.assertEqual(governor.mode, "enabled")
+        self.assertEqual(governor.config["agent_group_name"], "web-oauth-agents")
 
     async def test_opencode_agent_refresh_runtime_config_does_not_restart_uncached_adopted_server_on_refresh_miss(self):
         from config.v2_compat import OpenCodeCompatConfig

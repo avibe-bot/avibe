@@ -14,6 +14,7 @@ import time
 from typing import Dict, Optional
 
 from core.avibe_cloud import avibe_cloud_url_available
+from core.resource_governance import governor_from_controller
 from core.system_prompt_injection import build_system_prompt_injection, get_enabled_agents_for_prompt
 from modules.agents.base import AgentRequest, BaseAgent
 
@@ -58,6 +59,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
         self.opencode_config = opencode_config
 
         self._client_manager = OpenCodeClientManager(opencode_config)
+        self._client_manager.set_resource_governor(governor_from_controller(controller))
         self._session_manager = OpenCodeSessionManager(self.settings_manager, self.name)
 
         self._poll_loop = OpenCodePollLoop(self)
@@ -82,6 +84,7 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
                 binary=self.opencode_config.binary,
                 port=self.opencode_config.port,
                 request_timeout_seconds=self.opencode_config.request_timeout_seconds,
+                resource_governor=governor_from_controller(self.controller),
             )
             adopted_uncached_server = previous_server is not None
         self.opencode_config = opencode_config

@@ -25,6 +25,7 @@ import aiohttp
 
 from config import paths
 from core.process_isolation import isolated_subprocess_kwargs, terminate_process_tree
+from core.resource_governance import is_controller_resource_governor
 from modules.agents.opencode.caller_context import ensure_plugin_installed, server_environment
 from modules.agents.opencode.config_reconciler import OpenCodeConfigReconciler
 from vibe import runtime
@@ -66,10 +67,12 @@ class OpenCodeServerManager:
         binary: str = "opencode",
         port: int = DEFAULT_OPENCODE_PORT,
         request_timeout_seconds: int = 60,
+        resource_governor: Any | None = None,
     ):
         self.binary = binary
         self.port = port
         self.request_timeout_seconds = request_timeout_seconds
+        self.resource_governor = resource_governor
         self.host = DEFAULT_OPENCODE_HOST
         self._process: Optional[Process] = None
         # The event loop ``_process`` was created on. Subprocess transports
@@ -107,12 +110,21 @@ class OpenCodeServerManager:
             self._lock_loop = current_loop
         return self._lock
 
+    def _maybe_update_resource_governor(self, resource_governor: Any | None) -> None:
+        if resource_governor is None:
+            return
+        if is_controller_resource_governor(resource_governor) or not is_controller_resource_governor(
+            self.resource_governor
+        ):
+            self.resource_governor = resource_governor
+
     @classmethod
     async def get_instance(
         cls,
         binary: str = "opencode",
         port: int = DEFAULT_OPENCODE_PORT,
         request_timeout_seconds: int = 60,
+        resource_governor: Any | None = None,
     ) -> "OpenCodeServerManager":
         with cls._class_lock:
             if cls._instance is None:
@@ -120,8 +132,11 @@ class OpenCodeServerManager:
                     binary=binary,
                     port=port,
                     request_timeout_seconds=request_timeout_seconds,
+                    resource_governor=resource_governor,
                 )
-            elif (
+                return cls._instance
+            cls._instance._maybe_update_resource_governor(resource_governor)
+            if (
                 cls._instance.binary != binary
                 or cls._instance.port != port
                 or cls._instance.request_timeout_seconds != request_timeout_seconds
@@ -141,9 +156,11 @@ class OpenCodeServerManager:
         binary: str = "opencode",
         port: int = DEFAULT_OPENCODE_PORT,
         request_timeout_seconds: int = 60,
+        resource_governor: Any | None = None,
     ) -> Optional["OpenCodeServerManager"]:
         with cls._class_lock:
             if cls._instance is not None:
+                cls._instance._maybe_update_resource_governor(resource_governor)
                 return cls._instance
 
             pid_file = paths.get_logs_dir() / "opencode_server.json"
@@ -164,6 +181,7 @@ class OpenCodeServerManager:
                 binary=binary,
                 port=port,
                 request_timeout_seconds=request_timeout_seconds,
+                resource_governor=resource_governor,
             )
             return cls._instance
 
@@ -400,6 +418,12 @@ class OpenCodeServerManager:
             self._pid_file.write_text(json.dumps(payload))
         except Exception as e:
             logger.debug(f"Failed to write OpenCode pid file: {e}")
+
+    def _apply_resource_governance(self, pid: int | None) -> None:
+        governor = getattr(self, "resource_governor", None)
+        apply_to_pid = getattr(governor, "apply_to_pid", None)
+        if callable(apply_to_pid):
+            apply_to_pid(pid, label="opencode serve")
 
     def _write_active_run_sessions_to_pid_file(self) -> None:
         info = self._read_pid_file()
@@ -999,6 +1023,10 @@ class OpenCodeServerManager:
                         cmd = self._get_pid_command(pid)
                         if cmd and self._is_opencode_serve_cmd(cmd, self.port):
                             self._write_pid_file(pid)
+                            self._apply_resource_governance(pid)
+                else:
+                    pid = (pid_info or {}).get("pid") if isinstance(pid_info, dict) else None
+                    self._apply_resource_governance(pid)
 
                 self._base_url = f"http://{self.host}:{self.port}"
                 return self.base_url
@@ -1097,6 +1125,7 @@ class OpenCodeServerManager:
             self._process_loop = current_loop
             if self._process and self._process.pid:
                 self._write_pid_file(self._process.pid)
+                self._apply_resource_governance(self._process.pid)
         except FileNotFoundError:
             raise RuntimeError(
                 f"OpenCode CLI not found at '{self.binary}'. Please install OpenCode or set OPENCODE_CLI_PATH."

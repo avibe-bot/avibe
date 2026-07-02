@@ -1319,6 +1319,122 @@ class OpenCodeServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.port, 4100)
         self.assertEqual(manager.request_timeout_seconds, 15)
 
+    def test_apply_resource_governance_moves_managed_server_pid(self):
+        calls = []
+        governor = types.SimpleNamespace(
+            apply_to_pid=lambda pid, label="agent": calls.append((pid, label)) or True
+        )
+        manager = OpenCodeServerManager(binary="opencode", port=4096, resource_governor=governor)
+
+        manager._apply_resource_governance(1357)
+
+        self.assertEqual(calls, [(1357, "opencode serve")])
+
+    async def test_get_instance_attaches_resource_governor_when_existing_params_differ(self):
+        first = OpenCodeServerManager(binary="/old/opencode", port=4096, request_timeout_seconds=60)
+        governor = types.SimpleNamespace(apply_to_pid=lambda pid, label="agent": True)
+        previous = OpenCodeServerManager._instance
+        OpenCodeServerManager._instance = first
+
+        try:
+            manager = await OpenCodeServerManager.get_instance(
+                binary="/new/opencode",
+                port=4100,
+                request_timeout_seconds=15,
+                resource_governor=governor,
+            )
+        finally:
+            OpenCodeServerManager._instance = previous
+
+        self.assertIs(manager, first)
+        self.assertIs(first.resource_governor, governor)
+        self.assertEqual(first.binary, "/old/opencode")
+        self.assertEqual(first.port, 4096)
+
+    async def test_get_instance_preserves_controller_owned_resource_governor(self):
+        from core.resource_governance import mark_controller_resource_governor
+
+        controller_governor = types.SimpleNamespace(apply_to_pid=lambda pid, label="agent": True)
+        ui_governor = types.SimpleNamespace(apply_to_pid=lambda pid, label="agent": True)
+        mark_controller_resource_governor(controller_governor)
+        first = OpenCodeServerManager(
+            binary="opencode",
+            port=4096,
+            request_timeout_seconds=60,
+            resource_governor=controller_governor,
+        )
+        previous = OpenCodeServerManager._instance
+        OpenCodeServerManager._instance = first
+
+        try:
+            manager = await OpenCodeServerManager.get_instance(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=60,
+                resource_governor=ui_governor,
+            )
+        finally:
+            OpenCodeServerManager._instance = previous
+
+        self.assertIs(manager, first)
+        self.assertIs(first.resource_governor, controller_governor)
+
+    async def test_get_instance_allows_controller_resource_governor_to_take_over(self):
+        from core.resource_governance import mark_controller_resource_governor
+
+        ui_governor = types.SimpleNamespace(apply_to_pid=lambda pid, label="agent": True)
+        controller_governor = types.SimpleNamespace(apply_to_pid=lambda pid, label="agent": True)
+        mark_controller_resource_governor(controller_governor)
+        first = OpenCodeServerManager(
+            binary="opencode",
+            port=4096,
+            request_timeout_seconds=60,
+            resource_governor=ui_governor,
+        )
+        previous = OpenCodeServerManager._instance
+        OpenCodeServerManager._instance = first
+
+        try:
+            manager = await OpenCodeServerManager.get_instance(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=60,
+                resource_governor=controller_governor,
+            )
+        finally:
+            OpenCodeServerManager._instance = previous
+
+        self.assertIs(manager, first)
+        self.assertIs(first.resource_governor, controller_governor)
+
+    async def test_get_instance_if_managed_server_exists_allows_controller_governor_takeover(self):
+        from core.resource_governance import mark_controller_resource_governor
+
+        ui_governor = types.SimpleNamespace(apply_to_pid=lambda pid, label="agent": True)
+        controller_governor = types.SimpleNamespace(apply_to_pid=lambda pid, label="agent": True)
+        mark_controller_resource_governor(controller_governor)
+        first = OpenCodeServerManager(
+            binary="opencode",
+            port=4096,
+            request_timeout_seconds=60,
+            resource_governor=ui_governor,
+        )
+        previous = OpenCodeServerManager._instance
+        OpenCodeServerManager._instance = first
+
+        try:
+            manager = await OpenCodeServerManager.get_instance_if_managed_server_exists(
+                binary="opencode",
+                port=4096,
+                request_timeout_seconds=60,
+                resource_governor=controller_governor,
+            )
+        finally:
+            OpenCodeServerManager._instance = previous
+
+        self.assertIs(manager, first)
+        self.assertIs(first.resource_governor, controller_governor)
+
     async def test_pending_detach_defers_runtime_reload_until_old_port_cleanup(self):
         manager = OpenCodeServerManager(binary="/old/opencode", port=4096, request_timeout_seconds=60)
         terminated = []
