@@ -2607,6 +2607,13 @@ def _backend_for_routing_agent(agent_name: Optional[str]) -> Optional[str]:
         store.close()
 
 
+def _normalize_show_message_types_for_platform(show_message_types: Optional[list], platform: str) -> list[str]:
+    normalized = normalize_show_message_types(show_message_types)
+    if not get_platform_descriptor(platform).capabilities.supports_toolcall_delivery:
+        return [msg_type for msg_type in normalized if msg_type != "toolcall"]
+    return normalized
+
+
 def save_settings(payload: dict) -> dict:
     store = SettingsStore.get_instance()
     platform = payload.get("platform") or _current_platform()
@@ -2616,7 +2623,9 @@ def save_settings(payload: dict) -> dict:
         for channel_id, channel_payload in (payload.get("channels") or {}).items():
             channels[channel_id] = ChannelSettings(
                 enabled=channel_payload.get("enabled", True),
-                show_message_types=normalize_show_message_types(channel_payload.get("show_message_types")),
+                show_message_types=_normalize_show_message_types_for_platform(
+                    channel_payload.get("show_message_types"), platform
+                ),
                 custom_cwd=channel_payload.get("custom_cwd"),
                 routing=_parse_routing(_normalize_backend_routing_payload(channel_payload.get("routing") or {})),
                 require_mention=channel_payload.get("require_mention"),
@@ -3355,7 +3364,7 @@ def _settings_to_payload(store: SettingsStore, platform: str) -> dict:
     for channel_id, settings in store.get_channels_for_platform(platform).items():
         payload["channels"][channel_id] = {
             "enabled": settings.enabled,
-            "show_message_types": normalize_show_message_types(settings.show_message_types),
+            "show_message_types": _normalize_show_message_types_for_platform(settings.show_message_types, platform),
             "custom_cwd": settings.custom_cwd,
             "require_mention": settings.require_mention,
             "require_bind": settings.require_bind,
@@ -3376,7 +3385,7 @@ def _settings_to_payload(store: SettingsStore, platform: str) -> dict:
             "is_admin": u.is_admin,
             "bound_at": u.bound_at,
             "enabled": u.enabled,
-            "show_message_types": u.show_message_types,
+            "show_message_types": _normalize_show_message_types_for_platform(u.show_message_types, platform),
             "custom_cwd": u.custom_cwd,
             "routing": routing_to_compat_dict(u.routing),
         }
@@ -9310,7 +9319,7 @@ def get_users(platform: Optional[str] = None) -> dict:
             "is_admin": u.is_admin,
             "bound_at": u.bound_at,
             "enabled": u.enabled,
-            "show_message_types": u.show_message_types,
+            "show_message_types": _normalize_show_message_types_for_platform(u.show_message_types, platform),
             "custom_cwd": u.custom_cwd,
             "routing": routing_to_compat_dict(u.routing),
         }
@@ -9333,7 +9342,7 @@ def save_users(payload: dict) -> dict:
             is_admin=up.get("is_admin", False),
             bound_at=up.get("bound_at", ""),
             enabled=up.get("enabled", True),
-            show_message_types=normalize_show_message_types(up.get("show_message_types")),
+            show_message_types=_normalize_show_message_types_for_platform(up.get("show_message_types"), platform),
             custom_cwd=up.get("custom_cwd"),
             routing=_parse_routing(_normalize_backend_routing_payload(up.get("routing") or {})),
             dm_chat_id=existing.dm_chat_id if existing else "",

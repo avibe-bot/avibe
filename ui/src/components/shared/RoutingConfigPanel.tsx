@@ -49,6 +49,7 @@ export interface RoutingConfigPanelProps {
   /** Vibe Agent catalog — passed already-loaded from the parent. */
   vibeAgents?: VibeAgentBrief[];
   defaultAgentName?: string | null;
+  availableMessageTypes?: string[];
   // Legacy backend-model props: no longer read here (AgentRoutePicker self-loads
   // models + effort options). Kept on the interface so existing callers still
   // type-check; a follow-up can drop them and the parents' model preloading.
@@ -92,6 +93,7 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
   inheritsFromKey,
   vibeAgents = [],
   defaultAgentName,
+  availableMessageTypes = ['assistant', 'toolcall'],
   footerActions,
   containerClass = 'border-t border-border/60 px-5 py-4',
 }) => {
@@ -258,7 +260,7 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
           </span>
         </div>
         <div className="flex flex-wrap gap-2 text-sm">
-          {['assistant', 'toolcall'].map((msgType) => {
+          {availableMessageTypes.map((msgType) => {
             const checked = (value.show_message_types || []).includes(msgType);
             const label = t(`channelList.messageType.${msgType}`);
             return (

@@ -20,7 +20,7 @@ import { useToast } from '../../context/ToastContext';
 import { DirectoryBrowser } from '../ui/directory-browser';
 import { useNavigate } from 'react-router-dom';
 import clsx from 'clsx';
-import { getEnabledPlatforms, platformSupportsChannels } from '../../lib/platforms';
+import { getEnabledPlatforms, platformSupportsChannels, platformSupportsToolcallDelivery } from '../../lib/platforms';
 import { hasUsableSecret } from '../../lib/secretFields';
 import { EyebrowBadge, PlatformIcon, WizardCard } from '../visual';
 import { RoutingConfigPanel } from '../shared/RoutingConfigPanel';
@@ -792,6 +792,9 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     require_mention: null,
     require_bind: null,
   });
+
+  const availableMessageTypes = (platformId: string): string[] =>
+    platformSupportsToolcallDelivery(config, platformId) ? ['assistant', 'toolcall'] : ['assistant'];
 
   const selectedCount = channels.filter((channel) => isChannelEnabled(channel.id)).length;
   const currentRefreshMeta = refreshMetaByPlatform[platform] || {};
@@ -1642,6 +1645,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                       globalConfig={config}
                       vibeAgents={vibeAgents}
                       defaultAgentName={defaultAgentName}
+                      availableMessageTypes={availableMessageTypes(channelPlatform)}
                       showRequireMention={true}
                       inheritsFromKey={channelPlatform}
                       opencodeOptions={opencodeOptions}
@@ -1984,6 +1988,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                   globalConfig={config}
                   vibeAgents={vibeAgents}
                   defaultAgentName={defaultAgentName}
+                  availableMessageTypes={availableMessageTypes(platform)}
                   showRequireMention={true}
                   inheritsFromKey={platform}
                   opencodeOptions={opencodeOptions}

@@ -173,6 +173,9 @@ class ConsolidatedMessageDispatcher:
     def _get_session_key(self, context: MessageContext) -> str:
         return self.controller._get_session_key(context)
 
+    def _supports_toolcall_delivery(self, context: MessageContext) -> bool:
+        return self._capabilities(context).supports_toolcall_delivery
+
     def _get_im_client(self, context: MessageContext):
         getter = getattr(self.controller, "get_im_client_for_context", None)
         if callable(getter):
@@ -1545,6 +1548,13 @@ class ConsolidatedMessageDispatcher:
         # assistant / tool_call messages still land in the store (product
         # requirement: the process log is complete even when a channel hides it).
         persist_agent_message(target_context, canonical_type, persist_text)
+
+        if canonical_type == "toolcall" and not self._supports_toolcall_delivery(context):
+            logger.info(
+                "Skipping toolcall delivery for platform %s; persisted local process log only.",
+                self._get_platform(context),
+            )
+            return None
 
         if settings_manager.is_message_type_hidden(settings_key, canonical_type):
             preview = text if len(text) <= 500 else f"{text[:500]}…"
