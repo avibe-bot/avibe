@@ -1317,6 +1317,9 @@ def test_request_accepts_spec_path(tmp_path, capfd):
     assert payload["request"]["card"]["spec"]["group"] == "github"
     assert payload["request"]["card"]["spec"]["policy"]["allowed_hosts"] == ["api.github.com"]
     assert payload["request"]["card"]["spec"]["links"] == {"skills": ["github-pr-review"]}
+    assert payload["request_id"] in payload["message"]
+    assert "Provide secret" in payload["message"]
+    assert "Add secret" not in payload["message"]
 
 
 def test_request_rejects_spec_with_plaintext_value(capfd):

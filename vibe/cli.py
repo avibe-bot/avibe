@@ -5219,11 +5219,7 @@ def cmd_vault_request(args):
             secret_name=name,
             status="pending",
             request=req,
-            message=(
-                f"Recorded a request for '{name}'. The user fulfills it by adding a secret named "
-                f"{name} on the Vaults page (Add secret) — saving it marks this request fulfilled. "
-                f"Then use: vibe vault run --env {name} -- <command>"
-            ),
+            message=_vault_request_pending_message(name, req, has_spec=bool(spec)),
         )
         return 0
     except TaskCliError as exc:
@@ -5353,6 +5349,20 @@ def cmd_vault_await(args):
     except Exception as exc:
         _print_task_error(exc, help_command=help_command)
         return 1
+
+
+def _vault_request_pending_message(name: str, request: dict[str, object], *, has_spec: bool) -> str:
+    if has_spec:
+        return (
+            f"Recorded a request for '{name}'. The user fulfills request {request['id']} from the Vaults page pending "
+            f"requests list by opening its Provide secret row; that request-specific form preserves the requested "
+            f"group, policy, and skill links. Then use: vibe vault run --env {name} -- <command>"
+        )
+    return (
+        f"Recorded a request for '{name}'. The user fulfills it from the Vaults page pending requests list "
+        f"(Provide secret) or by adding a secret named {name}; saving it marks this request fulfilled. "
+        f"Then use: vibe vault run --env {name} -- <command>"
+    )
 
 
 def _load_vault_request_spec(args, *, help_command: str) -> dict | None:
