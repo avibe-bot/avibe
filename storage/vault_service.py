@@ -914,7 +914,7 @@ def _require_row(conn: Connection, name: str) -> dict[str, Any]:
     return dict(row)
 
 
-def _fulfill_pending_provision_requests_for_secret(
+def fulfill_pending_provision_requests_for_secret(
     conn: Connection,
     name: str,
     *,
@@ -978,12 +978,12 @@ def create_secret(
         if provision_row.get("status") == "expired":
             raise InvalidRequestError("provision request has expired")
         if provision_row.get("status") == "fulfilled" and existing_secret:
-            _fulfill_pending_provision_requests_for_secret(conn, name)
+            fulfill_pending_provision_requests_for_secret(conn, name)
             raise SecretExistsError(name)
         if provision_row.get("status") != "pending":
             raise InvalidRequestError("provision request is not pending")
     if existing_secret:
-        _fulfill_pending_provision_requests_for_secret(conn, name)
+        fulfill_pending_provision_requests_for_secret(conn, name)
         raise SecretExistsError(name)
 
     if establishing_vmk and protection == "protected":
@@ -1041,7 +1041,7 @@ def create_secret(
     # Once the secret exists, every same-name pending provision ask is satisfied. A
     # request-specific create still uses only that request's spec for the secret metadata,
     # but sibling waiters should not keep timing out or resurfacing stale rows.
-    _fulfill_pending_provision_requests_for_secret(conn, name, decided_at=decided_at)
+    fulfill_pending_provision_requests_for_secret(conn, name, decided_at=decided_at)
     return _meta_payload(_require_row(conn, name))
 
 

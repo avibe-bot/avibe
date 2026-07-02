@@ -2419,6 +2419,7 @@
       "notSetYet": "not set yet",
       "dismiss": "Dismiss",
       "saveAndWake": "Save & wake agent",
+      "ambiguousProvision": "Multiple pending requests need this secret. Open the request-specific Provide secret row in Vaults so the requested details are preserved.",
       "saveFailed": "Couldn't save the secret. Please try again."
     },
     "history": "History",

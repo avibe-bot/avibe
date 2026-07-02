@@ -300,6 +300,31 @@ def test_create_secret_with_fulfilled_provision_request_returns_secret_exists(mo
     assert exc.value.status == 409
 
 
+def test_secret_exists_response_commits_stale_pending_provision_cleanup(monkeypatch):
+    seal = Mock(side_effect=[_sealed("first"), _sealed("second")])
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    with api._vault_engine().begin() as conn:
+        req = vault_service.create_provision_request(conn, "GH_TOKEN")
+
+    payload = {
+        "name": "GH_TOKEN",
+        "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        "provision_request_id": req["id"],
+    }
+    api.create_vault_secret(payload)
+    with api._vault_engine().begin() as conn:
+        stale = vault_service.create_provision_request(conn, "GH_TOKEN")
+        conn.execute(vault_requests.update().where(vault_requests.c.id == stale["id"]).values(status="pending"))
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_secret({**payload, "blind_box": {**payload["blind_box"], "enc": "enc2", "ct": "ct2"}})
+
+    assert exc.value.code == "secret_exists"
+    with api._vault_engine().connect() as conn:
+        stale_status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == stale["id"])).scalar_one()
+    assert stale_status == "fulfilled"
+
+
 def test_duplicate_name_conflict(monkeypatch):
     from unittest.mock import Mock
 

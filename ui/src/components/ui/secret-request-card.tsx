@@ -87,18 +87,24 @@ export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> =
             </div>
           </div>
           {requestLoaded ? (
-            <VaultSecretForm
-              fixedName={name}
-              provisionRequestId={resolvedRequest?.id ?? requestId ?? null}
-              requestSpec={requestSpec}
-              defaultProtection={defaultProtection}
-              onCancel={() => setOpen(false)}
-              onCreated={() => {
-                setFulfilled(true);
-                setOpen(false);
-              }}
-              treatExistingAsFulfilled
-            />
+            resolvedRequest || requestId ? (
+              <VaultSecretForm
+                fixedName={name}
+                provisionRequestId={resolvedRequest?.id ?? requestId ?? null}
+                requestSpec={requestSpec}
+                defaultProtection={defaultProtection}
+                onCancel={() => setOpen(false)}
+                onCreated={() => {
+                  setFulfilled(true);
+                  setOpen(false);
+                }}
+                treatExistingAsFulfilled
+              />
+            ) : (
+              <div className="rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">
+                {t('vaults.request.ambiguousProvision')}
+              </div>
+            )
           ) : (
             <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">
               <Loader2 className="size-4 animate-spin" />

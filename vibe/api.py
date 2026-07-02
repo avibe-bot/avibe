@@ -1465,6 +1465,8 @@ def create_vault_secret(payload: dict) -> dict:
     except vault_service.InvalidSecretNameError as exc:
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name") from exc
     except vault_service.SecretExistsError as exc:
+        with engine.begin() as conn:
+            vault_service.fulfill_pending_provision_requests_for_secret(conn, name)
         raise VaultApiError(f"secret '{name}' already exists", code="secret_exists", status=409) from exc
     except vault_service.VaultAlreadyInitializedError as exc:
         raise VaultApiError(str(exc), code="vault_already_initialized", status=409) from exc

@@ -2418,6 +2418,7 @@
       "notSetYet": "尚未设置",
       "dismiss": "忽略",
       "saveAndWake": "保存并唤醒 Agent",
+      "ambiguousProvision": "有多个待处理请求都需要这个密钥。请在 Vaults 里打开对应请求的填写行，这样才能保留请求里的详细设置。",
       "saveFailed": "保存失败，请重试。"
     },
     "history": "历史",
