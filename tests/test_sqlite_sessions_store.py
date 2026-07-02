@@ -397,6 +397,68 @@ def test_sqlite_sessions_service_binds_reserved_agent_session_by_id(tmp_path: Pa
         service.close()
 
 
+def test_bind_agent_session_by_id_materializes_route_into_empty_columns_only(tmp_path: Path) -> None:
+    """First-turn bind pins the model/effort the turn actually ran with, but
+    never overwrites an explicit per-session pick (COALESCE semantics). A row
+    bound before this materialization existed (agent_name set, model NULL)
+    self-heals on its next turn's bind."""
+    db_path = tmp_path / "vibe.sqlite"
+    default_workdir = tmp_path / "runtime-default"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with patch(
+            "storage.sessions_service.V2Config.load",
+            return_value=SimpleNamespace(runtime=SimpleNamespace(default_cwd=str(default_workdir))),
+        ):
+            reserved_id = service.reserve_agent_session(
+                scope_key="avibe::project::proj_abc",
+                agent_backend="codex",
+                session_anchor="avibe_ses1",
+                agent_name="codex",
+            )
+        assert reserved_id is not None
+
+        # Legacy-shaped first bind (no model/effort): the row stays NULL — the
+        # state every pre-materialization session is in today.
+        service.bind_agent_session_by_id(
+            session_id=reserved_id,
+            native_session_id="codex-thread-1",
+            vibe_agent_name="codex",
+            vibe_agent_backend="codex",
+        )
+        row = service.get_agent_session_by_id(reserved_id)
+        assert row is not None
+        assert row["model"] is None
+        assert row["reasoning_effort"] is None
+
+        # Next turn's bind carries the effective route → empty columns fill in.
+        service.bind_agent_session_by_id(
+            session_id=reserved_id,
+            native_session_id="codex-thread-1",
+            model="gpt-5.5",
+            reasoning_effort="xhigh",
+        )
+        row = service.get_agent_session_by_id(reserved_id)
+        assert row is not None
+        assert row["model"] == "gpt-5.5"
+        assert row["reasoning_effort"] == "xhigh"
+
+        # A later bind with a different route must NOT overwrite the pinned one
+        # (e.g. the user re-picked in the chat header mid-turn).
+        service.bind_agent_session_by_id(
+            session_id=reserved_id,
+            native_session_id="codex-thread-1",
+            model="gpt-5.4",
+            reasoning_effort="low",
+        )
+        row = service.get_agent_session_by_id(reserved_id)
+        assert row is not None
+        assert row["model"] == "gpt-5.5"
+        assert row["reasoning_effort"] == "xhigh"
+    finally:
+        service.close()
+
+
 def test_reserve_agent_session_uses_runtime_default_when_scope_workdir_missing(tmp_path: Path) -> None:
     from storage.models import scope_settings
 

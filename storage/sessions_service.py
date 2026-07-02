@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Connection, case, select
+from sqlalchemy import Connection, case, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
@@ -351,6 +351,8 @@ class SQLiteSessionsService:
         vibe_agent_id: str | None = None,
         vibe_agent_name: str | None = None,
         vibe_agent_backend: str | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> str | None:
         """Bind a backend-native session id to an already-reserved Vibe session row."""
         now = _utc_now_iso()
@@ -367,6 +369,18 @@ class SQLiteSessionsService:
         if vibe_agent_backend is not None:
             values["agent_backend"] = vibe_agent_backend or ""
             values["agent_variant"] = vibe_agent_backend or "default"
+        # Materialize the model / effort the turn actually ran with, but only
+        # into EMPTY columns: a session created on an inherited default carries
+        # NULLs (dispatch resolves the live Agent default), and once the first
+        # turn runs the route is pinned — same lifecycle as the backend pin
+        # above. COALESCE keeps this atomic so a user's explicit header pick
+        # (update_session) is never overwritten by a late bind.
+        if model:
+            values["model"] = func.coalesce(func.nullif(agent_sessions.c.model, ""), model)
+        if reasoning_effort:
+            values["reasoning_effort"] = func.coalesce(
+                func.nullif(agent_sessions.c.reasoning_effort, ""), reasoning_effort
+            )
         with self.engine.begin() as conn:
             # Never resurrect an archived (terminal) session. ``bind_agent_session_by_id``
             # targets an explicit row, bypassing the ``status != 'archived'`` lookup

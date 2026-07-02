@@ -289,6 +289,18 @@ class MessageHandler(BaseHandler):
             session_target_reasoning = (
                 session_target.get("reasoning_effort") if isinstance(session_target, dict) else None
             ) or resolved_target.get("reasoning_effort")
+            # The model / effort this turn ACTUALLY runs with — the same
+            # precedence the request is built on below. Carried in
+            # ``resolved_vibe_agent`` so the native-bind path can materialize
+            # them onto a session row whose route was inherited (empty) at
+            # create time; otherwise the row keeps NULLs forever and the chat
+            # header shows an agent with no model / effort.
+            effective_model = session_target_model or scope_model_override or (
+                vibe_agent.model if vibe_agent else None
+            )
+            effective_reasoning_effort = session_target_reasoning or scope_reasoning_override or (
+                vibe_agent.reasoning_effort if vibe_agent else None
+            )
 
             matched_prefix = None
             subagent_message = None
@@ -427,6 +439,8 @@ class MessageHandler(BaseHandler):
                     "id": vibe_agent.id,
                     "name": vibe_agent.name,
                     "backend": vibe_agent.backend,
+                    "model": effective_model,
+                    "reasoning_effort": effective_reasoning_effort,
                 }
                 context.platform_specific = spec
 
@@ -444,12 +458,8 @@ class MessageHandler(BaseHandler):
                 vibe_agent_id=vibe_agent.id if vibe_agent else None,
                 vibe_agent_name=vibe_agent.name if vibe_agent else None,
                 vibe_agent_backend=vibe_agent.backend if vibe_agent else None,
-                vibe_agent_model=session_target_model
-                or scope_model_override
-                or (vibe_agent.model if vibe_agent else None),
-                vibe_agent_reasoning_effort=session_target_reasoning
-                or scope_reasoning_override
-                or (vibe_agent.reasoning_effort if vibe_agent else None),
+                vibe_agent_model=effective_model,
+                vibe_agent_reasoning_effort=effective_reasoning_effort,
                 vibe_agent_system_prompt=vibe_agent.system_prompt if vibe_agent else None,
                 processing_indicator=processing_indicator,
                 files=processed_files,

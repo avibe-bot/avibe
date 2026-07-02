@@ -320,7 +320,13 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.vibe_agent_system_prompt, "Default prompt")
         self.assertEqual(
             request.context.platform_specific["resolved_vibe_agent"],
-            {"id": "agent-default", "name": "default", "backend": "codex"},
+            {
+                "id": "agent-default",
+                "name": "default",
+                "backend": "codex",
+                "model": "gpt-5.4",
+                "reasoning_effort": "high",
+            },
         )
 
     async def test_scope_model_and_reasoning_override_vibe_agent_defaults(self):

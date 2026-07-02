@@ -254,6 +254,8 @@ class BaseAgent(ABC):
         vibe_agent_id: Optional[str] = None,
         vibe_agent_name: Optional[str] = None,
         vibe_agent_backend: Optional[str] = None,
+        model: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Optional[str]:
         """Bind the backend-native id to the RESERVED workbench session row, by id.
 
@@ -276,6 +278,10 @@ class BaseAgent(ABC):
             vibe_agent_id = vibe_agent_id if vibe_agent_id is not None else resolved.get("id")
             vibe_agent_name = vibe_agent_name if vibe_agent_name is not None else resolved.get("name")
             vibe_agent_backend = vibe_agent_backend if vibe_agent_backend is not None else resolved.get("backend")
+            model = model if model is not None else resolved.get("model")
+            reasoning_effort = (
+                reasoning_effort if reasoning_effort is not None else resolved.get("reasoning_effort")
+            )
         sessions = getattr(self, "sessions", None)
         bind_by_id = getattr(sessions, "bind_agent_session_by_id", None)
         bound: Optional[str] = None
@@ -298,6 +304,8 @@ class BaseAgent(ABC):
                     vibe_agent_id=vibe_agent_id,
                     vibe_agent_name=vibe_agent_name,
                     vibe_agent_backend=vibe_agent_backend,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
                 )
             except Exception:
                 logger.debug("bind_agent_session_by_id failed; keeping reserved id", exc_info=True)
@@ -403,6 +411,8 @@ class BaseAgent(ABC):
                 vibe_agent_id=getattr(request, "vibe_agent_id", None),
                 vibe_agent_name=getattr(request, "vibe_agent_name", None),
                 vibe_agent_backend=getattr(request, "vibe_agent_backend", None),
+                model=getattr(request, "vibe_agent_model", None),
+                reasoning_effort=getattr(request, "vibe_agent_reasoning_effort", None),
             )
             if reserved:
                 return reserved

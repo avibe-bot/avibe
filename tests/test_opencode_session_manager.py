@@ -182,6 +182,8 @@ def test_opencode_forks_pending_native_source() -> None:
         vibe_agent_id=None,
         vibe_agent_name=None,
         vibe_agent_backend=None,
+        model=None,
+        reasoning_effort=None,
     )
 
 
@@ -787,6 +789,8 @@ def test_opencode_reserved_agent_session_id_is_not_replaced() -> None:
         vibe_agent_id=None,
         vibe_agent_name=None,
         vibe_agent_backend=None,
+        model=None,
+        reasoning_effort=None,
     )
 
 
@@ -826,6 +830,8 @@ def test_opencode_resumes_reserved_native_session_id() -> None:
         vibe_agent_id=None,
         vibe_agent_name=None,
         vibe_agent_backend=None,
+        model=None,
+        reasoning_effort=None,
     )
 
 
@@ -862,6 +868,8 @@ def test_opencode_subagent_uses_reserved_native_session_id() -> None:
         vibe_agent_id=None,
         vibe_agent_name=None,
         vibe_agent_backend=None,
+        model=None,
+        reasoning_effort=None,
     )
     assert request.context.platform_specific["agent_session_id"] == "ses-reserved"
 
