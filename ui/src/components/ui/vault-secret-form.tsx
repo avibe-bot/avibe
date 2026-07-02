@@ -279,12 +279,13 @@ export const VaultSecretForm: React.FC<{
     event.preventDefault();
     if (!canSubmit) return;
     let fileBytesToWipe: Uint8Array | null = null;
-    // Don't silently drop a half-typed tag/host chip the user can still see. Tags live in the
-    // create-mode Advanced collapsible; the allowed-hosts input is in Advanced (create) and
-    // always visible in provision mode — guard whichever is on screen. Collapsing Advanced
-    // clears the pending flags, so a hidden draft can never block submit.
+    // Don't silently drop a half-typed tag/host chip the user can still see. Tags/hosts live in
+    // the create-mode Advanced collapsible and are always visible in provision mode — guard
+    // whichever is on screen. Collapsing Advanced clears the pending flags, so a hidden draft can
+    // never block submit.
+    const tagsVisible = isProvision || advancedOpen;
     const hostsVisible = isProvision || advancedOpen;
-    if ((advancedOpen && tagsPending) || (hostsVisible && hostsPending)) {
+    if ((tagsVisible && tagsPending) || (hostsVisible && hostsPending)) {
       setError(t('vaults.dialog.errors.pendingDraft'));
       return;
     }
@@ -599,8 +600,9 @@ export const VaultSecretForm: React.FC<{
   );
 
   // ---- Provision ($NAME) mode — design.pen `F4N19` (SecureInputCard) ------------------
-  // A provision fulfils a specific value the agent asked for, so the kind/group/advanced
-  // controls are hidden: it must stay a static secret. The same submit path is used.
+  // A provision fulfils a specific value the agent asked for, so kind stays fixed to static.
+  // Spec-derived metadata remains visible here so the user can confirm or adjust what the
+  // agent prefilled before anything is saved.
   if (isProvision) {
     return (
       <form className={cn('flex flex-col gap-4', className)} onSubmit={onSubmit}>
@@ -633,6 +635,45 @@ export const VaultSecretForm: React.FC<{
               ]}
             />
           </div>
+        </div>
+
+        <label className="flex flex-col gap-1.5">
+          <span className={FIELD_LABEL}>{t('vaults.dialog.group')}</span>
+          <Combobox
+            options={[...new Set([DEFAULT_GROUP, ...groups])].map((g) => ({ value: g, label: g }))}
+            value={group}
+            onValueChange={setGroup}
+            allowCustomValue
+            commitOnClose
+            withFolderIcon
+            createLabel={(v) => t('vaults.dialog.groupCreate', { name: v })}
+            createButtonLabel={t('vaults.dialog.groupCreateCta')}
+            createHeading={t('vaults.dialog.groupCreateHeading')}
+            placeholder={t('vaults.dialog.groupPlaceholder')}
+            searchPlaceholder={t('vaults.dialog.groupSearch')}
+          />
+        </label>
+
+        <label className="flex flex-col gap-1.5">
+          <span className={FIELD_LABEL}>{t('vaults.dialog.description')}</span>
+          <Input
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            placeholder={t('vaults.dialog.descriptionPlaceholder')}
+          />
+        </label>
+
+        <div className="flex flex-col gap-1.5">
+          <span className={FIELD_LABEL}>{t('vaults.dialog.tags')}</span>
+          <TagInput
+            values={tags}
+            onChange={setTags}
+            placeholder={t('vaults.dialog.tagsPlaceholder')}
+            ariaLabel={t('vaults.dialog.tags')}
+            removeLabel={(value) => t('vaults.dialog.removeChip', { value })}
+            onPendingChange={setTagsPending}
+          />
+          <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.tagsHelp')}</span>
         </div>
 
         {/* Allowed hosts — a provisioned secret used for brokered HTTP fetch needs at least
