@@ -305,6 +305,7 @@ def _injection_for(session_id, *, platform="avibe", platform_specific=None):
 
 def test_web_title_prompt_defaults_to_current_session():
     out = _injection_for("sesweb")
+    title_prompt = out[out.index("## Session Title") :]
     assert "## Session Title" in out
     assert "`vibe session get`" in out
     assert '`vibe session update --title "<short title>"`' in out
@@ -313,9 +314,10 @@ def test_web_title_prompt_defaults_to_current_session():
     assert "metadata.title_source" in out
     assert "`user` or `agent`" in out
     assert "leave the title unchanged" in out
-    assert "set one concise, human-scannable title" in out
-    assert "Do this silently as soon as the title is obvious" in out
-    assert "Do not repeatedly rename the same Session" in out
+    assert "silently set one concise, human-scannable Session title" in out
+    assert "without waiting for the user" in out
+    assert "do not rename it again" in out
+    assert len(title_prompt.strip()) < 450
     assert "not set yet" not in out
     assert "auto-generated" not in out
 
