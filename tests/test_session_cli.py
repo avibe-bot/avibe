@@ -313,8 +313,9 @@ def test_web_title_prompt_defaults_to_current_session():
     assert "metadata.title_source" in out
     assert "`user` or `agent`" in out
     assert "leave the title unchanged" in out
-    assert "may silently set one concise, human-scannable title" in out
-    assert "do not repeatedly rename the same Session" in out
+    assert "set one concise, human-scannable title" in out
+    assert "Do this silently as soon as the title is obvious" in out
+    assert "Do not repeatedly rename the same Session" in out
     assert "not set yet" not in out
     assert "auto-generated" not in out
 
