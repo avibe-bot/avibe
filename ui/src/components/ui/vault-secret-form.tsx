@@ -17,7 +17,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { ApiError, useApi, type DependencyItem } from '@/context/ApiContext';
+import { ApiError, useApi, type DependencyItem, type VaultRequestSpec } from '@/context/ApiContext';
 import { cn } from '@/lib/utils';
 import {
   generateSigningKey,
@@ -110,6 +110,8 @@ export const VaultSecretForm: React.FC<{
   onCreated: (name: string, reason?: 'created' | 'already_exists') => void;
   className?: string;
   defaultProtection?: VaultProtection;
+  provisionRequestId?: string | null;
+  requestSpec?: VaultRequestSpec | null;
   treatExistingAsFulfilled?: boolean;
   groups?: string[];
 }> = ({
@@ -118,6 +120,8 @@ export const VaultSecretForm: React.FC<{
   onCreated,
   className,
   defaultProtection = 'standard',
+  provisionRequestId,
+  requestSpec,
   treatExistingAsFulfilled = false,
   groups = [],
 }) => {
@@ -127,22 +131,24 @@ export const VaultSecretForm: React.FC<{
   const [value, setValue] = useState('');
   const [staticSource, setStaticSource] = useState<StaticSecretSource>('text');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [kind, setKind] = useState<VaultKind>('static');
+  const [kind, setKind] = useState<VaultKind>(requestSpec?.kind ?? 'static');
   const [signingSource, setSigningSource] = useState<'generate' | 'import'>('generate');
   const [importHex, setImportHex] = useState('');
   const [signingKey, setSigningKey] = useState<SigningKeyMaterial | null>(null);
   const [signingError, setSigningError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [group, setGroup] = useState(DEFAULT_GROUP);
-  const [tags, setTags] = useState<string[]>([]);
-  const [description, setDescription] = useState('');
-  const [allowHosts, setAllowHosts] = useState<string[]>([]);
-  const [fetchAuthMode, setFetchAuthMode] = useState<FetchAuthMode>('bearer');
-  const [fetchAuthName, setFetchAuthName] = useState('');
-  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [group, setGroup] = useState(requestSpec?.group ?? DEFAULT_GROUP);
+  const [tags, setTags] = useState<string[]>(requestSpec?.tags ?? []);
+  const [description, setDescription] = useState(requestSpec?.description ?? '');
+  const [allowHosts, setAllowHosts] = useState<string[]>(requestSpec?.policy?.allowed_hosts ?? []);
+  const [linkedSkills, setLinkedSkills] = useState<string[]>(requestSpec?.links?.skills ?? []);
+  const [fetchAuthMode, setFetchAuthMode] = useState<FetchAuthMode>(requestSpec?.policy?.auth?.type ?? 'bearer');
+  const [fetchAuthName, setFetchAuthName] = useState(requestSpec?.policy?.auth?.name ?? '');
+  const [advancedOpen, setAdvancedOpen] = useState(Boolean(requestSpec?.description || requestSpec?.tags?.length || requestSpec?.policy));
   const [tagsPending, setTagsPending] = useState(false);
   const [hostsPending, setHostsPending] = useState(false);
-  const [protection, setProtection] = useState<VaultProtection>(defaultProtection);
+  const [skillsPending, setSkillsPending] = useState(false);
+  const [protection, setProtection] = useState<VaultProtection>(requestSpec?.protection ?? defaultProtection);
   const [showValue, setShowValue] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [checkingAvault, setCheckingAvault] = useState(true);
@@ -177,11 +183,26 @@ export const VaultSecretForm: React.FC<{
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [protection]);
 
+  useEffect(() => {
+    if (!requestSpec) return;
+    if (requestSpec.kind) setKind(requestSpec.kind);
+    if (requestSpec.protection) setProtection(requestSpec.protection);
+    if (requestSpec.group) setGroup(requestSpec.group);
+    if (requestSpec.description) setDescription(requestSpec.description);
+    if (requestSpec.tags) setTags(requestSpec.tags);
+    if (requestSpec.policy?.allowed_hosts) setAllowHosts(requestSpec.policy.allowed_hosts);
+    if (requestSpec.links?.skills) setLinkedSkills(requestSpec.links.skills);
+    if (requestSpec.policy?.auth?.type) setFetchAuthMode(requestSpec.policy.auth.type);
+    if (requestSpec.policy?.auth?.name) setFetchAuthName(requestSpec.policy.auth.name);
+    if (requestSpec.description || requestSpec.tags?.length || requestSpec.policy) setAdvancedOpen(true);
+  }, [requestSpec]);
+
   const p2Ready = useMemo(() => avaultP2Ready(avaultDep), [avaultDep]);
   const secretName = (fixedName ?? name).trim().toUpperCase();
   const protectedCreateReady = protectedVault.status === 'unlocked';
   const isKeypair = kind === 'keypair';
   const isProvision = Boolean(fixedName);
+  const showLinkedSkills = isProvision && Boolean(requestSpec?.links?.skills?.length || linkedSkills.length);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Hold the latest key material in a ref too, so the unmount cleanup can zero
@@ -264,12 +285,13 @@ export const VaultSecretForm: React.FC<{
     event.preventDefault();
     if (!canSubmit) return;
     let fileBytesToWipe: Uint8Array | null = null;
-    // Don't silently drop a half-typed tag/host chip the user can still see. Tags live in the
-    // create-mode Advanced collapsible; the allowed-hosts input is in Advanced (create) and
-    // always visible in provision mode — guard whichever is on screen. Collapsing Advanced
-    // clears the pending flags, so a hidden draft can never block submit.
+    // Don't silently drop a half-typed tag/host chip the user can still see. Tags/hosts live in
+    // the create-mode Advanced collapsible and are always visible in provision mode — guard
+    // whichever is on screen. Collapsing Advanced clears the pending flags, so a hidden draft can
+    // never block submit.
+    const tagsVisible = isProvision || advancedOpen;
     const hostsVisible = isProvision || advancedOpen;
-    if ((advancedOpen && tagsPending) || (hostsVisible && hostsPending)) {
+    if ((tagsVisible && tagsPending) || (hostsVisible && hostsPending) || (showLinkedSkills && skillsPending)) {
       setError(t('vaults.dialog.errors.pendingDraft'));
       return;
     }
@@ -318,6 +340,8 @@ export const VaultSecretForm: React.FC<{
         description: description.trim() || undefined,
         tags: tags.length ? tags : undefined,
         policy: Object.keys(policy).length ? policy : undefined,
+        links: linkedSkills.length ? { skills: linkedSkills } : undefined,
+        provision_request_id: provisionRequestId || undefined,
         ...(isKeypair && signingKey
           ? {
               kind: 'keypair',
@@ -583,8 +607,9 @@ export const VaultSecretForm: React.FC<{
   );
 
   // ---- Provision ($NAME) mode — design.pen `F4N19` (SecureInputCard) ------------------
-  // A provision fulfils a specific value the agent asked for, so the kind/group/advanced
-  // controls are hidden: it must stay a static secret. The same submit path is used.
+  // A provision fulfils a specific value the agent asked for, so kind stays fixed to static.
+  // Spec-derived metadata remains visible here so the user can confirm or adjust what the
+  // agent prefilled before anything is saved.
   if (isProvision) {
     return (
       <form className={cn('flex flex-col gap-4', className)} onSubmit={onSubmit}>
@@ -618,6 +643,60 @@ export const VaultSecretForm: React.FC<{
             />
           </div>
         </div>
+
+        <label className="flex flex-col gap-1.5">
+          <span className={FIELD_LABEL}>{t('vaults.dialog.group')}</span>
+          <Combobox
+            options={[...new Set([DEFAULT_GROUP, ...groups])].map((g) => ({ value: g, label: g }))}
+            value={group}
+            onValueChange={setGroup}
+            allowCustomValue
+            commitOnClose
+            withFolderIcon
+            createLabel={(v) => t('vaults.dialog.groupCreate', { name: v })}
+            createButtonLabel={t('vaults.dialog.groupCreateCta')}
+            createHeading={t('vaults.dialog.groupCreateHeading')}
+            placeholder={t('vaults.dialog.groupPlaceholder')}
+            searchPlaceholder={t('vaults.dialog.groupSearch')}
+          />
+        </label>
+
+        <label className="flex flex-col gap-1.5">
+          <span className={FIELD_LABEL}>{t('vaults.dialog.description')}</span>
+          <Input
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            placeholder={t('vaults.dialog.descriptionPlaceholder')}
+          />
+        </label>
+
+        <div className="flex flex-col gap-1.5">
+          <span className={FIELD_LABEL}>{t('vaults.dialog.tags')}</span>
+          <TagInput
+            values={tags}
+            onChange={setTags}
+            placeholder={t('vaults.dialog.tagsPlaceholder')}
+            ariaLabel={t('vaults.dialog.tags')}
+            removeLabel={(value) => t('vaults.dialog.removeChip', { value })}
+            onPendingChange={setTagsPending}
+          />
+          <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.tagsHelp')}</span>
+        </div>
+
+        {showLinkedSkills && (
+          <div className="flex flex-col gap-1.5">
+            <span className={FIELD_LABEL}>{t('vaults.dialog.linkedSkills')}</span>
+            <TagInput
+              values={linkedSkills}
+              onChange={setLinkedSkills}
+              placeholder={t('vaults.dialog.linkedSkillsPlaceholder')}
+              ariaLabel={t('vaults.dialog.linkedSkills')}
+              removeLabel={(value) => t('vaults.dialog.removeChip', { value })}
+              onPendingChange={setSkillsPending}
+            />
+            <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.linkedSkillsHelp')}</span>
+          </div>
+        )}
 
         {/* Allowed hosts — a provisioned secret used for brokered HTTP fetch needs at least
             one allowed host, else vibe/cli.py refuses the fetch as proxy_unbound. */}

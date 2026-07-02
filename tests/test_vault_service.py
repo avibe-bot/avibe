@@ -457,6 +457,66 @@ def test_create_fulfills_pending_provision_request(vault):
     assert status == "fulfilled"
 
 
+def test_request_specific_create_uses_target_spec_and_fulfills_sibling_requests(vault):
+    with vault.begin() as conn:
+        old_req = vs.create_provision_request(conn, "ASKED_KEY", spec={"group": "old"})
+        new_req = vs.create_provision_request(conn, "ASKED_KEY", spec={"group": "new"})
+        meta = vs.create_secret(
+            conn,
+            name="ASKED_KEY",
+            sealed=_sealed("new"),
+            group="new",
+            provision_request_id=new_req["id"],
+        )
+
+    assert meta["group"] == "new"
+    with vault.connect() as conn:
+        rows = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                select(vault_requests.c.id, vault_requests.c.status).where(
+                    vault_requests.c.id.in_([old_req["id"], new_req["id"]])
+                )
+            ).mappings()
+        }
+    assert rows == {old_req["id"]: "fulfilled", new_req["id"]: "fulfilled"}
+
+
+def test_request_specific_create_treats_fulfilled_replay_as_existing(vault):
+    with vault.begin() as conn:
+        req = vs.create_provision_request(conn, "ASKED_KEY")
+        vs.create_secret(conn, name="ASKED_KEY", sealed=_sealed("first"), provision_request_id=req["id"])
+        with pytest.raises(vs.SecretExistsError):
+            vs.create_secret(conn, name="ASKED_KEY", sealed=_sealed("second"), provision_request_id=req["id"])
+
+
+def test_fulfilled_replay_leaves_cleanup_to_rest_conflict_handler(vault):
+    with vault.begin() as conn:
+        req = vs.create_provision_request(conn, "ASKED_KEY")
+        vs.create_secret(conn, name="ASKED_KEY", sealed=_sealed("first"), provision_request_id=req["id"])
+        stale = vs.create_provision_request(conn, "ASKED_KEY")
+        conn.execute(vault_requests.update().where(vault_requests.c.id == stale["id"]).values(status="pending"))
+
+        with pytest.raises(vs.SecretExistsError):
+            vs.create_secret(conn, name="ASKED_KEY", sealed=_sealed("second"), provision_request_id=req["id"])
+
+        stale_status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == stale["id"])).scalar_one()
+
+    assert stale_status == "pending"
+
+
+def test_request_specific_create_rejects_mismatched_provision_name(vault):
+    with vault.begin() as conn:
+        req = vs.create_provision_request(conn, "OTHER_KEY")
+        with pytest.raises(vs.InvalidRequestError, match="provision request secret name does not match"):
+            vs.create_secret(
+                conn,
+                name="ASKED_KEY",
+                sealed=_sealed("asked"),
+                provision_request_id=req["id"],
+            )
+
+
 def test_request_for_existing_secret_is_born_fulfilled(vault):
     _create(vault, name="ALREADY")
     with vault.begin() as conn:
@@ -480,14 +540,105 @@ def test_provision_request_and_fulfill(vault):
 
 def test_provision_request_carries_secure_input_card_without_value(vault):
     with vault.begin() as conn:
-        req = vs.create_provision_request(conn, "NEW_CARD_KEY", reason="deploy", skill="release")
+        req = vs.create_provision_request(
+            conn,
+            "NEW_CARD_KEY",
+            reason="deploy",
+            spec={
+                "kind": "static",
+                "protection": "protected",
+                "group": "github",
+                "description": "GitHub token",
+                "tags": ["github", "deploy"],
+                "policy": {"allowed_hosts": ["api.github.com"], "auth": {"type": "bearer"}},
+                "links": {"skills": ["release"]},
+            },
+        )
     assert req["card"]["card_type"] == "secure_input"
     assert req["card"]["secret_name"] == "NEW_CARD_KEY"
     assert req["card"]["value"] is None
+    assert req["card"]["spec"]["group"] == "github"
+    assert req["card"]["spec"]["links"] == {"skills": ["release"]}
     with vault.connect() as conn:
         listed = vs.list_requests(conn)
     assert listed[0]["card"]["default_protection"] == "protected"
+    assert listed[0]["card"]["spec"]["policy"]["allowed_hosts"] == ["api.github.com"]
     assert "secret-value" not in json.dumps(listed)
+
+
+def test_provision_request_spec_normalizes_allowed_hosts(vault):
+    with vault.begin() as conn:
+        req = vs.create_provision_request(
+            conn,
+            "HOST_KEY",
+            spec={"policy": {"allowed_hosts": ["https://api.github.com/v1", "api.github.com:443", ".Example.com"]}},
+        )
+
+    assert req["card"]["spec"]["policy"]["allowed_hosts"] == ["api.github.com", ".example.com"]
+
+
+def test_provision_request_spec_rejects_secret_material(vault):
+    with vault.begin() as conn:
+        with pytest.raises(vs.VaultServiceError):
+            vs.create_provision_request(conn, "BAD_CARD_KEY", spec={"policy": {"value": "secret"}})
+
+
+def test_provision_request_spec_rejects_object_valued_scalar_fields(vault):
+    with vault.begin() as conn:
+        with pytest.raises(vs.VaultServiceError, match="spec.description must be a string"):
+            vs.create_provision_request(conn, "BAD_DESC_KEY", spec={"description": {"text": "not allowed"}})
+        with pytest.raises(vs.VaultServiceError, match="spec.policy.auth.name must be a string"):
+            vs.create_provision_request(
+                conn,
+                "BAD_AUTH_KEY",
+                spec={"policy": {"auth": {"type": "header", "name": {"header": "X-Api-Key"}}}},
+            )
+
+
+def test_get_pending_provision_request_resolves_by_request_id(vault):
+    with vault.begin() as conn:
+        conn.execute(
+            vault_requests.insert(),
+            [
+                {
+                    "id": "vrq_old",
+                    "request_type": "provision",
+                    "secret_name": "DUP_KEY",
+                    "requester": None,
+                    "delivery": json.dumps({"card": vs._secure_input_card("DUP_KEY", request_id="vrq_old", spec={"group": "old"})}),
+                    "status": "pending",
+                    "message_id": None,
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                },
+                {
+                    "id": "vrq_new",
+                    "request_type": "provision",
+                    "secret_name": "DUP_KEY",
+                    "requester": None,
+                    "delivery": json.dumps({"card": vs._secure_input_card("DUP_KEY", request_id="vrq_new", spec={"group": "new"})}),
+                    "status": "pending",
+                    "message_id": None,
+                    "created_at": "2026-01-01T00:00:01+00:00",
+                },
+            ],
+        )
+
+    with vault.begin() as conn:
+        old_lookup = vs.get_pending_provision_request(conn, "vrq_old")
+        ambiguous_by_name = vs.find_pending_provision_request(conn, "DUP_KEY")
+
+    assert old_lookup["id"] == "vrq_old"
+    assert old_lookup["card"]["spec"]["group"] == "old"
+    assert ambiguous_by_name is None
+
+
+def test_create_secret_can_link_to_requested_skill(vault):
+    _create(vault, name="LINKED_KEY")
+    with vault.begin() as conn:
+        vs.link_secret_to_skills(conn, "LINKED_KEY", ["release"])
+    with vault.connect() as conn:
+        rows = conn.execute(select(vault_links.c.skill_name).where(vault_links.c.secret_name == "LINKED_KEY")).scalars().all()
+    assert rows == ["release"]
 
 
 def test_create_grant_freezes_scope_members_and_keeps_key_material_out_of_python(vault):

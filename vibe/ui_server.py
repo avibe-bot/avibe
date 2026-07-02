@@ -2744,6 +2744,26 @@ def vault_request_get(request_id):
         return _vault_error_response(exc)
 
 
+@app.route("/api/vault/provision-requests/<name>", methods=["GET"])
+def vault_provision_request_by_name_get(name):
+    from vibe import api
+
+    try:
+        return jsonify(api.get_vault_provision_request_by_name(name))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/provision-requests/by-id/<request_id>", methods=["GET"])
+def vault_provision_request_get(request_id):
+    from vibe import api
+
+    try:
+        return jsonify(api.get_vault_provision_request(request_id))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
 @app.route("/api/vault/requests/access", methods=["POST"])
 def vault_access_request_post():
     from vibe import api

@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy import select
 
 from storage import vault_service
-from storage.models import vault_links, vault_secrets
+from storage.models import vault_links, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
 from vibe import api
 
@@ -189,6 +189,142 @@ def test_create_with_policy_persists_allowed_hosts(monkeypatch):
     )
     secret = api.get_vault_secrets()["secrets"][0]
     assert secret["policy"]["allowed_hosts"] == ["api.github.com"]
+
+
+def test_create_with_links_persists_skill_link(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {
+            "name": "GH_PAT",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            "links": {"skills": ["github-pr-review"]},
+        }
+    )
+    with api._vault_engine().connect() as conn:
+        rows = conn.execute(select(vault_links.c.skill_name).where(vault_links.c.secret_name == "GH_PAT")).scalars().all()
+    assert rows == ["github-pr-review"]
+
+
+def test_get_provision_request_by_name_returns_pending_spec():
+    with api._vault_engine().begin() as conn:
+        req = vault_service.create_provision_request(
+            conn,
+            "GH_TOKEN",
+            spec={"group": "github", "links": {"skills": ["github-pr-review"]}},
+        )
+
+    result = api.get_vault_provision_request_by_name("GH_TOKEN")
+
+    assert result["request"]["id"] == req["id"]
+    assert result["request"]["card"]["spec"]["group"] == "github"
+    assert result["ambiguous"] is False
+
+
+def test_get_provision_request_returns_request_id_match():
+    with api._vault_engine().begin() as conn:
+        old_req = vault_service.create_provision_request(
+            conn,
+            "GH_TOKEN",
+            spec={"group": "old"},
+        )
+        vault_service.create_provision_request(
+            conn,
+            "GH_TOKEN",
+            spec={"group": "new"},
+        )
+
+    result = api.get_vault_provision_request(old_req["id"])
+
+    assert result["request"]["id"] == old_req["id"]
+    assert result["request"]["card"]["spec"]["group"] == "old"
+
+
+def test_get_provision_request_by_name_returns_none_when_ambiguous():
+    with api._vault_engine().begin() as conn:
+        vault_service.create_provision_request(conn, "GH_TOKEN", spec={"group": "old"})
+        vault_service.create_provision_request(conn, "GH_TOKEN", spec={"group": "new"})
+
+    result = api.get_vault_provision_request_by_name("GH_TOKEN")
+
+    assert result["request"] is None
+    assert result["ambiguous"] is True
+
+
+def test_create_secret_with_provision_request_id_fulfills_sibling_requests(monkeypatch):
+    seal = Mock(return_value=_sealed("api"))
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    with api._vault_engine().begin() as conn:
+        old_req = vault_service.create_provision_request(conn, "GH_TOKEN", spec={"group": "old"})
+        new_req = vault_service.create_provision_request(conn, "GH_TOKEN", spec={"group": "new"})
+
+    created = api.create_vault_secret(
+        {
+            "name": "GH_TOKEN",
+            "group": "new",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            "provision_request_id": new_req["id"],
+        }
+    )
+
+    assert created["secret"]["group"] == "new"
+    with api._vault_engine().connect() as conn:
+        rows = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                select(vault_requests.c.id, vault_requests.c.status).where(
+                    vault_requests.c.id.in_([old_req["id"], new_req["id"]])
+                )
+            ).mappings()
+        }
+    assert rows == {old_req["id"]: "fulfilled", new_req["id"]: "fulfilled"}
+
+
+def test_create_secret_with_fulfilled_provision_request_returns_secret_exists(monkeypatch):
+    seal = Mock(side_effect=[_sealed("first"), _sealed("second")])
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    with api._vault_engine().begin() as conn:
+        req = vault_service.create_provision_request(conn, "GH_TOKEN")
+
+    payload = {
+        "name": "GH_TOKEN",
+        "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        "provision_request_id": req["id"],
+    }
+    created = api.create_vault_secret(payload)
+    assert created["ok"] is True
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_secret({**payload, "blind_box": {**payload["blind_box"], "enc": "enc2", "ct": "ct2"}})
+
+    assert exc.value.code == "secret_exists"
+    assert exc.value.status == 409
+
+
+def test_secret_exists_response_commits_stale_pending_provision_cleanup(monkeypatch):
+    seal = Mock(side_effect=[_sealed("first"), _sealed("second")])
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    with api._vault_engine().begin() as conn:
+        req = vault_service.create_provision_request(conn, "GH_TOKEN")
+
+    payload = {
+        "name": "GH_TOKEN",
+        "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        "provision_request_id": req["id"],
+    }
+    api.create_vault_secret(payload)
+    with api._vault_engine().begin() as conn:
+        stale = vault_service.create_provision_request(conn, "GH_TOKEN")
+        conn.execute(vault_requests.update().where(vault_requests.c.id == stale["id"]).values(status="pending"))
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_secret({**payload, "blind_box": {**payload["blind_box"], "enc": "enc2", "ct": "ct2"}})
+
+    assert exc.value.code == "secret_exists"
+    with api._vault_engine().connect() as conn:
+        stale_status = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == stale["id"])).scalar_one()
+    assert stale_status == "fulfilled"
 
 
 def test_duplicate_name_conflict(monkeypatch):

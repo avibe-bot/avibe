@@ -35,7 +35,8 @@ def _ns(**kw):
         env=None,
         command_argv=None,
         reason=None,
-        skill=None,
+        spec=None,
+        spec_json=None,
         wait=None,
         no_wait=False,
         json=False,
@@ -1294,10 +1295,57 @@ def test_request_creates_pending(capfd):
     assert payload["request_id"].startswith("vrq_")
 
 
+def test_request_accepts_spec_path(tmp_path, capfd):
+    spec_path = tmp_path / "request-spec.json"
+    spec_path.write_text(
+        json.dumps(
+            {
+                "group": "github",
+                "tags": ["github"],
+                "protection": "protected",
+                "policy": {"allowed_hosts": ["api.github.com"], "auth": {"type": "bearer"}},
+                "links": {"skills": ["github-pr-review"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code = cli.cmd_vault_request(_ns(name="GITHUB_TOKEN", reason="need PR status", spec=str(spec_path)))
+    payload = json.loads(capfd.readouterr().out)
+
+    assert code == 0
+    assert payload["request"]["card"]["spec"]["group"] == "github"
+    assert payload["request"]["card"]["spec"]["policy"]["allowed_hosts"] == ["api.github.com"]
+    assert payload["request"]["card"]["spec"]["links"] == {"skills": ["github-pr-review"]}
+    assert payload["request_id"] in payload["message"]
+    assert "Provide secret" in payload["message"]
+    assert "Add secret" not in payload["message"]
+
+
+def test_request_rejects_spec_with_plaintext_value(capfd):
+    code = cli.cmd_vault_request(_ns(name="BAD_KEY", spec_json='{"policy":{"value":"secret"}}'))
+    payload = json.loads(capfd.readouterr().err)
+
+    assert code == 1
+    assert payload["code"] == "invalid_spec"
+
+
 def test_request_for_existing_secret_returns_fulfilled(tmp_path, capfd, monkeypatch):
     _create_standard_secret("HAVE_KEY")
     assert cli.cmd_vault_request(_ns(name="HAVE_KEY", wait=30)) == 0
     assert json.loads(capfd.readouterr().out)["status"] == "fulfilled"
+
+
+def test_request_wait_outputs_fulfilled_request(capfd, monkeypatch):
+    def wait_mock(request_id, *, timeout, poll_interval=2.0):
+        return {"id": request_id, "status": "fulfilled", "request_type": "provision", "secret_name": "WAIT_KEY"}
+
+    monkeypatch.setattr(cli, "_wait_for_provision", wait_mock)
+
+    assert cli.cmd_vault_request(_ns(name="WAIT_KEY", wait=30)) == 0
+    payload = json.loads(capfd.readouterr().out)
+    assert payload["status"] == "fulfilled"
+    assert payload["request"]["status"] == "fulfilled"
 
 
 def test_key_export_calls_avault_and_audits(tmp_path, capfd, monkeypatch):

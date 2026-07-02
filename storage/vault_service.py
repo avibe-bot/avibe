@@ -20,6 +20,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy import or_, select
 from sqlalchemy.engine import Connection
@@ -41,6 +42,28 @@ SUPPORTED_SIGNATURE_SCHEMES = {
 REQUEST_AUDIENCE_AGENT = "agent"
 REQUEST_AUDIENCE_UI = "ui"
 REQUEST_AUDIENCES = {REQUEST_AUDIENCE_AGENT, REQUEST_AUDIENCE_UI}
+PROVISION_SPEC_FORBIDDEN_KEYS = {
+    "value",
+    "sealed",
+    "envelope",
+    "blind_box",
+    "ciphertext",
+    "nonce",
+    "wrap_meta",
+    "private_key",
+    "secret",
+}
+PROVISION_SPEC_ALLOWED_KEYS = {
+    "kind",
+    "protection",
+    "group",
+    "description",
+    "tags",
+    "policy",
+    "links",
+}
+PROVISION_SPEC_ALLOWED_POLICY_KEYS = {"allowed_hosts", "auth"}
+PROVISION_SPEC_ALLOWED_AUTH_KEYS = {"type", "name"}
 
 
 @dataclass(frozen=True)
@@ -222,6 +245,160 @@ def _loads(raw: str | None) -> Any:
 def _public_meta(raw: str | None) -> dict[str, Any]:
     payload = _loads(raw)
     return payload if isinstance(payload, dict) else {}
+
+
+def _reject_provision_spec_secret_fields(value: Any, *, path: str = "spec") -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key) in PROVISION_SPEC_FORBIDDEN_KEYS:
+                raise VaultServiceError(f"{path}.{key} is not allowed in vault request spec")
+            _reject_provision_spec_secret_fields(item, path=f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _reject_provision_spec_secret_fields(item, path=f"{path}[{index}]")
+
+
+def _string_list(value: Any, *, field: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise VaultServiceError(f"{field} must be an array of strings")
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise VaultServiceError(f"{field} must be an array of strings")
+        stripped = item.strip()
+        if stripped:
+            out.append(stripped)
+    return out
+
+
+def _normalize_allowed_host(value: str, *, field: str) -> str:
+    raw = value.strip().lower()
+    if not raw:
+        raise VaultServiceError(f"{field} must contain non-empty host strings")
+    leading_dot = raw.startswith(".")
+    hostish = raw[1:] if leading_dot else raw
+    if "://" in hostish:
+        host = urlsplit(hostish).hostname or ""
+    elif hostish.startswith("[") or "/" in hostish or "?" in hostish or "#" in hostish or hostish.count(":") == 1:
+        host = urlsplit(f"//{hostish}").hostname or ""
+    else:
+        host = hostish
+    if not host or any(ch.isspace() for ch in host) or "/" in host or "*" in host:
+        raise VaultServiceError(f"{field} entries must be hostnames, URLs, or host:port values")
+    return f".{host}" if leading_dot else host
+
+
+def _allowed_host_list(value: Any, *, field: str) -> list[str]:
+    return list(dict.fromkeys(_normalize_allowed_host(item, field=field) for item in _string_list(value, field=field)))
+
+
+def _optional_string(value: Any, *, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise VaultServiceError(f"{field} must be a string")
+    stripped = value.strip()
+    return stripped or None
+
+
+def normalize_provision_spec(spec: Any) -> dict[str, Any]:
+    """Return non-secret creation hints for a provision request.
+
+    The request spec is agent-provided metadata only. It can pre-fill the browser
+    form and propose skill links, but it must never carry plaintext or sealed
+    value material.
+    """
+
+    if spec is None:
+        return {}
+    if not isinstance(spec, dict):
+        raise VaultServiceError("vault request spec must be a JSON object")
+    _reject_provision_spec_secret_fields(spec)
+    extra_keys = set(spec) - PROVISION_SPEC_ALLOWED_KEYS
+    if extra_keys:
+        raise VaultServiceError(f"unsupported vault request spec fields: {', '.join(sorted(extra_keys))}")
+
+    normalized: dict[str, Any] = {}
+    kind = spec.get("kind")
+    if kind is not None:
+        if not isinstance(kind, str):
+            raise VaultServiceError("spec.kind must be a string")
+        kind = kind.strip().lower()
+        if kind != "static":
+            raise VaultServiceError("spec.kind currently supports only 'static' for provision requests")
+        normalized["kind"] = kind
+
+    protection = spec.get("protection")
+    if protection is not None:
+        if not isinstance(protection, str):
+            raise VaultServiceError("spec.protection must be a string")
+        protection = protection.strip().lower()
+        if protection not in {"standard", "protected"}:
+            raise VaultServiceError("spec.protection must be 'standard' or 'protected'")
+        normalized["protection"] = protection
+
+    group = _optional_string(spec.get("group"), field="spec.group") if "group" in spec else None
+    if group:
+        normalized["group"] = group
+
+    description = _optional_string(spec.get("description"), field="spec.description") if "description" in spec else None
+    if description:
+        normalized["description"] = description
+
+    tags = _string_list(spec.get("tags"), field="spec.tags") if "tags" in spec else []
+    if tags:
+        normalized["tags"] = tags
+
+    policy = spec.get("policy")
+    if policy is not None:
+        if not isinstance(policy, dict):
+            raise VaultServiceError("spec.policy must be an object")
+        extra_policy_keys = set(policy) - PROVISION_SPEC_ALLOWED_POLICY_KEYS
+        if extra_policy_keys:
+            raise VaultServiceError(f"unsupported spec.policy fields: {', '.join(sorted(extra_policy_keys))}")
+        normalized_policy: dict[str, Any] = {}
+        allowed_hosts = _allowed_host_list(policy.get("allowed_hosts"), field="spec.policy.allowed_hosts") if "allowed_hosts" in policy else []
+        if allowed_hosts:
+            normalized_policy["allowed_hosts"] = allowed_hosts
+        auth = policy.get("auth")
+        if auth is not None:
+            if not isinstance(auth, dict):
+                raise VaultServiceError("spec.policy.auth must be an object")
+            extra_auth_keys = set(auth) - PROVISION_SPEC_ALLOWED_AUTH_KEYS
+            if extra_auth_keys:
+                raise VaultServiceError(f"unsupported spec.policy.auth fields: {', '.join(sorted(extra_auth_keys))}")
+            raw_auth_type = auth.get("type") or "bearer"
+            if not isinstance(raw_auth_type, str):
+                raise VaultServiceError("spec.policy.auth.type must be a string")
+            auth_type = raw_auth_type.strip().lower()
+            if auth_type not in {"bearer", "header", "query"}:
+                raise VaultServiceError("spec.policy.auth.type must be bearer, header, or query")
+            normalized_auth: dict[str, Any] = {"type": auth_type}
+            auth_name = _optional_string(auth.get("name"), field="spec.policy.auth.name") if "name" in auth else None
+            if auth_type in {"header", "query"}:
+                if not auth_name:
+                    raise VaultServiceError("spec.policy.auth.name is required for header/query auth")
+                normalized_auth["name"] = auth_name
+            elif auth_name:
+                normalized_auth["name"] = auth_name
+            normalized_policy["auth"] = normalized_auth
+        if normalized_policy:
+            normalized["policy"] = normalized_policy
+
+    links = spec.get("links")
+    if links is not None:
+        if not isinstance(links, dict):
+            raise VaultServiceError("spec.links must be an object")
+        extra_link_keys = set(links) - {"skills"}
+        if extra_link_keys:
+            raise VaultServiceError(f"unsupported spec.links fields: {', '.join(sorted(extra_link_keys))}")
+        skills = _string_list(links.get("skills"), field="spec.links.skills") if "skills" in links else []
+        if skills:
+            normalized["links"] = {"skills": skills}
+
+    return normalized
 
 
 def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
@@ -737,6 +914,23 @@ def _require_row(conn: Connection, name: str) -> dict[str, Any]:
     return dict(row)
 
 
+def fulfill_pending_provision_requests_for_secret(
+    conn: Connection,
+    name: str,
+    *,
+    decided_at: str | None = None,
+) -> None:
+    conn.execute(
+        vault_requests.update()
+        .where(
+            vault_requests.c.request_type == "provision",
+            vault_requests.c.secret_name == name,
+            vault_requests.c.status == "pending",
+        )
+        .values(status="fulfilled", decided_at=decided_at or _now())
+    )
+
+
 def create_secret(
     conn: Connection,
     *,
@@ -752,6 +946,7 @@ def create_secret(
     policy: dict[str, Any] | None = None,
     public_meta: dict[str, Any] | None = None,
     establishing_vmk: bool = False,
+    provision_request_id: str | None = None,
 ) -> dict[str, Any]:
     """Create a secret from a caller-supplied encrypted envelope; return masked metadata.
 
@@ -771,7 +966,22 @@ def create_secret(
         raise VaultServiceError(f"invalid vault secret kind: {kind!r}")
     if kind != "keypair" and signer_kind is not None:
         raise VaultServiceError("signer_kind is only valid for keypair secrets")
-    if conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name)).first() is not None:
+    provision_row: dict[str, Any] | None = None
+    existing_secret = conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name)).first() is not None
+    if provision_request_id:
+        _expire_pending_requests(conn)
+        provision_row = _load_request_row(conn, provision_request_id)
+        if provision_row.get("request_type") != "provision":
+            raise InvalidRequestError("secret create must complete a provision request")
+        if provision_row.get("secret_name") != name:
+            raise InvalidRequestError("provision request secret name does not match")
+        if provision_row.get("status") == "expired":
+            raise InvalidRequestError("provision request has expired")
+        if provision_row.get("status") == "fulfilled" and existing_secret:
+            raise SecretExistsError(name)
+        if provision_row.get("status") != "pending":
+            raise InvalidRequestError("provision request is not pending")
+    if existing_secret:
         raise SecretExistsError(name)
 
     if establishing_vmk and protection == "protected":
@@ -817,19 +1027,41 @@ def create_secret(
         # SecretExistsError → 409 so the racing already-fulfilled ask is handled, not a 500.
         raise SecretExistsError(name) from exc
     audit(conn, "created", secret_name=name)
-    # Any pending dynamic-ask (provision) request for this name is now satisfied,
-    # regardless of which create path stored it (CLI / API / inline card) — so a
-    # `vibe vault request --wait` resolves instead of timing out.
-    conn.execute(
-        vault_requests.update()
-        .where(
-            vault_requests.c.request_type == "provision",
-            vault_requests.c.secret_name == name,
-            vault_requests.c.status == "pending",
+    decided_at = _now()
+    if provision_row is not None:
+        result = conn.execute(
+            vault_requests.update()
+            .where(vault_requests.c.id == provision_row["id"], vault_requests.c.status == "pending")
+            .values(status="fulfilled", decided_at=decided_at)
         )
-        .values(status="fulfilled", decided_at=_now())
-    )
+        if result.rowcount != 1:
+            raise InvalidRequestError("provision request is not pending")
+    # Once the secret exists, every same-name pending provision ask is satisfied. A
+    # request-specific create still uses only that request's spec for the secret metadata,
+    # but sibling waiters should not keep timing out or resurfacing stale rows.
+    fulfill_pending_provision_requests_for_secret(conn, name, decided_at=decided_at)
     return _meta_payload(_require_row(conn, name))
+
+
+def link_secret_to_skills(conn: Connection, secret_name: str, skills: list[str], *, source: str = "agent") -> None:
+    if not skills:
+        return
+    _require_row(conn, secret_name)
+    now = _now()
+    for skill in dict.fromkeys(item.strip() for item in skills if item and item.strip()):
+        try:
+            conn.execute(
+                vault_links.insert().values(
+                    id=_id("vln"),
+                    secret_name=secret_name,
+                    skill_name=skill,
+                    source=source,
+                    required=1,
+                    created_at=now,
+                )
+            )
+        except IntegrityError:
+            pass
 
 
 def get_secret_meta(conn: Connection, name: str) -> dict[str, Any]:
@@ -1033,7 +1265,7 @@ def create_provision_request(
     name: str,
     *,
     reason: str | None = None,
-    skill: str | None = None,
+    spec: dict[str, Any] | None = None,
     requester: Any = None,
     message_id: str | None = None,
 ) -> dict[str, Any]:
@@ -1047,12 +1279,13 @@ def create_provision_request(
     now = _now()
     already = conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name)).first() is not None
     status = "fulfilled" if already else "pending"
-    card = _secure_input_card(name, request_id=request_id, reason=reason, skill=skill)
+    normalized_spec = normalize_provision_spec(spec)
+    card = _secure_input_card(name, request_id=request_id, reason=reason, spec=normalized_spec)
     delivery_payload: dict[str, Any] = {"card": card}
     if reason:
         delivery_payload["reason"] = reason
-    if skill:
-        delivery_payload["skill"] = skill
+    if normalized_spec:
+        delivery_payload["spec"] = normalized_spec
     conn.execute(
         vault_requests.insert().values(
             id=request_id,
@@ -1094,11 +1327,7 @@ def fulfill_provision(
         sealed=sealed,
         group=group,
         description=description,
-    )
-    conn.execute(
-        vault_requests.update()
-        .where(vault_requests.c.id == request_id)
-        .values(status="fulfilled", decided_at=_now())
+        provision_request_id=request_id,
     )
     return meta
 
@@ -1108,18 +1337,21 @@ def _secure_input_card(
     *,
     request_id: str,
     reason: str | None = None,
-    skill: str | None = None,
+    spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    normalized_spec = normalize_provision_spec(spec)
+    card = {
         "card_type": "secure_input",
         "request_id": request_id,
         "secret_name": name,
         "reason": reason,
-        "skill": skill,
         "protection_options": ["standard", "protected"],
-        "default_protection": "protected",
+        "default_protection": normalized_spec.get("protection") or "protected",
         "value": None,
     }
+    if normalized_spec:
+        card["spec"] = normalized_spec
+    return card
 
 
 def _grant_member_rows(conn: Connection, scope_type: str, scope_ref: str) -> list[dict[str, Any]]:
@@ -1726,6 +1958,50 @@ def list_requests(
         _request_row_payload(dict(row), conn=conn, audience=REQUEST_AUDIENCE_UI)
         for row in conn.execute(query).mappings()
     ]
+
+
+def resolve_pending_provision_request_by_name(conn: Connection, name: str) -> tuple[dict[str, Any] | None, bool]:
+    _expire_pending_requests(conn)
+    rows = list(
+        conn.execute(
+            select(vault_requests)
+            .where(
+                vault_requests.c.status == "pending",
+                vault_requests.c.request_type == "provision",
+                vault_requests.c.secret_name == name,
+            )
+            .order_by(vault_requests.c.created_at.desc(), vault_requests.c.id.desc())
+            .limit(2)
+        ).mappings()
+    )
+    if len(rows) == 1:
+        return _request_row_payload(dict(rows[0]), conn=conn, audience=REQUEST_AUDIENCE_UI), False
+    return None, len(rows) > 1
+
+
+def find_pending_provision_request(conn: Connection, name: str) -> dict[str, Any] | None:
+    request, _ambiguous = resolve_pending_provision_request_by_name(conn, name)
+    return request
+
+
+def get_pending_provision_request(conn: Connection, request_id: str) -> dict[str, Any] | None:
+    _expire_pending_requests(conn)
+    row = (
+        conn.execute(
+            select(vault_requests)
+            .where(
+                vault_requests.c.id == request_id,
+                vault_requests.c.status == "pending",
+                vault_requests.c.request_type == "provision",
+            )
+            .limit(1)
+        )
+        .mappings()
+        .first()
+    )
+    if row is None:
+        return None
+    return _request_row_payload(dict(row), conn=conn, audience=REQUEST_AUDIENCE_UI)
 
 
 def _expire_grant_rows(

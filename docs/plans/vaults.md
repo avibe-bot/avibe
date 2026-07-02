@@ -215,7 +215,10 @@ not promoted.
 fences) → `provision` request. Web: inline **SecureInputCard** (out-of-band TLS
 submit). IM: `🔐 Agent requests OPENAI_API_KEY → [Open Vaults](…?request=id)`.
 `vibe vault request NAME --wait` long-polls; `--no-wait` → `hook_send` on
-fulfillment. **Wake-up carries the name only, never the value.**
+fulfillment. Creation hints use `--spec file|-` or `--spec-json` and may include
+non-secret fields such as `protection`, `group`, `tags`, `policy`, and
+`links.skills`; the request CLI intentionally has no `--skill` flag. **Wake-up
+carries the name only, never the value.**
 
 ## 7. Crypto & auth (Q1: password + passkey, layered)
 
@@ -458,7 +461,7 @@ Internal UDS `/internal/vault/*`: `resolve`, `provision`, `sign`, `fetch`,
 
 CLI `vibe vault …`: create/set is intentionally not exposed to agents; values
 enter through browser-side sealed/blind-box payloads. `list [--skill S] [--group G] [--tag t] [--json]` · `rm` · `run` (promoted) ·
-`fetch` (promoted) · `sign` (promoted) · `request` · `link/unlink --skill S NAME` ·
+`fetch` (promoted) · `sign` (promoted) · `request [--spec file|- | --spec-json json]` · `link/unlink --skill S NAME` ·
 `audit` · `key export/import` · `import 1password [--vault V]` (§13.5) · `export` /
 `inject` (help-only, not promoted). No `vibe vault get`; no command prints a value.
 

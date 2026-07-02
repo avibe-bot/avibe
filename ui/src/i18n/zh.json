@@ -2332,6 +2332,9 @@
       "tags": "标签",
       "tagsPlaceholder": "输入标签后回车",
       "tagsHelp": "可选,用来查找和归类密钥。",
+      "linkedSkills": "关联技能",
+      "linkedSkillsPlaceholder": "输入技能名称后回车",
+      "linkedSkillsHelp": "由请求的 Agent 建议。若某个技能不应通过技能级授权拿到这条密钥，请先移除。",
       "removeChip": "移除 {{value}}",
       "protection": "保护级别",
       "protectedProtection": "受保护",
@@ -2364,8 +2367,10 @@
       "reviewTitle": "审阅请求",
       "review": "审阅",
       "waiting": "等待批准",
+      "waitingForValue": "等待填写",
       "access": "使用密钥",
       "sign": "签名",
+      "provision": "填写密钥",
       "approved": "已批准访问",
       "signed": "已返回签名",
       "denied": "已拒绝请求"
@@ -2413,6 +2418,7 @@
       "notSetYet": "尚未设置",
       "dismiss": "忽略",
       "saveAndWake": "保存并唤醒 Agent",
+      "ambiguousProvision": "有多个待处理请求都需要这个密钥。请在 Vaults 里打开对应请求的填写行，这样才能保留请求里的详细设置。",
       "saveFailed": "保存失败，请重试。"
     },
     "history": "历史",

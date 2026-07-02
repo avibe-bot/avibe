@@ -7,7 +7,7 @@ import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
 import { cn } from '../../lib/utils';
-import { useApi, type VaultAuditEvent, type VaultGrant, type VaultRequest, type VaultSecret } from '../../context/ApiContext';
+import { useApi, type VaultAuditEvent, type VaultGrant, type VaultRequest, type VaultRequestSpec, type VaultSecret } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { VaultApprovalCard, type ApprovalOutcome } from '../ui/vault-approval-card';
 import { VaultSecretForm } from '../ui/vault-secret-form';
@@ -16,8 +16,16 @@ const AddSecretDialog: React.FC<{
   onClose: () => void;
   onCreated: (name: string, reason?: 'created' | 'already_exists') => void;
   groups: string[];
-}> = ({ onClose, onCreated, groups }) => {
+  request?: VaultRequest | null;
+}> = ({ onClose, onCreated, groups, request }) => {
   const { t } = useTranslation();
+  const requestCard = (request?.card ?? null) as { default_protection?: unknown; spec?: VaultRequestSpec } | null;
+  const requestSpec = (requestCard?.spec ?? null) as VaultRequestSpec | null;
+  const defaultProtection =
+    requestCard?.default_protection === 'standard' || requestCard?.default_protection === 'protected'
+      ? requestCard.default_protection
+      : undefined;
+  const fixedName = request?.secret_name ?? undefined;
 
   return (
     <Dialog
@@ -28,9 +36,18 @@ const AddSecretDialog: React.FC<{
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{t('vaults.dialog.title')}</DialogTitle>
+          <DialogTitle>{request ? t('vaults.request.title') : t('vaults.dialog.title')}</DialogTitle>
         </DialogHeader>
-        <VaultSecretForm onCancel={onClose} onCreated={onCreated} groups={groups} />
+        <VaultSecretForm
+          fixedName={fixedName}
+          provisionRequestId={request?.id ?? null}
+          requestSpec={requestSpec}
+          defaultProtection={defaultProtection}
+          onCancel={onClose}
+          onCreated={onCreated}
+          groups={groups}
+          treatExistingAsFulfilled={Boolean(request)}
+        />
       </DialogContent>
     </Dialog>
   );
@@ -188,7 +205,9 @@ const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: Va
 const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultRequest) => void }> = ({ request: r, onReview }) => {
   const { t } = useTranslation();
   const card = (r.card ?? {}) as { request_type?: string; kind?: string; protection?: string; session_id?: string };
-  const isSign = (card.request_type ?? r.request_type) === 'sign';
+  const type = card.request_type ?? r.request_type;
+  const isSign = type === 'sign';
+  const isProvision = type === 'provision';
   const isProtected = card.protection === 'protected';
   const Icon = isSign || card.kind === 'keypair' ? Wallet : KeyRound;
   return (
@@ -199,12 +218,14 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
       <div className="flex min-w-0 flex-col gap-1">
         <div className="flex flex-wrap items-center gap-2">
           <span className="truncate font-mono text-sm font-semibold">{r.secret_name}</span>
-          <Badge variant="info">{isSign ? t('vaults.requests.sign') : t('vaults.requests.access')}</Badge>
+          <Badge variant="info">
+            {isProvision ? t('vaults.requests.provision') : isSign ? t('vaults.requests.sign') : t('vaults.requests.access')}
+          </Badge>
           {isProtected ? <Badge variant="warning">{t('vaults.protected')}</Badge> : null}
         </div>
         <span className="flex items-center gap-1.5 text-xs text-muted">
           <Clock className="size-3" />
-          {t('vaults.requests.waiting')}
+          {isProvision ? t('vaults.requests.waitingForValue') : t('vaults.requests.waiting')}
           {card.session_id ? (
             <>
               <span aria-hidden>·</span>
@@ -215,7 +236,7 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
       </div>
       <div className="ml-auto">
         <Button size="sm" onClick={() => onReview(r)}>
-          {t('vaults.requests.review')}
+          {isProvision ? t('vaults.request.provide') : t('vaults.requests.review')}
         </Button>
       </div>
     </div>
@@ -228,23 +249,22 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
  * Best-effort — a requests fetch failure (e.g. an older backend without the route) must
  * not surface an error or blank the rest of the hub.
  */
-const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolved }) => {
+const PendingRequestsSection: React.FC<{ groups: string[]; onResolved: () => void }> = ({ groups, onResolved }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
   const [requests, setRequests] = useState<VaultRequest[]>([]);
   const [reviewing, setReviewing] = useState<VaultRequest | null>(null);
+  const [provisioning, setProvisioning] = useState<VaultRequest | null>(null);
 
   const load = useCallback(async () => {
     try {
       // Best-effort with suppressed errors so an older backend without the route doesn't
-      // spam global toasts on every 5s poll. Only approval (access/sign) requests render
-      // here — a provision request ($NAME secure-input) has no grant scope and would show
-      // a broken Review row, so filter it out.
+      // spam global toasts on every 5s poll.
       const res = await api.getVaultRequests({ status: 'pending' }, { handleError: false });
       const pending = (res.requests ?? []).filter((r) => {
         const type = (r.card as { request_type?: string } | null)?.request_type ?? r.request_type;
-        return type === 'access' || type === 'sign';
+        return type === 'access' || type === 'sign' || type === 'provision';
       });
       setRequests(pending);
     } catch {
@@ -289,7 +309,18 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
         <span className="hidden text-xs text-muted sm:inline">{t('vaults.requests.subtitle')}</span>
       </div>
       {requests.map((r) => (
-        <RequestRow key={r.id} request={r} onReview={setReviewing} />
+        <RequestRow
+          key={r.id}
+          request={r}
+          onReview={(request) => {
+            const type = (request.card as { request_type?: string } | null)?.request_type ?? request.request_type;
+            if (type === 'provision') {
+              setProvisioning(request);
+            } else {
+              setReviewing(request);
+            }
+          }}
+        />
       ))}
       <Dialog
         open={reviewing != null}
@@ -306,6 +337,22 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
           ) : null}
         </DialogContent>
       </Dialog>
+      {provisioning != null ? (
+        <AddSecretDialog
+          request={provisioning}
+          groups={groups}
+          onClose={() => setProvisioning(null)}
+          onCreated={(name, reason) => {
+            setProvisioning(null);
+            if (reason !== 'already_exists') {
+              showToast(t('vaults.created', { name }), 'success');
+            }
+            setRequests((prev) => prev.filter((r) => r.id !== provisioning.id));
+            load();
+            onResolved();
+          }}
+        />
+      ) : null}
     </div>
   );
 };
@@ -438,7 +485,7 @@ export const VaultsPage: React.FC = () => {
       {error && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
       )}
-      <PendingRequestsSection onResolved={refresh} />
+      <PendingRequestsSection groups={groups.map(([g]) => g)} onResolved={refresh} />
       {grants.length > 0 && (
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-2 px-1">
