@@ -8,7 +8,7 @@ import threading
 from typing import Optional, Dict, Any
 from config import paths
 from config.platform_registry import get_platform_descriptor
-from config.v2_config import DEFAULT_AGENT_BACKEND, DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
+from config.v2_config import DEFAULT_AGENT_BACKEND, DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS, DEFAULT_AGENT_PROGRESS_STYLE
 from modules.im import BaseIMClient, MessageContext, IMFactory
 from modules.im.multi import MultiIMClient
 from modules.agent_router import AgentRouter
@@ -903,8 +903,8 @@ class Controller:
         Currently a global config setting; per-channel overrides can layer on top
         here later without touching the dispatcher.
         """
-        value = getattr(self.config, "agent_progress_style", "concise")
-        return value if value in ("concise", "verbose", "off") else "concise"
+        value = getattr(self.config, "agent_progress_style", DEFAULT_AGENT_PROGRESS_STYLE)
+        return value if value in ("concise", "verbose", "off") else DEFAULT_AGENT_PROGRESS_STYLE
 
     def uses_concise_status_bubble(self, context: MessageContext) -> bool:
         """True when this turn renders a concise status bubble (Slack/Discord +

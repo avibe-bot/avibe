@@ -71,7 +71,7 @@ class _EditClient:
 
 
 class _StubController:
-    def __init__(self, *, platform="slack", im_client=None, progress_style=None, backend_alive=None):
+    def __init__(self, *, platform="slack", im_client=None, progress_style="concise", backend_alive=None):
         self.config = type(
             "Config", (), {"platform": platform, "language": "en", "reply_enhancements": False}
         )()
@@ -113,6 +113,11 @@ def _dispatcher(controller, *, now=1000.0, disable_heartbeat=True):
 
 
 class StatusBubbleProcessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_missing_progress_getter_defaults_off(self):
+        controller = object()
+        d = ConsolidatedMessageDispatcher(controller)
+        self.assertEqual(d._progress_style(_ctx()), "off")
+
     async def test_process_messages_replace_in_one_bubble(self):
         controller = _StubController(platform="slack")
         d = _dispatcher(controller)

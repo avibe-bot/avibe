@@ -1568,7 +1568,7 @@
     "showPagesPrompt": "Show Page 引导",
     "showPagesPromptHint": "提示 Agent 何时以及如何使用可视化 Show Page。关闭后 vibe show CLI 仍然可用。",
     "agentProgressStyle": "进度显示（Slack/Discord）",
-    "agentProgressStyleHint": "Agent 进度的呈现方式：精简状态条(最终变成结果) / 详细过程日志 / 关闭。",
+    "agentProgressStyleHint": "Agent 进度的呈现方式：关闭 / 精简状态条(最终变成结果) / 详细过程日志。",
     "agentProgressStyleConcise": "精简",
     "agentProgressStyleVerbose": "详细",
     "agentProgressStyleOff": "关闭",

@@ -1568,7 +1568,7 @@
     "showPagesPrompt": "Show Page Guidance",
     "showPagesPromptHint": "Tell agents when and how to use visual Show Pages. The vibe show CLI remains available when this is off.",
     "agentProgressStyle": "Progress display (Slack/Discord)",
-    "agentProgressStyleHint": "How agent progress is shown: a single concise status bubble that becomes the result, the verbose process log, or off.",
+    "agentProgressStyleHint": "How agent progress is shown: off, a single concise status bubble that becomes the result, or the verbose process log.",
     "agentProgressStyleConcise": "Concise",
     "agentProgressStyleVerbose": "Verbose",
     "agentProgressStyleOff": "Off",

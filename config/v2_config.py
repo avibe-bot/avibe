@@ -74,6 +74,7 @@ DEFAULT_OPENCODE_ERROR_RETRY_LIMIT = 1
 DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX = 14
 MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
 MAX_CHAT_MESSAGE_FONT_SIZE_PX = 20
+DEFAULT_AGENT_PROGRESS_STYLE = "off"
 
 
 def _filter_dataclass_fields(dc_class, payload: dict) -> dict:
@@ -427,10 +428,10 @@ class V2Config:
     reply_enhancements: bool = True  # Enable quick-reply buttons
     show_pages_prompt: bool = True  # Inject Show Pages capability guidance into agent prompts
     language: str = "en"  # Global language setting (see vibe/i18n)
-    # Concise status-bubble UX for editing platforms (Slack/Discord):
-    #   "concise" (default) one self-updating bubble that becomes the result,
-    #   "verbose" legacy append/split process log, "off" no process bubble.
-    agent_progress_style: str = "concise"
+    # Progress UX for editing platforms (Slack/Discord):
+    #   "off" (default) no process bubble, "concise" one self-updating bubble,
+    #   "verbose" legacy append/split process log.
+    agent_progress_style: str = DEFAULT_AGENT_PROGRESS_STYLE
     agent_status_heartbeat_ms: int = 15000  # status-bubble elapsed-timer heartbeat
     agent_status_no_output_ms: int = 180000  # "no output for N min" hint threshold
     # True once the user has finished the setup wizard. This is the explicit
@@ -639,9 +640,9 @@ class V2Config:
 
         language = normalize_language(payload.get("language"), default="en")
 
-        agent_progress_style = payload.get("agent_progress_style", "concise")
+        agent_progress_style = payload.get("agent_progress_style", DEFAULT_AGENT_PROGRESS_STYLE)
         if agent_progress_style not in ("concise", "verbose", "off"):
-            agent_progress_style = "concise"
+            agent_progress_style = DEFAULT_AGENT_PROGRESS_STYLE
 
         def _positive_int(value, default, maximum):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0 or value > maximum:

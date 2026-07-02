@@ -15,6 +15,7 @@ from typing import Any, Optional
 from urllib.parse import urljoin
 
 from config.platform_registry import get_platform_descriptor
+from config.v2_config import DEFAULT_AGENT_PROGRESS_STYLE
 from modules.im import MessageContext
 from modules.im.formatters.base_formatter import to_status_label
 from core.message_mirror import persist_agent_message
@@ -304,10 +305,9 @@ class ConsolidatedMessageDispatcher:
     def _progress_style(self, context: MessageContext) -> str:
         """Resolve the per-channel progress style: ``concise`` | ``verbose`` | ``off``.
 
-        Defaults to ``concise`` (the locked default for editing platforms). A
+        Defaults to ``off`` unless config explicitly enables progress display. A
         controller may expose ``get_progress_style_for_context`` once the
-        settings/UI plumbing lands; until then this returns the default and the
-        feature degrades to existing behavior only via ``_concise_progress_style``.
+        settings/UI plumbing lands; until then this returns the default.
         """
         getter = getattr(self.controller, "get_progress_style_for_context", None)
         if callable(getter):
@@ -316,8 +316,8 @@ class ConsolidatedMessageDispatcher:
                 if value in {"concise", "verbose", "off"}:
                     return value
             except Exception:
-                logger.debug("get_progress_style_for_context failed; defaulting concise", exc_info=True)
-        return "concise"
+                logger.debug("get_progress_style_for_context failed; defaulting off", exc_info=True)
+        return DEFAULT_AGENT_PROGRESS_STYLE
 
     def _concise_progress_style(self, context: MessageContext) -> str:
         """Effective progress style for the process-message path.
