@@ -269,7 +269,7 @@ def test_restart_job_aborts_when_stop_fails(monkeypatch, tmp_path):
         "_stop_runtime_for_restart",
         lambda stop_ui=True: _fake_stop_runtime(calls, service_stopped=False),
     )
-    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 111)
+    monkeypatch.setattr(restart_supervisor, "_remaining_service_pids_after_stop", lambda: [111])
     monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
     monkeypatch.setattr(restart_supervisor.subprocess, "run", lambda *args, **kwargs: calls.append("run"))
 
@@ -280,7 +280,8 @@ def test_restart_job_aborts_when_stop_fails(monkeypatch, tmp_path):
     status = runtime.read_json(runtime.get_restart_status_path())
     assert status["ok"] is False
     assert status["state"] == "failed"
-    assert "did not stop" in status["error"]
+    assert "remaining service pid(s): 111" in status["error"]
+    assert status["remaining_service_pids"] == [111]
 
 
 def test_restart_job_continues_when_old_pid_already_exited(monkeypatch, tmp_path):
@@ -296,6 +297,7 @@ def test_restart_job_continues_when_old_pid_already_exited(monkeypatch, tmp_path
     )
     monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", lambda start_ui=True: _fake_start_runtime(calls))
     monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
+    monkeypatch.setattr(restart_supervisor, "_remaining_service_pids_after_stop", lambda: [])
     monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
     monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
 
@@ -304,6 +306,36 @@ def test_restart_job_continues_when_old_pid_already_exited(monkeypatch, tmp_path
     assert rc == 0
     assert calls == ["stop_runtime", "start_runtime"]
     assert runtime.read_json(runtime.get_restart_status_path())["state"] == "succeeded"
+
+
+def test_restart_job_aborts_when_extra_service_survives_stop(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    calls = []
+
+    monkeypatch.setattr(
+        restart_supervisor,
+        "_stop_runtime_for_restart",
+        lambda stop_ui=True: _fake_stop_runtime(calls, service_stopped=False),
+    )
+    monkeypatch.setattr(restart_supervisor, "_remaining_service_pids_after_stop", lambda: [333])
+    monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", lambda start_ui=True: _fake_start_runtime(calls))
+    monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
+
+    rc = restart_supervisor._run_restart_job(
+        job_id="jobextra",
+        delay_seconds=0,
+        vibe_path="/bin/vibe",
+        trigger="test",
+    )
+
+    assert rc == 2
+    assert calls == ["stop_runtime"]
+    status = runtime.read_json(runtime.get_restart_status_path())
+    assert status["ok"] is False
+    assert status["state"] == "failed"
+    assert status["remaining_service_pids"] == [333]
+    assert "remaining service pid(s): 333" in status["error"]
 
 
 def test_restart_job_adopts_slow_starting_service_pid(monkeypatch, tmp_path):
