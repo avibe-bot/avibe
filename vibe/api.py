@@ -1883,11 +1883,10 @@ def _access_request_secret_name(request_id: str) -> str:
 
 
 def _grant_scope_payload(grant: dict) -> list[dict[str, str]]:
-    scope_type = str(grant.get("scope_type") or "")
-    scope_ref = str(grant.get("scope_ref") or "")
-    if not scope_type or not scope_ref:
+    grant_id = str(grant.get("id") or grant.get("grant_id") or "")
+    if not grant_id:
         return []
-    return [{"scope_type": scope_type, "scope_ref": scope_ref}]
+    return [{"grant_id": grant_id}]
 
 
 def _cleanup_failed_agent_grant(
@@ -1919,24 +1918,8 @@ def _cleanup_failed_agent_grant(
                 else _grant_scope_payload(grant)
             )
             if force_release_scope:
-                forced_scopes = _grant_scope_payload(grant)
-                for scope in forced_scopes:
-                    raw_scope_members = grant.get("member_snapshot") or []
-                    scope_members = set(raw_scope_members if isinstance(raw_scope_members, list) else [])
-                    active_scope_members: set[str] = set()
-                    for active in conn.execute(
-                        select(vault_service.vault_grants).where(
-                            vault_service.vault_grants.c.status.in_(vault_service.ACTIVE_GRANT_STATES),
-                            vault_service.vault_grants.c.scope_type == scope["scope_type"],
-                            vault_service.vault_grants.c.scope_ref == scope["scope_ref"],
-                        )
-                    ).mappings():
-                        active_row = dict(active)
-                        if vault_service.grant_row_has_resident_agent_ready(active_row):
-                            active_members = json.loads(active_row.get("member_snapshot") or "[]")
-                            if isinstance(active_members, list):
-                                active_scope_members.update(str(member) for member in active_members if isinstance(member, str))
-                    if not scope_members.issubset(active_scope_members) and scope not in release_scopes:
+                for scope in _grant_scope_payload(grant):
+                    if scope not in release_scopes:
                         release_scopes.append(scope)
     except Exception:
         if not force_release_on_cleanup_failure:
@@ -2040,10 +2023,11 @@ def create_vault_grant(payload: dict) -> dict:
     try:
         relay_ttl = _grant_ttl_seconds(grant)
         agent_result = avault_agent_grant(
-            scope_type=str(grant["scope_type"]),
-            scope_ref=str(grant["scope_ref"]),
+            grant_id=str(grant["id"]),
             ttl_secs=relay_ttl,
             deks=agent_deks,
+            scope_type=scope_type,
+            scope_ref=scope_ref,
             expected_pubkey=expected_pubkey,
         )
         if not _agent_grant_cached_all(agent_result, len(agent_deks)):
@@ -5280,19 +5264,24 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> dict:
 
 
 def _agent_secret_payload(secret: dict, *, target_field: str) -> dict:
-    return {
+    payload = {
         "name": secret["name"],
         target_field: secret[target_field],
         "envelope": _envelope_payload(secret["envelope"]),
     }
+    tier = secret.get("tier")
+    if tier:
+        payload["tier"] = str(tier)
+    return payload
 
 
 def avault_agent_grant(
     *,
-    scope_type: str,
-    scope_ref: str,
+    grant_id: str,
     ttl_secs: int,
     deks: list[dict],
+    scope_type: str | None = None,
+    scope_ref: str | None = None,
     expected_pubkey: dict | None = None,
 ) -> dict:
     """Cache browser-released protected DEKs in the resident agent."""
@@ -5302,10 +5291,11 @@ def avault_agent_grant(
     validate_avault_agent_pubkey(expected_pubkey)
     try:
         return _avault_agent_client().grant(
-            scope_type=scope_type,
-            scope_ref=scope_ref,
+            grant_id=grant_id,
             ttl_secs=ttl_secs,
             deks=deks,
+            scope_type=scope_type,
+            scope_ref=scope_ref,
         )
     except AvaultAgentError as exc:
         raise AvaultError(str(exc)) from exc
@@ -5324,13 +5314,13 @@ def validate_avault_agent_pubkey(expected_pubkey: dict | None) -> None:
         raise AvaultError("avault agent public key mismatch")
 
 
-def avault_agent_release(*, scope_type: str, scope_ref: str) -> dict:
+def avault_agent_release(*, grant_id: str) -> dict:
     """Drop a resident-agent protected grant if present."""
     from vibe.avault_agent import AvaultAgentClient, AvaultAgentError
 
     _require_avault_p2_surface("resident agent release")
     try:
-        return AvaultAgentClient(_avault_agent_manager().socket_path, timeout=1.0).release(scope_type=scope_type, scope_ref=scope_ref)
+        return AvaultAgentClient(_avault_agent_manager().socket_path, timeout=1.0).release(grant_id=grant_id)
     except AvaultAgentError as exc:
         raise AvaultError(str(exc)) from exc
 
@@ -5377,51 +5367,47 @@ def _fail_closed_resident_agent_after_release_failure() -> None:
         )
 
 
-def _release_failed_grant_scope(scope_type: str, scope_ref: str, *, reason: str) -> None:
+def _release_failed_grant_scope(grant_id: str, *, reason: str) -> None:
     try:
-        release_vault_agent_scopes([{"scope_type": scope_type, "scope_ref": scope_ref}], reason=reason)
+        release_vault_agent_scopes([{"grant_id": grant_id}], reason=reason)
     except AvaultError:
         logger.warning(
-            "%s: failed to clear resident agent scope after failed grant relay",
+            "%s: failed to clear resident agent grant after failed grant relay",
             reason,
             exc_info=True,
         )
 
 
 def release_vault_agent_scopes(scopes: list[dict[str, str]], *, reason: str) -> None:
-    seen: set[tuple[str, str]] = set()
+    seen: set[str] = set()
     for scope in scopes:
-        scope_type = str(scope.get("scope_type") or "")
-        scope_ref = str(scope.get("scope_ref") or "")
-        if not scope_type or not scope_ref:
+        grant_id = str(scope.get("grant_id") or scope.get("id") or "")
+        if not grant_id:
             continue
-        key = (scope_type, scope_ref)
-        if key in seen:
+        if grant_id in seen:
             continue
-        seen.add(key)
+        seen.add(grant_id)
         try:
-            avault_agent_release(scope_type=scope_type, scope_ref=scope_ref)
+            avault_agent_release(grant_id=grant_id)
         except AvaultError as exc:
             if _agent_release_failure_is_absent(exc):
-                logger.debug("%s: resident agent absent while releasing grant %s:%s", reason, scope_type, scope_ref)
+                logger.debug("%s: resident agent absent while releasing grant %s", reason, grant_id)
                 continue
             try:
                 _fail_closed_resident_agent_after_release_failure()
             except OSError as reset_exc:
                 raise AvaultError("failed to clear resident agent after release failure") from reset_exc
             logger.warning(
-                "%s: release failed for resident agent grant %s:%s; reset resident agent cache",
+                "%s: release failed for resident agent grant %s; reset resident agent cache",
                 reason,
-                scope_type,
-                scope_ref,
+                grant_id,
                 exc_info=True,
             )
 
 
 def avault_agent_deliver_run(
     *,
-    scope_type: str,
-    scope_ref: str,
+    grant_id: str,
     secrets: list[dict],
     command: list[str],
 ) -> dict:
@@ -5431,8 +5417,7 @@ def avault_agent_deliver_run(
     _require_avault_p2_surface("resident agent deliver run")
     try:
         result = _avault_agent_manager().client(timeout=None).deliver_run(
-            scope_type=scope_type,
-            scope_ref=scope_ref,
+            grant_id=grant_id,
             command=command,
             secrets=[_agent_secret_payload(secret, target_field="env") for secret in secrets],
         )
@@ -5449,8 +5434,7 @@ def avault_agent_deliver_run(
 
 def avault_agent_deliver_fetch(
     *,
-    scope_type: str,
-    scope_ref: str,
+    grant_id: str,
     name: str,
     sealed,
     request: dict,
@@ -5461,8 +5445,7 @@ def avault_agent_deliver_fetch(
     _require_avault_p2_surface("resident agent deliver fetch")
     try:
         return _avault_agent_manager().client(timeout=_AVAULT_FETCH_TIMEOUT_SECONDS).deliver_fetch(
-            scope_type=scope_type,
-            scope_ref=scope_ref,
+            grant_id=grant_id,
             name=name,
             envelope=_envelope_payload(sealed),
             request=request,
@@ -5475,8 +5458,7 @@ def avault_agent_deliver_fetch(
 
 def avault_agent_deliver_inject(
     *,
-    scope_type: str,
-    scope_ref: str,
+    grant_id: str,
     path: str,
     fmt: str,
     secrets: list[dict],
@@ -5487,8 +5469,7 @@ def avault_agent_deliver_inject(
     _require_avault_p2_surface("resident agent deliver inject")
     try:
         result = _avault_agent_client().deliver_inject(
-            scope_type=scope_type,
-            scope_ref=scope_ref,
+            grant_id=grant_id,
             path=str(path),
             fmt=fmt,
             secrets=[_agent_secret_payload(secret, target_field="key") for secret in secrets],

@@ -131,8 +131,7 @@ def test_inject_uses_agent_delivery_for_protected_grant(tmp_path, capfd, monkeyp
     assert cli.cmd_vault_inject(_ns(keys="PROTECTED_KEY", out=str(out), format="dotenv")) == 0
 
     inject.assert_called_once_with(
-        scope_type=grant["scope_type"],
-        scope_ref=grant["scope_ref"],
+        grant_id=grant["id"],
         path=str(out),
         fmt="dotenv",
         secrets=[{"name": "PROTECTED_KEY", "key": "PROTECTED_KEY", "envelope": _sealed("protected_key")}],
@@ -156,8 +155,7 @@ def test_inject_resolves_protected_relative_output_in_caller_cwd(tmp_path, capfd
     payload = json.loads(capfd.readouterr().out)
 
     inject.assert_called_once_with(
-        scope_type=grant["scope_type"],
-        scope_ref=grant["scope_ref"],
+        grant_id=grant["id"],
         path=expected,
         fmt="dotenv",
         secrets=[{"name": "PROTECTED_KEY", "key": "PROTECTED_KEY", "envelope": _sealed("protected_key")}],

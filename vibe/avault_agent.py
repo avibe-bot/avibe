@@ -103,38 +103,37 @@ class AvaultAgentClient:
     def grant(
         self,
         *,
-        scope_type: str,
-        scope_ref: str,
+        grant_id: str,
         ttl_secs: int,
         deks: list[dict[str, Any]],
+        scope_type: str | None = None,
+        scope_ref: str | None = None,
     ) -> dict[str, Any]:
-        return self.request(
-            {
-                "type": "grant",
-                "scope_type": scope_type,
-                "scope_ref": scope_ref,
-                "ttl_secs": ttl_secs,
-                "deks": deks,
-            }
-        )
+        payload = {
+            "type": "grant",
+            "grant_id": grant_id,
+            "ttl_secs": ttl_secs,
+            "deks": deks,
+        }
+        if scope_type and scope_ref:
+            payload["scope_type"] = scope_type
+            payload["scope_ref"] = scope_ref
+        return self.request(payload)
 
-    def release(self, *, scope_type: str, scope_ref: str) -> dict[str, Any]:
-        return self.request({"type": "release", "scope_type": scope_type, "scope_ref": scope_ref})
+    def release(self, *, grant_id: str) -> dict[str, Any]:
+        return self.request({"type": "release", "grant_id": grant_id})
 
     def deliver_run(
         self,
         *,
-        scope_type: str,
-        scope_ref: str,
+        grant_id: str,
         command: list[str],
         secrets: list[dict[str, Any]],
     ) -> dict[str, Any]:
         return self.request(
             {
-                "type": "deliver",
-                "scope_type": scope_type,
-                "scope_ref": scope_ref,
-                "mode": "run",
+                "type": "deliver.run",
+                "grant_id": grant_id,
                 "command": command,
                 "secrets": secrets,
             }
@@ -143,18 +142,15 @@ class AvaultAgentClient:
     def deliver_fetch(
         self,
         *,
-        scope_type: str,
-        scope_ref: str,
+        grant_id: str,
         name: str,
         envelope: dict[str, Any],
         request: dict[str, Any],
     ) -> dict[str, Any]:
         return self.request(
             {
-                "type": "deliver",
-                "scope_type": scope_type,
-                "scope_ref": scope_ref,
-                "mode": "fetch",
+                "type": "deliver.fetch",
+                "grant_id": grant_id,
                 "name": name,
                 "envelope": envelope,
                 "request": request,
@@ -164,18 +160,15 @@ class AvaultAgentClient:
     def deliver_inject(
         self,
         *,
-        scope_type: str,
-        scope_ref: str,
+        grant_id: str,
         path: str,
         fmt: str,
         secrets: list[dict[str, Any]],
     ) -> dict[str, Any]:
         return self.request(
             {
-                "type": "deliver",
-                "scope_type": scope_type,
-                "scope_ref": scope_ref,
-                "mode": "inject",
+                "type": "deliver.inject",
+                "grant_id": grant_id,
                 "path": path,
                 "format": fmt,
                 "secrets": secrets,

@@ -183,9 +183,9 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
     assert result["status"] == "archived"
     assert result["agent_status"] == "idle"
     assert result["reclaimed"] == {"tasks": 1, "watches": 1, "runs": 2, "queued": 0}
-    assert {(scope["scope_type"], scope["scope_ref"]) for scope in result["revoked_vault_grant_scopes"]} == {
-        ("secret", "ARCHIVE_KEY"),
-        ("secret", "ARCHIVE_RESERVED_KEY"),
+    assert {scope["grant_id"] for scope in result["revoked_vault_grant_scopes"]} == {
+        grant["id"],
+        reserved_grant["id"],
     }
 
     with engine.connect() as conn:
@@ -252,13 +252,13 @@ def test_archive_release_vault_scopes_runs_in_threadpool(monkeypatch) -> None:
     asyncio.run(
         ui_server._archive_release_vault_scopes(
             "ses_archive",
-            [{"scope_type": "secret", "scope_ref": "ARCHIVE_KEY"}],
+            [{"grant_id": "grant_archive"}],
         )
     )
 
     assert calls
     release.assert_called_once_with(
-        [{"scope_type": "secret", "scope_ref": "ARCHIVE_KEY"}],
+        [{"grant_id": "grant_archive"}],
         reason="archive_session:ses_archive",
     )
 

@@ -31,8 +31,8 @@ from storage.models import vault_audit, vault_grants, vault_groups, vault_links,
 from storage.vault_crypto import Sealed
 
 DEFAULT_GROUP = "default"
-GRANT_SCOPE_TYPES = {"secret", "skill", "group"}
-DEFAULT_GRANT_TTL_SECONDS = {"secret": 300, "skill": 900, "group": 900}
+GRANT_SCOPE_TYPES = {"secret", "skill", "group", "set"}
+DEFAULT_GRANT_TTL_SECONDS = {"secret": 300, "skill": 900, "group": 900, "set": 900}
 GRANT_TTL_OPTIONS_SECONDS = (300, 900, 3600)
 SUPPORTED_SIGNATURE_SCHEMES = {
     "ecdsa-secp256k1-recoverable",
@@ -613,14 +613,14 @@ def _grant_payload(conn: Connection, row: dict[str, Any], *, cache: VaultGrantRu
 
 
 def _unique_grant_scopes(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
-    seen: set[tuple[str, str]] = set()
+    seen: set[str] = set()
     scopes: list[dict[str, str]] = []
     for row in rows:
-        key = (str(row["scope_type"]), str(row["scope_ref"]))
-        if key in seen:
+        grant_id = str(row.get("id") or "")
+        if not grant_id or grant_id in seen:
             continue
-        seen.add(key)
-        scopes.append({"scope_type": key[0], "scope_ref": key[1]})
+        seen.add(grant_id)
+        scopes.append({"grant_id": grant_id})
     return scopes
 
 
@@ -1357,6 +1357,8 @@ def _secure_input_card(
 def _grant_member_rows(conn: Connection, scope_type: str, scope_ref: str) -> list[dict[str, Any]]:
     if scope_type == "secret":
         return [_require_row(conn, scope_ref)]
+    if scope_type == "set":
+        return []
     if scope_type == "skill":
         rows = (
             conn.execute(
@@ -1423,6 +1425,36 @@ def _grantable_member_rows_for_request(
     scope_ref: str,
     request_id: str | None,
 ) -> list[dict[str, Any]]:
+    if scope_type == "set":
+        if not request_id:
+            return []
+        try:
+            request_row = _load_request_for_transition(
+                conn,
+                str(request_id),
+                request_type="access",
+                allowed_statuses={"pending"},
+                wrong_type_message="grant approval must complete an access request",
+                wrong_status_message="grant approval request is not pending",
+                expired_message="grant approval request has expired",
+            )
+        except RequestNotFoundError:
+            raise
+        except InvalidRequestError:
+            raise
+        card = _request_card(request_row)
+        for option in card.get("scope_options") or []:
+            if not (
+                isinstance(option, dict)
+                and option.get("scope_type") == "set"
+                and option.get("scope_ref") == scope_ref
+            ):
+                continue
+            snapshot = option.get("member_snapshot") or []
+            if not isinstance(snapshot, list):
+                return []
+            return _selector_set_rows(conn, [str(name) for name in snapshot if isinstance(name, str) and name])
+        return []
     rows = _grantable_member_rows(conn, scope_type, scope_ref)
     if rows or not request_id:
         return rows
@@ -1519,6 +1551,87 @@ def _secret_scope_option(
     return option
 
 
+def _selector_set_scope_ref(request_id: str) -> str:
+    return f"request:{request_id}"
+
+
+def _selector_set_rows(conn: Connection, names: list[str]) -> list[dict[str, Any]]:
+    ordered_names = list(dict.fromkeys(str(name) for name in names if str(name)))
+    if not ordered_names:
+        return []
+    rows_by_name = {
+        row["name"]: dict(row)
+        for row in conn.execute(
+            select(vault_secrets).where(vault_secrets.c.name.in_(ordered_names))
+        ).mappings()
+    }
+    rows: list[dict[str, Any]] = []
+    for name in ordered_names:
+        row = rows_by_name.get(name)
+        if (
+            row is None
+            or row.get("protection") != "protected"
+            or not _secret_access_grantable(row)
+            or not _groups_grantable(conn, [str(row.get("group_name") or "")])
+        ):
+            return []
+        rows.append(row)
+    return rows
+
+
+def _selector_set_names_from_delivery(delivery: dict[str, Any], requested_secret: str) -> list[str]:
+    raw_names = delivery.get("protected_secret_names")
+    if not isinstance(raw_names, list):
+        return []
+    names = list(dict.fromkeys(str(name) for name in raw_names if isinstance(name, str) and name))
+    if requested_secret not in names:
+        return []
+    return names
+
+
+def _selector_set_scope_option(
+    conn: Connection,
+    names: list[str],
+    *,
+    request_id: str,
+    default_ttl_seconds: int,
+) -> dict[str, Any] | None:
+    rows = _selector_set_rows(conn, names)
+    members = [row["name"] for row in rows]
+    if not members:
+        return None
+    ttl_cap = _ttl_cap_for_members(conn, members)
+    capped_default = min(default_ttl_seconds, ttl_cap)
+    return {
+        "scope_type": "set",
+        "scope_ref": _selector_set_scope_ref(request_id),
+        "default_ttl_seconds": capped_default,
+        "ttl_options_seconds": [seconds for seconds in GRANT_TTL_OPTIONS_SECONDS if seconds <= ttl_cap],
+        "session_binding_default": True,
+        "member_count": len(members),
+        "member_snapshot": members,
+        "member_versions": [_member_version(row) for row in rows],
+    }
+
+
+def _selector_set_default_ttl_seconds(delivery: dict[str, Any]) -> int:
+    source_selector = delivery.get("source_selector")
+    tags = source_selector.get("tags") if isinstance(source_selector, dict) else None
+    if isinstance(tags, list) and any(isinstance(tag, str) and tag for tag in tags):
+        return DEFAULT_GRANT_TTL_SECONDS["set"]
+    return DEFAULT_GRANT_TTL_SECONDS["secret"]
+
+
+def _selector_set_has_always_ask(conn: Connection, names: list[str]) -> bool:
+    ordered_names = list(dict.fromkeys(str(name) for name in names if str(name)))
+    if not ordered_names:
+        return False
+    return any(
+        _secret_always_ask(dict(row))
+        for row in conn.execute(select(vault_secrets).where(vault_secrets.c.name.in_(ordered_names))).mappings()
+    )
+
+
 def _scope_option(
     conn: Connection,
     scope_type: str,
@@ -1556,13 +1669,23 @@ def approval_card(
     skill: str | None = None,
     session_id: str | None = None,
     grantable: bool = True,
+    protected_secret_names: list[str] | None = None,
+    selector_set_ttl_seconds: int | None = None,
 ) -> dict[str, Any]:
     row = _require_row(conn, secret_name)
     group = row.get("group_name") or DEFAULT_GROUP
     always_ask = _secret_always_ask(row)
     one_shot_access = request_type == "access" and always_ask and _secret_access_requestable(row)
     scope_options: list[dict[str, Any]] = []
-    if one_shot_access:
+    if protected_secret_names and grantable:
+        option = _selector_set_scope_option(
+            conn,
+            protected_secret_names,
+            request_id=request_id,
+            default_ttl_seconds=selector_set_ttl_seconds or DEFAULT_GRANT_TTL_SECONDS["set"],
+        )
+        scope_options = [option] if option is not None else []
+    elif one_shot_access:
         option = _secret_scope_option(
             conn,
             row,
@@ -1570,7 +1693,7 @@ def approval_card(
             one_shot=True,
         )
         scope_options = [option] if option is not None else []
-    if grantable and not always_ask:
+    elif grantable and not always_ask:
         scope_options = [
             option
             for option in (
@@ -1638,6 +1761,9 @@ def create_access_request(
     delivery_payload = dict(delivery or {})
     requester_payload = requester if isinstance(requester, dict) else {}
     always_ask = _secret_always_ask(row)
+    protected_secret_names = _selector_set_names_from_delivery(delivery_payload, name)
+    if protected_secret_names and _selector_set_has_always_ask(conn, protected_secret_names):
+        raise InvalidRequestError("always_ask protected secrets cannot be approved as one selector-set grant")
     card = approval_card(
         conn,
         name,
@@ -1647,7 +1773,9 @@ def create_access_request(
         egress=delivery_payload.get("egress"),
         skill=delivery_payload.get("skill") or requester_payload.get("skill"),
         session_id=requester_payload.get("session_id") or delivery_payload.get("session_id"),
-        grantable=not always_ask,
+        grantable=bool(protected_secret_names) or not always_ask,
+        protected_secret_names=protected_secret_names,
+        selector_set_ttl_seconds=_selector_set_default_ttl_seconds(delivery_payload),
     )
     delivery_payload["card"] = card
     conn.execute(
@@ -2064,12 +2192,7 @@ def agent_release_scopes_after_rows(
     *,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
 ) -> list[dict[str, str]]:
-    """Return resident-agent scopes that must be dropped after grant rows stop being active.
-
-    The agent cache is keyed by scope, not grant id. Keeping a scope is valid only
-    when the remaining active grants for that scope still cover every member that
-    had been cached under the removed rows.
-    """
+    """Return resident-agent grant ids that must be dropped after rows stop being active."""
 
     now = _now()
     expired_rows = [
@@ -2084,48 +2207,10 @@ def agent_release_scopes_after_rows(
     rows = [dict(row) for row in rows if grant_row_has_resident_agent_ready(dict(row))]
     if not rows:
         return []
-    active_rows = [
-        dict(row)
-        for row in conn.execute(select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATES))).mappings()
-        if grant_row_has_resident_agent_ready(dict(row))
-    ]
-    active_by_scope: dict[tuple[str, str], set[str]] = {}
-    for row in active_rows:
-        key = (str(row["scope_type"]), str(row["scope_ref"]))
-        active_by_scope.setdefault(key, set()).update(_grant_member_names(row))
-
-    removed_by_scope: dict[tuple[str, str], set[str]] = {}
     for row in rows:
-        key = (str(row["scope_type"]), str(row["scope_ref"]))
-        removed_by_scope.setdefault(key, set()).update(_grant_member_names(row))
-
-    release_scopes: list[dict[str, str]] = []
-    for (scope_type, scope_ref), removed_members in removed_by_scope.items():
-        if removed_members.issubset(active_by_scope.get((scope_type, scope_ref), set())):
-            continue
-        stale_scope_grants = [
-            dict(row)
-            for row in conn.execute(
-                select(vault_grants).where(
-                    vault_grants.c.scope_type == scope_type,
-                    vault_grants.c.scope_ref == scope_ref,
-                )
-            ).mappings()
-        ]
-        for stale_row in stale_scope_grants:
-            cache.drop(str(stale_row["id"]))
-            _clear_grant_agent_ready(conn, str(stale_row["id"]))
-        conn.execute(
-            vault_grants.update()
-            .where(
-                vault_grants.c.scope_type == scope_type,
-                vault_grants.c.scope_ref == scope_ref,
-                vault_grants.c.status.in_(ACTIVE_GRANT_STATES),
-            )
-            .values(agent_ready=0, agent_ready_at=None)
-        )
-        release_scopes.append({"scope_type": scope_type, "scope_ref": scope_ref})
-    return release_scopes
+        cache.drop(str(row["id"]))
+        _clear_grant_agent_ready(conn, str(row["id"]))
+    return _unique_grant_scopes(rows)
 
 
 def expire_grant(

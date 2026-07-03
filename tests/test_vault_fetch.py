@@ -21,7 +21,6 @@ def _ns(**kw):
         name=None,
         stdin=False,
         from_file=None,
-        group=None,
         tag=None,
         description=None,
         allow_host=None,
@@ -181,8 +180,7 @@ def test_fetch_uses_agent_delivery_for_protected_grant(capfd, monkeypatch):
     assert code == 0
     assert captured.out == '{"ok":true}'
     fetch.assert_called_once()
-    assert fetch.call_args.kwargs["scope_type"] == grant["scope_type"]
-    assert fetch.call_args.kwargs["scope_ref"] == grant["scope_ref"]
+    assert fetch.call_args.kwargs["grant_id"] == grant["id"]
     assert fetch.call_args.kwargs["sealed"] == _sealed("gh_pat")
     assert "value" not in repr(fetch.call_args.kwargs)
 
