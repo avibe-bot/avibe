@@ -29,11 +29,14 @@ from modules.im.formatters.slack_formatter import SlackFormatter
 
 
 class _StubSettingsManager:
+    def __init__(self, hidden_types=None):
+        self._hidden_types = set(hidden_types or ())
+
     def _canonicalize_message_type(self, message_type):
         return message_type
 
     def is_message_type_hidden(self, settings_key, canonical_type):
-        return False
+        return canonical_type in self._hidden_types
 
 
 class _StubSessionHandler:
@@ -71,7 +74,15 @@ class _EditClient:
 
 
 class _StubController:
-    def __init__(self, *, platform="slack", im_client=None, progress_style="concise", backend_alive=None):
+    def __init__(
+        self,
+        *,
+        platform="slack",
+        im_client=None,
+        progress_style="concise",
+        backend_alive=None,
+        hidden_types=None,
+    ):
         self.config = type(
             "Config", (), {"platform": platform, "language": "en", "reply_enhancements": False}
         )()
@@ -80,6 +91,7 @@ class _StubController:
         self.agent_service = None
         self._progress_style_value = progress_style
         self._backend_alive_value = backend_alive
+        self._hidden_types = hidden_types
 
     def _get_settings_key(self, context):
         return context.channel_id
@@ -88,7 +100,7 @@ class _StubController:
         return f"{context.platform}::{context.channel_id}"
 
     def get_settings_manager_for_context(self, context):
-        return _StubSettingsManager()
+        return _StubSettingsManager(self._hidden_types)
 
     def get_im_client_for_context(self, context):
         return self.im_client
@@ -177,6 +189,64 @@ class StatusBubbleProcessTests(unittest.IsolatedAsyncioTestCase):
         controller = _StubController(platform="lark")
         d = _dispatcher(controller)
         self.assertEqual(d._concise_progress_style(_ctx("lark")), "verbose")
+
+    async def test_concise_toolcall_renders_despite_hidden_toolcall(self):
+        # Regression: the concise status bubble is an ephemeral status line, not
+        # the verbose per-message log that ``show_message_types`` governs. A
+        # toolcall emit must render into the bubble even when the channel hides
+        # the toolcall message type (the default show_message_types=['assistant']).
+        controller = _StubController(platform="slack", hidden_types={"toolcall"})
+        d = _dispatcher(controller)
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            mid = await d.emit_agent_message(
+                _ctx(), "toolcall", "🔧 `Read` `{}`", status_label="🔧 Read: a.py"
+            )
+        self.assertEqual(mid, "msg-1")
+        self.assertEqual(controller.im_client.sent[0][1], "🔧 Read: a.py")
+
+    async def test_concise_renders_empty_chunk_with_status_label(self):
+        # File-link-only body strips to empty, but a non-empty status_label still
+        # renders the bubble (footer/label), so tool steps are never dropped.
+        controller = _StubController(platform="slack", hidden_types={"toolcall"})
+        d = _dispatcher(controller)
+        with mock.patch("core.message_dispatcher.strip_file_links", return_value=""):
+            with mock.patch("core.message_dispatcher.persist_agent_message"):
+                mid = await d.emit_agent_message(
+                    _ctx(), "toolcall", "[f](file:///tmp/x)", status_label="🔧 Read: x"
+                )
+        self.assertEqual(mid, "msg-1")
+        self.assertEqual(controller.im_client.sent[0][1], "🔧 Read: x")
+
+    async def test_concise_empty_chunk_and_no_label_does_not_render(self):
+        # Empty body AND no status_label → nothing to show; no bubble is posted.
+        controller = _StubController(platform="slack", hidden_types={"toolcall"})
+        d = _dispatcher(controller)
+        with mock.patch("core.message_dispatcher.strip_file_links", return_value=""):
+            with mock.patch("core.message_dispatcher.persist_agent_message"):
+                mid = await d.emit_agent_message(_ctx(), "toolcall", "[f](file:///tmp/x)")
+        self.assertIsNone(mid)
+        self.assertEqual(controller.im_client.sent, [])
+
+    async def test_concise_assistant_renders_despite_hidden_assistant(self):
+        # Concise mode bypasses the visibility toggle for assistant mutterings too;
+        # users who want zero process output use progress_style=off.
+        controller = _StubController(platform="slack", hidden_types={"assistant", "toolcall"})
+        d = _dispatcher(controller)
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            mid = await d.emit_agent_message(_ctx(), "assistant", "thinking about it")
+        self.assertEqual(mid, "msg-1")
+        self.assertEqual(controller.im_client.sent[0][1], "thinking about it")
+
+    async def test_off_still_respects_no_bubble_when_toolcall_hidden(self):
+        # off must remain fully silent regardless of the visibility toggle.
+        controller = _StubController(
+            platform="slack", progress_style="off", hidden_types={"toolcall"}
+        )
+        d = _dispatcher(controller)
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            mid = await d.emit_agent_message(_ctx(), "toolcall", "🔧 `Read` `{}`")
+        self.assertIsNone(mid)
+        self.assertEqual(controller.im_client.sent, [])
 
 
 class StatusBubbleResultTests(unittest.IsolatedAsyncioTestCase):

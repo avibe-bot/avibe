@@ -1549,6 +1549,23 @@ class ConsolidatedMessageDispatcher:
         # requirement: the process log is complete even when a channel hides it).
         persist_agent_message(target_context, canonical_type, persist_text)
 
+        # The concise status bubble is a single ephemeral status line, NOT the
+        # verbose per-message log that ``show_message_types`` governs. When a
+        # status-bubble platform (Slack/Discord) is in ``concise`` style, render
+        # tool-step / muttering emits into the bubble regardless of the
+        # toolcall-delivery capability gate and the ``is_message_type_hidden``
+        # visibility toggle below: persistence already happened above so nothing
+        # is lost, and users who want zero process output use ``off``. ``system``
+        # emits carry no status label and stay on the gated path.
+        if canonical_type in {"assistant", "toolcall"} and self._concise_progress_style(context) == "concise":
+            # ``_render_concise_status`` renders a footer-only bubble when the
+            # stripped body is empty but ``status_label`` is present, so do not
+            # drop empty-body toolcall emits here.
+            concise_chunk = strip_file_links(text).strip()
+            return await self._render_concise_status(
+                im_client, context, concise_chunk, status_label=status_label
+            )
+
         if canonical_type == "toolcall" and not self._supports_toolcall_delivery(target_context):
             logger.info(
                 "Skipping toolcall delivery for platform %s; persisted local process log only.",

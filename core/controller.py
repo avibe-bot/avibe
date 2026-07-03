@@ -499,7 +499,8 @@ class Controller:
 
         Called on every ``_t()`` invocation (guarded by mtime check).
         Refreshes: language, show_duration, ack_mode, include_time_info, include_user_info,
-        reply_enhancements, and mutable platform message filters.
+        reply_enhancements, agent_progress_style, agent_status_heartbeat_ms,
+        agent_status_no_output_ms, and mutable platform message filters.
         """
         try:
             config_path = paths.get_config_path()
@@ -516,6 +517,9 @@ class Controller:
                 self.config.include_time_info = v2_config.include_time_info
                 self.config.include_user_info = v2_config.include_user_info
                 self.config.reply_enhancements = v2_config.reply_enhancements
+                self.config.agent_progress_style = v2_config.agent_progress_style
+                self.config.agent_status_heartbeat_ms = v2_config.agent_status_heartbeat_ms
+                self.config.agent_status_no_output_ms = v2_config.agent_status_no_output_ms
                 self.config.resource_governance = v2_config.runtime.resource_governance
                 governor = getattr(self, "_agent_resource_governor", None)
                 if governor is not None:

@@ -112,3 +112,31 @@ def test_refresh_config_updates_remote_access_for_audio_asr(tmp_path, monkeypatc
 
     assert controller.config.remote_access.vibe_cloud.instance_secret == "secret"
     assert controller.audio_asr_service.config is controller.config
+
+
+def test_refresh_config_updates_agent_progress_style(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    controller = Controller.__new__(Controller)
+    controller.config = V2Config.from_payload(
+        {**_config_payload({"bot_token": "discord-token"}), "agent_progress_style": "off"}
+    )
+    controller.im_clients = {}
+    controller._config_mtime = None
+    assert controller.config.agent_progress_style == "off"
+
+    latest_config = V2Config.from_payload(
+        {
+            **_config_payload({"bot_token": "discord-token"}),
+            "agent_progress_style": "concise",
+            "agent_status_heartbeat_ms": 9000,
+            "agent_status_no_output_ms": 45000,
+        }
+    )
+    latest_config.save()
+
+    controller._refresh_config_from_disk()
+
+    assert controller.config.agent_progress_style == "concise"
+    assert controller.config.agent_status_heartbeat_ms == 9000
+    assert controller.config.agent_status_no_output_ms == 45000
