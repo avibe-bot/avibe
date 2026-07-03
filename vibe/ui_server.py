@@ -7591,19 +7591,44 @@ def _compress_response_content(content: bytes, headers: dict[str, str], starlett
         return content
     if _response_header(headers, "content-encoding"):
         return content
-    if "gzip" not in (starlette_request.headers.get("accept-encoding") or "").lower():
-        return content
     content_type = _response_header(headers, "content-type") or ""
     if not _show_response_is_compressible(content_type):
+        return content
+    _set_response_header(headers, "Vary", _append_vary_header(_response_header(headers, "vary"), "Accept-Encoding"))
+    if not _accept_encoding_allows_gzip(starlette_request.headers.get("accept-encoding")):
         return content
     compressed = gzip.compress(content, compresslevel=6)
     if len(compressed) >= len(content):
         return content
     _remove_response_header(headers, "content-length")
     _remove_response_header(headers, "etag")
-    headers["Content-Encoding"] = "gzip"
-    headers["Vary"] = _append_vary_header(_response_header(headers, "vary"), "Accept-Encoding")
+    _set_response_header(headers, "Content-Encoding", "gzip")
     return compressed
+
+
+def _accept_encoding_allows_gzip(accept_encoding: str | None) -> bool:
+    if not accept_encoding:
+        return False
+    for item in accept_encoding.split(","):
+        parts = [part.strip() for part in item.split(";") if part.strip()]
+        if not parts or parts[0].lower() != "gzip":
+            continue
+        q = 1.0
+        for param in parts[1:]:
+            name, separator, value = param.partition("=")
+            if separator and name.strip().lower() == "q":
+                try:
+                    q = float(value.strip())
+                except ValueError:
+                    q = 0.0
+                break
+        return q > 0
+    return False
+
+
+def _set_response_header(headers: dict[str, str], name: str, value: str) -> None:
+    _remove_response_header(headers, name)
+    headers[name] = value
 
 
 def _append_vary_header(existing: str | None, value: str) -> str:
@@ -7747,7 +7772,7 @@ def _remove_response_header(headers: dict[str, str], name: str) -> None:
     normalized = name.lower()
     for key in list(headers):
         if key.lower() == normalized:
-            headers.pop(key, None)
+            del headers[key]
 
 
 def _response_header(headers: dict[str, str], name: str) -> str | None:
@@ -8000,7 +8025,7 @@ def _ui_static_file_response(resolved_path: Path, *, content_type: str, cache_co
         response.set_stat_headers(resolved_path.stat())
     if request.method != "GET" or request.headers.get("range"):
         return response
-    headers = dict(response.headers)
+    headers = response.headers
     content = resolved_path.read_bytes()
     compressed = _compress_response_content(content, headers, request._request)
     if compressed is content:

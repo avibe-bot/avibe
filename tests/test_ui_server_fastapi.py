@@ -638,9 +638,16 @@ def test_static_ui_asset_gzip_uses_shared_response_rules(monkeypatch, tmp_path):
     assert identity_response.status_code == 200
     assert identity_response.content == original
     assert "Content-Encoding" not in identity_response.headers
+    assert "Accept-Encoding" in identity_response.headers["Vary"]
     assert identity_response.headers["Accept-Ranges"] == "bytes"
     assert identity_response.headers["ETag"]
     assert identity_response.headers["Last-Modified"]
+
+    gzip_disabled_response = client.get("/assets/index-abc123.js", headers={"Accept-Encoding": "br, gzip;q=0"})
+    assert gzip_disabled_response.status_code == 200
+    assert gzip_disabled_response.content == original
+    assert "Content-Encoding" not in gzip_disabled_response.headers
+    assert "Accept-Encoding" in gzip_disabled_response.headers["Vary"]
 
     with client._client.stream(
         "GET",
@@ -705,6 +712,7 @@ def test_static_ui_asset_gzip_skips_small_and_binary_files(monkeypatch, tmp_path
     assert binary_response.status_code == 200
     assert binary_response.content == png
     assert "Content-Encoding" not in binary_response.headers
+    assert "Vary" not in binary_response.headers
 
 
 def test_run_maybe_async_offloads_sync_handlers_without_losing_context():
