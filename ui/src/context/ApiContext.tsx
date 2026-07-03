@@ -98,6 +98,11 @@ export type VaultGrant = {
   member_count: number;
   runtime_member_count: number;
   one_shot?: boolean;
+  /** Legacy pre-refactor bridge only: the current backend still returns scope_type/scope_ref
+   *  (no source_selector). Read to keep grant chips distinguishable until Track B lands; not
+   *  part of the final product shape and never written by the UI. */
+  scope_type?: string;
+  scope_ref?: string;
 };
 
 type VaultBlindBox = {
@@ -150,6 +155,10 @@ export type VaultCreatePayload = {
   signer_kind?: string | null;
   policy?: Record<string, unknown>;
   public_meta?: Record<string, unknown>;
+  /** Bare skill names. Sent alongside the folded `skill:<name>` tags so skill scopes work on
+   *  the pre-refactor backend (which populates vault_links from links.skills); `links.skills`
+   *  is also part of the final request spec (design §5). */
+  links?: { skills?: string[] };
   provision_request_id?: string;
   /** Set on the first protected secret so the daemon atomically guards single VMK init. */
   establishing_vmk?: boolean;

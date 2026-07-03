@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, Clock, Copy, Globe, History, Inbox, KeyRound, Link2, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
+import { Check, Clock, Copy, Globe, History, Inbox, KeyRound, Layers, Link2, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
+import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
@@ -158,10 +159,38 @@ function chipCountdown(rem: { h: number; m: number; s: number }): string {
 }
 
 /**
+ * Icon + human label for an active grant. Prefers the new `source_selector` (explicit
+ * secrets, a tag, or a skill). For a legacy pre-refactor grant (no source_selector) it falls
+ * back to the scope ref / member names so two same-size grants stay distinguishable — both in
+ * the chip and in the revoke confirmation — until the grant-id backend lands.
+ */
+function describeGrant(g: VaultGrant, t: TFunction): { Icon: typeof KeyRound; label: string } {
+  const selector = g.source_selector ?? {};
+  const { tags, skills } = partitionTags(selector.tags);
+  if (skills.length) {
+    return { Icon: Puzzle, label: skills.length === 1 ? skills[0] : t('vaults.grants.skillCount', { count: skills.length }) };
+  }
+  if (tags.length) {
+    return { Icon: Tag, label: tags.length === 1 ? tags[0] : t('vaults.grants.tagCount', { count: tags.length }) };
+  }
+  if (selector.env?.length) {
+    return { Icon: KeyRound, label: selector.env.length === 1 ? selector.env[0] : t('vaults.grants.secretCount', { count: selector.env.length }) };
+  }
+  // Legacy grant: no source_selector. Use the concrete scope ref / member name.
+  if (g.scope_ref) {
+    const Icon = g.scope_type === 'skill' ? Puzzle : g.scope_type === 'group' ? Layers : KeyRound;
+    return { Icon, label: g.scope_ref };
+  }
+  const names = g.member_snapshot ?? [];
+  if (names.length === 1) return { Icon: KeyRound, label: names[0] };
+  return { Icon: KeyRound, label: t('vaults.grants.secretCount', { count: g.member_count || names.length || 0 }) };
+}
+
+/**
  * Active-grant chip (design.pen `y4rw5Q` ACTIVE GRANTS row): a compact mint pill describing
  * how the protected set was selected (explicit secrets, a tag, or a skill), a live countdown,
  * and an inline × to revoke. A grant is a fixed protected set keyed by grant_id — the chip
- * summarizes its `source_selector`, never a group/scope.
+ * summarizes its `source_selector` (or the legacy scope during the bridge), never a group.
  */
 const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: VaultGrant) => void }> = ({
   grant: g,
@@ -170,18 +199,7 @@ const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: Va
 }) => {
   const { t } = useTranslation();
   const rem = remaining(g.expires_at, now);
-  const { Icon, label } = useMemo(() => {
-    const selector = g.source_selector ?? {};
-    const { tags, skills } = partitionTags(selector.tags);
-    if (skills.length) {
-      return { Icon: Puzzle, label: skills.length === 1 ? skills[0] : t('vaults.grants.skillCount', { count: skills.length }) };
-    }
-    if (tags.length) {
-      return { Icon: Tag, label: tags.length === 1 ? tags[0] : t('vaults.grants.tagCount', { count: tags.length }) };
-    }
-    const count = g.member_count || g.member_snapshot?.length || (selector.env?.length ?? 0);
-    return { Icon: KeyRound, label: t('vaults.grants.secretCount', { count }) };
-  }, [g, t]);
+  const { Icon, label } = useMemo(() => describeGrant(g, t), [g, t]);
   return (
     <span
       className="inline-flex items-center gap-2 rounded-full border border-mint/40 bg-mint-soft py-1 pl-2.5 pr-1.5 text-xs text-mint"
@@ -491,10 +509,12 @@ export const VaultsPage: React.FC = () => {
   };
 
   const onRevokeGrant = async (g: VaultGrant) => {
-    if (!window.confirm(t('vaults.grants.revokeConfirm'))) return;
+    // Name the grant in the confirm/toast so two same-size grants aren't confused.
+    const { label } = describeGrant(g, t);
+    if (!window.confirm(t('vaults.grants.revokeConfirm', { target: label }))) return;
     try {
       await api.revokeVaultGrant(g.id);
-      showToast(t('vaults.grants.revoked'), 'success');
+      showToast(t('vaults.grants.revoked', { target: label }), 'success');
       refresh();
     } catch (err: any) {
       setError(err?.message ?? String(err));
@@ -542,7 +562,7 @@ export const VaultsPage: React.FC = () => {
           </div>
         </div>
       )}
-      {allTags.length > 0 || allSkills.length > 0 ? (
+      {allTags.length > 0 || allSkills.length > 0 || hasActiveFilter ? (
         <div className="flex flex-wrap items-center gap-2">
           {allSkills.map((skill) => (
             <FilterChip

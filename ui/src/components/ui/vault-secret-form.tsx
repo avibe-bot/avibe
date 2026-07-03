@@ -343,6 +343,11 @@ export const VaultSecretForm: React.FC<{
         protection,
         description: description.trim() || undefined,
         tags: mergedTags.length ? mergedTags : undefined,
+        // Bridge: send the bare skill names too. The pre-Track-B backend resolves skill scopes
+        // from vault_links (populated by payload.links.skills), so skill-scoped access can't
+        // find this secret from `skill:` tags alone until the refactor lands; `links.skills`
+        // is part of the final request spec as well (design §5), so this is safe on both.
+        links: skills.length ? { skills } : undefined,
         policy: Object.keys(policy).length ? policy : undefined,
         provision_request_id: provisionRequestId || undefined,
         ...(isKeypair && signingKey

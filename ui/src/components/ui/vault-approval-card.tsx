@@ -118,13 +118,20 @@ export const VaultApprovalCard: React.FC<{
   const isProtected = card?.protection === 'protected';
   const isKeypair = card?.kind === 'keypair';
 
-  // A grant covers a fixed protected set — there is no scope picker. Prefer the option
-  // carrying protected members to release; fall back to the first the backend sent.
+  // A grant covers a fixed protected set — there is no scope picker.
   const grantOptions = useMemo(() => card?.grant_options ?? card?.scope_options ?? [], [card]);
-  const option = useMemo(
-    () => grantOptions.find((o) => (o.unlock_material?.length ?? 0) > 0) ?? grantOptions[0],
-    [grantOptions],
-  );
+  const option = useMemo(() => {
+    if (!grantOptions.length) return undefined;
+    // New backend: exactly one fixed protected set covered by the request's selector.
+    if (card?.grant_options?.length) return grantOptions[0];
+    // Legacy pre-refactor scope_options are ordered [secret, skill, group] and only options
+    // containing protected members get hydrated unlock_material. Prefer the EXACT
+    // requested-secret scope so approving never auto-selects a broader skill/group option that
+    // would release unrelated protected secrets; fall back to a protected option only if the
+    // secret scope is absent.
+    const exact = grantOptions.find((o) => o.scope_type === 'secret');
+    return exact ?? grantOptions.find((o) => (o.unlock_material?.length ?? 0) > 0) ?? grantOptions[0];
+  }, [grantOptions, card]);
   const materials = useMemo(() => option?.unlock_material ?? [], [option]);
   // Protected secret names to be granted (design: "show the protected secret names covered").
   const protectedNames = useMemo(() => materials.map((m) => m.name), [materials]);
