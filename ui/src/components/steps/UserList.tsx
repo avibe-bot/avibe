@@ -16,7 +16,7 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { useApi } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
-import { getEnabledPlatforms } from '../../lib/platforms';
+import { getEnabledPlatforms, platformSupportsToolcallDelivery } from '../../lib/platforms';
 import { DirectoryBrowser } from '../ui/directory-browser';
 import { copyTextToClipboard } from '../../lib/utils';
 import { PlatformIcon } from '../visual';
@@ -667,6 +667,9 @@ export const UserList: React.FC = () => {
     },
   });
 
+  const availableMessageTypes = (platform: string): string[] =>
+    platformSupportsToolcallDelivery(config, platform) ? ['assistant', 'toolcall'] : ['assistant'];
+
   const totalCount = aggregated.length;
 
   // Backend label helper
@@ -882,6 +885,7 @@ export const UserList: React.FC = () => {
                       globalConfig={config}
                       vibeAgents={vibeAgents}
                       defaultAgentName={defaultAgentName}
+                      availableMessageTypes={availableMessageTypes(u.platform)}
                       showRequireMention={false}
                       opencodeOptions={opencodeOptions}
                       claudeAgents={claudeAgents}

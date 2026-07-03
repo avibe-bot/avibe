@@ -161,6 +161,37 @@ def test_session_handler_passes_configured_claude_cli_path(monkeypatch, tmp_path
     assert getattr(client, "_vibe_runtime_session_key") == f"slack_C123:{tmp_path}"
 
 
+def test_session_handler_moves_claude_process_into_agent_cgroup(monkeypatch, tmp_path: Path) -> None:
+    calls: list[tuple[int, str]] = []
+
+    class _StubClaudeSDKClient:
+        def __init__(self, options):
+            self._transport = type("Transport", (), {"_process": type("Process", (), {"pid": 9753})()})()
+
+        async def connect(self) -> None:
+            return None
+
+    monkeypatch.setattr(session_handler_module, "ClaudeAgentOptions", _StubClaudeAgentOptions)
+    monkeypatch.setattr(session_handler_module, "ClaudeSDKClient", _StubClaudeSDKClient)
+
+    controller = _Controller(tmp_path)
+    handler = SessionHandler(controller)
+
+    monkeypatch.setattr(
+        session_handler_module,
+        "governor_from_controller",
+        lambda _controller: type(
+            "Governor",
+            (),
+            {"apply_to_pid": lambda self, pid, label="agent": calls.append((pid, label)) or True},
+        )(),
+    )
+
+    _run_session(handler, MessageContext(user_id="U123", channel_id="C123"))
+
+    assert calls == [(9753, "claude")]
+
+
 def test_session_handler_keeps_sdk_default_for_default_claude_binary(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 
@@ -239,7 +270,8 @@ def test_session_handler_sets_claude_fork_session_for_pending_native_fork(monkey
     assert "Current session id: `ses-target`" in prompt
     assert "This Agent Session was forked from `ses-source`." in prompt
     assert "The authoritative Avibe session id for this fork is `ses-target`." in prompt
-    assert "use `ses-target` for Show Pages" in prompt
+    assert "treat it as historical source-context only" in prompt
+    assert "use `ses-target` for Show Pages" not in prompt
 
 
 def test_session_handler_disallows_remote_unsafe_claude_tools(monkeypatch, tmp_path: Path) -> None:
@@ -305,7 +337,8 @@ def test_session_handler_ensures_agent_session_id_before_prompt(
     prompt = prompt_value["append"] if isinstance(prompt_value, dict) else prompt_value
     assert captured["connected"] is True
     assert "Current session id: `sesk8m4q2p7x`" in prompt
-    assert "--session-id sesk8m4q2p7x" in prompt
+    assert "`vibe show path`" in prompt
+    assert "--session-id sesk8m4q2p7x" not in prompt
     assert "--session-key" not in prompt
 
 

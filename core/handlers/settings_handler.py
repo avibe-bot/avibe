@@ -280,11 +280,13 @@ class SettingsHandler(BaseHandler):
             settings_manager = self._get_settings_manager(context)
             # Toggle message type visibility
             settings_key = self._get_settings_key(context)
+            message_types = settings_manager.get_available_message_types()
+            if msg_type not in message_types:
+                return
             is_shown = settings_manager.toggle_show_message_type(settings_key, msg_type)
 
             # Update the keyboard
             user_settings = settings_manager.get_user_settings(settings_key)
-            message_types = settings_manager.get_available_message_types()
             display_names = self._message_type_display_names()
 
             buttons = []

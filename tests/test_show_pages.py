@@ -52,6 +52,19 @@ def test_show_without_subcommand_prints_help(capsys):
     assert "vibe show path --session-id sesk8m4q2p7x" in captured.out
 
 
+def test_show_path_help_uses_explicit_session_id(capsys):
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(["show", "path", "--help"])
+
+    assert exc.value.code == 0
+    captured = capsys.readouterr()
+    assert "Run: vibe show path --session-id sesk8m4q2p7x" in captured.out
+    assert "`vibe show update --session-id sesk8m4q2p7x --visibility public`" in captured.out
+    assert "Run: vibe show path\n" not in captured.out
+
+
 def test_runtime_prepare_cli_reports_warning_only_failure(monkeypatch, capsys):
     parser = cli.build_parser()
     args = parser.parse_args(["runtime", "prepare", "--json"])
@@ -661,7 +674,7 @@ def test_show_path_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
     assert payload["session_id"] == "sesCaller"
     assert payload["session_default_notice"] == {
         "code": "session_defaulted_to_caller",
-        "message": "Show Page session defaulted to the caller Session from AVIBE_SESSION_ID.",
+        "message": "Show Page session defaulted to this Agent Session.",
         "session_id": "sesCaller",
     }
     assert (tmp_path / "show" / "sesCaller" / "index.html").exists()

@@ -32,6 +32,8 @@ def test_platform_catalog_exposes_capability_flags() -> None:
     assert catalog["wechat"]["capabilities"]["supports_typing_indicator"] is True
     assert catalog["wechat"]["capabilities"]["typing_indicator_requires_clear"] is True
     assert catalog["wechat"]["capabilities"]["force_preferred_processing_indicator"] is True
+    assert catalog["wechat"]["capabilities"]["supports_toolcall_delivery"] is False
+    assert catalog["slack"]["capabilities"]["supports_toolcall_delivery"] is True
     assert catalog["lark"]["capabilities"]["supports_typing_indicator"] is False
     assert catalog["lark"]["capabilities"]["preferred_processing_indicator"] == "reaction"
     assert catalog["telegram"]["capabilities"]["supports_message_indicator_delete"] is True

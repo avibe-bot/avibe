@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Union
 from pathlib import Path
 
 from config import paths
+from config.platform_registry import get_platform_descriptor
 from config.v2_sessions import SessionsStore
 from config.v2_settings import SettingsStore, ChannelSettings, GuildSettings, RoutingSettings, SCOPED_KEY_SEP
 from config.v2_settings import normalize_routing_settings
@@ -380,7 +381,10 @@ class SettingsManager:
         ``system`` is intentionally excluded: system/init messages are never
         pushed to users, so there is nothing for the toggle to control.
         """
-        return ["assistant", "toolcall"]
+        message_types = ["assistant"]
+        if get_platform_descriptor(self.platform).capabilities.supports_toolcall_delivery:
+            message_types.append("toolcall")
+        return message_types
 
     def get_message_type_display_names(self) -> Dict[str, str]:
         """Get display names for message types"""

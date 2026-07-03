@@ -30,7 +30,7 @@ def test_rest_create_rejects_protected_plaintext_value(monkeypatch):
     )
 
     assert response.status_code == 400
-    assert response.get_json()["code"] == "invalid_envelope"
+    assert response.get_json()["code"] == "plaintext_value_rejected"
     seal.assert_not_called()
 
 
@@ -51,9 +51,9 @@ def test_rest_create_accepts_blind_box(monkeypatch):
     seal.assert_called_once_with("REST_KEY", blind_box)
 
 
-def test_rest_create_accepts_standard_value_fallback(monkeypatch):
-    seal = Mock(return_value=_sealed("rest-fallback"))
-    monkeypatch.setattr(api, "avault_seal", seal)
+def test_rest_create_rejects_standard_plaintext_value(monkeypatch):
+    seal = Mock()
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
     client = app.test_client()
 
     response = client.post(
@@ -62,9 +62,81 @@ def test_rest_create_accepts_standard_value_fallback(monkeypatch):
         headers=csrf_headers(client),
     )
 
-    assert response.status_code == 200
-    assert response.get_json()["secret"]["name"] == "REST_FALLBACK"
-    seal.assert_called_once_with("REST_FALLBACK", b"secret")
+    assert response.status_code == 400
+    assert response.get_json()["code"] == "plaintext_value_rejected"
+    seal.assert_not_called()
+
+
+def test_rest_create_rejects_plaintext_value_in_mixed_payloads(monkeypatch):
+    seal = Mock()
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    client = app.test_client()
+
+    standard = client.post(
+        "/api/vault/secrets",
+        json={
+            "name": "MIXED_REST",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            "value": "secret",
+        },
+        headers=csrf_headers(client),
+    )
+    protected = client.post(
+        "/api/vault/secrets",
+        json={
+            "name": "MIXED_PROTECTED_REST",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+            "value": "secret",
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert standard.status_code == 400
+    assert standard.get_json()["code"] == "plaintext_value_rejected"
+    assert protected.status_code == 400
+    assert protected.get_json()["code"] == "plaintext_value_rejected"
+    seal.assert_not_called()
+
+
+def test_rest_create_rejects_nested_plaintext_value_fields(monkeypatch):
+    seal = Mock()
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    client = app.test_client()
+
+    standard = client.post(
+        "/api/vault/secrets",
+        json={
+            "name": "NESTED_REST",
+            "blind_box": {
+                "scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1",
+                "enc": "enc",
+                "ct": "ct",
+                "value": "secret",
+            },
+        },
+        headers=csrf_headers(client),
+    )
+    protected = client.post(
+        "/api/vault/secrets",
+        json={
+            "name": "NESTED_PROTECTED_REST",
+            "protection": "protected",
+            "sealed": {
+                "ciphertext": "ct",
+                "nonce": "n",
+                "wrap_meta": "wm",
+                "value": "secret",
+            },
+        },
+        headers=csrf_headers(client),
+    )
+
+    assert standard.status_code == 400
+    assert standard.get_json()["code"] == "plaintext_value_rejected"
+    assert protected.status_code == 400
+    assert protected.get_json()["code"] == "plaintext_value_rejected"
+    seal.assert_not_called()
 
 
 def test_rest_agent_pubkey_route(monkeypatch):

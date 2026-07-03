@@ -705,8 +705,8 @@ Important options:
 - `--create-session`
 - `--create-session-per-run`
 - `--agent`
-- `--post-to {thread,channel}`
-- `--deliver-key`
+- `--same-scope`
+- `--scope-id`
 - `--cron`
 - `--at`
 - `--message`
@@ -727,8 +727,8 @@ Important options:
 - `--create-session`
 - `--create-session-per-run`
 - `--agent`
-- `--post-to {thread,channel}`
-- `--deliver-key`
+- `--same-scope`
+- `--scope-id`
 - `--reset-delivery`
 - `--cron`
 - `--at`
@@ -826,24 +826,29 @@ Important options:
 - `--session-id`
 - `--fork-session`
 - `--create-session`
-- `--deliver-key`
+- `--same-scope`
+- `--scope-id`
 - `--model`
 - `--reasoning-effort`
-- `--async`
+- `--sync`
 - `--message`
 - `--message-file`
 
-If neither `--session-id` nor `--create-session` is provided, the run uses a
+If neither `--session-id` nor a creation policy is provided, the run uses a
 private no-delivery session and is best suited for sub-agent style calls.
-`--deliver-key` is only meaningful with `--create-session`.
+
+Runs are asynchronous by default: the command queues the run, returns a payload
+with `run_id` / `session_id`, and uses the callback policy to deliver the final
+result later. Use `--sync` only when the terminal should wait for completion.
+`--async` is still accepted for older scripts but is no longer required.
 
 `--fork-session <session_id>` creates a new Agent Session by forking the source
 Session's native backend context. It is for alternate investigations or
 delegated work that should keep the source context without mutating the source
 Session. Forks keep the same backend as the source; `--agent`, `--model`, and
 `--reasoning-effort` may override the forked Session only when the backend does
-not change. Do not combine `--fork-session` with `--session-id`,
-`--create-session`, `--deliver-key`, or `--post-to`.
+not change. Do not combine `--fork-session` with `--session-id` or
+`--create-session`.
 
 ## 5.4 `vibe runs`
 
@@ -869,7 +874,7 @@ Use the right command family for the job:
 - Want to control the local daemon or troubleshoot installation:
   - use `vibe`, `vibe status`, `vibe doctor`, `vibe upgrade`
 - Want asynchronous automation:
-  - use `vibe task ...`, `vibe watch ...`, or `vibe agent run --async ...`
+  - use `vibe task ...`, `vibe watch ...`, or `vibe agent run ...`
 
 ## 7. Quick Examples
 
@@ -892,5 +897,5 @@ vibe
 vibe status
 vibe doctor
 vibe task list --brief
-vibe agent run --async --no-callback --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
+vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
 ```

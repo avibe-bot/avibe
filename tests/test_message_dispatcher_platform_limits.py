@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -86,7 +87,7 @@ class MessageDispatcherPlatformLimitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("".join(text for _, _, text, _ in controller.im_client.sent), long_text)
         self.assertTrue(all(len(text.encode("utf-8")) <= 1900 for _, _, text, _ in controller.im_client.sent))
 
-    async def test_wechat_long_log_message_splits_before_send_failure(self):
+    async def test_wechat_long_assistant_log_message_splits_before_send_failure(self):
         controller = _StubController("wechat")
         dispatcher = ConsolidatedMessageDispatcher(controller)
         context = MessageContext(user_id="wechat-user", channel_id="wechat-user", platform="wechat")
@@ -99,21 +100,60 @@ class MessageDispatcherPlatformLimitTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(len(text.encode("utf-8")) <= 1900 for _, _, text, _ in controller.im_client.sent))
         self.assertEqual(controller.im_client.edit_calls, [])
 
-    async def test_wechat_log_messages_send_individually_without_append_edit(self):
+    async def test_wechat_non_toolcall_log_messages_send_individually_without_append_edit(self):
         controller = _StubController("wechat")
         dispatcher = ConsolidatedMessageDispatcher(controller)
         context = MessageContext(user_id="wechat-user", channel_id="wechat-user", platform="wechat")
 
         first_id = await dispatcher.emit_agent_message(context, "system", "cwd: /tmp/project")
         second_id = await dispatcher.emit_agent_message(context, "assistant", "running command")
-        third_id = await dispatcher.emit_agent_message(context, "toolcall", "exec_command")
 
-        self.assertEqual((first_id, second_id, third_id), ("bot-msg-1", "bot-msg-2", "bot-msg-3"))
+        self.assertEqual((first_id, second_id), ("bot-msg-1", "bot-msg-2"))
         self.assertEqual(
             [text for _, _, text, _ in controller.im_client.sent],
-            ["cwd: /tmp/project", "running command", "exec_command"],
+            ["cwd: /tmp/project", "running command"],
         )
         self.assertEqual(controller.im_client.edit_calls, [])
+
+    async def test_wechat_toolcall_is_persisted_but_never_delivered(self):
+        controller = _StubController("wechat")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(user_id="wechat-user", channel_id="wechat-user", platform="wechat")
+
+        with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
+            message_id = await dispatcher.emit_agent_message(context, "toolcall", "exec_command")
+
+        self.assertIsNone(message_id)
+        self.assertEqual(controller.im_client.sent, [])
+        persist.assert_called_once()
+        self.assertEqual(persist.call_args.args[1], "toolcall")
+
+    async def test_toolcall_delivery_override_to_wechat_is_persisted_but_never_delivered(self):
+        controller = _StubController("slack")
+        dispatcher = ConsolidatedMessageDispatcher(controller)
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "delivery_override": {
+                    "platform": "wechat",
+                    "user_id": "wechat-user",
+                    "channel_id": "wechat-user",
+                }
+            },
+        )
+
+        with mock.patch("core.message_dispatcher.persist_agent_message") as persist:
+            message_id = await dispatcher.emit_agent_message(context, "toolcall", "exec_command")
+
+        self.assertIsNone(message_id)
+        self.assertEqual(controller.im_client.sent, [])
+        persist.assert_called_once()
+        persisted_context = persist.call_args.args[0]
+        self.assertEqual(persisted_context.platform, "wechat")
+        self.assertEqual(persisted_context.channel_id, "wechat-user")
+        self.assertEqual(persist.call_args.args[1], "toolcall")
 
     def test_result_split_boundary_never_exceeds_platform_limit(self):
         dispatcher = ConsolidatedMessageDispatcher(_StubController("wechat"))

@@ -33,6 +33,7 @@ from modules.agents.opencode.message_processor import (
 )
 from modules.agents.opencode.utils import resolve_opencode_model_id, resolve_opencode_reasoning_effort
 from modules.im import InlineButton, InlineKeyboard, MessageContext
+from core.resource_governance import governor_from_controller
 from vibe.i18n import t as i18n_t
 from vibe.opencode_config import remove_opencode_provider_api_key
 
@@ -1092,6 +1093,10 @@ class AgentAuthService:
 
         client = ClaudeSDKClient(options=ClaudeAgentOptions(**option_kwargs))
         await client.connect()
+        governor_from_controller(self.controller).apply_to_pid(
+            get_claude_client_pid(client),
+            label="claude auth",
+        )
         return client
 
     async def _send_claude_control_request(
@@ -2551,11 +2556,13 @@ class AgentAuthService:
         try:
             from config.v2_compat import to_app_config
             from config.v2_config import V2Config
+            from core.resource_governance import AgentResourceGovernor, config_from_runtime
             from modules.agents.opencode import OpenCodeServerManager
         except ImportError:
             return None
         try:
-            compat = to_app_config(V2Config.load())
+            v2_config = V2Config.load()
+            compat = to_app_config(v2_config)
         except Exception as err:  # noqa: BLE001
             logger.warning("V2Config.load failed in web OAuth path: %s", err)
             return None
@@ -2567,6 +2574,7 @@ class AgentAuthService:
                 binary=opencode_cfg.binary,
                 port=opencode_cfg.port,
                 request_timeout_seconds=opencode_cfg.request_timeout_seconds,
+                resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
             )
             await server.ensure_running()
             return server

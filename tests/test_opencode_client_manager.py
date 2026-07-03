@@ -39,5 +39,6 @@ def test_reset_config_keeps_existing_server_manager_until_refresh_completes(monk
             "binary": "/old/opencode",
             "port": 4096,
             "request_timeout_seconds": 60,
+            "resource_governor": None,
         }
     ]

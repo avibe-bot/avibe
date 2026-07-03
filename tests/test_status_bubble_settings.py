@@ -28,7 +28,7 @@ def _payload(**extra):
 class ConfigParsingTests(unittest.TestCase):
     def test_defaults(self):
         cfg = V2Config.from_payload(_payload())
-        self.assertEqual(cfg.agent_progress_style, "concise")
+        self.assertEqual(cfg.agent_progress_style, "off")
         self.assertEqual(cfg.agent_status_heartbeat_ms, 15000)
         self.assertEqual(cfg.agent_status_no_output_ms, 180000)
 
@@ -52,7 +52,7 @@ class ConfigParsingTests(unittest.TestCase):
                 agent_status_no_output_ms="nope",
             )
         )
-        self.assertEqual(cfg.agent_progress_style, "concise")
+        self.assertEqual(cfg.agent_progress_style, "off")
         self.assertEqual(cfg.agent_status_heartbeat_ms, 15000)
         self.assertEqual(cfg.agent_status_no_output_ms, 180000)
 
@@ -95,7 +95,7 @@ class ControllerGetterTests(unittest.TestCase):
 
     def test_progress_style_getter_guards_bad_value(self):
         fake = self._fake(agent_progress_style="bogus")
-        self.assertEqual(Controller.get_progress_style_for_context(fake, None), "concise")
+        self.assertEqual(Controller.get_progress_style_for_context(fake, None), "off")
 
     def test_interval_getters(self):
         fake = self._fake(agent_status_heartbeat_ms=9000, agent_status_no_output_ms=45000)

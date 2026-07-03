@@ -44,16 +44,27 @@ def _sealed(suffix: str = "1") -> Sealed:
     return Sealed(ciphertext=f"ct-{suffix}", nonce=f"n-{suffix}", wrap_meta=f"wm-{suffix}")
 
 
-def _set(name, value, tmp_path, monkeypatch, capfd, **kw):
-    from unittest.mock import Mock
-
-    from vibe import api
-
-    vf = tmp_path / f"{name}.txt"
-    vf.write_text(value)
-    monkeypatch.setattr(api, "avault_seal", Mock(return_value=_sealed(name.lower())))
-    assert cli.cmd_vault_set(_ns(name=name, from_file=str(vf), **kw)) == 0
-    capfd.readouterr()
+def _create_standard_secret(
+    name: str,
+    *,
+    allow_host: list[str] | None = None,
+    auth_header: str | None = None,
+    auth_query: str | None = None,
+) -> None:
+    policy: dict = {}
+    if allow_host:
+        policy["allowed_hosts"] = allow_host
+    if auth_header:
+        policy["auth"] = {"type": "header", "name": auth_header}
+    elif auth_query:
+        policy["auth"] = {"type": "query", "name": auth_query}
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name=name,
+            sealed=_sealed(name.lower()),
+            policy=policy or None,
+        )
 
 
 def _set_protected_grant(name: str, *, allow_host: list[str], session_id: str | None = None) -> dict:
@@ -107,7 +118,7 @@ def test_fetch_passes_bearer_request_to_avault_and_writes_stdout(tmp_path, capfd
 
     from vibe import api
 
-    _set("GH_PAT", "ghp-never-returned", tmp_path, monkeypatch, capfd, allow_host=["api.github.com"])
+    _create_standard_secret("GH_PAT", allow_host=["api.github.com"])
     fetch = Mock(return_value={"status": 200, "headers": {"content-type": "application/json"}, "body": '{"ok":true}'})
     monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
 
@@ -204,7 +215,7 @@ def test_fetch_header_auth_request_shape(tmp_path, capfd, monkeypatch):
 
     from vibe import api
 
-    _set("SVC_KEY", "apikey-never-returned", tmp_path, monkeypatch, capfd, allow_host=["api.example.com"], auth_header="X-Api-Key")
+    _create_standard_secret("SVC_KEY", allow_host=["api.example.com"], auth_header="X-Api-Key")
     fetch = Mock(return_value={"status": 204, "headers": {}, "body": ""})
     monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
 
@@ -218,7 +229,7 @@ def test_fetch_query_auth_request_shape(tmp_path, capfd, monkeypatch):
 
     from vibe import api
 
-    _set("QUERY_KEY", "query-never-returned", tmp_path, monkeypatch, capfd, allow_host=["api.example.com"], auth_query="api_key")
+    _create_standard_secret("QUERY_KEY", allow_host=["api.example.com"], auth_query="api_key")
     fetch = Mock(return_value={"status": 200, "headers": {}, "body": "ok"})
     monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
 
@@ -232,7 +243,7 @@ def test_fetch_post_body_and_headers_pass_to_avault(tmp_path, capfd, monkeypatch
 
     from vibe import api
 
-    _set("POST_KEY", "k", tmp_path, monkeypatch, capfd, allow_host=["api.example.com"])
+    _create_standard_secret("POST_KEY", allow_host=["api.example.com"])
     fetch = Mock(return_value={"status": 201, "headers": {}, "body": "created"})
     monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
 
@@ -256,7 +267,7 @@ def test_fetch_writes_mocked_response_to_output_file(tmp_path, capfd, monkeypatc
 
     from vibe import api
 
-    _set("OUT_KEY", "secret", tmp_path, monkeypatch, capfd, allow_host=["api.example.com"])
+    _create_standard_secret("OUT_KEY", allow_host=["api.example.com"])
     fetch = Mock(return_value={"status": 200, "headers": {}, "body": "file body"})
     monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
     out = tmp_path / "resp.txt"
@@ -278,7 +289,7 @@ def test_fetch_preflights_reject_before_avault(tmp_path, capfd, monkeypatch, url
 
     from vibe import api
 
-    _set("BOUND_KEY", "secret", tmp_path, monkeypatch, capfd, allow_host=["api.example.com"])
+    _create_standard_secret("BOUND_KEY", allow_host=["api.example.com"])
     fetch = Mock(return_value={"status": 200, "headers": {}, "body": "ok"})
     monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
 
@@ -295,7 +306,7 @@ def test_fetch_refuses_unbound_secret_before_avault(tmp_path, capfd, monkeypatch
 
     from vibe import api
 
-    _set("UNBOUND_KEY", "secret", tmp_path, monkeypatch, capfd)
+    _create_standard_secret("UNBOUND_KEY")
     fetch = Mock(return_value={"status": 200, "headers": {}, "body": "ok"})
     monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
 
@@ -311,7 +322,7 @@ def test_fetch_rejects_trace_method_before_avault(tmp_path, capfd, monkeypatch):
 
     from vibe import api
 
-    _set("GH_PAT", "secret", tmp_path, monkeypatch, capfd, allow_host=["api.example.com"])
+    _create_standard_secret("GH_PAT", allow_host=["api.example.com"])
     fetch = Mock(return_value={"status": 200, "headers": {}, "body": "ok"})
     monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
 
@@ -327,7 +338,7 @@ def test_fetch_rejects_host_header_override_before_avault(tmp_path, capfd, monke
 
     from vibe import api
 
-    _set("GH_PAT", "secret", tmp_path, monkeypatch, capfd, allow_host=["api.example.com"])
+    _create_standard_secret("GH_PAT", allow_host=["api.example.com"])
     fetch = Mock(return_value={"status": 200, "headers": {}, "body": "ok"})
     monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
 
@@ -338,21 +349,20 @@ def test_fetch_rejects_host_header_override_before_avault(tmp_path, capfd, monke
     fetch.assert_not_called()
 
 
-def test_set_rejects_host_auth_header_before_avault(tmp_path, capfd, monkeypatch):
+def test_fetch_rejects_stored_host_auth_policy_before_avault(capfd, monkeypatch):
     from unittest.mock import Mock
 
     from vibe import api
 
-    vf = tmp_path / "v.txt"
-    vf.write_text("tok")
-    seal = Mock(return_value=_sealed())
-    monkeypatch.setattr(api, "avault_seal", seal)
+    _create_standard_secret("HOST_AUTH_KEY", allow_host=["api.example.com"], auth_header="Host")
+    fetch = Mock(return_value={"status": 200, "headers": {}, "body": "ok"})
+    monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
 
-    code = cli.cmd_vault_set(_ns(name="HOST_AUTH_KEY", from_file=str(vf), allow_host=["api.example.com"], auth_header="Host"))
+    code = cli.cmd_vault_fetch(_ns(auth="HOST_AUTH_KEY", url="https://api.example.com/x"))
     captured = capfd.readouterr()
     assert code == 1
     assert json.loads(captured.err)["code"] == "forbidden_header"
-    seal.assert_not_called()
+    fetch.assert_not_called()
 
 
 def test_fetch_output_unwritable_is_preflighted_before_avault(tmp_path, capfd, monkeypatch):
@@ -360,7 +370,7 @@ def test_fetch_output_unwritable_is_preflighted_before_avault(tmp_path, capfd, m
 
     from vibe import api
 
-    _set("GH_PAT", "secret", tmp_path, monkeypatch, capfd, allow_host=["api.example.com"])
+    _create_standard_secret("GH_PAT", allow_host=["api.example.com"])
     fetch = Mock(return_value={"status": 200, "headers": {}, "body": "ok"})
     monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
 
@@ -377,7 +387,7 @@ def test_fetch_returns_response_even_if_audit_fails(tmp_path, capfd, monkeypatch
 
     from vibe import api
 
-    _set("GH_PAT", "secret", tmp_path, monkeypatch, capfd, allow_host=["api.example.com"])
+    _create_standard_secret("GH_PAT", allow_host=["api.example.com"])
     fetch = Mock(return_value={"status": 200, "headers": {}, "body": "ok"})
     monkeypatch.setattr(api, "avault_deliver_fetch", fetch)
 

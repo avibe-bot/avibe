@@ -112,7 +112,7 @@ write the dot, in_flight, queue, or lifecycle events. Differences that the FSM m
 
 ### 1.6 Scheduled / watch / webhook / agent_run entry
 
-`scheduled_tasks._execute_request:1556-1564`: `if platform=="avibe" and session_id and gate: await gate.submit_scheduled(...); return None` else `handle_scheduled_message` (IM, byte-identical). `_build_context` sets `channel_id=session_id`, `agent_session_id`, `turn_source="scheduled"`, `suppress_delivery`, `delivery_override`, `agent_session_target`. Triggers: cron/one-shot (`task_run`/`scheduled`), `hook_send`, watch-waiter (`watch`), `agent_run` (`vibe agent run --async`); `webhook` is defined-but-unwired.
+`scheduled_tasks._execute_request:1556-1564`: `if platform=="avibe" and session_id and gate: await gate.submit_scheduled(...); return None` else `handle_scheduled_message` (IM, byte-identical). `_build_context` sets `channel_id=session_id`, `agent_session_id`, `turn_source="scheduled"`, `suppress_delivery`, `delivery_override`, `agent_session_target`. Triggers: cron/one-shot (`task_run`/`scheduled`), `hook_send`, watch-waiter (`watch`), `agent_run` (`vibe agent run` default async); `webhook` is defined-but-unwired.
 
 ### 1.7 The frontend contract (MUST be preserved verbatim)
 

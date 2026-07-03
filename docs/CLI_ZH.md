@@ -189,8 +189,7 @@ vibe task remove <task-id>
 更完整的参数说明请直接看 `vibe task add --help` 和 `vibe task update --help`。其中重点包括：
 
 - 用 `--session-id` 指定要延续的 Agent Session
-- 用 `--post-to channel` 在保留 thread 上下文的同时把消息发到父频道
-- 用 `--deliver-key` 指定显式投递目标
+- 用 `--create-session`、`--create-session-per-run`、`--same-scope` 和 `--scope-id` 控制 Session placement
 - 用 `--cron` / `--at` 控制定时方式
 - 以及 `--name`、`--timezone`、`--message-file` 等参数
 
@@ -204,22 +203,23 @@ session creation 参数和 delivery 参数仍然优先。
 
 ### `vibe agent run`
 
-直接运行一个 Agent。加 `--async` 时会队列化一次后台 run，但不会创建持久化任务定义。
+直接运行一个 Agent。Run 默认异步，并且不会创建持久化任务定义。只有终端需要等待完成时才使用
+`--sync`。
 
 ```bash
-vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
-vibe agent run --async --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
-vibe agent run --async --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
-vibe agent run --async --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
-vibe agent run --async --no-callback --create-session --deliver-key slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
+vibe agent run --no-callback --agent release-reviewer --message 'Review the latest deployment result.'
+vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
+vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
+vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
+vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
+vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
 ```
 
 当一个新 Agent Session 需要从现有 Session 的 native backend 上下文分叉，而不是空白开始时，
 使用 `--fork-session <session-id>`。新 Session 会保持源 Session 的 backend。
 只有 backend 不变时，才可以通过 `--agent`、`--model`、`--reasoning-effort`
 覆盖 fork 后 Session 的 Agent、模型或推理强度；跨 backend fork 会被拒绝。
-不要把 `--fork-session` 和 `--session-id`、`--create-session`、`--deliver-key`
-或 `--post-to` 混用。
+不要把 `--fork-session` 和 `--session-id` 或 `--create-session` 混用。
 
 异步 run 需要明确 callback 策略，除非命令运行在 Avibe 已注入 caller context
 的 Agent 环境内。当最终结果文本需要回到调用方 Session 时，使用
@@ -265,9 +265,10 @@ vibe watch remove <watch-id>
 
 waiter 命令放在 `--` 后面；或者通过 `--shell` 传入一整段 shell 字符串。
 完整参数请看 `vibe watch add --help`，包括 `--timeout`、`--lifetime-timeout`、
-`--forever`、`--retry-exit-code`、`--retry-delay`、`--post-to channel`、
-`--deliver-key` 和 `--name`。watch 与 `vibe task`、`vibe agent run` 共用
-`--session-id`、`--post-to` 和 `--deliver-key` 语义。需要可管理、可暂停、可查看的
+`--forever`、`--retry-exit-code`、`--retry-delay`、`--name` 和 session creation 参数。
+watch 与 `vibe task`、`vibe agent run` 共用 `--session-id`、`--create-session`、
+`--same-scope` 和 `--scope-id` 语义；`--create-session-per-run`
+只属于 `vibe task` 和 `vibe watch` 这类 stored definitions。需要可管理、可暂停、可查看的
 后台等待任务时，优先使用 `vibe watch`，不要随手起 `nohup`。
 
 ### `vibe version`

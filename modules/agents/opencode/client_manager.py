@@ -15,6 +15,12 @@ class OpenCodeClientManager:
         self._config = opencode_config
         self._server_manager: Optional[OpenCodeServerManager] = None
         self._lock = asyncio.Lock()
+        self._resource_governor = None
+
+    def set_resource_governor(self, governor) -> None:
+        self._resource_governor = governor
+        if self._server_manager is not None:
+            self._server_manager.resource_governor = governor
 
     async def get_server(self) -> OpenCodeServerManager:
         async with self._lock:
@@ -23,6 +29,7 @@ class OpenCodeClientManager:
                     binary=self._config.binary,
                     port=self._config.port,
                     request_timeout_seconds=self._config.request_timeout_seconds,
+                    resource_governor=self._resource_governor,
                 )
             return self._server_manager
 

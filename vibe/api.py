@@ -950,6 +950,7 @@ def config_to_payload(config: V2Config, *, include_secrets: bool = False) -> dic
         "runtime": {
             "default_cwd": config.runtime.default_cwd,
             "log_level": config.runtime.log_level,
+            "resource_governance": config.runtime.resource_governance,
         },
         "agents": {
             "opencode": config.agents.opencode.__dict__,
@@ -1363,6 +1364,20 @@ def get_vault_vmk() -> dict:
     return {"ok": True, "exists": wrap_meta is not None, "wrap_meta": wrap_meta}
 
 
+def _reject_plaintext_value_fields(payload: object) -> None:
+    if isinstance(payload, dict):
+        if "value" in payload:
+            raise VaultApiError(
+                "vault create does not accept plaintext value fields",
+                code="plaintext_value_rejected",
+            )
+        for item in payload.values():
+            _reject_plaintext_value_fields(item)
+    elif isinstance(payload, list):
+        for item in payload:
+            _reject_plaintext_value_fields(item)
+
+
 def _sealed_from_payload(payload: dict):
     from storage.vault_crypto import Sealed
 
@@ -1390,6 +1405,7 @@ def create_vault_secret(payload: dict) -> dict:
 
     if not isinstance(payload, dict):
         raise VaultApiError("payload must be an object", code="invalid_payload")
+    _reject_plaintext_value_fields(payload)
     name = str(payload.get("name") or "").strip()
     if not vault_crypto.is_valid_secret_name(name):
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
@@ -1404,20 +1420,14 @@ def create_vault_secret(payload: dict) -> dict:
         signer_kind = str(signer_kind)
     if protection == "standard":
         blind_box = payload.get("blind_box")
-        value = payload.get("value")
         if isinstance(blind_box, dict):
             try:
                 sealed = avault_seal_blind_box(name, blind_box)
             except AvaultError as exc:
                 raise VaultApiError(f"avault blind-box seal failed: {exc}", code="avault_failed") from exc
-        elif isinstance(value, str) and value:
-            try:
-                sealed = avault_seal(name, value.encode("utf-8"))
-            except AvaultError as exc:
-                raise VaultApiError(f"avault seal failed: {exc}", code="avault_failed") from exc
         else:
             raise VaultApiError(
-                "standard create requires a browser blind_box or value fallback",
+                "standard create requires a browser blind_box",
                 code="blind_box_required",
             )
     elif protection == "protected":
@@ -2597,6 +2607,13 @@ def _backend_for_routing_agent(agent_name: Optional[str]) -> Optional[str]:
         store.close()
 
 
+def _normalize_show_message_types_for_platform(show_message_types: Optional[list], platform: str) -> list[str]:
+    normalized = normalize_show_message_types(show_message_types)
+    if not get_platform_descriptor(platform).capabilities.supports_toolcall_delivery:
+        return [msg_type for msg_type in normalized if msg_type != "toolcall"]
+    return normalized
+
+
 def save_settings(payload: dict) -> dict:
     store = SettingsStore.get_instance()
     platform = payload.get("platform") or _current_platform()
@@ -2606,7 +2623,9 @@ def save_settings(payload: dict) -> dict:
         for channel_id, channel_payload in (payload.get("channels") or {}).items():
             channels[channel_id] = ChannelSettings(
                 enabled=channel_payload.get("enabled", True),
-                show_message_types=normalize_show_message_types(channel_payload.get("show_message_types")),
+                show_message_types=_normalize_show_message_types_for_platform(
+                    channel_payload.get("show_message_types"), platform
+                ),
                 custom_cwd=channel_payload.get("custom_cwd"),
                 routing=_parse_routing(_normalize_backend_routing_payload(channel_payload.get("routing") or {})),
                 require_mention=channel_payload.get("require_mention"),
@@ -3222,12 +3241,14 @@ async def opencode_options_async(cwd: str) -> dict:
     server = None
     try:
         from config.v2_compat import to_app_config
+        from core.resource_governance import AgentResourceGovernor, config_from_runtime
         from modules.agents.opencode import (
             OpenCodeServerManager,
             build_reasoning_effort_options,
         )
 
-        config = to_app_config(V2Config.load())
+        v2_config = V2Config.load()
+        config = to_app_config(v2_config)
         if not config.opencode:
             return {"ok": False, "error": "opencode disabled"}
         opencode_config = config.opencode
@@ -3259,6 +3280,7 @@ async def opencode_options_async(cwd: str) -> dict:
             binary=opencode_config.binary,
             port=opencode_config.port,
             request_timeout_seconds=opencode_config.request_timeout_seconds,
+            resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
         )
         await asyncio.wait_for(server.ensure_running(), timeout=timeout_seconds)
         agents = await asyncio.wait_for(server.get_available_agents(expanded_cwd), timeout=timeout_seconds)
@@ -3342,7 +3364,7 @@ def _settings_to_payload(store: SettingsStore, platform: str) -> dict:
     for channel_id, settings in store.get_channels_for_platform(platform).items():
         payload["channels"][channel_id] = {
             "enabled": settings.enabled,
-            "show_message_types": normalize_show_message_types(settings.show_message_types),
+            "show_message_types": _normalize_show_message_types_for_platform(settings.show_message_types, platform),
             "custom_cwd": settings.custom_cwd,
             "require_mention": settings.require_mention,
             "require_bind": settings.require_bind,
@@ -3363,7 +3385,7 @@ def _settings_to_payload(store: SettingsStore, platform: str) -> dict:
             "is_admin": u.is_admin,
             "bound_at": u.bound_at,
             "enabled": u.enabled,
-            "show_message_types": u.show_message_types,
+            "show_message_types": _normalize_show_message_types_for_platform(u.show_message_types, platform),
             "custom_cwd": u.custom_cwd,
             "routing": routing_to_compat_dict(u.routing),
         }
@@ -5075,27 +5097,6 @@ def _run_avault(
 def _envelope_payload(sealed) -> dict:
     """Serialize a stored envelope for an avault stdin request (no plaintext)."""
     return {"ciphertext": sealed.ciphertext, "nonce": sealed.nonce, "wrap_meta": sealed.wrap_meta}
-
-
-def avault_seal(name: str, value: bytes):
-    """Seal a value under the machine key via avault; return a :class:`Sealed`.
-
-    ``value`` is piped straight to avault's stdin and never persisted or logged here.
-    """
-    from storage.vault_crypto import Sealed
-
-    proc = _run_avault(["seal", "--name", name], stdin=value)
-    if proc.returncode != 0:
-        raise AvaultError(_avault_detail(proc) or "avault seal failed")
-    try:
-        payload = json.loads(proc.stdout)
-        return Sealed(
-            ciphertext=payload["ciphertext"],
-            nonce=payload["nonce"],
-            wrap_meta=payload["wrap_meta"],
-        )
-    except (ValueError, KeyError, TypeError) as exc:
-        raise AvaultError("avault seal returned malformed output") from exc
 
 
 def avault_pubkey() -> dict:
@@ -7546,9 +7547,11 @@ async def _opencode_get_server():
     into a UI-friendly error.
     """
     from config.v2_compat import to_app_config
+    from core.resource_governance import AgentResourceGovernor, config_from_runtime
     from modules.agents.opencode import OpenCodeServerManager
 
-    config = to_app_config(V2Config.load())
+    v2_config = V2Config.load()
+    config = to_app_config(v2_config)
     if not config.opencode:
         return None
     opencode_config = config.opencode
@@ -7556,6 +7559,7 @@ async def _opencode_get_server():
         binary=opencode_config.binary,
         port=opencode_config.port,
         request_timeout_seconds=opencode_config.request_timeout_seconds,
+        resource_governor=AgentResourceGovernor(config_from_runtime(v2_config)),
     )
     await server.ensure_running()
     return server
@@ -9315,7 +9319,7 @@ def get_users(platform: Optional[str] = None) -> dict:
             "is_admin": u.is_admin,
             "bound_at": u.bound_at,
             "enabled": u.enabled,
-            "show_message_types": u.show_message_types,
+            "show_message_types": _normalize_show_message_types_for_platform(u.show_message_types, platform),
             "custom_cwd": u.custom_cwd,
             "routing": routing_to_compat_dict(u.routing),
         }
@@ -9338,7 +9342,7 @@ def save_users(payload: dict) -> dict:
             is_admin=up.get("is_admin", False),
             bound_at=up.get("bound_at", ""),
             enabled=up.get("enabled", True),
-            show_message_types=normalize_show_message_types(up.get("show_message_types")),
+            show_message_types=_normalize_show_message_types_for_platform(up.get("show_message_types"), platform),
             custom_cwd=up.get("custom_cwd"),
             routing=_parse_routing(_normalize_backend_routing_payload(up.get("routing") or {})),
             dm_chat_id=existing.dm_chat_id if existing else "",

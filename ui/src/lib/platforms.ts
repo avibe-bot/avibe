@@ -16,6 +16,7 @@ export type PlatformCapabilities = {
   supports_message_indicator_delete?: boolean;
   preferred_processing_indicator?: string;
   force_preferred_processing_indicator?: boolean;
+  supports_toolcall_delivery?: boolean;
 };
 
 export type PlatformDescriptor = {
@@ -137,6 +138,7 @@ const LEGACY_FALLBACK_CATALOG: PlatformDescriptor[] = [
       supports_message_indicator: true,
       preferred_processing_indicator: 'typing',
       force_preferred_processing_indicator: true,
+      supports_toolcall_delivery: false,
     },
   },
 ];
@@ -185,6 +187,9 @@ export const platformHasCapability = (
 
 export const platformSupportsChannels = (data: any, platform: string): boolean =>
   platformHasCapability(data, platform, 'supports_channels');
+
+export const platformSupportsToolcallDelivery = (data: any, platform: string): boolean =>
+  getPlatformDescriptor(data, platform)?.capabilities?.supports_toolcall_delivery !== false;
 
 export const platformHasCredentials = (data: any, platform: string): boolean => {
   const descriptor = getPlatformDescriptor(data, platform);

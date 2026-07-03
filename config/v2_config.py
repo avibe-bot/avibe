@@ -74,6 +74,7 @@ DEFAULT_OPENCODE_ERROR_RETRY_LIMIT = 1
 DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX = 14
 MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
 MAX_CHAT_MESSAGE_FONT_SIZE_PX = 20
+DEFAULT_AGENT_PROGRESS_STYLE = "off"
 
 
 def _filter_dataclass_fields(dc_class, payload: dict) -> dict:
@@ -91,6 +92,10 @@ class SlackConfig(BaseIMConfig):
     team_name: Optional[str] = None
     app_id: Optional[str] = None
     require_mention: bool = False
+    # Global default for the per-channel require_bind gate (allowed users).
+    # False=any channel member may drive the agent, True=only bound users.
+    # Channels whose per-channel require_bind is None inherit this value.
+    require_bind: bool = False
     disable_link_unfurl: bool = False
 
     def validate(self) -> None:
@@ -110,6 +115,8 @@ class DiscordConfig(BaseIMConfig):
     guild_allowlist: Optional[List[str]] = None
     guild_denylist: Optional[List[str]] = None
     require_mention: bool = False
+    # Global default for the per-channel require_bind gate (allowed users).
+    require_bind: bool = False
     # Auto-archive duration (minutes) for threads created by vibe-remote.
     # Discord only accepts 60, 1440, 4320, or 10080 (1h / 1d / 3d / 7d).
     # Defaults to 10080 (7d) to match Discord's longest native inactivity window
@@ -133,6 +140,8 @@ class DiscordConfig(BaseIMConfig):
 class TelegramConfig(BaseIMConfig):
     bot_token: str = ""
     require_mention: bool = True
+    # Global default for the per-channel require_bind gate (allowed users).
+    require_bind: bool = False
     forum_auto_topic: bool = True
     use_webhook: bool = False
     webhook_url: Optional[str] = None
@@ -151,6 +160,8 @@ class LarkConfig(BaseIMConfig):
     app_id: str = ""
     app_secret: str = ""
     require_mention: bool = False
+    # Global default for the per-channel require_bind gate (allowed users).
+    require_bind: bool = False
     domain: str = "feishu"  # "feishu" for domestic (open.feishu.cn), "lark" for international (open.larksuite.com)
 
     def validate(self) -> None:
@@ -171,6 +182,7 @@ class WeChatConfig(BaseIMConfig):
     base_url: str = "https://ilinkai.weixin.qq.com"
     cdn_base_url: str = "https://novac2c.cdn.weixin.qq.com/c2c"
     require_mention: bool = False  # unused for WeChat DM-only, kept for interface compat
+    require_bind: bool = False  # unused for WeChat DM-only, kept for interface compat
 
     def validate(self) -> None:
         # bot_token can be empty during setup wizard (filled after QR login)
@@ -216,6 +228,10 @@ class AudioAsrConfig:
 class RuntimeConfig:
     default_cwd: str
     log_level: str = "INFO"
+    # Linux/cgroup v2 best-effort resource governance for aggregate agent
+    # workload. "auto" enables it only when Avibe can create and write the
+    # delegated cgroup; unsupported systems silently fall back to legacy spawn.
+    resource_governance: dict = field(default_factory=lambda: {"mode": "auto"})
 
 
 @dataclass
@@ -412,10 +428,10 @@ class V2Config:
     reply_enhancements: bool = True  # Enable quick-reply buttons
     show_pages_prompt: bool = True  # Inject Show Pages capability guidance into agent prompts
     language: str = "en"  # Global language setting (see vibe/i18n)
-    # Concise status-bubble UX for editing platforms (Slack/Discord):
-    #   "concise" (default) one self-updating bubble that becomes the result,
-    #   "verbose" legacy append/split process log, "off" no process bubble.
-    agent_progress_style: str = "concise"
+    # Progress UX for editing platforms (Slack/Discord):
+    #   "off" (default) no process bubble, "concise" one self-updating bubble,
+    #   "verbose" legacy append/split process log.
+    agent_progress_style: str = DEFAULT_AGENT_PROGRESS_STYLE
     agent_status_heartbeat_ms: int = 15000  # status-bubble elapsed-timer heartbeat
     agent_status_no_output_ms: int = 180000  # "no output for N min" hint threshold
     # True once the user has finished the setup wizard. This is the explicit
@@ -624,9 +640,9 @@ class V2Config:
 
         language = normalize_language(payload.get("language"), default="en")
 
-        agent_progress_style = payload.get("agent_progress_style", "concise")
+        agent_progress_style = payload.get("agent_progress_style", DEFAULT_AGENT_PROGRESS_STYLE)
         if agent_progress_style not in ("concise", "verbose", "off"):
-            agent_progress_style = "concise"
+            agent_progress_style = DEFAULT_AGENT_PROGRESS_STYLE
 
         def _positive_int(value, default, maximum):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0 or value > maximum:
@@ -714,6 +730,7 @@ class V2Config:
             "runtime": {
                 "default_cwd": self.runtime.default_cwd,
                 "log_level": self.runtime.log_level,
+                "resource_governance": self.runtime.resource_governance,
             },
             "agents": {
                 "opencode": self.agents.opencode.__dict__,

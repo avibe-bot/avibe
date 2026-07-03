@@ -180,6 +180,25 @@ def test_require_bind_off_allows_any_channel_member():
     assert result.allowed is True
 
 
+def test_require_bind_null_allows_any_member_regardless_of_platform_default():
+    # Legacy channels store require_bind=None ("Anyone" in the old UI). The
+    # platform default is a copy-on-enable seed, NOT a runtime fallback, so a
+    # None channel must keep allowing unbound members even if the platform
+    # default is later flipped on.
+    store = _Store()
+    store.settings.channels["C1"] = SimpleNamespace(enabled=True, require_bind=None)
+
+    result = check_auth(
+        user_id="U-stranger",
+        channel_id="C1",
+        is_dm=False,
+        action="",
+        store=store,
+    )
+
+    assert result.allowed is True
+
+
 def test_admin_guard_denies_non_admin_for_auth_setup_callback():
     store = _Store()
     store.settings.channels["C1"] = SimpleNamespace(enabled=True)

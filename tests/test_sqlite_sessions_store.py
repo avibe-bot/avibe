@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
@@ -63,9 +65,16 @@ def test_sessions_store_uses_sqlite_without_rewriting_legacy_json(tmp_path: Path
     reloaded = SessionsStore(sessions_path)
     try:
         # Legacy OpenCode ``base:/cwd`` composite is normalised to the bare anchor
-        # on import (cwd -> workdir column), matching the bare-anchor read path; the
-        # native id is preserved. (Codex P2: composite anchors were unreadable.)
+        # on import; the native id is preserved, but cwd is not inferred from the
+        # anchor suffix.
         assert reloaded.state.session_mappings["slack::C123"]["opencode"]["slack_123.456"] == "session-old"
+        engine = create_sqlite_engine(reloaded.db_path)
+        with engine.connect() as conn:
+            workdir = conn.execute(
+                select(agent_sessions.c.workdir).where(agent_sessions.c.session_anchor == "slack_123.456")
+            ).scalar_one()
+        engine.dispose()
+        assert workdir is None
         assert reloaded.state.active_polls["oc-1"]["settings_key"] == "C123"
         assert reloaded.state.active_polls["oc-1"]["platform"] == "slack"
         assert reloaded.get_active_poll("oc-2") is not None
@@ -351,14 +360,19 @@ def test_bind_agent_session_upgrades_legacy_default_anchor_row(tmp_path: Path, l
 
 def test_sqlite_sessions_service_binds_reserved_agent_session_by_id(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
+    default_workdir = tmp_path / "runtime-default"
     service = SQLiteSessionsService(db_path)
     try:
-        reserved_id = service.reserve_agent_session(
-            scope_key="slack::channel::C123",
-            agent_backend="opencode",
-            session_anchor="slack_private-agent",
-            agent_name="opencode",
-        )
+        with patch(
+            "storage.sessions_service.V2Config.load",
+            return_value=SimpleNamespace(runtime=SimpleNamespace(default_cwd=str(default_workdir))),
+        ):
+            reserved_id = service.reserve_agent_session(
+                scope_key="slack::channel::C123",
+                agent_backend="opencode",
+                session_anchor="slack_private-agent",
+                agent_name="opencode",
+            )
         assert reserved_id is not None
 
         bound_id = service.bind_agent_session_by_id(
@@ -374,11 +388,58 @@ def test_sqlite_sessions_service_binds_reserved_agent_session_by_id(tmp_path: Pa
         row = service.get_agent_session_by_id(reserved_id)
         assert row is not None
         assert row["native_session_id"] == "oc-session-1"
-        assert row["workdir"] is None
+        assert row["workdir"] == str(default_workdir)
         assert row["agent_id"] == "agent-codex"
         assert row["agent_name"] == "codex"
         assert row["agent_backend"] == "codex"
         assert row["agent_variant"] == "codex"
+    finally:
+        service.close()
+
+
+def test_reserve_agent_session_uses_runtime_default_when_scope_workdir_missing(tmp_path: Path) -> None:
+    from storage.models import scope_settings
+
+    db_path = tmp_path / "vibe.sqlite"
+    default_workdir = tmp_path / "runtime-default"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with service.engine.begin() as conn:
+            scope_id = upsert_scope(conn, "slack", "channel", "C123", now="2026-07-01T00:00:00Z")
+            conn.execute(
+                scope_settings.insert().values(
+                    scope_id=scope_id,
+                    enabled=1,
+                    role=None,
+                    workdir=None,
+                    agent_name="codex",
+                    agent_backend="codex",
+                    agent_variant="codex",
+                    model=None,
+                    reasoning_effort=None,
+                    require_mention=None,
+                    settings_version=1,
+                    settings_json="{}",
+                    created_at="2026-07-01T00:00:00Z",
+                    updated_at="2026-07-01T00:00:00Z",
+                )
+            )
+
+        with patch(
+            "storage.sessions_service.V2Config.load",
+            return_value=SimpleNamespace(runtime=SimpleNamespace(default_cwd=str(default_workdir))),
+        ):
+            session_id = service.reserve_agent_session(
+                scope_key="slack::channel::C123",
+                agent_backend="codex",
+                session_anchor="slack_171717.123:definition_test",
+                agent_name="codex",
+            )
+
+        assert session_id is not None
+        row = service.get_agent_session_by_id(session_id)
+        assert row is not None
+        assert row["workdir"] == str(default_workdir)
     finally:
         service.close()
 
@@ -421,18 +482,23 @@ def test_bind_agent_session_by_id_does_not_overwrite_existing_workdir(tmp_path: 
 
 def test_bind_agent_session_by_id_does_not_use_anchor_suffix_as_workdir(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
+    default_workdir = tmp_path / "runtime-default"
     service = SQLiteSessionsService(db_path)
     try:
-        reserved_id = service.reserve_agent_session(
-            scope_key="slack::channel::C123",
-            agent_backend="codex",
-            session_anchor="slack_scheduled:/tmp/test",
-            agent_name="codex",
-        )
+        with patch(
+            "storage.sessions_service.V2Config.load",
+            return_value=SimpleNamespace(runtime=SimpleNamespace(default_cwd=str(default_workdir))),
+        ):
+            reserved_id = service.reserve_agent_session(
+                scope_key="slack::channel::C123",
+                agent_backend="codex",
+                session_anchor="slack_scheduled:/tmp/test",
+                agent_name="codex",
+            )
         assert reserved_id is not None
         row = service.get_agent_session_by_id(reserved_id)
         assert row is not None
-        assert row["workdir"] is None
+        assert row["workdir"] == str(default_workdir)
 
         service.bind_agent_session_by_id(
             session_id=reserved_id,
@@ -442,7 +508,7 @@ def test_bind_agent_session_by_id_does_not_use_anchor_suffix_as_workdir(tmp_path
 
         row = service.get_agent_session_by_id(reserved_id)
         assert row is not None
-        assert row["workdir"] is None
+        assert row["workdir"] == str(default_workdir)
     finally:
         service.close()
 

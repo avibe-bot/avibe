@@ -4,7 +4,7 @@
 
 The Harness CLI used to expose backend and transport details directly to
 agents. In particular, `vibe agent run`, `vibe task`, and `vibe watch` relied on
-explicit session ids, delivery keys, and post targets even when Avibe already
+explicit session ids and legacy delivery-target syntax even when Avibe already
 knows the calling Agent Session through `AVIBE_SESSION_ID`.
 
 That made agents carry routing details in prompts instead of using the runtime
@@ -19,10 +19,9 @@ context as a first-class API.
 - Scope placement is a session-level decision. It decides where a newly-created
   session lives: a private/background scope, the caller/source scope, or a
   specific `scopes.id`.
-- Message delivery overrides are not scope placement. `post-to` remains a reply
-  delivery override; it does not move a session.
-- `deliver-key` is legacy transport syntax and should leave the agent-facing
-  CLI surface. New commands should use `--scope-id` or `--same-scope`.
+- Message delivery overrides are not scope placement. Legacy transport
+  overrides should leave the agent-facing CLI surface.
+- New commands should use `--scope-id` or `--same-scope`.
 
 ## `vibe agent run` Defaults
 
@@ -37,11 +36,10 @@ Avibe treats it as:
 - create a new private/background session;
 - use the caller shell cwd as the new session cwd;
 - record callback route to the caller session when `AVIBE_SESSION_ID` exists;
-- keep the run synchronous unless `--async` is explicitly passed.
+- queue the run and return immediately by default.
 
-The async-by-default proposal is intentionally left as a follow-up. It changes
-the waiting contract of every existing caller and should land separately with a
-focused migration.
+Use `--sync` only when the CLI process must wait for the run result. The legacy
+`--async` flag remains accepted for older scripts, but it is no longer required.
 
 ## New Target And Scope Parameters
 
@@ -62,8 +60,8 @@ to fork into a different scope.
 | Operation | Default cwd |
 | --- | --- |
 | create private/background session | caller shell cwd |
-| create with `--same-scope` | caller shell cwd |
-| create with `--scope-id` | caller shell cwd |
+| create with `--same-scope` | selected scope workdir |
+| create with `--scope-id` | selected scope workdir |
 | fork self/session | source session cwd |
 | continue existing session | existing session cwd |
 | explicit `--cwd` | wins for blank create only |
@@ -76,8 +74,8 @@ All `vibe agent run` invocations resolve a callback route:
 - `--no-callback` records an intentional no-callback policy;
 - otherwise, `AVIBE_SESSION_ID` becomes the callback route when available.
 
-For async runs, the callback route is used when the run completes. For sync
-runs, the route is only recorded for future detach-to-async behavior.
+For default async runs, the callback route is used when the run completes. For
+sync runs, the route is recorded for future detach-to-async behavior.
 
 ## Other CLI Defaults
 
@@ -98,8 +96,8 @@ runs, the route is only recorded for future detach-to-async behavior.
 
 ## Migration
 
-This batch removes `deliver-key` from recommended agent-facing help, prompt
-injection, and examples. Internal persistence can keep legacy field names until
-a later database cleanup. The CLI may continue accepting hidden legacy
-`--deliver-key` for compatibility, but new code paths write placement through
-`scope_id` semantics.
+This batch removes legacy delivery-target syntax from recommended agent-facing
+help, prompt injection, and examples. Internal persistence can keep legacy field
+names until a later database cleanup. The CLI may continue accepting hidden
+legacy placement input for compatibility, but new code paths write placement
+through `scope_id` semantics.

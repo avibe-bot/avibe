@@ -33,6 +33,38 @@ def test_get_users_respects_platform_scope(monkeypatch, tmp_path):
     assert set(wechat_users["users"].keys()) == {"wx1"}
 
 
+def test_wechat_settings_filter_toolcall_visibility(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    SettingsStore.reset_instance()
+
+    settings = api.save_settings(
+        {
+            "platform": "wechat",
+            "channels": {
+                "wx-chat": {
+                    "enabled": True,
+                    "show_message_types": ["assistant", "toolcall"],
+                }
+            },
+        }
+    )
+    users = api.save_users(
+        {
+            "platform": "wechat",
+            "users": {
+                "wx-user": {
+                    "display_name": "WeChat User",
+                    "enabled": True,
+                    "show_message_types": ["assistant", "toolcall"],
+                }
+            },
+        }
+    )
+
+    assert settings["channels"]["wx-chat"]["show_message_types"] == ["assistant"]
+    assert users["users"]["wx-user"]["show_message_types"] == ["assistant"]
+
+
 def test_toggle_admin_is_scoped_per_platform(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     SettingsStore.reset_instance()

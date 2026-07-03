@@ -8,7 +8,7 @@ import threading
 from typing import Optional, Dict, Any
 from config import paths
 from config.platform_registry import get_platform_descriptor
-from config.v2_config import DEFAULT_AGENT_BACKEND, DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
+from config.v2_config import DEFAULT_AGENT_BACKEND, DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS, DEFAULT_AGENT_PROGRESS_STYLE
 from modules.im import BaseIMClient, MessageContext, IMFactory
 from modules.im.multi import MultiIMClient
 from modules.agent_router import AgentRouter
@@ -368,6 +368,9 @@ class Controller:
 
     def _sync_config_references(self, new_config) -> None:
         self.config = new_config
+        governor = getattr(self, "_agent_resource_governor", None)
+        if governor is not None:
+            governor.update_config(getattr(new_config, "resource_governance", {"mode": "auto"}))
         self.processing_indicator.config = new_config
         self.audio_asr_service.config = new_config
         for handler_name in ("command_handler", "settings_handler", "message_handler", "session_handler"):
@@ -513,6 +516,10 @@ class Controller:
                 self.config.include_time_info = v2_config.include_time_info
                 self.config.include_user_info = v2_config.include_user_info
                 self.config.reply_enhancements = v2_config.reply_enhancements
+                self.config.resource_governance = v2_config.runtime.resource_governance
+                governor = getattr(self, "_agent_resource_governor", None)
+                if governor is not None:
+                    governor.update_config(self.config.resource_governance)
                 self.config.audio_asr = v2_config.audio_asr
                 self.config.remote_access = v2_config.remote_access
                 audio_asr_service = getattr(self, "audio_asr_service", None)
@@ -896,8 +903,8 @@ class Controller:
         Currently a global config setting; per-channel overrides can layer on top
         here later without touching the dispatcher.
         """
-        value = getattr(self.config, "agent_progress_style", "concise")
-        return value if value in ("concise", "verbose", "off") else "concise"
+        value = getattr(self.config, "agent_progress_style", DEFAULT_AGENT_PROGRESS_STYLE)
+        return value if value in ("concise", "verbose", "off") else DEFAULT_AGENT_PROGRESS_STYLE
 
     def uses_concise_status_bubble(self, context: MessageContext) -> bool:
         """True when this turn renders a concise status bubble (Slack/Discord +

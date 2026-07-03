@@ -137,7 +137,7 @@ def test_get_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
     assert payload["session"]["id"] == "sesaaa"
     assert payload["session_default_notice"] == {
         "code": "session_defaulted_to_caller",
-        "message": "Session defaulted to the caller Session from AVIBE_SESSION_ID.",
+        "message": "Session defaulted to this Agent Session.",
         "session_id": "sesaaa",
     }
 
@@ -151,6 +151,7 @@ def test_get_requires_session_without_caller(monkeypatch, tmp_path, capsys):
     assert code == 1
     assert payload["code"] == "missing_session_target"
     assert payload["help_command"] == "vibe session get --help"
+    assert payload["hint"] == "Run this command from an Avibe Agent shell, or pass the target Session ID positionally."
 
 
 def test_get_archived_is_not_found(monkeypatch, tmp_path, capsys):
@@ -196,7 +197,7 @@ def test_update_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
     assert payload["session"]["title"] == "New name"
     assert payload["session_default_notice"] == {
         "code": "session_defaulted_to_caller",
-        "message": "Session defaulted to the caller Session from AVIBE_SESSION_ID.",
+        "message": "Session defaulted to this Agent Session.",
         "session_id": "sesaaa",
     }
 
@@ -210,6 +211,7 @@ def test_update_requires_session_without_caller(monkeypatch, tmp_path, capsys):
     assert code == 1
     assert payload["code"] == "missing_session_target"
     assert payload["help_command"] == "vibe session update --help"
+    assert payload["hint"] == "Run this command from an Avibe Agent shell, or pass the target Session ID positionally."
 
 
 def test_update_empty_title_clears(monkeypatch, tmp_path, capsys):
@@ -301,17 +303,21 @@ def _injection_for(session_id, *, platform="avibe", platform_specific=None):
     return build_system_prompt_injection(context=ctx)
 
 
-def test_web_title_prompt_is_fixed_and_uses_session_id():
+def test_web_title_prompt_defaults_to_current_session():
     out = _injection_for("sesweb")
+    title_prompt = out[out.index("## Session Title") :]
     assert "## Session Title" in out
-    # the command carries the REAL session id (not a <id> placeholder)
-    assert "vibe session get sesweb" in out
-    assert 'vibe session update sesweb --title "<short title>"' in out
+    assert "`vibe session get`" in out
+    assert '`vibe session update --title "<short title>"`' in out
+    assert "vibe session get sesweb" not in out
+    assert 'vibe session update sesweb --title "<short title>"' not in out
     assert "metadata.title_source" in out
     assert "`user` or `agent`" in out
     assert "leave the title unchanged" in out
-    assert "may silently set one concise, human-scannable title" in out
-    assert "do not repeatedly rename the same Session" in out
+    assert "silently set one concise, human-scannable Session title" in out
+    assert "without waiting for the user" in out
+    assert "do not rename it again" in out
+    assert len(title_prompt.strip()) < 450
     assert "not set yet" not in out
     assert "auto-generated" not in out
 
@@ -320,7 +326,7 @@ def test_im_title_prompt_is_not_injected():
     out = _injection_for("sesim", platform="slack")
     assert "## Session Title" not in out
     assert "vibe session update sesim --title" not in out
-    assert "Current Session Reminder" in out  # the reminder itself still renders
+    assert "Current Session Reminder" not in out
 
 
 def test_forked_session_prompt_marks_target_session_id_authoritative():
@@ -342,7 +348,8 @@ def test_forked_session_prompt_marks_target_session_id_authoritative():
     assert "This Agent Session was forked from `sessource`." in out
     assert "The authoritative Avibe session id for this fork is `sestarget`." in out
     assert "If copied source context mentions another Avibe session id" in out
-    assert "use `sestarget` for Show Pages, Harness commands, tasks, watches, callbacks, and session updates" in out
+    assert "treat it as historical source-context only" in out
+    assert "for Show Pages, Harness commands, tasks, watches, callbacks, and session updates" not in out
 
 
 def test_forked_session_prompt_can_use_persisted_metadata():

@@ -1361,7 +1361,7 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["threadId"], "thread-existing")
         developer_instructions = params["developerInstructions"]
         self.assertEqual(developer_instructions.count("Focus on regressions."), 1)
-        self.assertEqual(developer_instructions.count("Current session id:"), 3)
+        self.assertEqual(developer_instructions.count("Current session id:"), 2)
         self.assertNotIn("Legacy session key:", developer_instructions)
         self.assertNotIn("--session-key", developer_instructions)
         self.assertEqual(developer_instructions.count("If you generate an image with Codex"), 1)
@@ -1549,7 +1549,8 @@ class CodexAgentPayloadTests(unittest.IsolatedAsyncioTestCase):
             "The authoritative Avibe session id for this fork is `ses-target`.",
             developer_instructions,
         )
-        self.assertIn("use `ses-target` for Show Pages", developer_instructions)
+        self.assertIn("treat it as historical source-context only", developer_instructions)
+        self.assertNotIn("use `ses-target` for Show Pages", developer_instructions)
         inject_method, inject_params = transport.send_request.await_args_list[1].args
         self.assertEqual(inject_method, "thread/inject_items")
         self.assertEqual(inject_params["threadId"], "thread-fork")
@@ -2923,6 +2924,7 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
         agent._session_locks = {}
         agent._session_mgr = SimpleNamespace(sessions_for_cwd=lambda cwd: [])
         agent.codex_config = SimpleNamespace(binary="codex", extra_args=[])
+        agent.controller = SimpleNamespace()
         return agent
 
     async def test_server_request_refreshes_transport_activity(self):
@@ -2967,6 +2969,37 @@ class CodexTransportCwdStalenessTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(result, {"approved": True})
             self.assertEqual(agent._transport_last_activity[cwd], 999.0)
+
+    async def test_get_or_create_transport_moves_app_server_into_agent_cgroup(self):
+        import tempfile
+
+        agent = self._agent()
+        calls = []
+        agent.controller._agent_resource_governor = SimpleNamespace(
+            apply_to_pid=lambda pid, label="agent": calls.append((pid, label)) or True
+        )
+        with tempfile.TemporaryDirectory() as cwd:
+            fresh = SimpleNamespace(
+                is_initialized=True,
+                pid=2468,
+                start=AsyncMock(),
+                on_notification=Mock(),
+                on_server_request=Mock(),
+            )
+            with (
+                patch.object(_MODULE, "CodexTransport", return_value=fresh),
+                patch.object(
+                    _MODULE,
+                    "governor_from_controller",
+                    return_value=SimpleNamespace(
+                        apply_to_pid=lambda pid, label="agent": calls.append((pid, label)) or True
+                    ),
+                ),
+            ):
+                result = await agent._get_or_create_transport(cwd)
+
+            self.assertIs(result, fresh)
+            self.assertEqual(calls, [(2468, "codex app-server")])
 
     async def test_cached_transport_evicted_when_cwd_inode_changes(self):
         import tempfile

@@ -121,9 +121,9 @@ export const SettingsMessagingPage: React.FC = () => {
     { value: 'message', label: t('dashboard.ackMessage'), disabled: false },
   ];
   const progressStyleOptions = [
+    { value: 'off', label: t('dashboard.agentProgressStyleOff') },
     { value: 'concise', label: t('dashboard.agentProgressStyleConcise') },
     { value: 'verbose', label: t('dashboard.agentProgressStyleVerbose') },
-    { value: 'off', label: t('dashboard.agentProgressStyleOff') },
   ];
   const includeTimeInfoEnabled = config.include_time_info !== false;
   const audioAsr = config.audio_asr || {};
@@ -337,11 +337,11 @@ export const SettingsMessagingPage: React.FC = () => {
           description={t('dashboard.agentProgressStyleHint')}
           control={
             <CompactSelect
-              value={config.agent_progress_style || 'concise'}
+              value={config.agent_progress_style || 'off'}
               onChange={(event) =>
                 void persist({
                   ...config,
-                  agent_progress_style: event.target.value || 'concise',
+                  agent_progress_style: event.target.value || 'off',
                 })
               }
               className="w-40"

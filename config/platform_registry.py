@@ -32,6 +32,10 @@ class PlatformCapabilities:
     # footer) that becomes the result. One capability shared by the dispatcher and
     # the processing indicator instead of a hardcoded {"slack","discord"} literal.
     supports_status_bubble: bool = False
+    # Whether intermediate tool-call traces may be pushed to this IM transport
+    # when a user opts into "Toolcall" visibility. Platforms can keep local
+    # history/audit rows while still suppressing noisy IM delivery.
+    supports_toolcall_delivery: bool = True
 
 
 @dataclass(frozen=True)
@@ -247,6 +251,7 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
             supports_reaction_indicator=False,
             preferred_processing_indicator="typing",
             force_preferred_processing_indicator=True,
+            supports_toolcall_delivery=False,
         ),
     ),
     # The Vibe Remote Web UI itself, surfaced as a peer platform so the

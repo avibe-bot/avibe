@@ -77,8 +77,8 @@ _EXPECTED_RUN_KEYS_QUEUED = {
 }
 
 
-def test_agent_run_async_envelope_schema(tmp_path: Path, capsys) -> None:
-    """Locks the top-level keys + nested ``run`` keys for the async path
+def test_agent_run_default_async_envelope_schema(tmp_path: Path, capsys) -> None:
+    """Locks the top-level keys + nested ``run`` keys for the default async path
     (the synchronous path adds the resolved result fields after
     ``_wait_for_run_result``, so they're tested via existing wait-flow
     coverage).
@@ -88,7 +88,7 @@ def test_agent_run_async_envelope_schema(tmp_path: Path, capsys) -> None:
     agent_store = cli.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
     request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-    args = _parse_agent_run(["--agent", "worker", "--async", "--no-callback", "--message", "hi"])
+    args = _parse_agent_run(["--agent", "worker", "--no-callback", "--message", "hi"])
 
     with (
         patch("vibe.cli._agent_store", return_value=agent_store),
@@ -126,6 +126,27 @@ def test_agent_run_async_envelope_schema(tmp_path: Path, capsys) -> None:
     assert run["source_kind"] == "cli"
     assert run["source_actor"] is None
     assert run["parent_run_id"] is None
+
+
+def test_agent_run_explicit_async_flag_remains_compatible(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="worker", backend="codex")
+    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    args = _parse_agent_run(["--agent", "worker", "--async", "--no-callback", "--message", "hi"])
+
+    with (
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._primary_platform", return_value="slack"),
+    ):
+        result = cli.cmd_agent_run(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["async"] is True
+    assert payload["run"]["status"] == "queued"
 
 
 def test_agent_run_async_accepts_callback_session_id(tmp_path: Path, capsys) -> None:
@@ -179,7 +200,6 @@ def test_agent_run_async_accepts_callback_session_id(tmp_path: Path, capsys) -> 
             [
                 "--agent",
                 "worker",
-                "--async",
                 "--callback-session-id",
                 callback_session["id"],
                 "--message",
@@ -217,7 +237,7 @@ def test_agent_run_async_requires_callback_or_no_callback_without_caller(tmp_pat
         agent_store = cli.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
         request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-        args = _parse_agent_run(["--agent", "worker", "--async", "--message", "hi"])
+        args = _parse_agent_run(["--agent", "worker", "--message", "hi"])
 
         with (
             patch("vibe.cli._agent_store", return_value=agent_store),
@@ -287,7 +307,7 @@ def test_agent_run_async_defaults_callback_from_caller_env(tmp_path: Path, capsy
         agent_store = cli.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
         request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-        args = _parse_agent_run(["--agent", "worker", "--async", "--message", "hi"])
+        args = _parse_agent_run(["--agent", "worker", "--message", "hi"])
 
         with (
             patch.dict(
@@ -379,7 +399,7 @@ def test_agent_run_async_self_target_defaults_to_no_callback(
         agent_store = cli.VibeAgentStore(db_path)
         agent_store.create(name="caller", backend="codex")
         request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-        args = _parse_agent_run(["--session-id", caller_session["id"], "--async", "--message", "hi"])
+        args = _parse_agent_run(["--session-id", caller_session["id"], "--message", "hi"])
 
         with (
             patch.dict(
@@ -456,7 +476,7 @@ def test_agent_run_sync_self_target_detach_defaults_to_no_callback(
         agent_store = cli.VibeAgentStore(db_path)
         agent_store.create(name="caller", backend="codex")
         request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-        args = _parse_agent_run(["--session-id", caller_session["id"], "--message", "hi"])
+        args = _parse_agent_run(["--session-id", caller_session["id"], "--sync", "--message", "hi"])
 
         with (
             patch.dict(
@@ -541,7 +561,7 @@ def test_agent_run_callback_session_records_sync_route(tmp_path: Path, capsys) -
         agent_store = cli.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
         request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-        args = _parse_agent_run(["--agent", "worker", "--callback-session-id", callback_session["id"], "--message", "hi"])
+        args = _parse_agent_run(["--agent", "worker", "--sync", "--callback-session-id", callback_session["id"], "--message", "hi"])
 
         with (
             patch("vibe.cli._agent_store", return_value=agent_store),
@@ -560,6 +580,64 @@ def test_agent_run_callback_session_records_sync_route(tmp_path: Path, capsys) -
     assert stored is not None
     assert stored["callback_session_id"] == callback_session["id"]
     assert stored["callback_status"] is None
+
+
+def test_agent_run_sync_waits_for_run_result(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="worker", backend="codex")
+    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    args = _parse_agent_run(["--agent", "worker", "--sync", "--no-callback", "--message", "hi"])
+
+    wait_calls: list[tuple[str, float | None]] = []
+
+    def _wait_for_result(_store, run_id: str, *, wait_timeout: float | None) -> dict:
+        wait_calls.append((run_id, wait_timeout))
+        return {"id": "done", "status": "succeeded"}
+
+    with (
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._primary_platform", return_value="slack"),
+        patch("vibe.cli._wait_for_run_result", side_effect=_wait_for_result),
+    ):
+        result = cli.cmd_agent_run(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["async"] is False
+    assert payload["run"] == {"id": "done", "status": "succeeded"}
+    assert wait_calls == [(payload["run_id"], None)]
+
+
+def test_agent_run_sync_wait_timeout_is_passed_to_waiter(tmp_path: Path, capsys) -> None:
+    db_path = tmp_path / "state" / "vibe.sqlite"
+    agent_store = cli.VibeAgentStore(db_path)
+    agent_store.create(name="worker", backend="codex")
+    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+    args = _parse_agent_run(
+        ["--agent", "worker", "--sync", "--wait-timeout", "2.5", "--no-callback", "--message", "hi"]
+    )
+    wait_timeouts: list[float | None] = []
+
+    def _wait_for_result(_store, _run_id: str, *, wait_timeout: float | None) -> dict:
+        wait_timeouts.append(wait_timeout)
+        return {"id": "done", "status": "succeeded"}
+
+    with (
+        patch("vibe.cli._agent_store", return_value=agent_store),
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        patch("vibe.cli._primary_platform", return_value="slack"),
+        patch("vibe.cli._wait_for_run_result", side_effect=_wait_for_result),
+    ):
+        result = cli.cmd_agent_run(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["async"] is False
+    assert wait_timeouts == [2.5]
 
 
 def test_agent_run_callback_session_records_sync_route_in_sqlite_store(tmp_path: Path, capsys) -> None:
@@ -610,7 +688,7 @@ def test_agent_run_callback_session_records_sync_route_in_sqlite_store(tmp_path:
             )
 
         args = _parse_agent_run(
-            ["--agent", "worker", "--callback-session-id", callback_session["id"], "--message", "hi"]
+            ["--agent", "worker", "--sync", "--callback-session-id", callback_session["id"], "--message", "hi"]
         )
 
         with (
@@ -683,7 +761,7 @@ def test_agent_run_sync_detach_marks_callback_pending(tmp_path: Path, capsys) ->
             )
 
         args = _parse_agent_run(
-            ["--agent", "worker", "--callback-session-id", callback_session["id"], "--message", "hi"]
+            ["--agent", "worker", "--sync", "--callback-session-id", callback_session["id"], "--message", "hi"]
         )
 
         with (
@@ -944,7 +1022,7 @@ def test_agent_run_fork_self_uses_caller_session_and_inherits_scope(tmp_path: Pa
     assert row["workdir"] == str(tmp_path)
 
 
-def test_agent_run_create_same_scope_uses_invocation_workdir(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_agent_run_create_same_scope_snapshots_scope_workdir(tmp_path: Path, capsys, monkeypatch) -> None:
     from sqlalchemy import select
 
     from storage.db import create_sqlite_engine
@@ -985,7 +1063,61 @@ def test_agent_run_create_same_scope_uses_invocation_workdir(tmp_path: Path, cap
     finally:
         engine.dispose()
     assert row["scope_id"] == "avibe::project::proj_fork_cli"
-    assert row["workdir"] == str(invoke_dir)
+    assert row["workdir"] == str(tmp_path)
+
+
+def test_agent_run_create_scope_id_snapshots_scope_workdir(tmp_path: Path, capsys, monkeypatch) -> None:
+    from sqlalchemy import select
+
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions
+
+    state_home = tmp_path / "home"
+    invoke_dir = tmp_path / "invoke"
+    invoke_dir.mkdir()
+    with patch.dict("os.environ", {"AVIBE_HOME": str(state_home)}):
+        ensure_sqlite_state()
+        db_path = state_home / "state" / "vibe.sqlite"
+        _seed_bound_session(db_path, tmp_path)
+        agent_store = cli.VibeAgentStore(db_path)
+        agent_store.create(name="worker", backend="codex")
+        request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
+        args = _parse_agent_run(
+            [
+                "--agent",
+                "worker",
+                "--scope-id",
+                "avibe::project::proj_fork_cli",
+                "--async",
+                "--no-callback",
+                "--message",
+                "hi",
+            ]
+        )
+        monkeypatch.chdir(invoke_dir)
+
+        with (
+            patch("vibe.cli._agent_store", return_value=agent_store),
+            patch("vibe.cli._task_request_store", return_value=request_store),
+            patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
+        ):
+            result = cli.cmd_agent_run(args)
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["scope_id"] == "avibe::project::proj_fork_cli"
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(agent_sessions).where(agent_sessions.c.id == payload["session_id"])
+            ).mappings().one()
+    finally:
+        engine.dispose()
+    assert row["scope_id"] == "avibe::project::proj_fork_cli"
+    assert row["workdir"] == str(tmp_path)
 
 
 def test_agent_run_create_scope_id_requires_existing_scope(tmp_path: Path, capsys) -> None:
@@ -1217,17 +1349,19 @@ def test_agent_run_cwd_rejected_with_existing_session(capsys) -> None:
     assert payload["code"] == "cwd_with_existing_session"
 
 
-def test_resolve_run_cwd_deliver_key_defaults_to_invocation_cwd(monkeypatch, tmp_path: Path) -> None:
-    """Without --cwd, every blank session reservation snapshots the caller cwd.
-    An explicit --cwd still wins."""
+def test_resolve_run_cwd_defaults_by_session_target(monkeypatch, tmp_path: Path) -> None:
+    """Without --cwd, private sessions snapshot the caller cwd, while scoped
+    sessions leave cwd unset so creation snapshots the selected scope workdir."""
 
     from types import SimpleNamespace
 
     monkeypatch.chdir(tmp_path)
-    args = SimpleNamespace(cwd=None, deliver_key="slack::channel::C123")
+    args = SimpleNamespace(cwd=None)
     assert cli._resolve_run_cwd(args, session_policy="create", help_command="x") == str(tmp_path)
+    assert cli._resolve_run_cwd(args, session_policy="create", scoped_session=True, help_command="x") is None
+
     args = SimpleNamespace(cwd=str(tmp_path), deliver_key="slack::channel::C123")
-    assert cli._resolve_run_cwd(args, session_policy="create", help_command="x") == str(tmp_path)
+    assert cli._resolve_run_cwd(args, session_policy="create", scoped_session=True, help_command="x") == str(tmp_path)
 
 
 def test_runs_list_current_session_filters_from_caller_env(tmp_path: Path, capsys) -> None:

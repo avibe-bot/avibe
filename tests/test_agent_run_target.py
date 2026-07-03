@@ -4,13 +4,15 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from core.services import sessions as sessions_service
 from core.services.agent_run_target import resolve_agent_run_target
 from modules.im import MessageContext
 from storage.agent_session_rows import create_agent_session_row
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import scope_settings
+from storage.models import agent_sessions, scope_settings
 from storage.sessions_service import SQLiteSessionsService
 from storage.settings_service import upsert_scope
 
@@ -659,8 +661,10 @@ def test_existing_im_session_workdir_wins_over_scope_change(tmp_path):
     assert target.workdir == str(original_workdir)
 
 
-def test_reserved_session_placeholder_workdir_falls_back_to_scope(tmp_path):
+def test_existing_session_workdir_does_not_read_anchor_suffix(tmp_path, monkeypatch):
     workdir = tmp_path / "channel"
+    deleted_cwd = tmp_path / "deleted-cwd"
+    deleted_cwd.mkdir()
     controller = _controller(tmp_path)
     with controller.sqlite_engine.begin() as conn:
         scope_id = upsert_scope(
@@ -676,8 +680,9 @@ def test_reserved_session_placeholder_workdir_falls_back_to_scope(tmp_path):
         session_id = service.reserve_agent_session(
             scope_key="slack::channel::C123",
             agent_backend="codex",
-            session_anchor="slack_scheduled:/tmp/test",
+            session_anchor="slack_scheduled:legacy-suffix",
             agent_name="codex",
+            workdir=str(workdir),
         )
         assert session_id is not None
     finally:
@@ -691,20 +696,64 @@ def test_reserved_session_placeholder_workdir_falls_back_to_scope(tmp_path):
             "agent_session_id": session_id,
             "agent_session_target": {
                 "id": session_id,
-                "session_anchor": "slack_scheduled:/tmp/test",
+                "session_anchor": "slack_scheduled:legacy-suffix",
             },
         },
     )
 
-    target = resolve_agent_run_target(
-        ctx,
-        controller=controller,
-        base_session_id="slack_scheduled:/tmp/test",
-    )
+    monkeypatch.chdir(deleted_cwd)
+    deleted_cwd.rmdir()
+
+    target = resolve_agent_run_target(ctx, controller=controller, base_session_id="slack_scheduled:legacy-suffix")
 
     assert target.agent_session_id == session_id
-    assert target.session_anchor == "slack_scheduled:/tmp/test"
+    assert target.session_anchor == "slack_scheduled:legacy-suffix"
     assert target.workdir == str(workdir)
+
+
+def test_existing_session_missing_workdir_is_rejected(tmp_path, monkeypatch):
+    deleted_cwd = tmp_path / "deleted-cwd"
+    deleted_cwd.mkdir()
+    workdir = tmp_path / "scope"
+    controller = _controller(tmp_path)
+    with controller.sqlite_engine.begin() as conn:
+        scope_id = upsert_scope(
+            conn,
+            platform="slack",
+            scope_type="channel",
+            native_id="C123",
+            now="2026-06-04T05:00:00Z",
+        )
+        _seed_scope_settings(conn, scope_id, workdir=str(workdir))
+        session_id = create_agent_session_row(
+            conn,
+            scope_id=scope_id,
+            session_anchor="slack_171717.123",
+            agent_backend="codex",
+            agent_variant="codex",
+            agent_name="codex",
+            workdir=None,
+            require_workdir=False,
+        )
+        conn.execute(agent_sessions.update().where(agent_sessions.c.id == session_id).values(workdir=None))
+
+    ctx = MessageContext(
+        user_id="U1",
+        channel_id="C123",
+        platform="slack",
+        platform_specific={
+            "agent_session_id": session_id,
+            "agent_session_target": {"id": session_id},
+        },
+    )
+
+    monkeypatch.chdir(deleted_cwd)
+    deleted_cwd.rmdir()
+
+    with pytest.raises(RuntimeError, match="missing workdir"):
+        resolve_agent_run_target(ctx, controller=controller, base_session_id="slack_171717.123")
+
+    assert not workdir.exists()
 
 
 def test_new_im_session_bind_snapshots_scope_workdir(tmp_path):

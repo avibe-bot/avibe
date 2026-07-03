@@ -207,8 +207,7 @@ vibe task remove <task-id>
 Use `vibe task add --help` and `vibe task update --help` for the full command surface, including:
 
 - `--session-id` for Agent Session continuity
-- `--post-to channel` to publish into the parent channel while keeping thread context
-- `--deliver-key` for an explicit delivery target
+- `--create-session`, `--create-session-per-run`, `--same-scope`, and `--scope-id` for Session placement
 - `--cron` and `--at` scheduling
 - `--name`, `--timezone`, and message file support
 
@@ -222,15 +221,16 @@ the Agent Session ID shown in the active Avibe prompt.
 
 ### `vibe agent run`
 
-Run an Agent directly. Use `--async` for a queued background run without storing
-a scheduled task definition.
+Run an Agent directly. Runs are async by default and do not store a scheduled
+task definition. Use `--sync` only when the terminal should wait for completion.
 
 ```bash
-vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
-vibe agent run --async --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
-vibe agent run --async --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
-vibe agent run --async --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
-vibe agent run --async --no-callback --create-session --deliver-key slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
+vibe agent run --no-callback --agent release-reviewer --message 'Review the latest deployment result.'
+vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
+vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
+vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
+vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
+vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
 ```
 
 Use `--fork-session <session-id>` when a new Agent Session should branch from
@@ -238,8 +238,7 @@ an existing Session's native backend context instead of starting blank. The new
 Session keeps the source backend. `--agent`, `--model`, and
 `--reasoning-effort` can override the forked Session only when the Agent backend
 stays the same; a cross-backend fork is rejected. Do not combine
-`--fork-session` with `--session-id`, `--create-session`, `--deliver-key`, or
-`--post-to`.
+`--fork-session` with `--session-id` or `--create-session`.
 
 Async runs need an explicit callback policy unless the command is running inside
 an Avibe-injected Agent environment. Use `--callback-session-id` when the final
@@ -289,9 +288,10 @@ The waiter command is passed positionally after `--` (or as a single shell
 string via `--shell`). Use `vibe watch add --help` for the full surface,
 including `--timeout` (per-cycle timeout in seconds), `--lifetime-timeout`
 (total wall-clock limit), `--forever`, `--retry-exit-code`, `--retry-delay`,
-`--post-to channel`, `--deliver-key`, and `--name`. Watches share
-`--session-id`, `--post-to`, and `--deliver-key` semantics with `vibe task`
-and `vibe agent run`. `vibe watch remove` hides the watch from management
+`--name`, and session creation flags. Watches share `--session-id`,
+`--create-session`, `--create-session-per-run`, `--same-scope`, and `--scope-id`
+semantics with `vibe task`; direct `vibe agent run` uses `--create-session`
+for one-shot session creation. `vibe watch remove` hides the watch from management
 views while preserving existing run history in SQLite. Prefer `vibe watch`
 over ad-hoc `nohup` jobs when the
 user wants a managed background task with a guaranteed follow-up message.

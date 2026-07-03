@@ -110,6 +110,18 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
   const style: React.CSSProperties = win.maximized
     ? { left: 0, top: 0, width: layerWidth, height: layerHeight, zIndex: win.z }
     : { left: win.bounds.x, top: win.bounds.y, width: win.bounds.width, height: win.bounds.height, zIndex: win.z };
+  // Minimize morph: shrink the window and fly it toward the Dock (bottom-left, above the sidebar's
+  // Apps button) so it's visually clear where it went — a CSS approximation of macOS's genie (a
+  // literal liquid warp needs WebGL). Restoring reverses the same transition. Exact landing doesn't
+  // matter; anchoring near the bottom-left is enough to read as "went down to the Dock".
+  if (win.minimized) {
+    const left = win.maximized ? 0 : win.bounds.x;
+    const top = win.maximized ? 0 : win.bounds.y;
+    const targetX = 96;
+    const targetY = Math.max(0, layerHeight - 44);
+    style.transform = `translate(${targetX - left}px, ${targetY - top}px) scale(0.08)`;
+    style.transformOrigin = 'top left';
+  }
 
   const lights: { key: string; color: string; Glyph: LucideIcon; onClick: () => void; label: string }[] = [
     {
@@ -163,20 +175,19 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
         wm.close(win.id);
       }}
       className={clsx(
-        'group/win absolute flex flex-col overflow-hidden border bg-surface-2 outline-none',
-        // Minimize shrinks toward the bottom-left (where the Dock lives) for a macOS-like genie;
-        // otherwise scale from center for the open/close keyframe.
-        win.minimized ? 'origin-bottom-left' : 'origin-center',
-        // Geometry animates (maximize/restore) except during a drag/resize, which must track the
-        // pointer instantly.
+        // origin-center drives the open/close keyframe; the minimize morph overrides transform-origin
+        // to top-left inline (so its translate+scale math lands the window at the Dock).
+        'group/win absolute flex flex-col overflow-hidden border bg-surface-2 outline-none origin-center',
+        // Geometry + the minimize/restore morph animate, except during a drag/resize (which must track
+        // the pointer instantly). 300ms so the fly-to-Dock reads clearly.
         dragging
           ? 'transition-[transform,opacity] duration-200 ease-out'
-          : 'transition-[left,top,width,height,transform,opacity] duration-200 ease-out',
+          : 'transition-[left,top,width,height,transform,opacity] duration-300 ease-out',
         win.maximized ? 'rounded-none' : 'rounded-xl',
         exitKind === 'close' ? 'animate-appwindow-out' : 'animate-appwindow-in',
         // Minimize = mounted hide: the body stays alive (terminal/editor state preserved) while the
-        // window scales away toward the Dock and stops taking pointer events.
-        win.minimized ? 'pointer-events-none scale-[0.18] opacity-0' : 'pointer-events-auto',
+        // window shrinks toward the Dock (inline transform above) and stops taking pointer events.
+        win.minimized ? 'pointer-events-none opacity-0' : 'pointer-events-auto',
         focused
           ? 'border-border-strong shadow-[0_28px_60px_-12px_rgba(0,0,0,0.7)]'
           : 'border-border shadow-[0_16px_40px_-16px_rgba(0,0,0,0.6)]',
@@ -226,7 +237,9 @@ export const AppWindow: React.FC<{ win: WindowInstance; layerWidth: number; laye
           <div
             key={h.dir}
             onPointerDown={(e) => startGesture(e, h.dir)}
-            className={clsx('absolute z-10', h.className)}
+            // z-30 keeps the edge/corner grips ABOVE any app-body content (a full-bleed preview,
+            // image, or overlay), so the window edges stay grabbable no matter what the app renders.
+            className={clsx('absolute z-30', h.className)}
           />
         ))}
     </div>

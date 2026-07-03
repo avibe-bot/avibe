@@ -23,6 +23,7 @@ from core.system_prompt_injection import (
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
 )
+from core.resource_governance import governor_from_controller
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.agents.subagent_router import SubagentDefinition, load_codex_subagent
 from modules.agents.codex.event_handler import CodexEventHandler
@@ -722,6 +723,7 @@ class CodexAgent(BaseAgent):
             )
 
             await transport.start()
+            governor_from_controller(self.controller).apply_to_pid(getattr(transport, "pid", None), label="codex app-server")
             self._transports[cwd] = transport
             self._cwd_inodes()[cwd] = self._cwd_inode(cwd)
             self._touch_transport_activity(cwd)
