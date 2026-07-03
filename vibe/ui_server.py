@@ -343,7 +343,7 @@ def _is_show_api_mutation() -> bool:
 
 
 def _ensure_csrf_cookie(response: Response) -> Response:
-    if _is_current_show_runtime_immutable_asset_request():
+    if _is_current_immutable_static_asset_request():
         return response
     if response.headers.getlist("Set-Cookie"):
         for cookie_header in response.headers.getlist("Set-Cookie"):
@@ -1873,7 +1873,7 @@ def renew_remote_access_cookie(response: Response) -> Response:
     # Logout handler explicitly clears the session cookie; never re-issue it.
     if getattr(g, "remote_session_logout", False):
         return response
-    if _is_current_show_runtime_immutable_asset_request():
+    if _is_current_immutable_static_asset_request():
         return response
     renew = getattr(g, "remote_session_renew", None)
     if not renew:
@@ -7379,7 +7379,7 @@ async def show_runtime_vendor_asset(vendor_path: str):
         _remove_response_header(response_headers, "cache-control")
         _remove_response_header(response_headers, "set-cookie")
         response_headers["Cache-Control"] = _SHOW_RUNTIME_IMMUTABLE_CACHE_CONTROL
-    content = _compress_show_runtime_response(proxied.content, response_headers, request._request)
+    content = _compress_response_content(proxied.content, response_headers, request._request)
     return FastAPIResponse(content=content, status_code=proxied.status_code, headers=response_headers)
 
 
@@ -7554,7 +7554,7 @@ async def _show_page_runtime_response(
         # and base path); never let it be cached. App modules and per-session deps keep
         # the runtime's own cache headers (Vite marks optimized deps immutable).
         _mark_show_runtime_document_no_store(response_headers)
-    content = _compress_show_runtime_response(content, response_headers, starlette_request)
+    content = _compress_response_content(content, response_headers, starlette_request)
     return FastAPIResponse(content=content, status_code=proxied.status_code, headers=response_headers)
 
 
@@ -7577,24 +7577,49 @@ def _mark_show_runtime_document_no_store(headers: dict[str, str]) -> None:
     headers["Cache-Control"] = "no-store"
 
 
-def _compress_show_runtime_response(content: bytes, headers: dict[str, str], starlette_request: FastAPIRequest) -> bytes:
+def _compress_response_content(content: bytes, headers: dict[str, str], starlette_request: FastAPIRequest) -> bytes:
     if len(content) < _SHOW_RUNTIME_COMPRESSIBLE_MIN_BYTES:
         return content
     if _response_header(headers, "content-encoding"):
         return content
-    if "gzip" not in (starlette_request.headers.get("accept-encoding") or "").lower():
-        return content
     content_type = _response_header(headers, "content-type") or ""
     if not _show_response_is_compressible(content_type):
+        return content
+    _set_response_header(headers, "Vary", _append_vary_header(_response_header(headers, "vary"), "Accept-Encoding"))
+    if not _accept_encoding_allows_gzip(starlette_request.headers.get("accept-encoding")):
         return content
     compressed = gzip.compress(content, compresslevel=6)
     if len(compressed) >= len(content):
         return content
     _remove_response_header(headers, "content-length")
     _remove_response_header(headers, "etag")
-    headers["Content-Encoding"] = "gzip"
-    headers["Vary"] = _append_vary_header(_response_header(headers, "vary"), "Accept-Encoding")
+    _set_response_header(headers, "Content-Encoding", "gzip")
     return compressed
+
+
+def _accept_encoding_allows_gzip(accept_encoding: str | None) -> bool:
+    if not accept_encoding:
+        return False
+    for item in accept_encoding.split(","):
+        parts = [part.strip() for part in item.split(";") if part.strip()]
+        if not parts or parts[0].lower() != "gzip":
+            continue
+        q = 1.0
+        for param in parts[1:]:
+            name, separator, value = param.partition("=")
+            if separator and name.strip().lower() == "q":
+                try:
+                    q = float(value.strip())
+                except ValueError:
+                    q = 0.0
+                break
+        return q > 0
+    return False
+
+
+def _set_response_header(headers: dict[str, str], name: str, value: str) -> None:
+    _remove_response_header(headers, name)
+    headers[name] = value
 
 
 def _append_vary_header(existing: str | None, value: str) -> str:
@@ -7730,11 +7755,15 @@ def _is_current_show_runtime_immutable_asset_request() -> bool:
     return _is_show_runtime_immutable_asset_path(parts[2])
 
 
+def _is_current_immutable_static_asset_request() -> bool:
+    return (request.path or "").startswith("/assets/") or _is_current_show_runtime_immutable_asset_request()
+
+
 def _remove_response_header(headers: dict[str, str], name: str) -> None:
     normalized = name.lower()
     for key in list(headers):
         if key.lower() == normalized:
-            headers.pop(key, None)
+            del headers[key]
 
 
 def _response_header(headers: dict[str, str], name: str) -> str | None:
@@ -7980,6 +8009,22 @@ async def serve_public_show_page(share_id, asset_path):
         store.close()
 
 
+def _ui_static_file_response(resolved_path: Path, *, content_type: str, cache_control: str) -> Response:
+    response = send_file(resolved_path, mimetype=content_type)
+    response.headers["Cache-Control"] = cache_control
+    if hasattr(response, "set_stat_headers"):
+        response.set_stat_headers(resolved_path.stat())
+    if request.method != "GET" or request.headers.get("range"):
+        return response
+    headers = response.headers
+    content = resolved_path.read_bytes()
+    compressed = _compress_response_content(content, headers, request._request)
+    if compressed is content:
+        return response
+    _remove_response_header(headers, "accept-ranges")
+    return Response(content=compressed, headers=headers)
+
+
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def serve_static(path):
@@ -8001,22 +8046,27 @@ def serve_static(path):
 
     if resolved_path.exists() and resolved_path.is_file():
         mime_type, _ = mimetypes.guess_type(str(resolved_path))
-        response = send_file(resolved_path, mimetype=mime_type or "application/octet-stream")
         if path.startswith("assets/"):
-            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            cache_control = "public, max-age=31536000, immutable"
         elif resolved_path.name == "index.html":
-            response.headers["Cache-Control"] = "no-store, private"
+            cache_control = "no-store, private"
         else:
-            response.headers["Cache-Control"] = "public, max-age=3600"
-        return response
+            cache_control = "public, max-age=3600"
+        return _ui_static_file_response(
+            resolved_path,
+            content_type=mime_type or "application/octet-stream",
+            cache_control=cache_control,
+        )
 
     # SPA fallback: serve index.html for routes without file extension
     if "." not in path:
         index_path = ui_dist / "index.html"
         if index_path.exists():
-            response = send_file(index_path, mimetype="text/html")
-            response.headers["Cache-Control"] = "no-store, private"
-            return response
+            return _ui_static_file_response(
+                index_path,
+                content_type="text/html",
+                cache_control="no-store, private",
+            )
 
     return jsonify({"error": "not_found"}), 404
 
