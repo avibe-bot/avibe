@@ -857,6 +857,29 @@ def test_repair_home_migration_skips_empty_home_without_initializing(monkeypatch
     assert not (home / ".vibe_remote").exists()
 
 
+def test_repair_home_migration_fails_when_compatibility_symlink_is_missing(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    avibe_home = home / ".avibe"
+    legacy_home = home / ".vibe_remote"
+    legacy_home.mkdir(parents=True)
+    monkeypatch.delenv("AVIBE_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(cli.paths, "migrate_default_home", lambda: legacy_home.rename(avibe_home) or avibe_home)
+    monkeypatch.setattr(
+        cli.paths,
+        "ensure_data_dirs",
+        lambda: (_ for _ in ()).throw(AssertionError("failed migration must not declare data dirs ready")),
+    )
+
+    result = cli._repair_home_migration()
+
+    assert result["status"] == "failed"
+    assert "compatibility symlink" in result["message"]
+    assert avibe_home.exists()
+    assert not legacy_home.exists()
+
+
 def test_repair_stale_restart_state_removes_marker(monkeypatch):
     paths.ensure_data_dirs()
     restart_path = runtime.get_restart_status_path()

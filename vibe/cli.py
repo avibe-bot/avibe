@@ -7553,10 +7553,16 @@ def _repair_home_migration(*, dry_run: bool = False) -> dict:
         return _doctor_repair_result(target, "skipped", "No runtime home migration is needed.")
 
     migrated_home = paths.migrate_default_home()
-    if _path_points_to(migrated_home, avibe_home):
-        paths.ensure_data_dirs()
-        return _doctor_repair_result(target, "repaired", "Migrated ~/.vibe_remote to ~/.avibe.")
-    return _doctor_repair_result(target, "failed", f"Default home remains at {migrated_home}; migration did not complete.")
+    if not _path_points_to(migrated_home, avibe_home):
+        return _doctor_repair_result(target, "failed", f"Default home remains at {migrated_home}; migration did not complete.")
+    if not _path_points_to(legacy_home, avibe_home):
+        return _doctor_repair_result(
+            target,
+            "failed",
+            "Migrated ~/.vibe_remote to ~/.avibe, but failed to create the compatibility symlink.",
+        )
+    paths.ensure_data_dirs()
+    return _doctor_repair_result(target, "repaired", "Migrated ~/.vibe_remote to ~/.avibe.")
 
 
 def _repair_stale_restart_state(*, dry_run: bool = False) -> dict:
