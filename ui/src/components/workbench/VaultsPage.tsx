@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Check, Clock, Copy, Globe, History, Inbox, KeyRound, Link2, Loader2, Plus, RefreshCw, ShieldCheck, Trash2, Wallet, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Check, Clock, Copy, Globe, History, Inbox, KeyRound, Link2, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
+import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
@@ -7,6 +8,7 @@ import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
 import { cn } from '../../lib/utils';
+import { partitionTags } from '../../lib/vaultTags';
 import { useApi, type VaultAuditEvent, type VaultGrant, type VaultRequest, type VaultRequestSpec, type VaultSecret } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { VaultApprovalCard, type ApprovalOutcome } from '../ui/vault-approval-card';
@@ -57,14 +59,14 @@ const proxyHosts = (s: VaultSecret): string[] => {
   return Array.isArray(hosts) ? hosts : [];
 };
 
-const isAlwaysAsk = (s: VaultSecret): boolean => Boolean((s.policy as { always_ask?: boolean })?.always_ask);
-
 const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => void }> = ({ secret: s, onDelete }) => {
   const { t } = useTranslation();
   const isKeypair = s.kind === 'keypair';
   const isProtected = s.protection === 'protected';
   const [copied, setCopied] = useState(false);
   const publicKey = s.signing_public_key?.public_key;
+  // Skills are stored as reserved `skill:<name>` tags; render them as their own chips.
+  const { tags, skills } = useMemo(() => partitionTags(s.tags), [s.tags]);
   return (
     <div className="flex items-center gap-3.5 rounded-xl border border-border bg-surface px-4 py-3">
       <div
@@ -88,14 +90,19 @@ const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => voi
               {t('vaults.signing')}
             </Badge>
           ) : null}
-          {isAlwaysAsk(s) ? <Badge variant="destructive">{t('vaults.alwaysAsk')}</Badge> : null}
           {proxyHosts(s).length > 0 ? (
             <Badge variant="info">
               {t('vaults.proxyHost', { host: proxyHosts(s)[0] })}
               {proxyHosts(s).length > 1 ? ` +${proxyHosts(s).length - 1}` : ''}
             </Badge>
           ) : null}
-          {s.tags?.map((tag) => (
+          {skills.map((skill) => (
+            <Badge key={`skill:${skill}`} variant="outline" className="gap-1 border-violet/40 bg-violet-soft text-violet">
+              <Puzzle className="size-3" />
+              {skill}
+            </Badge>
+          ))}
+          {tags.map((tag) => (
             <Badge key={tag} variant="outline" className="text-muted">
               {tag}
             </Badge>
@@ -151,25 +158,37 @@ function chipCountdown(rem: { h: number; m: number; s: number }): string {
   return rem.h > 0 ? `${rem.h}:${pad(rem.m)}:${pad(rem.s)}` : `${pad(rem.m)}:${pad(rem.s)}`;
 }
 
-function stringItems(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.length > 0) : [];
-}
+/**
+ * Icon + labels for an active grant. Builds from EVERY populated `source_selector` bucket
+ * (skills, tags, explicit env), so a mixed grant (e.g. same skill but a different `--tag`
+ * or `--env`) stays distinguishable and revoke targets the right access. Returns a compact
+ * `label` (truncated for the chip) and a `full` form (every token) for the tooltip and the
+ * revoke confirmation.
+ */
+function describeGrant(g: VaultGrant, t: TFunction): { Icon: typeof KeyRound; label: string; full: string } {
+  const compact = (tokens: string[]): string =>
+    tokens.length > 2 ? t('vaults.grants.moreLabel', { names: tokens.slice(0, 2).join(', '), extra: tokens.length - 2 }) : tokens.join(', ');
 
-function grantScopeLabel(g: VaultGrant, t: ReturnType<typeof useTranslation>['t']): string {
-  const env = stringItems(g.source_selector?.env);
-  const tags = stringItems(g.source_selector?.tags);
-  const skills = tags.filter((tag) => tag.startsWith('skill:')).map((tag) => tag.slice('skill:'.length));
-  const plainTags = tags.filter((tag) => !tag.startsWith('skill:'));
-  if (env.length === 1 && tags.length === 0) return `${t('vaults.grants.scope.secret')} · ${env[0]}`;
-  if (skills.length === 1 && env.length === 0 && plainTags.length === 0) return `${t('vaults.grants.scope.skill')} · ${skills[0]}`;
-  if (plainTags.length === 1 && env.length === 0 && skills.length === 0) return `${t('vaults.grants.scope.tag')} · ${plainTags[0]}`;
-  return `${t('vaults.grants.scope.selector')} · ${g.member_snapshot.join(', ')}`;
+  const selector = g.source_selector ?? {};
+  const { tags, skills } = partitionTags(selector.tags);
+  const env = selector.env ?? [];
+  const tokens = [...skills, ...tags, ...env];
+  if (tokens.length) {
+    // Icon reflects the primary bucket, but the label spans all of them.
+    const Icon = skills.length ? Puzzle : tags.length ? Tag : KeyRound;
+    return { Icon, label: compact(tokens), full: tokens.join(', ') };
+  }
+  const names = g.member_snapshot ?? [];
+  if (names.length) return { Icon: KeyRound, label: compact(names), full: names.join(', ') };
+  const count = t('vaults.grants.secretCount', { count: g.member_count || 0 });
+  return { Icon: KeyRound, label: count, full: count };
 }
 
 /**
- * Active-grant chip (design.pen `y4rw5Q` ACTIVE GRANTS row): a compact mint pill with the
- * scope icon, `type · ref`, a live countdown, and an inline × to revoke. Replaces the older
- * full-width grant card so the strip reads as a quick "what's live right now" glance.
+ * Active-grant chip (design.pen `y4rw5Q` ACTIVE GRANTS row): a compact mint pill describing
+ * how the protected set was selected (explicit secrets, a tag, or a skill), a live countdown,
+ * and an inline × to revoke. A grant is a fixed protected set keyed by grant_id — the chip
+ * summarizes its `source_selector`, never a group.
  */
 const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: VaultGrant) => void }> = ({
   grant: g,
@@ -178,10 +197,18 @@ const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: Va
 }) => {
   const { t } = useTranslation();
   const rem = remaining(g.expires_at, now);
-  const label = grantScopeLabel(g, t);
+  const { Icon, label, full } = useMemo(() => describeGrant(g, t), [g, t]);
+  // Tooltip carries the full selector plus the covered secret names, so a truncated label
+  // never hides which grant this is.
+  const tip = [full, g.member_snapshot?.length ? g.member_snapshot.join(', ') : '']
+    .filter(Boolean)
+    .join(' · ');
   return (
-    <span className="inline-flex items-center gap-2 rounded-full border border-mint/40 bg-mint-soft py-1 pl-2.5 pr-1.5 text-xs text-mint">
-      <KeyRound className="size-3.5 shrink-0" />
+    <span
+      className="inline-flex items-center gap-2 rounded-full border border-mint/40 bg-mint-soft py-1 pl-2.5 pr-1.5 text-xs text-mint"
+      title={tip || undefined}
+    >
+      <Icon className="size-3.5 shrink-0" />
       <span className="font-medium">{label}</span>
       <span
         className="flex shrink-0"
@@ -359,6 +386,21 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
   );
 };
 
+/** A toggleable tag/skill filter pill. */
+const FilterChip: React.FC<{ active: boolean; onClick: () => void; children: React.ReactNode }> = ({ active, onClick, children }) => (
+  <button
+    type="button"
+    aria-pressed={active}
+    onClick={onClick}
+    className={cn(
+      'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors',
+      active ? 'border-accent bg-accent/10 text-accent' : 'border-border bg-surface text-muted hover:bg-surface-2',
+    )}
+  >
+    {children}
+  </button>
+);
+
 export const VaultsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
@@ -370,6 +412,8 @@ export const VaultsPage: React.FC = () => {
   const [adding, setAdding] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
   const [audit, setAudit] = useState<VaultAuditEvent[]>([]);
+  const [activeTags, setActiveTags] = useState<string[]>([]);
+  const [activeSkills, setActiveSkills] = useState<string[]>([]);
   const [now, setNow] = useState(() => Date.now());
 
   const refresh = useCallback(async () => {
@@ -417,6 +461,32 @@ export const VaultsPage: React.FC = () => {
     return () => clearInterval(id);
   }, [hasGrants]);
 
+  // Every distinct tag and skill across the inventory, for the filter bar.
+  const { allTags, allSkills } = useMemo(() => {
+    const tagSet = new Set<string>();
+    const skillSet = new Set<string>();
+    for (const s of secrets) {
+      const parts = partitionTags(s.tags);
+      parts.tags.forEach((tag) => tagSet.add(tag));
+      parts.skills.forEach((skill) => skillSet.add(skill));
+    }
+    return { allTags: [...tagSet].sort(), allSkills: [...skillSet].sort() };
+  }, [secrets]);
+
+  // A secret is visible when it carries every active tag and skill filter (intersection).
+  const visibleSecrets = useMemo(() => {
+    if (activeTags.length === 0 && activeSkills.length === 0) return secrets;
+    return secrets.filter((s) => {
+      const parts = partitionTags(s.tags);
+      return activeTags.every((tag) => parts.tags.includes(tag)) && activeSkills.every((skill) => parts.skills.includes(skill));
+    });
+  }, [secrets, activeTags, activeSkills]);
+
+  const toggleFilter = (list: string[], setList: (next: string[]) => void, value: string) =>
+    setList(list.includes(value) ? list.filter((v) => v !== value) : [...list, value]);
+
+  const hasActiveFilter = activeTags.length > 0 || activeSkills.length > 0;
+
   const toggleAudit = useCallback(async () => {
     const next = !showAudit;
     setShowAudit(next);
@@ -442,11 +512,13 @@ export const VaultsPage: React.FC = () => {
   };
 
   const onRevokeGrant = async (g: VaultGrant) => {
-    const scope = grantScopeLabel(g, t);
-    if (!window.confirm(t('vaults.grants.revokeConfirm', { scope }))) return;
+    // Name the grant by its FULL selector in the confirm/toast so two grants that share a
+    // bucket (e.g. the same skill but a different tag/env) aren't confused.
+    const { label, full } = describeGrant(g, t);
+    if (!window.confirm(t('vaults.grants.revokeConfirm', { target: full }))) return;
     try {
       await api.revokeVaultGrant(g.id);
-      showToast(t('vaults.grants.revoked', { scope }), 'success');
+      showToast(t('vaults.grants.revoked', { target: label }), 'success');
       refresh();
     } catch (err: any) {
       setError(err?.message ?? String(err));
@@ -494,6 +566,38 @@ export const VaultsPage: React.FC = () => {
           </div>
         </div>
       )}
+      {allTags.length > 0 || allSkills.length > 0 || hasActiveFilter ? (
+        <div className="flex flex-wrap items-center gap-2">
+          {allSkills.map((skill) => (
+            <FilterChip
+              key={`skill:${skill}`}
+              active={activeSkills.includes(skill)}
+              onClick={() => toggleFilter(activeSkills, setActiveSkills, skill)}
+            >
+              <Puzzle className="size-3" />
+              {skill}
+            </FilterChip>
+          ))}
+          {allTags.map((tag) => (
+            <FilterChip key={tag} active={activeTags.includes(tag)} onClick={() => toggleFilter(activeTags, setActiveTags, tag)}>
+              <Tag className="size-3" />
+              {tag}
+            </FilterChip>
+          ))}
+          {hasActiveFilter ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setActiveTags([]);
+                setActiveSkills([]);
+              }}
+            >
+              {t('vaults.filter.clear')}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
       {loading && secrets.length === 0 ? (
         <div className="flex items-center gap-2 px-1 text-sm text-muted">
           <Loader2 className="size-4 animate-spin" />
@@ -501,9 +605,11 @@ export const VaultsPage: React.FC = () => {
         </div>
       ) : secrets.length === 0 ? (
         <div className="rounded-2xl border border-border bg-surface p-8 text-center text-sm text-muted">{t('vaults.empty')}</div>
+      ) : visibleSecrets.length === 0 ? (
+        <div className="rounded-2xl border border-border bg-surface p-8 text-center text-sm text-muted">{t('vaults.filter.empty')}</div>
       ) : (
         <div className="flex flex-col gap-2">
-          {secrets.map((s) => (
+          {visibleSecrets.map((s) => (
             <SecretRow key={s.name} secret={s} onDelete={onDelete} />
           ))}
         </div>

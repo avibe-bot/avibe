@@ -449,6 +449,82 @@ def _runtime_architecture_items() -> list[dict[str, str]]:
     return items
 
 
+def _service_lifecycle_items() -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    pid_path = paths.get_runtime_pid_path()
+    recorded_pid: int | None = None
+    try:
+        recorded_pid = int(pid_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        recorded_pid = None
+
+    owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
+    lock_holder_pid = runtime.service_lock_holder_pid()
+    extra_service_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
+    unverified_service_pids = runtime.extra_service_process_pids(
+        owner_pid=owner_pid,
+        include_unverified=True,
+    )
+    unverified_service_pids = [pid for pid in unverified_service_pids if pid not in set(extra_service_pids)]
+    status = runtime.read_status()
+    status_pid = status.get("service_pid")
+
+    if owner_pid:
+        _add_doctor_item(items, "pass", f"Service lock owner: pid={owner_pid}")
+    elif lock_holder_pid:
+        _add_doctor_item(
+            items,
+            "warn",
+            f"Service lock is held by pid={lock_holder_pid}, but the owner could not be verified",
+            "Run `vibe status` and inspect service logs before starting another service.",
+        )
+    else:
+        _add_doctor_item(items, "pass", "Service lock is free")
+
+    if owner_pid and recorded_pid != owner_pid:
+        _add_doctor_item(
+            items,
+            "warn",
+            f"Service pid file does not match the lock owner: pidfile={recorded_pid or 'missing'} lock_owner={owner_pid}",
+            "Run `vibe restart` once the current work is idle so Avibe can rewrite runtime ownership files.",
+        )
+    elif recorded_pid:
+        _add_doctor_item(items, "pass", f"Service pid file points to pid={recorded_pid}")
+    else:
+        _add_doctor_item(items, "pass", "Service pid file is absent")
+
+    if owner_pid and status_pid != owner_pid:
+        _add_doctor_item(
+            items,
+            "warn",
+            f"Runtime status service_pid does not match the lock owner: status={status_pid or 'missing'} lock_owner={owner_pid}",
+            "Refresh status; if it remains stale, restart Avibe when safe.",
+        )
+    elif status_pid:
+        _add_doctor_item(items, "pass", f"Runtime status service_pid: {status_pid}")
+    else:
+        _add_doctor_item(items, "pass", "Runtime status service_pid is absent")
+
+    if extra_service_pids:
+        _add_doctor_item(
+            items,
+            "warn",
+            f"Extra Avibe service process detected outside the service lock: pids={','.join(map(str, extra_service_pids))}",
+            "Run `vibe stop`; if the process remains, inspect the service log before starting again.",
+        )
+    elif unverified_service_pids:
+        _add_doctor_item(
+            items,
+            "warn",
+            f"Possible extra Avibe service process could not be matched to AVIBE_HOME: pids={','.join(map(str, unverified_service_pids))}",
+            "Inspect the process environment before starting another service.",
+        )
+    else:
+        _add_doctor_item(items, "pass", "No extra Avibe service process detected")
+
+    return items
+
+
 def _remote_examples_text() -> str:
     return dedent(
         """\
@@ -6849,7 +6925,7 @@ def _doctor():
         )
         summary["pass"] += 1
 
-    for item in _runtime_architecture_items():
+    for item in [*_service_lifecycle_items(), *_runtime_architecture_items()]:
         runtime_items.append(item)
         status = item.get("status")
         if status in summary:
@@ -7218,6 +7294,10 @@ def _stop_opencode_server():
 
 
 def _pid_file_points_to_live_process(pid_path: Path) -> bool:
+    if pid_path == paths.get_runtime_pid_path():
+        return runtime.resolve_service_owner_pid(include_starting=True) is not None or bool(
+            runtime.extra_service_process_pids()
+        )
     try:
         raw_pid = pid_path.read_text(encoding="utf-8").strip()
         pid = int(raw_pid)
@@ -7227,7 +7307,7 @@ def _pid_file_points_to_live_process(pid_path: Path) -> bool:
 
 
 def _runtime_process_was_running() -> bool:
-    return runtime.service_pid_file_points_to_running_service() or runtime.ui_pid_file_points_to_running_ui()
+    return runtime.service_process_running() or runtime.ui_pid_file_points_to_running_ui()
 
 
 def cmd_stop():

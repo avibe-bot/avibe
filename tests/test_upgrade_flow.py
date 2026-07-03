@@ -627,13 +627,10 @@ def test_api_runtime_process_was_running_checks_service_and_ui_pid_files(monkeyp
     service_running = False
     ui_running = False
 
-    def fake_service_running(pid_path):
-        return pid_path == service_pid_path and service_running
-
     def fake_ui_running(pid_path):
         return pid_path == ui_pid_path and ui_running
 
-    monkeypatch.setattr(runtime, "service_pid_file_points_to_running_service", fake_service_running)
+    monkeypatch.setattr(runtime, "service_process_running", lambda: service_running)
     monkeypatch.setattr(runtime, "ui_pid_file_points_to_running_ui", fake_ui_running)
 
     assert api._runtime_process_was_running() is False
@@ -642,6 +639,17 @@ def test_api_runtime_process_was_running_checks_service_and_ui_pid_files(monkeyp
     ui_running = False
     service_running = True
     assert api._runtime_process_was_running() is True
+
+
+def test_cli_runtime_process_was_running_uses_service_process_state(monkeypatch):
+    service_running = False
+
+    monkeypatch.setattr(cli.runtime, "service_process_running", lambda: service_running)
+    monkeypatch.setattr(cli.runtime, "ui_pid_file_points_to_running_ui", lambda: False)
+
+    assert cli._runtime_process_was_running() is False
+    service_running = True
+    assert cli._runtime_process_was_running() is True
 
 
 def test_cmd_upgrade_uses_upgrade_plan_env(monkeypatch):
@@ -760,7 +768,7 @@ def test_cmd_upgrade_keeps_runtime_stopped_when_it_was_not_running(monkeypatch):
     monkeypatch.setattr(cli, "get_latest_version", lambda: {"error": None, "has_update": True, "latest": "2.2.0"})
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: "/custom/bin/vibe")
     monkeypatch.setattr(cli, "build_upgrade_plan", lambda **kwargs: plan)
-    monkeypatch.setattr(cli, "_pid_file_points_to_live_process", lambda path: False)
+    monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: False)
 
     def fail_restart(**kwargs):
         raise AssertionError("schedule_restart should not run when Avibe was not running")

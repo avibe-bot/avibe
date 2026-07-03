@@ -18,6 +18,7 @@ export type GlobalPromptFile = {
 
 export type VaultSecret = {
   name: string;
+  /** Flat tag list; skill association is a reserved `skill:<name>` tag (see lib/vaultTags). */
   tags: string[];
   kind: string;
   protection: string;
@@ -61,6 +62,7 @@ export type VaultRequestSpec = {
   kind?: 'static';
   protection?: 'standard' | 'protected';
   description?: string;
+  /** May already include `skill:<name>` tags; `links.skills` is a bare-name convenience mirror. */
   tags?: string[];
   policy?: {
     allowed_hosts?: string[];
@@ -69,11 +71,24 @@ export type VaultRequestSpec = {
   links?: { skills?: string[] };
 };
 
+/**
+ * How a grant's protected set was selected. Env selectors are explicit secret/env
+ * names (`OPENAI_API_KEY`, `DB_URL=PROD_DB_URL`); tag selectors group by tag, with
+ * skill selectors carried as `skill:<name>` tags.
+ */
+export type VaultSourceSelector = { env?: string[]; tags?: string[] };
+
+/**
+ * A grant is a first-class, time-limited authorization for avault to use a fixed set
+ * of protected secrets (design: docs/plans/vaults-grant-delivery-refactor.md §6). It
+ * is keyed by `id` (the grant_id); `member_snapshot` is the frozen protected set and
+ * `source_selector` records how it was chosen. Tag edits never mutate an active grant.
+ */
 export type VaultGrant = {
   id: string;
-  source_selector: { env?: string[]; tags?: string[] };
+  source_selector: VaultSourceSelector;
   session_id: string | null;
-  purpose?: string | null;
+  purpose: string;
   status: string;
   request_id: string | null;
   created_at: string;
@@ -97,7 +112,6 @@ type VaultBlindBox = {
  * Browser-relayed protected access fulfillment. The browser releases each protected
  * DEK as an opaque HPKE blind box addressed to the resident avault agent and submits
  * ONLY `{name, dek_blindbox, approval}` per secret — never a raw DEK or plaintext.
- * Mirrors the backend contract in PR #711 so the two additions dedupe cleanly on merge.
  */
 export type VaultAccessFulfillmentPayload = {
   grant_id?: string;
@@ -106,8 +120,6 @@ export type VaultAccessFulfillmentPayload = {
   this_session_only?: boolean;
   agent_pubkey?: { public_key?: string; fingerprint?: string };
   deks?: Array<{ name: string; dek_blindbox: VaultBlindBox; approval: Record<string, unknown> }>;
-  agent_deks?: Array<{ name: string; dek_blindbox: VaultBlindBox; approval: Record<string, unknown> }>;
-  deks_by_secret?: Record<string, { dek_blindbox: VaultBlindBox; approval: Record<string, unknown> } | VaultBlindBox>;
 };
 
 type VaultSealedEnvelope = {
@@ -129,11 +141,15 @@ export type VaultCreatePayload = {
   sealed?: VaultSealedEnvelope;
   envelope?: VaultSealedEnvelope;
   description?: string;
+  /** Flat tag list; skill association is folded in as `skill:<name>` tags (see lib/vaultTags). */
   tags?: string[];
   kind?: string;
   signer_kind?: string | null;
   policy?: Record<string, unknown>;
   public_meta?: Record<string, unknown>;
+  /** Bare skill names. Sent alongside the folded `skill:<name>` tags so skill scopes work on
+   *  the pre-refactor backend (which populates vault_links from links.skills); `links.skills`
+   *  is also part of the final request spec (design §5). */
   links?: { skills?: string[] };
   provision_request_id?: string;
   /** Set on the first protected secret so the daemon atomically guards single VMK init. */

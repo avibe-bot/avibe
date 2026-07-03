@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.scheduled_tasks import TaskExecutionStore
-from core.watches import ManagedWatchService, ManagedWatchStore, WatchRuntimeStateStore
+from core.watches import ManagedWatchService, ManagedWatchStore, WatchRuntimeStateStore, _CycleResult
 from storage.background import SQLiteBackgroundTaskStore
 
 
@@ -310,6 +310,49 @@ def test_managed_watch_service_once_success_enqueues_hook_and_disables(tmp_path:
     assert saved.last_event_at is not None
 
 
+def test_managed_watch_service_does_not_enqueue_after_service_lease_loss(tmp_path: Path, monkeypatch) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = store.add_watch(
+        name="Wait once",
+        session_key="slack::channel::C123",
+        command=["python3", "-c", "print('waiter output')"],
+        shell_command=None,
+        prefix="The waiter finished.",
+        cwd=None,
+        mode="once",
+        timeout_seconds=5,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=30,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+    service._running = True
+    service._requires_service_lease = True
+    owner_checks = iter([True, False])
+    monkeypatch.setattr(
+        "core.watches.runtime.current_process_owns_service_instance",
+        lambda: next(owner_checks),
+    )
+
+    async def fake_run_cycle(*args, **kwargs):
+        return _CycleResult(exit_code=0, stdout="waiter output", stderr="", timed_out=False)
+
+    monkeypatch.setattr(service, "_run_cycle", fake_run_cycle)
+
+    asyncio.run(service._run_watch(watch.id))
+
+    assert request_store.list_pending() == []
+
+
 def test_managed_watch_service_forever_timeout_disables_and_enqueues_failure(tmp_path: Path) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     request_store = TaskExecutionStore(tmp_path / "task_requests")
@@ -431,6 +474,66 @@ def test_managed_watch_service_stop_terminates_running_waiter(tmp_path: Path) ->
             raise AssertionError("waiter pid was never recorded")
         pgid = os.getpgid(pid) if hasattr(os, "getpgid") else None
         await service.stop()
+        return pid, pgid
+
+    pid, pgid = asyncio.run(_run())
+
+    if pgid is not None:
+        assert pgid != os.getpgrp()
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_managed_watch_service_lease_loss_terminates_running_waiter(tmp_path: Path, monkeypatch) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    watch = store.add_watch(
+        name="Wait forever",
+        session_key="slack::channel::C123",
+        command=["python3", "-c", "import time; time.sleep(30)"],
+        shell_command=None,
+        prefix=None,
+        cwd=None,
+        mode="forever",
+        timeout_seconds=0,
+        lifetime_timeout_seconds=0,
+        retry_exit_codes=[75],
+        retry_delay_seconds=0.01,
+        post_to=None,
+        deliver_key=None,
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=request_store,
+        runtime_store=runtime_store,
+    )
+    service._requires_service_lease = True
+    owner_state = {"owns": True}
+    monkeypatch.setattr("core.watches.runtime.current_process_owns_service_instance", lambda: owner_state["owns"])
+
+    async def _run() -> tuple[int, int | None]:
+        service.start()
+        for _ in range(100):
+            pid = service._active_pids.get(watch.id)
+            if pid:
+                break
+            await asyncio.sleep(0.02)
+        else:
+            raise AssertionError("waiter pid was never recorded")
+        pgid = os.getpgid(pid) if hasattr(os, "getpgid") else None
+        active_tasks = list(service._active_tasks.values())
+        owner_state["owns"] = False
+        assert service._owns_service_instance() is False
+        await asyncio.gather(*active_tasks, return_exceptions=True)
+        if service._reconcile_task:
+            try:
+                await service._reconcile_task
+            except asyncio.CancelledError:
+                pass
+            service._reconcile_task = None
         return pid, pgid
 
     pid, pgid = asyncio.run(_run())
