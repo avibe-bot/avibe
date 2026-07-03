@@ -824,6 +824,28 @@ def test_repair_stale_restart_state_removes_marker(monkeypatch):
     assert refreshed == [True]
 
 
+def test_repair_stale_restart_state_removes_old_marker_without_start_time(monkeypatch):
+    paths.ensure_data_dirs()
+    restart_path = runtime.get_restart_status_path()
+    runtime.write_json(restart_path, {"state": "running", "supervisor_pid": 4242})
+    old_timestamp = time.time() - 120
+    os.utime(restart_path, (old_timestamp, old_timestamp))
+    monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        cli.runtime,
+        "process_create_time",
+        lambda pid: (_ for _ in ()).throw(AssertionError("missing start time should use marker age")),
+    )
+    refreshed = []
+    monkeypatch.setattr(cli, "_write_refreshed_runtime_status", lambda: refreshed.append(True))
+
+    result = cli._repair_stale_restart_state()
+
+    assert result["status"] == "repaired"
+    assert not restart_path.exists()
+    assert refreshed == [True]
+
+
 def test_doctor_repair_dry_run_does_not_probe_runtime(monkeypatch):
     def fail_runtime_probe(*args, **kwargs):
         raise AssertionError("dry-run must not touch runtime probes")

@@ -638,10 +638,9 @@ def _restart_status_is_stale(payload: dict, path: Path) -> bool:
         supervisor_pid = payload.get("supervisor_pid")
         if isinstance(supervisor_pid, int) and runtime.pid_alive(supervisor_pid):
             started_at = payload.get("supervisor_started_at")
-            if started_at is None:
-                return False
-            current_started_at = runtime.process_create_time(supervisor_pid)
-            return current_started_at is not None and current_started_at != started_at
+            if started_at is not None:
+                current_started_at = runtime.process_create_time(supervisor_pid)
+                return current_started_at is not None and current_started_at != started_at
         try:
             age = time.time() - path.stat().st_mtime
         except OSError:
