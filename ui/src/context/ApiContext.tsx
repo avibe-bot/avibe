@@ -100,6 +100,7 @@ type VaultBlindBox = {
  * Mirrors the backend contract in PR #711 so the two additions dedupe cleanly on merge.
  */
 export type VaultAccessFulfillmentPayload = {
+  grant_id?: string;
   session_id?: string | null;
   ttl_seconds?: number;
   this_session_only?: boolean;

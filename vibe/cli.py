@@ -4504,6 +4504,7 @@ def _expire_agent_grant_after_missing(
     *,
     requester: dict | None = None,
     delivery: dict | None = None,
+    purpose: str = "run",
 ) -> dict | None:
     from storage import vault_service
 
@@ -4517,6 +4518,7 @@ def _expire_agent_grant_after_missing(
                     name,
                     requester=requester or {"source": "cli", "pid": os.getpid()},
                     delivery=delivery or {},
+                    purpose=purpose,
                 )
                 if first_request is None and isinstance(resolved.get("request"), dict):
                     first_request = resolved["request"]
@@ -5243,6 +5245,7 @@ def cmd_vault_run(args):
                 sorted(set(mapping.values())),
                 requester=requester,
                 delivery=delivery,
+                purpose="run",
             )
             _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
             return 1
@@ -5796,6 +5799,7 @@ def cmd_vault_fetch(args):
                     [name],
                     requester=requester,
                     delivery=delivery,
+                    purpose="fetch",
                 )
                 _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
                 return 1
@@ -5958,6 +5962,7 @@ def cmd_vault_inject(args):
                 keys,
                 requester=requester,
                 delivery=delivery,
+                purpose="inject",
             )
             _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
             return 1

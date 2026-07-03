@@ -374,6 +374,63 @@ def test_vault_links_are_preserved_as_skill_tags_before_drop(tmp_path: Path) -> 
     assert json.loads(rows["B_KEY"]) == ["skill:deploy"]
 
 
+def test_run_migrations_expires_legacy_pending_access_cards(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260627_0025")
+
+    now = "2026-07-03T00:00:00+00:00"
+    legacy_delivery = json.dumps(
+        {
+            "card": {
+                "card_type": "approval",
+                "scope_options": [{"scope_type": "secret", "scope_ref": "A_KEY"}],
+            }
+        }
+    )
+    current_delivery = json.dumps(
+        {
+            "card": {
+                "card_type": "approval",
+                "grant_options": [
+                    {
+                        "grant_id": "vgr_ready",
+                        "member_snapshot": ["B_KEY"],
+                        "source_selector": {"env": ["B_KEY"]},
+                    }
+                ],
+            }
+        }
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(
+            """
+            insert into vault_requests (
+                id, request_type, secret_name, requester, delivery, status,
+                message_id, created_at, decided_at, expires_at
+            ) values (?, ?, ?, null, ?, 'pending', null, ?, null, null)
+            """,
+            [
+                ("req_legacy", "access", "A_KEY", legacy_delivery, now),
+                ("req_current", "access", "B_KEY", current_delivery, now),
+                ("req_sign", "sign", "SIGNING_KEY", legacy_delivery, now),
+            ],
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = {
+            row[0]: (row[1], row[2])
+            for row in conn.execute("select id, status, decided_at from vault_requests order by id").fetchall()
+        }
+
+    assert rows["req_legacy"][0] == "expired"
+    assert rows["req_legacy"][1] is not None
+    assert rows["req_current"] == ("pending", None)
+    assert rows["req_sign"] == ("pending", None)
+
+
 def test_scope_agent_backfill_migrates_explicit_agent_routes(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path, revision="20260526_0006")

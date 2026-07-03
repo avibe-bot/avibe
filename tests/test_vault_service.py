@@ -118,6 +118,7 @@ def test_access_request_for_tag_selector_freezes_protected_subset_only(vault):
 
     assert card["source_selector"] == {"tags": ["deploy"]}
     assert card["protected_secret_names"] == ["PROTECTED_A"]
+    assert card["grant_options"][0]["grant_id"].startswith("vgr_")
     assert card["grant_options"][0]["member_snapshot"] == ["PROTECTED_A"]
     assert "STANDARD_B" not in json.dumps(card["grant_options"])
 
@@ -155,6 +156,7 @@ def test_create_grant_stores_final_fields_and_readiness_by_grant_id(vault):
         )
 
     assert ready["source_selector"] == {"tags": ["deploy"]}
+    assert ready["id"] == req["card"]["grant_options"][0]["grant_id"]
     assert ready["purpose"] == "inject"
     assert ready["request_id"] == req["id"]
     assert ready["delivery_ready"] is True
@@ -171,6 +173,30 @@ def test_create_grant_caps_ttl_to_approval_options(vault):
     created = datetime.fromisoformat(grant["created_at"])
     expires = datetime.fromisoformat(grant["expires_at"])
     assert expires - created == timedelta(seconds=3600)
+
+
+def test_sibling_approval_requires_matching_purpose(vault):
+    _create(vault, name="A_KEY", protection="protected", tags=["deploy"])
+
+    with vault.begin() as conn:
+        run_req = vs.create_access_request(
+            conn,
+            source_selector={"tags": ["deploy"]},
+            purpose="run",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        fetch_req = vs.create_access_request(
+            conn,
+            source_selector={"tags": ["deploy"]},
+            purpose="fetch",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        _grant_from_request(conn, run_req)
+        fetch_row = conn.execute(select(vault_requests).where(vault_requests.c.id == fetch_req["id"])).mappings().one()
+
+    assert fetch_row["status"] == "pending"
 
 
 def test_secret_delete_rotate_and_classification_changes_expire_covering_grants(vault):

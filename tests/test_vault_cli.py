@@ -1094,6 +1094,7 @@ def test_run_expires_grant_when_agent_cache_is_missing(capfd, monkeypatch):
     assert requests[0]["secret_name"] == "PROTECTED_KEY"
     assert requests[0]["requester"]["session_id"] == "ses_cli"
     assert requests[0]["delivery"]["session_id"] == "ses_cli"
+    assert requests[0]["card"]["grant_options"][0]["purpose"] == "run"
 
 
 def test_run_reopens_only_one_approval_when_group_agent_cache_is_missing(capfd, monkeypatch):
@@ -1139,6 +1140,7 @@ def test_fetch_reopens_session_bound_approval_when_agent_cache_is_missing(capfd,
     assert requests[0]["secret_name"] == "PROTECTED_KEY"
     assert requests[0]["requester"]["session_id"] == "ses_cli"
     assert requests[0]["delivery"]["session_id"] == "ses_cli"
+    assert requests[0]["card"]["grant_options"][0]["purpose"] == "fetch"
 
 
 def test_inject_reopens_session_bound_approval_when_agent_cache_is_missing(tmp_path, capfd, monkeypatch):
@@ -1160,6 +1162,7 @@ def test_inject_reopens_session_bound_approval_when_agent_cache_is_missing(tmp_p
     assert requests[0]["secret_name"] == "PROTECTED_KEY"
     assert requests[0]["requester"]["session_id"] == "ses_cli"
     assert requests[0]["delivery"]["session_id"] == "ses_cli"
+    assert requests[0]["card"]["grant_options"][0]["purpose"] == "inject"
 
 
 def test_run_persists_protected_approval_request_without_grant(capfd):

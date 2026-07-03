@@ -24,6 +24,7 @@ type SourceSelector = {
 
 /** The approval `card` the daemon attaches to a request's delivery payload. */
 type GrantOption = {
+  grant_id: string;
   source_selector: SourceSelector;
   purpose?: string;
   default_ttl_seconds: number;
@@ -167,9 +168,10 @@ export const VaultApprovalCard: React.FC<{
     finish(async () => {
       const option = selectedOption;
       if (!option) throw new Error(t('vaults.approval.errors.noScope'));
+      const grantId = option.grant_id?.trim();
+      if (!grantId) throw new Error(t('vaults.approval.errors.failed'));
       const ttlSeconds = option.default_ttl_seconds;
       const materials = option.unlock_material ?? [];
-      const optionScope = grantOptionScope(option);
       // A protected secret with no hydrated unlock material means the request was read
       // without UI-audience hydration — fail clearly instead of taking the standard path
       // (which the daemon rejects for a protected secret anyway).
@@ -179,6 +181,7 @@ export const VaultApprovalCard: React.FC<{
         failIfNotOk(
           await api.createVaultGrant({
             request_id: request.id,
+            grant_id: grantId,
             ttl_seconds: ttlSeconds,
             this_session_only: thisSessionOnly,
           }),
@@ -194,8 +197,8 @@ export const VaultApprovalCard: React.FC<{
           const approvalNonce = crypto.getRandomValues(new Uint8Array(16));
           const context = await protectedDekReleaseBlindBoxContext(material.name, {
             kind: 'agent-deliver',
-            scopeType: optionScope.type,
-            scopeRef: optionScope.ref,
+            scopeType: 'grant',
+            scopeRef: grantId,
             ttlSecs: ttlSeconds,
             approval: { nonce: approvalNonce, expiresAtUnix },
             operationHash: await blindBoxAgentDeliverOperationHash(material.name, ttlSeconds),
@@ -211,6 +214,7 @@ export const VaultApprovalCard: React.FC<{
         }
         failIfNotOk(
           await api.fulfillVaultAccessRequest(request.id, {
+            grant_id: grantId,
             ttl_seconds: ttlSeconds,
             this_session_only: thisSessionOnly,
             agent_pubkey: agentPubkey,

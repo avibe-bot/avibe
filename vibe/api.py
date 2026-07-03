@@ -1530,6 +1530,21 @@ def get_vault_provision_request(request_id: str) -> dict:
     return {"ok": True, "request": request}
 
 
+def _vault_request_grant_members_and_purpose(request: dict) -> tuple[list[str], str]:
+    card = request.get("card") if isinstance(request.get("card"), dict) else {}
+    purpose = str(card.get("purpose") or "run")
+    options = card.get("grant_options") if isinstance(card, dict) else None
+    if isinstance(options, list) and options and isinstance(options[0], dict):
+        option = options[0]
+        purpose = str(option.get("purpose") or purpose)
+        snapshot = option.get("member_snapshot")
+        if isinstance(snapshot, list):
+            members = [str(name) for name in snapshot if isinstance(name, str) and name]
+            return sorted(set(members)), purpose
+    secret_name = str(request.get("secret_name") or "").strip()
+    return ([secret_name] if secret_name else []), purpose
+
+
 def _vault_request_result(conn, request: dict) -> dict | None:
     from storage import vault_service
 
@@ -1543,13 +1558,20 @@ def _vault_request_result(conn, request: dict) -> dict | None:
             delivery = request.get("delivery") if isinstance(request.get("delivery"), dict) else {}
             session_id = str(requester.get("session_id") or delivery.get("session_id") or "").strip() or None
             secret_name = str(request.get("secret_name") or "").strip()
+            member_names, purpose = _vault_request_grant_members_and_purpose(request)
             if secret_name:
-                card = request.get("card") if isinstance(request.get("card"), dict) else {}
                 grant = vault_service.find_active_grant_for_secret(
                     conn,
                     secret_name,
                     session_id=session_id,
-                    purpose=str(card.get("purpose") or "run"),
+                    purpose=purpose,
+                )
+            elif member_names:
+                grant = vault_service.find_active_grant_for_secrets(
+                    conn,
+                    member_names,
+                    session_id=session_id,
+                    purpose=purpose,
                 )
         if grant is None:
             return None
@@ -1908,6 +1930,9 @@ def _grant_option_from_request(conn, request_id: str) -> dict[str, Any]:
     if not isinstance(options, list) or len(options) != 1 or not isinstance(options[0], dict):
         raise VaultApiError("access request is missing a grant option", code="invalid_request", status=409)
     option = options[0]
+    grant_id = str(option.get("grant_id") or "").strip()
+    if not grant_id:
+        raise VaultApiError("access request is missing a grant id", code="invalid_request", status=409)
     members = option.get("member_snapshot")
     if not isinstance(members, list) or not all(isinstance(name, str) and name for name in members):
         raise VaultApiError("access request has an invalid grant member snapshot", code="invalid_request", status=409)
@@ -1916,6 +1941,7 @@ def _grant_option_from_request(conn, request_id: str) -> dict[str, Any]:
         raise VaultApiError("access request has an invalid source selector", code="invalid_request", status=409)
     purpose = str(option.get("purpose") or "run")
     return {
+        "grant_id": grant_id,
         "member_names": list(members),
         "source_selector": source_selector,
         "purpose": purpose,
@@ -2001,6 +2027,9 @@ def create_vault_grant(payload: dict) -> dict:
             member_names = [str(name) for name in member_names if isinstance(name, str) and name]
             source_selector = payload.get("source_selector") if isinstance(payload.get("source_selector"), dict) else option["source_selector"]
             purpose = str(payload.get("purpose") or option["purpose"])
+            grant_id = str(payload.get("grant_id") or "").strip()
+            if grant_id and grant_id != option["grant_id"]:
+                raise vault_service.InvalidRequestError("grant id does not match the approval request")
             if set(member_names) != set(option["member_names"]):
                 raise vault_service.InvalidRequestError("grant members do not match the approval request")
             if source_selector != option["source_selector"]:

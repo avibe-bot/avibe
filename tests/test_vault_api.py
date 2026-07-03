@@ -758,6 +758,52 @@ def test_agent_access_sibling_request_result_returns_covering_grant(monkeypatch)
     assert fetched["result"]["grant"]["id"] == created["grant"]["id"]
 
 
+def test_agent_access_selector_sibling_request_result_returns_covering_grant(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("api")))
+    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "avault_agent_grant", Mock(return_value={"granted": 2, "ttl_secs": 300}))
+    for name in ("A_KEY", "B_KEY"):
+        api.create_vault_secret(
+            {
+                "name": name,
+                "protection": "protected",
+                "tags": ["deploy"],
+                "sealed": {
+                    "ciphertext": f"ct-{name.lower()}",
+                    "nonce": f"n-{name.lower()}",
+                    "wrap_meta": f"wm-{name.lower()}",
+                },
+            }
+        )
+    req_a = api.request_vault_access({"source_selector": {"tags": ["deploy"]}, "session_id": "ses_1"})
+    req_b = api.request_vault_access({"source_selector": {"tags": ["deploy"]}, "session_id": "ses_1"})
+    created = api.create_vault_grant(
+        {
+            "request_id": req_a["request"]["id"],
+            "session_id": "ses_1",
+            "deks": [
+                {
+                    "name": "A_KEY",
+                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc-a", "ct": "ct-a"},
+                    "approval": {"nonce": "bm9uY2UtYQ==", "expires_at_unix": 4102444800},
+                },
+                {
+                    "name": "B_KEY",
+                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc-b", "ct": "ct-b"},
+                    "approval": {"nonce": "bm9uY2UtYg==", "expires_at_unix": 4102444800},
+                },
+            ],
+        }
+    )
+
+    fetched = api.get_vault_request(req_b["request"]["id"])
+
+    assert req_b["request"]["secret_name"] is None
+    assert fetched["request"]["status"] == "approved"
+    assert fetched["result"]["type"] == "grant"
+    assert fetched["result"]["grant"]["id"] == created["grant"]["id"]
+
+
 def test_get_vault_request_expires_timed_out_pending_request(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("api")))
     api.create_vault_secret(
@@ -1111,10 +1157,12 @@ def test_fulfill_access_request_relays_only_browser_dek_blindbox(monkeypatch, av
         }
     )
     requested = api.request_vault_access({"name": "PROTECTED_KEY", "session_id": "ses_1"})
+    grant_id = requested["request"]["card"]["grant_options"][0]["grant_id"]
 
     fulfilled = api.fulfill_vault_access_request(
         requested["request"]["id"],
         {
+            "grant_id": grant_id,
             "session_id": "ses_1",
             "ttl_seconds": 300,
             "agent_pubkey": {"public_key": "pk", "fingerprint": "fp"},
@@ -1130,6 +1178,8 @@ def test_fulfill_access_request_relays_only_browser_dek_blindbox(monkeypatch, av
 
     assert fulfilled["ok"] is True
     assert fulfilled["result"]["type"] == "grant"
+    assert fulfilled["grant"]["id"] == grant_id
+    assert agent_grant.call_args.kwargs["grant_id"] == grant_id
     assert fulfilled["grant"]["delivery_ready"] is True
     assert agent_grant.call_args.kwargs["deks"] == [
         {

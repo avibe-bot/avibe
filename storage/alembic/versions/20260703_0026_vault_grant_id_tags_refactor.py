@@ -8,6 +8,7 @@ Create Date: 2026-07-03
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import sqlalchemy as sa
 from alembic import op
@@ -109,8 +110,51 @@ def _preserve_skill_links_as_tags() -> None:
         )
 
 
+def _pending_access_card_is_legacy(delivery_raw: str | None) -> bool:
+    try:
+        delivery = json.loads(delivery_raw) if delivery_raw else {}
+    except json.JSONDecodeError:
+        return True
+    if not isinstance(delivery, dict):
+        return True
+    card = delivery.get("card")
+    if not isinstance(card, dict):
+        return True
+    if "scope_options" in card:
+        return True
+    options = card.get("grant_options")
+    if not isinstance(options, list) or len(options) != 1 or not isinstance(options[0], dict):
+        return True
+    return not bool(str(options[0].get("grant_id") or "").strip())
+
+
+def _retire_legacy_pending_access_requests() -> None:
+    if not _table_exists("vault_requests"):
+        return
+    bind = op.get_bind()
+    now = datetime.now(timezone.utc).isoformat()
+    legacy_ids = [
+        str(row["id"])
+        for row in bind.exec_driver_sql(
+            """
+            select id, delivery
+            from vault_requests
+            where request_type = 'access' and status = 'pending'
+            """
+        ).mappings()
+        if _pending_access_card_is_legacy(row.get("delivery"))
+    ]
+    for request_id in legacy_ids:
+        bind.exec_driver_sql(
+            "update vault_requests set status = 'expired', decided_at = ? where id = ? and status = 'pending'",
+            (now, request_id),
+        )
+
+
 def upgrade() -> None:
     bind = op.get_bind()
+
+    _retire_legacy_pending_access_requests()
 
     if _table_exists("vault_links"):
         _preserve_skill_links_as_tags()

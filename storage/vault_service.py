@@ -73,6 +73,7 @@ PROVISION_SPEC_ALLOWED_AUTH_KEYS = {"type", "name"}
 
 @dataclass(frozen=True)
 class GrantApproval:
+    grant_id: str
     members: list[str]
     session_id: str | None
     source_selector: dict[str, Any]
@@ -83,6 +84,7 @@ class GrantApproval:
 
 @dataclass(frozen=True)
 class RequestGrantOption:
+    grant_id: str
     members: list[str]
     source_selector: dict[str, Any]
     purpose: str
@@ -888,6 +890,9 @@ def _request_grant_option(row: dict[str, Any]) -> RequestGrantOption:
     if not isinstance(options, list) or len(options) != 1 or not isinstance(options[0], dict):
         raise InvalidRequestError("grant approval request is missing a grant option")
     option = options[0]
+    grant_id = str(option.get("grant_id") or "").strip()
+    if not grant_id:
+        raise InvalidRequestError("grant approval request is missing a grant id")
     snapshot = option.get("member_snapshot")
     if not isinstance(snapshot, list):
         raise InvalidRequestError("grant approval request has an invalid member snapshot")
@@ -897,6 +902,7 @@ def _request_grant_option(row: dict[str, Any]) -> RequestGrantOption:
     if purpose not in GRANT_PURPOSES:
         raise InvalidRequestError("grant approval request has an invalid purpose")
     return RequestGrantOption(
+        grant_id=grant_id,
         members=members,
         source_selector=selector,
         purpose=purpose,
@@ -1606,6 +1612,7 @@ def _grant_option(
     members = [str(row["name"]) for row in rows]
     default_ttl_seconds = _selector_ttl_seconds(source_selector)
     option = {
+        "grant_id": _id("vgr"),
         "source_selector": source_selector,
         "purpose": purpose,
         "default_ttl_seconds": default_ttl_seconds,
@@ -2272,6 +2279,7 @@ def _validate_access_request_for_grant(
         if not _member_version_matches(current, versions_by_name[member_name]):
             raise InvalidRequestError("grant approval snapshot has stale members")
     return GrantApproval(
+        grant_id=option.grant_id,
         members=option.members,
         session_id=effective_session_id,
         source_selector=option.source_selector,
@@ -2287,6 +2295,7 @@ def _approve_sibling_access_requests_for_grant(
     request_id: str,
     members: list[str],
     session_id: str | None,
+    purpose: str,
     decided_at: str,
 ) -> int:
     if not members:
@@ -2298,6 +2307,14 @@ def _approve_sibling_access_requests_for_grant(
     if not target_session_id:
         return 0
     member_set = {str(name) for name in members if str(name)}
+
+    def _same_purpose_subset(row: dict[str, Any]) -> bool:
+        try:
+            option = _request_grant_option(row)
+        except InvalidRequestError:
+            return False
+        return option.purpose == purpose and _request_members_are_subset(row, member_set)
+
     rows = [
         dict(row)
         for row in conn.execute(
@@ -2307,7 +2324,7 @@ def _approve_sibling_access_requests_for_grant(
                 vault_requests.c.status == "pending",
             )
         ).mappings()
-        if _request_session_id(dict(row)) == target_session_id and _request_members_are_subset(dict(row), member_set)
+        if _request_session_id(dict(row)) == target_session_id and _same_purpose_subset(dict(row))
     ]
     approved = 0
     now_dt = datetime.now(timezone.utc)
@@ -2448,7 +2465,7 @@ def create_grant(
     ttl = max(1, min(ttl, approval.ttl_cap_seconds))
     now_dt = datetime.now(timezone.utc)
     expires_at = (now_dt + timedelta(seconds=ttl)).isoformat()
-    grant_id = _id("vgr")
+    grant_id = approval.grant_id
     try:
         conn.execute(
             vault_grants.insert().values(
@@ -2488,6 +2505,7 @@ def create_grant(
             request_id=request_id,
             members=members,
             session_id=session_id,
+            purpose=purpose,
             decided_at=decided_at,
         )
     if resident_cache_ready:
