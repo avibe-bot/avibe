@@ -26,6 +26,7 @@ from storage.db import create_sqlite_engine
 from storage.background import SQLiteBackgroundTaskStore
 from storage.models import agent_sessions, scope_settings, scopes
 from storage.pagination import PageRequest, PageResult, page_sequence
+from vibe import runtime
 
 logger = logging.getLogger(__name__)
 
@@ -1373,6 +1374,7 @@ class ScheduledTaskService:
         self._inflight_sessions: set[str] = set()
         # Cache of session_id -> canonical lock key (resolution hits SQLite).
         self._session_lock_cache: Dict[str, str] = {}
+        self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
         self.request_store.recover_processing()
 
     def validate_platform(self, platform: str) -> None:
@@ -1419,8 +1421,36 @@ class ScheduledTaskService:
         )
         self._spawn_watch_store()
 
-    async def stop(self) -> None:
+    def _current_asyncio_task(self) -> Optional["asyncio.Task[Any]"]:
+        try:
+            return asyncio.current_task()
+        except RuntimeError:
+            return None
+
+    def _begin_stop(self, *, cancel_reconcile: bool = True) -> None:
         self._running = False
+        current_task = self._current_asyncio_task()
+        if cancel_reconcile and self._reconcile_task and self._reconcile_task is not current_task:
+            self._reconcile_task.cancel()
+        for task in list(self._inflight_executions.values()):
+            if task is not current_task:
+                task.cancel()
+        try:
+            self.scheduler.shutdown(wait=False)
+        except Exception:
+            logger.debug("Failed to shut down scheduler", exc_info=True)
+
+    def _owns_service_instance(self) -> bool:
+        if not self._requires_service_lease:
+            return True
+        if runtime.current_process_owns_service_instance():
+            return True
+        logger.error("Scheduled task service stopping because this process no longer owns the service lock")
+        self._begin_stop()
+        return False
+
+    async def stop(self) -> None:
+        self._begin_stop()
         if self._reconcile_task:
             self._reconcile_task.cancel()
             try:
@@ -1434,18 +1464,17 @@ class ScheduledTaskService:
         # init backstops anything left ``running`` after a hard crash).
         inflight = list(self._inflight_executions.values())
         for task in inflight:
-            task.cancel()
-        for task in inflight:
             try:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
         self._inflight_executions.clear()
         self._inflight_sessions.clear()
-        self.scheduler.shutdown(wait=False)
 
     async def _watch_store(self) -> None:
         while self._running:
+            if not self._owns_service_instance():
+                return
             try:
                 if self.store.maybe_reload():
                     self.reconcile_jobs()
@@ -1462,6 +1491,8 @@ class ScheduledTaskService:
                     raise
 
     def reconcile_jobs(self) -> None:
+        if not self._owns_service_instance():
+            return
         desired_ids = set()
         for task in self.store.list_tasks():
             if not task.enabled:
@@ -1516,6 +1547,8 @@ class ScheduledTaskService:
         raise ValueError(f"unknown schedule type: {task.schedule_type}")
 
     async def _run_task(self, task_id: str) -> None:
+        if not self._owns_service_instance():
+            return
         self.store.maybe_reload()
         task = self.store.get_task(task_id)
         if not task or not task.enabled:
@@ -1527,6 +1560,8 @@ class ScheduledTaskService:
         await self._execute_claimed_request(request)
 
     async def _drain_requests(self) -> None:
+        if not self._owns_service_instance():
+            return
         # Claim eligible pending requests and dispatch each as its own task,
         # then return immediately. The previous implementation awaited every
         # execution inline in this loop, so one turn that hung (e.g. an agent
@@ -1552,6 +1587,8 @@ class ScheduledTaskService:
             self._spawn_execution(request, lock_key)
 
     async def _drain_callbacks(self) -> None:
+        if not self._owns_service_instance():
+            return
         for run in self.request_store.list_pending_callbacks():
             run_id = str(run.get("id") or "")
             if not run_id:

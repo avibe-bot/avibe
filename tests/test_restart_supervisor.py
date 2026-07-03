@@ -150,6 +150,26 @@ def test_restart_job_stops_and_starts_service(monkeypatch, tmp_path):
     assert "restart_total_seconds" in status["stage_durations"]
 
 
+def test_restart_job_uses_lock_holder_when_pidfile_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    calls = []
+
+    monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda: 111)
+    monkeypatch.setattr(restart_supervisor, "_stop_runtime_for_restart", lambda stop_ui=True: _fake_stop_runtime(calls))
+    monkeypatch.setattr(restart_supervisor, "_start_runtime_processes", lambda start_ui=True: _fake_start_runtime(calls))
+    monkeypatch.setattr(restart_supervisor, "_wait_for_service_lock_release", lambda: True)
+    monkeypatch.setattr(runtime, "pid_alive", lambda pid: pid == 222)
+    monkeypatch.setattr(runtime, "service_pid_recorded", lambda pid: pid == 222)
+
+    rc = restart_supervisor._run_restart_job(job_id="joblockowner", delay_seconds=0, vibe_path="/bin/vibe", trigger="test")
+
+    assert rc == 0
+    status = runtime.read_json(runtime.get_restart_status_path())
+    assert status["old_pid"] == 111
+    assert status["new_pid"] == 222
+
+
 def test_restart_job_prepares_show_runtime_after_service_start(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()

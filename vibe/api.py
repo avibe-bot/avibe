@@ -3493,7 +3493,7 @@ def _pid_file_points_to_live_process(pid_path: Path) -> bool:
     from vibe import runtime
 
     if pid_path == paths.get_runtime_pid_path():
-        return runtime.service_pid_file_points_to_running_service(pid_path)
+        return runtime.service_process_running()
     if pid_path == paths.get_runtime_ui_pid_path():
         return runtime.ui_pid_file_points_to_running_ui(pid_path)
     return False

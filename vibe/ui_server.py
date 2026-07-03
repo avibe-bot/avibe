@@ -258,10 +258,11 @@ def _runtime_pid_file_points_to_live_process(pid_path: Path) -> bool:
 def _stop_runtime_process_or_error(pid_path: Path, label: str) -> tuple[bool, str | None]:
     from vibe import runtime
 
-    was_running = _runtime_pid_file_points_to_live_process(pid_path)
     if pid_path == paths.get_runtime_pid_path():
+        was_running = runtime.resolve_service_owner_pid() is not None or bool(runtime.extra_service_process_pids())
         stopped = runtime.stop_service()
     else:
+        was_running = _runtime_pid_file_points_to_live_process(pid_path)
         stopped = runtime.stop_process(pid_path)
     if was_running and stopped is False:
         return False, f"{label} did not stop"
@@ -2003,23 +2004,10 @@ def health():
 def status():
     from vibe import runtime
 
-    payload = runtime.read_status()
-    pid_path = paths.get_runtime_pid_path()
-    pid = pid_path.read_text(encoding="utf-8").strip() if pid_path.exists() else None
-    try:
-        running = bool(pid and pid.isdigit() and runtime.service_pid_recorded(int(pid)))
-    except Exception as exc:
-        logger.warning("Failed to inspect service pid %s: %s", pid, exc)
-        running = False
-    payload["running"] = running
-    payload["pid"] = int(pid) if pid and pid.isdigit() else None
-    if running:
-        payload["service_pid"] = payload.get("service_pid") or payload["pid"]
-    elif payload.get("state") == "running":
+    payload = json.loads(runtime.render_status())
+    if not payload.get("running") and runtime.read_status().get("state") == "running":
         runtime.write_status("stopped", "process not running", None, payload.get("ui_pid"))
-        payload = runtime.read_status()
-        payload["running"] = False
-        payload["pid"] = None
+        payload = json.loads(runtime.render_status())
     return jsonify(payload)
 
 

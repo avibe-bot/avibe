@@ -99,8 +99,10 @@ def _read_recorded_pid() -> int | None:
     try:
         pid = int(pid_path.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
-        return None
-    return pid if pid > 0 else None
+        pid = None
+    if pid and pid > 0:
+        return pid
+    return runtime.resolve_service_owner_pid()
 
 
 def _read_recorded_ui_pid() -> int | None:

@@ -433,6 +433,21 @@ def test_cmd_stop_fails_when_live_service_survives(monkeypatch, capsys):
     assert "Avibe service did not stop" in capsys.readouterr().err
 
 
+def test_cmd_stop_fails_when_lock_owner_survives_without_pidfile(monkeypatch, capsys):
+    status = []
+
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
+    monkeypatch.setattr(cli.runtime, "ui_pid_file_points_to_running_ui", lambda: False)
+    monkeypatch.setattr(runtime, "stop_service", lambda: False)
+    monkeypatch.setattr(runtime, "stop_ui", lambda: False)
+    monkeypatch.setattr(cli, "_stop_opencode_server", lambda: False)
+    monkeypatch.setattr(cli, "_write_status", lambda state, detail=None: status.append((state, detail)))
+
+    assert cli.cmd_stop() == 2
+    assert status == [("error", "service stop failed")]
+    assert "Avibe service did not stop" in capsys.readouterr().err
+
+
 def test_cmd_vibe_uses_start_compatibility_default(monkeypatch):
     calls = []
 
@@ -612,6 +627,39 @@ def test_cmd_start_fails_only_when_slow_service_exits(monkeypatch):
         cli.cmd_start()
 
     assert ("error", "service process exited before startup completed", 1234, 5678) in statuses
+
+
+def test_service_lifecycle_doctor_warns_when_pidfile_missing_but_lock_owner_exists(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    cli.paths.ensure_data_dirs()
+    cli.runtime.write_status("running", "pid missing", None, None)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
+    monkeypatch.setattr(cli.runtime, "service_lock_holder_pid", lambda: 1234)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None, include_unverified=False: [])
+
+    items = cli._service_lifecycle_items()
+
+    messages = [item["message"] for item in items if item["status"] == "warn"]
+    assert any("pid file does not match" in message for message in messages)
+    assert any("Runtime status service_pid does not match" in message for message in messages)
+
+
+def test_service_lifecycle_doctor_warns_when_extra_service_process_exists(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    cli.paths.ensure_data_dirs()
+    cli.runtime.write_status("running", "healthy", 1234, None)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
+    monkeypatch.setattr(cli.runtime, "service_lock_holder_pid", lambda: 1234)
+    monkeypatch.setattr(
+        cli.runtime,
+        "extra_service_process_pids",
+        lambda owner_pid=None, include_unverified=False: [2222] if not include_unverified else [2222],
+    )
+
+    items = cli._service_lifecycle_items()
+
+    messages = [item["message"] for item in items if item["status"] == "warn"]
+    assert any("Extra Avibe service process detected" in message and "2222" in message for message in messages)
 
 
 def test_restart_parser_accepts_delay_seconds():
