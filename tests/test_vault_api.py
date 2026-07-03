@@ -66,6 +66,7 @@ def _assert_no_unlock_material(payload: object) -> None:
 @pytest.fixture
 def avault_p2(monkeypatch):
     monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
 
 
 def test_create_list_delete_roundtrip(monkeypatch):
@@ -531,6 +532,24 @@ def test_agent_pubkey_reports_upgrade_required_when_managed_pin_lacks_p2(monkeyp
     assert exc.value.status == 409
     assert api.AVAULT_VERSION in str(exc.value)
     assert api.AVAULT_P2_MIN_VERSION in str(exc.value)
+
+
+def test_grant_delivery_rejects_avault_before_grant_id_protocol(monkeypatch):
+    installed_pre_grant_id = api.AVAULT_P2_MIN_VERSION
+    assert not api._version_at_least(installed_pre_grant_id, api.AVAULT_GRANT_DELIVERY_MIN_VERSION)
+    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": installed_pre_grant_id})
+
+    with pytest.raises(api.AvaultPreHandoffError) as exc:
+        api.avault_agent_deliver_run(
+            grant_id="vgr_test",
+            secrets=[{"name": "GRANT_KEY", "env": "GRANT_KEY", "envelope": _sealed()}],
+            command=["python3", "-c", "pass"],
+        )
+
+    message = str(exc.value)
+    assert "resident agent deliver run requires avault >=" in message
+    assert api.AVAULT_GRANT_DELIVERY_MIN_VERSION in message
+    assert api.AVAULT_VERSION in message
 
 
 def test_pubkey_wrapper_parses_avault(monkeypatch):
@@ -1082,6 +1101,47 @@ def test_create_and_revoke_grant_api(monkeypatch, avault_p2):
     revoked = api.revoke_vault_grant(created["grant"]["id"])
     assert revoked["grant"]["status"] == "revoked"
     agent_release.assert_called_once_with(grant_id=created["grant"]["id"])
+
+
+def test_create_grant_api_rejects_pre_grant_id_protocol_before_db_grant(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": api.AVAULT_P2_MIN_VERSION})
+    api.create_vault_secret(
+        {"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}}
+    )
+    with api._vault_engine().begin() as conn:
+        req = vault_service.create_access_request(
+            conn,
+            "GRANT_KEY",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_grant(
+            {
+                "grant_id": _request_grant_id(req),
+                "scope_type": "secret",
+                "scope_ref": "GRANT_KEY",
+                "session_id": "ses_1",
+                "ttl_seconds": 300,
+                "request_id": req["id"],
+                "deks": [
+                    {
+                        "name": "GRANT_KEY",
+                        "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                        "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                    }
+                ],
+            }
+        )
+
+    assert exc.value.code == "avault_upgrade_required"
+    assert api.AVAULT_GRANT_DELIVERY_MIN_VERSION in str(exc.value)
+    with api._vault_engine().connect() as conn:
+        assert list(conn.execute(select(vault_service.vault_grants)).mappings()) == []
 
 
 def test_fulfill_access_request_relays_only_browser_dek_blindbox(monkeypatch, avault_p2):
@@ -1700,7 +1760,7 @@ def test_release_agent_scope_ignores_absent_agent(monkeypatch):
 
 def test_agent_grant_rejects_pubkey_mismatch(monkeypatch):
     agent_client = Mock()
-    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
     monkeypatch.setattr(api, "_avault_agent_client", lambda: agent_client)
     monkeypatch.setattr(api, "avault_agent_pubkey", lambda: {"public_key": "current-pk", "fingerprint": "current-fp"})
 
@@ -1733,7 +1793,7 @@ def test_agent_deliver_run_reuses_resident_agent_socket(monkeypatch):
             seen_timeout.append(timeout)
             return FakeClient()
 
-    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
     monkeypatch.setattr(api, "_avault_agent_manager", lambda: FakeManager())
 
     result = api.avault_agent_deliver_run(
@@ -1753,7 +1813,7 @@ def test_agent_deliver_run_treats_connect_failure_as_pre_handoff(monkeypatch):
         def client(self, *, timeout=None):
             raise AvaultAgentError("failed to connect to avault agent: [Errno 2] No such file or directory")
 
-    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
     monkeypatch.setattr(api, "_avault_agent_manager", lambda: FakeManager())
 
     with pytest.raises(api.AvaultPreHandoffError):
@@ -1776,7 +1836,7 @@ def test_agent_deliver_fetch_uses_finite_timeout(monkeypatch):
             seen_timeout.append(timeout)
             return FakeClient()
 
-    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
     monkeypatch.setattr(api, "_avault_agent_manager", lambda: FakeManager())
 
     result = api.avault_agent_deliver_fetch(

@@ -1990,7 +1990,7 @@ def create_vault_grant(payload: dict) -> dict:
     expected_pubkey = payload.get("agent_pubkey") if isinstance(payload.get("agent_pubkey"), dict) else None
     if needs_agent_deks:
         try:
-            _require_avault_p2_surface("resident agent grant")
+            _require_avault_grant_delivery_surface("resident agent grant")
             validate_avault_agent_pubkey(expected_pubkey)
         except AvaultError as exc:
             raise _vault_api_error_from_avault(exc, prefix="avault agent grant failed") from exc
@@ -4580,6 +4580,11 @@ _AVAULT_INSTALL_LOCK = threading.Lock()
 _AVAULT_AGENT_MANAGER_LOCK = threading.Lock()
 _AVAULT_AGENT_MANAGER = None
 AVAULT_P2_MIN_VERSION = "0.1.3"
+# The released 0.1.3 resident-agent protocol still used scope_type/scope_ref
+# delivery frames. The grant_id delivery protocol is intentionally gated on the
+# next avault release so upgraded Avibe installs fail closed instead of sending
+# new frames to an incompatible resident agent.
+AVAULT_GRANT_DELIVERY_MIN_VERSION = "0.1.4"
 # Installer pin must reference a published manifest-pinned release. It may lag
 # the P2 surface; standard sealing remains usable while P2-only entry points
 # gate on AVAULT_P2_MIN_VERSION below.
@@ -4593,6 +4598,10 @@ def _truncate_install_output(output: str, limit: int = 8192) -> str:
 
 def _managed_avault_release_satisfies_p2() -> bool:
     return _version_at_least(AVAULT_VERSION, AVAULT_P2_MIN_VERSION)
+
+
+def _managed_avault_release_satisfies_grant_delivery() -> bool:
+    return _version_at_least(AVAULT_VERSION, AVAULT_GRANT_DELIVERY_MIN_VERSION)
 
 
 def _avault_p2_release_unavailable_result(*, existing: str | None = None, existing_version: str | None = None) -> dict:
@@ -5032,16 +5041,32 @@ def _version_at_least(current: str | None, minimum: str) -> bool:
     return cur_parts + (0,) * (width - len(cur_parts)) >= min_parts + (0,) * (width - len(min_parts))
 
 
-def _require_avault_p2_surface(feature: str) -> None:
+def _require_avault_min_version(feature: str, minimum: str, *, managed_available: bool) -> None:
     status = avault_status()
     if not status.get("installed"):
         raise AvaultPreHandoffError(f"avault is required for {feature}")
     version = status.get("version")
-    if not _version_at_least(version, AVAULT_P2_MIN_VERSION):
-        detail = f"{feature} requires avault >= {AVAULT_P2_MIN_VERSION}; installed {version or 'unknown'}"
-        if not _managed_avault_release_satisfies_p2():
+    if not _version_at_least(version, minimum):
+        detail = f"{feature} requires avault >= {minimum}; installed {version or 'unknown'}"
+        if not managed_available:
             detail = f"{detail}; managed avault install is pinned to {AVAULT_VERSION}"
         raise AvaultPreHandoffError(detail)
+
+
+def _require_avault_p2_surface(feature: str) -> None:
+    _require_avault_min_version(
+        feature,
+        AVAULT_P2_MIN_VERSION,
+        managed_available=_managed_avault_release_satisfies_p2(),
+    )
+
+
+def _require_avault_grant_delivery_surface(feature: str) -> None:
+    _require_avault_min_version(
+        feature,
+        AVAULT_GRANT_DELIVERY_MIN_VERSION,
+        managed_available=_managed_avault_release_satisfies_grant_delivery(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -5294,7 +5319,7 @@ def avault_agent_grant(
     """Cache browser-released protected DEKs in the resident agent."""
     from vibe.avault_agent import AvaultAgentError
 
-    _require_avault_p2_surface("resident agent grant")
+    _require_avault_grant_delivery_surface("resident agent grant")
     validate_avault_agent_pubkey(expected_pubkey)
     try:
         return _avault_agent_client().grant(
@@ -5326,7 +5351,7 @@ def avault_agent_release(*, grant_id: str) -> dict:
     """Drop a resident-agent protected grant if present."""
     from vibe.avault_agent import AvaultAgentClient, AvaultAgentError
 
-    _require_avault_p2_surface("resident agent release")
+    _require_avault_grant_delivery_surface("resident agent release")
     try:
         return AvaultAgentClient(_avault_agent_manager().socket_path, timeout=1.0).release(grant_id=grant_id)
     except AvaultAgentError as exc:
@@ -5423,7 +5448,7 @@ def avault_agent_deliver_run(
     """Run a child under a protected grant. Plaintext stays inside avault."""
     from vibe.avault_agent import AvaultAgentError
 
-    _require_avault_p2_surface("resident agent deliver run")
+    _require_avault_grant_delivery_surface("resident agent deliver run")
     try:
         result = _avault_agent_manager().client(timeout=None).deliver_run(
             grant_id=grant_id,
@@ -5453,7 +5478,7 @@ def avault_agent_deliver_fetch(
     """Broker an HTTP request under a protected grant."""
     from vibe.avault_agent import AvaultAgentError
 
-    _require_avault_p2_surface("resident agent deliver fetch")
+    _require_avault_grant_delivery_surface("resident agent deliver fetch")
     try:
         return _avault_agent_manager().client(timeout=_AVAULT_FETCH_TIMEOUT_SECONDS).deliver_fetch(
             grant_id=grant_id,
@@ -5478,7 +5503,7 @@ def avault_agent_deliver_inject(
     """Render a protected-grant secret file inside avault."""
     from vibe.avault_agent import AvaultAgentError
 
-    _require_avault_p2_surface("resident agent deliver inject")
+    _require_avault_grant_delivery_surface("resident agent deliver inject")
     try:
         result = _avault_agent_client().deliver_inject(
             grant_id=grant_id,
