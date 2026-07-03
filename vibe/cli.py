@@ -5417,11 +5417,14 @@ def _resolve_vault_run_delivery(
         for name in dict.fromkeys(mapping.values())
         if str(metas[name].get("protection") or "standard") == "protected"
     ]
+    standard_approval_error: TaskCliError | None = None
     if metas and not protected_names:
         with engine.begin() as conn:
+            standard_names = list(dict.fromkeys(mapping.values()))
+            approval_names = _always_ask_names(metas, standard_names)
             common_grant = vault_service.find_active_grant_for_secrets(
                 conn,
-                list(mapping.values()),
+                approval_names or standard_names,
                 session_id=session_id,
                 purpose="run",
                 reserve_one_shot=True,
@@ -5431,6 +5434,22 @@ def _resolve_vault_run_delivery(
                     {"name": vault_name, "env": env_name, "envelope": vault_service.get_envelope(conn, vault_name)}
                     for env_name, vault_name in mapping.items()
                 ]
+            if approval_names and _source_selector_tags(source_selector):
+                req = vault_service.create_access_request(
+                    conn,
+                    None,
+                    source_selector=source_selector,
+                    requester=requester,
+                    delivery=delivery,
+                    purpose="run",
+                )
+                standard_approval_error = TaskCliError(
+                    "standard always_ask secrets need approval before vault run delivery",
+                    code="approval_required",
+                    details={"request_id": req.get("id"), "secret_names": approval_names},
+                )
+        if standard_approval_error is not None:
+            raise standard_approval_error
     secrets = []
     grant: dict | None = None
     one_shot_grants: list[dict] = []

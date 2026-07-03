@@ -12,6 +12,7 @@ import hashlib
 import io
 import json
 import tarfile
+from unittest.mock import Mock
 
 import pytest
 
@@ -400,6 +401,24 @@ def test_install_avault_force_redownloads_when_present(monkeypatch):
     assert installed.read_text(encoding="utf-8").startswith("#!/bin/sh")
 
 
+def test_install_avault_force_resets_resident_agent_after_binary_change(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    monkeypatch.setattr("platform.machine", lambda: "arm64")
+    manager = Mock()
+    manager.socket_path = api.Path.home() / ".avibe" / "run" / "avault.sock"
+    monkeypatch.setattr(api, "_AVAULT_AGENT_MANAGER", manager)
+    quarantined: list[api.Path] = []
+    monkeypatch.setattr(api, "_quarantine_resident_agent_socket", lambda path: quarantined.append(path))
+    _installable_avault_release(monkeypatch, target="macos-arm64")
+
+    out = api.install_avault(force=True)
+
+    assert out["ok"] is True
+    manager.reset.assert_called_once()
+    assert quarantined == [manager.socket_path]
+
+
 def test_ensure_avault_force_uses_managed_binary_after_install(monkeypatch):
     monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: True)
     configured = api.Path.home() / "custom" / "avault"
@@ -440,7 +459,7 @@ def test_avault_resolves_path_fallback_when_configured_path_missing(monkeypatch)
 def test_ensure_avault_idempotent_when_present(monkeypatch):
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
-    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_P2_MIN_VERSION)
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_GRANT_DELIVERY_MIN_VERSION)
     flag = {"installed": False}
     monkeypatch.setattr(api, "install_avault", lambda force=False: flag.__setitem__("installed", True) or {"ok": True})
 
@@ -451,7 +470,7 @@ def test_ensure_avault_idempotent_when_present(monkeypatch):
         "installed": True,
         "changed": False,
         "path": "/usr/local/bin/avault",
-        "version": api.AVAULT_P2_MIN_VERSION,
+        "version": api.AVAULT_GRANT_DELIVERY_MIN_VERSION,
     }
     assert flag["installed"] is False
 
@@ -473,10 +492,10 @@ def test_ensure_avault_force_rechecks_existing_binary(monkeypatch):
 
 
 def test_ensure_avault_force_does_not_downgrade_compatible_binary_when_pin_is_old(monkeypatch):
-    monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: False)
+    monkeypatch.setattr(api, "_managed_avault_release_satisfies_ready_minimum", lambda: False)
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
-    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_P2_MIN_VERSION)
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_GRANT_DELIVERY_MIN_VERSION)
     monkeypatch.setattr(api, "install_avault", lambda force=False: pytest.fail("should not downgrade avault"))
 
     out = api.ensure_avault_installed(force=True)
@@ -486,7 +505,7 @@ def test_ensure_avault_force_does_not_downgrade_compatible_binary_when_pin_is_ol
         "installed": True,
         "changed": False,
         "path": "/usr/local/bin/avault",
-        "version": api.AVAULT_P2_MIN_VERSION,
+        "version": api.AVAULT_GRANT_DELIVERY_MIN_VERSION,
     }
 
 
@@ -512,12 +531,12 @@ def test_ensure_avault_force_does_not_downgrade_newer_binary(monkeypatch):
     }
 
 
-def test_ensure_avault_upgrades_existing_binary_below_p2_minimum(monkeypatch):
-    monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: True)
+def test_ensure_avault_upgrades_existing_binary_below_grant_delivery_minimum(monkeypatch):
+    monkeypatch.setattr(api, "_managed_avault_release_satisfies_ready_minimum", lambda: True)
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
     seen_force: list[bool] = []
-    versions = iter(["0.1.1", api.AVAULT_P2_MIN_VERSION])
+    versions = iter([api.AVAULT_P2_MIN_VERSION, api.AVAULT_GRANT_DELIVERY_MIN_VERSION])
     monkeypatch.setattr(api, "_probe_avault_version", lambda _path: next(versions))
 
     def fake_install(force=False):
@@ -531,11 +550,11 @@ def test_ensure_avault_upgrades_existing_binary_below_p2_minimum(monkeypatch):
     assert seen_force == [True]
     assert out["ok"] is True
     assert out["changed"] is True
-    assert out["version"] == api.AVAULT_P2_MIN_VERSION
+    assert out["version"] == api.AVAULT_GRANT_DELIVERY_MIN_VERSION
 
 
-def test_ensure_avault_keeps_existing_standard_release_below_p2_minimum(monkeypatch):
-    monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: False)
+def test_ensure_avault_keeps_existing_standard_release_when_ready_pin_unavailable(monkeypatch):
+    monkeypatch.setattr(api, "_managed_avault_release_satisfies_ready_minimum", lambda: False)
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
     monkeypatch.setattr(api, "_probe_avault_version", lambda _path: "0.1.1")
@@ -550,8 +569,8 @@ def test_ensure_avault_keeps_existing_standard_release_below_p2_minimum(monkeypa
     assert out["version"] == "0.1.1"
 
 
-def test_ensure_avault_force_reports_manual_upgrade_when_pin_is_below_p2(monkeypatch):
-    monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: False)
+def test_ensure_avault_force_reports_manual_upgrade_when_pin_is_below_ready_minimum(monkeypatch):
+    monkeypatch.setattr(api, "_managed_avault_release_satisfies_ready_minimum", lambda: False)
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/usr/local/bin/avault")
     monkeypatch.setattr(api, "_probe_avault_version", lambda _path: "0.1.1")
@@ -568,8 +587,8 @@ def test_ensure_avault_force_reports_manual_upgrade_when_pin_is_below_p2(monkeyp
     assert out["reason"] == "avault_p2_release_unavailable"
 
 
-def test_ensure_avault_installs_pinned_standard_release_when_p2_pin_unavailable(monkeypatch):
-    monkeypatch.setattr(api, "_managed_avault_release_satisfies_p2", lambda: False)
+def test_ensure_avault_installs_pinned_release_even_when_ready_pin_unavailable(monkeypatch):
+    monkeypatch.setattr(api, "_managed_avault_release_satisfies_ready_minimum", lambda: False)
     monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
     monkeypatch.setattr("platform.system", lambda: "Darwin")
     monkeypatch.setattr("platform.machine", lambda: "arm64")
@@ -603,12 +622,24 @@ def test_avault_status_present_parses_version(monkeypatch):
 
     class _R:
         returncode = 0
-        stdout = f"avault {api.AVAULT_P2_MIN_VERSION}\n"
+        stdout = f"avault {api.AVAULT_GRANT_DELIVERY_MIN_VERSION}\n"
         stderr = ""
 
     monkeypatch.setattr(api.subprocess, "run", lambda *a, **k: _R())
     s = api.avault_status()
-    assert s["installed"] and s["version"] == api.AVAULT_P2_MIN_VERSION and s["status"] == "ready"
+    assert s["installed"] and s["version"] == api.AVAULT_GRANT_DELIVERY_MIN_VERSION and s["status"] == "ready"
+
+
+def test_avault_status_marks_p2_only_version_upgrade_required(monkeypatch):
+    monkeypatch.setattr(api, "_configured_avault_cli_path", lambda: "avault")
+    monkeypatch.setattr(api, "resolve_cli_path", lambda b: "/x/avault")
+    monkeypatch.setattr(api, "_probe_avault_version", lambda _path: api.AVAULT_P2_MIN_VERSION)
+
+    s = api.avault_status()
+
+    assert s["installed"] is True
+    assert s["version"] == api.AVAULT_P2_MIN_VERSION
+    assert s["status"] == "upgrade_required"
 
 
 def test_avault_status_marks_old_version_upgrade_required(monkeypatch):

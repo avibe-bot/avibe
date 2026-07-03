@@ -920,6 +920,67 @@ def test_run_reuses_multi_secret_standard_one_shot_grant(tmp_path, capfd, monkey
     assert status == "expired"
 
 
+def test_run_tag_standard_always_ask_request_offers_batch_one_shot_grant(capfd, monkeypatch):
+    from vibe import api
+
+    _create_standard_secret(
+        "ASK_A",
+        protection="standard",
+        sealed=_sealed("ask_a"),
+        tags=["deploy"],
+        policy={"always_ask": True},
+    )
+    _create_standard_secret(
+        "ASK_B",
+        protection="standard",
+        sealed=_sealed("ask_b"),
+        tags=["deploy"],
+        policy={"always_ask": True},
+    )
+    _create_standard_secret("NORMAL_DEPLOY", protection="standard", sealed=_sealed("normal"), tags=["deploy"])
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(_ns(tag=["deploy"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        requests = vault_service.list_requests(conn, status="pending")
+    assert len(requests) == 1
+    assert requests[0]["secret_name"] is None
+    assert requests[0]["delivery"]["source_selector"] == {"tags": ["deploy"]}
+    assert requests[0]["card"]["one_shot"] is True
+    option = requests[0]["card"]["grant_options"][0]
+    assert option["source_selector"] == {"tags": ["deploy"]}
+    assert option["one_shot"] is True
+    assert option["member_snapshot"] == ["ASK_A", "ASK_B"]
+
+
+def test_run_tag_reuses_standard_one_shot_subset_with_normal_secrets(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    grant = _set_always_ask_standard_tag_grant(["ASK_A", "ASK_B"], tag="deploy", session_id="ses_cli")
+    _create_standard_secret("NORMAL_DEPLOY", protection="standard", sealed=_sealed("normal"), tags=["deploy"])
+    deliver = Mock(return_value={"exit_code": 0, "delivered": True})
+    monkeypatch.setattr(api, "avault_deliver_run", deliver)
+
+    code = cli.cmd_vault_run(_ns(tag=["deploy"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
+
+    assert code == 0
+    deliver.assert_called_once_with(
+        [
+            {"name": "ASK_A", "env": "ASK_A", "envelope": _sealed("ask_a")},
+            {"name": "ASK_B", "env": "ASK_B", "envelope": _sealed("ask_b")},
+            {"name": "NORMAL_DEPLOY", "env": "NORMAL_DEPLOY", "envelope": _sealed("normal")},
+        ],
+        ["python3", "-c", "pass"],
+    )
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
+    assert status == "expired"
+
+
 def test_inject_reuses_multi_secret_standard_one_shot_grant(tmp_path, capfd, monkeypatch):
     from vibe import api
 

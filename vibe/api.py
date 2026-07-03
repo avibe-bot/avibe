@@ -4683,7 +4683,13 @@ def _managed_avault_release_satisfies_grant_delivery() -> bool:
     return _version_at_least(AVAULT_VERSION, AVAULT_GRANT_DELIVERY_MIN_VERSION)
 
 
-def _avault_p2_release_unavailable_result(*, existing: str | None = None, existing_version: str | None = None) -> dict:
+def _avault_p2_release_unavailable_result(
+    *,
+    existing: str | None = None,
+    existing_version: str | None = None,
+    required: str | None = None,
+) -> dict:
+    required = required or AVAULT_P2_MIN_VERSION
     return {
         "ok": False,
         "installed": bool(existing),
@@ -4695,9 +4701,37 @@ def _avault_p2_release_unavailable_result(*, existing: str | None = None, existi
         "message": backend_t(
             "dependencies.avault.p2ReleaseUnavailable",
             pinned=AVAULT_VERSION,
-            required=AVAULT_P2_MIN_VERSION,
+            required=required,
         ),
     }
+
+
+def _avault_ready_min_version() -> str:
+    # Avibe-managed avault readiness follows the resident delivery protocol now
+    # that the managed pin includes grant-id frames. Older P2 binaries can still
+    # seal/sign, but they are not safe as the default dependency for Vaults.
+    return AVAULT_GRANT_DELIVERY_MIN_VERSION
+
+
+def _managed_avault_release_satisfies_ready_minimum() -> bool:
+    return _version_at_least(AVAULT_VERSION, _avault_ready_min_version())
+
+
+def _reset_avault_agent_after_binary_change(*, reason: str) -> None:
+    from vibe.avault_agent import default_agent_socket_path
+
+    with _AVAULT_AGENT_MANAGER_LOCK:
+        manager = _AVAULT_AGENT_MANAGER
+    socket_path = manager.socket_path if manager is not None else default_agent_socket_path()
+    if manager is not None:
+        try:
+            manager.reset()
+        except Exception:  # noqa: BLE001
+            logger.warning("%s: failed to reset resident avault agent after binary change", reason, exc_info=True)
+    try:
+        _quarantine_resident_agent_socket(socket_path)
+    except Exception:  # noqa: BLE001
+        logger.warning("%s: failed to quarantine resident avault agent socket after binary change", reason, exc_info=True)
 
 
 def install_askill() -> dict:
@@ -4971,6 +5005,7 @@ def install_avault(force: bool = False) -> dict:
             install_path.chmod(0o755)
             _clear_macos_quarantine(install_path)
         _persist_avault_cli_path(str(install_path))
+        _reset_avault_agent_after_binary_change(reason="install_avault")
 
         return {
             "ok": True,
@@ -4992,9 +5027,10 @@ def install_avault(force: bool = False) -> dict:
 def ensure_avault_installed(force: bool = False) -> dict:
     """Ensure avault is present.
 
-    The managed pin can be older than the P2 surface while still supporting the
-    standard seal path. P2-only commands call ``_require_avault_p2_surface`` at
-    their own boundary instead of making dependency install fail.
+    The dependency manager keeps Avibe's default avault at the resident delivery
+    protocol minimum. Older P2 binaries can still handle some one-shot commands,
+    but they are not ready for the protected Vaults surfaces that share this
+    managed dependency.
     """
     if not _AVAULT_INSTALL_LOCK.acquire(blocking=False):
         return {
@@ -5006,8 +5042,9 @@ def ensure_avault_installed(force: bool = False) -> dict:
     try:
         existing = _resolve_avault_cli_path()
         existing_version = _probe_avault_version(existing) if existing else None
-        existing_is_p2 = _version_at_least(existing_version, AVAULT_P2_MIN_VERSION)
-        can_managed_install_p2 = _managed_avault_release_satisfies_p2()
+        ready_minimum = _avault_ready_min_version()
+        existing_is_ready = _version_at_least(existing_version, ready_minimum)
+        can_managed_install_ready = _managed_avault_release_satisfies_ready_minimum()
         # Never downgrade: keep an existing binary that is strictly newer than the
         # managed pin, even under ``force``. ``force`` may still reinstall an equal
         # or older managed version to repair a binary, but it must not replace a
@@ -5015,7 +5052,7 @@ def ensure_avault_installed(force: bool = False) -> dict:
         # genuinely broken binary can't report a version, so it isn't matched here
         # and still gets repaired below.
         existing_newer_than_pin = (
-            existing_is_p2
+            existing_is_ready
             and _version_at_least(existing_version, AVAULT_VERSION)
             and not _version_at_least(AVAULT_VERSION, existing_version)
         )
@@ -5027,11 +5064,15 @@ def ensure_avault_installed(force: bool = False) -> dict:
                 "path": existing,
                 "version": existing_version,
             }
-        if existing and not existing_is_p2 and force and not can_managed_install_p2:
-            return _avault_p2_release_unavailable_result(existing=existing, existing_version=existing_version)
+        if existing and not existing_is_ready and force and not can_managed_install_ready:
+            return _avault_p2_release_unavailable_result(
+                existing=existing,
+                existing_version=existing_version,
+                required=ready_minimum,
+            )
         if existing and (
-            (existing_is_p2 and (not force or not can_managed_install_p2))
-            or (not existing_is_p2 and not force and not can_managed_install_p2)
+            (existing_is_ready and (not force or not can_managed_install_ready))
+            or (not existing_is_ready and not force and not can_managed_install_ready)
         ):
             return {
                 "ok": True,
@@ -5040,7 +5081,7 @@ def ensure_avault_installed(force: bool = False) -> dict:
                 "path": existing,
                 "version": existing_version,
             }
-        needs_upgrade = bool(existing and not existing_is_p2 and can_managed_install_p2)
+        needs_upgrade = bool(existing and not existing_is_ready and can_managed_install_ready)
         result = install_avault(force=force or needs_upgrade)
         resolved = _resolve_avault_cli_path()
         installed = bool(resolved)
@@ -5055,7 +5096,7 @@ def ensure_avault_installed(force: bool = False) -> dict:
             result["message"] = (
                 result.get("message") or backend_t("dependencies.avault.installedNotFound")
             )
-        elif result.get("ok") and not _version_at_least(resolved_version, AVAULT_P2_MIN_VERSION):
+        elif result.get("ok") and not _version_at_least(resolved_version, ready_minimum):
             result["status"] = "upgrade_required"
         return result
     finally:
@@ -5088,7 +5129,7 @@ def avault_status() -> dict:
     if not path:
         return {"id": "avault", "installed": False, "version": None, "status": "missing", "path": None}
     version = _probe_avault_version(path)
-    status = "ready" if _version_at_least(version, AVAULT_P2_MIN_VERSION) else "upgrade_required"
+    status = "ready" if _version_at_least(version, _avault_ready_min_version()) else "upgrade_required"
     return {"id": "avault", "installed": True, "version": version, "status": status, "path": path}
 
 
