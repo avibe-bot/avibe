@@ -1,5 +1,11 @@
 # Vaults — secret management for agents
 
+> Superseded for current implementation: the group and scope-typed grant model
+> in this older draft has been replaced by
+> `vaults-grant-delivery-refactor.md`. New work should implement the final model
+> there: no product `group`, tags plus `skill:<name>` tags, first-class
+> `grant_id`, and unified avault delivery for mixed standard/protected runs.
+
 Status: **v7 draft — architecture converged; P0 build plan drafted** (no code yet)
 Owner: Alex + agent session `sestvmy6e5c8e`
 Date: 2026-06-16 (v7, after review round 6 — scope-typed grants)
