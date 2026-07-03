@@ -386,8 +386,6 @@ def normalize_provision_spec(spec: Any) -> dict[str, Any]:
         normalized["description"] = description
 
     tags = _string_list(spec.get("tags"), field="spec.tags") if "tags" in spec else []
-    if tags:
-        normalized["tags"] = tags
 
     policy = spec.get("policy")
     if policy is not None:
@@ -435,6 +433,10 @@ def normalize_provision_spec(spec: Any) -> dict[str, Any]:
         skills = _string_list(links.get("skills"), field="spec.links.skills") if "skills" in links else []
         if skills:
             normalized["links"] = {"skills": skills}
+            tags = _append_skill_tags(tags, skills)
+
+    if tags:
+        normalized["tags"] = tags
 
     return normalized
 
@@ -537,6 +539,22 @@ def _card_hydration_policy(audience: str | None) -> CardHydrationPolicy:
 
 ACTIVE_GRANT_STATES = {"active", "reserved"}
 ACTIVE_GRANT_STATUSES = ACTIVE_GRANT_STATES
+
+
+def _skill_tag(skill: str) -> str | None:
+    name = str(skill or "").strip()
+    if name.startswith("skill:"):
+        name = name[len("skill:") :].strip()
+    return f"skill:{name}" if name else None
+
+
+def _append_skill_tags(tags: list[Any], skills: list[str]) -> list[str]:
+    merged = [str(tag) for tag in tags if isinstance(tag, str) and tag]
+    for skill in skills:
+        tag = _skill_tag(skill)
+        if tag:
+            merged.append(tag)
+    return list(dict.fromkeys(merged))
 
 
 def _grant_is_active(row: dict[str, Any]) -> bool:
@@ -1087,9 +1105,10 @@ def create_secret(
 def link_secret_to_skills(conn: Connection, secret_name: str, skills: list[str], *, source: str = "agent") -> None:
     if not skills:
         return
-    _require_row(conn, secret_name)
+    row = _require_row(conn, secret_name)
     now = _now()
-    for skill in dict.fromkeys(item.strip() for item in skills if item and item.strip()):
+    normalized_skills = list(dict.fromkeys(item.strip() for item in skills if item and item.strip()))
+    for skill in normalized_skills:
         try:
             conn.execute(
                 vault_links.insert().values(
@@ -1103,6 +1122,14 @@ def link_secret_to_skills(conn: Connection, secret_name: str, skills: list[str],
             )
         except IntegrityError:
             pass
+    current_tags = _loads(row.get("tags")) or []
+    tags = _append_skill_tags(current_tags, normalized_skills)
+    if tags != current_tags:
+        conn.execute(
+            vault_secrets.update()
+            .where(vault_secrets.c.name == secret_name)
+            .values(tags=json.dumps(tags), updated_at=now)
+        )
 
 
 def get_secret_meta(conn: Connection, name: str) -> dict[str, Any]:
@@ -2539,6 +2566,21 @@ def create_grant(
     resident_cache_ready = cache_ready and any(
         live_rows_by_name[name].get("protection") != "standard" for name in members
     )
+    grant_id = requested_grant_id or approval.grant_id or _id("vgr")
+    existing_retry_grant: dict[str, Any] | None = None
+    existing_grant = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().first()
+    if existing_grant is not None:
+        existing_retry_grant = dict(existing_grant)
+        if existing_retry_grant.get("status") in ACTIVE_GRANT_STATES:
+            raise InvalidGrantError("grant_id is already active")
+        if (
+            existing_retry_grant.get("created_by_request_id") != created_by_request_id
+            or existing_retry_grant.get("scope_type") != scope_type
+            or existing_retry_grant.get("scope_ref") != scope_ref
+            or str(existing_retry_grant.get("purpose") or "run") != grant_purpose
+            or set(_grant_member_names(existing_retry_grant)) != set(members)
+        ):
+            raise InvalidGrantError("grant_id belongs to a different grant approval")
     decided_at = _now()
     claim = conn.execute(
         vault_requests.update()
@@ -2555,25 +2597,38 @@ def create_grant(
     ttl = max(1, min(ttl, _ttl_cap_for_members(conn, members)))
     now_dt = datetime.now(timezone.utc)
     expires_at = (now_dt + timedelta(seconds=ttl)).isoformat()
-    grant_id = requested_grant_id or approval.grant_id or _id("vgr")
     try:
-        conn.execute(
-            vault_grants.insert().values(
-                id=grant_id,
-                scope_type=scope_type,
-                scope_ref=scope_ref,
-                member_snapshot=json.dumps(members),
-                source_selector=json.dumps(source_selector) if source_selector else None,
-                purpose=grant_purpose,
-                session_id=session_id,
-                status="active",
-                created_by_request_id=created_by_request_id,
-                created_at=now_dt.isoformat(),
-                expires_at=expires_at,
-                agent_ready=1 if resident_cache_ready else 0,
-                agent_ready_at=now_dt.isoformat() if resident_cache_ready else None,
+        values = {
+            "scope_type": scope_type,
+            "scope_ref": scope_ref,
+            "member_snapshot": json.dumps(members),
+            "source_selector": json.dumps(source_selector) if source_selector else None,
+            "purpose": grant_purpose,
+            "session_id": session_id,
+            "status": "active",
+            "created_by_request_id": created_by_request_id,
+            "created_at": now_dt.isoformat(),
+            "expires_at": expires_at,
+            "revoked_at": None,
+            "agent_ready": 1 if resident_cache_ready else 0,
+            "agent_ready_at": now_dt.isoformat() if resident_cache_ready else None,
+        }
+        if existing_retry_grant is not None:
+            cache.drop(grant_id)
+            result = conn.execute(
+                vault_grants.update()
+                .where(vault_grants.c.id == grant_id, ~vault_grants.c.status.in_(ACTIVE_GRANT_STATES))
+                .values(**values)
             )
-        )
+            if result.rowcount != 1:
+                raise InvalidGrantError("grant_id is already active")
+        else:
+            conn.execute(
+                vault_grants.insert().values(
+                    id=grant_id,
+                    **values,
+                )
+            )
     except Exception:
         conn.execute(
             vault_requests.update()

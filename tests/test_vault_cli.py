@@ -418,6 +418,24 @@ def test_run_expands_tags_and_skill_tags_as_union(capfd, monkeypatch):
     )
 
 
+def test_run_skill_selects_skill_link_mirror_tag(monkeypatch):
+    from vibe import api
+
+    _create_standard_secret("LINKED_KEY", sealed=_sealed("linked"))
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.link_secret_to_skills(conn, "LINKED_KEY", ["deploy"])
+    deliver = Mock(return_value=0)
+    monkeypatch.setattr(api, "avault_deliver_run", deliver)
+
+    code = cli.cmd_vault_run(_ns(skill=["deploy"], command_argv=["python3", "-c", "pass"]))
+
+    assert code == 0
+    deliver.assert_called_once_with(
+        [{"name": "LINKED_KEY", "env": "LINKED_KEY", "envelope": _sealed("linked")}],
+        ["python3", "-c", "pass"],
+    )
+
+
 def test_run_rejects_conflicting_alias_from_tag_selection(capfd, monkeypatch):
     from vibe import api
 
