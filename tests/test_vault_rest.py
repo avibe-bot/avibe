@@ -67,6 +67,15 @@ def test_rest_create_rejects_standard_plaintext_value(monkeypatch):
     seal.assert_not_called()
 
 
+def test_rest_list_invalid_tag_returns_vault_error():
+    client = app.test_client()
+
+    response = client.get("/api/vault/secrets?tag=bad%20tag")
+
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "invalid_request"
+
+
 def test_rest_create_rejects_plaintext_value_in_mixed_payloads(monkeypatch):
     seal = Mock()
     monkeypatch.setattr(api, "avault_seal_blind_box", seal)

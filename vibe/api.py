@@ -1674,7 +1674,8 @@ def request_vault_access(payload: dict) -> dict:
                 audience=vault_service.REQUEST_AUDIENCE_AGENT,
             )
     except vault_service.SecretNotFoundError as exc:
-        raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+        missing_name = name or str(exc)
+        raise VaultApiError(f"secret '{missing_name}' not found", code="secret_not_found", status=404) from exc
     except vault_service.NotGrantableError as exc:
         raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
     except vault_service.KeypairNotValueDeliverableError as exc:

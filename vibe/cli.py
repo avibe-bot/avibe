@@ -5158,7 +5158,8 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
 
     requester, delivery, session_id = _vault_cli_delivery_context(args, mode="inject", path=path, format=fmt)
     metas = _preflight_vault_inject_batch(engine, names)
-    if metas and {str(meta.get("protection") or "standard") for meta in metas.values()} == {"protected"}:
+    tiers = {str(meta.get("protection") or "standard") for meta in metas.values()}
+    if metas and tiers == {"protected"}:
         with engine.begin() as conn:
             common_grant = vault_service.find_active_grant_for_secrets(
                 conn,
@@ -5172,6 +5173,21 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
                     {"name": name, "key": name, "envelope": vault_service.get_protected_envelope(conn, name)}
                     for name in names
                 ]
+    if metas and tiers == {"standard"}:
+        with engine.begin() as conn:
+            standard_secrets = [
+                {"name": name, "key": name, "envelope": vault_service.get_envelope(conn, name)}
+                for name in names
+            ]
+            common_grant = vault_service.find_active_grant_for_secrets(
+                conn,
+                names,
+                session_id=session_id,
+                purpose="inject",
+                reserve_one_shot=True,
+            )
+            if isinstance(common_grant, dict) and common_grant.get("one_shot") is True:
+                return None, [common_grant], standard_secrets
     secrets = []
     grant: dict | None = None
     one_shot_grants: list[dict] = []

@@ -758,6 +758,15 @@ def test_request_vault_access_malformed_selector_returns_vault_api_error():
     assert exc.value.status == 409
 
 
+def test_request_vault_access_reports_missing_selector_member_name():
+    with pytest.raises(api.VaultApiError) as exc:
+        api.request_vault_access({"source_selector": {"env": ["MISSING_KEY"]}, "session_id": "ses_1"})
+
+    assert exc.value.code == "secret_not_found"
+    assert exc.value.status == 404
+    assert "MISSING_KEY" in str(exc.value)
+
+
 def test_agent_access_sibling_request_result_returns_covering_grant(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("api")))
     monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
@@ -2175,6 +2184,31 @@ def test_create_grant_api_preserves_unbound_session_choice(monkeypatch, avault_p
     )
 
     assert created["grant"]["session_id"] is None
+
+
+def test_create_grant_api_binds_one_shot_to_request_session_when_unbound_requested(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("ask")))
+    api.create_vault_secret(
+        {
+            "name": "ASK_KEY",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            "policy": {"always_ask": True},
+        }
+    )
+    requested = api.request_vault_access({"name": "ASK_KEY", "session_id": "ses_1"})
+
+    created = api.create_vault_grant(
+        {
+            "request_id": requested["request"]["id"],
+            "this_session_only": False,
+        }
+    )
+
+    assert created["grant"]["one_shot"] is True
+    assert created["grant"]["session_id"] == "ses_1"
+    with api._vault_engine().begin() as conn:
+        assert vault_service.find_active_grant_for_secret(conn, "ASK_KEY", session_id="other") is None
+        assert vault_service.find_active_grant_for_secret(conn, "ASK_KEY", session_id="ses_1")["id"] == created["grant"]["id"]
 
 
 def test_protected_sign_requires_browser_signature(monkeypatch):

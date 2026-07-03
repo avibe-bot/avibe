@@ -1713,6 +1713,7 @@ def create_access_request(
         purpose=purpose,
         command=delivery_payload.get("command"),
         egress=delivery_payload.get("egress"),
+        skill=delivery_payload.get("skill") or requester_payload.get("skill"),
         session_id=requester_payload.get("session_id") or delivery_payload.get("session_id"),
         one_shot=one_shot,
     )
@@ -2246,9 +2247,11 @@ def _validate_access_request_for_grant(
     )
     requested_session_id = _request_session_id(row_dict)
     effective_session_id = requested_session_id if session_id is None and inherit_request_session else session_id
+    option = _request_grant_option(row_dict)
+    if option.one_shot and requested_session_id:
+        effective_session_id = requested_session_id
     if requested_session_id and effective_session_id and requested_session_id != effective_session_id:
         raise InvalidRequestError("grant session does not match the approval request")
-    option = _request_grant_option(row_dict)
     if option.purpose != purpose:
         raise InvalidRequestError("grant purpose does not match the approval request")
     if option.source_selector != _source_selector_payload(source_selector):

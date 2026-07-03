@@ -243,12 +243,15 @@ def test_access_request_cli_uses_caller_session(tmp_path, capfd, monkeypatch):
         vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses_cli")
 
-    assert cli.cmd_vault_access(_ns(name="PROTECTED_KEY", command="python sync.py")) == 0
+    assert cli.cmd_vault_access(_ns(name="PROTECTED_KEY", command="python sync.py", skill="deploy")) == 0
     payload = json.loads(capfd.readouterr().out)
 
     assert payload["kind"] == "vault_access_request"
     assert payload["request"]["requester"]["session_id"] == "ses_cli"
+    assert payload["request"]["requester"]["skill"] == "deploy"
     assert payload["request"]["delivery"]["command"] == "python sync.py"
+    assert payload["request"]["delivery"]["skill"] == "deploy"
+    assert payload["request"]["card"]["skill"] == "deploy"
     assert payload["request"]["status"] == "pending"
 
 
@@ -833,6 +836,30 @@ def test_run_reuses_multi_secret_standard_one_shot_grant(tmp_path, capfd, monkey
             {"name": "ASK_B", "env": "B", "envelope": _sealed("ask_b")},
         ],
         ["python3", "-c", "pass"],
+    )
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
+    assert status == "expired"
+
+
+def test_inject_reuses_multi_secret_standard_one_shot_grant(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    grant = _set_always_ask_standard_tag_grant(["ASK_A", "ASK_B"], session_id="ses_cli", purpose="inject")
+    deliver = Mock(return_value=None)
+    monkeypatch.setattr(api, "avault_deliver_inject", deliver)
+    out = tmp_path / "out.env"
+
+    code = cli.cmd_vault_inject(_ns(keys="ASK_A,ASK_B", out=str(out), format="dotenv", session_id="ses_cli"))
+
+    assert code == 0
+    deliver.assert_called_once_with(
+        str(out),
+        "dotenv",
+        [
+            {"name": "ASK_A", "key": "ASK_A", "envelope": _sealed("ask_a")},
+            {"name": "ASK_B", "key": "ASK_B", "envelope": _sealed("ask_b")},
+        ],
     )
     with cli._open_vault_engine().connect() as conn:
         status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]

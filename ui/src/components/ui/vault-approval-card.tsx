@@ -38,6 +38,8 @@ type ApprovalCard = {
   card_type?: string;
   request_type?: 'access' | 'sign';
   secret_name?: string;
+  secret_names?: string[];
+  protected_secret_names?: string[];
   kind?: string | null;
   protection?: string | null;
   command?: string | null;
@@ -110,15 +112,22 @@ export const VaultApprovalCard: React.FC<{
   const card = (request.card ?? null) as ApprovalCard | null;
   const delivery = (request.delivery ?? {}) as { digest?: string; scheme?: string };
   const isSign = (card?.request_type ?? request.request_type) === 'sign';
-  const isProtected = card?.protection === 'protected';
   const isKeypair = card?.kind === 'keypair';
 
   // A grant covers a fixed protected set — there is no scope picker.
   const grantOptions = useMemo(() => card?.grant_options ?? [], [card]);
   const option = useMemo(() => grantOptions[0], [grantOptions]);
   const materials = useMemo(() => option?.unlock_material ?? [], [option]);
+  const memberNames = useMemo(() => {
+    if (isSign) return card?.secret_name ? [card.secret_name] : [];
+    return option?.member_snapshot?.length ? option.member_snapshot : (card?.secret_names ?? (card?.secret_name ? [card.secret_name] : []));
+  }, [card, isSign, option]);
   // Protected secret names to be granted (design: "show the protected secret names covered").
-  const protectedNames = useMemo(() => materials.map((m) => m.name), [materials]);
+  const protectedNames = useMemo(() => {
+    const materialNames = materials.map((m) => m.name);
+    return materialNames.length ? materialNames : (card?.protected_secret_names ?? []);
+  }, [card, materials]);
+  const isProtected = isSign ? card?.protection === 'protected' : protectedNames.length > 0 || card?.protection === 'protected';
   const source = useMemo<VaultSourceSelector>(() => card?.source_selector ?? option?.source_selector ?? {}, [card, option]);
   const sourceChips = useMemo(() => {
     const chips: Array<{ key: string; label: string; icon: typeof KeyRound; mono?: boolean }> = [];
@@ -137,7 +146,7 @@ export const VaultApprovalCard: React.FC<{
 
   // A request needs the browser VMK unlocked when it touches protected key material:
   // a protected sign, or an access whose fixed set includes protected members.
-  const needsUnlock = isSign ? isProtected : materials.length > 0;
+  const needsUnlock = isSign ? isProtected : protectedNames.length > 0;
   const unlocked = vault.status === 'unlocked';
 
   useEffect(() => {
@@ -293,7 +302,15 @@ export const VaultApprovalCard: React.FC<{
       {/* Details — borderless list, sentence-case labels. */}
       <div className="flex flex-col gap-3.5">
         <DetailRow label={isSign ? t('vaults.approval.key') : t('vaults.approval.secret')}>
-          <span className="truncate font-mono text-[13px] font-semibold">{card.secret_name}</span>
+          {memberNames.length > 1 ? (
+            memberNames.map((name) => (
+              <Badge key={name} variant="outline" className="font-mono">
+                {name}
+              </Badge>
+            ))
+          ) : (
+            <span className="truncate font-mono text-[13px] font-semibold">{memberNames[0] ?? card?.secret_name ?? ''}</span>
+          )}
           {isProtected ? (
             <Badge variant="warning">{t('vaults.protected')}</Badge>
           ) : (
