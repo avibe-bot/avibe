@@ -42,22 +42,29 @@ def _create_standard_secret(name: str, *, sealed: Sealed | None = None):
         vault_service.create_secret(conn, name=name, sealed=sealed or _sealed(name.lower()))
 
 
+def _grant_from_request(conn, request: dict, *, session_id: str | None = None) -> dict:
+    option = request["card"]["grant_options"][0]
+    return vault_service.create_grant(
+        conn,
+        member_names=option["member_snapshot"],
+        source_selector=option["source_selector"],
+        purpose=option["purpose"],
+        session_id=session_id,
+        request_id=request["id"],
+    )
+
+
 def _set_protected_grant(name: str, *, session_id: str | None = None) -> dict:
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(conn, name=name, protection="protected", sealed=_sealed(name.lower()))
         req = vault_service.create_access_request(
             conn,
             name,
+            purpose="inject",
             requester={"source": "cli", "session_id": session_id} if session_id else {"source": "cli"},
             delivery={"session_id": session_id, "mode": "inject"} if session_id else {"mode": "inject"},
         )
-        return vault_service.create_grant(
-            conn,
-            scope_type="secret",
-            scope_ref=name,
-            session_id=session_id,
-            created_by_request_id=req["id"],
-        )
+        return _grant_from_request(conn, req, session_id=session_id)
 
 
 def test_export_is_deprecated_and_does_not_touch_db(capfd):

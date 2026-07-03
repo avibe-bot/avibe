@@ -2657,7 +2657,10 @@ def _vault_error_response(exc):
 def vault_secrets_get():
     from vibe import api
 
-    return jsonify(api.get_vault_secrets(group=request.args.get("group") or None))
+    try:
+        return jsonify(api.get_vault_secrets(tag=request.args.get("tag") or None))
+    except ValueError as exc:
+        return _vault_error_response(exc)
 
 
 @app.route("/api/vault/pubkey", methods=["GET"])

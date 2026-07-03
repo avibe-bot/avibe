@@ -14,11 +14,6 @@ def _sealed(suffix: str = "1") -> Sealed:
     return Sealed(ciphertext=f"ct-{suffix}", nonce=f"n-{suffix}", wrap_meta=f"wm-{suffix}")
 
 
-def _request_grant_id(request: dict) -> str:
-    row = request.get("request") if isinstance(request.get("request"), dict) else request
-    return row["card"]["scope_options"][0]["grant_id"]
-
-
 def _mock_avault_p2(monkeypatch):
     monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
     monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
@@ -71,6 +66,15 @@ def test_rest_create_rejects_standard_plaintext_value(monkeypatch):
     assert response.status_code == 400
     assert response.get_json()["code"] == "plaintext_value_rejected"
     seal.assert_not_called()
+
+
+def test_rest_list_invalid_tag_returns_vault_error():
+    client = app.test_client()
+
+    response = client.get("/api/vault/secrets?tag=bad%20tag")
+
+    assert response.status_code == 409
+    assert response.get_json()["code"] == "invalid_request"
 
 
 def test_rest_create_rejects_plaintext_value_in_mixed_payloads(monkeypatch):
@@ -181,9 +185,6 @@ def test_rest_requests_and_grants_routes(monkeypatch):
     grant_response = client.post(
         "/api/vault/grants",
         json={
-            "grant_id": _request_grant_id(req),
-            "scope_type": "secret",
-            "scope_ref": "PROTECTED_REST",
             "session_id": "ses_1",
             "request_id": req["id"],
             "deks": [
@@ -262,9 +263,8 @@ def test_rest_grant_rejects_mismatched_request(monkeypatch):
     response = client.post(
         "/api/vault/grants",
         json={
-            "grant_id": _request_grant_id(req),
-            "scope_type": "secret",
-            "scope_ref": "B_KEY",
+            "member_names": ["B_KEY"],
+            "source_selector": {"env": ["B_KEY"]},
             "session_id": "ses_1",
             "request_id": req["id"],
             "deks": [
@@ -300,7 +300,6 @@ def test_rest_fulfill_access_request_route(monkeypatch):
     response = client.post(
         f"/api/vault/requests/{requested['request']['id']}/fulfill-access",
         json={
-            "grant_id": _request_grant_id(requested),
             "session_id": "ses_1",
             "deks": [
                 {

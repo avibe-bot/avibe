@@ -1332,12 +1332,15 @@ def _vault_engine():
     return create_sqlite_engine(paths.get_sqlite_state_path())
 
 
-def get_vault_secrets(*, group: Optional[str] = None) -> dict:
+def get_vault_secrets(*, tag: Optional[str] = None) -> dict:
     from storage import vault_service
 
     engine = _vault_engine()
-    with engine.connect() as conn:
-        secrets = vault_service.list_secrets(conn, group=group)
+    try:
+        with engine.connect() as conn:
+            secrets = vault_service.list_secrets(conn, tag=tag)
+    except vault_service.VaultServiceError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     return {"ok": True, "secrets": secrets}
 
 
@@ -1409,10 +1412,15 @@ def create_vault_secret(payload: dict) -> dict:
     name = str(payload.get("name") or "").strip()
     if not vault_crypto.is_valid_secret_name(name):
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
-    tags = payload.get("tags") if isinstance(payload.get("tags"), list) else None
+    tags = [str(tag) for tag in payload.get("tags", []) if isinstance(tag, str)] if isinstance(payload.get("tags"), list) else []
     policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else None
     public_meta = payload.get("public_meta") if isinstance(payload.get("public_meta"), dict) else None
     links = payload.get("links") if isinstance(payload.get("links"), dict) else None
+    try:
+        if links and isinstance(links.get("skills"), list):
+            tags.extend(vault_service.skill_tag(str(skill)) for skill in links["skills"] if isinstance(skill, str))
+    except vault_service.VaultServiceError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     protection = str(payload.get("protection") or "standard").strip().lower()
     establishing_vmk = bool(payload.get("establishing_vmk"))
     kind = str(payload.get("kind") or "static").strip().lower()
@@ -1444,8 +1452,7 @@ def create_vault_secret(payload: dict) -> dict:
                 conn,
                 name=name,
                 sealed=sealed,
-                group=str(payload.get("group") or vault_service.DEFAULT_GROUP),
-                tags=tags,
+                tags=tags or None,
                 protection=protection,
                 kind=kind,
                 signer_kind=signer_kind,
@@ -1455,13 +1462,6 @@ def create_vault_secret(payload: dict) -> dict:
                 establishing_vmk=establishing_vmk,
                 provision_request_id=str(payload.get("provision_request_id") or "") or None,
             )
-            if links and isinstance(links.get("skills"), list):
-                vault_service.link_secret_to_skills(
-                    conn,
-                    name,
-                    [str(skill) for skill in links["skills"] if isinstance(skill, str)],
-                    source="agent",
-                )
     except vault_service.InvalidSecretNameError as exc:
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name") from exc
     except vault_service.SecretExistsError as exc:
@@ -1536,6 +1536,21 @@ def get_vault_provision_request(request_id: str) -> dict:
     return {"ok": True, "request": request}
 
 
+def _vault_request_grant_members_and_purpose(request: dict) -> tuple[list[str], str]:
+    card = request.get("card") if isinstance(request.get("card"), dict) else {}
+    purpose = str(card.get("purpose") or "run")
+    options = card.get("grant_options") if isinstance(card, dict) else None
+    if isinstance(options, list) and options and isinstance(options[0], dict):
+        option = options[0]
+        purpose = str(option.get("purpose") or purpose)
+        snapshot = option.get("member_snapshot")
+        if isinstance(snapshot, list):
+            members = [str(name) for name in snapshot if isinstance(name, str) and name]
+            return sorted(set(members)), purpose
+    secret_name = str(request.get("secret_name") or "").strip()
+    return ([secret_name] if secret_name else []), purpose
+
+
 def _vault_request_result(conn, request: dict) -> dict | None:
     from storage import vault_service
 
@@ -1548,12 +1563,22 @@ def _vault_request_result(conn, request: dict) -> dict | None:
             requester = request.get("requester") if isinstance(request.get("requester"), dict) else {}
             delivery = request.get("delivery") if isinstance(request.get("delivery"), dict) else {}
             session_id = str(requester.get("session_id") or delivery.get("session_id") or "").strip() or None
-            grant = vault_service.find_active_grant_for_secret(
-                conn,
-                str(request["secret_name"]),
-                session_id=session_id,
-                purpose=vault_service._grant_purpose_from_delivery(delivery),
-            )
+            secret_name = str(request.get("secret_name") or "").strip()
+            member_names, purpose = _vault_request_grant_members_and_purpose(request)
+            if secret_name:
+                grant = vault_service.find_active_grant_for_secret(
+                    conn,
+                    secret_name,
+                    session_id=session_id,
+                    purpose=purpose,
+                )
+            elif member_names:
+                grant = vault_service.find_active_grant_for_secrets(
+                    conn,
+                    member_names,
+                    session_id=session_id,
+                    purpose=purpose,
+                )
         if grant is None:
             return None
         return {"type": "grant", "grant": grant}
@@ -1626,25 +1651,38 @@ def request_vault_access(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise VaultApiError("payload must be an object", code="invalid_payload")
     name = str(payload.get("name") or "").strip()
-    if not vault_crypto.is_valid_secret_name(name):
+    raw_selector = payload.get("source_selector")
+    source_selector = dict(raw_selector) if isinstance(raw_selector, dict) else None
+    if not name and source_selector is None:
+        raise VaultApiError("name or source_selector is required", code="invalid_request", status=409)
+    if name and not vault_crypto.is_valid_secret_name(name):
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
+    purpose = str(payload.get("purpose") or "run")
     engine = _vault_engine()
     try:
         with engine.begin() as conn:
-            vault_service.get_secret_meta(conn, name)
+            if name:
+                vault_service.get_secret_meta(conn, name)
             request = vault_service.create_access_request(
                 conn,
-                name,
+                name or None,
+                source_selector=source_selector,
+                purpose=purpose,
                 requester=_vault_requester_payload(payload),
                 delivery=_vault_delivery_payload(payload),
                 expires_at=_expires_at_from_ttl(payload),
                 audience=vault_service.REQUEST_AUDIENCE_AGENT,
             )
     except vault_service.SecretNotFoundError as exc:
-        raise VaultApiError(f"secret '{name}' not found", code="secret_not_found", status=404) from exc
+        missing_name = name or str(exc)
+        raise VaultApiError(f"secret '{missing_name}' not found", code="secret_not_found", status=404) from exc
     except vault_service.NotGrantableError as exc:
         raise VaultApiError(str(exc), code="not_grantable", status=409) from exc
+    except vault_service.KeypairNotValueDeliverableError as exc:
+        raise VaultApiError(str(exc), code="keypair_not_value_deliverable", status=409) from exc
     except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+    except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     return {"ok": True, "request": request}
 
@@ -1746,7 +1784,7 @@ def _grant_ttl_seconds(grant: dict) -> int:
 def _release_one_shot_agent_grant(grant: dict | None, *, reason: str) -> None:
     if not isinstance(grant, dict) or grant.get("one_shot") is not True:
         return
-    release_vault_agent_scopes(_grant_scope_payload(grant), reason=reason)
+    release_vault_agent_scopes(_grant_release_payload(grant), reason=reason)
 
 
 def consume_one_shot_grants(grants: list[dict] | tuple[dict, ...] | None, *, reason: str) -> None:
@@ -1791,7 +1829,7 @@ def _restore_access_request_after_failed_agent_grant(
     with contextlib.suppress(Exception), engine.begin() as conn:
         vault_service.restore_access_request_after_failed_grant(
             conn,
-            created_by_request_id=str(request_id),
+            request_id=str(request_id),
             member_names=list(member_names or []),
             session_id=session_id,
         )
@@ -1883,11 +1921,41 @@ def _access_request_secret_name(request_id: str) -> str:
     return name
 
 
-def _grant_scope_payload(grant: dict) -> list[dict[str, str]]:
+def _grant_release_payload(grant: dict) -> list[dict[str, str]]:
     grant_id = str(grant.get("id") or grant.get("grant_id") or "")
     if not grant_id:
         return []
     return [{"grant_id": grant_id}]
+
+
+def _grant_option_from_request(conn, request_id: str) -> dict[str, Any]:
+    from storage import vault_service
+
+    request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+    if request.get("request_type") != "access":
+        raise VaultApiError("grant approval must complete an access request", code="invalid_request", status=409)
+    card = request.get("card") if isinstance(request.get("card"), dict) else {}
+    options = card.get("grant_options") if isinstance(card, dict) else None
+    if not isinstance(options, list) or len(options) != 1 or not isinstance(options[0], dict):
+        raise VaultApiError("access request is missing a grant option", code="invalid_request", status=409)
+    option = options[0]
+    grant_id = str(option.get("grant_id") or "").strip()
+    if not grant_id:
+        raise VaultApiError("access request is missing a grant id", code="invalid_request", status=409)
+    members = option.get("member_snapshot")
+    if not isinstance(members, list) or not all(isinstance(name, str) and name for name in members):
+        raise VaultApiError("access request has an invalid grant member snapshot", code="invalid_request", status=409)
+    source_selector = option.get("source_selector")
+    if not isinstance(source_selector, dict):
+        raise VaultApiError("access request has an invalid source selector", code="invalid_request", status=409)
+    purpose = str(option.get("purpose") or "run")
+    return {
+        "grant_id": grant_id,
+        "member_names": list(members),
+        "source_selector": source_selector,
+        "purpose": purpose,
+        "one_shot": bool(option.get("one_shot")),
+    }
 
 
 def _cleanup_failed_agent_grant(
@@ -1916,17 +1984,32 @@ def _cleanup_failed_agent_grant(
             release_scopes = (
                 vault_service.agent_release_scopes_after_rows(conn, grant_rows)
                 if grant_rows
-                else _grant_scope_payload(grant)
+                else _grant_release_payload(grant)
             )
             if force_release_scope:
-                for scope in _grant_scope_payload(grant):
-                    if scope not in release_scopes:
+                forced_scopes = _grant_release_payload(grant)
+                for scope in forced_scopes:
+                    raw_scope_members = grant.get("member_snapshot") or []
+                    scope_members = set(raw_scope_members if isinstance(raw_scope_members, list) else [])
+                    active_scope_members: set[str] = set()
+                    for active in conn.execute(
+                        select(vault_service.vault_grants).where(
+                            vault_service.vault_grants.c.status.in_(vault_service.ACTIVE_GRANT_STATES),
+                            vault_service.vault_grants.c.id == scope["grant_id"],
+                        )
+                    ).mappings():
+                        active_row = dict(active)
+                        if vault_service.grant_row_has_resident_agent_ready(active_row):
+                            active_members = json.loads(active_row.get("member_snapshot") or "[]")
+                            if isinstance(active_members, list):
+                                active_scope_members.update(str(member) for member in active_members if isinstance(member, str))
+                    if not scope_members.issubset(active_scope_members) and scope not in release_scopes:
                         release_scopes.append(scope)
     except Exception:
         if not force_release_on_cleanup_failure:
             raise
         logger.warning("%s: failed to update grant DB state; releasing resident scope", reason, exc_info=True)
-        release_scopes = _grant_scope_payload(grant)
+        release_scopes = _grant_release_payload(grant)
     release_vault_agent_scopes(release_scopes, reason=reason)
 
 
@@ -1935,30 +2018,34 @@ def create_vault_grant(payload: dict) -> dict:
 
     if not isinstance(payload, dict):
         raise VaultApiError("payload must be an object", code="invalid_payload")
-    try:
-        scope_type = str(payload["scope_type"])
-        scope_ref = str(payload["scope_ref"])
-    except KeyError as exc:
-        raise VaultApiError("scope_type and scope_ref are required", code="invalid_grant") from exc
     ttl = payload.get("ttl_seconds")
     try:
         ttl_seconds = int(ttl) if ttl is not None else None
     except (TypeError, ValueError) as exc:
         raise VaultApiError("ttl_seconds must be an integer", code="invalid_grant") from exc
-    request_id = payload.get("request_id") or payload.get("created_by_request_id")
+    request_id = payload.get("request_id")
     if not request_id:
         raise VaultApiError("request_id is required to create a grant", code="missing_request_id")
-    requested_grant_id = str(payload.get("grant_id") or "").strip() or None
+    request_id = str(request_id)
     engine = _vault_engine()
     preflight_error: Exception | None = None
     with engine.begin() as conn:
         try:
-            grantable_members = vault_service.request_grantable_member_metas(
-                conn,
-                scope_type,
-                scope_ref,
-                str(request_id),
-            )
+            option = _grant_option_from_request(conn, request_id)
+            member_names = payload.get("member_names") if isinstance(payload.get("member_names"), list) else option["member_names"]
+            member_names = [str(name) for name in member_names if isinstance(name, str) and name]
+            source_selector = payload.get("source_selector") if isinstance(payload.get("source_selector"), dict) else option["source_selector"]
+            purpose = str(payload.get("purpose") or option["purpose"])
+            grant_id = str(payload.get("grant_id") or "").strip()
+            if grant_id and grant_id != option["grant_id"]:
+                raise vault_service.InvalidRequestError("grant id does not match the approval request")
+            if set(member_names) != set(option["member_names"]):
+                raise vault_service.InvalidRequestError("grant members do not match the approval request")
+            if source_selector != option["source_selector"]:
+                raise vault_service.InvalidRequestError("grant source selector does not match the approval request")
+            if purpose != option["purpose"]:
+                raise vault_service.InvalidRequestError("grant purpose does not match the approval request")
+            grantable_members = vault_service.request_grantable_member_metas(conn, request_id)
         except (
             vault_service.SecretNotFoundError,
             vault_service.RequestNotFoundError,
@@ -1976,7 +2063,7 @@ def create_vault_grant(payload: dict) -> dict:
     if isinstance(preflight_error, vault_service.InvalidGrantError):
         raise VaultApiError(str(preflight_error), code="invalid_grant") from preflight_error
     if not grantable_members:
-        raise VaultApiError(f"{scope_type}:{scope_ref} has no grantable static secrets", code="not_grantable", status=409)
+        raise VaultApiError("grant has no grantable static secrets", code="not_grantable", status=409)
     protected_member_names = {str(member["name"]) for member in grantable_members if member.get("protection") == "protected"}
     needs_agent_deks = bool(protected_member_names)
 
@@ -1984,8 +2071,6 @@ def create_vault_grant(payload: dict) -> dict:
     provided_names = {item["name"] for item in agent_deks}
     if needs_agent_deks and provided_names != protected_member_names:
         raise VaultApiError("resident agent DEKs must match the protected grant members", code="invalid_grant")
-    if needs_agent_deks and not requested_grant_id:
-        raise VaultApiError("grant_id is required for resident agent DEK approval", code="invalid_grant")
     expected_member_names = {str(member["name"]) for member in grantable_members} if needs_agent_deks else None
     expected_pubkey = payload.get("agent_pubkey") if isinstance(payload.get("agent_pubkey"), dict) else None
     if needs_agent_deks:
@@ -2002,14 +2087,14 @@ def create_vault_grant(payload: dict) -> dict:
         with engine.begin() as conn:
             grant = vault_service.create_grant(
                 conn,
-                scope_type=scope_type,
-                scope_ref=scope_ref,
+                member_names=member_names,
+                source_selector=source_selector,
+                purpose=purpose,
                 session_id=str(session_id) if session_id else None,
                 ttl_seconds=ttl_seconds,
-                created_by_request_id=str(request_id),
+                request_id=request_id,
                 inherit_request_session=inherit_request_session,
                 expected_member_names=expected_member_names,
-                grant_id=requested_grant_id,
                 cache_ready=False,
             )
     except vault_service.NotGrantableError as exc:
@@ -2029,11 +2114,9 @@ def create_vault_grant(payload: dict) -> dict:
         relay_ttl = _grant_ttl_seconds(grant)
         agent_result = avault_agent_grant(
             grant_id=str(grant["id"]),
+            purpose=str(grant.get("purpose") or purpose),
             ttl_secs=relay_ttl,
             deks=agent_deks,
-            purpose="deliver",
-            scope_type="grant",
-            scope_ref=str(grant["id"]),
             expected_pubkey=expected_pubkey,
         )
         if not _agent_grant_cached_all(agent_result, len(agent_deks)):
@@ -2097,9 +2180,6 @@ def fulfill_vault_access_request(request_id: str, payload: dict | None = None) -
     request_id = str(request_id or "").strip()
     if not request_id:
         raise VaultApiError("request_id is required to fulfill protected access", code="missing_request_id")
-    if not body.get("scope_type") or not body.get("scope_ref"):
-        body.setdefault("scope_type", "secret")
-        body.setdefault("scope_ref", _access_request_secret_name(request_id))
     body["request_id"] = request_id
     created = create_vault_grant(body)
     return {
@@ -5295,25 +5375,19 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> dict:
 
 
 def _agent_secret_payload(secret: dict, *, target_field: str) -> dict:
-    payload = {
+    return {
         "name": secret["name"],
         target_field: secret[target_field],
         "envelope": _envelope_payload(secret["envelope"]),
     }
-    tier = secret.get("tier")
-    if tier:
-        payload["tier"] = str(tier)
-    return payload
 
 
 def avault_agent_grant(
     *,
     grant_id: str,
+    purpose: str,
     ttl_secs: int,
     deks: list[dict],
-    purpose: str = "deliver",
-    scope_type: str | None = None,
-    scope_ref: str | None = None,
     expected_pubkey: dict | None = None,
 ) -> dict:
     """Cache browser-released protected DEKs in the resident agent."""
@@ -5324,11 +5398,9 @@ def avault_agent_grant(
     try:
         return _avault_agent_client().grant(
             grant_id=grant_id,
+            purpose=purpose,
             ttl_secs=ttl_secs,
             deks=deks,
-            purpose=purpose,
-            scope_type=scope_type,
-            scope_ref=scope_ref,
         )
     except AvaultAgentError as exc:
         raise AvaultError(str(exc)) from exc
@@ -5405,7 +5477,7 @@ def _release_failed_grant_scope(grant_id: str, *, reason: str) -> None:
         release_vault_agent_scopes([{"grant_id": grant_id}], reason=reason)
     except AvaultError:
         logger.warning(
-            "%s: failed to clear resident agent grant after failed grant relay",
+            "%s: failed to clear resident agent scope after failed grant relay",
             reason,
             exc_info=True,
         )
@@ -5414,7 +5486,7 @@ def _release_failed_grant_scope(grant_id: str, *, reason: str) -> None:
 def release_vault_agent_scopes(scopes: list[dict[str, str]], *, reason: str) -> None:
     seen: set[str] = set()
     for scope in scopes:
-        grant_id = str(scope.get("grant_id") or scope.get("id") or "")
+        grant_id = str(scope.get("grant_id") or "")
         if not grant_id:
             continue
         if grant_id in seen:

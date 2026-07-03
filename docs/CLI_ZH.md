@@ -90,11 +90,22 @@ vibe status
 vibe doctor
 ```
 
+显式运行安全的一期修复：
+
+```bash
+vibe doctor repair --dry-run
+vibe doctor repair home-migration --yes
+vibe doctor repair duplicate-service-processes --yes
+vibe doctor repair stale-install-runtime --yes
+vibe doctor repair stale-restart-state --yes
+```
+
 **检查内容：**
 - 配置文件有效性
 - Slack token 配置
 - Agent CLI 可用性（Claude Code、OpenCode、Codex）
-- 运行时环境
+- runtime home 迁移状态
+- runtime 进程、安装来源和重启元数据状态
 
 ### `vibe remote`
 

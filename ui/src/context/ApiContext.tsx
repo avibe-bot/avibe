@@ -86,7 +86,7 @@ export type VaultSourceSelector = { env?: string[]; tags?: string[] };
  */
 export type VaultGrant = {
   id: string;
-  source_selector: VaultSourceSelector | null;
+  source_selector: VaultSourceSelector;
   session_id: string | null;
   purpose: string;
   status: string;
@@ -97,10 +97,9 @@ export type VaultGrant = {
   member_snapshot: string[];
   member_count: number;
   runtime_member_count: number;
+  delivery_ready?: boolean;
+  delivery_status?: string;
   one_shot?: boolean;
-  /** Backend request-option handle, not a user-facing product scope. */
-  scope_type?: string;
-  scope_ref?: string;
 };
 
 type VaultBlindBox = {
@@ -113,15 +112,9 @@ type VaultBlindBox = {
  * Browser-relayed protected access fulfillment. The browser releases each protected
  * DEK as an opaque HPKE blind box addressed to the resident avault agent and submits
  * ONLY `{name, dek_blindbox, approval}` per secret — never a raw DEK or plaintext.
- *
- * `grant_id` is the avault runtime binding the DEK blind boxes are sealed against.
- * `scope_type`/`scope_ref` identify the backend request option whose fixed member
- * snapshot is being approved; they are never rendered as product scopes.
  */
 export type VaultAccessFulfillmentPayload = {
   grant_id?: string;
-  scope_type?: string;
-  scope_ref?: string;
   session_id?: string | null;
   ttl_seconds?: number;
   this_session_only?: boolean;

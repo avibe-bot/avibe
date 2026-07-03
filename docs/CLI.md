@@ -105,11 +105,22 @@ Run diagnostic checks on your configuration.
 vibe doctor
 ```
 
+Run safe first-phase repairs explicitly:
+
+```bash
+vibe doctor repair --dry-run
+vibe doctor repair home-migration --yes
+vibe doctor repair duplicate-service-processes --yes
+vibe doctor repair stale-install-runtime --yes
+vibe doctor repair stale-restart-state --yes
+```
+
 **Checks:**
 - Configuration file validity
 - Slack token configuration
 - Agent CLI availability (Claude Code, OpenCode, Codex)
-- Runtime environment
+- Runtime home migration state
+- Runtime process, install, and restart metadata state
 
 ### `vibe remote`
 

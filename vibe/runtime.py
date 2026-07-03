@@ -113,6 +113,9 @@ class ServiceAlreadyRunningError(RuntimeError):
 
 
 def ensure_dirs():
+    from storage.migrations import guard_source_checkout_default_state_bootstrap
+
+    guard_source_checkout_default_state_bootstrap()
     paths.ensure_data_dirs()
 
 
@@ -133,6 +136,9 @@ def default_config():
 
 
 def ensure_config():
+    from storage.migrations import guard_source_checkout_default_state_bootstrap
+
+    guard_source_checkout_default_state_bootstrap()
     config_path = paths.get_config_path()
     if not config_path.exists():
         default = default_config()
@@ -234,7 +240,7 @@ def acquire_service_instance_lock() -> None:
     global _SERVICE_INSTANCE_LOCK_HANDLE
     if _SERVICE_INSTANCE_LOCK_HANDLE is not None:
         return
-    paths.ensure_data_dirs()
+    ensure_dirs()
     lock_path = get_service_lock_path()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_file = lock_path.open("a+", encoding="utf-8")
@@ -290,7 +296,7 @@ def release_service_instance_lock() -> None:
 
 def service_instance_lock_available() -> tuple[bool, int | None]:
     """Return whether the data-dir scoped service lock can be acquired."""
-    paths.ensure_data_dirs()
+    ensure_dirs()
     lock_path = get_service_lock_path()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_file = lock_path.open("a+", encoding="utf-8")
@@ -1069,6 +1075,9 @@ def start_service(
     wait_for_ready: bool = True,
     initial_ready_timeout: float = SERVICE_LOCK_READY_TIMEOUT_SECONDS,
 ):
+    from storage.migrations import guard_source_checkout_default_state_bootstrap
+
+    guard_source_checkout_default_state_bootstrap()
     with _SERVICE_LOCK:
         pid_path = paths.get_runtime_pid_path()
         existing_pid = 0

@@ -1,7 +1,7 @@
 """Resident avault agent socket client.
 
 The resident agent is the protected-tier delivery boundary: Python sends names,
-sealed envelopes, scopes, and browser-sealed DEK blind boxes over a Unix socket.
+    sealed envelopes, grant ids, and browser-sealed DEK blind boxes over a Unix socket.
 Plaintext and DEKs stay inside ``avault``.
 """
 

@@ -6,6 +6,7 @@ import shlex
 import sqlite3
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -660,6 +661,274 @@ def test_service_lifecycle_doctor_warns_when_extra_service_process_exists(monkey
 
     messages = [item["message"] for item in items if item["status"] == "warn"]
     assert any("Extra Avibe service process detected" in message and "2222" in message for message in messages)
+    warning = next(item for item in items if item.get("code") == "runtime.extra_service_process")
+    assert warning["repair"]["target"] == "duplicate-service-processes"
+
+
+def test_home_migration_doctor_warns_when_legacy_home_is_unmigrated(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    legacy_home = home / ".vibe_remote"
+    legacy_home.mkdir(parents=True)
+    monkeypatch.delenv("AVIBE_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("HOME", str(home))
+
+    items = cli._home_migration_items()
+
+    warning = next(item for item in items if item.get("code") == "runtime.legacy_home_unmigrated")
+    assert warning["status"] == "warn"
+    assert warning["repair"]["target"] == "home-migration"
+
+
+def test_service_install_doctor_warns_when_service_uses_legacy_package(monkeypatch):
+    monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [])
+    monkeypatch.setattr(
+        cli.runtime,
+        "get_process_command",
+        lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python "
+        "/home/test/.local/share/uv/tools/vibe-remote/lib/python3.13/site-packages/vibe/service_main.py",
+    )
+
+    items = cli._service_install_family_items()
+
+    warning = next(item for item in items if item.get("code") == "runtime.stale_install_process")
+    assert warning["repair"]["target"] == "stale-install-runtime"
+
+
+def test_tool_family_detection_resolves_uv_tool_launcher_symlink(tmp_path):
+    tool_root = tmp_path / ".local" / "share" / "uv" / "tools" / "avibe-os"
+    bin_dir = tool_root / "bin"
+    bin_dir.mkdir(parents=True)
+    vibe_bin = bin_dir / "vibe"
+    vibe_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    vibe_bin.chmod(0o755)
+    shim = tmp_path / ".local" / "bin" / "vibe"
+    shim.parent.mkdir(parents=True)
+    shim.symlink_to(vibe_bin)
+
+    assert cli._tool_family_from_text(str(shim)) == cli.PACKAGE_NAME
+
+
+def test_current_cli_install_family_resolves_cached_launcher_symlink(monkeypatch, tmp_path):
+    tool_root = tmp_path / ".local" / "share" / "uv" / "tools" / "avibe-os"
+    bin_dir = tool_root / "bin"
+    bin_dir.mkdir(parents=True)
+    vibe_bin = bin_dir / "vibe"
+    vibe_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    vibe_bin.chmod(0o755)
+    shim = tmp_path / ".local" / "bin" / "vibe"
+    shim.parent.mkdir(parents=True)
+    shim.symlink_to(vibe_bin)
+    monkeypatch.setattr(cli.sys, "executable", "/usr/bin/python3")
+    monkeypatch.setenv(cli.CURRENT_VIBE_EXECUTABLE_ENV, str(shim))
+    monkeypatch.setattr(cli, "_path_entries_for_executable", lambda name: [])
+
+    assert cli._current_cli_install_family() == cli.PACKAGE_NAME
+
+
+def test_repair_duplicate_service_processes_stops_only_extra_process(monkeypatch):
+    stopped = []
+    monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [2222])
+    monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
+    monkeypatch.setattr(cli, "_write_refreshed_runtime_status", lambda: None)
+
+    result = cli._repair_duplicate_service_processes()
+
+    assert result["status"] == "repaired"
+    assert stopped == [2222]
+    assert result["stopped_pids"] == [2222]
+
+
+def test_repair_stale_install_runtime_stops_only_legacy_extra_process(monkeypatch):
+    stopped = []
+    refreshed = []
+    monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
+    monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1111)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [2222])
+    monkeypatch.setattr(
+        cli.runtime,
+        "get_process_command",
+        lambda pid: {
+            1111: "/home/test/.local/share/uv/tools/avibe-os/bin/python service_main.py",
+            2222: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
+        }[pid],
+    )
+    monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda: (_ for _ in ()).throw(AssertionError("must not restart current owner")))
+    monkeypatch.setattr(cli, "_write_refreshed_runtime_status", lambda: refreshed.append(True))
+
+    result = cli._repair_stale_install_runtime()
+
+    assert result["status"] == "repaired"
+    assert stopped == [2222]
+    assert refreshed == [True]
+
+
+def test_repair_stale_install_runtime_restarts_when_legacy_owner_is_stopped(monkeypatch):
+    stopped = []
+    statuses = []
+    monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
+    monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1111)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [])
+    monkeypatch.setattr(
+        cli.runtime,
+        "get_process_command",
+        lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
+    )
+    monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda: 3333)
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 4444})
+    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: statuses.append(args))
+
+    result = cli._repair_stale_install_runtime()
+
+    assert result["status"] == "repaired"
+    assert stopped == [1111]
+    assert result["service_pid"] == 3333
+    assert statuses == [("running", "pid=3333", 3333, 4444)]
+
+
+def test_repair_stale_install_runtime_restarts_after_lockless_legacy_stopped(monkeypatch):
+    stopped = []
+    statuses = []
+    monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
+    monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [2222])
+    monkeypatch.setattr(
+        cli.runtime,
+        "get_process_command",
+        lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
+    )
+    monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda: 3333)
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 4444})
+    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: statuses.append(args))
+
+    result = cli._repair_stale_install_runtime()
+
+    assert result["status"] == "repaired"
+    assert stopped == [2222]
+    assert result["service_pid"] == 3333
+    assert statuses == [("running", "pid=3333", 3333, 4444)]
+
+
+def test_repair_stale_install_runtime_reports_failed_when_restart_fails(monkeypatch):
+    stopped = []
+    refreshed = []
+    monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
+    monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1111)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [])
+    monkeypatch.setattr(
+        cli.runtime,
+        "get_process_command",
+        lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
+    )
+    monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(cli, "_write_refreshed_runtime_status", lambda: refreshed.append(True))
+
+    result = cli._repair_stale_install_runtime()
+
+    assert result["status"] == "failed"
+    assert "failed to start" in result["message"]
+    assert stopped == [1111]
+    assert result["stopped_pids"] == [1111]
+    assert refreshed == [True]
+
+
+def test_repair_home_migration_skips_empty_home_without_initializing(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    monkeypatch.delenv("AVIBE_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("HOME", str(home))
+
+    result = cli._repair_home_migration()
+
+    assert result["status"] == "skipped"
+    assert not (home / ".avibe").exists()
+    assert not (home / ".vibe_remote").exists()
+
+
+def test_repair_home_migration_fails_when_compatibility_symlink_is_missing(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    avibe_home = home / ".avibe"
+    legacy_home = home / ".vibe_remote"
+    legacy_home.mkdir(parents=True)
+    monkeypatch.delenv("AVIBE_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(cli.paths, "migrate_default_home", lambda: legacy_home.rename(avibe_home) or avibe_home)
+    monkeypatch.setattr(
+        cli.paths,
+        "ensure_data_dirs",
+        lambda: (_ for _ in ()).throw(AssertionError("failed migration must not declare data dirs ready")),
+    )
+
+    result = cli._repair_home_migration()
+
+    assert result["status"] == "failed"
+    assert "compatibility symlink" in result["message"]
+    assert avibe_home.exists()
+    assert not legacy_home.exists()
+
+
+def test_repair_stale_restart_state_removes_marker(monkeypatch):
+    paths.ensure_data_dirs()
+    restart_path = runtime.get_restart_status_path()
+    runtime.write_json(restart_path, {"state": "running", "supervisor_pid": 4242})
+    old_timestamp = time.time() - 120
+    os.utime(restart_path, (old_timestamp, old_timestamp))
+    monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: False)
+    refreshed = []
+    monkeypatch.setattr(cli, "_write_refreshed_runtime_status", lambda: refreshed.append(True))
+
+    result = cli._repair_stale_restart_state()
+
+    assert result["status"] == "repaired"
+    assert not restart_path.exists()
+    assert refreshed == [True]
+
+
+def test_repair_stale_restart_state_removes_old_marker_without_start_time(monkeypatch):
+    paths.ensure_data_dirs()
+    restart_path = runtime.get_restart_status_path()
+    runtime.write_json(restart_path, {"state": "running", "supervisor_pid": 4242})
+    old_timestamp = time.time() - 120
+    os.utime(restart_path, (old_timestamp, old_timestamp))
+    monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        cli.runtime,
+        "process_create_time",
+        lambda pid: (_ for _ in ()).throw(AssertionError("missing start time should use marker age")),
+    )
+    refreshed = []
+    monkeypatch.setattr(cli, "_write_refreshed_runtime_status", lambda: refreshed.append(True))
+
+    result = cli._repair_stale_restart_state()
+
+    assert result["status"] == "repaired"
+    assert not restart_path.exists()
+    assert refreshed == [True]
+
+
+def test_doctor_repair_dry_run_does_not_probe_runtime(monkeypatch):
+    def fail_runtime_probe(*args, **kwargs):
+        raise AssertionError("dry-run must not touch runtime probes")
+
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", fail_runtime_probe)
+
+    result = cli._repair_doctor_targets(["duplicate-service-processes"], dry_run=True)
+
+    assert result["ok"] is True
+    assert result["results"][0]["status"] == "planned"
 
 
 def test_restart_parser_accepts_delay_seconds():
@@ -668,6 +937,25 @@ def test_restart_parser_accepts_delay_seconds():
 
     assert args.command == "restart"
     assert args.delay_seconds == 60
+
+
+def test_doctor_parser_accepts_repair_target_and_dry_run():
+    parser = cli.build_parser()
+    args = parser.parse_args(["doctor", "repair", "duplicate-service-processes", "--dry-run"])
+
+    assert args.command == "doctor"
+    assert args.doctor_action == "repair"
+    assert args.doctor_repair_targets == ["duplicate-service-processes"]
+    assert args.dry_run is True
+
+
+def test_doctor_bare_dry_run_does_not_request_repair():
+    parser = cli.build_parser()
+    args = parser.parse_args(["doctor", "--dry-run"])
+
+    assert args.command == "doctor"
+    assert args.doctor_action is None
+    assert cli._doctor_repair_requested(args) is False
 
 
 def test_start_parser_accepts_start_command():

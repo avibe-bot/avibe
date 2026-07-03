@@ -247,6 +247,9 @@ def _run_restart_job(
     # running (a config change shouldn't tear down the open Web UI). "all"
     # (default, e.g. CLI `vibe restart` / upgrades) restarts both.
     restart_ui = scope != "service"
+    from storage.migrations import guard_source_checkout_default_state_bootstrap
+
+    guard_source_checkout_default_state_bootstrap()
     log_path = _restart_log_path(job_id)
     safe_cwd = get_safe_cwd()
     _prune_restart_logs()
@@ -430,6 +433,9 @@ def schedule_restart(
     scope: str = "all",
     prepare_show_runtime: bool = False,
 ) -> dict:
+    from storage.migrations import guard_source_checkout_default_state_bootstrap
+
+    guard_source_checkout_default_state_bootstrap()
     job_id = uuid.uuid4().hex[:12]
     invocation = get_restart_invocation_command(vibe_path=vibe_path)
     command = [*invocation[:-1], "__restart-supervisor"] if invocation and invocation[-1] == "restart" else [

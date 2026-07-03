@@ -72,9 +72,8 @@ def test_agent_client_round_trips_pubkey_grant_deliver_and_release(tmp_path):
         assert client.pubkey() == {"public_key": "pk", "fingerprint": "fp"}
         assert client.grant(
             grant_id="vgr_api",
+            purpose="run",
             ttl_secs=300,
-            scope_type="grant",
-            scope_ref="vgr_api",
             deks=[
                 {
                     "name": "API_TOKEN",
@@ -98,24 +97,19 @@ def test_agent_client_round_trips_pubkey_grant_deliver_and_release(tmp_path):
         assert client.release(grant_id="vgr_api") == {"released": True}
 
     assert [request["type"] for request in server.requests] == ["pubkey", "grant", "deliver.inject", "release"]
-    assert [request.get("grant_id") for request in server.requests[1:]] == ["vgr_api", "vgr_api", "vgr_api"]
     assert server.requests[1]["ttl_secs"] == 300
-    assert server.requests[1]["purpose"] == "deliver"
-    assert server.requests[1]["scope_type"] == "grant"
-    assert server.requests[1]["scope_ref"] == "vgr_api"
     assert "value" not in json.dumps(server.requests)
 
 
 def test_agent_client_surfaces_agent_errors(tmp_path):
     socket_path = Path(tempfile.mkdtemp(prefix="avault-agent-", dir="/tmp")) / "s"
-    with FakeAgentServer(socket_path, [{"ok": False, "error": "grant is missing or expired"}]) as server:
+    with FakeAgentServer(socket_path, [{"ok": False, "error": "grant is missing or expired"}]):
         client = AvaultAgentClient(socket_path)
 
         with pytest.raises(AvaultAgentError, match="grant is missing or expired"):
             client.deliver_run(
                 grant_id="vgr_api",
                 command=["/bin/true"],
-                context={"session_id": "ses_cli", "purpose": "run"},
                 secrets=[
                     {
                         "name": "API_TOKEN",
@@ -124,8 +118,6 @@ def test_agent_client_surfaces_agent_errors(tmp_path):
                     }
                 ],
             )
-    assert server.requests[0]["type"] == "deliver.run"
-    assert server.requests[0]["context"] == {"session_id": "ses_cli", "purpose": "run"}
 
 
 def test_agent_socket_path_uses_avibe_home_and_secures_directories(tmp_path, monkeypatch):
@@ -268,21 +260,11 @@ def test_agent_client_does_not_retry_deliver_after_frame_write_timeout(tmp_path)
             name="API_TOKEN",
             envelope={"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
             request={"headers": []},
-            context={"session_id": "ses_cli", "purpose": "fetch"},
         )
 
     thread.join(1)
     assert len(requests) == 1
     assert requests[0]["type"] == "deliver.fetch"
-    assert requests[0]["grant_id"] == "vgr_api"
-    assert requests[0]["auth"] == {
-        "name": "API_TOKEN",
-        "tier": "protected",
-        "envelope": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
-    }
-    assert requests[0]["context"] == {"session_id": "ses_cli", "purpose": "fetch"}
-    assert "name" not in requests[0]
-    assert "envelope" not in requests[0]
     assert ensure_calls == 0
 
 

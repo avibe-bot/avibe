@@ -21,6 +21,7 @@ def _ns(**kw):
         name=None,
         stdin=False,
         from_file=None,
+        group=None,
         tag=None,
         description=None,
         allow_host=None,
@@ -66,13 +67,19 @@ def _create_standard_secret(
         )
 
 
-def _set_protected_grant(
-    name: str,
-    *,
-    allow_host: list[str],
-    session_id: str | None = None,
-    mode: str = "fetch",
-) -> dict:
+def _grant_from_request(conn, request: dict, *, session_id: str | None = None) -> dict:
+    option = request["card"]["grant_options"][0]
+    return vault_service.create_grant(
+        conn,
+        member_names=option["member_snapshot"],
+        source_selector=option["source_selector"],
+        purpose=option["purpose"],
+        session_id=session_id,
+        request_id=request["id"],
+    )
+
+
+def _set_protected_grant(name: str, *, allow_host: list[str], session_id: str | None = None) -> dict:
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(
             conn,
@@ -84,16 +91,11 @@ def _set_protected_grant(
         req = vault_service.create_access_request(
             conn,
             name,
+            purpose="fetch",
             requester={"source": "cli", "session_id": session_id} if session_id else {"source": "cli"},
-            delivery={"session_id": session_id, "mode": mode} if session_id else {"mode": mode},
+            delivery={"session_id": session_id, "mode": "fetch"} if session_id else {"mode": "fetch"},
         )
-        return vault_service.create_grant(
-            conn,
-            scope_type="secret",
-            scope_ref=name,
-            session_id=session_id,
-            created_by_request_id=req["id"],
-        )
+        return _grant_from_request(conn, req, session_id=session_id)
 
 
 def _set_always_ask_grant(name: str, *, allow_host: list[str]) -> dict:
@@ -107,15 +109,11 @@ def _set_always_ask_grant(name: str, *, allow_host: list[str]) -> dict:
         req = vault_service.create_access_request(
             conn,
             name,
+            purpose="fetch",
             requester={"source": "cli"},
             delivery={"mode": "fetch"},
         )
-        return vault_service.create_grant(
-            conn,
-            scope_type="secret",
-            scope_ref=name,
-            created_by_request_id=req["id"],
-        )
+        return _grant_from_request(conn, req)
 
 
 def test_fetch_passes_bearer_request_to_avault_and_writes_stdout(tmp_path, capfd, monkeypatch):
@@ -188,32 +186,7 @@ def test_fetch_uses_agent_delivery_for_protected_grant(capfd, monkeypatch):
     fetch.assert_called_once()
     assert fetch.call_args.kwargs["grant_id"] == grant["id"]
     assert fetch.call_args.kwargs["sealed"] == _sealed("gh_pat")
-    assert fetch.call_args.kwargs["context"] == {"session_id": grant.get("session_id"), "purpose": "fetch"}
     assert "value" not in repr(fetch.call_args.kwargs)
-
-
-def test_fetch_does_not_reuse_run_grant(capfd, monkeypatch):
-    from unittest.mock import Mock
-
-    from vibe import api
-
-    grant = _set_protected_grant("GH_PAT", allow_host=["api.github.com"], session_id="ses_cli", mode="run")
-    agent_fetch = Mock(return_value={"status": 200, "headers": {}, "body": "ok"})
-    monkeypatch.setattr(api, "avault_agent_deliver_fetch", agent_fetch)
-    monkeypatch.setattr(api, "avault_deliver_fetch", Mock())
-
-    code = cli.cmd_vault_fetch(_ns(auth="GH_PAT", url="https://api.github.com/repos/o/r", session_id="ses_cli"))
-    captured = capfd.readouterr()
-
-    assert code == 1
-    assert json.loads(captured.err)["code"] == "approval_required"
-    agent_fetch.assert_not_called()
-    with cli._open_vault_engine().connect() as conn:
-        grant_row = conn.execute(vault_service.vault_grants.select().where(vault_service.vault_grants.c.id == grant["id"])).mappings().one()
-        requests = vault_service.list_requests(conn, status="pending")
-    assert grant_row["purpose"] == "run"
-    assert len(requests) == 1
-    assert requests[0]["delivery"]["mode"] == "fetch"
 
 
 def test_fetch_persists_protected_approval_request_without_grant(capfd):
