@@ -4665,10 +4665,9 @@ AVAULT_P2_MIN_VERSION = "0.1.3"
 # next avault release so upgraded Avibe installs fail closed instead of sending
 # new frames to an incompatible resident agent.
 AVAULT_GRANT_DELIVERY_MIN_VERSION = "0.1.4"
-# Installer pin must reference a published manifest-pinned release. It may lag
-# the P2 surface; standard sealing remains usable while P2-only entry points
-# gate on AVAULT_P2_MIN_VERSION below.
-AVAULT_VERSION = "0.1.3"
+# Installer pin must reference a published manifest-pinned release. v0.1.5 is
+# the first managed release carrying the final grant_id resident delivery frames.
+AVAULT_VERSION = "0.1.5"
 _AVAULT_RELEASE_BASE_URL = f"https://github.com/avibe-bot/avault/releases/download/v{AVAULT_VERSION}/"
 
 
@@ -5012,7 +5011,7 @@ def ensure_avault_installed(force: bool = False) -> dict:
         # Never downgrade: keep an existing binary that is strictly newer than the
         # managed pin, even under ``force``. ``force`` may still reinstall an equal
         # or older managed version to repair a binary, but it must not replace a
-        # newer user/custom avault (e.g. 0.1.4) with the older managed release. A
+        # newer user/custom avault (e.g. 0.1.6) with the older managed release. A
         # genuinely broken binary can't report a version, so it isn't matched here
         # and still gets repaired below.
         existing_newer_than_pin = (
