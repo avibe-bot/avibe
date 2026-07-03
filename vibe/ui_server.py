@@ -2669,7 +2669,7 @@ def _vault_error_response(exc):
 def vault_secrets_get():
     from vibe import api
 
-    return jsonify(api.get_vault_secrets(group=request.args.get("group") or None))
+    return jsonify(api.get_vault_secrets(tag=request.args.get("tag") or None))
 
 
 @app.route("/api/vault/pubkey", methods=["GET"])

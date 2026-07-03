@@ -1,14 +1,14 @@
-"""CRUD + resolve + grants + audit over the vault tables (design: docs/plans/vaults.md).
+"""CRUD + resolve + grants + audit over the vault tables.
 
 Data layer for Vaults, sibling to ``storage/messages_service.py`` etc.: functions take
 a SQLAlchemy ``Connection`` and never open their own engine. This module owns the
-metadata invariants around stored envelopes, approval requests, scope grants, and audit
+metadata invariants around stored envelopes, approval requests, grants, and audit
 rows so future vault behavior lands here rather than in callers.
 
 Secret values and key material never live here. Standard-tier values are sealed by
 ``avault`` before this layer stores them. Protected-tier values arrive already
 encrypted by the browser; this layer only stores the opaque ciphertext + wrap
-metadata. Scope grants persist metadata only; protected delivery material is owned by
+metadata. Grants persist metadata only; protected delivery material is owned by
 the resident avault agent, not by Python.
 """
 
@@ -27,13 +27,19 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
 from storage import vault_crypto
-from storage.models import vault_audit, vault_grants, vault_groups, vault_links, vault_requests, vault_secrets
+from storage.models import vault_audit, vault_grants, vault_requests, vault_secrets
 from storage.vault_crypto import Sealed
 
-DEFAULT_GROUP = "default"
-GRANT_SCOPE_TYPES = {"secret", "skill", "group"}
-DEFAULT_GRANT_TTL_SECONDS = {"secret": 300, "skill": 900, "group": 900}
+SKILL_TAG_PREFIX = "skill:"
+DEFAULT_ENV_GRANT_TTL_SECONDS = 300
+DEFAULT_TAG_GRANT_TTL_SECONDS = 900
+DEFAULT_GRANT_TTL_SECONDS = {
+    "env": DEFAULT_ENV_GRANT_TTL_SECONDS,
+    "tag": DEFAULT_TAG_GRANT_TTL_SECONDS,
+    "skill": DEFAULT_TAG_GRANT_TTL_SECONDS,
+}
 GRANT_TTL_OPTIONS_SECONDS = (300, 900, 3600)
+GRANT_PURPOSES = {"run", "fetch", "inject"}
 SUPPORTED_SIGNATURE_SCHEMES = {
     "ecdsa-secp256k1-recoverable",
     "ecdsa-secp256k1-der",
@@ -56,7 +62,6 @@ PROVISION_SPEC_FORBIDDEN_KEYS = {
 PROVISION_SPEC_ALLOWED_KEYS = {
     "kind",
     "protection",
-    "group",
     "description",
     "tags",
     "policy",
@@ -70,6 +75,17 @@ PROVISION_SPEC_ALLOWED_AUTH_KEYS = {"type", "name"}
 class GrantApproval:
     members: list[str]
     session_id: str | None
+    source_selector: dict[str, Any]
+    purpose: str
+    one_shot: bool
+
+
+@dataclass(frozen=True)
+class RequestGrantOption:
+    members: list[str]
+    source_selector: dict[str, Any]
+    purpose: str
+    one_shot: bool
 
 
 @dataclass(frozen=True)
@@ -273,6 +289,33 @@ def _string_list(value: Any, *, field: str) -> list[str]:
     return out
 
 
+def _normalize_tag(value: str, *, field: str = "tag") -> str:
+    tag = value.strip()
+    if not tag:
+        raise VaultServiceError(f"{field} must be a non-empty string")
+    if any(ch.isspace() for ch in tag):
+        raise VaultServiceError(f"{field} must not contain whitespace")
+    return tag
+
+
+def skill_tag(skill: str) -> str:
+    skill_name = _normalize_tag(skill, field="skill")
+    if skill_name.startswith(SKILL_TAG_PREFIX):
+        return skill_name
+    return f"{SKILL_TAG_PREFIX}{skill_name}"
+
+
+def _normalize_tags(tags: list[str] | None) -> list[str]:
+    return list(dict.fromkeys(_normalize_tag(tag) for tag in (tags or []) if isinstance(tag, str) and tag.strip()))
+
+
+def _row_tags(row: dict[str, Any]) -> list[str]:
+    raw = _loads(row.get("tags")) or []
+    if not isinstance(raw, list):
+        return []
+    return [str(tag) for tag in raw if isinstance(tag, str) and tag]
+
+
 def _normalize_allowed_host(value: str, *, field: str) -> str:
     raw = value.strip().lower()
     if not raw:
@@ -339,17 +382,12 @@ def normalize_provision_spec(spec: Any) -> dict[str, Any]:
             raise VaultServiceError("spec.protection must be 'standard' or 'protected'")
         normalized["protection"] = protection
 
-    group = _optional_string(spec.get("group"), field="spec.group") if "group" in spec else None
-    if group:
-        normalized["group"] = group
-
     description = _optional_string(spec.get("description"), field="spec.description") if "description" in spec else None
     if description:
         normalized["description"] = description
 
     tags = _string_list(spec.get("tags"), field="spec.tags") if "tags" in spec else []
-    if tags:
-        normalized["tags"] = tags
+    tags = _normalize_tags(tags)
 
     policy = spec.get("policy")
     if policy is not None:
@@ -396,7 +434,12 @@ def normalize_provision_spec(spec: Any) -> dict[str, Any]:
             raise VaultServiceError(f"unsupported spec.links fields: {', '.join(sorted(extra_link_keys))}")
         skills = _string_list(links.get("skills"), field="spec.links.skills") if "skills" in links else []
         if skills:
-            normalized["links"] = {"skills": skills}
+            normalized_skills = list(dict.fromkeys(_normalize_tag(skill, field="spec.links.skills") for skill in skills))
+            tags = list(dict.fromkeys([*tags, *(skill_tag(skill) for skill in normalized_skills)]))
+            normalized["links"] = {"skills": normalized_skills}
+
+    if tags:
+        normalized["tags"] = tags
 
     return normalized
 
@@ -408,8 +451,7 @@ def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
     protection = row.get("protection")
     payload = {
         "name": row["name"],
-        "group": row.get("group_name"),
-        "tags": _loads(row.get("tags")) or [],
+        "tags": _row_tags(row),
         "kind": kind,
         "protection": protection,
         "signer_kind": row.get("signer_kind"),
@@ -570,17 +612,13 @@ def _grant_row_payload(
     readiness = _grant_readiness(conn, row, cache=cache, members=members)
     grant_id = row["id"]
     runtime_members = cache.covered_names(grant_id) if readiness.active else []
-    try:
-        always_ask = len(members) == 1 and _secret_always_ask(_require_row(conn, members[0]))
-    except SecretNotFoundError:
-        always_ask = False
     return {
         "id": grant_id,
-        "scope_type": row["scope_type"],
-        "scope_ref": row["scope_ref"],
+        "source_selector": _loads(row.get("source_selector")) or {},
         "session_id": row.get("session_id"),
+        "purpose": row.get("purpose"),
         "status": row.get("status"),
-        "created_by_request_id": row.get("created_by_request_id"),
+        "request_id": row.get("request_id"),
         "created_at": row.get("created_at"),
         "expires_at": row.get("expires_at"),
         "revoked_at": row.get("revoked_at"),
@@ -589,7 +627,7 @@ def _grant_row_payload(
         "runtime_member_count": len(runtime_members),
         "delivery_ready": readiness.delivery_ready,
         "delivery_status": readiness.delivery_status,
-        "one_shot": always_ask,
+        "one_shot": bool(int(row.get("one_shot") or 0)),
     }
 
 
@@ -612,16 +650,18 @@ def _grant_payload(conn: Connection, row: dict[str, Any], *, cache: VaultGrantRu
     return _grant_row_payload(conn, dict(row), cache=cache)
 
 
-def _unique_grant_scopes(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
-    seen: set[tuple[str, str]] = set()
-    scopes: list[dict[str, str]] = []
+def _unique_grant_release_refs(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    refs: list[dict[str, str]] = []
     for row in rows:
-        key = (str(row["scope_type"]), str(row["scope_ref"]))
+        key = str(row.get("id") or "")
+        if not key:
+            continue
         if key in seen:
             continue
         seen.add(key)
-        scopes.append({"scope_type": key[0], "scope_ref": key[1]})
-    return scopes
+        refs.append({"grant_id": key})
+    return refs
 
 
 def _hydrate_card_unlock_material(conn: Connection, row: dict[str, Any], card: dict[str, Any]) -> dict[str, Any]:
@@ -632,7 +672,7 @@ def _hydrate_card_unlock_material(conn: Connection, row: dict[str, Any], card: d
         if secret_row is not None and (material := _protected_unlock_material(dict(secret_row))) is not None:
             card["secret_unlock_material"] = material
     hydrated_options: list[dict[str, Any]] = []
-    for option in card.get("scope_options") or []:
+    for option in card.get("grant_options") or []:
         if not isinstance(option, dict):
             continue
         option_payload = dict(option)
@@ -657,7 +697,7 @@ def _hydrate_card_unlock_material(conn: Connection, row: dict[str, Any], card: d
             option_payload["unlock_material"] = materials
         hydrated_options.append(option_payload)
     if hydrated_options:
-        card["scope_options"] = hydrated_options
+        card["grant_options"] = hydrated_options
     return card
 
 
@@ -793,6 +833,28 @@ def _request_card(row: dict[str, Any]) -> dict[str, Any]:
     return card if isinstance(card, dict) else {}
 
 
+def _request_grant_option(row: dict[str, Any]) -> RequestGrantOption:
+    card = _request_card(row)
+    options = card.get("grant_options") if isinstance(card, dict) else None
+    if not isinstance(options, list) or len(options) != 1 or not isinstance(options[0], dict):
+        raise InvalidRequestError("grant approval request is missing a grant option")
+    option = options[0]
+    snapshot = option.get("member_snapshot")
+    if not isinstance(snapshot, list):
+        raise InvalidRequestError("grant approval request has an invalid member snapshot")
+    members = [str(name) for name in snapshot if isinstance(name, str) and name]
+    selector = _source_selector_payload(option.get("source_selector") if isinstance(option.get("source_selector"), dict) else {})
+    purpose = str(option.get("purpose") or "run")
+    if purpose not in GRANT_PURPOSES:
+        raise InvalidRequestError("grant approval request has an invalid purpose")
+    return RequestGrantOption(
+        members=members,
+        source_selector=selector,
+        purpose=purpose,
+        one_shot=bool(option.get("one_shot")),
+    )
+
+
 def _secret_policy(row: dict[str, Any]) -> dict[str, Any]:
     return _loads(row.get("policy")) or {}
 
@@ -866,47 +928,6 @@ def audit(
     )
 
 
-def ensure_default_group(conn: Connection) -> None:
-    """Insert the implicit ``default`` group if absent (the migration seeds it, but
-    keep this defensive for DBs built another way)."""
-    exists = conn.execute(select(vault_groups.c.name).where(vault_groups.c.name == DEFAULT_GROUP)).first()
-    if exists is None:
-        conn.execute(
-            vault_groups.insert().values(
-                name=DEFAULT_GROUP,
-                description="Default group",
-                grantable=1,
-                max_grant_ttl_seconds=900,
-                created_at=_now(),
-            )
-        )
-
-
-def _ensure_group(conn: Connection, name: str) -> None:
-    """Create the group row if it's missing so a secret's ``group_name`` FK is satisfied.
-
-    The Vaults UI / ``--group`` expose arbitrary group labels; without this an unseeded
-    group would trip the FK with a generic ``FOREIGN KEY constraint failed`` instead of
-    the group option just working.
-    """
-    if conn.execute(select(vault_groups.c.name).where(vault_groups.c.name == name)).first() is None:
-        try:
-            conn.execute(
-                vault_groups.insert().values(
-                    name=name,
-                    description="Default group" if name == DEFAULT_GROUP else None,
-                    grantable=1,
-                    max_grant_ttl_seconds=900,
-                    created_at=_now(),
-                )
-            )
-        except IntegrityError:
-            # A concurrent create inserted this brand-new group between our check and insert.
-            # The row now exists (all the FK needs), so swallow the PK conflict and continue —
-            # otherwise the loser's otherwise-valid secret create would fail with a raw error.
-            pass
-
-
 def _require_row(conn: Connection, name: str) -> dict[str, Any]:
     row = conn.execute(select(vault_secrets).where(vault_secrets.c.name == name)).mappings().first()
     if row is None:
@@ -936,7 +957,6 @@ def create_secret(
     *,
     name: str,
     sealed: Sealed,
-    group: str = DEFAULT_GROUP,
     tags: list[str] | None = None,
     protection: str = "standard",
     kind: str = "static",
@@ -995,8 +1015,8 @@ def create_secret(
         ):
             raise VaultAlreadyInitializedError("a protected vault already exists; unlock it instead of re-initializing")
 
-    _ensure_group(conn, group)
     now = _now()
+    normalized_tags = _normalize_tags(tags)
     public_meta = dict(public_meta or {})
     if description:
         public_meta["description"] = description
@@ -1005,8 +1025,7 @@ def create_secret(
             vault_secrets.insert().values(
                 id=_id("vlt"),
                 name=name,
-                group_name=group,
-                tags=json.dumps(tags) if tags else None,
+                tags=json.dumps(normalized_tags) if normalized_tags else None,
                 kind=kind,
                 protection=protection,
                 signer_kind=signer_kind,
@@ -1046,22 +1065,60 @@ def create_secret(
 def link_secret_to_skills(conn: Connection, secret_name: str, skills: list[str], *, source: str = "agent") -> None:
     if not skills:
         return
-    _require_row(conn, secret_name)
-    now = _now()
-    for skill in dict.fromkeys(item.strip() for item in skills if item and item.strip()):
-        try:
-            conn.execute(
-                vault_links.insert().values(
-                    id=_id("vln"),
-                    secret_name=secret_name,
-                    skill_name=skill,
-                    source=source,
-                    required=1,
-                    created_at=now,
-                )
-            )
-        except IntegrityError:
-            pass
+    row = _require_row(conn, secret_name)
+    current = _row_tags(row)
+    updated = list(dict.fromkeys([*current, *(skill_tag(skill) for skill in skills if skill and skill.strip())]))
+    if updated == current:
+        return
+    conn.execute(
+        vault_secrets.update()
+        .where(vault_secrets.c.name == secret_name)
+        .values(tags=json.dumps(updated) if updated else None)
+    )
+    audit(conn, "tags-updated", secret_name=secret_name, delivery={"source": source, "tags": updated})
+
+
+def update_secret_tags(conn: Connection, secret_name: str, tags: list[str]) -> dict[str, Any]:
+    row = _require_row(conn, secret_name)
+    normalized = _normalize_tags(tags)
+    conn.execute(
+        vault_secrets.update()
+        .where(vault_secrets.c.name == secret_name)
+        .values(tags=json.dumps(normalized) if normalized else None)
+    )
+    audit(conn, "tags-updated", secret_name=secret_name, delivery={"tags": normalized})
+    return _meta_payload(dict(row) | {"tags": json.dumps(normalized) if normalized else None})
+
+
+def update_secret_classification(
+    conn: Connection,
+    secret_name: str,
+    *,
+    kind: str | None = None,
+    protection: str | None = None,
+    cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+) -> dict[str, Any]:
+    row = _require_row(conn, secret_name)
+    values: dict[str, Any] = {}
+    if kind is not None:
+        normalized_kind = kind.strip().lower()
+        if normalized_kind not in {"static", "keypair"}:
+            raise VaultServiceError(f"invalid vault secret kind: {kind!r}")
+        values["kind"] = normalized_kind
+    if protection is not None:
+        normalized_protection = protection.strip().lower()
+        if normalized_protection not in {"standard", "protected"}:
+            raise VaultServiceError(f"invalid protection tier: {protection!r}")
+        values["protection"] = normalized_protection
+    if not values:
+        return _meta_payload(row)
+    if values.get("kind", row.get("kind")) != row.get("kind") or values.get("protection", row.get("protection")) != row.get("protection"):
+        _expire_pending_requests_for_secret(conn, secret_name, reason="request-expired-classification-changed")
+        _expire_active_grants_for_secret(conn, secret_name, cache=cache, reason="grant-expired-classification-changed")
+    values["updated_at"] = _now()
+    conn.execute(vault_secrets.update().where(vault_secrets.c.name == secret_name).values(**values))
+    audit(conn, "updated", secret_name=secret_name, delivery={"fields": sorted(values)})
+    return _meta_payload(_require_row(conn, secret_name))
 
 
 def get_secret_meta(conn: Connection, name: str) -> dict[str, Any]:
@@ -1091,12 +1148,14 @@ def store_pubkey_pin(conn: Connection, name: str, pin: dict[str, Any]) -> dict[s
     return get_secret_meta(conn, name)
 
 
-def list_secrets(conn: Connection, *, group: str | None = None) -> list[dict[str, Any]]:
+def list_secrets(conn: Connection, *, tag: str | None = None) -> list[dict[str, Any]]:
     """Masked, value-free list. Never decrypts."""
     query = select(vault_secrets).order_by(vault_secrets.c.name)
-    if group is not None:
-        query = query.where(vault_secrets.c.group_name == group)
-    return [_meta_payload(dict(row)) for row in conn.execute(query).mappings()]
+    rows = [_meta_payload(dict(row)) for row in conn.execute(query).mappings()]
+    if tag is not None:
+        normalized = _normalize_tag(tag)
+        rows = [row for row in rows if normalized in row.get("tags", [])]
+    return rows
 
 
 def latest_protected_vmk_wrap_meta(conn: Connection) -> str | None:
@@ -1314,7 +1373,6 @@ def fulfill_provision(
     request_id: str,
     sealed: Sealed,
     *,
-    group: str = DEFAULT_GROUP,
     description: str | None = None,
 ) -> dict[str, Any]:
     """Store the caller-sealed value for a pending provision request."""
@@ -1325,7 +1383,6 @@ def fulfill_provision(
         conn,
         name=row["secret_name"],
         sealed=sealed,
-        group=group,
         description=description,
         provision_request_id=request_id,
     )
@@ -1354,307 +1411,262 @@ def _secure_input_card(
     return card
 
 
-def _grant_member_rows(conn: Connection, scope_type: str, scope_ref: str) -> list[dict[str, Any]]:
-    if scope_type == "secret":
-        return [_require_row(conn, scope_ref)]
-    if scope_type == "skill":
-        rows = (
-            conn.execute(
-                select(vault_secrets)
-                .select_from(vault_links.join(vault_secrets, vault_links.c.secret_name == vault_secrets.c.name))
-                .where(vault_links.c.skill_name == scope_ref)
-                .order_by(vault_secrets.c.name)
-            )
-            .mappings()
-            .all()
-        )
-        return [dict(row) for row in rows]
-    if scope_type == "group":
-        rows = (
-            conn.execute(
-                select(vault_secrets)
-                .where(vault_secrets.c.group_name == scope_ref)
-                .order_by(vault_secrets.c.name)
-            )
-            .mappings()
-            .all()
-        )
-        return [dict(row) for row in rows]
-    raise InvalidGrantError(f"invalid grant scope_type: {scope_type!r}")
+def _source_selector_payload(source_selector: dict[str, Any] | None = None) -> dict[str, Any]:
+    if source_selector is None:
+        return {"env": [], "tags": []}
+    if not isinstance(source_selector, dict):
+        raise InvalidGrantError("source_selector must be an object")
+    env = _string_list(source_selector.get("env"), field="source_selector.env") if "env" in source_selector else []
+    tags = _string_list(source_selector.get("tags"), field="source_selector.tags") if "tags" in source_selector else []
+    skills = _string_list(source_selector.get("skills"), field="source_selector.skills") if "skills" in source_selector else []
+    normalized_tags = _normalize_tags(tags)
+    normalized_tags = list(dict.fromkeys([*normalized_tags, *(skill_tag(skill) for skill in skills)]))
+    payload: dict[str, Any] = {}
+    if env:
+        payload["env"] = env
+    if normalized_tags:
+        payload["tags"] = normalized_tags
+    return payload or {"env": [], "tags": []}
 
 
-def _grantable_member_rows(conn: Connection, scope_type: str, scope_ref: str) -> list[dict[str, Any]]:
-    rows = _grant_member_rows(conn, scope_type, scope_ref)
-    if not rows:
-        return []
-    group_names = {row.get("group_name") for row in rows if row.get("group_name")}
-    grantable_groups = {
-        row["name"]
-        for row in conn.execute(select(vault_groups).where(vault_groups.c.name.in_(group_names))).mappings()
-        if int(row.get("grantable") or 0) == 1
-    }
-    return [
-        row
-        for row in rows
-        if _secret_access_grantable(row) and (row.get("group_name") in grantable_groups)
-    ]
+def _selector_ttl_seconds(source_selector: dict[str, Any]) -> int:
+    tags = source_selector.get("tags")
+    if isinstance(tags, list) and tags:
+        if any(isinstance(tag, str) and tag.startswith(SKILL_TAG_PREFIX) for tag in tags):
+            return DEFAULT_GRANT_TTL_SECONDS["skill"]
+        return DEFAULT_GRANT_TTL_SECONDS["tag"]
+    return DEFAULT_GRANT_TTL_SECONDS["env"]
 
 
-def _always_ask_request_member_rows(
+def _parse_env_selector(spec: str) -> tuple[str, str]:
+    raw = spec.strip()
+    if not raw:
+        raise InvalidRequestError("env selector must be non-empty")
+    if "=" in raw:
+        env_name, secret_name = raw.split("=", 1)
+        env_name = env_name.strip()
+        secret_name = secret_name.strip()
+    else:
+        env_name = secret_name = raw
+    if not vault_crypto.is_valid_secret_name(env_name) or not vault_crypto.is_valid_secret_name(secret_name):
+        raise InvalidRequestError("env selector must use valid secret names")
+    return env_name, secret_name
+
+
+def expand_value_delivery_selector(
     conn: Connection,
-    scope_type: str,
-    scope_ref: str,
-    request_row: dict[str, Any],
-) -> list[dict[str, Any]]:
-    requested_secret = request_row.get("secret_name")
-    if not requested_secret or scope_type != "secret" or scope_ref != requested_secret:
-        return []
-    row = _require_row(conn, str(requested_secret))
-    if not _secret_access_requestable(row) or not _secret_always_ask(row):
-        return []
-    if not _groups_grantable(conn, [str(row.get("group_name") or "")]):
-        return []
-    return [row]
-
-
-def _grantable_member_rows_for_request(
-    conn: Connection,
-    scope_type: str,
-    scope_ref: str,
-    request_id: str | None,
-) -> list[dict[str, Any]]:
-    rows = _grantable_member_rows(conn, scope_type, scope_ref)
-    if rows or not request_id:
-        return rows
-    try:
-        request_row = _load_request_for_transition(
-            conn,
-            str(request_id),
-            request_type="access",
-            allowed_statuses={"pending"},
-            wrong_type_message="grant approval must complete an access request",
-            wrong_status_message="grant approval request is not pending",
-            expired_message="grant approval request has expired",
-        )
-    except RequestNotFoundError:
-        raise
-    except InvalidRequestError:
-        raise
-    return _always_ask_request_member_rows(conn, scope_type, scope_ref, request_row)
-
-
-def grantable_member_metas(conn: Connection, scope_type: str, scope_ref: str) -> list[dict[str, Any]]:
-    return [_meta_payload(row) for row in _grantable_member_rows(conn, scope_type, scope_ref)]
-
-
-def request_grantable_member_metas(
-    conn: Connection,
-    scope_type: str,
-    scope_ref: str,
-    request_id: str,
-) -> list[dict[str, Any]]:
-    return [
-        _meta_payload(row)
-        for row in _grantable_member_rows_for_request(
-            conn,
-            scope_type,
-            scope_ref,
-            request_id,
-        )
-    ]
-
-
-def _ttl_cap_for_members(conn: Connection, member_names: list[str]) -> int:
-    if not member_names:
-        return min(DEFAULT_GRANT_TTL_SECONDS.values())
-    rows = (
-        conn.execute(
-            select(vault_groups.c.max_grant_ttl_seconds)
-            .select_from(vault_secrets.join(vault_groups, vault_secrets.c.group_name == vault_groups.c.name))
-            .where(vault_secrets.c.name.in_(member_names))
-        )
-        .scalars()
-        .all()
-    )
-    caps = [int(row) for row in rows if row is not None]
-    return min(caps) if caps else 900
-
-
-def _groups_grantable(conn: Connection, group_names: list[str]) -> bool:
-    names = {name for name in group_names if name}
-    if not names:
-        return False
-    grantable_groups = {
-        row["name"]
-        for row in conn.execute(select(vault_groups).where(vault_groups.c.name.in_(names))).mappings()
-        if int(row.get("grantable") or 0) == 1
-    }
-    return names.issubset(grantable_groups)
-
-
-def _secret_scope_option(
-    conn: Connection,
-    row: dict[str, Any],
     *,
-    default_ttl_seconds: int,
-    one_shot: bool = False,
-) -> dict[str, Any] | None:
-    secret_name = str(row["name"])
-    if not _groups_grantable(conn, [str(row.get("group_name") or "")]):
-        return None
-    ttl_cap = _ttl_cap_for_members(conn, [secret_name])
-    capped_default = min(default_ttl_seconds, ttl_cap)
+    env: list[str] | None = None,
+    tags: list[str] | None = None,
+    skills: list[str] | None = None,
+    source_selector: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    selector = _source_selector_payload(source_selector or {"env": env or [], "tags": tags or [], "skills": skills or []})
+    selections: list[dict[str, Any]] = []
+    env_by_secret: dict[str, str] = {}
+    secret_by_env: dict[str, str] = {}
+
+    def add_selection(row: dict[str, Any], env_name: str) -> None:
+        secret_name = str(row["name"])
+        _reject_keypair_value_delivery(row, secret_name)
+        existing_env = env_by_secret.get(secret_name)
+        if existing_env is not None:
+            if existing_env != env_name:
+                raise InvalidRequestError(f"{secret_name} was selected with conflicting env names")
+            return
+        existing_secret = secret_by_env.get(env_name)
+        if existing_secret is not None and existing_secret != secret_name:
+            raise InvalidRequestError(f"env {env_name} maps to multiple vault secrets")
+        env_by_secret[secret_name] = env_name
+        secret_by_env[env_name] = secret_name
+        selections.append(
+            {
+                "name": secret_name,
+                "env": env_name,
+                "kind": row.get("kind"),
+                "protection": row.get("protection"),
+            }
+        )
+
+    for env_spec in selector.get("env") or []:
+        env_name, secret_name = _parse_env_selector(str(env_spec))
+        add_selection(_require_row(conn, secret_name), env_name)
+
+    for tag in selector.get("tags") or []:
+        normalized = _normalize_tag(str(tag))
+        rows = [
+            dict(row)
+            for row in conn.execute(select(vault_secrets).order_by(vault_secrets.c.name)).mappings()
+            if normalized in _row_tags(dict(row))
+        ]
+        for row in rows:
+            add_selection(row, str(row["name"]))
+
+    return {"source_selector": selector, "secrets": selections}
+
+
+def _request_member_rows_for_selector(
+    conn: Connection,
+    *,
+    source_selector: dict[str, Any],
+) -> list[dict[str, Any]]:
+    expanded = expand_value_delivery_selector(conn, source_selector=source_selector)
+    rows: list[dict[str, Any]] = []
+    for item in expanded["secrets"]:
+        row = _require_row(conn, str(item["name"]))
+        if row.get("protection") == "protected" or _secret_always_ask(row):
+            rows.append(row)
+    return rows
+
+
+def _member_rows_for_names(conn: Connection, member_names: list[str]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for name in member_names:
+        row = _require_row(conn, str(name))
+        _reject_keypair_value_delivery(row, str(name))
+        rows.append(row)
+    return rows
+
+
+def grantable_member_metas(conn: Connection, member_names: list[str]) -> list[dict[str, Any]]:
+    return [_meta_payload(row) for row in _member_rows_for_names(conn, member_names) if _secret_access_grantable(row)]
+
+
+def request_grantable_member_metas(conn: Connection, request_id: str) -> list[dict[str, Any]]:
+    row = _load_request_for_transition(
+        conn,
+        str(request_id),
+        request_type="access",
+        allowed_statuses={"pending"},
+        wrong_type_message="grant approval must complete an access request",
+        wrong_status_message="grant approval request is not pending",
+        expired_message="grant approval request has expired",
+    )
+    option = _request_grant_option(row)
+    return [_meta_payload(_require_row(conn, name)) for name in option.members]
+
+
+def _grant_option(
+    rows: list[dict[str, Any]],
+    *,
+    source_selector: dict[str, Any],
+    purpose: str,
+    one_shot: bool,
+) -> dict[str, Any]:
+    members = [str(row["name"]) for row in rows]
+    default_ttl_seconds = _selector_ttl_seconds(source_selector)
     option = {
-        "scope_type": "secret",
-        "scope_ref": secret_name,
-        "default_ttl_seconds": capped_default,
-        "ttl_options_seconds": [seconds for seconds in GRANT_TTL_OPTIONS_SECONDS if seconds <= ttl_cap],
+        "source_selector": source_selector,
+        "purpose": purpose,
+        "default_ttl_seconds": default_ttl_seconds,
+        "ttl_options_seconds": [seconds for seconds in GRANT_TTL_OPTIONS_SECONDS if seconds >= default_ttl_seconds],
         "session_binding_default": True,
-        "member_count": 1,
-        "member_snapshot": [secret_name],
-        "member_versions": [_member_version(row)],
+        "member_count": len(members),
+        "member_snapshot": members,
+        "member_versions": [_member_version(row) for row in rows],
     }
     if one_shot:
         option["one_shot"] = True
     return option
 
 
-def _scope_option(
-    conn: Connection,
-    scope_type: str,
-    scope_ref: str,
-    *,
-    requested_secret: str,
-    default_ttl_seconds: int,
-) -> dict[str, Any] | None:
-    rows = _grantable_member_rows(conn, scope_type, scope_ref)
-    members = [row["name"] for row in rows]
-    if not members or requested_secret not in members:
-        return None
-    ttl_cap = _ttl_cap_for_members(conn, members)
-    capped_default = min(default_ttl_seconds, ttl_cap)
-    return {
-        "scope_type": scope_type,
-        "scope_ref": scope_ref,
-        "default_ttl_seconds": capped_default,
-        "ttl_options_seconds": [seconds for seconds in GRANT_TTL_OPTIONS_SECONDS if seconds <= ttl_cap],
-        "session_binding_default": True,
-        "member_count": len(members),
-        "member_snapshot": members,
-        "member_versions": [_member_version(row) for row in rows],
-    }
-
-
 def approval_card(
     conn: Connection,
-    secret_name: str,
+    secret_name: str | None,
     *,
     request_id: str,
     request_type: str = "access",
+    member_rows: list[dict[str, Any]] | None = None,
+    source_selector: dict[str, Any] | None = None,
+    purpose: str = "run",
     command: str | None = None,
     egress: str | None = None,
     skill: str | None = None,
     session_id: str | None = None,
+    one_shot: bool = False,
     grantable: bool = True,
 ) -> dict[str, Any]:
-    row = _require_row(conn, secret_name)
-    group = row.get("group_name") or DEFAULT_GROUP
-    always_ask = _secret_always_ask(row)
-    one_shot_access = request_type == "access" and always_ask and _secret_access_requestable(row)
-    scope_options: list[dict[str, Any]] = []
-    if one_shot_access:
-        option = _secret_scope_option(
-            conn,
-            row,
-            default_ttl_seconds=DEFAULT_GRANT_TTL_SECONDS["secret"],
-            one_shot=True,
-        )
-        scope_options = [option] if option is not None else []
-    if grantable and not always_ask:
-        scope_options = [
-            option
-            for option in (
-                _scope_option(
-                    conn,
-                    "secret",
-                    secret_name,
-                    requested_secret=secret_name,
-                    default_ttl_seconds=DEFAULT_GRANT_TTL_SECONDS["secret"],
-                ),
-                (
-                    _scope_option(
-                        conn,
-                        "skill",
-                        skill,
-                        requested_secret=secret_name,
-                        default_ttl_seconds=DEFAULT_GRANT_TTL_SECONDS["skill"],
-                    )
-                    if skill
-                    else None
-                ),
-                _scope_option(
-                    conn,
-                    "group",
-                    group,
-                    requested_secret=secret_name,
-                    default_ttl_seconds=DEFAULT_GRANT_TTL_SECONDS["group"],
-                ),
-            )
-            if option is not None
-        ]
+    rows = member_rows if member_rows is not None else ([_require_row(conn, secret_name)] if secret_name else [])
+    default_selector = {"env": [secret_name]} if secret_name else None
+    selector = _source_selector_payload(source_selector or default_selector)
+    grant_options = [_grant_option(rows, source_selector=selector, purpose=purpose, one_shot=one_shot)] if grantable and rows else []
+    protected_names = [str(row["name"]) for row in rows if row.get("protection") == "protected"]
     card = {
         "card_type": "approval",
         "request_id": request_id,
         "request_type": request_type,
         "secret_name": secret_name,
-        "kind": row.get("kind"),
-        "protection": row.get("protection"),
+        "secret_names": [str(row["name"]) for row in rows],
+        "protected_secret_names": protected_names,
+        "source_selector": selector,
+        "purpose": purpose,
         "command": command,
         "egress": egress,
+        "skill": skill,
         "session_id": session_id,
         "approve_once": True,
-        "one_shot": one_shot_access,
-        "scope_options": scope_options,
+        "one_shot": one_shot,
+        "grant_options": grant_options,
         "value": None,
     }
+    if len(rows) == 1:
+        card["kind"] = rows[0].get("kind")
+        card["protection"] = rows[0].get("protection")
     return card
 
 
 def create_access_request(
     conn: Connection,
-    name: str,
+    name: str | None = None,
     *,
+    source_selector: dict[str, Any] | None = None,
+    purpose: str = "run",
     requester: Any = None,
     delivery: dict[str, Any] | None = None,
     message_id: str | None = None,
     expires_at: str | None = None,
     audience: str | None = None,
 ) -> dict[str, Any]:
-    row = _require_row(conn, name)
-    if not _secret_access_requestable(row):
-        raise NotGrantableError(f"{name} is not access-requestable")
+    if purpose not in GRANT_PURPOSES:
+        raise InvalidRequestError(f"invalid grant purpose: {purpose!r}")
     payload_audience = audience or _request_audience_from_requester(requester)
     request_id = _id("vrq")
     delivery_payload = dict(delivery or {})
     requester_payload = requester if isinstance(requester, dict) else {}
-    always_ask = _secret_always_ask(row)
+    default_selector = {"env": [name]} if name else None
+    selector = _source_selector_payload(source_selector or default_selector)
+    rows = _request_member_rows_for_selector(conn, source_selector=selector)
+    if name:
+        direct_row = _require_row(conn, name)
+        if not _secret_access_requestable(direct_row):
+            raise NotGrantableError(f"{name} is not access-requestable")
+    if not rows:
+        raise NotGrantableError("selector has no protected or approval-required static secrets")
+    if len(rows) == 1 and _secret_always_ask(rows[0]) and rows[0].get("protection") == "standard":
+        one_shot = True
+    else:
+        one_shot = any(_secret_always_ask(row) for row in rows)
     card = approval_card(
         conn,
-        name,
+        str(rows[0]["name"]) if len(rows) == 1 else name,
         request_id=request_id,
         request_type="access",
+        member_rows=rows,
+        source_selector=selector,
+        purpose=purpose,
         command=delivery_payload.get("command"),
         egress=delivery_payload.get("egress"),
-        skill=delivery_payload.get("skill") or requester_payload.get("skill"),
         session_id=requester_payload.get("session_id") or delivery_payload.get("session_id"),
-        grantable=not always_ask,
+        one_shot=one_shot,
     )
     delivery_payload["card"] = card
+    delivery_payload["source_selector"] = selector
+    delivery_payload["purpose"] = purpose
     conn.execute(
         vault_requests.insert().values(
             id=request_id,
             request_type="access",
-            secret_name=name,
+            secret_name=str(rows[0]["name"]) if len(rows) == 1 else None,
             requester=json.dumps(requester) if requester is not None else None,
             delivery=json.dumps(delivery_payload),
             status="pending",
@@ -2020,7 +2032,7 @@ def _expire_grant_rows(
             .values(status="expired", revoked_at=now, agent_ready=0, agent_ready_at=None)
         )
         cache.drop(row["id"])
-        audit(conn, reason, grant_id=row["id"], delivery={"scope_type": row["scope_type"], "scope_ref": row["scope_ref"]})
+        audit(conn, reason, grant_id=row["id"], delivery={"grant_id": row["id"]})
         expired += 1
     return expired
 
@@ -2045,7 +2057,7 @@ def active_grant_rows_for_secret(conn: Connection, secret_name: str) -> list[dic
 
 
 def active_grant_scopes_for_secret(conn: Connection, secret_name: str) -> list[dict[str, str]]:
-    return _unique_grant_scopes(active_grant_rows_for_secret(conn, secret_name))
+    return _unique_grant_release_refs(active_grant_rows_for_secret(conn, secret_name))
 
 
 def active_grant_scopes_for_session(conn: Connection, session_id: str) -> list[dict[str, str]]:
@@ -2055,7 +2067,7 @@ def active_grant_scopes_for_session(conn: Connection, session_id: str) -> list[d
             select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATES), vault_grants.c.session_id == session_id)
         ).mappings()
     ]
-    return _unique_grant_scopes(rows)
+    return _unique_grant_release_refs(rows)
 
 
 def agent_release_scopes_after_rows(
@@ -2064,12 +2076,7 @@ def agent_release_scopes_after_rows(
     *,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
 ) -> list[dict[str, str]]:
-    """Return resident-agent scopes that must be dropped after grant rows stop being active.
-
-    The agent cache is keyed by scope, not grant id. Keeping a scope is valid only
-    when the remaining active grants for that scope still cover every member that
-    had been cached under the removed rows.
-    """
+    """Return resident-agent grant ids that must be dropped after rows stop being active."""
 
     now = _now()
     expired_rows = [
@@ -2084,48 +2091,15 @@ def agent_release_scopes_after_rows(
     rows = [dict(row) for row in rows if grant_row_has_resident_agent_ready(dict(row))]
     if not rows:
         return []
-    active_rows = [
-        dict(row)
-        for row in conn.execute(select(vault_grants).where(vault_grants.c.status.in_(ACTIVE_GRANT_STATES))).mappings()
-        if grant_row_has_resident_agent_ready(dict(row))
-    ]
-    active_by_scope: dict[tuple[str, str], set[str]] = {}
-    for row in active_rows:
-        key = (str(row["scope_type"]), str(row["scope_ref"]))
-        active_by_scope.setdefault(key, set()).update(_grant_member_names(row))
-
-    removed_by_scope: dict[tuple[str, str], set[str]] = {}
+    release_refs: list[dict[str, str]] = []
     for row in rows:
-        key = (str(row["scope_type"]), str(row["scope_ref"]))
-        removed_by_scope.setdefault(key, set()).update(_grant_member_names(row))
-
-    release_scopes: list[dict[str, str]] = []
-    for (scope_type, scope_ref), removed_members in removed_by_scope.items():
-        if removed_members.issubset(active_by_scope.get((scope_type, scope_ref), set())):
+        grant_id = str(row.get("id") or "")
+        if not grant_id:
             continue
-        stale_scope_grants = [
-            dict(row)
-            for row in conn.execute(
-                select(vault_grants).where(
-                    vault_grants.c.scope_type == scope_type,
-                    vault_grants.c.scope_ref == scope_ref,
-                )
-            ).mappings()
-        ]
-        for stale_row in stale_scope_grants:
-            cache.drop(str(stale_row["id"]))
-            _clear_grant_agent_ready(conn, str(stale_row["id"]))
-        conn.execute(
-            vault_grants.update()
-            .where(
-                vault_grants.c.scope_type == scope_type,
-                vault_grants.c.scope_ref == scope_ref,
-                vault_grants.c.status.in_(ACTIVE_GRANT_STATES),
-            )
-            .values(agent_ready=0, agent_ready_at=None)
-        )
-        release_scopes.append({"scope_type": scope_type, "scope_ref": scope_ref})
-    return release_scopes
+        cache.drop(grant_id)
+        _clear_grant_agent_ready(conn, grant_id)
+        release_refs.append({"grant_id": grant_id})
+    return release_refs
 
 
 def expire_grant(
@@ -2197,11 +2171,11 @@ def _validate_access_request_for_grant(
     conn: Connection,
     request_id: str,
     *,
-    scope_type: str,
-    scope_ref: str,
     session_id: str | None,
     inherit_request_session: bool,
     live_members: list[str],
+    source_selector: dict[str, Any],
+    purpose: str,
 ) -> GrantApproval:
     row_dict = _load_request_for_transition(
         conn,
@@ -2212,70 +2186,53 @@ def _validate_access_request_for_grant(
         wrong_status_message="grant approval request is not pending",
         expired_message="grant approval request has expired",
     )
-    requested_secret = row_dict.get("secret_name")
-    if requested_secret not in live_members:
-        raise InvalidRequestError("grant scope does not cover the requested secret")
-    requested_row = _require_row(conn, str(requested_secret))
-    always_ask = _secret_always_ask(requested_row)
-    if always_ask and (
-        scope_type != "secret"
-        or scope_ref != requested_secret
-        or set(live_members) != {requested_secret}
-    ):
-        raise InvalidRequestError("always_ask secrets can only approve one-shot secret access")
     requested_session_id = _request_session_id(row_dict)
     effective_session_id = requested_session_id if session_id is None and inherit_request_session else session_id
-    if always_ask:
-        effective_session_id = requested_session_id or effective_session_id
     if requested_session_id and effective_session_id and requested_session_id != effective_session_id:
         raise InvalidRequestError("grant session does not match the approval request")
+    option = _request_grant_option(row_dict)
+    if option.purpose != purpose:
+        raise InvalidRequestError("grant purpose does not match the approval request")
+    if option.source_selector != _source_selector_payload(source_selector):
+        raise InvalidRequestError("grant source selector does not match the approval request")
+    if set(option.members) != set(live_members):
+        raise InvalidRequestError("grant approval snapshot has stale members")
     card = _request_card(row_dict)
-    allowed_scopes = card.get("scope_options") if isinstance(card, dict) else None
-    if isinstance(allowed_scopes, list) and allowed_scopes:
-        for option in allowed_scopes:
-            if not (
-                isinstance(option, dict)
-                and option.get("scope_type") == scope_type
-                and option.get("scope_ref") == scope_ref
-            ):
-                continue
-            snapshot = option.get("member_snapshot") or []
-            if not isinstance(snapshot, list):
-                raise InvalidRequestError("grant scope has an invalid approval snapshot")
-            members = [str(name) for name in snapshot if isinstance(name, str) and name]
-            if always_ask and set(members) != {requested_secret}:
-                raise InvalidRequestError("always_ask secrets can only approve one-shot secret access")
-            if requested_secret not in members:
-                break
-            versions = option.get("member_versions")
-            if not isinstance(versions, list):
-                raise InvalidRequestError("grant scope approval snapshot is stale")
-            versions_by_name = {
-                item.get("name"): item
-                for item in versions
-                if isinstance(item, dict) and isinstance(item.get("name"), str)
-            }
-            if set(versions_by_name) != set(members):
-                raise InvalidRequestError("grant scope approval snapshot is stale")
-            current_rows = {
-                current["name"]: dict(current)
-                for current in conn.execute(select(vault_secrets).where(vault_secrets.c.name.in_(members))).mappings()
-            }
-            for member_name in members:
-                current = current_rows.get(member_name)
-                if current is None or member_name not in live_members:
-                    raise InvalidRequestError("grant approval snapshot has stale members")
-                if not _member_version_matches(current, versions_by_name[member_name]):
-                    raise InvalidRequestError("grant approval snapshot has stale members")
-            return GrantApproval(members=members, session_id=effective_session_id)
-        raise InvalidRequestError("grant scope was not offered by the approval request")
-    return GrantApproval(members=live_members, session_id=effective_session_id)
+    raw_options = card.get("grant_options") if isinstance(card, dict) else None
+    raw_option = raw_options[0] if isinstance(raw_options, list) and raw_options and isinstance(raw_options[0], dict) else {}
+    versions = raw_option.get("member_versions")
+    if not isinstance(versions, list):
+        raise InvalidRequestError("grant approval snapshot is stale")
+    versions_by_name = {
+        item.get("name"): item
+        for item in versions
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    if set(versions_by_name) != set(option.members):
+        raise InvalidRequestError("grant approval snapshot is stale")
+    current_rows = {
+        current["name"]: dict(current)
+        for current in conn.execute(select(vault_secrets).where(vault_secrets.c.name.in_(option.members))).mappings()
+    }
+    for member_name in option.members:
+        current = current_rows.get(member_name)
+        if current is None or member_name not in live_members:
+            raise InvalidRequestError("grant approval snapshot has stale members")
+        if not _member_version_matches(current, versions_by_name[member_name]):
+            raise InvalidRequestError("grant approval snapshot has stale members")
+    return GrantApproval(
+        members=option.members,
+        session_id=effective_session_id,
+        source_selector=option.source_selector,
+        purpose=option.purpose,
+        one_shot=option.one_shot,
+    )
 
 
 def _approve_sibling_access_requests_for_grant(
     conn: Connection,
     *,
-    created_by_request_id: str,
+    request_id: str,
     members: list[str],
     session_id: str | None,
     decided_at: str,
@@ -2284,7 +2241,7 @@ def _approve_sibling_access_requests_for_grant(
         return 0
     target_session_id = session_id
     if not target_session_id:
-        approval_row = conn.execute(select(vault_requests).where(vault_requests.c.id == created_by_request_id)).mappings().first()
+        approval_row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().first()
         target_session_id = _request_session_id(dict(approval_row)) if approval_row else None
     if not target_session_id:
         return 0
@@ -2292,7 +2249,7 @@ def _approve_sibling_access_requests_for_grant(
         dict(row)
         for row in conn.execute(
             select(vault_requests).where(
-                vault_requests.c.id != created_by_request_id,
+                vault_requests.c.id != request_id,
                 vault_requests.c.request_type == "access",
                 vault_requests.c.status == "pending",
                 vault_requests.c.secret_name.in_(members),
@@ -2332,16 +2289,16 @@ def _approve_sibling_access_requests_for_grant(
 def restore_access_request_after_failed_grant(
     conn: Connection,
     *,
-    created_by_request_id: str,
+    request_id: str,
     member_names: list[str] | set[str] | tuple[str, ...],
     session_id: str | None,
 ) -> int:
     """Make a protected grant approval retryable after resident-agent relay fails."""
 
     members = {str(name) for name in member_names if str(name)}
-    if not created_by_request_id or not members:
+    if not request_id or not members:
         return 0
-    approval_row = conn.execute(select(vault_requests).where(vault_requests.c.id == created_by_request_id)).mappings().first()
+    approval_row = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().first()
     if approval_row is None or approval_row.get("status") != "approved":
         return 0
     decided_at = approval_row.get("decided_at")
@@ -2355,7 +2312,7 @@ def restore_access_request_after_failed_grant(
                 vault_requests.c.secret_name.in_(members),
             )
         ).mappings()
-        if row["id"] == created_by_request_id
+        if row["id"] == request_id
         or (
             target_session_id
             and row.get("decided_at") == decided_at
@@ -2385,32 +2342,34 @@ def restore_access_request_after_failed_grant(
 def create_grant(
     conn: Connection,
     *,
-    scope_type: str,
-    scope_ref: str,
+    member_names: list[str],
+    source_selector: dict[str, Any],
+    purpose: str = "run",
     session_id: str | None = None,
     ttl_seconds: int | None = None,
-    created_by_request_id: str | None = None,
+    request_id: str | None = None,
     inherit_request_session: bool = True,
     expected_member_names: set[str] | list[str] | tuple[str, ...] | None = None,
     cache_ready: bool = True,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
 ) -> dict[str, Any]:
-    if scope_type not in GRANT_SCOPE_TYPES:
-        raise InvalidGrantError(f"invalid grant scope_type: {scope_type!r}")
-    if not created_by_request_id:
+    if purpose not in GRANT_PURPOSES:
+        raise InvalidGrantError(f"invalid grant purpose: {purpose!r}")
+    if not request_id:
         raise InvalidRequestError("grant creation requires an approval request")
-    live_rows = _grantable_member_rows_for_request(conn, scope_type, scope_ref, created_by_request_id)
+    selector = _source_selector_payload(source_selector)
+    live_rows = _member_rows_for_names(conn, member_names)
     live_members = [row["name"] for row in live_rows]
     if not live_members:
-        raise NotGrantableError(f"{scope_type}:{scope_ref} has no grantable static secrets")
+        raise NotGrantableError("grant has no static secrets")
     approval = _validate_access_request_for_grant(
         conn,
-        created_by_request_id,
-        scope_type=scope_type,
-        scope_ref=scope_ref,
+        request_id,
         session_id=session_id,
         inherit_request_session=inherit_request_session,
         live_members=live_members,
+        source_selector=selector,
+        purpose=purpose,
     )
     session_id = approval.session_id
     members = approval.members
@@ -2419,15 +2378,13 @@ def create_grant(
     if expected_member_names is not None and set(members) != set(expected_member_names):
         raise InvalidGrantError("resident agent DEKs must match the approved grant members")
     live_rows_by_name = {row["name"]: row for row in live_rows}
-    always_ask_grant = len(members) == 1 and _secret_always_ask(live_rows_by_name[members[0]])
-    resident_cache_ready = cache_ready and any(
-        live_rows_by_name[name].get("protection") != "standard" for name in members
-    )
+    one_shot_grant = approval.one_shot
+    resident_cache_ready = cache_ready and any(live_rows_by_name[name].get("protection") == "protected" for name in members)
     decided_at = _now()
     claim = conn.execute(
         vault_requests.update()
         .where(
-            vault_requests.c.id == created_by_request_id,
+            vault_requests.c.id == request_id,
             vault_requests.c.request_type == "access",
             vault_requests.c.status == "pending",
         )
@@ -2435,8 +2392,8 @@ def create_grant(
     )
     if claim.rowcount != 1:
         raise InvalidRequestError("grant approval request is not pending")
-    ttl = int(ttl_seconds or DEFAULT_GRANT_TTL_SECONDS[scope_type])
-    ttl = max(1, min(ttl, _ttl_cap_for_members(conn, members)))
+    ttl = int(ttl_seconds or _selector_ttl_seconds(selector))
+    ttl = max(1, ttl)
     now_dt = datetime.now(timezone.utc)
     expires_at = (now_dt + timedelta(seconds=ttl)).isoformat()
     grant_id = _id("vgr")
@@ -2444,12 +2401,13 @@ def create_grant(
         conn.execute(
             vault_grants.insert().values(
                 id=grant_id,
-                scope_type=scope_type,
-                scope_ref=scope_ref,
                 member_snapshot=json.dumps(members),
+                source_selector=json.dumps(selector),
                 session_id=session_id,
+                purpose=purpose,
                 status="active",
-                created_by_request_id=created_by_request_id,
+                request_id=request_id,
+                one_shot=1 if one_shot_grant else 0,
                 created_at=now_dt.isoformat(),
                 expires_at=expires_at,
                 agent_ready=1 if resident_cache_ready else 0,
@@ -2459,7 +2417,7 @@ def create_grant(
     except Exception:
         conn.execute(
             vault_requests.update()
-            .where(vault_requests.c.id == created_by_request_id)
+            .where(vault_requests.c.id == request_id)
             .values(status="pending", decided_at=None)
         )
         raise
@@ -2467,15 +2425,15 @@ def create_grant(
         conn,
         "granted",
         requester={"session_id": session_id} if session_id else None,
-        delivery={"scope_type": scope_type, "scope_ref": scope_ref, "member_count": len(members)},
-        request_id=created_by_request_id,
+        delivery={"source_selector": selector, "purpose": purpose, "member_count": len(members)},
+        request_id=request_id,
         grant_id=grant_id,
     )
     row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().one()
-    if not always_ask_grant:
+    if not one_shot_grant:
         _approve_sibling_access_requests_for_grant(
             conn,
-            created_by_request_id=created_by_request_id,
+            request_id=request_id,
             members=members,
             session_id=session_id,
             decided_at=decided_at,
@@ -2512,7 +2470,7 @@ def get_grant_created_by_request(
     row = (
         conn.execute(
             select(vault_grants)
-            .where(vault_grants.c.created_by_request_id == request_id)
+            .where(vault_grants.c.request_id == request_id)
             .order_by(vault_grants.c.created_at.desc(), vault_grants.c.id.desc())
             .limit(1)
         )
@@ -2554,7 +2512,7 @@ def revoke_grant(
         .values(status="revoked", revoked_at=now, agent_ready=0, agent_ready_at=None)
     )
     cache.drop(grant_id)
-    audit(conn, "grant-revoked", grant_id=grant_id, delivery={"scope_type": row_dict["scope_type"], "scope_ref": row_dict["scope_ref"]})
+    audit(conn, "grant-revoked", grant_id=grant_id, delivery={"grant_id": grant_id})
     updated = conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().one()
     return _grant_payload(conn, dict(updated), cache=cache)
 
@@ -2623,7 +2581,7 @@ def revoke_session_grants(
             conn,
             "grant-revoked-session-archived",
             grant_id=row["id"],
-            delivery={"scope_type": row["scope_type"], "scope_ref": row["scope_ref"], "session_id": session_id},
+            delivery={"grant_id": row["id"], "session_id": session_id},
         )
         revoked += 1
     return revoked
@@ -2634,6 +2592,7 @@ def find_active_grant_for_secret(
     secret_name: str,
     *,
     session_id: str | None = None,
+    purpose: str | None = None,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
     reserve_one_shot: bool = False,
 ) -> dict[str, Any] | None:
@@ -2641,6 +2600,7 @@ def find_active_grant_for_secret(
         conn,
         [secret_name],
         session_id=session_id,
+        purpose=purpose,
         cache=cache,
         reserve_one_shot=reserve_one_shot,
     )
@@ -2653,7 +2613,10 @@ def _grant_is_always_ask_for_members(
     members = _grant_member_names(row)
     if len(members) != 1:
         return False
-    return _secret_always_ask(_require_row(conn, members[0]))
+    try:
+        return bool(int(row.get("one_shot") or 0))
+    except (TypeError, ValueError):
+        return False
 
 
 def consume_one_shot_grant(
@@ -2700,7 +2663,7 @@ def release_one_shot_reservation(
     )
     if result.rowcount != 1:
         raise GrantNotActiveError(grant_id)
-    audit(conn, "grant-reservation-released", grant_id=grant_id, delivery={"scope_type": row_dict["scope_type"], "scope_ref": row_dict["scope_ref"]})
+    audit(conn, "grant-reservation-released", grant_id=grant_id, delivery={"grant_id": grant_id})
     row_dict = dict(conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id)).mappings().one())
     members = _grant_member_names(row_dict)
     if grant_row_has_resident_agent_ready(row_dict) and members:
@@ -2725,7 +2688,7 @@ def _reserve_one_shot_grant(
     )
     if result.rowcount != 1:
         return None
-    audit(conn, "grant-reserved-one-shot", grant_id=row["id"], delivery={"scope_type": row["scope_type"], "scope_ref": row["scope_ref"]})
+    audit(conn, "grant-reserved-one-shot", grant_id=row["id"], delivery={"grant_id": row["id"]})
     updated = dict(conn.execute(select(vault_grants).where(vault_grants.c.id == row["id"])).mappings().one())
     return _grant_payload(conn, updated, cache=cache)
 
@@ -2735,6 +2698,7 @@ def find_active_grant_for_secrets(
     secret_names: list[str],
     *,
     session_id: str | None = None,
+    purpose: str | None = None,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
     reserve_one_shot: bool = False,
 ) -> dict[str, Any] | None:
@@ -2742,15 +2706,13 @@ def find_active_grant_for_secrets(
     requested = {str(name) for name in secret_names if str(name)}
     if not requested:
         return None
-    rows = [
-        dict(row)
-        for row in conn.execute(
-            select(vault_grants).where(
-                vault_grants.c.status.in_(ACTIVE_GRANT_STATES),
-                or_(vault_grants.c.session_id.is_(None), vault_grants.c.session_id == session_id),
-            )
-        ).mappings()
-    ]
+    query = select(vault_grants).where(
+        vault_grants.c.status.in_(ACTIVE_GRANT_STATES),
+        or_(vault_grants.c.session_id.is_(None), vault_grants.c.session_id == session_id),
+    )
+    if purpose is not None:
+        query = query.where(vault_grants.c.purpose == purpose)
+    rows = [dict(row) for row in conn.execute(query).mappings()]
     candidates: list[tuple[bool, int, str, str, dict[str, Any]]] = []
     for row in rows:
         members = _loads(row.get("member_snapshot")) or []
@@ -2790,6 +2752,7 @@ def resolve_secret_access(
     name: str,
     *,
     session_id: str | None = None,
+    purpose: str = "run",
     requester: Any = None,
     delivery: dict[str, Any] | None = None,
     create_request: bool = True,
@@ -2804,6 +2767,8 @@ def resolve_secret_access(
     expire the grant and re-run this resolver to create a fresh approval request.
     """
     row = _require_row(conn, name)
+    if purpose not in GRANT_PURPOSES:
+        raise InvalidRequestError(f"invalid grant purpose: {purpose!r}")
     _reject_keypair_value_delivery(row, name)
     delivery_payload = dict(delivery or {})
     effective_session_id = (
@@ -2818,6 +2783,7 @@ def resolve_secret_access(
         conn,
         name,
         session_id=effective_session_id,
+        purpose=purpose,
         cache=cache,
         reserve_one_shot=reserve_one_shot,
     )
@@ -2836,6 +2802,8 @@ def resolve_secret_access(
         request_payload = create_access_request(
             conn,
             name,
+            source_selector={"env": [name]},
+            purpose=purpose,
             requester=requester,
             delivery=delivery_payload,
         )

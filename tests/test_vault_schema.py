@@ -1,30 +1,39 @@
-"""Migration smoke test: the vault tables exist and the default group is seeded
-after the standard state-init path. Relies on the autouse ``VIBE_REMOTE_HOME``
-isolation in conftest, so this builds a fresh DB under tmp — never the real home.
-"""
-
 from __future__ import annotations
 
-import sqlite3
+from sqlalchemy import text
 
-from config import paths
-from storage.importer import ensure_sqlite_state
-
-_VAULT_TABLES = ("vault_groups", "vault_secrets", "vault_links", "vault_requests", "vault_grants", "vault_audit")
+from storage.db import create_sqlite_engine
+from storage.models import metadata
 
 
-def test_vault_tables_created_and_default_group_seeded():
-    ensure_sqlite_state(primary_platform=None)
-    conn = sqlite3.connect(paths.get_sqlite_state_path())
-    try:
-        tables = {row[0] for row in conn.execute("select name from sqlite_master where type='table'")}
-        for table in _VAULT_TABLES:
-            assert table in tables, f"missing vault table: {table}"
+_VAULT_TABLES = ("vault_secrets", "vault_requests", "vault_grants", "vault_audit")
 
-        secret_cols = {row[1] for row in conn.execute('pragma table_info("vault_secrets")')}
-        assert {"name", "group_name", "kind", "protection", "ciphertext", "nonce", "wrap_meta"} <= secret_cols
 
-        groups = {row[0]: row[1] for row in conn.execute("select name, grantable from vault_groups")}
-        assert groups.get("default") == 1
-    finally:
-        conn.close()
+def test_vault_metadata_schema_matches_grant_id_tag_model(tmp_path):
+    engine = create_sqlite_engine(tmp_path / "vault_schema.sqlite")
+    metadata.create_all(engine)
+
+    with engine.connect() as conn:
+        tables = {row[0] for row in conn.execute(text("select name from sqlite_master where type='table'"))}
+        assert set(_VAULT_TABLES) <= tables
+        assert "vault_groups" not in tables
+        assert "vault_links" not in tables
+
+        secret_cols = {row[1] for row in conn.execute(text("pragma table_info(vault_secrets)"))}
+        assert {"name", "tags", "kind", "protection", "ciphertext", "nonce", "wrap_meta"} <= secret_cols
+        assert "group_name" not in secret_cols
+
+        grant_cols = {row[1] for row in conn.execute(text("pragma table_info(vault_grants)"))}
+        assert {
+            "id",
+            "member_snapshot",
+            "source_selector",
+            "request_id",
+            "session_id",
+            "purpose",
+            "one_shot",
+            "expires_at",
+            "agent_ready_at",
+        } <= grant_cols
+        assert "scope_type" not in grant_cols
+        assert "scope_ref" not in grant_cols

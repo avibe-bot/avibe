@@ -175,8 +175,6 @@ def test_rest_requests_and_grants_routes(monkeypatch):
     grant_response = client.post(
         "/api/vault/grants",
         json={
-            "scope_type": "secret",
-            "scope_ref": "PROTECTED_REST",
             "session_id": "ses_1",
             "request_id": req["id"],
             "deks": [
@@ -255,8 +253,8 @@ def test_rest_grant_rejects_mismatched_request(monkeypatch):
     response = client.post(
         "/api/vault/grants",
         json={
-            "scope_type": "secret",
-            "scope_ref": "B_KEY",
+            "member_names": ["B_KEY"],
+            "source_selector": {"env": ["B_KEY"]},
             "session_id": "ses_1",
             "request_id": req["id"],
             "deks": [

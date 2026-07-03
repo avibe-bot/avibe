@@ -16,7 +16,7 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260627_0025"
+HEAD_REVISION = "20260703_0026"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -243,10 +243,10 @@ def test_run_migrations_strips_vault_secret_preview_metadata(tmp_path: Path) -> 
         conn.executemany(
             """
             insert into vault_secrets (
-                id, name, group_name, tags, kind, protection, source,
+                id, name, tags, kind, protection, source,
                 ciphertext, nonce, wrap_meta, public_meta, policy,
                 use_count, created_at, updated_at
-            ) values (?, ?, 'default', null, 'static', 'standard', 'manual',
+            ) values (?, ?, null, 'static', 'standard', 'manual',
                 'ct', 'nonce', 'wrap', ?, null, 0, 'now', 'now')
             """,
             [
@@ -279,17 +279,29 @@ def test_run_migrations_strips_vault_secret_preview_metadata(tmp_path: Path) -> 
     assert "9999" not in json.dumps(rows)
 
 
-def test_run_migrations_adds_vault_grant_agent_readiness_columns(tmp_path: Path) -> None:
+def test_vault_snapshot_uses_final_grant_id_readiness_model(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
 
-    run_migrations(db_path, revision="20260626_0024")
+    run_migrations(db_path, revision="20260621_0023")
     with sqlite3.connect(db_path) as conn:
         version = conn.execute("select version_num from alembic_version").fetchone()
-        before_columns = {row[1] for row in conn.execute('pragma table_info("vault_grants")')}
+        columns = {row[1] for row in conn.execute('pragma table_info("vault_grants")')}
 
-    assert version == ("20260626_0024",)
-    assert "agent_ready" not in before_columns
-    assert "agent_ready_at" not in before_columns
+    assert version == ("20260621_0023",)
+    assert {
+        "id",
+        "member_snapshot",
+        "source_selector",
+        "request_id",
+        "session_id",
+        "purpose",
+        "one_shot",
+        "expires_at",
+        "agent_ready",
+        "agent_ready_at",
+    } <= columns
+    assert "scope_type" not in columns
+    assert "scope_ref" not in columns
 
     run_migrations(db_path)
     run_migrations(db_path)
@@ -299,7 +311,9 @@ def test_run_migrations_adds_vault_grant_agent_readiness_columns(tmp_path: Path)
         columns = {row[1] for row in conn.execute('pragma table_info("vault_grants")')}
 
     assert version == (HEAD_REVISION,)
-    assert {"agent_ready", "agent_ready_at"} <= columns
+    assert {"request_id", "session_id", "purpose", "agent_ready", "agent_ready_at"} <= columns
+    assert "scope_type" not in columns
+    assert "scope_ref" not in columns
 
 
 def test_scope_agent_backfill_migrates_explicit_agent_routes(tmp_path: Path) -> None:

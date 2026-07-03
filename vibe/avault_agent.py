@@ -1,7 +1,7 @@
 """Resident avault agent socket client.
 
 The resident agent is the protected-tier delivery boundary: Python sends names,
-sealed envelopes, scopes, and browser-sealed DEK blind boxes over a Unix socket.
+    sealed envelopes, grant ids, and browser-sealed DEK blind boxes over a Unix socket.
 Plaintext and DEKs stay inside ``avault``.
 """
 
@@ -103,37 +103,35 @@ class AvaultAgentClient:
     def grant(
         self,
         *,
-        scope_type: str,
-        scope_ref: str,
+        grant_id: str,
+        purpose: str,
         ttl_secs: int,
         deks: list[dict[str, Any]],
     ) -> dict[str, Any]:
         return self.request(
             {
                 "type": "grant",
-                "scope_type": scope_type,
-                "scope_ref": scope_ref,
+                "grant_id": grant_id,
+                "purpose": purpose,
                 "ttl_secs": ttl_secs,
                 "deks": deks,
             }
         )
 
-    def release(self, *, scope_type: str, scope_ref: str) -> dict[str, Any]:
-        return self.request({"type": "release", "scope_type": scope_type, "scope_ref": scope_ref})
+    def release(self, *, grant_id: str) -> dict[str, Any]:
+        return self.request({"type": "release", "grant_id": grant_id})
 
     def deliver_run(
         self,
         *,
-        scope_type: str,
-        scope_ref: str,
+        grant_id: str,
         command: list[str],
         secrets: list[dict[str, Any]],
     ) -> dict[str, Any]:
         return self.request(
             {
                 "type": "deliver",
-                "scope_type": scope_type,
-                "scope_ref": scope_ref,
+                "grant_id": grant_id,
                 "mode": "run",
                 "command": command,
                 "secrets": secrets,
@@ -143,8 +141,7 @@ class AvaultAgentClient:
     def deliver_fetch(
         self,
         *,
-        scope_type: str,
-        scope_ref: str,
+        grant_id: str,
         name: str,
         envelope: dict[str, Any],
         request: dict[str, Any],
@@ -152,8 +149,7 @@ class AvaultAgentClient:
         return self.request(
             {
                 "type": "deliver",
-                "scope_type": scope_type,
-                "scope_ref": scope_ref,
+                "grant_id": grant_id,
                 "mode": "fetch",
                 "name": name,
                 "envelope": envelope,
@@ -164,8 +160,7 @@ class AvaultAgentClient:
     def deliver_inject(
         self,
         *,
-        scope_type: str,
-        scope_ref: str,
+        grant_id: str,
         path: str,
         fmt: str,
         secrets: list[dict[str, Any]],
@@ -173,8 +168,7 @@ class AvaultAgentClient:
         return self.request(
             {
                 "type": "deliver",
-                "scope_type": scope_type,
-                "scope_ref": scope_ref,
+                "grant_id": grant_id,
                 "mode": "inject",
                 "path": path,
                 "format": fmt,
