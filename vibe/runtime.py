@@ -664,7 +664,9 @@ def service_processes(*, include_unverified: bool = False) -> list[dict]:
     deliberately secondary: it detects extra lock-less daemons left behind by
     older lifecycle bugs, but only treats a process as actionable when its
     command looks like Avibe's service entry point and its environment maps to
-    the current AVIBE_HOME.
+    the current AVIBE_HOME. Do not require session leadership here: legacy and
+    container launchers may background ``python main.py`` from a shell without
+    creating a new session, and those lock-less services still need recovery.
     """
     processes: list[dict] = []
     try:
@@ -676,10 +678,14 @@ def service_processes(*, include_unverified: bool = False) -> list[dict]:
         pid = info.get("pid")
         if not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
             continue
-        if not pid_alive(pid):
+        try:
+            alive = pid_alive(pid)
+        except Exception as exc:
+            logger.warning("Failed to inspect possible service process pid=%s: %s", pid, exc)
             continue
-        if not _process_is_service_session_leader(pid):
+        if not alive:
             continue
+        session_leader = _process_is_service_session_leader(pid)
         command = _process_command_from_info(proc)
         if not _command_looks_like_service_entry(command, cwd=_process_cwd(proc)):
             continue
@@ -693,6 +699,7 @@ def service_processes(*, include_unverified: bool = False) -> list[dict]:
                 "command": command,
                 "lock_owner": lock_owner,
                 "home_match": home_match,
+                "session_leader": session_leader,
             }
         )
     return processes
@@ -1018,17 +1025,30 @@ def _pid_mismatches_service(pid: int) -> bool:
 def render_status():
     status = read_status()
     owner_pid = resolve_service_owner_pid(include_starting=False)
-    running = bool(owner_pid)
-    if running:
+    extra_pids = extra_service_process_pids(owner_pid=owner_pid)
+    running = bool(owner_pid or extra_pids)
+    if owner_pid:
         status["state"] = "running"
         status["service_pid"] = owner_pid
-        status["detail"] = f"pid={owner_pid}"
-    elif status.get("state") == "running":
+        if extra_pids:
+            status["detail"] = f"pid={owner_pid}; extra_service_pids={','.join(str(pid) for pid in extra_pids)}"
+        else:
+            status["detail"] = f"pid={owner_pid}"
+    elif extra_pids:
+        status["state"] = "degraded"
+        status["service_pid"] = extra_pids[0]
+        status["detail"] = f"lockless service process detected pid={extra_pids[0]}"
+    elif status.get("state") in {"running", "degraded"}:
         status["state"] = "stopped"
         status["detail"] = "process not running"
         status["service_pid"] = None
+    if extra_pids:
+        status["extra_service_pids"] = extra_pids
+    else:
+        status.pop("extra_service_pids", None)
+    status["service_owner_pid"] = owner_pid
     status["running"] = running
-    status["pid"] = owner_pid
+    status["pid"] = owner_pid or (extra_pids[0] if extra_pids else None)
     restart_status = read_json(get_restart_status_path())
     if restart_status:
         status["restart"] = restart_status

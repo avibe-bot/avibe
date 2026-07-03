@@ -362,20 +362,22 @@ class RuntimeServiceLockTests(unittest.TestCase):
                             with patch("vibe.runtime._process_is_service_session_leader", return_value=True):
                                 self.assertEqual(runtime.service_processes(), [])
 
-    def test_service_processes_ignores_inherited_env_child_process(self):
+    def test_service_processes_detects_shell_launched_lockless_service(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir) / "home"
             home.mkdir()
-            package_dir = Path(tmpdir) / "pkg" / "vibe"
-            package_dir.mkdir(parents=True)
-            (package_dir / "service_main.py").write_text("", encoding="utf-8")
-            (package_dir / "runtime.py").write_text("", encoding="utf-8")
+            repo_root = Path(tmpdir) / "repo"
+            (repo_root / "vibe").mkdir(parents=True)
+            (repo_root / "core").mkdir()
+            (repo_root / "main.py").write_text("", encoding="utf-8")
+            (repo_root / "vibe" / "runtime.py").write_text("", encoding="utf-8")
+            (repo_root / "core" / "controller.py").write_text("", encoding="utf-8")
 
             class FakeProcess:
-                info = {"pid": 33333, "cmdline": [sys.executable, str(package_dir / "service_main.py")]}
+                info = {"pid": 33333, "cmdline": [sys.executable, "main.py"]}
 
                 def cwd(self):
-                    return str(package_dir)
+                    return str(repo_root)
 
                 def environ(self):
                     return {"AVIBE_HOME": str(home), "VIBE_REQUIRE_SHUTDOWN_INTENT": "1"}
@@ -383,8 +385,12 @@ class RuntimeServiceLockTests(unittest.TestCase):
             with patch("vibe.runtime.paths.get_vibe_remote_dir", return_value=home):
                 with patch("vibe.runtime.psutil.process_iter", return_value=[FakeProcess()]):
                     with patch("vibe.runtime.pid_alive", return_value=True):
-                        with patch("vibe.runtime._process_is_service_session_leader", return_value=False):
-                            self.assertEqual(runtime.service_processes(), [])
+                        with patch("vibe.runtime.service_lock_held_by", return_value=False):
+                            with patch("vibe.runtime._process_is_service_session_leader", return_value=False):
+                                processes = runtime.service_processes()
+
+            self.assertEqual([process["pid"] for process in processes], [33333])
+            self.assertFalse(processes[0]["session_leader"])
 
     def test_service_processes_ignores_service_entry_path_used_as_data_argument(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -457,6 +463,23 @@ class RuntimeServiceLockTests(unittest.TestCase):
             self.assertEqual(payload["state"], "running")
             self.assertEqual(payload["service_pid"], 12345)
             self.assertEqual(payload["pid"], 12345)
+
+    def test_render_status_surfaces_lockless_service_process(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            status_path = Path(tmpdir) / "status.json"
+            runtime.write_json(status_path, {"state": "running", "service_pid": None})
+
+            with patch("vibe.runtime.paths.get_runtime_status_path", return_value=status_path):
+                with patch("vibe.runtime.resolve_service_owner_pid", return_value=None):
+                    with patch("vibe.runtime.extra_service_process_pids", return_value=[22222]):
+                        payload = runtime.json.loads(runtime.render_status())
+
+            self.assertTrue(payload["running"])
+            self.assertEqual(payload["state"], "degraded")
+            self.assertEqual(payload["service_pid"], 22222)
+            self.assertEqual(payload["pid"], 22222)
+            self.assertEqual(payload["service_owner_pid"], None)
+            self.assertEqual(payload["extra_service_pids"], [22222])
 
     def test_wait_for_service_pid_adopts_slow_pid_file_write(self):
         with tempfile.TemporaryDirectory() as tmpdir:

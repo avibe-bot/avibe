@@ -1557,7 +1557,17 @@ class ScheduledTaskService:
         request = self.request_store.claim(queued.id)
         if request is None:
             return
-        await self._execute_claimed_request(request)
+        lock_key = self._execution_lock_key(request)
+        if len(self._inflight_executions) >= self._MAX_CONCURRENT_EXECUTIONS:
+            self.request_store.requeue(request.id)
+            return
+        if lock_key is not None and lock_key in self._inflight_sessions:
+            self.request_store.requeue(request.id)
+            return
+        self._spawn_execution(request, lock_key)
+        execution = self._inflight_executions.get(request.id)
+        if execution is not None:
+            await execution
 
     async def _drain_requests(self) -> None:
         if not self._owns_service_instance():

@@ -1458,6 +1458,50 @@ def test_service_lease_loss_cancels_inflight_execution(tmp_path: Path, monkeypat
     assert service._running is False
 
 
+def test_run_task_uses_tracked_execution_for_lease_loss(tmp_path: Path, monkeypatch) -> None:
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="send digest",
+        schedule_type="at",
+        run_at="2026-03-31T09:00:00+08:00",
+        timezone_name="Asia/Shanghai",
+    )
+    controller = SimpleNamespace(platform_settings_managers={"slack": object()}, im_clients={})
+    service = ScheduledTaskService(controller=controller, store=store, request_store=request_store)
+    service._running = True
+    service._requires_service_lease = True
+    owner_state = {"owns": True}
+    started = asyncio.Event()
+
+    async def fake_execute(claimed):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "core.scheduled_tasks.runtime.current_process_owns_service_instance",
+        lambda: owner_state["owns"],
+    )
+    service._execute_claimed_request = fake_execute  # type: ignore[assignment]
+
+    async def _exercise() -> None:
+        run_task = asyncio.create_task(service._run_task(task.id))
+        await started.wait()
+        assert len(service._inflight_executions) == 1
+        execution = next(iter(service._inflight_executions.values()))
+        owner_state["owns"] = False
+        assert service._owns_service_instance() is False
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+    asyncio.run(_exercise())
+
+    assert service._running is False
+
+
 def test_drain_requests_executes_hook_send(tmp_path: Path) -> None:
     request_store = TaskExecutionStore(tmp_path / "task_requests")
     request = request_store.enqueue_hook_send(
