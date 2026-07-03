@@ -429,6 +429,20 @@ class SessionsStore:
             agent_map[thread_id] = session_id
         return agent_session_id
 
+    def materialize_agent_session_route(
+        self,
+        agent_session_id: str,
+        *,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ) -> bool:
+        self._ensure_service()
+        return self._service.materialize_agent_session_route(
+            agent_session_id,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+
     def bind_agent_session_by_id(
         self,
         agent_session_id: str,

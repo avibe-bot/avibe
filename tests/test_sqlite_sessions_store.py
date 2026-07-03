@@ -397,6 +397,68 @@ def test_sqlite_sessions_service_binds_reserved_agent_session_by_id(tmp_path: Pa
         service.close()
 
 
+def test_materialize_agent_session_route_fills_empty_columns_only(tmp_path: Path) -> None:
+    """Turn-start materialization pins the resolved model/effort into empty
+    columns, never overwrites an existing value, and — because it runs at
+    dispatch time — a later explicit clear (update_session storing NULL) is a
+    fact the NEXT turn re-pins from its own resolution, not something a stale
+    value from this turn may undo."""
+    db_path = tmp_path / "vibe.sqlite"
+    default_workdir = tmp_path / "runtime-default"
+    service = SQLiteSessionsService(db_path)
+    try:
+        with patch(
+            "storage.sessions_service.V2Config.load",
+            return_value=SimpleNamespace(runtime=SimpleNamespace(default_cwd=str(default_workdir))),
+        ):
+            reserved_id = service.reserve_agent_session(
+                scope_key="avibe::project::proj_abc",
+                agent_backend="codex",
+                session_anchor="avibe_ses1",
+                agent_name="codex",
+            )
+        assert reserved_id is not None
+        row = service.get_agent_session_by_id(reserved_id)
+        assert row is not None
+        assert row["model"] is None
+        assert row["reasoning_effort"] is None
+
+        # First turn resolves the Agent default → empty columns fill in.
+        assert service.materialize_agent_session_route(
+            reserved_id, model="gpt-5.5", reasoning_effort="xhigh"
+        )
+        row = service.get_agent_session_by_id(reserved_id)
+        assert row is not None
+        assert row["model"] == "gpt-5.5"
+        assert row["reasoning_effort"] == "xhigh"
+
+        # A later turn resolving a different route must NOT overwrite the pin.
+        service.materialize_agent_session_route(reserved_id, model="gpt-5.4", reasoning_effort="low")
+        row = service.get_agent_session_by_id(reserved_id)
+        assert row is not None
+        assert row["model"] == "gpt-5.5"
+        assert row["reasoning_effort"] == "xhigh"
+
+        # Explicit clear back to inherited (the chat-header "Default" pick →
+        # update_session stores NULL): the cleared state persists —
+        # materialization happens only at the START of a turn, so nothing later
+        # in the old turn refills it.
+        from storage.workbench_sessions_service import update_session
+
+        with service.engine.begin() as conn:
+            update_session(conn, reserved_id, model=None, reasoning_effort=None)
+        row = service.get_agent_session_by_id(reserved_id)
+        assert row is not None
+        assert row["model"] is None
+        assert row["reasoning_effort"] is None
+
+        # No-op call shapes: nothing to pin → False, row untouched.
+        assert not service.materialize_agent_session_route(reserved_id)
+        assert not service.materialize_agent_session_route("ses_missing", model="gpt-5.5")
+    finally:
+        service.close()
+
+
 def test_reserve_agent_session_uses_runtime_default_when_scope_workdir_missing(tmp_path: Path) -> None:
     from storage.models import scope_settings
 
