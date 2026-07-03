@@ -1606,18 +1606,18 @@ def test_revoke_tag_grant_releases_its_grant_id(monkeypatch):
         )
         _grant_from_request(conn, req_narrow, session_id="ses_narrow")
         vault_service.create_secret(conn, name="B_KEY", protection="protected", tags=["crypto"], sealed=_sealed("b"))
-        req_group = vault_service.create_access_request(
+        req_tag = vault_service.create_access_request(
             conn,
             source_selector={"tags": ["crypto"]},
-            requester={"session_id": "ses_group"},
-            delivery={"session_id": "ses_group"},
+            requester={"session_id": "ses_tag"},
+            delivery={"session_id": "ses_tag"},
         )
-        group_grant = _grant_from_request(conn, req_group, session_id="ses_group")
+        tag_grant = _grant_from_request(conn, req_tag, session_id="ses_tag")
 
-    revoked = api.revoke_vault_grant(group_grant["id"])
+    revoked = api.revoke_vault_grant(tag_grant["id"])
 
     assert revoked["grant"]["status"] == "revoked"
-    agent_release.assert_called_once_with(grant_id=group_grant["id"])
+    agent_release.assert_called_once_with(grant_id=tag_grant["id"])
 
 
 def test_delete_protected_secret_releases_agent_scope(monkeypatch):

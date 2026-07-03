@@ -5585,7 +5585,7 @@ def _vault_request_pending_message(name: str, request: dict[str, object], *, has
         return (
             f"Recorded a request for '{name}'. The user fulfills request {request['id']} from the Vaults page pending "
             f"requests list by opening its Provide secret row; that request-specific form preserves the requested "
-            f"group, policy, and skill links. Then use: vibe vault run --env {name} -- <command>"
+            f"tags, policy, and skill links. Then use: vibe vault run --env {name} -- <command>"
         )
     return (
         f"Recorded a request for '{name}'. The user fulfills it from the Vaults page pending requests list "

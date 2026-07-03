@@ -26,7 +26,6 @@ def _ns(**kw):
         name=None,
         stdin=False,
         from_file=None,
-        group=None,
         tag=None,
         description=None,
         allow_host=None,
@@ -109,13 +108,13 @@ def _set_protected_always_ask_grant(name: str, *, session_id: str | None = None,
         return _grant_from_request(conn, req, session_id=session_id)
 
 
-def _set_group_grant(names: list[str], *, group: str = "crypto", session_id: str | None = None) -> dict:
+def _set_tag_grant(names: list[str], *, tag: str = "crypto", session_id: str | None = None) -> dict:
     with cli._open_vault_engine().begin() as conn:
         for name in names:
-            vault_service.create_secret(conn, name=name, protection="protected", tags=[group], sealed=_sealed(name.lower()))
+            vault_service.create_secret(conn, name=name, protection="protected", tags=[tag], sealed=_sealed(name.lower()))
         req = vault_service.create_access_request(
             conn,
-            source_selector={"tags": [group]},
+            source_selector={"tags": [tag]},
             requester={"source": "cli", "session_id": session_id} if session_id else {"source": "cli"},
             delivery={"session_id": session_id, "mode": "run"} if session_id else {"mode": "run"},
         )
@@ -555,7 +554,7 @@ def test_run_prefers_common_grant_for_protected_batch(tmp_path, capfd, monkeypat
     from vibe import api
 
     monkeypatch.chdir(tmp_path)
-    group_grant = _set_group_grant(["A_KEY", "B_KEY"])
+    tag_grant = _set_tag_grant(["A_KEY", "B_KEY"])
     with cli._open_vault_engine().begin() as conn:
         req = vault_service.create_access_request(
             conn,
@@ -572,7 +571,7 @@ def test_run_prefers_common_grant_for_protected_batch(tmp_path, capfd, monkeypat
 
     assert code == 0
     deliver.assert_called_once()
-    assert deliver.call_args.kwargs["grant_id"] == group_grant["id"]
+    assert deliver.call_args.kwargs["grant_id"] == tag_grant["id"]
     assert [secret["name"] for secret in deliver.call_args.kwargs["secrets"]] == ["A_KEY", "B_KEY"]
 
 
@@ -1097,10 +1096,10 @@ def test_run_expires_grant_when_agent_cache_is_missing(capfd, monkeypatch):
     assert requests[0]["card"]["grant_options"][0]["purpose"] == "run"
 
 
-def test_run_reopens_only_one_approval_when_group_agent_cache_is_missing(capfd, monkeypatch):
+def test_run_reopens_only_one_approval_when_tag_agent_cache_is_missing(capfd, monkeypatch):
     from vibe import api
 
-    grant = _set_group_grant(["A_KEY", "B_KEY"])
+    grant = _set_tag_grant(["A_KEY", "B_KEY"])
     monkeypatch.setattr(api, "avault_agent_deliver_run", Mock(side_effect=api.AvaultError("grant is missing or expired")))
 
     code = cli.cmd_vault_run(_ns(env=["A_KEY", "B_KEY"], command_argv=["python3", "-c", "pass"]))
