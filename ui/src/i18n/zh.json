@@ -2202,7 +2202,8 @@
       "scope": {
         "secret": "密钥",
         "skill": "技能",
-        "group": "分组"
+        "tag": "标签",
+        "selector": "选择器"
       },
       "dur": {
         "hm": "{{h}} 时 {{m}} 分",
@@ -2391,7 +2392,8 @@
       "scope": {
         "secret": "仅此密钥",
         "skill": "技能 · {{ref}}",
-        "group": "分组 · {{ref}}"
+        "tag": "标签 · {{ref}}",
+        "selector": "所选密钥 · {{ref}}"
       },
       "thisSessionOnly": "仅限本会话",
       "approve": "批准",

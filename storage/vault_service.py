@@ -78,6 +78,7 @@ class GrantApproval:
     source_selector: dict[str, Any]
     purpose: str
     one_shot: bool
+    ttl_cap_seconds: int
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,7 @@ class RequestGrantOption:
     source_selector: dict[str, Any]
     purpose: str
     one_shot: bool
+    ttl_cap_seconds: int
 
 
 @dataclass(frozen=True)
@@ -833,6 +835,53 @@ def _request_card(row: dict[str, Any]) -> dict[str, Any]:
     return card if isinstance(card, dict) else {}
 
 
+def _request_member_names(row: dict[str, Any]) -> list[str]:
+    card = _request_card(row)
+    members: list[str] = []
+    options = card.get("grant_options") if isinstance(card, dict) else None
+    if isinstance(options, list):
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            snapshot = option.get("member_snapshot")
+            if isinstance(snapshot, list):
+                members.extend(str(name) for name in snapshot if isinstance(name, str) and name)
+    if not members and row.get("secret_name"):
+        members.append(str(row["secret_name"]))
+    return sorted(set(members))
+
+
+def _request_covers_any_member(row: dict[str, Any], members: set[str]) -> bool:
+    if not members:
+        return False
+    return bool(set(_request_member_names(row)) & members)
+
+
+def _request_members_are_subset(row: dict[str, Any], members: set[str]) -> bool:
+    request_members = set(_request_member_names(row))
+    return bool(request_members) and request_members.issubset(members)
+
+
+def _ttl_cap_from_grant_option(option: dict[str, Any], selector: dict[str, Any]) -> int:
+    raw_options = option.get("ttl_options_seconds")
+    ttl_options: list[int] = []
+    if isinstance(raw_options, list):
+        for raw in raw_options:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                ttl_options.append(value)
+    if ttl_options:
+        return max(ttl_options)
+    try:
+        default = int(option.get("default_ttl_seconds") or 0)
+    except (TypeError, ValueError):
+        default = 0
+    return max(1, default or _selector_ttl_seconds(selector))
+
+
 def _request_grant_option(row: dict[str, Any]) -> RequestGrantOption:
     card = _request_card(row)
     options = card.get("grant_options") if isinstance(card, dict) else None
@@ -852,6 +901,7 @@ def _request_grant_option(row: dict[str, Any]) -> RequestGrantOption:
         source_selector=selector,
         purpose=purpose,
         one_shot=bool(option.get("one_shot")),
+        ttl_cap_seconds=_ttl_cap_from_grant_option(option, selector),
     )
 
 
@@ -2125,19 +2175,20 @@ def _expire_pending_requests_for_secret(
     *,
     reason: str = "request-expired",
 ) -> int:
+    changed_members = {secret_name}
     rows = [
         dict(row)
         for row in conn.execute(
             select(vault_requests).where(
-                vault_requests.c.secret_name == secret_name,
                 vault_requests.c.status == "pending",
                 vault_requests.c.request_type.in_(("access", "sign")),
             )
         ).mappings()
+        if row.get("secret_name") == secret_name or _request_covers_any_member(dict(row), changed_members)
     ]
     if not rows:
         return 0
-    return _expire_pending_request_rows(conn, rows, reason=reason)
+    return _expire_pending_request_rows(conn, rows, reason=reason, delivery_extra={"changed_secret": secret_name})
 
 
 def expire_session_requests(conn: Connection, session_id: str, *, reason: str = "request-expired-session-archived") -> int:
@@ -2226,6 +2277,7 @@ def _validate_access_request_for_grant(
         source_selector=option.source_selector,
         purpose=option.purpose,
         one_shot=option.one_shot,
+        ttl_cap_seconds=option.ttl_cap_seconds,
     )
 
 
@@ -2245,6 +2297,7 @@ def _approve_sibling_access_requests_for_grant(
         target_session_id = _request_session_id(dict(approval_row)) if approval_row else None
     if not target_session_id:
         return 0
+    member_set = {str(name) for name in members if str(name)}
     rows = [
         dict(row)
         for row in conn.execute(
@@ -2252,10 +2305,9 @@ def _approve_sibling_access_requests_for_grant(
                 vault_requests.c.id != request_id,
                 vault_requests.c.request_type == "access",
                 vault_requests.c.status == "pending",
-                vault_requests.c.secret_name.in_(members),
             )
         ).mappings()
-        if _request_session_id(dict(row)) == target_session_id
+        if _request_session_id(dict(row)) == target_session_id and _request_members_are_subset(dict(row), member_set)
     ]
     approved = 0
     now_dt = datetime.now(timezone.utc)
@@ -2309,12 +2361,12 @@ def restore_access_request_after_failed_grant(
             select(vault_requests).where(
                 vault_requests.c.request_type == "access",
                 vault_requests.c.status == "approved",
-                vault_requests.c.secret_name.in_(members),
             )
         ).mappings()
         if row["id"] == request_id
         or (
-            target_session_id
+            _request_members_are_subset(dict(row), members)
+            and target_session_id
             and row.get("decided_at") == decided_at
             and _request_session_id(dict(row)) == target_session_id
         )
@@ -2393,7 +2445,7 @@ def create_grant(
     if claim.rowcount != 1:
         raise InvalidRequestError("grant approval request is not pending")
     ttl = int(ttl_seconds or _selector_ttl_seconds(selector))
-    ttl = max(1, ttl)
+    ttl = max(1, min(ttl, approval.ttl_cap_seconds))
     now_dt = datetime.now(timezone.utc)
     expires_at = (now_dt + timedelta(seconds=ttl)).isoformat()
     grant_id = _id("vgr")
@@ -2610,9 +2662,6 @@ def _grant_is_always_ask_for_members(
     conn: Connection,
     row: dict[str, Any],
 ) -> bool:
-    members = _grant_member_names(row)
-    if len(members) != 1:
-        return False
     try:
         return bool(int(row.get("one_shot") or 0))
     except (TypeError, ValueError):

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, Clock, Copy, Folder, Globe, History, Inbox, KeyRound, Layers, Link2, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, Trash2, Wallet, X } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Check, Clock, Copy, Globe, History, Inbox, KeyRound, Link2, Loader2, Plus, RefreshCw, ShieldCheck, Trash2, Wallet, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
@@ -15,9 +15,8 @@ import { VaultSecretForm } from '../ui/vault-secret-form';
 const AddSecretDialog: React.FC<{
   onClose: () => void;
   onCreated: (name: string, reason?: 'created' | 'already_exists') => void;
-  groups: string[];
   request?: VaultRequest | null;
-}> = ({ onClose, onCreated, groups, request }) => {
+}> = ({ onClose, onCreated, request }) => {
   const { t } = useTranslation();
   const requestCard = (request?.card ?? null) as { default_protection?: unknown; spec?: VaultRequestSpec } | null;
   const requestSpec = (requestCard?.spec ?? null) as VaultRequestSpec | null;
@@ -45,15 +44,12 @@ const AddSecretDialog: React.FC<{
           defaultProtection={defaultProtection}
           onCancel={onClose}
           onCreated={onCreated}
-          groups={groups}
           treatExistingAsFulfilled={Boolean(request)}
         />
       </DialogContent>
     </Dialog>
   );
 };
-
-type ViewMode = 'all' | 'group';
 
 /** All allowed proxy-fetch hosts on a secret (for the `proxy · <host> +N` badge). */
 const proxyHosts = (s: VaultSecret): string[] => {
@@ -136,12 +132,6 @@ const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => voi
   );
 };
 
-const SCOPE_ICON: Record<VaultGrant['scope_type'], typeof KeyRound> = {
-  secret: KeyRound,
-  skill: Puzzle,
-  group: Layers,
-};
-
 /** Break a grant's time-to-expiry into parts; the units are localized in the row. */
 function remaining(expiresAt: string, now: number): { h: number; m: number; s: number; expired: boolean; urgent: boolean } {
   const end = Date.parse(expiresAt);
@@ -161,6 +151,21 @@ function chipCountdown(rem: { h: number; m: number; s: number }): string {
   return rem.h > 0 ? `${rem.h}:${pad(rem.m)}:${pad(rem.s)}` : `${pad(rem.m)}:${pad(rem.s)}`;
 }
 
+function stringItems(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.length > 0) : [];
+}
+
+function grantScopeLabel(g: VaultGrant, t: ReturnType<typeof useTranslation>['t']): string {
+  const env = stringItems(g.source_selector?.env);
+  const tags = stringItems(g.source_selector?.tags);
+  const skills = tags.filter((tag) => tag.startsWith('skill:')).map((tag) => tag.slice('skill:'.length));
+  const plainTags = tags.filter((tag) => !tag.startsWith('skill:'));
+  if (env.length === 1 && tags.length === 0) return `${t('vaults.grants.scope.secret')} · ${env[0]}`;
+  if (skills.length === 1 && env.length === 0 && plainTags.length === 0) return `${t('vaults.grants.scope.skill')} · ${skills[0]}`;
+  if (plainTags.length === 1 && env.length === 0 && skills.length === 0) return `${t('vaults.grants.scope.tag')} · ${plainTags[0]}`;
+  return `${t('vaults.grants.scope.selector')} · ${g.member_snapshot.join(', ')}`;
+}
+
 /**
  * Active-grant chip (design.pen `y4rw5Q` ACTIVE GRANTS row): a compact mint pill with the
  * scope icon, `type · ref`, a live countdown, and an inline × to revoke. Replaces the older
@@ -172,14 +177,12 @@ const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: Va
   onRevoke,
 }) => {
   const { t } = useTranslation();
-  const Icon = SCOPE_ICON[g.scope_type] ?? KeyRound;
   const rem = remaining(g.expires_at, now);
+  const label = grantScopeLabel(g, t);
   return (
     <span className="inline-flex items-center gap-2 rounded-full border border-mint/40 bg-mint-soft py-1 pl-2.5 pr-1.5 text-xs text-mint">
-      <Icon className="size-3.5 shrink-0" />
-      <span className="font-medium">
-        {t(`vaults.grants.scope.${g.scope_type}`)} · {g.scope_ref}
-      </span>
+      <KeyRound className="size-3.5 shrink-0" />
+      <span className="font-medium">{label}</span>
       <span
         className="flex shrink-0"
         title={g.session_id ? t('vaults.grants.session.bound') : t('vaults.grants.session.any')}
@@ -249,7 +252,7 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
  * Best-effort — a requests fetch failure (e.g. an older backend without the route) must
  * not surface an error or blank the rest of the hub.
  */
-const PendingRequestsSection: React.FC<{ groups: string[]; onResolved: () => void }> = ({ groups, onResolved }) => {
+const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolved }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -340,7 +343,6 @@ const PendingRequestsSection: React.FC<{ groups: string[]; onResolved: () => voi
       {provisioning != null ? (
         <AddSecretDialog
           request={provisioning}
-          groups={groups}
           onClose={() => setProvisioning(null)}
           onCreated={(name, reason) => {
             setProvisioning(null);
@@ -368,7 +370,6 @@ export const VaultsPage: React.FC = () => {
   const [adding, setAdding] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
   const [audit, setAudit] = useState<VaultAuditEvent[]>([]);
-  const [view, setView] = useState<ViewMode>('all');
   const [now, setNow] = useState(() => Date.now());
 
   const refresh = useCallback(async () => {
@@ -416,15 +417,6 @@ export const VaultsPage: React.FC = () => {
     return () => clearInterval(id);
   }, [hasGrants]);
 
-  const groups = useMemo(() => {
-    const byGroup = new Map<string, VaultSecret[]>();
-    for (const s of secrets) {
-      const key = s.group || 'default';
-      (byGroup.get(key) ?? byGroup.set(key, []).get(key)!).push(s);
-    }
-    return [...byGroup.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  }, [secrets]);
-
   const toggleAudit = useCallback(async () => {
     const next = !showAudit;
     setShowAudit(next);
@@ -450,10 +442,11 @@ export const VaultsPage: React.FC = () => {
   };
 
   const onRevokeGrant = async (g: VaultGrant) => {
-    if (!window.confirm(t('vaults.grants.revokeConfirm', { scope: g.scope_ref }))) return;
+    const scope = grantScopeLabel(g, t);
+    if (!window.confirm(t('vaults.grants.revokeConfirm', { scope }))) return;
     try {
       await api.revokeVaultGrant(g.id);
-      showToast(t('vaults.grants.revoked', { scope: g.scope_ref }), 'success');
+      showToast(t('vaults.grants.revoked', { scope }), 'success');
       refresh();
     } catch (err: any) {
       setError(err?.message ?? String(err));
@@ -485,7 +478,7 @@ export const VaultsPage: React.FC = () => {
       {error && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
       )}
-      <PendingRequestsSection groups={groups.map(([g]) => g)} onResolved={refresh} />
+      <PendingRequestsSection onResolved={refresh} />
       {grants.length > 0 && (
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-2 px-1">
@@ -501,16 +494,6 @@ export const VaultsPage: React.FC = () => {
           </div>
         </div>
       )}
-      {secrets.length > 0 ? (
-        <div className="flex items-center gap-1 self-start rounded-lg border border-border bg-surface p-1">
-          <Button variant={view === 'all' ? 'secondary' : 'ghost'} size="sm" onClick={() => setView('all')}>
-            {t('vaults.view.all')}
-          </Button>
-          <Button variant={view === 'group' ? 'secondary' : 'ghost'} size="sm" onClick={() => setView('group')}>
-            {t('vaults.view.byGroup')}
-          </Button>
-        </div>
-      ) : null}
       {loading && secrets.length === 0 ? (
         <div className="flex items-center gap-2 px-1 text-sm text-muted">
           <Loader2 className="size-4 animate-spin" />
@@ -518,26 +501,6 @@ export const VaultsPage: React.FC = () => {
         </div>
       ) : secrets.length === 0 ? (
         <div className="rounded-2xl border border-border bg-surface p-8 text-center text-sm text-muted">{t('vaults.empty')}</div>
-      ) : view === 'group' ? (
-        <div className="flex flex-col gap-4">
-          {groups.map(([group, items]) => {
-            const allKeys = items.every((s) => s.kind === 'keypair');
-            return (
-              <div key={group} className="flex flex-col gap-2">
-                <div className="flex items-center gap-2 px-1 text-xs font-semibold text-foreground">
-                  <Folder className="size-3.5 text-muted" />
-                  <span>{group}</span>
-                  <span className="font-normal text-muted">
-                    {allKeys ? t('vaults.keyCount', { count: items.length }) : t('vaults.secretCount', { count: items.length })}
-                  </span>
-                </div>
-                {items.map((s) => (
-                  <SecretRow key={s.name} secret={s} onDelete={onDelete} />
-                ))}
-              </div>
-            );
-          })}
-        </div>
       ) : (
         <div className="flex flex-col gap-2">
           {secrets.map((s) => (
@@ -565,7 +528,6 @@ export const VaultsPage: React.FC = () => {
       )}
       {adding && (
         <AddSecretDialog
-          groups={groups.map(([g]) => g)}
           onClose={() => setAdding(false)}
           onCreated={(name, reason) => {
             if (reason === 'already_exists') return;

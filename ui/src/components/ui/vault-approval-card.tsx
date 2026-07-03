@@ -17,15 +17,21 @@ import { Button } from './button';
 import { Switch } from './switch';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 
+type SourceSelector = {
+  env?: string[];
+  tags?: string[];
+};
+
 /** The approval `card` the daemon attaches to a request's delivery payload. */
-type ScopeOption = {
-  scope_type: 'secret' | 'skill' | 'group';
-  scope_ref: string;
+type GrantOption = {
+  source_selector: SourceSelector;
+  purpose?: string;
   default_ttl_seconds: number;
   ttl_options_seconds: number[];
   session_binding_default: boolean;
   member_count: number;
   member_snapshot: string[];
+  one_shot?: boolean;
   /** Hydrated for UI audience: the protected members of this scope to release. */
   unlock_material?: ProtectedUnlockMaterial[];
 };
@@ -39,7 +45,7 @@ type ApprovalCard = {
   command?: string | null;
   egress?: string | null;
   session_id?: string | null;
-  scope_options?: ScopeOption[];
+  grant_options?: GrantOption[];
   /** Hydrated for UI audience when the requested secret is protected. */
   secret_unlock_material?: ProtectedUnlockMaterial | null;
 };
@@ -77,6 +83,22 @@ function useTtlLabel() {
   );
 }
 
+function stringItems(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.length > 0) : [];
+}
+
+function grantOptionScope(option: GrantOption): { type: 'secret' | 'skill' | 'tag' | 'selector'; ref: string } {
+  const env = stringItems(option.source_selector?.env);
+  const tags = stringItems(option.source_selector?.tags);
+  const skills = tags.filter((tag) => tag.startsWith('skill:')).map((tag) => tag.slice('skill:'.length));
+  const plainTags = tags.filter((tag) => !tag.startsWith('skill:'));
+  if (env.length === 1 && tags.length === 0) return { type: 'secret', ref: env[0] };
+  if (skills.length === 1 && env.length === 0 && plainTags.length === 0) return { type: 'skill', ref: skills[0] };
+  if (plainTags.length === 1 && env.length === 0 && skills.length === 0) return { type: 'tag', ref: plainTags[0] };
+  const members = stringItems(option.member_snapshot);
+  return { type: 'selector', ref: members.length > 0 ? members.join(', ') : 'selector' };
+}
+
 /**
  * Full approval surface for a single pending vault request (access or sign), rendering
  * the daemon's approval card (design.pen frames ① / ②). Standard and protected tiers are
@@ -96,23 +118,23 @@ export const VaultApprovalCard: React.FC<{
 
   // The request is passed in already hydrated by the UI-audience inbox list
   // (`getVaultRequests`, #708), so `card.secret_unlock_material` /
-  // `scope_options[].unlock_material` are present for protected requests. No fetch or
+  // `grant_options[].unlock_material` are present for protected requests. No fetch or
   // loading state is needed here — the single-request GET is agent-audience (value-free).
   const card = (request.card ?? null) as ApprovalCard | null;
   const delivery = (request.delivery ?? {}) as { digest?: string; scheme?: string };
   const isSign = (card?.request_type ?? request.request_type) === 'sign';
   const isProtected = card?.protection === 'protected';
   const isKeypair = card?.kind === 'keypair';
-  const scopeOptions = card?.scope_options ?? [];
+  const grantOptions = card?.grant_options ?? [];
 
   const [scopeIdx, setScopeIdx] = useState(0);
   const [thisSessionOnly, setThisSessionOnly] = useState(
-    () => scopeOptions.length === 0 || scopeOptions[0].session_binding_default !== false,
+    () => grantOptions.length === 0 || grantOptions[0].session_binding_default !== false,
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const selectedOption = scopeOptions[scopeIdx];
+  const selectedOption = grantOptions[scopeIdx];
   const selectedMaterials = useMemo(() => selectedOption?.unlock_material ?? [], [selectedOption]);
 
   // A request needs the browser VMK unlocked when it touches protected key material:
@@ -147,6 +169,7 @@ export const VaultApprovalCard: React.FC<{
       if (!option) throw new Error(t('vaults.approval.errors.noScope'));
       const ttlSeconds = option.default_ttl_seconds;
       const materials = option.unlock_material ?? [];
+      const optionScope = grantOptionScope(option);
       // A protected secret with no hydrated unlock material means the request was read
       // without UI-audience hydration — fail clearly instead of taking the standard path
       // (which the daemon rejects for a protected secret anyway).
@@ -156,8 +179,6 @@ export const VaultApprovalCard: React.FC<{
         failIfNotOk(
           await api.createVaultGrant({
             request_id: request.id,
-            scope_type: option.scope_type,
-            scope_ref: option.scope_ref,
             ttl_seconds: ttlSeconds,
             this_session_only: thisSessionOnly,
           }),
@@ -173,8 +194,8 @@ export const VaultApprovalCard: React.FC<{
           const approvalNonce = crypto.getRandomValues(new Uint8Array(16));
           const context = await protectedDekReleaseBlindBoxContext(material.name, {
             kind: 'agent-deliver',
-            scopeType: option.scope_type,
-            scopeRef: option.scope_ref,
+            scopeType: optionScope.type,
+            scopeRef: optionScope.ref,
             ttlSecs: ttlSeconds,
             approval: { nonce: approvalNonce, expiresAtUnix },
             operationHash: await blindBoxAgentDeliverOperationHash(material.name, ttlSeconds),
@@ -190,8 +211,6 @@ export const VaultApprovalCard: React.FC<{
         }
         failIfNotOk(
           await api.fulfillVaultAccessRequest(request.id, {
-            scope_type: option.scope_type,
-            scope_ref: option.scope_ref,
             ttl_seconds: ttlSeconds,
             this_session_only: thisSessionOnly,
             agent_pubkey: agentPubkey,
@@ -320,7 +339,7 @@ export const VaultApprovalCard: React.FC<{
       <div className="h-px bg-border" />
 
       {/* Approval scope (access only) */}
-      {!isSign && scopeOptions.length > 0 ? (
+      {!isSign && grantOptions.length > 0 ? (
         <div className="flex flex-col gap-2">
           <span className="px-1 text-xs font-semibold uppercase tracking-wide text-muted">
             {t('vaults.approval.scopeTitle')}
@@ -332,18 +351,19 @@ export const VaultApprovalCard: React.FC<{
             onKeyDown={(e) => {
               if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
                 e.preventDefault();
-                setScopeIdx((i) => (i + 1) % scopeOptions.length);
+                setScopeIdx((i) => (i + 1) % grantOptions.length);
               } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
                 e.preventDefault();
-                setScopeIdx((i) => (i - 1 + scopeOptions.length) % scopeOptions.length);
+                setScopeIdx((i) => (i - 1 + grantOptions.length) % grantOptions.length);
               }
             }}
           >
-            {scopeOptions.map((option, idx) => {
+            {grantOptions.map((option, idx) => {
               const selected = idx === scopeIdx;
+              const optionScope = grantOptionScope(option);
               return (
                 <button
-                  key={`${option.scope_type}:${option.scope_ref}`}
+                  key={`${optionScope.type}:${optionScope.ref}:${idx}`}
                   type="button"
                   role="radio"
                   aria-checked={selected}
@@ -364,7 +384,7 @@ export const VaultApprovalCard: React.FC<{
                   </span>
                   <span className="flex min-w-0 flex-col gap-px">
                     <span className={cn('flex flex-wrap items-center gap-1.5 text-[13px]', selected ? 'font-semibold' : 'font-medium')}>
-                      {t(`vaults.approval.scope.${option.scope_type}`, { ref: option.scope_ref })}
+                      {t(`vaults.approval.scope.${optionScope.type}`, { ref: optionScope.ref })}
                       <Badge variant="secondary">{ttlLabel(option.default_ttl_seconds)}</Badge>
                     </span>
                     <span className="text-[11px] text-muted-foreground">

@@ -316,6 +316,64 @@ def test_vault_snapshot_uses_final_grant_id_readiness_model(tmp_path: Path) -> N
     assert "scope_ref" not in columns
 
 
+def test_vault_links_are_preserved_as_skill_tags_before_drop(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260627_0025")
+
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(
+            """
+            insert into vault_secrets (
+                id, name, tags, kind, protection, source,
+                ciphertext, nonce, wrap_meta, public_meta, policy,
+                use_count, created_at, updated_at
+            ) values (?, ?, ?, 'static', 'standard', 'manual',
+                'ct', 'nonce', 'wrap', null, null, 0, 'now', 'now')
+            """,
+            [
+                ("vlt_a", "A_KEY", json.dumps(["existing"])),
+                ("vlt_b", "B_KEY", None),
+            ],
+        )
+        conn.execute(
+            """
+            create table vault_links (
+                id text primary key,
+                secret_name text not null,
+                skill_name text not null,
+                source text not null default 'agent',
+                required integer not null default 0,
+                created_at text not null,
+                unique(secret_name, skill_name)
+            )
+            """
+        )
+        conn.execute("create index ix_vault_links_skill on vault_links(skill_name)")
+        conn.executemany(
+            """
+            insert into vault_links (id, secret_name, skill_name, source, required, created_at)
+            values (?, ?, ?, 'agent', 0, 'now')
+            """,
+            [
+                ("lnk_1", "A_KEY", "deploy"),
+                ("lnk_2", "A_KEY", "skill:release"),
+                ("lnk_3", "B_KEY", "deploy"),
+            ],
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        tables = {row[0] for row in conn.execute("select name from sqlite_master where type = 'table'")}
+        rows = dict(conn.execute("select name, tags from vault_secrets order by name").fetchall())
+
+    assert "vault_links" not in tables
+    assert json.loads(rows["A_KEY"]) == ["existing", "skill:deploy", "skill:release"]
+    assert json.loads(rows["B_KEY"]) == ["skill:deploy"]
+
+
 def test_scope_agent_backfill_migrates_explicit_agent_routes(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path, revision="20260526_0006")

@@ -18,7 +18,6 @@ export type GlobalPromptFile = {
 
 export type VaultSecret = {
   name: string;
-  group: string;
   tags: string[];
   kind: string;
   protection: string;
@@ -61,7 +60,6 @@ export type VaultRequest = {
 export type VaultRequestSpec = {
   kind?: 'static';
   protection?: 'standard' | 'protected';
-  group?: string;
   description?: string;
   tags?: string[];
   policy?: {
@@ -73,17 +71,20 @@ export type VaultRequestSpec = {
 
 export type VaultGrant = {
   id: string;
-  scope_type: 'secret' | 'skill' | 'group';
-  scope_ref: string;
+  source_selector: { env?: string[]; tags?: string[] };
   session_id: string | null;
+  purpose?: string | null;
   status: string;
-  created_by_request_id: string | null;
+  request_id: string | null;
   created_at: string;
   expires_at: string;
   revoked_at: string | null;
   member_snapshot: string[];
   member_count: number;
   runtime_member_count: number;
+  delivery_ready?: boolean;
+  delivery_status?: string;
+  one_shot?: boolean;
 };
 
 type VaultBlindBox = {
@@ -99,8 +100,6 @@ type VaultBlindBox = {
  * Mirrors the backend contract in PR #711 so the two additions dedupe cleanly on merge.
  */
 export type VaultAccessFulfillmentPayload = {
-  scope_type?: 'secret' | 'skill' | 'group';
-  scope_ref?: string;
   session_id?: string | null;
   ttl_seconds?: number;
   this_session_only?: boolean;
@@ -128,7 +127,6 @@ export type VaultCreatePayload = {
   blind_box?: VaultBlindBox;
   sealed?: VaultSealedEnvelope;
   envelope?: VaultSealedEnvelope;
-  group?: string;
   description?: string;
   tags?: string[];
   kind?: string;
@@ -345,7 +343,7 @@ export type ApiContextType = {
   updateVibeAgent: (name: string, payload: VibeAgentUpdatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   setDefaultVibeAgent: (name: string) => Promise<{ ok: boolean; default_agent_name: string; agent: VibeAgentBrief }>;
   removeVibeAgent: (name: string) => Promise<{ ok: boolean; code?: string; message?: string; references?: Record<string, number>; removed_agent?: string }>;
-  listVaultSecrets: (params?: { group?: string }) => Promise<{ ok: boolean; secrets: VaultSecret[] }>;
+  listVaultSecrets: () => Promise<{ ok: boolean; secrets: VaultSecret[] }>;
   getVaultVmk: () => Promise<VaultVmkResult>;
   getVaultPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   getVaultAgentPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
@@ -2059,12 +2057,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setDefaultVibeAgent: (name) => postJson('/api/agents/default', { name }),
     removeVibeAgent: (name) => deleteJson(`/api/agents/${encodeURIComponent(name)}`),
     getVaultVmk: () => getCachedJson('/api/vault/vmk', 1500, { handleError: false }),
-    listVaultSecrets: (params) => {
-      const search = new URLSearchParams();
-      if (params?.group) search.set('group', params.group);
-      const qs = search.toString();
-      return getCachedJson(qs ? `/api/vault/secrets?${qs}` : '/api/vault/secrets', 1500);
-    },
+    listVaultSecrets: () => getCachedJson('/api/vault/secrets', 1500),
     getVaultPubkey: () => getCachedJson('/api/vault/pubkey', 1500),
     getVaultAgentPubkey: () => getCachedJson('/api/vault/agent/pubkey', 1500),
     createVaultSecret: (payload, opts) => postJson('/api/vault/secrets', payload, opts),

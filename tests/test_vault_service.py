@@ -161,6 +161,18 @@ def test_create_grant_stores_final_fields_and_readiness_by_grant_id(vault):
     assert release_refs == [{"grant_id": grant["id"]}]
 
 
+def test_create_grant_caps_ttl_to_approval_options(vault):
+    _create(vault, name="A_KEY", protection="protected", tags=["deploy"])
+
+    with vault.begin() as conn:
+        req = vs.create_access_request(conn, source_selector={"tags": ["deploy"]})
+        grant = _grant_from_request(conn, req, ttl_seconds=86_400)
+
+    created = datetime.fromisoformat(grant["created_at"])
+    expires = datetime.fromisoformat(grant["expires_at"])
+    assert expires - created == timedelta(seconds=3600)
+
+
 def test_secret_delete_rotate_and_classification_changes_expire_covering_grants(vault):
     _create(vault, name="A_KEY", protection="protected")
     _create(vault, name="B_KEY", protection="protected")
@@ -196,6 +208,68 @@ def test_standard_secret_does_not_create_access_request_unless_always_ask(vault)
     assert req["card"]["one_shot"] is True
     assert grant["one_shot"] is True
     assert reserved["status"] == "reserved"
+
+
+def test_multi_member_one_shot_grant_is_consumed_once(vault):
+    _create(vault, name="ASK_KEY", protection="standard", tags=["deploy"], policy={"always_ask": True})
+    _create(vault, name="PROTECTED_KEY", protection="protected", tags=["deploy"])
+
+    with vault.begin() as conn:
+        req = vs.create_access_request(conn, source_selector={"tags": ["deploy"]}, requester={"session_id": "ses_1"})
+        grant = _grant_from_request(conn, req)
+        reserved = vs.find_active_grant_for_secret(
+            conn,
+            "ASK_KEY",
+            session_id="ses_1",
+            reserve_one_shot=True,
+        )
+        releases = vs.consume_one_shot_grant(conn, grant["id"])
+        row = conn.execute(select(vault_grants).where(vault_grants.c.id == grant["id"])).mappings().one()
+
+    assert req["card"]["one_shot"] is True
+    assert grant["one_shot"] is True
+    assert reserved["status"] == "reserved"
+    assert row["status"] == "expired"
+    assert releases == [{"grant_id": grant["id"]}]
+
+
+def test_selector_request_expires_when_member_rotates(vault):
+    _create(vault, name="A_KEY", protection="protected", tags=["deploy"])
+    _create(vault, name="B_KEY", protection="protected", tags=["deploy"])
+
+    with vault.begin() as conn:
+        req = vs.create_access_request(conn, source_selector={"tags": ["deploy"]})
+        assert req["secret_name"] is None
+        expired = vs.rotate_secret(conn, "A_KEY", _sealed("rotated"))
+        row = conn.execute(select(vault_requests).where(vault_requests.c.id == req["id"])).mappings().one()
+
+    assert expired["name"] == "A_KEY"
+    assert row["status"] == "expired"
+
+
+def test_selector_request_restores_after_failed_grant(vault):
+    _create(vault, name="A_KEY", protection="protected", tags=["deploy"])
+    _create(vault, name="B_KEY", protection="protected", tags=["deploy"])
+
+    with vault.begin() as conn:
+        req = vs.create_access_request(
+            conn,
+            source_selector={"tags": ["deploy"]},
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+        grant = _grant_from_request(conn, req, cache_ready=False)
+        restored = vs.restore_access_request_after_failed_grant(
+            conn,
+            request_id=req["id"],
+            member_names=grant["member_snapshot"],
+            session_id=grant["session_id"],
+        )
+        row = conn.execute(select(vault_requests).where(vault_requests.c.id == req["id"])).mappings().one()
+
+    assert restored == 1
+    assert row["status"] == "pending"
+    assert row["decided_at"] is None
 
 
 def test_request_payload_hydrates_unlock_material_only_for_ui(vault):

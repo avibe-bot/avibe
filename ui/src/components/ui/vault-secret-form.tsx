@@ -30,7 +30,6 @@ import {
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { Badge } from './badge';
 import { Button } from './button';
-import { Combobox } from './combobox';
 import { Input } from './input';
 import { SegmentedRadio } from './segmented';
 import { TagInput } from './tag-input';
@@ -42,7 +41,6 @@ type FetchAuthMode = 'bearer' | 'header' | 'query';
 type StaticSecretSource = 'text' | 'file';
 
 const AVAULT_P2_MIN_VERSION = '0.1.3';
-const DEFAULT_GROUP = 'default';
 const MAX_SECRET_FILE_BYTES = 1024 * 1024;
 const HTTP_HEADER_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const QUERY_PARAM_RE = /^[A-Za-z0-9._~-]+$/;
@@ -113,7 +111,6 @@ export const VaultSecretForm: React.FC<{
   provisionRequestId?: string | null;
   requestSpec?: VaultRequestSpec | null;
   treatExistingAsFulfilled?: boolean;
-  groups?: string[];
 }> = ({
   fixedName,
   onCancel,
@@ -123,7 +120,6 @@ export const VaultSecretForm: React.FC<{
   provisionRequestId,
   requestSpec,
   treatExistingAsFulfilled = false,
-  groups = [],
 }) => {
   const { t } = useTranslation();
   const api = useApi();
@@ -137,7 +133,6 @@ export const VaultSecretForm: React.FC<{
   const [signingKey, setSigningKey] = useState<SigningKeyMaterial | null>(null);
   const [signingError, setSigningError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [group, setGroup] = useState(requestSpec?.group ?? DEFAULT_GROUP);
   const [tags, setTags] = useState<string[]>(requestSpec?.tags ?? []);
   const [description, setDescription] = useState(requestSpec?.description ?? '');
   const [allowHosts, setAllowHosts] = useState<string[]>(requestSpec?.policy?.allowed_hosts ?? []);
@@ -187,7 +182,6 @@ export const VaultSecretForm: React.FC<{
     if (!requestSpec) return;
     if (requestSpec.kind) setKind(requestSpec.kind);
     if (requestSpec.protection) setProtection(requestSpec.protection);
-    if (requestSpec.group) setGroup(requestSpec.group);
     if (requestSpec.description) setDescription(requestSpec.description);
     if (requestSpec.tags) setTags(requestSpec.tags);
     if (requestSpec.policy?.allowed_hosts) setAllowHosts(requestSpec.policy.allowed_hosts);
@@ -336,7 +330,6 @@ export const VaultSecretForm: React.FC<{
       const base = {
         name: secretName,
         protection,
-        group: group.trim() || undefined,
         description: description.trim() || undefined,
         tags: tags.length ? tags : undefined,
         policy: Object.keys(policy).length ? policy : undefined,
@@ -645,23 +638,6 @@ export const VaultSecretForm: React.FC<{
         </div>
 
         <label className="flex flex-col gap-1.5">
-          <span className={FIELD_LABEL}>{t('vaults.dialog.group')}</span>
-          <Combobox
-            options={[...new Set([DEFAULT_GROUP, ...groups])].map((g) => ({ value: g, label: g }))}
-            value={group}
-            onValueChange={setGroup}
-            allowCustomValue
-            commitOnClose
-            withFolderIcon
-            createLabel={(v) => t('vaults.dialog.groupCreate', { name: v })}
-            createButtonLabel={t('vaults.dialog.groupCreateCta')}
-            createHeading={t('vaults.dialog.groupCreateHeading')}
-            placeholder={t('vaults.dialog.groupPlaceholder')}
-            searchPlaceholder={t('vaults.dialog.groupSearch')}
-          />
-        </label>
-
-        <label className="flex flex-col gap-1.5">
           <span className={FIELD_LABEL}>{t('vaults.dialog.description')}</span>
           <Input
             value={description}
@@ -883,24 +859,6 @@ export const VaultSecretForm: React.FC<{
 
       {/* Protection */}
       {protectionCards}
-
-      {/* Group */}
-      <label className="flex flex-col gap-1.5">
-        <span className={FIELD_LABEL}>{t('vaults.dialog.group')}</span>
-        <Combobox
-          options={[...new Set([DEFAULT_GROUP, ...groups])].map((g) => ({ value: g, label: g }))}
-          value={group}
-          onValueChange={setGroup}
-          allowCustomValue
-          commitOnClose
-          withFolderIcon
-          createLabel={(v) => t('vaults.dialog.groupCreate', { name: v })}
-          createButtonLabel={t('vaults.dialog.groupCreateCta')}
-          createHeading={t('vaults.dialog.groupCreateHeading')}
-          placeholder={t('vaults.dialog.groupPlaceholder')}
-          searchPlaceholder={t('vaults.dialog.groupSearch')}
-        />
-      </label>
 
       {/* Advanced — collapsible: description, tags, allowed hosts, always-ask. */}
       <div className="flex flex-col overflow-hidden rounded-[10px] bg-surface-2">

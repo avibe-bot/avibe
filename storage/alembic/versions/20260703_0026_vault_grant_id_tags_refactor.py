@@ -7,6 +7,8 @@ Create Date: 2026-07-03
 
 from __future__ import annotations
 
+import json
+
 import sqlalchemy as sa
 from alembic import op
 
@@ -71,10 +73,47 @@ def _create_vault_grants() -> None:
     )
 
 
+def _merge_json_tags(raw: str | None, added_tags: set[str]) -> str:
+    try:
+        current = json.loads(raw) if raw else []
+    except json.JSONDecodeError:
+        current = []
+    tags = [str(tag) for tag in current if isinstance(tag, str) and tag]
+    seen = set(tags)
+    for tag in sorted(added_tags):
+        if tag not in seen:
+            tags.append(tag)
+            seen.add(tag)
+    return json.dumps(tags)
+
+
+def _preserve_skill_links_as_tags() -> None:
+    if not _table_exists("vault_links") or not _table_exists("vault_secrets") or "tags" not in _columns("vault_secrets"):
+        return
+    bind = op.get_bind()
+    links: dict[str, set[str]] = {}
+    for row in bind.exec_driver_sql("select secret_name, skill_name from vault_links").mappings():
+        secret_name = str(row.get("secret_name") or "").strip()
+        skill_name = str(row.get("skill_name") or "").strip()
+        if not secret_name or not skill_name:
+            continue
+        tag = skill_name if skill_name.startswith("skill:") else f"skill:{skill_name}"
+        links.setdefault(secret_name, set()).add(tag)
+    for secret_name, added_tags in links.items():
+        current = bind.exec_driver_sql("select tags from vault_secrets where name = ?", (secret_name,)).first()
+        if current is None:
+            continue
+        bind.exec_driver_sql(
+            "update vault_secrets set tags = ? where name = ?",
+            (_merge_json_tags(current[0], added_tags), secret_name),
+        )
+
+
 def upgrade() -> None:
     bind = op.get_bind()
 
     if _table_exists("vault_links"):
+        _preserve_skill_links_as_tags()
         op.drop_index("ix_vault_links_skill", table_name="vault_links", if_exists=True)
         op.drop_table("vault_links")
 

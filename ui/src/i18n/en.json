@@ -2203,7 +2203,8 @@
       "scope": {
         "secret": "Secret",
         "skill": "Skill",
-        "group": "Group"
+        "tag": "Tag",
+        "selector": "Selector"
       },
       "dur": {
         "hm": "{{h}}h {{m}}m",
@@ -2392,7 +2393,8 @@
       "scope": {
         "secret": "This secret only",
         "skill": "Skill · {{ref}}",
-        "group": "Group · {{ref}}"
+        "tag": "Tag · {{ref}}",
+        "selector": "Selected secrets · {{ref}}"
       },
       "thisSessionOnly": "This session only",
       "approve": "Approve",
