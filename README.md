@@ -235,7 +235,7 @@ Forgets nothing. Holds opinions. Says thanks when you fix its bugs.
 vibe            # Start Avibe and open the Workbench
 vibe status     # Check service and configuration status
 vibe stop       # Stop the local service
-vibe doctor     # Diagnose common setup issues
+vibe doctor     # Diagnose common setup issues; use "vibe doctor repair" for explicit safe fixes
 vibe remote     # Reach your Workbench from any device via avibe.bot
 vibe agent      # Run and manage Avibe agents
 vibe task       # Schedule time-based work (cron / one-off)

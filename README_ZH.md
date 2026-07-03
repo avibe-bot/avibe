@@ -235,7 +235,7 @@ prototypes → Codex        （快速试验）
 vibe            # 启动 Avibe 并打开 Workbench
 vibe status     # 查看服务和配置状态
 vibe stop       # 停止本地服务
-vibe doctor     # 诊断常见安装问题
+vibe doctor     # 诊断常见安装问题；用 "vibe doctor repair" 显式执行安全修复
 vibe remote     # 通过 avibe.bot 从任意设备访问 Workbench
 vibe agent      # 运行和管理 Avibe agent
 vibe task       # 安排定时工作（cron / 一次性）

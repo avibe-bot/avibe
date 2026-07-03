@@ -522,7 +522,7 @@ The `vibe` executable controls the local service and async automation features.
 | `vibe stop` | Stop the service and UI; also terminates OpenCode server |
 | `vibe restart` | Stop then start again |
 | `vibe status` | Print runtime status JSON |
-| `vibe doctor` | Run diagnostics |
+| `vibe doctor` | Run diagnostics; `vibe doctor repair` applies explicit safe repairs |
 | `vibe remote` | Guided Avibe Cloud remote Web UI setup |
 | `vibe screenshot` | Capture a local desktop screenshot |
 | `vibe version` | Show installed version |
@@ -606,7 +606,18 @@ vibe doctor
 - validates config
 - checks platform credentials
 - checks backend CLI availability
-- checks runtime environment
+- checks runtime home migration state
+- checks runtime process, install, and restart metadata state
+
+Repair mode is explicit and supports dry-run:
+
+```bash
+vibe doctor repair --dry-run
+vibe doctor repair home-migration --yes
+vibe doctor repair duplicate-service-processes --yes
+vibe doctor repair stale-install-runtime --yes
+vibe doctor repair stale-restart-state --yes
+```
 
 ### `vibe remote`
 
