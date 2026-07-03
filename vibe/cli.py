@@ -4685,13 +4685,15 @@ def _is_env_name(name: str) -> bool:
     return all(c.isascii() and (c.isalnum() or c == "_") for c in name)
 
 
-def _parse_env_specs(specs) -> dict:
+def _parse_env_specs_parts(specs) -> tuple[dict[str, str], list[str]]:
     """Map ENV var name -> vault secret name from ``--env`` specs.
 
     Accepts ``NAME`` (inject as the same name), ``LOCAL=NAME`` (rename), and
     comma-separated ``A,B`` within one flag.
     """
     mapping: dict[str, str] = {}
+    env_by_secret: dict[str, str] = {}
+    normalized: list[str] = []
     for spec in specs or []:
         for part in str(spec).split(","):
             part = part.strip()
@@ -4716,8 +4718,24 @@ def _parse_env_specs(specs) -> dict:
                     code="conflicting_env_alias",
                     help_command="vibe vault run --help",
                 )
+            existing_env = env_by_secret.get(vault_name)
+            if existing_env is not None and existing_env != local:
+                raise TaskCliError(
+                    f"secret '{vault_name}' was selected as both {existing_env!r} and {local!r}",
+                    code="conflicting_env_alias",
+                    hint="Use one --env alias for each selected secret.",
+                    help_command="vibe vault run --help",
+                )
+            if existing == vault_name:
+                continue
             mapping[local] = vault_name
-    return mapping
+            env_by_secret[vault_name] = local
+            normalized.append(vault_name if local == vault_name else f"{local}={vault_name}")
+    return mapping, normalized
+
+
+def _parse_env_specs(specs) -> dict:
+    return _parse_env_specs_parts(specs)[0]
 
 
 def _arg_list(args, name: str) -> list[str]:
@@ -4735,7 +4753,6 @@ def _add_vault_run_selection(
     *,
     vault_name: str,
     env_name: str,
-    allow_duplicate_secret: bool = False,
 ) -> None:
     if not vault_name or not env_name:
         raise TaskCliError("vault run selector produced an empty secret or env name", code="invalid_selector")
@@ -4748,15 +4765,14 @@ def _add_vault_run_selection(
                 help_command="vibe vault run --help",
             )
         return
-    if not allow_duplicate_secret:
-        existing_env = next((selected_env for selected_env, selected_secret in selections.items() if selected_secret == vault_name), None)
-        if existing_env is not None and existing_env != env_name:
-            raise TaskCliError(
-                f"secret '{vault_name}' was selected as both {existing_env!r} and {env_name!r}",
-                code="conflicting_env_alias",
-                hint="Use one --env alias for each selected secret.",
-                help_command="vibe vault run --help",
-            )
+    existing_env = next((selected_env for selected_env, selected_secret in selections.items() if selected_secret == vault_name), None)
+    if existing_env is not None and existing_env != env_name:
+        raise TaskCliError(
+            f"secret '{vault_name}' was selected as both {existing_env!r} and {env_name!r}",
+            code="conflicting_env_alias",
+            hint="Use one --env alias for each selected secret.",
+            help_command="vibe vault run --help",
+        )
     selections[env_name] = vault_name
 
 
@@ -4766,14 +4782,14 @@ def _resolve_vault_run_selectors(engine, args) -> tuple[dict[str, str], dict]:
     from storage import vault_service
 
     env_specs = list(getattr(args, "env", None) or [])
-    explicit_mapping = _parse_env_specs(env_specs)
+    explicit_mapping, normalized_env_specs = _parse_env_specs_parts(env_specs)
     tag_specs = _arg_list(args, "tag")
     skill_specs = _arg_list(args, "skill")
     selections: dict[str, str] = {}
     for env_name, vault_name in explicit_mapping.items():
-        _add_vault_run_selection(selections, vault_name=vault_name, env_name=env_name, allow_duplicate_secret=True)
+        _add_vault_run_selection(selections, vault_name=vault_name, env_name=env_name)
 
-    source_selector: dict = {"env": env_specs}
+    source_selector: dict = {"env": normalized_env_specs}
     if tag_specs or skill_specs:
         with engine.connect() as conn:
             expanded = vault_service.expand_value_delivery_selector(conn, tags=tag_specs, skills=skill_specs)
@@ -5424,6 +5440,11 @@ def _resolve_vault_run_delivery(
         with engine.begin() as conn:
             if protected_names:
                 needs_selector_set = _needs_protected_selector_set(protected_names, source_selector)
+                selector_standard_names = [
+                    name
+                    for name in dict.fromkeys(mapping.values())
+                    if name not in protected_names and str(metas[name].get("protection") or "standard") == "standard"
+                ]
                 grant = vault_service.find_active_grant_for_secrets(
                     conn,
                     protected_names,
@@ -5433,23 +5454,28 @@ def _resolve_vault_run_delivery(
                 )
                 if grant is None:
                     always_ask_names = _always_ask_names(metas, protected_names) if needs_selector_set else []
-                    if always_ask_names:
+                    standard_always_ask_names = _always_ask_names(metas, selector_standard_names) if needs_selector_set else []
+                    if always_ask_names or standard_always_ask_names:
                         approval_error = TaskCliError(
-                            "always_ask protected secrets cannot be approved as one selector-set grant",
+                            "always_ask secrets cannot be approved as one protected selector-set grant",
                             code="always_ask_selector_set",
                             details={
                                 "protected_secret_names": protected_names,
                                 "always_ask_secret_names": always_ask_names,
+                                "standard_always_ask_secret_names": standard_always_ask_names,
                             },
-                            hint="Run those secrets individually so each per-use approval can be consumed once.",
+                            hint="Run always_ask secrets individually so each per-use approval can be consumed once.",
                         )
                     else:
+                        request_delivery = dict(delivery)
+                        if needs_selector_set:
+                            request_delivery["protected_secret_names"] = protected_names
                         req = vault_service.create_access_request(
                             conn,
                             None if needs_selector_set else protected_names[0],
                             source_selector=source_selector if needs_selector_set else None,
                             requester=requester,
-                            delivery=delivery,
+                            delivery=request_delivery,
                             purpose="run",
                         )
                         approval_error = TaskCliError(

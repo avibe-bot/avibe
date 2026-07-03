@@ -72,7 +72,6 @@ def test_agent_client_round_trips_pubkey_grant_deliver_and_release(tmp_path):
         assert client.pubkey() == {"public_key": "pk", "fingerprint": "fp"}
         assert client.grant(
             grant_id="vgr_api",
-            purpose="run",
             ttl_secs=300,
             deks=[
                 {
@@ -97,6 +96,7 @@ def test_agent_client_round_trips_pubkey_grant_deliver_and_release(tmp_path):
         assert client.release(grant_id="vgr_api") == {"released": True}
 
     assert [request["type"] for request in server.requests] == ["pubkey", "grant", "deliver.inject", "release"]
+    assert server.requests[1]["purpose"] == "deliver"
     assert server.requests[1]["ttl_secs"] == 300
     assert "value" not in json.dumps(server.requests)
 

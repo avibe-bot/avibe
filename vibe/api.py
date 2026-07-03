@@ -5375,11 +5375,15 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> dict:
 
 
 def _agent_secret_payload(secret: dict, *, target_field: str) -> dict:
-    return {
+    payload = {
         "name": secret["name"],
         target_field: secret[target_field],
         "envelope": _envelope_payload(secret["envelope"]),
     }
+    tier = secret.get("tier")
+    if tier is not None:
+        payload["tier"] = tier
+    return payload
 
 
 def avault_agent_grant(
@@ -5398,7 +5402,7 @@ def avault_agent_grant(
     try:
         return _avault_agent_client().grant(
             grant_id=grant_id,
-            purpose=purpose,
+            purpose="deliver",
             ttl_secs=ttl_secs,
             deks=deks,
         )

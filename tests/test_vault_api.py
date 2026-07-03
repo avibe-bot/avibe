@@ -1762,11 +1762,35 @@ def test_agent_grant_rejects_pubkey_mismatch(monkeypatch):
     agent_client.grant.assert_not_called()
 
 
+def test_agent_grant_uses_deliver_custody_purpose(monkeypatch):
+    agent_client = Mock()
+    agent_client.grant.return_value = {"granted": 1}
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_avault_agent_client", lambda: agent_client)
+    monkeypatch.setattr(api, "avault_agent_pubkey", lambda: {"public_key": "current-pk", "fingerprint": "current-fp"})
+
+    assert api.avault_agent_grant(
+        grant_id="vgr_grant",
+        purpose="run",
+        ttl_secs=300,
+        deks=[
+            {
+                "name": "GRANT_KEY",
+                "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+            }
+        ],
+    ) == {"granted": 1}
+    assert agent_client.grant.call_args.kwargs["purpose"] == "deliver"
+
+
 def test_agent_deliver_run_reuses_resident_agent_socket(monkeypatch):
     seen_timeout = []
+    seen_kwargs = []
 
     class FakeClient:
         def deliver_run(self, **kwargs):
+            seen_kwargs.append(kwargs)
             return {"exit_code": 7}
 
     class FakeManager:
@@ -1779,12 +1803,27 @@ def test_agent_deliver_run_reuses_resident_agent_socket(monkeypatch):
 
     result = api.avault_agent_deliver_run(
         grant_id="vgr_grant",
-        secrets=[{"name": "GRANT_KEY", "env": "GRANT_KEY", "envelope": _sealed()}],
+        secrets=[{"name": "GRANT_KEY", "env": "GRANT_KEY", "envelope": _sealed(), "tier": "protected"}],
         command=["python3", "-c", "pass"],
     )
 
     assert result == {"exit_code": 7}
     assert seen_timeout == [None]
+    assert seen_kwargs == [
+        {
+            "grant_id": "vgr_grant",
+            "command": ["python3", "-c", "pass"],
+            "secrets": [
+                {
+                    "name": "GRANT_KEY",
+                    "env": "GRANT_KEY",
+                    "envelope": {"ciphertext": "ct-1", "nonce": "n-1", "wrap_meta": "wm-1"},
+                    "tier": "protected",
+                }
+            ],
+            "context": None,
+        }
+    ]
 
 
 def test_agent_deliver_run_treats_connect_failure_as_pre_handoff(monkeypatch):
