@@ -66,7 +66,13 @@ def _create_standard_secret(
         )
 
 
-def _set_protected_grant(name: str, *, allow_host: list[str], session_id: str | None = None) -> dict:
+def _set_protected_grant(
+    name: str,
+    *,
+    allow_host: list[str],
+    session_id: str | None = None,
+    mode: str = "fetch",
+) -> dict:
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(
             conn,
@@ -79,7 +85,7 @@ def _set_protected_grant(name: str, *, allow_host: list[str], session_id: str | 
             conn,
             name,
             requester={"source": "cli", "session_id": session_id} if session_id else {"source": "cli"},
-            delivery={"session_id": session_id, "mode": "fetch"} if session_id else {"mode": "fetch"},
+            delivery={"session_id": session_id, "mode": mode} if session_id else {"mode": mode},
         )
         return vault_service.create_grant(
             conn,
@@ -183,6 +189,30 @@ def test_fetch_uses_agent_delivery_for_protected_grant(capfd, monkeypatch):
     assert fetch.call_args.kwargs["grant_id"] == grant["id"]
     assert fetch.call_args.kwargs["sealed"] == _sealed("gh_pat")
     assert "value" not in repr(fetch.call_args.kwargs)
+
+
+def test_fetch_does_not_reuse_run_grant(capfd, monkeypatch):
+    from unittest.mock import Mock
+
+    from vibe import api
+
+    grant = _set_protected_grant("GH_PAT", allow_host=["api.github.com"], session_id="ses_cli", mode="run")
+    agent_fetch = Mock(return_value={"status": 200, "headers": {}, "body": "ok"})
+    monkeypatch.setattr(api, "avault_agent_deliver_fetch", agent_fetch)
+    monkeypatch.setattr(api, "avault_deliver_fetch", Mock())
+
+    code = cli.cmd_vault_fetch(_ns(auth="GH_PAT", url="https://api.github.com/repos/o/r", session_id="ses_cli"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    agent_fetch.assert_not_called()
+    with cli._open_vault_engine().connect() as conn:
+        grant_row = conn.execute(vault_service.vault_grants.select().where(vault_service.vault_grants.c.id == grant["id"])).mappings().one()
+        requests = vault_service.list_requests(conn, status="pending")
+    assert grant_row["purpose"] == "run"
+    assert len(requests) == 1
+    assert requests[0]["delivery"]["mode"] == "fetch"
 
 
 def test_fetch_persists_protected_approval_request_without_grant(capfd):

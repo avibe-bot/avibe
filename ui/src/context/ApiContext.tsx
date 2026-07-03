@@ -73,8 +73,10 @@ export type VaultRequestSpec = {
 
 export type VaultGrant = {
   id: string;
-  scope_type: 'secret' | 'skill' | 'group';
+  scope_type: 'secret' | 'skill' | 'set';
   scope_ref: string;
+  purpose?: 'run' | 'fetch' | 'inject';
+  source_selector?: { env?: string[]; tags?: string[] } | null;
   session_id: string | null;
   status: string;
   created_by_request_id: string | null;
@@ -99,7 +101,7 @@ type VaultBlindBox = {
  * Mirrors the backend contract in PR #711 so the two additions dedupe cleanly on merge.
  */
 export type VaultAccessFulfillmentPayload = {
-  scope_type?: 'secret' | 'skill' | 'group';
+  scope_type?: 'secret' | 'skill' | 'set';
   scope_ref?: string;
   session_id?: string | null;
   ttl_seconds?: number;

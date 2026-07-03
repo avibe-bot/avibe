@@ -106,12 +106,14 @@ class AvaultAgentClient:
         grant_id: str,
         ttl_secs: int,
         deks: list[dict[str, Any]],
+        purpose: str = "deliver",
         scope_type: str | None = None,
         scope_ref: str | None = None,
     ) -> dict[str, Any]:
         payload = {
             "type": "grant",
             "grant_id": grant_id,
+            "purpose": purpose,
             "ttl_secs": ttl_secs,
             "deks": deks,
         }
@@ -151,8 +153,11 @@ class AvaultAgentClient:
             {
                 "type": "deliver.fetch",
                 "grant_id": grant_id,
-                "name": name,
-                "envelope": envelope,
+                "auth": {
+                    "name": name,
+                    "tier": "protected",
+                    "envelope": envelope,
+                },
                 "request": request,
             }
         )

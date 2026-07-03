@@ -16,7 +16,7 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260627_0025"
+HEAD_REVISION = "20260703_0026"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -279,7 +279,7 @@ def test_run_migrations_strips_vault_secret_preview_metadata(tmp_path: Path) -> 
     assert "9999" not in json.dumps(rows)
 
 
-def test_run_migrations_adds_vault_grant_agent_readiness_columns(tmp_path: Path) -> None:
+def test_run_migrations_adds_vault_grant_runtime_columns(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
 
     run_migrations(db_path, revision="20260626_0024")
@@ -290,6 +290,8 @@ def test_run_migrations_adds_vault_grant_agent_readiness_columns(tmp_path: Path)
     assert version == ("20260626_0024",)
     assert "agent_ready" not in before_columns
     assert "agent_ready_at" not in before_columns
+    assert "purpose" not in before_columns
+    assert "source_selector" not in before_columns
 
     run_migrations(db_path)
     run_migrations(db_path)
@@ -299,7 +301,7 @@ def test_run_migrations_adds_vault_grant_agent_readiness_columns(tmp_path: Path)
         columns = {row[1] for row in conn.execute('pragma table_info("vault_grants")')}
 
     assert version == (HEAD_REVISION,)
-    assert {"agent_ready", "agent_ready_at"} <= columns
+    assert {"agent_ready", "agent_ready_at", "purpose", "source_selector"} <= columns
 
 
 def test_scope_agent_backfill_migrates_explicit_agent_routes(tmp_path: Path) -> None:

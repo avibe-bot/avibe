@@ -545,9 +545,11 @@ vault_grants = Table(
     "vault_grants",
     metadata,
     Column("id", String, primary_key=True),
-    Column("scope_type", String, nullable=False),  # secret | skill | group
+    Column("scope_type", String, nullable=False),  # secret | skill | set
     Column("scope_ref", String, nullable=False),
     Column("member_snapshot", Text, nullable=True),  # JSON: frozen secret-name set (audit)
+    Column("source_selector", Text, nullable=True),  # JSON: env/tag selector that produced this set
+    Column("purpose", String, nullable=False, server_default="run"),  # run | fetch | inject
     Column("session_id", String, nullable=True),  # null = any-session
     Column("status", String, nullable=False, server_default="active"),  # active | expired | revoked
     Column("created_by_request_id", String, nullable=True),

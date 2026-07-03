@@ -19,13 +19,14 @@ import { VaultProtectedUnlock } from './vault-protected-unlock';
 
 /** The approval `card` the daemon attaches to a request's delivery payload. */
 type ScopeOption = {
-  scope_type: 'secret' | 'skill' | 'group';
+  scope_type: 'secret' | 'skill' | 'set';
   scope_ref: string;
   default_ttl_seconds: number;
   ttl_options_seconds: number[];
   session_binding_default: boolean;
   member_count: number;
   member_snapshot: string[];
+  source_selector?: { env?: string[]; tags?: string[] } | null;
   /** Hydrated for UI audience: the protected members of this scope to release. */
   unlock_material?: ProtectedUnlockMaterial[];
 };
@@ -75,6 +76,24 @@ function useTtlLabel() {
     },
     [t],
   );
+}
+
+function scopeSelectorLabel(option: ScopeOption, t: ReturnType<typeof useTranslation>['t']): string | null {
+  const selector = option.source_selector;
+  if (!selector) return null;
+  const tags = Array.isArray(selector.tags) ? selector.tags.filter((tag): tag is string => typeof tag === 'string' && tag.length > 0) : [];
+  const env = Array.isArray(selector.env) ? selector.env.filter((name): name is string => typeof name === 'string' && name.length > 0) : [];
+  if (tags.length > 0) {
+    const skillTags = tags.filter((tag) => tag.startsWith('skill:')).map((tag) => tag.slice('skill:'.length));
+    if (skillTags.length === tags.length) {
+      return t('vaults.approval.scopeSource.skill', { value: skillTags.join(', ') });
+    }
+    return t('vaults.approval.scopeSource.tag', { value: tags.join(', ') });
+  }
+  if (env.length > 0) {
+    return t('vaults.approval.scopeSource.env', { value: env.join(', ') });
+  }
+  return null;
 }
 
 /**
@@ -341,6 +360,8 @@ export const VaultApprovalCard: React.FC<{
           >
             {scopeOptions.map((option, idx) => {
               const selected = idx === scopeIdx;
+              const selectorLabel = scopeSelectorLabel(option, t);
+              const memberNames = option.member_snapshot.join(', ');
               return (
                 <button
                   key={`${option.scope_type}:${option.scope_ref}`}
@@ -368,8 +389,13 @@ export const VaultApprovalCard: React.FC<{
                       <Badge variant="secondary">{ttlLabel(option.default_ttl_seconds)}</Badge>
                     </span>
                     <span className="text-[11px] text-muted-foreground">
-                      {t('vaults.approval.scopeMembers', { count: option.member_count })}
+                      {option.scope_type === 'set' && selectorLabel ? selectorLabel : t('vaults.approval.scopeMembers', { count: option.member_count })}
                     </span>
+                    {option.scope_type === 'set' && memberNames ? (
+                      <span className="break-all text-[11px] text-muted-foreground">
+                        {t('vaults.approval.scopeSetMembers', { names: memberNames })}
+                      </span>
+                    ) : null}
                   </span>
                 </button>
               );

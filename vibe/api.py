@@ -1552,6 +1552,7 @@ def _vault_request_result(conn, request: dict) -> dict | None:
                 conn,
                 str(request["secret_name"]),
                 session_id=session_id,
+                purpose=vault_service._grant_purpose_from_delivery(delivery),
             )
         if grant is None:
             return None
@@ -2026,6 +2027,7 @@ def create_vault_grant(payload: dict) -> dict:
             grant_id=str(grant["id"]),
             ttl_secs=relay_ttl,
             deks=agent_deks,
+            purpose="deliver",
             scope_type=scope_type,
             scope_ref=scope_ref,
             expected_pubkey=expected_pubkey,
@@ -5280,6 +5282,7 @@ def avault_agent_grant(
     grant_id: str,
     ttl_secs: int,
     deks: list[dict],
+    purpose: str = "deliver",
     scope_type: str | None = None,
     scope_ref: str | None = None,
     expected_pubkey: dict | None = None,
@@ -5294,6 +5297,7 @@ def avault_agent_grant(
             grant_id=grant_id,
             ttl_secs=ttl_secs,
             deks=deks,
+            purpose=purpose,
             scope_type=scope_type,
             scope_ref=scope_ref,
         )

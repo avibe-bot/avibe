@@ -660,7 +660,7 @@ def test_agent_access_request_and_standard_grant_api(monkeypatch):
     assert fetched["result"]["grant"]["id"] == created["grant"]["id"]
 
 
-def test_agent_access_request_does_not_return_protected_group_unlock_material(monkeypatch):
+def test_agent_access_request_does_not_return_protected_unlock_material(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("standard")))
     api.create_vault_secret(
         {
@@ -681,8 +681,7 @@ def test_agent_access_request_does_not_return_protected_group_unlock_material(mo
     requested = api.request_vault_access({"name": "STANDARD_KEY", "session_id": "ses_1"})
 
     _assert_no_unlock_material(requested["request"]["card"])
-    group_option = next(option for option in requested["request"]["card"]["scope_options"] if option["scope_type"] == "group")
-    assert group_option["member_snapshot"] == ["PROTECTED_KEY", "STANDARD_KEY"]
+    assert all(option["scope_type"] != "group" for option in requested["request"]["card"]["scope_options"])
 
 
 def test_agent_access_request_ignores_client_source_for_hydration(monkeypatch):
@@ -1552,24 +1551,29 @@ def test_revoke_grant_releases_scope_when_remaining_members_do_not_cover_cache(m
         )
         vault_service.create_grant(
             conn,
-            scope_type="group",
-            scope_ref="crypto",
+            scope_type="secret",
+            scope_ref="A_KEY",
             session_id="ses_narrow",
             created_by_request_id=req_narrow["id"],
         )
         vault_service.create_secret(conn, name="B_KEY", protection="protected", group="crypto", sealed=_sealed("b"))
-        req_group = vault_service.create_access_request(
+        req_set = vault_service.create_access_request(
             conn,
             "A_KEY",
             requester={"session_id": "ses_group"},
-            delivery={"session_id": "ses_group"},
+            delivery={
+                "session_id": "ses_group",
+                "protected_secret_names": ["A_KEY", "B_KEY"],
+                "source_selector": {"env": ["A_KEY", "B_KEY"], "tags": []},
+            },
         )
+        option = req_set["card"]["scope_options"][0]
         group_grant = vault_service.create_grant(
             conn,
-            scope_type="group",
-            scope_ref="crypto",
+            scope_type="set",
+            scope_ref=option["scope_ref"],
             session_id="ses_group",
-            created_by_request_id=req_group["id"],
+            created_by_request_id=req_set["id"],
         )
 
     revoked = api.revoke_vault_grant(group_grant["id"])

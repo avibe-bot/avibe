@@ -139,7 +139,7 @@ const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => voi
 const SCOPE_ICON: Record<VaultGrant['scope_type'], typeof KeyRound> = {
   secret: KeyRound,
   skill: Puzzle,
-  group: Layers,
+  set: Layers,
 };
 
 /** Break a grant's time-to-expiry into parts; the units are localized in the row. */

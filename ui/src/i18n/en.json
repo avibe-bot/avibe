@@ -2203,7 +2203,7 @@
       "scope": {
         "secret": "Secret",
         "skill": "Skill",
-        "group": "Group"
+        "set": "Set"
       },
       "dur": {
         "hm": "{{h}}h {{m}}m",
@@ -2389,10 +2389,16 @@
       "digest": "Digest",
       "scopeTitle": "Approval scope",
       "scopeMembers": "Covers {{count}} secrets",
+      "scopeSetMembers": "Includes {{names}}",
+      "scopeSource": {
+        "env": "Explicit env list · {{value}}",
+        "tag": "Tag · {{value}}",
+        "skill": "Skill · {{value}}"
+      },
       "scope": {
         "secret": "This secret only",
         "skill": "Skill · {{ref}}",
-        "group": "Group · {{ref}}"
+        "set": "Selected protected set"
       },
       "thisSessionOnly": "This session only",
       "approve": "Approve",

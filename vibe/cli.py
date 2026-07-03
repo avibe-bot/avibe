@@ -4935,6 +4935,7 @@ def _resolve_vault_run_delivery(
                     conn,
                     protected_names,
                     session_id=session_id,
+                    purpose="run",
                     reserve_one_shot=True,
                 )
                 if grant is None:
@@ -5062,6 +5063,7 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
                 conn,
                 names,
                 session_id=session_id,
+                purpose="inject",
                 reserve_one_shot=True,
             )
             if common_grant is not None:

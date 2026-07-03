@@ -31,8 +31,9 @@ from storage.models import vault_audit, vault_grants, vault_groups, vault_links,
 from storage.vault_crypto import Sealed
 
 DEFAULT_GROUP = "default"
-GRANT_SCOPE_TYPES = {"secret", "skill", "group", "set"}
-DEFAULT_GRANT_TTL_SECONDS = {"secret": 300, "skill": 900, "group": 900, "set": 900}
+GRANT_SCOPE_TYPES = {"secret", "skill", "set"}
+GRANT_PURPOSES = {"run", "fetch", "inject"}
+DEFAULT_GRANT_TTL_SECONDS = {"secret": 300, "skill": 900, "set": 900}
 GRANT_TTL_OPTIONS_SECONDS = (300, 900, 3600)
 SUPPORTED_SIGNATURE_SCHEMES = {
     "ecdsa-secp256k1-recoverable",
@@ -240,6 +241,31 @@ def _loads(raw: str | None) -> Any:
         return json.loads(raw)
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_grant_purpose(value: Any) -> str:
+    purpose = str(value or "run").strip().lower()
+    if purpose not in GRANT_PURPOSES:
+        raise InvalidGrantError(f"invalid grant purpose: {purpose!r}")
+    return purpose
+
+
+def _grant_purpose_from_delivery(delivery: dict[str, Any] | None) -> str:
+    mode = delivery.get("mode") if isinstance(delivery, dict) else None
+    if mode in GRANT_PURPOSES:
+        return str(mode)
+    return "run"
+
+
+def _grant_purpose_from_request(row: dict[str, Any]) -> str:
+    _, delivery = _request_json_payloads(row)
+    return _grant_purpose_from_delivery(delivery)
+
+
+def _grant_source_selector_from_request(row: dict[str, Any]) -> dict[str, Any] | None:
+    _, delivery = _request_json_payloads(row)
+    source_selector = delivery.get("source_selector") if isinstance(delivery, dict) else None
+    return source_selector if isinstance(source_selector, dict) else None
 
 
 def _public_meta(raw: str | None) -> dict[str, Any]:
@@ -578,6 +604,8 @@ def _grant_row_payload(
         "id": grant_id,
         "scope_type": row["scope_type"],
         "scope_ref": row["scope_ref"],
+        "purpose": row.get("purpose") or "run",
+        "source_selector": _loads(row.get("source_selector")) if row.get("source_selector") else None,
         "session_id": row.get("session_id"),
         "status": row.get("status"),
         "created_by_request_id": row.get("created_by_request_id"),
@@ -1371,17 +1399,6 @@ def _grant_member_rows(conn: Connection, scope_type: str, scope_ref: str) -> lis
             .all()
         )
         return [dict(row) for row in rows]
-    if scope_type == "group":
-        rows = (
-            conn.execute(
-                select(vault_secrets)
-                .where(vault_secrets.c.group_name == scope_ref)
-                .order_by(vault_secrets.c.name)
-            )
-            .mappings()
-            .all()
-        )
-        return [dict(row) for row in rows]
     raise InvalidGrantError(f"invalid grant scope_type: {scope_type!r}")
 
 
@@ -1595,6 +1612,7 @@ def _selector_set_scope_option(
     *,
     request_id: str,
     default_ttl_seconds: int,
+    source_selector: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     rows = _selector_set_rows(conn, names)
     members = [row["name"] for row in rows]
@@ -1611,6 +1629,7 @@ def _selector_set_scope_option(
         "member_count": len(members),
         "member_snapshot": members,
         "member_versions": [_member_version(row) for row in rows],
+        "source_selector": dict(source_selector) if source_selector else None,
     }
 
 
@@ -1671,9 +1690,9 @@ def approval_card(
     grantable: bool = True,
     protected_secret_names: list[str] | None = None,
     selector_set_ttl_seconds: int | None = None,
+    source_selector: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     row = _require_row(conn, secret_name)
-    group = row.get("group_name") or DEFAULT_GROUP
     always_ask = _secret_always_ask(row)
     one_shot_access = request_type == "access" and always_ask and _secret_access_requestable(row)
     scope_options: list[dict[str, Any]] = []
@@ -1683,6 +1702,7 @@ def approval_card(
             protected_secret_names,
             request_id=request_id,
             default_ttl_seconds=selector_set_ttl_seconds or DEFAULT_GRANT_TTL_SECONDS["set"],
+            source_selector=source_selector,
         )
         scope_options = [option] if option is not None else []
     elif one_shot_access:
@@ -1714,13 +1734,6 @@ def approval_card(
                     )
                     if skill
                     else None
-                ),
-                _scope_option(
-                    conn,
-                    "group",
-                    group,
-                    requested_secret=secret_name,
-                    default_ttl_seconds=DEFAULT_GRANT_TTL_SECONDS["group"],
                 ),
             )
             if option is not None
@@ -1776,6 +1789,7 @@ def create_access_request(
         grantable=bool(protected_secret_names) or not always_ask,
         protected_secret_names=protected_secret_names,
         selector_set_ttl_seconds=_selector_set_default_ttl_seconds(delivery_payload),
+        source_selector=delivery_payload.get("source_selector") if isinstance(delivery_payload.get("source_selector"), dict) else None,
     )
     delivery_payload["card"] = card
     conn.execute(
@@ -2477,6 +2491,7 @@ def create_grant(
     created_by_request_id: str | None = None,
     inherit_request_session: bool = True,
     expected_member_names: set[str] | list[str] | tuple[str, ...] | None = None,
+    purpose: str | None = None,
     cache_ready: bool = True,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
 ) -> dict[str, Any]:
@@ -2503,6 +2518,11 @@ def create_grant(
         raise InvalidRequestError("grant approval snapshot has stale members")
     if expected_member_names is not None and set(members) != set(expected_member_names):
         raise InvalidGrantError("resident agent DEKs must match the approved grant members")
+    request_row = _load_request_row(conn, created_by_request_id)
+    grant_purpose = _normalize_grant_purpose(
+        purpose if purpose is not None else _grant_purpose_from_request(request_row)
+    )
+    source_selector = _grant_source_selector_from_request(request_row)
     live_rows_by_name = {row["name"]: row for row in live_rows}
     always_ask_grant = len(members) == 1 and _secret_always_ask(live_rows_by_name[members[0]])
     resident_cache_ready = cache_ready and any(
@@ -2532,6 +2552,8 @@ def create_grant(
                 scope_type=scope_type,
                 scope_ref=scope_ref,
                 member_snapshot=json.dumps(members),
+                source_selector=json.dumps(source_selector) if source_selector else None,
+                purpose=grant_purpose,
                 session_id=session_id,
                 status="active",
                 created_by_request_id=created_by_request_id,
@@ -2552,7 +2574,12 @@ def create_grant(
         conn,
         "granted",
         requester={"session_id": session_id} if session_id else None,
-        delivery={"scope_type": scope_type, "scope_ref": scope_ref, "member_count": len(members)},
+        delivery={
+            "scope_type": scope_type,
+            "scope_ref": scope_ref,
+            "member_count": len(members),
+            "purpose": grant_purpose,
+        },
         request_id=created_by_request_id,
         grant_id=grant_id,
     )
@@ -2719,6 +2746,7 @@ def find_active_grant_for_secret(
     secret_name: str,
     *,
     session_id: str | None = None,
+    purpose: str | None = None,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
     reserve_one_shot: bool = False,
 ) -> dict[str, Any] | None:
@@ -2726,6 +2754,7 @@ def find_active_grant_for_secret(
         conn,
         [secret_name],
         session_id=session_id,
+        purpose=purpose,
         cache=cache,
         reserve_one_shot=reserve_one_shot,
     )
@@ -2820,6 +2849,7 @@ def find_active_grant_for_secrets(
     secret_names: list[str],
     *,
     session_id: str | None = None,
+    purpose: str | None = None,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
     reserve_one_shot: bool = False,
 ) -> dict[str, Any] | None:
@@ -2827,13 +2857,17 @@ def find_active_grant_for_secrets(
     requested = {str(name) for name in secret_names if str(name)}
     if not requested:
         return None
+    grant_purpose = _normalize_grant_purpose(purpose) if purpose is not None else None
+    filters = [
+        vault_grants.c.status.in_(ACTIVE_GRANT_STATES),
+        or_(vault_grants.c.session_id.is_(None), vault_grants.c.session_id == session_id),
+    ]
+    if grant_purpose is not None:
+        filters.append(vault_grants.c.purpose == grant_purpose)
     rows = [
         dict(row)
         for row in conn.execute(
-            select(vault_grants).where(
-                vault_grants.c.status.in_(ACTIVE_GRANT_STATES),
-                or_(vault_grants.c.session_id.is_(None), vault_grants.c.session_id == session_id),
-            )
+            select(vault_grants).where(*filters)
         ).mappings()
     ]
     candidates: list[tuple[bool, int, str, str, dict[str, Any]]] = []
@@ -2891,6 +2925,7 @@ def resolve_secret_access(
     row = _require_row(conn, name)
     _reject_keypair_value_delivery(row, name)
     delivery_payload = dict(delivery or {})
+    grant_purpose = _grant_purpose_from_delivery(delivery_payload)
     effective_session_id = (
         session_id
         or _payload_session_id(delivery_payload)
@@ -2903,6 +2938,7 @@ def resolve_secret_access(
         conn,
         name,
         session_id=effective_session_id,
+        purpose=grant_purpose,
         cache=cache,
         reserve_one_shot=reserve_one_shot,
     )

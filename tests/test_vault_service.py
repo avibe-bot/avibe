@@ -49,6 +49,51 @@ def _access_request(conn, name: str, *, session_id: str = "ses_1", skill: str | 
     return vs.create_access_request(conn, name, requester=payload, delivery=payload)
 
 
+def _set_access_request(
+    conn,
+    requested: str,
+    members: list[str],
+    *,
+    session_id: str = "ses_1",
+    expires_at: str | None = None,
+) -> dict:
+    payload = {
+        "session_id": session_id,
+        "protected_secret_names": members,
+        "source_selector": {"env": members, "tags": []},
+    }
+    return vs.create_access_request(
+        conn,
+        requested,
+        requester={"session_id": session_id},
+        delivery=payload,
+        expires_at=expires_at,
+    )
+
+
+def _create_set_grant(
+    conn,
+    request: dict,
+    *,
+    session_id: str = "ses_1",
+    ttl_seconds: int | None = None,
+    cache_ready: bool = True,
+    cache: vs.VaultGrantRuntimeCache = vs.GRANT_RUNTIME_CACHE,
+) -> dict:
+    option = request["card"]["scope_options"][0]
+    assert option["scope_type"] == "set"
+    return vs.create_grant(
+        conn,
+        scope_type="set",
+        scope_ref=option["scope_ref"],
+        session_id=session_id,
+        ttl_seconds=ttl_seconds,
+        created_by_request_id=request["id"],
+        cache_ready=cache_ready,
+        cache=cache,
+    )
+
+
 def _row(engine, name: str) -> dict:
     with engine.connect() as conn:
         return dict(conn.execute(select(vault_secrets).where(vault_secrets.c.name == name)).mappings().one())
@@ -646,19 +691,12 @@ def test_create_grant_freezes_scope_members_and_keeps_key_material_out_of_python
     _create(vault, name="B_KEY", protection="protected", group="crypto")
     cache = vs.VaultGrantRuntimeCache()
     with vault.begin() as conn:
-        req = _access_request(conn, "A_KEY", session_id="ses_1")
-        grant = vs.create_grant(
-            conn,
-            scope_type="group",
-            scope_ref="crypto",
-            session_id="ses_1",
-            ttl_seconds=900,
-            created_by_request_id=req["id"],
-            cache=cache,
-        )
+        req = _set_access_request(conn, "A_KEY", ["A_KEY", "B_KEY"], session_id="ses_1")
+        grant = _create_set_grant(conn, req, session_id="ses_1", ttl_seconds=900, cache=cache)
 
-    assert grant["scope_type"] == "group"
+    assert grant["scope_type"] == "set"
     assert grant["member_snapshot"] == ["A_KEY", "B_KEY"]
+    assert grant["source_selector"] == {"env": ["A_KEY", "B_KEY"], "tags": []}
     assert grant["runtime_member_count"] == 2
     assert cache.get(grant["id"], "A_KEY") is None
     with vault.connect() as conn:
@@ -679,38 +717,25 @@ def test_find_active_grant_for_secrets_chooses_covering_scope(vault):
             session_id="ses_1",
             created_by_request_id=req_a["id"],
         )
-        req_group = _access_request(conn, "A_KEY", session_id="ses_1")
-        group_grant = vs.create_grant(
-            conn,
-            scope_type="group",
-            scope_ref="crypto",
-            session_id="ses_1",
-            created_by_request_id=req_group["id"],
-        )
+        req_set = _set_access_request(conn, "A_KEY", ["A_KEY", "B_KEY"], session_id="ses_1")
+        set_grant = _create_set_grant(conn, req_set, session_id="ses_1")
 
         selected = vs.find_active_grant_for_secrets(conn, ["A_KEY", "B_KEY"], session_id="ses_1")
 
     assert selected is not None
-    assert selected["id"] == group_grant["id"]
+    assert selected["id"] == set_grant["id"]
     assert selected["id"] != secret_grant["id"]
 
 
-def test_group_grant_approves_sibling_requests_in_same_session(vault):
+def test_set_grant_approves_sibling_requests_in_same_session(vault):
     _create(vault, name="A_KEY", protection="protected", group="crypto")
     _create(vault, name="B_KEY", protection="protected", group="crypto")
     cache = vs.VaultGrantRuntimeCache()
     with vault.begin() as conn:
-        req_a = _access_request(conn, "A_KEY", session_id="ses_1")
+        req_a = _set_access_request(conn, "A_KEY", ["A_KEY", "B_KEY"], session_id="ses_1")
         req_b = _access_request(conn, "B_KEY", session_id="ses_1")
         req_other = _access_request(conn, "B_KEY", session_id="ses_2")
-        grant = vs.create_grant(
-            conn,
-            scope_type="group",
-            scope_ref="crypto",
-            session_id="ses_1",
-            created_by_request_id=req_a["id"],
-            cache=cache,
-        )
+        grant = _create_set_grant(conn, req_a, session_id="ses_1", cache=cache)
         statuses = {
             row["id"]: row["status"]
             for row in conn.execute(
@@ -728,13 +753,13 @@ def test_group_grant_approves_sibling_requests_in_same_session(vault):
     }
 
 
-def test_group_grant_expires_stale_sibling_requests(vault):
+def test_set_grant_expires_stale_sibling_requests(vault):
     _create(vault, name="A_KEY", protection="protected", group="crypto")
     _create(vault, name="B_KEY", protection="protected", group="crypto")
     cache = vs.VaultGrantRuntimeCache()
     expired_at = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
     with vault.begin() as conn:
-        req_a = _access_request(conn, "A_KEY", session_id="ses_1")
+        req_a = _set_access_request(conn, "A_KEY", ["A_KEY", "B_KEY"], session_id="ses_1")
         req_b = vs.create_access_request(
             conn,
             "B_KEY",
@@ -742,14 +767,7 @@ def test_group_grant_expires_stale_sibling_requests(vault):
             delivery={"session_id": "ses_1"},
             expires_at=expired_at,
         )
-        vs.create_grant(
-            conn,
-            scope_type="group",
-            scope_ref="crypto",
-            session_id="ses_1",
-            created_by_request_id=req_a["id"],
-            cache=cache,
-        )
+        _create_set_grant(conn, req_a, session_id="ses_1", cache=cache)
         statuses = {
             row["id"]: row["status"]
             for row in conn.execute(
@@ -765,20 +783,13 @@ def test_group_grant_expires_stale_sibling_requests(vault):
     }
 
 
-def test_grant_uses_approval_member_snapshot_not_later_group_members(vault):
+def test_grant_uses_approval_member_snapshot_not_later_set_members(vault):
     _create(vault, name="A_KEY", protection="protected", group="crypto")
     cache = vs.VaultGrantRuntimeCache()
     with vault.begin() as conn:
-        req = _access_request(conn, "A_KEY", session_id="ses_1")
+        req = _set_access_request(conn, "A_KEY", ["A_KEY"], session_id="ses_1")
         vs.create_secret(conn, name="B_KEY", protection="protected", group="crypto", sealed=_sealed("b"))
-        grant = vs.create_grant(
-            conn,
-            scope_type="group",
-            scope_ref="crypto",
-            session_id="ses_1",
-            created_by_request_id=req["id"],
-            cache=cache,
-        )
+        grant = _create_set_grant(conn, req, session_id="ses_1", cache=cache)
 
     assert grant["member_snapshot"] == ["A_KEY"]
     assert grant["runtime_member_count"] == 1
@@ -899,13 +910,11 @@ def test_resolve_secret_prefers_cache_ready_grant_over_stale_scope(vault):
     _create(vault, name="B_KEY", protection="protected", group="crypto")
     cache = vs.VaultGrantRuntimeCache()
     with vault.begin() as conn:
-        req_group = _access_request(conn, "A_KEY", session_id="ses_1")
-        stale_group = vs.create_grant(
+        req_set = _set_access_request(conn, "A_KEY", ["A_KEY", "B_KEY"], session_id="ses_1")
+        stale_set = _create_set_grant(
             conn,
-            scope_type="group",
-            scope_ref="crypto",
+            req_set,
             session_id="ses_1",
-            created_by_request_id=req_group["id"],
             cache_ready=False,
             cache=cache,
         )
@@ -924,7 +933,7 @@ def test_resolve_secret_prefers_cache_ready_grant_over_stale_scope(vault):
 
     assert active is not None
     assert active["id"] == ready_secret["id"]
-    assert active["id"] != stale_group["id"]
+    assert active["id"] != stale_set["id"]
     assert resolved["status"] == "agent_delivery_ready"
     assert resolved["grant"]["id"] == ready_secret["id"]
 
@@ -936,28 +945,21 @@ def test_agent_release_returns_removed_grant_id(vault):
         req_narrow = _access_request(conn, "A_KEY", session_id="ses_narrow")
         narrow_grant = vs.create_grant(
             conn,
-            scope_type="group",
-            scope_ref="crypto",
+            scope_type="secret",
+            scope_ref="A_KEY",
             session_id="ses_narrow",
             created_by_request_id=req_narrow["id"],
             cache=cache,
         )
         vs.create_secret(conn, name="B_KEY", protection="protected", group="crypto", sealed=_sealed("b"))
-        req_group = _access_request(conn, "A_KEY", session_id="ses_group")
-        group_grant = vs.create_grant(
-            conn,
-            scope_type="group",
-            scope_ref="crypto",
-            session_id="ses_group",
-            created_by_request_id=req_group["id"],
-            cache=cache,
-        )
-        rows = [dict(conn.execute(select(vault_grants).where(vault_grants.c.id == group_grant["id"])).mappings().one())]
-        vs.revoke_grant(conn, group_grant["id"], cache=cache)
+        req_set = _set_access_request(conn, "A_KEY", ["A_KEY", "B_KEY"], session_id="ses_group")
+        set_grant = _create_set_grant(conn, req_set, session_id="ses_group", cache=cache)
+        rows = [dict(conn.execute(select(vault_grants).where(vault_grants.c.id == set_grant["id"])).mappings().one())]
+        vs.revoke_grant(conn, set_grant["id"], cache=cache)
         release_scopes = vs.agent_release_scopes_after_rows(conn, rows, cache=cache)
 
-    assert release_scopes == [{"grant_id": group_grant["id"]}]
-    assert not cache.has(group_grant["id"], "A_KEY")
+    assert release_scopes == [{"grant_id": set_grant["id"]}]
+    assert not cache.has(set_grant["id"], "A_KEY")
     assert cache.has(narrow_grant["id"], "A_KEY")
     with vault.connect() as conn:
         listed = {grant["id"]: grant for grant in vs.list_grants(conn, status=None, cache=vs.VaultGrantRuntimeCache())}
@@ -969,24 +971,10 @@ def test_agent_release_does_not_skip_when_same_member_grant_remains(vault):
     _create(vault, name="B_KEY", protection="protected", group="crypto")
     cache = vs.VaultGrantRuntimeCache()
     with vault.begin() as conn:
-        req_1 = _access_request(conn, "A_KEY", session_id="ses_1")
-        grant_1 = vs.create_grant(
-            conn,
-            scope_type="group",
-            scope_ref="crypto",
-            session_id="ses_1",
-            created_by_request_id=req_1["id"],
-            cache=cache,
-        )
-        req_2 = _access_request(conn, "A_KEY", session_id="ses_2")
-        grant_2 = vs.create_grant(
-            conn,
-            scope_type="group",
-            scope_ref="crypto",
-            session_id="ses_2",
-            created_by_request_id=req_2["id"],
-            cache=cache,
-        )
+        req_1 = _set_access_request(conn, "A_KEY", ["A_KEY", "B_KEY"], session_id="ses_1")
+        grant_1 = _create_set_grant(conn, req_1, session_id="ses_1", cache=cache)
+        req_2 = _set_access_request(conn, "A_KEY", ["A_KEY", "B_KEY"], session_id="ses_2")
+        grant_2 = _create_set_grant(conn, req_2, session_id="ses_2", cache=cache)
         rows = [dict(conn.execute(select(vault_grants).where(vault_grants.c.id == grant_1["id"])).mappings().one())]
         vs.revoke_grant(conn, grant_1["id"], cache=cache)
         release_scopes = vs.agent_release_scopes_after_rows(conn, rows, cache=cache)
@@ -1003,8 +991,8 @@ def test_agent_release_ignores_unready_remaining_grants(vault):
         req_1 = _access_request(conn, "A_KEY", session_id="ses_1")
         grant_1 = vs.create_grant(
             conn,
-            scope_type="group",
-            scope_ref="crypto",
+            scope_type="secret",
+            scope_ref="A_KEY",
             session_id="ses_1",
             created_by_request_id=req_1["id"],
             cache=cache,
@@ -1012,8 +1000,8 @@ def test_agent_release_ignores_unready_remaining_grants(vault):
         req_2 = _access_request(conn, "A_KEY", session_id="ses_2")
         grant_2 = vs.create_grant(
             conn,
-            scope_type="group",
-            scope_ref="crypto",
+            scope_type="secret",
+            scope_ref="A_KEY",
             session_id="ses_2",
             created_by_request_id=req_2["id"],
             cache_ready=False,
@@ -1038,8 +1026,8 @@ def test_agent_release_ignores_expired_remaining_grants(vault):
         req_1 = _access_request(conn, "A_KEY", session_id="ses_1")
         grant_1 = vs.create_grant(
             conn,
-            scope_type="group",
-            scope_ref="crypto",
+            scope_type="secret",
+            scope_ref="A_KEY",
             session_id="ses_1",
             created_by_request_id=req_1["id"],
             cache=cache,
@@ -1047,8 +1035,8 @@ def test_agent_release_ignores_expired_remaining_grants(vault):
         req_2 = _access_request(conn, "A_KEY", session_id="ses_2")
         grant_2 = vs.create_grant(
             conn,
-            scope_type="group",
-            scope_ref="crypto",
+            scope_type="secret",
+            scope_ref="A_KEY",
             session_id="ses_2",
             created_by_request_id=req_2["id"],
             cache=cache,
@@ -1179,20 +1167,9 @@ def test_resolve_protected_without_grant_returns_approval_card(vault):
         "kind": "static",
         "envelope": {"ciphertext": "ct-1", "nonce": "n-1", "wrap_meta": "wm-1"},
     }
-    group_option = next(option for option in card["scope_options"] if option["scope_type"] == "group")
-    assert group_option["member_snapshot"] == ["GROUP_KEY", "PROTECTED_KEY"]
-    assert group_option["unlock_material"] == [
-        {
-            "name": "GROUP_KEY",
-            "kind": "static",
-            "envelope": {"ciphertext": "ct-group", "nonce": "n-group", "wrap_meta": "wm-group"},
-        },
-        {
-            "name": "PROTECTED_KEY",
-            "kind": "static",
-            "envelope": {"ciphertext": "ct-1", "nonce": "n-1", "wrap_meta": "wm-1"},
-        },
-    ]
+    scope_types = [option["scope_type"] for option in card["scope_options"]]
+    assert "group" not in scope_types
+    assert all(option["member_snapshot"] == ["PROTECTED_KEY"] for option in card["scope_options"])
     assert all("member_versions" in option for option in card["scope_options"])
     with vault.connect() as conn:
         request_row = conn.execute(select(vault_requests).where(vault_requests.c.id == result["request"]["id"])).mappings().one()
@@ -1341,12 +1318,17 @@ def test_request_inbox_hydrates_unlock_material_without_persisting_it(vault):
 def test_agent_created_request_hydrates_only_for_ui_inbox(vault):
     _create(vault, name="STANDARD_KEY", protection="standard", group="crypto")
     with vault.begin() as conn:
+        vs.create_secret(conn, name="A_KEY", protection="protected", group="crypto", sealed=_sealed("a"))
         vs.create_secret(conn, name="PROTECTED_KEY", protection="protected", group="crypto", sealed=_sealed("protected"))
         req = vs.create_access_request(
             conn,
-            "STANDARD_KEY",
+            "A_KEY",
             requester={"source": "agent-cli", "session_id": "ses_1"},
-            delivery={"session_id": "ses_1"},
+            delivery={
+                "session_id": "ses_1",
+                "protected_secret_names": ["A_KEY", "PROTECTED_KEY"],
+                "source_selector": {"env": ["A_KEY", "PROTECTED_KEY"], "tags": []},
+            },
         )
         ui_payload = vs.get_request(conn, req["id"])
         agent_payload = vs.get_request(conn, req["id"], audience=vs.REQUEST_AUDIENCE_AGENT)
@@ -1359,10 +1341,20 @@ def test_agent_created_request_hydrates_only_for_ui_inbox(vault):
     assert "wm-protected" not in agent_encoded
     ui_encoded = json.dumps({"ui": ui_payload, "listed": listed})
     assert "unlock_material" in ui_encoded
+    assert "ct-a" in ui_encoded
     assert "ct-protected" in ui_encoded
     assert "wm-protected" in ui_encoded
-    group_option = next(option for option in listed[0]["card"]["scope_options"] if option["scope_type"] == "group")
-    assert group_option["unlock_material"] == [
+    set_option = next(option for option in listed[0]["card"]["scope_options"] if option["scope_type"] == "set")
+    assert set_option["unlock_material"] == [
+        {
+            "name": "A_KEY",
+            "kind": "static",
+            "envelope": {
+                "ciphertext": "ct-a",
+                "nonce": "n-a",
+                "wrap_meta": "wm-a",
+            },
+        },
         {
             "name": "PROTECTED_KEY",
             "kind": "static",

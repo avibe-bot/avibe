@@ -2202,7 +2202,7 @@
       "scope": {
         "secret": "密钥",
         "skill": "技能",
-        "group": "分组"
+        "set": "集合"
       },
       "dur": {
         "hm": "{{h}} 时 {{m}} 分",
@@ -2388,10 +2388,16 @@
       "digest": "摘要",
       "scopeTitle": "授权范围",
       "scopeMembers": "覆盖 {{count}} 个密钥",
+      "scopeSetMembers": "包含 {{names}}",
+      "scopeSource": {
+        "env": "显式环境变量 · {{value}}",
+        "tag": "标签 · {{value}}",
+        "skill": "技能 · {{value}}"
+      },
       "scope": {
         "secret": "仅此密钥",
         "skill": "技能 · {{ref}}",
-        "group": "分组 · {{ref}}"
+        "set": "选中的受保护集合"
       },
       "thisSessionOnly": "仅限本会话",
       "approve": "批准",
