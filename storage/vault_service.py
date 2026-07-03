@@ -284,6 +284,33 @@ def _grant_source_selector_from_request(row: dict[str, Any]) -> dict[str, Any] |
     return source_selector if isinstance(source_selector, dict) else None
 
 
+def _request_required_member_names(row: dict[str, Any]) -> list[str]:
+    requested_secret = str(row.get("secret_name") or "")
+    _, delivery = _request_json_payloads(row)
+    if isinstance(delivery, dict):
+        selector_names = _selector_set_names_from_delivery(delivery, requested_secret)
+        if selector_names:
+            return selector_names
+    card = _request_card(row)
+    options = card.get("scope_options") if isinstance(card, dict) else None
+    snapshots: list[list[str]] = []
+    if isinstance(options, list):
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            snapshot = option.get("member_snapshot")
+            if not isinstance(snapshot, list):
+                continue
+            names = [str(name) for name in snapshot if isinstance(name, str) and name]
+            if requested_secret and requested_secret not in names:
+                continue
+            if names:
+                snapshots.append(names)
+    if snapshots:
+        return min(snapshots, key=len)
+    return [requested_secret] if requested_secret else []
+
+
 def _public_meta(raw: str | None) -> dict[str, Any]:
     payload = _loads(raw)
     return payload if isinstance(payload, dict) else {}
@@ -2432,6 +2459,7 @@ def _approve_sibling_access_requests_for_grant(
         ).mappings()
         if _request_session_id(dict(row)) == target_session_id
         and _grant_purpose_from_request(dict(row)) == purpose
+        and set(_request_required_member_names(dict(row))).issubset(set(members))
     ]
     approved = 0
     now_dt = datetime.now(timezone.utc)

@@ -760,6 +760,32 @@ def test_set_grant_approves_sibling_requests_in_same_session(vault):
     }
 
 
+def test_set_grant_does_not_approve_overlapping_wider_sibling_request(vault):
+    _create(vault, name="A_KEY", protection="protected", group="crypto")
+    _create(vault, name="B_KEY", protection="protected", group="crypto")
+    _create(vault, name="C_KEY", protection="protected", group="crypto")
+    cache = vs.VaultGrantRuntimeCache()
+    with vault.begin() as conn:
+        req_ab = _set_access_request(conn, "A_KEY", ["A_KEY", "B_KEY"], session_id="ses_1")
+        req_bc = _set_access_request(conn, "B_KEY", ["B_KEY", "C_KEY"], session_id="ses_1")
+        req_b = _access_request(conn, "B_KEY", session_id="ses_1")
+        _create_set_grant(conn, req_ab, session_id="ses_1", cache=cache)
+        statuses = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                select(vault_requests.c.id, vault_requests.c.status).where(
+                    vault_requests.c.id.in_([req_ab["id"], req_bc["id"], req_b["id"]])
+                )
+            ).mappings()
+        }
+
+    assert statuses == {
+        req_ab["id"]: "approved",
+        req_bc["id"]: "pending",
+        req_b["id"]: "approved",
+    }
+
+
 def test_set_grant_does_not_approve_sibling_requests_for_other_purpose(vault):
     _create(vault, name="A_KEY", protection="protected", group="crypto")
     _create(vault, name="B_KEY", protection="protected", group="crypto")
