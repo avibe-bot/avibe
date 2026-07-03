@@ -87,10 +87,7 @@ class ControllerGetterTests(unittest.TestCase):
         cfg = V2Config.from_payload(_payload())
         for k, v in overrides.items():
             setattr(cfg, k, v)
-        # The getters call ``_refresh_status_bubble_config`` (mtime-guarded disk
-        # reload) before reading config; a no-op keeps these pure-getter unit
-        # tests isolated from disk.
-        return types.SimpleNamespace(config=cfg, _refresh_status_bubble_config=lambda: None)
+        return types.SimpleNamespace(config=cfg)
 
     def test_progress_style_getter(self):
         fake = self._fake(agent_progress_style="off")
