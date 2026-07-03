@@ -131,15 +131,17 @@ class AvaultAgentClient:
         grant_id: str,
         command: list[str],
         secrets: list[dict[str, Any]],
+        context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return self.request(
-            {
-                "type": "deliver.run",
-                "grant_id": grant_id,
-                "command": command,
-                "secrets": secrets,
-            }
-        )
+        payload = {
+            "type": "deliver.run",
+            "grant_id": grant_id,
+            "command": command,
+            "secrets": secrets,
+        }
+        if context is not None:
+            payload["context"] = context
+        return self.request(payload)
 
     def deliver_fetch(
         self,
@@ -148,19 +150,21 @@ class AvaultAgentClient:
         name: str,
         envelope: dict[str, Any],
         request: dict[str, Any],
+        context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return self.request(
-            {
-                "type": "deliver.fetch",
-                "grant_id": grant_id,
-                "auth": {
-                    "name": name,
-                    "tier": "protected",
-                    "envelope": envelope,
-                },
-                "request": request,
-            }
-        )
+        payload = {
+            "type": "deliver.fetch",
+            "grant_id": grant_id,
+            "auth": {
+                "name": name,
+                "tier": "protected",
+                "envelope": envelope,
+            },
+            "request": request,
+        }
+        if context is not None:
+            payload["context"] = context
+        return self.request(payload)
 
     def deliver_inject(
         self,

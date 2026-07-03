@@ -31,9 +31,9 @@ from storage.models import vault_audit, vault_grants, vault_groups, vault_links,
 from storage.vault_crypto import Sealed
 
 DEFAULT_GROUP = "default"
-GRANT_SCOPE_TYPES = {"secret", "skill", "set"}
+GRANT_SCOPE_TYPES = {"secret", "set"}
 GRANT_PURPOSES = {"run", "fetch", "inject"}
-DEFAULT_GRANT_TTL_SECONDS = {"secret": 300, "skill": 900, "set": 900}
+DEFAULT_GRANT_TTL_SECONDS = {"secret": 300, "set": 900}
 GRANT_TTL_OPTIONS_SECONDS = (300, 900, 3600)
 SUPPORTED_SIGNATURE_SCHEMES = {
     "ecdsa-secp256k1-recoverable",
@@ -57,7 +57,6 @@ PROVISION_SPEC_FORBIDDEN_KEYS = {
 PROVISION_SPEC_ALLOWED_KEYS = {
     "kind",
     "protection",
-    "group",
     "description",
     "tags",
     "policy",
@@ -71,6 +70,7 @@ PROVISION_SPEC_ALLOWED_AUTH_KEYS = {"type", "name"}
 class GrantApproval:
     members: list[str]
     session_id: str | None
+    grant_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -234,6 +234,22 @@ def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
+def _option_grant_id(request_id: str, scope_type: str, scope_ref: str) -> str:
+    seed = f"avibe:vault-grant:{request_id}:{scope_type}:{scope_ref}"
+    return f"vgr_{uuid.uuid5(uuid.NAMESPACE_URL, seed).hex[:12]}"
+
+
+def _normalize_supplied_grant_id(value: Any) -> str | None:
+    if value is None:
+        return None
+    grant_id = str(value).strip()
+    if not grant_id:
+        return None
+    if len(grant_id) > 128:
+        raise InvalidGrantError("grant_id is too long")
+    return grant_id
+
+
 def _loads(raw: str | None) -> Any:
     if not raw:
         return None
@@ -364,10 +380,6 @@ def normalize_provision_spec(spec: Any) -> dict[str, Any]:
         if protection not in {"standard", "protected"}:
             raise VaultServiceError("spec.protection must be 'standard' or 'protected'")
         normalized["protection"] = protection
-
-    group = _optional_string(spec.get("group"), field="spec.group") if "group" in spec else None
-    if group:
-        normalized["group"] = group
 
     description = _optional_string(spec.get("description"), field="spec.description") if "description" in spec else None
     if description:
@@ -686,6 +698,8 @@ def _hydrate_card_unlock_material(conn: Connection, row: dict[str, Any], card: d
         hydrated_options.append(option_payload)
     if hydrated_options:
         card["scope_options"] = hydrated_options
+        if isinstance(card.get("grant_options"), list):
+            card["grant_options"] = [dict(option) for option in hydrated_options]
     return card
 
 
@@ -913,9 +927,8 @@ def ensure_default_group(conn: Connection) -> None:
 def _ensure_group(conn: Connection, name: str) -> None:
     """Create the group row if it's missing so a secret's ``group_name`` FK is satisfied.
 
-    The Vaults UI / ``--group`` expose arbitrary group labels; without this an unseeded
-    group would trip the FK with a generic ``FOREIGN KEY constraint failed`` instead of
-    the group option just working.
+    Hidden storage defaults may still reference a non-seeded legacy group name; without
+    this, the FK would fail with a generic ``FOREIGN KEY constraint failed``.
     """
     if conn.execute(select(vault_groups.c.name).where(vault_groups.c.name == name)).first() is None:
         try:
@@ -1387,18 +1400,6 @@ def _grant_member_rows(conn: Connection, scope_type: str, scope_ref: str) -> lis
         return [_require_row(conn, scope_ref)]
     if scope_type == "set":
         return []
-    if scope_type == "skill":
-        rows = (
-            conn.execute(
-                select(vault_secrets)
-                .select_from(vault_links.join(vault_secrets, vault_links.c.secret_name == vault_secrets.c.name))
-                .where(vault_links.c.skill_name == scope_ref)
-                .order_by(vault_secrets.c.name)
-            )
-            .mappings()
-            .all()
-        )
-        return [dict(row) for row in rows]
     raise InvalidGrantError(f"invalid grant scope_type: {scope_type!r}")
 
 
@@ -1716,28 +1717,25 @@ def approval_card(
     elif grantable and not always_ask:
         scope_options = [
             option
-            for option in (
+            for option in [
                 _scope_option(
                     conn,
                     "secret",
                     secret_name,
                     requested_secret=secret_name,
                     default_ttl_seconds=DEFAULT_GRANT_TTL_SECONDS["secret"],
-                ),
-                (
-                    _scope_option(
-                        conn,
-                        "skill",
-                        skill,
-                        requested_secret=secret_name,
-                        default_ttl_seconds=DEFAULT_GRANT_TTL_SECONDS["skill"],
-                    )
-                    if skill
-                    else None
-                ),
-            )
+                )
+            ]
             if option is not None
         ]
+    for option in scope_options:
+        if not isinstance(option, dict):
+            continue
+        scope_type = str(option.get("scope_type") or "")
+        scope_ref = str(option.get("scope_ref") or "")
+        if scope_type and scope_ref:
+            option.setdefault("grant_id", _option_grant_id(request_id, scope_type, scope_ref))
+    grant_options = [option for option in scope_options if isinstance(option, dict)]
     card = {
         "card_type": "approval",
         "request_id": request_id,
@@ -1751,6 +1749,9 @@ def approval_card(
         "approve_once": True,
         "one_shot": one_shot_access,
         "scope_options": scope_options,
+        "grant_options": grant_options,
+        "source_selector": dict(source_selector) if source_selector else None,
+        "default_ttl_seconds": scope_options[0]["default_ttl_seconds"] if scope_options else None,
         "value": None,
     }
     return card
@@ -2366,7 +2367,11 @@ def _validate_access_request_for_grant(
                     raise InvalidRequestError("grant approval snapshot has stale members")
                 if not _member_version_matches(current, versions_by_name[member_name]):
                     raise InvalidRequestError("grant approval snapshot has stale members")
-            return GrantApproval(members=members, session_id=effective_session_id)
+            return GrantApproval(
+                members=members,
+                session_id=effective_session_id,
+                grant_id=_normalize_supplied_grant_id(option.get("grant_id")),
+            )
         raise InvalidRequestError("grant scope was not offered by the approval request")
     return GrantApproval(members=live_members, session_id=effective_session_id)
 
@@ -2377,6 +2382,7 @@ def _approve_sibling_access_requests_for_grant(
     created_by_request_id: str,
     members: list[str],
     session_id: str | None,
+    purpose: str,
     decided_at: str,
 ) -> int:
     if not members:
@@ -2398,6 +2404,7 @@ def _approve_sibling_access_requests_for_grant(
             )
         ).mappings()
         if _request_session_id(dict(row)) == target_session_id
+        and _grant_purpose_from_request(dict(row)) == purpose
     ]
     approved = 0
     now_dt = datetime.now(timezone.utc)
@@ -2492,6 +2499,7 @@ def create_grant(
     inherit_request_session: bool = True,
     expected_member_names: set[str] | list[str] | tuple[str, ...] | None = None,
     purpose: str | None = None,
+    grant_id: str | None = None,
     cache_ready: bool = True,
     cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
 ) -> dict[str, Any]:
@@ -2513,6 +2521,9 @@ def create_grant(
         live_members=live_members,
     )
     session_id = approval.session_id
+    requested_grant_id = _normalize_supplied_grant_id(grant_id)
+    if requested_grant_id and approval.grant_id and requested_grant_id != approval.grant_id:
+        raise InvalidGrantError("grant_id does not match the approval request")
     members = approval.members
     if any(name not in live_members for name in members):
         raise InvalidRequestError("grant approval snapshot has stale members")
@@ -2544,7 +2555,7 @@ def create_grant(
     ttl = max(1, min(ttl, _ttl_cap_for_members(conn, members)))
     now_dt = datetime.now(timezone.utc)
     expires_at = (now_dt + timedelta(seconds=ttl)).isoformat()
-    grant_id = _id("vgr")
+    grant_id = requested_grant_id or approval.grant_id or _id("vgr")
     try:
         conn.execute(
             vault_grants.insert().values(
@@ -2590,6 +2601,7 @@ def create_grant(
             created_by_request_id=created_by_request_id,
             members=members,
             session_id=session_id,
+            purpose=grant_purpose,
             decided_at=decided_at,
         )
     if resident_cache_ready:

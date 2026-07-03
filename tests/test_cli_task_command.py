@@ -8,7 +8,7 @@ import sys
 from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -51,6 +51,11 @@ def _parse_agent_run(argv: list[str]):
 def _parse_agent(argv: list[str]):
     parser = cli.build_parser()
     return parser.parse_args(["agent", *argv])
+
+
+def _parse_runs_cancel(argv: list[str]):
+    parser = cli.build_parser()
+    return parser.parse_args(["runs", "cancel", *argv])
 
 
 def _capture_stderr_json(func, *args):
@@ -1441,6 +1446,235 @@ def test_hook_send_enqueues_request(tmp_path: Path, capsys) -> None:
     assert payload["session_key"] == "slack::channel::C123::thread::171717.123"
     assert payload["post_to"] == "channel"
     assert (request_root / "pending" / f"{payload['execution_id']}.json").exists()
+
+
+def test_runs_cancel_running_agent_run_stops_live_turn_and_marks_canceled(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = cli.TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="ses_live_cancel",
+        message="keep working",
+        agent_name="worker",
+        callback_session_id="ses_callback",
+    )
+    assert request_store.claim(request.id) is not None
+    cancel_dispatch = AsyncMock(
+        return_value={
+            "status_code": 200,
+            "body": {"ok": True, "session_id": "ses_live_cancel", "status": "cancel_requested"},
+        }
+    )
+
+    with (
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.internal_client.cancel_dispatch", cancel_dispatch),
+    ):
+        result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
+
+    assert result == 0
+    cancel_dispatch.assert_awaited_once_with("ses_live_cancel")
+    saved = request_store.get_run(request.id)
+    assert saved is not None
+    assert saved["status"] == "canceled"
+    assert saved["completed_at"] is not None
+    assert saved["cancel_requested"] is True
+    assert saved["callback_status"] == "pending"
+    pending_callbacks = request_store.list_pending_callbacks()
+    assert [item["id"] for item in pending_callbacks] == [request.id]
+    assert pending_callbacks[0]["status"] == "canceled"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["cancel_code"] == "live_cancel_confirmed"
+    assert payload["cancel_result"]["live_cancel_confirmed"] is True
+    assert payload["cancel_result"]["run_terminalized"] is True
+    assert payload["run"]["status"] == "canceled"
+
+
+def test_runs_cancel_running_agent_run_reports_recorded_only_when_controller_unavailable(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    from vibe import internal_client
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = cli.TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="ses_controller_down",
+        message="keep working",
+        agent_name="worker",
+    )
+    assert request_store.claim(request.id) is not None
+    cancel_dispatch = AsyncMock(side_effect=internal_client.InternalServerUnavailable("missing socket"))
+
+    with (
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.internal_client.cancel_dispatch", cancel_dispatch),
+    ):
+        result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
+
+    assert result == 0
+    cancel_dispatch.assert_awaited_once_with("ses_controller_down")
+    saved = request_store.get_run(request.id)
+    assert saved is not None
+    assert saved["status"] == "running"
+    assert saved["completed_at"] is None
+    assert saved["cancel_requested"] is True
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["cancel_code"] == "cancel_request_recorded_only"
+    assert payload["cancel_result"]["reason_code"] == "internal_unavailable"
+    assert payload["cancel_result"]["live_cancel_confirmed"] is False
+    assert payload["run"]["status"] == "running"
+
+
+def test_runs_cancel_running_agent_run_reports_recorded_only_when_backend_refuses_stop(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = cli.TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="ses_stop_failed",
+        message="keep working",
+        agent_name="worker",
+    )
+    assert request_store.claim(request.id) is not None
+    cancel_dispatch = AsyncMock(
+        return_value={
+            "status_code": 409,
+            "body": {"ok": False, "code": "stop_failed", "reason": "interrupt_failed"},
+        }
+    )
+
+    with (
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.internal_client.cancel_dispatch", cancel_dispatch),
+    ):
+        result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
+
+    assert result == 0
+    cancel_dispatch.assert_awaited_once_with("ses_stop_failed")
+    saved = request_store.get_run(request.id)
+    assert saved is not None
+    assert saved["status"] == "running"
+    assert saved["cancel_requested"] is True
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["cancel_code"] == "cancel_request_recorded_only"
+    assert payload["cancel_result"]["reason_code"] == "stop_failed"
+    assert payload["cancel_result"]["detail"]["controller_status_code"] == 409
+
+
+def test_runs_cancel_running_agent_run_reports_recorded_only_when_no_live_turn(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = cli.TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="ses_no_live_turn",
+        message="keep working",
+        agent_name="worker",
+    )
+    assert request_store.claim(request.id) is not None
+    cancel_dispatch = AsyncMock(
+        return_value={
+            "status_code": 404,
+            "body": {"ok": False, "code": "not_in_flight", "session_id": "ses_no_live_turn"},
+        }
+    )
+
+    with (
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.internal_client.cancel_dispatch", cancel_dispatch),
+    ):
+        result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
+
+    assert result == 0
+    cancel_dispatch.assert_awaited_once_with("ses_no_live_turn")
+    saved = request_store.get_run(request.id)
+    assert saved is not None
+    assert saved["status"] == "running"
+    assert saved["cancel_requested"] is True
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["cancel_code"] == "cancel_request_recorded_only"
+    assert payload["cancel_result"]["reason_code"] == "not_in_flight"
+    assert payload["cancel_result"]["detail"]["controller_status_code"] == 404
+
+
+def test_runs_cancel_running_agent_run_does_not_overwrite_already_finished_turn(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = cli.TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="ses_already_finished",
+        message="keep working",
+        agent_name="worker",
+    )
+    assert request_store.claim(request.id) is not None
+    cancel_dispatch = AsyncMock(
+        return_value={
+            "status_code": 200,
+            "body": {"ok": True, "session_id": "ses_already_finished", "status": "already_finished"},
+        }
+    )
+
+    with (
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.internal_client.cancel_dispatch", cancel_dispatch),
+    ):
+        result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
+
+    assert result == 0
+    cancel_dispatch.assert_awaited_once_with("ses_already_finished")
+    saved = request_store.get_run(request.id)
+    assert saved is not None
+    assert saved["status"] == "running"
+    assert saved["completed_at"] is None
+    assert saved["cancel_requested"] is True
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["cancel_code"] == "cancel_request_recorded_only"
+    assert payload["cancel_result"]["reason_code"] == "already_finished"
+    assert payload["cancel_result"]["live_cancel_confirmed"] is False
+    assert payload["run"]["status"] == "running"
+
+
+def test_runs_cancel_queued_agent_run_does_not_call_live_controller(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store = cli.TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="ses_queued_cancel",
+        message="queued work",
+        agent_name="worker",
+    )
+    cancel_dispatch = AsyncMock()
+
+    with (
+        patch("vibe.cli._task_request_store", return_value=request_store),
+        patch("vibe.internal_client.cancel_dispatch", cancel_dispatch),
+    ):
+        result = cli.cmd_runs_cancel(_parse_runs_cancel([request.id]))
+
+    assert result == 0
+    cancel_dispatch.assert_not_awaited()
+    saved = request_store.get_run(request.id)
+    assert saved is not None
+    assert saved["status"] == "canceled"
+    assert saved["cancel_requested"] is True
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["cancel_code"] == "queued_canceled"
+    assert payload["run"]["status"] == "canceled"
 
 
 def test_hook_send_allows_unresolved_legacy_scope_backend(tmp_path: Path, capsys) -> None:

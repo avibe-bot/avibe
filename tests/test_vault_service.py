@@ -504,17 +504,17 @@ def test_create_fulfills_pending_provision_request(vault):
 
 def test_request_specific_create_uses_target_spec_and_fulfills_sibling_requests(vault):
     with vault.begin() as conn:
-        old_req = vs.create_provision_request(conn, "ASKED_KEY", spec={"group": "old"})
-        new_req = vs.create_provision_request(conn, "ASKED_KEY", spec={"group": "new"})
+        old_req = vs.create_provision_request(conn, "ASKED_KEY", spec={"tags": ["old"]})
+        new_req = vs.create_provision_request(conn, "ASKED_KEY", spec={"tags": ["new"]})
         meta = vs.create_secret(
             conn,
             name="ASKED_KEY",
             sealed=_sealed("new"),
-            group="new",
+            tags=["new"],
             provision_request_id=new_req["id"],
         )
 
-    assert meta["group"] == "new"
+    assert meta["tags"] == ["new"]
     with vault.connect() as conn:
         rows = {
             row["id"]: row["status"]
@@ -592,7 +592,6 @@ def test_provision_request_carries_secure_input_card_without_value(vault):
             spec={
                 "kind": "static",
                 "protection": "protected",
-                "group": "github",
                 "description": "GitHub token",
                 "tags": ["github", "deploy"],
                 "policy": {"allowed_hosts": ["api.github.com"], "auth": {"type": "bearer"}},
@@ -602,7 +601,6 @@ def test_provision_request_carries_secure_input_card_without_value(vault):
     assert req["card"]["card_type"] == "secure_input"
     assert req["card"]["secret_name"] == "NEW_CARD_KEY"
     assert req["card"]["value"] is None
-    assert req["card"]["spec"]["group"] == "github"
     assert req["card"]["spec"]["links"] == {"skills": ["release"]}
     with vault.connect() as conn:
         listed = vs.list_requests(conn)
@@ -628,6 +626,12 @@ def test_provision_request_spec_rejects_secret_material(vault):
             vs.create_provision_request(conn, "BAD_CARD_KEY", spec={"policy": {"value": "secret"}})
 
 
+def test_provision_request_spec_rejects_group(vault):
+    with vault.begin() as conn:
+        with pytest.raises(vs.VaultServiceError, match="unsupported vault request spec fields: group"):
+            vs.create_provision_request(conn, "BAD_GROUP_KEY", spec={"group": "legacy"})
+
+
 def test_provision_request_spec_rejects_object_valued_scalar_fields(vault):
     with vault.begin() as conn:
         with pytest.raises(vs.VaultServiceError, match="spec.description must be a string"):
@@ -650,7 +654,7 @@ def test_get_pending_provision_request_resolves_by_request_id(vault):
                     "request_type": "provision",
                     "secret_name": "DUP_KEY",
                     "requester": None,
-                    "delivery": json.dumps({"card": vs._secure_input_card("DUP_KEY", request_id="vrq_old", spec={"group": "old"})}),
+                    "delivery": json.dumps({"card": vs._secure_input_card("DUP_KEY", request_id="vrq_old", spec={"tags": ["old"]})}),
                     "status": "pending",
                     "message_id": None,
                     "created_at": "2026-01-01T00:00:00+00:00",
@@ -660,7 +664,7 @@ def test_get_pending_provision_request_resolves_by_request_id(vault):
                     "request_type": "provision",
                     "secret_name": "DUP_KEY",
                     "requester": None,
-                    "delivery": json.dumps({"card": vs._secure_input_card("DUP_KEY", request_id="vrq_new", spec={"group": "new"})}),
+                    "delivery": json.dumps({"card": vs._secure_input_card("DUP_KEY", request_id="vrq_new", spec={"tags": ["new"]})}),
                     "status": "pending",
                     "message_id": None,
                     "created_at": "2026-01-01T00:00:01+00:00",
@@ -673,7 +677,7 @@ def test_get_pending_provision_request_resolves_by_request_id(vault):
         ambiguous_by_name = vs.find_pending_provision_request(conn, "DUP_KEY")
 
     assert old_lookup["id"] == "vrq_old"
-    assert old_lookup["card"]["spec"]["group"] == "old"
+    assert old_lookup["card"]["spec"]["tags"] == ["old"]
     assert ambiguous_by_name is None
 
 
@@ -750,6 +754,34 @@ def test_set_grant_approves_sibling_requests_in_same_session(vault):
         req_a["id"]: "approved",
         req_b["id"]: "approved",
         req_other["id"]: "pending",
+    }
+
+
+def test_set_grant_does_not_approve_sibling_requests_for_other_purpose(vault):
+    _create(vault, name="A_KEY", protection="protected", group="crypto")
+    _create(vault, name="B_KEY", protection="protected", group="crypto")
+    cache = vs.VaultGrantRuntimeCache()
+    with vault.begin() as conn:
+        req_run = _set_access_request(conn, "A_KEY", ["A_KEY", "B_KEY"], session_id="ses_1")
+        req_fetch = vs.create_access_request(
+            conn,
+            "B_KEY",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1", "mode": "fetch"},
+        )
+        _create_set_grant(conn, req_run, session_id="ses_1", cache=cache)
+        statuses = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                select(vault_requests.c.id, vault_requests.c.status).where(
+                    vault_requests.c.id.in_([req_run["id"], req_fetch["id"]])
+                )
+            ).mappings()
+        }
+
+    assert statuses == {
+        req_run["id"]: "approved",
+        req_fetch["id"]: "pending",
     }
 
 
@@ -2332,20 +2364,12 @@ def test_sign_request_completion_rejects_malformed_signatures(vault):
     assert meta["use_count"] == 0
 
 
-def test_skill_grant_uses_vault_links(vault):
+def test_selector_set_grant_uses_request_snapshot(vault):
     _create(vault, name="A_KEY", protection="protected")
     _create(vault, name="B_KEY", protection="protected")
     with vault.begin() as conn:
-        conn.execute(vault_links.insert().values(id="ln_a", secret_name="A_KEY", skill_name="deploy", source="user", required=1, created_at="now"))
-        conn.execute(vault_links.insert().values(id="ln_b", secret_name="B_KEY", skill_name="deploy", source="user", required=1, created_at="now"))
-        req = _access_request(conn, "A_KEY", skill="deploy")
-        grant = vs.create_grant(
-            conn,
-            scope_type="skill",
-            scope_ref="deploy",
-            session_id="ses_1",
-            created_by_request_id=req["id"],
-        )
+        req = _set_access_request(conn, "A_KEY", ["A_KEY", "B_KEY"], session_id="ses_1")
+        grant = _create_set_grant(conn, req, session_id="ses_1")
     assert grant["member_snapshot"] == ["A_KEY", "B_KEY"]
 
 
@@ -2353,15 +2377,14 @@ def test_scope_grant_rejects_stale_member_snapshot_after_rotation(vault):
     _create(vault, name="A_KEY", protection="protected")
     _create(vault, name="B_KEY", protection="protected")
     with vault.begin() as conn:
-        conn.execute(vault_links.insert().values(id="ln_a", secret_name="A_KEY", skill_name="deploy", source="user", required=1, created_at="now"))
-        conn.execute(vault_links.insert().values(id="ln_b", secret_name="B_KEY", skill_name="deploy", source="user", required=1, created_at="now"))
-        req = _access_request(conn, "A_KEY", skill="deploy")
+        req = _set_access_request(conn, "A_KEY", ["A_KEY", "B_KEY"], session_id="ses_1")
+        option = req["card"]["scope_options"][0]
         vs.rotate_secret(conn, "B_KEY", _sealed("rotated-b"))
         with pytest.raises(vs.InvalidRequestError):
             vs.create_grant(
                 conn,
-                scope_type="skill",
-                scope_ref="deploy",
+                scope_type="set",
+                scope_ref=option["scope_ref"],
                 session_id="ses_1",
                 created_by_request_id=req["id"],
             )

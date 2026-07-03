@@ -455,9 +455,9 @@ web_push_subscriptions = Table(
 )
 
 # Vaults — secret management for agents (design: docs/plans/vaults.md).
-# A named secret is referenced by a globally-unique env-style ``name``; ``group_name``
-# is a lightweight organizational + unlock-scope axis (NOT a separate keyspace, NOT a
-# 1Password-style multi-vault container). Values are envelope-encrypted at rest
+# A named secret is referenced by a globally-unique env-style ``name``. ``group_name``
+# remains a storage/default-policy column for pre-launch rows; product grouping is tag
+# based. Values are envelope-encrypted at rest
 # (storage/vault_crypto.py): standard tier under a machine key, protected tier (P1)
 # under a password/passkey-derived key. ``ciphertext``/``nonce`` are base64 text and
 # ``wrap_meta`` is a JSON blob of the wrapped DEK + scheme — there is deliberately no
@@ -537,15 +537,14 @@ vault_requests = Table(
     Index("ix_vault_requests_status_created", "status", "created_at"),
 )
 
-# Metadata + audit of active scope-typed unlock grants. Key material is NEVER stored
-# here; resident avault agent delivery material wires in later as process-local opaque
-# state. This row records the scope + bounds for the UI and audit; the member set is
-# frozen at grant time.
+# Metadata + audit of active protected unlock grants. Key material is NEVER stored
+# here; resident avault agent delivery material wires in as process-local opaque
+# state. This row records the fixed member set, source selector, and lifetime.
 vault_grants = Table(
     "vault_grants",
     metadata,
     Column("id", String, primary_key=True),
-    Column("scope_type", String, nullable=False),  # secret | skill | set
+    Column("scope_type", String, nullable=False),  # secret | set (request option handle)
     Column("scope_ref", String, nullable=False),
     Column("member_snapshot", Text, nullable=True),  # JSON: frozen secret-name set (audit)
     Column("source_selector", Text, nullable=True),  # JSON: env/tag selector that produced this set

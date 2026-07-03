@@ -449,6 +449,82 @@ def _runtime_architecture_items() -> list[dict[str, str]]:
     return items
 
 
+def _service_lifecycle_items() -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    pid_path = paths.get_runtime_pid_path()
+    recorded_pid: int | None = None
+    try:
+        recorded_pid = int(pid_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        recorded_pid = None
+
+    owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
+    lock_holder_pid = runtime.service_lock_holder_pid()
+    extra_service_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
+    unverified_service_pids = runtime.extra_service_process_pids(
+        owner_pid=owner_pid,
+        include_unverified=True,
+    )
+    unverified_service_pids = [pid for pid in unverified_service_pids if pid not in set(extra_service_pids)]
+    status = runtime.read_status()
+    status_pid = status.get("service_pid")
+
+    if owner_pid:
+        _add_doctor_item(items, "pass", f"Service lock owner: pid={owner_pid}")
+    elif lock_holder_pid:
+        _add_doctor_item(
+            items,
+            "warn",
+            f"Service lock is held by pid={lock_holder_pid}, but the owner could not be verified",
+            "Run `vibe status` and inspect service logs before starting another service.",
+        )
+    else:
+        _add_doctor_item(items, "pass", "Service lock is free")
+
+    if owner_pid and recorded_pid != owner_pid:
+        _add_doctor_item(
+            items,
+            "warn",
+            f"Service pid file does not match the lock owner: pidfile={recorded_pid or 'missing'} lock_owner={owner_pid}",
+            "Run `vibe restart` once the current work is idle so Avibe can rewrite runtime ownership files.",
+        )
+    elif recorded_pid:
+        _add_doctor_item(items, "pass", f"Service pid file points to pid={recorded_pid}")
+    else:
+        _add_doctor_item(items, "pass", "Service pid file is absent")
+
+    if owner_pid and status_pid != owner_pid:
+        _add_doctor_item(
+            items,
+            "warn",
+            f"Runtime status service_pid does not match the lock owner: status={status_pid or 'missing'} lock_owner={owner_pid}",
+            "Refresh status; if it remains stale, restart Avibe when safe.",
+        )
+    elif status_pid:
+        _add_doctor_item(items, "pass", f"Runtime status service_pid: {status_pid}")
+    else:
+        _add_doctor_item(items, "pass", "Runtime status service_pid is absent")
+
+    if extra_service_pids:
+        _add_doctor_item(
+            items,
+            "warn",
+            f"Extra Avibe service process detected outside the service lock: pids={','.join(map(str, extra_service_pids))}",
+            "Run `vibe stop`; if the process remains, inspect the service log before starting again.",
+        )
+    elif unverified_service_pids:
+        _add_doctor_item(
+            items,
+            "warn",
+            f"Possible extra Avibe service process could not be matched to AVIBE_HOME: pids={','.join(map(str, unverified_service_pids))}",
+            "Inspect the process environment before starting another service.",
+        )
+    else:
+        _add_doctor_item(items, "pass", "No extra Avibe service process detected")
+
+    return items
+
+
 def _remote_examples_text() -> str:
     return dedent(
         """\
@@ -3931,13 +4007,158 @@ def cmd_runs_show(args):
     return 0
 
 
+def _run_type(run: dict | None) -> str:
+    if not isinstance(run, dict):
+        return ""
+    return str(run.get("run_type") or run.get("request_type") or "").strip()
+
+
+def _run_session_id(run: dict | None) -> str:
+    if not isinstance(run, dict):
+        return ""
+    return str(run.get("session_id") or "").strip()
+
+
+def _should_attempt_live_run_cancel(run: dict | None) -> bool:
+    if not isinstance(run, dict):
+        return False
+    return (
+        _run_type(run) == "agent_run"
+        and normalize_run_status(run.get("status")) == "running"
+        and bool(_run_session_id(run))
+    )
+
+
+def _recorded_only_cancel_result(*, reason_code: str, detail: object | None = None) -> dict:
+    result = {
+        "code": "cancel_request_recorded_only",
+        "live_cancel_attempted": reason_code not in {"not_running_agent_run", "missing_session_id"},
+        "live_cancel_confirmed": False,
+        "reason_code": reason_code,
+        "message": "Cancel request was recorded, but no live backend turn was stopped.",
+    }
+    if detail is not None:
+        result["detail"] = detail
+    return result
+
+
+def _initial_cancel_result(run: dict | None) -> dict:
+    if not isinstance(run, dict):
+        return _recorded_only_cancel_result(reason_code="run_not_found")
+    status = normalize_run_status(run.get("status"))
+    if status == "queued":
+        return {
+            "code": "queued_canceled",
+            "live_cancel_attempted": False,
+            "live_cancel_confirmed": False,
+            "message": "Queued run was canceled before it started.",
+        }
+    if _run_type(run) != "agent_run" or status != "running":
+        return _recorded_only_cancel_result(reason_code="not_running_agent_run")
+    if not _run_session_id(run):
+        return _recorded_only_cancel_result(reason_code="missing_session_id")
+    return {
+        "code": "cancel_request_recorded",
+        "live_cancel_attempted": False,
+        "live_cancel_confirmed": False,
+        "message": "Cancel request was recorded.",
+    }
+
+
+def _live_cancel_failure_code(status_code: int | None, body: object) -> str:
+    body_code = ""
+    body_status = ""
+    if isinstance(body, dict):
+        body_code = str(body.get("code") or "").strip()
+        body_status = str(body.get("status") or "").strip()
+    if body_code == "not_in_flight" or status_code == 404:
+        return "not_in_flight"
+    if body_code == "stop_failed" or status_code == 409:
+        return "stop_failed"
+    if body_status:
+        return body_status
+    if status_code is None:
+        return body_code or "live_cancel_failed"
+    if status_code >= 500:
+        return body_code or "internal_error"
+    return body_code or "live_cancel_not_confirmed"
+
+
+def _live_cancel_was_confirmed(status_code: int | None, body: object) -> bool:
+    if status_code is None or status_code < 200 or status_code >= 300:
+        return False
+    if isinstance(body, dict) and body.get("ok") is False:
+        return False
+    if not isinstance(body, dict):
+        return False
+    return str(body.get("status") or "").strip() in {"cancel_requested", "stale_released"}
+
+
+async def _request_live_run_cancel(session_id: str) -> dict:
+    from vibe import internal_client
+
+    return await internal_client.cancel_dispatch(session_id)
+
+
+def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
+    session_id = _run_session_id(run)
+    from vibe import internal_client
+
+    try:
+        controller_result = asyncio.run(_request_live_run_cancel(session_id))
+    except internal_client.InternalServerUnavailable as exc:
+        return _recorded_only_cancel_result(reason_code="internal_unavailable", detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _recorded_only_cancel_result(reason_code="live_cancel_failed", detail=str(exc))
+
+    status_code = controller_result.get("status_code")
+    try:
+        normalized_status_code = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        normalized_status_code = None
+    body = controller_result.get("body") or {}
+    if not _live_cancel_was_confirmed(normalized_status_code, body):
+        return _recorded_only_cancel_result(
+            reason_code=_live_cancel_failure_code(normalized_status_code, body),
+            detail={
+                "controller_status_code": normalized_status_code,
+                "controller_response": body,
+            },
+        )
+
+    run_terminalized = store.mark_run_canceled(str(run.get("id") or ""))
+    return {
+        "code": "live_cancel_confirmed",
+        "live_cancel_attempted": True,
+        "live_cancel_confirmed": True,
+        "run_terminalized": run_terminalized,
+        "controller_status_code": normalized_status_code,
+        "controller_response": body,
+        "message": "Live backend turn was stopped and the run was marked canceled.",
+    }
+
+
 def cmd_runs_cancel(args):
-    canceled = _task_request_store().cancel_run(args.run_id)
+    store = _task_request_store()
+    existing = store.get_run(args.run_id)
+    if existing is None:
+        _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
+        return 1
+    canceled = store.cancel_run(args.run_id)
     if not canceled:
         _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
         return 1
-    run = _task_request_store().get_run(args.run_id)
-    _print_cli_payload("agent_run", cancel_requested=True, run=_run_payload(run or {"id": args.run_id}))
+    cancel_result = _initial_cancel_result(existing)
+    if _should_attempt_live_run_cancel(existing):
+        cancel_result = _cancel_live_agent_run(store, existing)
+    run = store.get_run(args.run_id)
+    _print_cli_payload(
+        "agent_run",
+        cancel_requested=True,
+        cancel_code=cancel_result["code"],
+        cancel_result=cancel_result,
+        run=_run_payload(run or {"id": args.run_id}),
+    )
     return 0
 
 
@@ -5215,6 +5436,7 @@ def cmd_vault_run(args):
                 result = api.avault_agent_deliver_run(
                     grant_id=grant["id"],
                     secrets=secrets,
+                    context={"session_id": grant.get("session_id"), "purpose": "run"},
                     command=_agent_run_command(
                         command_argv,
                         stdout_path=str(output_bridge.stdout_path),
@@ -5756,6 +5978,7 @@ def cmd_vault_fetch(args):
                 name=name,
                 sealed=sealed,
                 request=request,
+                context={"session_id": grant.get("session_id"), "purpose": "fetch"},
             )
         else:
             result = api.avault_deliver_fetch(name, sealed, request)
@@ -6870,7 +7093,7 @@ def _doctor():
         )
         summary["pass"] += 1
 
-    for item in _runtime_architecture_items():
+    for item in [*_service_lifecycle_items(), *_runtime_architecture_items()]:
         runtime_items.append(item)
         status = item.get("status")
         if status in summary:
@@ -7239,6 +7462,10 @@ def _stop_opencode_server():
 
 
 def _pid_file_points_to_live_process(pid_path: Path) -> bool:
+    if pid_path == paths.get_runtime_pid_path():
+        return runtime.resolve_service_owner_pid(include_starting=True) is not None or bool(
+            runtime.extra_service_process_pids()
+        )
     try:
         raw_pid = pid_path.read_text(encoding="utf-8").strip()
         pid = int(raw_pid)
@@ -7248,7 +7475,7 @@ def _pid_file_points_to_live_process(pid_path: Path) -> bool:
 
 
 def _runtime_process_was_running() -> bool:
-    return runtime.service_pid_file_points_to_running_service() or runtime.ui_pid_file_points_to_running_ui()
+    return runtime.service_process_running() or runtime.ui_pid_file_points_to_running_ui()
 
 
 def cmd_stop():

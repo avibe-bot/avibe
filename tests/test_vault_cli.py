@@ -515,6 +515,7 @@ def test_run_delivers_protected_secret_under_agent_grant(tmp_path, capfd, monkey
     assert "protected err\n" in captured.err
     deliver.assert_called_once()
     assert deliver.call_args.kwargs["grant_id"] == grant["id"]
+    assert deliver.call_args.kwargs["context"] == {"session_id": grant.get("session_id"), "purpose": "run"}
     assert deliver.call_args.kwargs["secrets"] == [
         {"name": "PROTECTED_KEY", "env": "LOCAL_NAME", "envelope": _sealed("protected"), "tier": "protected"}
     ]
@@ -643,6 +644,7 @@ def test_run_uses_single_grant_for_protected_batch(tmp_path, capfd, monkeypatch)
     assert code == 0
     deliver.assert_called_once()
     assert deliver.call_args.kwargs["grant_id"] == grant["id"]
+    assert deliver.call_args.kwargs["context"] == {"session_id": grant.get("session_id"), "purpose": "run"}
     assert [secret["name"] for secret in deliver.call_args.kwargs["secrets"]] == ["A_KEY", "B_KEY"]
 
 
@@ -661,6 +663,7 @@ def test_run_uses_session_bound_protected_grant(tmp_path, capfd, monkeypatch):
     deliver.assert_called_once()
     assert deliver.call_args.kwargs["secrets"][0]["name"] == "PROTECTED_KEY"
     assert deliver.call_args.kwargs["grant_id"]
+    assert deliver.call_args.kwargs["context"] == {"session_id": "ses_cli", "purpose": "run"}
 
 
 def test_fetch_uses_session_bound_protected_grant(capfd, monkeypatch):
@@ -686,6 +689,7 @@ def test_fetch_uses_session_bound_protected_grant(capfd, monkeypatch):
     deliver.assert_called_once()
     assert deliver.call_args.kwargs["grant_id"] == grant["id"]
     assert deliver.call_args.kwargs["sealed"] == _sealed("protected")
+    assert deliver.call_args.kwargs["context"] == {"session_id": "ses_cli", "purpose": "fetch"}
 
 
 def test_inject_resolver_uses_session_bound_protected_grant(tmp_path):
@@ -1272,6 +1276,7 @@ def test_run_mixed_tiers_delivers_once_through_resident_agent(tmp_path, capfd, m
     one_shot.assert_not_called()
     deliver.assert_called_once()
     assert deliver.call_args.kwargs["grant_id"] == grant["id"]
+    assert deliver.call_args.kwargs["context"] == {"session_id": grant.get("session_id"), "purpose": "run"}
     assert deliver.call_args.kwargs["secrets"] == [
         {"name": "STANDARD_KEY", "env": "STANDARD_KEY", "envelope": _sealed("standard"), "tier": "standard"},
         {"name": "PROTECTED_KEY", "env": "PROTECTED_KEY", "envelope": _sealed("protected_key"), "tier": "protected"},
@@ -1559,6 +1564,15 @@ def test_request_rejects_spec_with_plaintext_value(capfd):
 
     assert code == 1
     assert payload["code"] == "invalid_spec"
+
+
+def test_request_rejects_spec_with_group(capfd):
+    code = cli.cmd_vault_request(_ns(name="BAD_GROUP_KEY", spec_json='{"group":"legacy"}'))
+    payload = json.loads(capfd.readouterr().err)
+
+    assert code == 1
+    assert payload["code"] == "invalid_spec"
+    assert "group" in payload["error"]
 
 
 def test_request_for_existing_secret_returns_fulfilled(tmp_path, capfd, monkeypatch):

@@ -16,6 +16,7 @@ from config import paths
 from core.process_isolation import isolated_subprocess_kwargs, terminate_and_communicate
 from core.scheduled_tasks import TaskExecutionStore
 from storage.background import SQLiteBackgroundTaskStore
+from vibe import runtime
 
 logger = logging.getLogger(__name__)
 
@@ -411,6 +412,7 @@ class ManagedWatchService:
         self._fused_watch_ids: set[str] = set()
         self._store_error_fused = False
         self._store_reconcile_failures = 0
+        self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
 
     def active_process_pids(self) -> set[int]:
         """Return active waiter process roots owned by managed watches."""
@@ -427,7 +429,7 @@ class ManagedWatchService:
             self._handle_reconcile_store_error(exc)
 
     async def stop(self) -> None:
-        self._running = False
+        self._begin_stop()
         if self._reconcile_task:
             self._reconcile_task.cancel()
             try:
@@ -435,8 +437,6 @@ class ManagedWatchService:
             except asyncio.CancelledError:
                 pass
             self._reconcile_task = None
-        for task in list(self._active_tasks.values()):
-            task.cancel()
         if self._active_tasks:
             await asyncio.gather(*self._active_tasks.values(), return_exceptions=True)
         self._active_tasks.clear()
@@ -446,6 +446,8 @@ class ManagedWatchService:
 
     async def _watch_store(self) -> None:
         while self._running:
+            if not self._owns_service_instance():
+                return
             if self._store_error_fused:
                 await asyncio.sleep(WATCH_RECONCILE_INTERVAL_SECONDS)
                 continue
@@ -461,6 +463,8 @@ class ManagedWatchService:
             await asyncio.sleep(WATCH_RECONCILE_INTERVAL_SECONDS)
 
     def reconcile_watches(self) -> None:
+        if not self._owns_service_instance():
+            return
         if self._store_error_fused:
             return
         desired_ids = {watch.id for watch in self.store.list_watches() if watch.enabled}
@@ -534,12 +538,39 @@ class ManagedWatchService:
             self._fuse_store_after_error(operation, exc, watch_id=watch_id)
             return False
 
+    def _current_asyncio_task(self) -> Optional["asyncio.Task[Any]"]:
+        try:
+            return asyncio.current_task()
+        except RuntimeError:
+            return None
+
+    def _begin_stop(self, *, cancel_reconcile: bool = True) -> None:
+        self._running = False
+        current_task = self._current_asyncio_task()
+        if cancel_reconcile and self._reconcile_task and self._reconcile_task is not current_task:
+            self._reconcile_task.cancel()
+        for task in list(self._active_tasks.values()):
+            if task is not current_task:
+                task.cancel()
+        self._write_runtime_state()
+
+    def _owns_service_instance(self) -> bool:
+        if not self._requires_service_lease:
+            return True
+        if runtime.current_process_owns_service_instance():
+            return True
+        logger.error("Managed watch service stopping because this process no longer owns the service lock")
+        self._begin_stop()
+        return False
+
     async def _run_watch(self, watch_id: str) -> None:
         lifetime_started = asyncio.get_running_loop().time()
         self._watch_started_at[watch_id] = _utc_now_iso()
         self._write_runtime_state()
 
         while self._running:
+            if not self._owns_service_instance():
+                return
             if watch_id in self._fused_watch_ids:
                 return
             if not self._watch_store_call(watch_id, "reload", self.store.maybe_reload):
@@ -592,6 +623,9 @@ class ManagedWatchService:
                     stderr=str(exc),
                     timed_out=False,
                 )
+
+            if not self._owns_service_instance():
+                return
 
             if result.exit_code == 0:
                 prompt = _build_prompt(watch.message or watch.prefix, result.stdout)

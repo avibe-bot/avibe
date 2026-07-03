@@ -1948,6 +1948,7 @@ def create_vault_grant(payload: dict) -> dict:
     request_id = payload.get("request_id") or payload.get("created_by_request_id")
     if not request_id:
         raise VaultApiError("request_id is required to create a grant", code="missing_request_id")
+    requested_grant_id = str(payload.get("grant_id") or "").strip() or None
     engine = _vault_engine()
     preflight_error: Exception | None = None
     with engine.begin() as conn:
@@ -1983,6 +1984,8 @@ def create_vault_grant(payload: dict) -> dict:
     provided_names = {item["name"] for item in agent_deks}
     if needs_agent_deks and provided_names != protected_member_names:
         raise VaultApiError("resident agent DEKs must match the protected grant members", code="invalid_grant")
+    if needs_agent_deks and not requested_grant_id:
+        raise VaultApiError("grant_id is required for resident agent DEK approval", code="invalid_grant")
     expected_member_names = {str(member["name"]) for member in grantable_members} if needs_agent_deks else None
     expected_pubkey = payload.get("agent_pubkey") if isinstance(payload.get("agent_pubkey"), dict) else None
     if needs_agent_deks:
@@ -2006,6 +2009,7 @@ def create_vault_grant(payload: dict) -> dict:
                 created_by_request_id=str(request_id),
                 inherit_request_session=inherit_request_session,
                 expected_member_names=expected_member_names,
+                grant_id=requested_grant_id,
                 cache_ready=False,
             )
     except vault_service.NotGrantableError as exc:
@@ -2028,8 +2032,8 @@ def create_vault_grant(payload: dict) -> dict:
             ttl_secs=relay_ttl,
             deks=agent_deks,
             purpose="deliver",
-            scope_type=scope_type,
-            scope_ref=scope_ref,
+            scope_type="grant",
+            scope_ref=str(grant["id"]),
             expected_pubkey=expected_pubkey,
         )
         if not _agent_grant_cached_all(agent_result, len(agent_deks)):
@@ -3479,7 +3483,7 @@ def _pid_file_points_to_live_process(pid_path: Path) -> bool:
     from vibe import runtime
 
     if pid_path == paths.get_runtime_pid_path():
-        return runtime.service_pid_file_points_to_running_service(pid_path)
+        return runtime.service_process_running()
     if pid_path == paths.get_runtime_ui_pid_path():
         return runtime.ui_pid_file_points_to_running_ui(pid_path)
     return False
@@ -5414,6 +5418,7 @@ def avault_agent_deliver_run(
     grant_id: str,
     secrets: list[dict],
     command: list[str],
+    context: dict | None = None,
 ) -> dict:
     """Run a child under a protected grant. Plaintext stays inside avault."""
     from vibe.avault_agent import AvaultAgentError
@@ -5424,6 +5429,7 @@ def avault_agent_deliver_run(
             grant_id=grant_id,
             command=command,
             secrets=[_agent_secret_payload(secret, target_field="env") for secret in secrets],
+            context=context,
         )
     except AvaultAgentError as exc:
         if _avault_agent_error_is_absent(str(exc)):
@@ -5442,6 +5448,7 @@ def avault_agent_deliver_fetch(
     name: str,
     sealed,
     request: dict,
+    context: dict | None = None,
 ) -> dict:
     """Broker an HTTP request under a protected grant."""
     from vibe.avault_agent import AvaultAgentError
@@ -5453,6 +5460,7 @@ def avault_agent_deliver_fetch(
             name=name,
             envelope=_envelope_payload(sealed),
             request=request,
+            context=context,
         )
     except AvaultAgentError as exc:
         if _avault_agent_error_is_absent(str(exc)):

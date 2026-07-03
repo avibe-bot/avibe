@@ -858,6 +858,29 @@ def test_reconcile_jobs_skips_invalid_tasks_and_keeps_valid_jobs(tmp_path: Path)
     assert invalid.id not in service.scheduler.jobs
 
 
+def test_reconcile_jobs_stops_after_service_lease_loss(tmp_path: Path, monkeypatch) -> None:
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="send digest",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
+    controller = SimpleNamespace(platform_settings_managers={"slack": object()}, im_clients={})
+    service = ScheduledTaskService(controller=controller, store=store)
+    service.scheduler = _StubScheduler()
+    service._running = True
+    service._requires_service_lease = True
+    monkeypatch.setattr("core.scheduled_tasks.runtime.current_process_owns_service_instance", lambda: False)
+
+    service.reconcile_jobs()
+
+    assert task.id not in service.scheduler.jobs
+    assert service._running is False
+    assert service.scheduler.shutdown_calls == 1
+
+
 def test_request_store_enqueue_claim_and_complete(tmp_path: Path) -> None:
     store = TaskExecutionStore(tmp_path / "task_requests")
 
@@ -1394,6 +1417,89 @@ def test_drain_requests_requeues_cancelled_task_run(tmp_path: Path) -> None:
     assert (request_store.pending_dir / f"{request.id}.json").exists()
     assert not (request_store.processing_dir / f"{request.id}.json").exists()
     assert not (request_store.completed_dir / f"{request.id}.json").exists()
+
+
+def test_service_lease_loss_cancels_inflight_execution(tmp_path: Path, monkeypatch) -> None:
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    request = request_store.enqueue_hook_send(session_key="slack::channel::C123", prompt="send digest")
+    controller = SimpleNamespace(platform_settings_managers={"slack": object()}, im_clients={})
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    service._running = True
+    service._requires_service_lease = True
+    owner_state = {"owns": True}
+    started = asyncio.Event()
+
+    async def fake_execute(claimed):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "core.scheduled_tasks.runtime.current_process_owns_service_instance",
+        lambda: owner_state["owns"],
+    )
+    service._execute_claimed_request = fake_execute  # type: ignore[assignment]
+
+    async def _exercise() -> None:
+        await service._drain_requests()
+        execution = service._inflight_executions.get(request.id)
+        assert execution is not None
+        await started.wait()
+        owner_state["owns"] = False
+        assert service._owns_service_instance() is False
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+
+    asyncio.run(_exercise())
+
+    assert service._running is False
+
+
+def test_run_task_uses_tracked_execution_for_lease_loss(tmp_path: Path, monkeypatch) -> None:
+    request_store = TaskExecutionStore(tmp_path / "task_requests")
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    task = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="send digest",
+        schedule_type="at",
+        run_at="2026-03-31T09:00:00+08:00",
+        timezone_name="Asia/Shanghai",
+    )
+    controller = SimpleNamespace(platform_settings_managers={"slack": object()}, im_clients={})
+    service = ScheduledTaskService(controller=controller, store=store, request_store=request_store)
+    service._running = True
+    service._requires_service_lease = True
+    owner_state = {"owns": True}
+    started = asyncio.Event()
+
+    async def fake_execute(claimed):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "core.scheduled_tasks.runtime.current_process_owns_service_instance",
+        lambda: owner_state["owns"],
+    )
+    service._execute_claimed_request = fake_execute  # type: ignore[assignment]
+
+    async def _exercise() -> None:
+        run_task = asyncio.create_task(service._run_task(task.id))
+        await started.wait()
+        assert len(service._inflight_executions) == 1
+        execution = next(iter(service._inflight_executions.values()))
+        owner_state["owns"] = False
+        assert service._owns_service_instance() is False
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+    asyncio.run(_exercise())
+
+    assert service._running is False
 
 
 def test_drain_requests_executes_hook_send(tmp_path: Path) -> None:

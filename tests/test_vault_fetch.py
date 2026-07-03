@@ -188,6 +188,7 @@ def test_fetch_uses_agent_delivery_for_protected_grant(capfd, monkeypatch):
     fetch.assert_called_once()
     assert fetch.call_args.kwargs["grant_id"] == grant["id"]
     assert fetch.call_args.kwargs["sealed"] == _sealed("gh_pat")
+    assert fetch.call_args.kwargs["context"] == {"session_id": grant.get("session_id"), "purpose": "fetch"}
     assert "value" not in repr(fetch.call_args.kwargs)
 
 

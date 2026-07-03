@@ -12,6 +12,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 import psutil
@@ -247,7 +248,10 @@ def acquire_service_instance_lock() -> None:
         json.dumps(
             {
                 "pid": os.getpid(),
+                "instance_id": uuid.uuid4().hex,
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "started_at": process_create_time(os.getpid()),
+                "phase": "running",
                 "command": get_process_command(os.getpid()),
             },
             indent=2,
@@ -297,6 +301,30 @@ def service_instance_lock_available() -> tuple[bool, int | None]:
         return False, _lock_file_pid(lock_file)
     finally:
         lock_file.close()
+
+
+def service_lock_holder_pid() -> int | None:
+    available, holder_pid = service_instance_lock_available()
+    if available:
+        return None
+    return holder_pid
+
+
+def current_process_owns_service_instance() -> bool:
+    """Return whether this process is still the active service owner.
+
+    Controller-owned background services capture whether they require this gate
+    at construction time. A real service process constructs them only after
+    acquiring the lock, so losing this handle later means the process must stop
+    scheduling work.
+    """
+    if _SERVICE_INSTANCE_LOCK_HANDLE is None:
+        return False
+    return service_lock_held_by(os.getpid())
+
+
+def service_instance_lock_attached_to_process() -> bool:
+    return _SERVICE_INSTANCE_LOCK_HANDLE is not None
 
 
 def get_shutdown_intent_path() -> Path:
@@ -470,7 +498,7 @@ def get_process_command(pid: int) -> str | None:
         )
     except Exception:
         return None
-    command = (result.stdout or "").strip()
+    command = (getattr(result, "stdout", "") or "").strip()
     return command or None
 
 
@@ -515,6 +543,191 @@ def process_create_time(pid: int) -> float | None:
         return float(psutil.Process(pid).create_time())
     except (psutil.Error, ValueError, TypeError):
         return None
+
+
+def _safe_resolve_path(value: str | Path) -> Path | None:
+    try:
+        return Path(value).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _path_is_service_entry(path: Path, current_main: Path | None) -> bool:
+    resolved = _safe_resolve_path(path)
+    if current_main is not None and resolved == current_main:
+        return True
+    if path.name == "service_main.py":
+        parent = resolved.parent if resolved is not None else path.parent
+        return parent.name == "vibe" and (parent / "runtime.py").exists()
+    if path.name == "main.py":
+        root = resolved.parent if resolved is not None else path.parent
+        return (root / "vibe" / "runtime.py").exists() and (root / "core" / "controller.py").exists()
+    return False
+
+
+def _service_entry_arg_from_argv(args: list[str]) -> str | None:
+    if not args:
+        return None
+    executable_name = Path(args[0].strip("\"'")).name.lower()
+    if executable_name.startswith("python"):
+        for arg in args[1:]:
+            cleaned_arg = arg.strip("\"'")
+            if cleaned_arg in {"-c", "-m"}:
+                return None
+            if cleaned_arg.startswith("-"):
+                continue
+            return cleaned_arg
+        return None
+    if Path(args[0].strip("\"'")).name in {"main.py", "service_main.py"}:
+        return args[0].strip("\"'")
+    return None
+
+
+def _command_looks_like_service_entry(command: str | None, *, cwd: str | None = None) -> bool:
+    if not command:
+        return False
+    try:
+        args = shlex.split(command, posix=(os.name != "nt"))
+    except ValueError:
+        return False
+    current_main = _safe_resolve_path(get_service_main_path())
+    cwd_path = _safe_resolve_path(cwd) if cwd else None
+    entry_arg = _service_entry_arg_from_argv(args)
+    if not entry_arg:
+        return False
+    path = Path(entry_arg)
+    if not path.is_absolute() and cwd_path is not None:
+        path = cwd_path / path
+    return _path_is_service_entry(path, current_main)
+
+
+def _process_is_service_session_leader(pid: int) -> bool:
+    if os.name == "nt":
+        return True
+    try:
+        return os.getsid(pid) == pid
+    except OSError:
+        return False
+
+
+def _process_command_from_info(proc) -> str | None:
+    info = getattr(proc, "info", {}) or {}
+    cmdline = info.get("cmdline")
+    if cmdline:
+        return shlex.join(str(part) for part in cmdline if str(part))
+    pid = info.get("pid")
+    if isinstance(pid, int):
+        return get_process_command(pid)
+    return None
+
+
+def _process_cwd(proc) -> str | None:
+    try:
+        return proc.cwd()
+    except (psutil.Error, OSError, AttributeError):
+        return None
+
+
+def _process_home_matches_current(proc) -> bool | None:
+    current_home = _safe_resolve_path(paths.get_vibe_remote_dir())
+    if current_home is None:
+        return None
+    try:
+        env = proc.environ()
+    except (psutil.Error, OSError, AttributeError):
+        return None
+    explicit_home = env.get(paths.AVIBE_HOME_ENV)
+    if explicit_home:
+        return _safe_resolve_path(explicit_home) == current_home
+    has_avibe_marker = str(env.get(SHUTDOWN_INTENT_ENV) or "").lower() in {"1", "true", "yes"}
+    has_avibe_marker = has_avibe_marker or str(env.get("VIBE_DISABLE_STDOUT_LOGGING") or "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    if not has_avibe_marker:
+        return None
+    home = env.get("HOME")
+    if not home:
+        return None
+    candidates = [
+        Path(home) / paths.AVIBE_HOME_DIRNAME,
+        Path(home) / paths.LEGACY_HOME_DIRNAME,
+    ]
+    return any(_safe_resolve_path(candidate) == current_home for candidate in candidates)
+
+
+def service_processes(*, include_unverified: bool = False) -> list[dict]:
+    """Return Avibe service processes associated with the current data dir.
+
+    The service lock remains the authoritative owner signal. This process scan is
+    deliberately secondary: it detects extra lock-less daemons left behind by
+    older lifecycle bugs, but only treats a process as actionable when its
+    command looks like Avibe's service entry point and its environment maps to
+    the current AVIBE_HOME. Do not require session leadership here: legacy and
+    container launchers may background ``python main.py`` from a shell without
+    creating a new session, and those lock-less services still need recovery.
+    """
+    processes: list[dict] = []
+    try:
+        iterator = psutil.process_iter(attrs=["pid", "cmdline"])
+    except psutil.Error:
+        return processes
+    for proc in iterator:
+        info = getattr(proc, "info", {}) or {}
+        pid = info.get("pid")
+        if not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
+            continue
+        try:
+            alive = pid_alive(pid)
+        except Exception as exc:
+            logger.warning("Failed to inspect possible service process pid=%s: %s", pid, exc)
+            continue
+        if not alive:
+            continue
+        session_leader = _process_is_service_session_leader(pid)
+        command = _process_command_from_info(proc)
+        if not _command_looks_like_service_entry(command, cwd=_process_cwd(proc)):
+            continue
+        lock_owner = service_lock_held_by(pid)
+        home_match = _process_home_matches_current(proc)
+        if not (lock_owner or home_match is True or (include_unverified and home_match is None)):
+            continue
+        processes.append(
+            {
+                "pid": pid,
+                "command": command,
+                "lock_owner": lock_owner,
+                "home_match": home_match,
+                "session_leader": session_leader,
+            }
+        )
+    return processes
+
+
+def extra_service_process_pids(owner_pid: int | None = None, *, include_unverified: bool = False) -> list[int]:
+    pids: list[int] = []
+    for process in service_processes(include_unverified=include_unverified):
+        pid = process.get("pid")
+        if not isinstance(pid, int) or pid == owner_pid:
+            continue
+        if include_unverified or process.get("home_match") is True or process.get("lock_owner") is True:
+            pids.append(pid)
+    return sorted(set(pids))
+
+
+def service_process_running() -> bool:
+    return resolve_service_owner_pid(include_starting=False) is not None or bool(extra_service_process_pids())
+
+
+def _pid_reservation_is_fresh(pid_path: Path, pid: int, *, max_age: float = SERVICE_SLOW_START_TIMEOUT_SECONDS) -> bool:
+    try:
+        pidfile_mtime = pid_path.stat().st_mtime
+    except OSError:
+        return False
+    create_time = process_create_time(pid)
+    latest_signal = max(pidfile_mtime, create_time or 0)
+    return time.time() - latest_signal <= max_age
 
 
 def stop_pid(pid: int, timeout: float = 5) -> bool:
@@ -688,6 +901,36 @@ def service_pid_file_points_to_running_service(pid_path: Path | None = None) -> 
     return bool(pid and service_pid_recorded(pid))
 
 
+def _pid_alive_for_owner_resolution(pid: int) -> bool:
+    try:
+        return pid_alive(pid)
+    except Exception as exc:
+        logger.warning("Failed to inspect service owner pid=%s: %s", pid, exc)
+        return False
+
+
+def resolve_service_owner_pid(*, include_starting: bool = True) -> int | None:
+    """Resolve the live service owner for this data dir.
+
+    The flock in ``service.lock`` is the authoritative owner signal. The pidfile
+    is still useful for fast reuse and for a just-spawned service that has not
+    acquired the lock yet, but it must not be the only lifecycle source of truth.
+    """
+    pid_path = paths.get_runtime_pid_path()
+    recorded_pid = _read_pid_file(pid_path)
+    if recorded_pid and _pid_alive_for_owner_resolution(recorded_pid):
+        if service_pid_recorded(recorded_pid):
+            return recorded_pid
+
+    available, lock_holder_pid = service_instance_lock_available()
+    if not available and lock_holder_pid and _pid_alive_for_owner_resolution(lock_holder_pid):
+        return lock_holder_pid
+    if include_starting and available and recorded_pid and _pid_alive_for_owner_resolution(recorded_pid):
+        if not _pid_mismatches_service(recorded_pid):
+            return recorded_pid
+    return None
+
+
 def wait_for_service_pid(pid: int, timeout: float = SERVICE_LOCK_READY_TIMEOUT_SECONDS) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -764,24 +1007,6 @@ def read_status():
     return read_json(paths.get_runtime_status_path()) or {}
 
 
-def _command_references_path(command: str | None, expected_path: Path) -> bool:
-    if not command:
-        return False
-    try:
-        args = shlex.split(command, posix=(os.name != "nt"))
-    except ValueError:
-        return False
-    expected_resolved = expected_path.resolve()
-    for arg in args:
-        cleaned_arg = arg.strip("\"'")
-        try:
-            if Path(cleaned_arg).resolve() == expected_resolved:
-                return True
-        except (OSError, RuntimeError):
-            continue
-    return False
-
-
 def _pid_mismatches_service(pid: int) -> bool:
     command = get_process_command(pid)
     if not command:
@@ -790,16 +1015,40 @@ def _pid_mismatches_service(pid: int) -> bool:
             pid,
         )
         return False
-    return not _command_references_path(command, get_service_main_path())
+    try:
+        cwd = psutil.Process(pid).cwd()
+    except (psutil.Error, OSError):
+        cwd = None
+    return not _command_looks_like_service_entry(command, cwd=cwd)
 
 
 def render_status():
     status = read_status()
-    pid_path = paths.get_runtime_pid_path()
-    pid = pid_path.read_text(encoding="utf-8").strip() if pid_path.exists() else None
-    running = bool(pid and pid.isdigit() and service_pid_recorded(int(pid)))
+    owner_pid = resolve_service_owner_pid(include_starting=False)
+    extra_pids = extra_service_process_pids(owner_pid=owner_pid)
+    running = bool(owner_pid or extra_pids)
+    if owner_pid:
+        status["state"] = "running"
+        status["service_pid"] = owner_pid
+        if extra_pids:
+            status["detail"] = f"pid={owner_pid}; extra_service_pids={','.join(str(pid) for pid in extra_pids)}"
+        else:
+            status["detail"] = f"pid={owner_pid}"
+    elif extra_pids:
+        status["state"] = "degraded"
+        status["service_pid"] = extra_pids[0]
+        status["detail"] = f"lockless service process detected pid={extra_pids[0]}"
+    elif status.get("state") in {"running", "degraded"}:
+        status["state"] = "stopped"
+        status["detail"] = "process not running"
+        status["service_pid"] = None
+    if extra_pids:
+        status["extra_service_pids"] = extra_pids
+    else:
+        status.pop("extra_service_pids", None)
+    status["service_owner_pid"] = owner_pid
     status["running"] = running
-    status["pid"] = int(pid) if pid and pid.isdigit() else None
+    status["pid"] = owner_pid or (extra_pids[0] if extra_pids else None)
     restart_status = read_json(get_restart_status_path())
     if restart_status:
         status["restart"] = restart_status
@@ -832,11 +1081,28 @@ def start_service(
                 if not _pid_mismatches_service(existing_pid):
                     if service_pid_recorded(existing_pid):
                         return existing_pid
-                    if not wait_for_ready:
-                        return existing_pid
-                    if wait_for_service_pid(existing_pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS):
-                        return existing_pid
-                    _raise_service_start_not_ready(existing_pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS)
+                    if _pid_reservation_is_fresh(pid_path, existing_pid):
+                        if not wait_for_ready:
+                            return existing_pid
+                        if wait_for_service_pid(existing_pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS):
+                            return existing_pid
+                        _raise_service_start_not_ready(existing_pid, timeout=SERVICE_SLOW_START_TIMEOUT_SECONDS)
+                    logger.warning(
+                        "Ignoring stale service pid file pid=%s because it never acquired the service lock",
+                        existing_pid,
+                    )
+                lock_available, lock_holder_pid = service_instance_lock_available()
+                if not lock_available:
+                    if lock_holder_pid and pid_alive(lock_holder_pid):
+                        if lock_holder_pid == existing_pid:
+                            logger.warning(
+                                "Reusing service pid=%s from lock even though the pid file command does not "
+                                "match this CLI install",
+                                existing_pid,
+                            )
+                            return lock_holder_pid
+                        raise ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=lock_holder_pid)
+                    raise ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=lock_holder_pid)
                 logger.warning(
                     "Ignoring stale service pid file pid=%s because it does not match the Vibe service",
                     existing_pid,
@@ -848,6 +1114,10 @@ def start_service(
             if lock_holder_pid and lock_holder_pid == existing_pid and pid_alive(lock_holder_pid):
                 return lock_holder_pid
             raise ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=lock_holder_pid)
+
+        extra_pids = extra_service_process_pids()
+        if extra_pids:
+            raise ServiceAlreadyRunningError(lock_path=get_service_lock_path(), holder_pid=extra_pids[0])
 
         main_path = get_service_main_path()
         process = spawn_service_background_process(
@@ -1036,7 +1306,31 @@ def start_ui(host, port, *, wait_for_ready: bool = True):
 
 def stop_service():
     with _SERVICE_LOCK:
-        return stop_process(paths.get_runtime_pid_path())
+        pid_path = paths.get_runtime_pid_path()
+        owner_pid = resolve_service_owner_pid()
+        target_pids: list[int] = []
+        if owner_pid is not None:
+            target_pids.append(owner_pid)
+        target_pids.extend(extra_service_process_pids(owner_pid=owner_pid))
+        target_pids = sorted(set(target_pids))
+        if not target_pids:
+            recorded_pid = _read_pid_file(pid_path)
+            if recorded_pid and not pid_alive(recorded_pid):
+                pid_path.unlink(missing_ok=True)
+            return False
+
+        stopped_all = True
+        for pid in target_pids:
+            stopped = stop_pid(pid, timeout=5)
+            if stopped:
+                _clear_service_pid_reservation(pid)
+                continue
+            stopped_all = False
+            logger.error(
+                "Failed to stop resolved service process pid=%s; preserving pid and lock state",
+                pid,
+            )
+        return stopped_all
 
 
 def stop_ui(timings: dict[str, float | bool] | None = None, *, stop_remote_access: bool = True):
