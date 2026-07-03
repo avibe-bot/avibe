@@ -5445,6 +5445,24 @@ def _resolve_vault_run_delivery(
                     for name in dict.fromkeys(mapping.values())
                     if name not in protected_names and str(metas[name].get("protection") or "standard") == "standard"
                 ]
+                common_standard_grant = None
+                if selector_standard_names:
+                    common_standard_grant = vault_service.find_active_grant_for_secrets(
+                        conn,
+                        selector_standard_names,
+                        session_id=session_id,
+                        purpose="run",
+                        reserve_one_shot=True,
+                    )
+                    if isinstance(common_standard_grant, dict) and common_standard_grant.get("one_shot") is True:
+                        one_shot_grants.append(common_standard_grant)
+                        for standard_name in selector_standard_names:
+                            resolved_by_name[standard_name] = {
+                                "status": "standard",
+                                "secret": metas[standard_name],
+                                "grant": common_standard_grant,
+                                "envelope": vault_service.get_envelope(conn, standard_name),
+                            }
                 grant = vault_service.find_active_grant_for_secrets(
                     conn,
                     protected_names,

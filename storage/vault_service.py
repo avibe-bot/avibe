@@ -1504,9 +1504,15 @@ def _parse_env_selector(spec: str) -> tuple[str, str]:
         secret_name = secret_name.strip()
     else:
         env_name = secret_name = raw
-    if not vault_crypto.is_valid_secret_name(env_name) or not vault_crypto.is_valid_secret_name(secret_name):
-        raise InvalidRequestError("env selector must use valid secret names")
+    if not _is_delivery_env_name(env_name) or not vault_crypto.is_valid_secret_name(secret_name):
+        raise InvalidRequestError("env selector must use a valid env alias and secret name")
     return env_name, secret_name
+
+
+def _is_delivery_env_name(name: str) -> bool:
+    if not name or not name[0].isascii() or not (name[0].isalpha() or name[0] == "_"):
+        return False
+    return all(char.isascii() and (char.isalnum() or char == "_") for char in name)
 
 
 def expand_value_delivery_selector(

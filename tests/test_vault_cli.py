@@ -1249,6 +1249,40 @@ def test_run_mixed_tiers_delivers_once_through_resident_agent(tmp_path, capfd, m
     ]
 
 
+def test_run_mixed_tiers_reserves_standard_one_shot_batch(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    standard_grant = _set_always_ask_standard_tag_grant(["ASK_A", "ASK_B"], session_id="ses_cli")
+    protected_grant = _set_protected_grant("PROTECTED_KEY", session_id="ses_cli")
+    deliver = Mock(return_value={"exit_code": 0})
+    legacy_deliver = Mock()
+    monkeypatch.setattr(api, "avault_agent_deliver_run", deliver)
+    monkeypatch.setattr(api, "avault_deliver_run", legacy_deliver)
+
+    code = cli.cmd_vault_run(
+        _ns(
+            env=["A=ASK_A", "B=ASK_B", "PROTECTED_KEY"],
+            command_argv=["python3", "-c", "pass"],
+            session_id="ses_cli",
+        )
+    )
+
+    assert code == 0
+    legacy_deliver.assert_not_called()
+    deliver.assert_called_once()
+    assert deliver.call_args.kwargs["grant_id"] == protected_grant["id"]
+    assert deliver.call_args.kwargs["secrets"] == [
+        {"name": "ASK_A", "env": "A", "envelope": _sealed("ask_a"), "tier": "standard"},
+        {"name": "ASK_B", "env": "B", "envelope": _sealed("ask_b"), "tier": "standard"},
+        {"name": "PROTECTED_KEY", "env": "PROTECTED_KEY", "envelope": _sealed("protected"), "tier": "protected"},
+    ]
+    with cli._open_vault_engine().connect() as conn:
+        standard_status = conn.execute(vault_grants.select().where(vault_grants.c.id == standard_grant["id"])).mappings().one()["status"]
+        protected_status = conn.execute(vault_grants.select().where(vault_grants.c.id == protected_grant["id"])).mappings().one()["status"]
+    assert standard_status == "expired"
+    assert protected_status == "active"
+
+
 def test_run_tag_request_offers_fixed_protected_set_grant(capfd, monkeypatch):
     from vibe import api
 
@@ -1281,7 +1315,7 @@ def test_run_comma_env_request_offers_normalized_protected_set_grant(capfd, monk
     monkeypatch.setattr(api, "avault_agent_deliver_run", Mock())
     monkeypatch.setattr(api, "avault_deliver_run", Mock())
 
-    code = cli.cmd_vault_run(_ns(env=["A_DEPLOY,B_ALIAS=B_DEPLOY"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
+    code = cli.cmd_vault_run(_ns(env=["A_DEPLOY,api_key=B_DEPLOY"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
     captured = capfd.readouterr()
 
     assert code == 1
@@ -1289,9 +1323,9 @@ def test_run_comma_env_request_offers_normalized_protected_set_grant(capfd, monk
     with cli._open_vault_engine().connect() as conn:
         requests = vault_service.list_requests(conn, status="pending")
     assert len(requests) == 1
-    assert requests[0]["delivery"]["source_selector"] == {"env": ["A_DEPLOY", "B_ALIAS=B_DEPLOY"]}
+    assert requests[0]["delivery"]["source_selector"] == {"env": ["A_DEPLOY", "api_key=B_DEPLOY"]}
     option = requests[0]["card"]["grant_options"][0]
-    assert option["source_selector"] == {"env": ["A_DEPLOY", "B_ALIAS=B_DEPLOY"]}
+    assert option["source_selector"] == {"env": ["A_DEPLOY", "api_key=B_DEPLOY"]}
     assert option["member_snapshot"] == ["A_DEPLOY", "B_DEPLOY"]
 
 
