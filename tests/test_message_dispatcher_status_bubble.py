@@ -581,6 +581,21 @@ class StatusBubbleResultTests(unittest.IsolatedAsyncioTestCase):
             await d.emit_agent_message(ctx, "result", "Done")
         self.assertNotIn(key, d._status_heartbeat_tasks)  # cancelled + cleared
 
+    async def test_heartbeat_render_bails_when_key_no_longer_concise(self):
+        # After a concise->verbose mid-turn flip the message is reused as a verbose
+        # log and the concise marker is dropped; a still-scheduled heartbeat tick
+        # must not stamp a status footer onto that log.
+        controller = _StubController(platform="slack")
+        d = _dispatcher(controller)
+        ctx = _ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await d.emit_agent_message(ctx, "toolcall", "🔧 `Bash` `{}`")  # bubble msg-1
+        key = d._get_consolidated_message_key(ctx)
+        d._concise_bubble_keys.discard(key)  # simulate the verbose-path marker drop
+        controller.im_client.edits.clear()
+        await d._status_heartbeat_render_once(ctx, controller.im_client, key, "msg-1")
+        self.assertEqual(controller.im_client.edits, [])  # no footer stamped on the log
+
 
 class BeginStatusBubbleTests(unittest.IsolatedAsyncioTestCase):
     async def test_begin_creates_bubble_then_first_emit_edits_same_id(self):

@@ -724,6 +724,11 @@ class ConsolidatedMessageDispatcher:
                 # Stop if the turn was superseded or the bubble is gone.
                 if not self._is_current_runtime_turn(context):
                     return
+                # Stop if the key is no longer a concise bubble — e.g. a mid-turn
+                # concise->verbose flip reused this message as the verbose log; the
+                # heartbeat must not keep stamping a status footer onto a log.
+                if consolidated_key not in self._concise_bubble_keys:
+                    return
                 message_id = self._consolidated_message_ids.get(consolidated_key)
                 if not message_id:
                     return
@@ -745,6 +750,10 @@ class ConsolidatedMessageDispatcher:
             # can't re-render a bubble that's being retired (mirrors the C1 guard
             # in _render_concise_status).
             if consolidated_key in self._status_finalized:
+                return
+            # Also bail if the key stopped being a concise bubble since this tick
+            # was scheduled (mid-turn concise->verbose flip reused the message).
+            if consolidated_key not in self._concise_bubble_keys:
                 return
             if self._consolidated_message_ids.get(consolidated_key) != message_id:
                 return
