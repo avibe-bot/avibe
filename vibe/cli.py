@@ -7484,6 +7484,27 @@ def _write_refreshed_runtime_status() -> None:
         runtime.write_status("stopped", "process not running", None, ui_pid)
 
 
+def _start_service_after_repair(target: str, success_message: str, failure_message: str, *, stopped_pids: list[int]) -> dict:
+    try:
+        new_pid = runtime.start_service()
+    except Exception as exc:
+        _write_refreshed_runtime_status()
+        return _doctor_repair_result(
+            target,
+            "failed",
+            f"{failure_message}: {exc}",
+            stopped_pids=stopped_pids,
+        )
+    runtime.write_status("running", f"pid={new_pid}", new_pid, runtime.read_status().get("ui_pid"))
+    return _doctor_repair_result(
+        target,
+        "repaired",
+        success_message,
+        stopped_pids=stopped_pids,
+        service_pid=new_pid,
+    )
+
+
 def _repair_home_migration(*, dry_run: bool = False) -> dict:
     target = "home-migration"
     if os.environ.get(paths.AVIBE_HOME_ENV):
@@ -7579,14 +7600,11 @@ def _repair_duplicate_service_processes(*, dry_run: bool = False) -> dict:
             failed.append(pid)
 
     if not owner_pid and stopped and not failed:
-        new_pid = runtime.start_service()
-        runtime.write_status("running", f"pid={new_pid}", new_pid, runtime.read_status().get("ui_pid"))
-        return _doctor_repair_result(
+        return _start_service_after_repair(
             target,
-            "repaired",
             "Stopped lockless service process(es) and started a clean service.",
+            "Stopped lockless service process(es), but failed to start a clean service",
             stopped_pids=stopped,
-            service_pid=new_pid,
         )
 
     _write_refreshed_runtime_status()
@@ -7646,7 +7664,7 @@ def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
             failed_pids=failed,
         )
 
-    if owner_pid not in stale_pids or current_pids:
+    if current_pids or (owner_pid is not None and owner_pid not in stale_pids):
         _write_refreshed_runtime_status()
         return _doctor_repair_result(
             target,
@@ -7655,14 +7673,11 @@ def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
             stopped_pids=stopped,
         )
 
-    new_pid = runtime.start_service()
-    runtime.write_status("running", f"pid={new_pid}", new_pid, runtime.read_status().get("ui_pid"))
-    return _doctor_repair_result(
+    return _start_service_after_repair(
         target,
-        "repaired",
         "Stopped legacy vibe-remote service process and started the current Avibe service.",
+        "Stopped legacy vibe-remote service process, but failed to start the current Avibe service",
         stopped_pids=stopped,
-        service_pid=new_pid,
     )
 
 

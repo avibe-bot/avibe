@@ -794,6 +794,56 @@ def test_repair_stale_install_runtime_restarts_when_legacy_owner_is_stopped(monk
     assert statuses == [("running", "pid=3333", 3333, 4444)]
 
 
+def test_repair_stale_install_runtime_restarts_after_lockless_legacy_stopped(monkeypatch):
+    stopped = []
+    statuses = []
+    monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
+    monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [2222])
+    monkeypatch.setattr(
+        cli.runtime,
+        "get_process_command",
+        lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
+    )
+    monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda: 3333)
+    monkeypatch.setattr(cli.runtime, "read_status", lambda: {"ui_pid": 4444})
+    monkeypatch.setattr(cli.runtime, "write_status", lambda *args: statuses.append(args))
+
+    result = cli._repair_stale_install_runtime()
+
+    assert result["status"] == "repaired"
+    assert stopped == [2222]
+    assert result["service_pid"] == 3333
+    assert statuses == [("running", "pid=3333", 3333, 4444)]
+
+
+def test_repair_stale_install_runtime_reports_failed_when_restart_fails(monkeypatch):
+    stopped = []
+    refreshed = []
+    monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
+    monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1111)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [])
+    monkeypatch.setattr(
+        cli.runtime,
+        "get_process_command",
+        lambda pid: "/home/test/.local/share/uv/tools/vibe-remote/bin/python service_main.py",
+    )
+    monkeypatch.setattr(cli.runtime, "stop_pid", lambda pid, timeout=5: stopped.append(pid) or True)
+    monkeypatch.setattr(cli.runtime, "start_service", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(cli, "_write_refreshed_runtime_status", lambda: refreshed.append(True))
+
+    result = cli._repair_stale_install_runtime()
+
+    assert result["status"] == "failed"
+    assert "failed to start" in result["message"]
+    assert stopped == [1111]
+    assert result["stopped_pids"] == [1111]
+    assert refreshed == [True]
+
+
 def test_repair_home_migration_skips_empty_home_without_initializing(monkeypatch, tmp_path):
     home = tmp_path / "home"
     monkeypatch.delenv("AVIBE_HOME", raising=False)
