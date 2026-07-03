@@ -702,6 +702,46 @@ def test_agent_access_request_and_standard_always_ask_grant_api(monkeypatch):
     assert fetched["result"]["grant"]["id"] == created["grant"]["id"]
 
 
+def test_agent_access_request_and_tag_standard_always_ask_grant_api(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("api")))
+    agent_grant = Mock()
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    for name in ("ASK_A", "ASK_B"):
+        api.create_vault_secret(
+            {
+                "name": name,
+                "tags": ["deploy"],
+                "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                "policy": {"always_ask": True},
+            }
+        )
+    api.create_vault_secret(
+        {
+            "name": "NORMAL_DEPLOY",
+            "tags": ["deploy"],
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        }
+    )
+
+    requested = api.request_vault_access({"source_selector": {"tags": ["deploy"]}, "session_id": "ses_1"})
+
+    assert requested["ok"] is True
+    option = requested["request"]["card"]["grant_options"][0]
+    assert option["source_selector"] == {"tags": ["deploy"]}
+    assert option["member_snapshot"] == ["ASK_A", "ASK_B"]
+    assert option["one_shot"] is True
+    created = api.create_vault_grant(
+        {
+            "session_id": "ses_1",
+            "request_id": requested["request"]["id"],
+        }
+    )
+    assert created["grant"]["member_snapshot"] == ["ASK_A", "ASK_B"]
+    assert created["grant"]["delivery_status"] == "standard_ready"
+    assert created["grant"]["one_shot"] is True
+    agent_grant.assert_not_called()
+
+
 def test_agent_access_request_does_not_return_protected_tag_unlock_material(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("standard")))
     api.create_vault_secret(

@@ -5491,7 +5491,10 @@ def _resolve_vault_run_delivery(
                 )
                 if grant is None:
                     always_ask_names = _always_ask_names(metas, protected_names) if needs_selector_set else []
-                    standard_always_ask_names = _always_ask_names(metas, selector_standard_names) if needs_selector_set else []
+                    unresolved_standard_names = [name for name in selector_standard_names if name not in resolved_by_name]
+                    standard_always_ask_names = (
+                        _always_ask_names(metas, unresolved_standard_names) if needs_selector_set else []
+                    )
                     if always_ask_names or standard_always_ask_names:
                         approval_error = TaskCliError(
                             "always_ask secrets cannot be approved as one protected selector-set grant",

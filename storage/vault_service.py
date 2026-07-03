@@ -1632,7 +1632,8 @@ def request_grantable_member_metas(conn: Connection, request_id: str) -> list[di
         expired_message="grant approval request has expired",
     )
     option = _request_grant_option(row)
-    return [_meta_payload(_require_row(conn, name)) for name in option.members]
+    rows = _member_rows_for_names(conn, option.members)
+    return [_meta_payload(row) for row in rows]
 
 
 def _grant_option(
