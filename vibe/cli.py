@@ -1246,6 +1246,12 @@ def _ensure_cli_sqlite_state() -> None:
     ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
 
 
+def _guard_cli_default_state_migration() -> None:
+    from storage.migrations import guard_source_checkout_default_state_bootstrap
+
+    guard_source_checkout_default_state_bootstrap()
+
+
 def _primary_platform() -> str:
     try:
         return _ensure_config().platform
@@ -7194,6 +7200,7 @@ def _local_cli_installation_items() -> list[dict]:
 
 
 def cmd_start():
+    _guard_cli_default_state_migration()
     paths.ensure_data_dirs()
     config = _ensure_config()
 

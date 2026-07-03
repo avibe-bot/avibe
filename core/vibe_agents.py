@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from config import paths
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
-from storage.migrations import run_migrations
+from storage.migrations import guard_source_checkout_default_state_migration, run_migrations
 from storage.models import agent_sessions, agents, run_definitions, scope_settings, state_meta
 
 logger = logging.getLogger(__name__)
@@ -106,6 +106,7 @@ class AgentImportResult:
 class VibeAgentStore:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or paths.get_sqlite_state_path()
+        guard_source_checkout_default_state_migration(self.db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         if db_path is None:
             ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))

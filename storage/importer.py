@@ -23,7 +23,7 @@ from config.v2_sessions import (
 from config.v2_settings import SettingsState, load_settings_state_from_json
 from storage.db import create_sqlite_engine
 from storage.lock import MigrationFileLock
-from storage.migrations import run_migrations
+from storage.migrations import guard_source_checkout_default_state_migration, run_migrations
 from storage.models import (
     agents,
     agent_sessions,
@@ -62,6 +62,7 @@ def ensure_sqlite_state(
 
     target_db = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
     target_state_dir = (state_dir or paths.get_state_dir()).expanduser().resolve()
+    guard_source_checkout_default_state_migration(target_db)
     _ensure_sqlite_target_dirs(
         target_state_dir=target_state_dir,
         target_db=target_db,

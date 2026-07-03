@@ -13,7 +13,11 @@ from sqlalchemy import func, insert, or_, select, update
 
 from config import paths
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
-from storage.migrations import background_tables_ready, initialize_background_tables
+from storage.migrations import (
+    background_tables_ready,
+    guard_source_checkout_default_state_migration,
+    initialize_background_tables,
+)
 from storage.models import agent_runs, agent_sessions, run_definitions, scopes
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 
@@ -385,6 +389,7 @@ def reset_workbench_claimed_runs_in_connection(conn: Any, run_ids: list[str]) ->
 class SQLiteBackgroundTaskStore:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or paths.get_sqlite_state_path()
+        guard_source_checkout_default_state_migration(self.db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         if db_path is None:
             from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config

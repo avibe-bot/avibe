@@ -15,7 +15,7 @@ from sqlalchemy import Connection, and_, select
 
 from config import paths
 from storage.db import create_sqlite_engine
-from storage.migrations import run_migrations
+from storage.migrations import guard_source_checkout_default_state_migration, run_migrations
 from storage.models import agent_events, media_objects, messages, scope_settings, scopes, state_meta
 from storage.settings_service import make_scope_id, upsert_scope
 
@@ -152,6 +152,7 @@ def _db_path(db_path: Path | None = None) -> Path:
 
 def _ensure_sqlite(db_path: Path | None = None) -> Path:
     target = _db_path(db_path)
+    guard_source_checkout_default_state_migration(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     with _migration_lock:
         if target not in _migrated_db_paths:

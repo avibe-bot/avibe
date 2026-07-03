@@ -11,7 +11,8 @@ from config import paths
 from config.v2_settings import ChannelSettings, RoutingSettings, SettingsState, SettingsStore
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.importer import JSON_IMPORT_MARKER, ensure_sqlite_state
-from storage.migrations import background_tables_ready, run_migrations
+from storage import migrations
+from storage.migrations import UnsafeDefaultStateMigrationError, background_tables_ready, run_migrations
 from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
@@ -97,6 +98,94 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "deleted_at" in background_columns
         version = conn.execute("select version_num from alembic_version").fetchone()
         assert version == (HEAD_REVISION,)
+
+
+def test_run_migrations_blocks_source_checkout_default_user_state(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    db_path = home / ".avibe" / "state" / "vibe.sqlite"
+
+    monkeypatch.setattr(migrations.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv(paths.AVIBE_HOME_ENV, raising=False)
+    monkeypatch.delenv(migrations.ALLOW_DEV_STATE_MIGRATION_ENV, raising=False)
+    monkeypatch.setattr(migrations, "_running_from_source_checkout", lambda: True)
+
+    with pytest.raises(UnsafeDefaultStateMigrationError) as exc:
+        run_migrations(db_path)
+
+    message = str(exc.value)
+    assert "Refusing to run SQLite migrations from an Avibe source checkout" in message
+    assert str(db_path) in message
+    assert not db_path.exists()
+
+
+def test_run_migrations_blocks_default_state_when_override_is_falsey(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    db_path = home / ".avibe" / "state" / "vibe.sqlite"
+
+    monkeypatch.setattr(migrations.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv(paths.AVIBE_HOME_ENV, raising=False)
+    monkeypatch.setenv(migrations.ALLOW_DEV_STATE_MIGRATION_ENV, "0")
+    monkeypatch.setattr(migrations, "_running_from_source_checkout", lambda: True)
+
+    with pytest.raises(UnsafeDefaultStateMigrationError):
+        run_migrations(db_path)
+
+    assert not db_path.exists()
+
+
+def test_ensure_sqlite_state_blocks_source_checkout_default_user_state_before_dirs(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    db_path = home / ".avibe" / "state" / "vibe.sqlite"
+
+    monkeypatch.setattr(migrations.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv(paths.AVIBE_HOME_ENV, raising=False)
+    monkeypatch.delenv(migrations.ALLOW_DEV_STATE_MIGRATION_ENV, raising=False)
+    monkeypatch.setattr(migrations, "_running_from_source_checkout", lambda: True)
+
+    with pytest.raises(UnsafeDefaultStateMigrationError):
+        ensure_sqlite_state()
+
+    assert not db_path.exists()
+    assert not db_path.parent.exists()
+
+
+def test_ensure_sqlite_state_blocks_explicit_avibe_home_pointing_at_default_state(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    avibe_home = home / ".avibe"
+    db_path = avibe_home / "state" / "vibe.sqlite"
+
+    monkeypatch.setattr(migrations.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv(paths.AVIBE_HOME_ENV, str(avibe_home))
+    monkeypatch.delenv(migrations.ALLOW_DEV_STATE_MIGRATION_ENV, raising=False)
+    monkeypatch.setattr(migrations, "_running_from_source_checkout", lambda: True)
+
+    with pytest.raises(UnsafeDefaultStateMigrationError):
+        ensure_sqlite_state()
+
+    assert not db_path.exists()
+    assert not db_path.parent.exists()
+
+
+def test_run_migrations_allows_source_checkout_with_explicit_avibe_home(monkeypatch, tmp_path: Path) -> None:
+    avibe_home = tmp_path / "dev-home"
+    db_path = avibe_home / "state" / "vibe.sqlite"
+
+    monkeypatch.setenv(paths.AVIBE_HOME_ENV, str(avibe_home))
+    monkeypatch.delenv(migrations.ALLOW_DEV_STATE_MIGRATION_ENV, raising=False)
+    monkeypatch.setattr(migrations, "_running_from_source_checkout", lambda: True)
+
+    db_path.parent.mkdir(parents=True)
+    run_migrations()
+
+    with sqlite3.connect(db_path) as conn:
+        version = conn.execute("select version_num from alembic_version").fetchone()
+    assert version == (HEAD_REVISION,)
 
 
 def test_initial_migration_is_schema_snapshot() -> None:
