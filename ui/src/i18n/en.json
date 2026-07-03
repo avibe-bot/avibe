@@ -2201,8 +2201,7 @@
       "revokeConfirm": "Revoke access to \"{{target}}\" now? Agents lose it immediately.",
       "revoked": "Revoked access to {{target}}",
       "secretCount": "{{count}} secrets",
-      "tagCount": "{{count}} tags",
-      "skillCount": "{{count}} skills",
+      "moreLabel": "{{names}} +{{extra}}",
       "session": {
         "bound": "Session-bound",
         "any": "Any session"

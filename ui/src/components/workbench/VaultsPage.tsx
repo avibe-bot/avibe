@@ -159,31 +159,35 @@ function chipCountdown(rem: { h: number; m: number; s: number }): string {
 }
 
 /**
- * Icon + human label for an active grant. Prefers the new `source_selector` (explicit
- * secrets, a tag, or a skill). For a legacy pre-refactor grant (no source_selector) it falls
- * back to the scope ref / member names so two same-size grants stay distinguishable — both in
- * the chip and in the revoke confirmation — until the grant-id backend lands.
+ * Icon + labels for an active grant. Builds from EVERY populated `source_selector` bucket
+ * (skills, tags, explicit env), so a mixed grant (e.g. same skill but a different `--tag`
+ * or `--env`) stays distinguishable and revoke targets the right access. Returns a compact
+ * `label` (truncated for the chip) and a `full` form (every token) for the tooltip and the
+ * revoke confirmation. For a legacy pre-refactor grant (no source_selector) it falls back to
+ * the scope ref / member names until the grant-id backend lands.
  */
-function describeGrant(g: VaultGrant, t: TFunction): { Icon: typeof KeyRound; label: string } {
+function describeGrant(g: VaultGrant, t: TFunction): { Icon: typeof KeyRound; label: string; full: string } {
+  const compact = (tokens: string[]): string =>
+    tokens.length > 2 ? t('vaults.grants.moreLabel', { names: tokens.slice(0, 2).join(', '), extra: tokens.length - 2 }) : tokens.join(', ');
+
   const selector = g.source_selector ?? {};
   const { tags, skills } = partitionTags(selector.tags);
-  if (skills.length) {
-    return { Icon: Puzzle, label: skills.length === 1 ? skills[0] : t('vaults.grants.skillCount', { count: skills.length }) };
+  const env = selector.env ?? [];
+  const tokens = [...skills, ...tags, ...env];
+  if (tokens.length) {
+    // Icon reflects the primary bucket, but the label spans all of them.
+    const Icon = skills.length ? Puzzle : tags.length ? Tag : KeyRound;
+    return { Icon, label: compact(tokens), full: tokens.join(', ') };
   }
-  if (tags.length) {
-    return { Icon: Tag, label: tags.length === 1 ? tags[0] : t('vaults.grants.tagCount', { count: tags.length }) };
-  }
-  if (selector.env?.length) {
-    return { Icon: KeyRound, label: selector.env.length === 1 ? selector.env[0] : t('vaults.grants.secretCount', { count: selector.env.length }) };
-  }
-  // Legacy grant: no source_selector. Use the concrete scope ref / member name.
+  // Legacy grant: no source_selector. Use the concrete scope ref / member names.
   if (g.scope_ref) {
     const Icon = g.scope_type === 'skill' ? Puzzle : g.scope_type === 'group' ? Layers : KeyRound;
-    return { Icon, label: g.scope_ref };
+    return { Icon, label: g.scope_ref, full: g.scope_ref };
   }
   const names = g.member_snapshot ?? [];
-  if (names.length === 1) return { Icon: KeyRound, label: names[0] };
-  return { Icon: KeyRound, label: t('vaults.grants.secretCount', { count: g.member_count || names.length || 0 }) };
+  if (names.length) return { Icon: KeyRound, label: compact(names), full: names.join(', ') };
+  const count = t('vaults.grants.secretCount', { count: g.member_count || 0 });
+  return { Icon: KeyRound, label: count, full: count };
 }
 
 /**
@@ -199,11 +203,16 @@ const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: Va
 }) => {
   const { t } = useTranslation();
   const rem = remaining(g.expires_at, now);
-  const { Icon, label } = useMemo(() => describeGrant(g, t), [g, t]);
+  const { Icon, label, full } = useMemo(() => describeGrant(g, t), [g, t]);
+  // Tooltip carries the full selector plus the covered secret names, so a truncated label
+  // never hides which grant this is.
+  const tip = [full, g.member_snapshot?.length ? g.member_snapshot.join(', ') : '']
+    .filter(Boolean)
+    .join(' · ');
   return (
     <span
       className="inline-flex items-center gap-2 rounded-full border border-mint/40 bg-mint-soft py-1 pl-2.5 pr-1.5 text-xs text-mint"
-      title={g.member_snapshot?.length ? g.member_snapshot.join(', ') : undefined}
+      title={tip || undefined}
     >
       <Icon className="size-3.5 shrink-0" />
       <span className="font-medium">{label}</span>
@@ -509,9 +518,10 @@ export const VaultsPage: React.FC = () => {
   };
 
   const onRevokeGrant = async (g: VaultGrant) => {
-    // Name the grant in the confirm/toast so two same-size grants aren't confused.
-    const { label } = describeGrant(g, t);
-    if (!window.confirm(t('vaults.grants.revokeConfirm', { target: label }))) return;
+    // Name the grant by its FULL selector in the confirm/toast so two grants that share a
+    // bucket (e.g. the same skill but a different tag/env) aren't confused.
+    const { label, full } = describeGrant(g, t);
+    if (!window.confirm(t('vaults.grants.revokeConfirm', { target: full }))) return;
     try {
       await api.revokeVaultGrant(g.id);
       showToast(t('vaults.grants.revoked', { target: label }), 'success');
