@@ -3,10 +3,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from config import paths
 from config.v2_config import AgentsConfig, RuntimeConfig, SlackConfig, V2Config
 from core.resource_governance import (
     MIB,
     AgentResourceGovernor,
+    _is_known_avibe_runtime_member,
     config_from_controller,
     derive_agent_limits,
     is_controller_resource_governor,
@@ -87,6 +89,98 @@ def test_governor_from_controller_marks_long_lived_governor() -> None:
 
     assert is_controller_resource_governor(governor) is True
     assert governor_from_controller(controller) is governor
+
+
+def test_known_runtime_member_accepts_current_source_main(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+
+    monkeypatch.setattr("core.resource_governance._pid_uid", lambda pid: 1000)
+    monkeypatch.setattr("core.resource_governance._pid_cwd", lambda pid: source)
+    monkeypatch.setattr("core.resource_governance._current_runtime_cwd", lambda: source)
+    monkeypatch.setattr(
+        "core.resource_governance._pid_cmdline",
+        lambda pid: f"/opt/avibe/venv/bin/python {source}/main.py",
+    )
+
+    assert _is_known_avibe_runtime_member(1234, uid=1000) is True
+
+
+def test_known_runtime_member_rejects_unrelated_main_py(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "avibe" / "source"
+    other = tmp_path / "other"
+    source.mkdir(parents=True)
+    other.mkdir()
+
+    monkeypatch.setattr("core.resource_governance._pid_uid", lambda pid: 1000)
+    monkeypatch.setattr("core.resource_governance._pid_cwd", lambda pid: other)
+    monkeypatch.setattr("core.resource_governance._current_runtime_cwd", lambda: source)
+    monkeypatch.setattr(
+        "core.resource_governance._pid_cmdline",
+        lambda pid: f"/usr/bin/python {other}/main.py",
+    )
+
+    assert _is_known_avibe_runtime_member(1234, uid=1000) is False
+
+
+def test_known_runtime_member_accepts_custom_avibe_runtime_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    avibe_home = tmp_path / "data" / "avibe"
+    monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
+
+    monkeypatch.setattr("core.resource_governance._pid_uid", lambda pid: 1000)
+    monkeypatch.setattr("core.resource_governance._pid_cwd", lambda pid: None)
+    monkeypatch.setattr("core.resource_governance._current_runtime_cwd", lambda: None)
+    monkeypatch.setattr(
+        "core.resource_governance._pid_cmdline",
+        lambda pid: f"/usr/bin/node {avibe_home}/runtime/show-runtime/source/main/packages/runtime/dist/cli.js",
+    )
+
+    assert _is_known_avibe_runtime_member(1234, uid=1000) is True
+
+
+def test_known_runtime_member_accepts_custom_cloudflared_pid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    avibe_home = tmp_path / "custom-home"
+    monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
+    paths.get_runtime_dir().mkdir(parents=True)
+    paths.get_runtime_remote_access_pid_path().write_text("4321\n", encoding="utf-8")
+
+    monkeypatch.setattr("core.resource_governance._pid_uid", lambda pid: 1000)
+    monkeypatch.setattr("core.resource_governance._pid_cwd", lambda pid: None)
+    monkeypatch.setattr("core.resource_governance._current_runtime_cwd", lambda: None)
+    monkeypatch.setattr(
+        "core.resource_governance._pid_cmdline",
+        lambda pid: "/opt/cloudflare/cloudflared tunnel --no-autoupdate run",
+    )
+
+    assert _is_known_avibe_runtime_member(4321, uid=1000) is True
+
+
+def test_known_runtime_member_rejects_unowned_cloudflared(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("core.resource_governance._pid_uid", lambda pid: 1000)
+    monkeypatch.setattr("core.resource_governance._pid_cwd", lambda pid: None)
+    monkeypatch.setattr("core.resource_governance._current_runtime_cwd", lambda: None)
+    monkeypatch.setattr(
+        "core.resource_governance._pid_cmdline",
+        lambda pid: "/opt/cloudflare/cloudflared tunnel --no-autoupdate run",
+    )
+
+    assert _is_known_avibe_runtime_member(4321, uid=1000) is False
 
 
 def test_governor_disabled_mode_does_not_create_group(tmp_path: Path) -> None:
@@ -263,6 +357,57 @@ def test_governor_falls_back_when_base_has_foreign_member_pids(
     assert governor.apply_to_pid(4321, label="test") is False
     assert governor.group_path is None
     assert writes == []
+
+
+def test_governor_allows_known_runtime_sibling_pids_during_base_migration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "cgroup"
+    base = root / "service"
+    base.mkdir(parents=True)
+    (base / "memory.max").write_text(str(512 * MIB), encoding="utf-8")
+    (base / "cgroup.procs").write_text("1001\n1002\n5001\n", encoding="utf-8")
+
+    governor = AgentResourceGovernor({"mode": "enabled"}, root=root, base_cgroup=base)
+    group = base / "avibe-agents"
+    runtime_group = base / "avibe-runtime"
+    original_mkdir = Path.mkdir
+    runtime_writes: list[str] = []
+    agent_writes: list[str] = []
+
+    def mkdir_with_cgroup_procs(path: Path, *args, **kwargs):
+        result = original_mkdir(path, *args, **kwargs)
+        if path == group:
+            (group / "cgroup.procs").write_text("", encoding="utf-8")
+        if path == runtime_group:
+            (runtime_group / "cgroup.procs").write_text("", encoding="utf-8")
+        return result
+
+    def fake_write_cgroup_value(path: Path, value: str) -> None:
+        if path == runtime_group / "cgroup.procs":
+            runtime_writes.append(value)
+        elif path == group / "cgroup.procs":
+            agent_writes.append(value)
+        else:
+            path.write_text(f"{value}\n", encoding="utf-8")
+            return
+        remaining = [pid for pid in _base_members() if pid != value]
+        (base / "cgroup.procs").write_text("\n".join(remaining) + ("\n" if remaining else ""), encoding="utf-8")
+
+    def _base_members() -> list[str]:
+        text = (base / "cgroup.procs").read_text(encoding="utf-8")
+        return [pid for pid in text.split() if pid]
+
+    monkeypatch.setattr(Path, "mkdir", mkdir_with_cgroup_procs)
+    monkeypatch.setattr("core.resource_governance._runtime_process_tree_pids", lambda pid=None: {1001})
+    monkeypatch.setattr("core.resource_governance._known_avibe_runtime_sibling_pids", lambda pids: {1002})
+    monkeypatch.setattr("core.resource_governance._write_cgroup_value", fake_write_cgroup_value)
+
+    assert governor.apply_to_pid(5001, label="test") is True
+    assert runtime_writes == ["1001", "1002"]
+    assert agent_writes == ["5001", "5001"]
+    assert governor.group_path == group
 
 
 def test_governor_allows_known_agent_pids_during_base_migration(

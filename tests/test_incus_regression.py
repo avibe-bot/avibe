@@ -246,6 +246,8 @@ def test_cloud_init_configures_systemd_service_without_source_code() -> None:
     assert "Environment=VIBE_DEPLOYMENT_ENV=regression" in data
     assert "EnvironmentFile=-/etc/avibe-regression.env" in data
     assert "ExecStart=/opt/avibe/venv/bin/python scripts/incus_regression_supervisor.py" in data
+    assert "Delegate=yes" in data
+    assert "MemoryAccounting=yes" in data
     assert "/opt/avibe/source" in data
     assert "/home/avibe/.vibe_remote" in data
 
