@@ -237,6 +237,28 @@ class StatusBubbleProcessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mid, "msg-1")
         self.assertEqual(controller.im_client.sent[0][1], "thinking about it")
 
+    async def test_concise_toolcall_persisted_only_when_target_blocks_toolcall_delivery(self):
+        # A Slack concise turn routed via delivery_override to a target that
+        # cannot deliver toolcalls (WeChat) must stay persisted-only: the target
+        # toolcall-delivery gate runs BEFORE the concise shortcut, so no status
+        # bubble send is attempted to a platform that can't deliver toolcalls.
+        controller = _StubController(platform="slack", hidden_types={"toolcall"})
+        d = _dispatcher(controller)
+        ctx = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "delivery_override": {"platform": "wechat", "channel_id": "wx1", "user_id": "wxu"}
+            },
+        )
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            mid = await d.emit_agent_message(
+                ctx, "toolcall", "🔧 `Read` `{}`", status_label="🔧 Read: a.py"
+            )
+        self.assertIsNone(mid)
+        self.assertEqual(controller.im_client.sent, [])
+
     async def test_off_still_respects_no_bubble_when_toolcall_hidden(self):
         # off must remain fully silent regardless of the visibility toggle.
         controller = _StubController(
