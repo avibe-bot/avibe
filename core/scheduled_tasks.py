@@ -1239,6 +1239,59 @@ class TaskExecutionStore:
             return True
         return False
 
+    def mark_run_canceled(self, run_id: str, *, completed_at: Optional[str] = None) -> bool:
+        now = completed_at or _utc_now_iso()
+        existing = self.get_run(run_id)
+        if existing is None:
+            return False
+        cancel_requested_at = str(existing.get("cancel_requested_at") or now)
+        if self._sqlite is not None:
+            self._sqlite.update_run_status(
+                run_id,
+                status="canceled",
+                completed_at=now,
+                updated_at=now,
+                cancel_requested=True,
+                cancel_requested_at=cancel_requested_at,
+            )
+            return True
+
+        for state in ("pending", "processing", "completed"):
+            source_path = self._request_path(run_id, state=state)
+            if not source_path.exists():
+                continue
+            try:
+                payload = json.loads(source_path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {"id": run_id}
+            if not isinstance(payload, dict):
+                payload = {"id": run_id}
+            payload.update(
+                {
+                    "id": run_id,
+                    "status": "canceled",
+                    "cancel_requested": True,
+                    "cancel_requested_at": payload.get("cancel_requested_at") or now,
+                    "completed_at": now,
+                    "updated_at": now,
+                }
+            )
+            completed_path = self._request_path(run_id, state="completed")
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                dir=self.completed_dir,
+                suffix=".tmp",
+                delete=False,
+                encoding="utf-8",
+            ) as handle:
+                json.dump(payload, handle, indent=2)
+                tmp_path = Path(handle.name)
+            tmp_path.replace(completed_path)
+            if state != "completed":
+                source_path.unlink(missing_ok=True)
+            return True
+        return False
+
     def claim(self, request_id: str) -> Optional[TaskExecutionRequest]:
         if self._sqlite is not None:
             now = _utc_now_iso()

@@ -3931,13 +3931,158 @@ def cmd_runs_show(args):
     return 0
 
 
+def _run_type(run: dict | None) -> str:
+    if not isinstance(run, dict):
+        return ""
+    return str(run.get("run_type") or run.get("request_type") or "").strip()
+
+
+def _run_session_id(run: dict | None) -> str:
+    if not isinstance(run, dict):
+        return ""
+    return str(run.get("session_id") or "").strip()
+
+
+def _should_attempt_live_run_cancel(run: dict | None) -> bool:
+    if not isinstance(run, dict):
+        return False
+    return (
+        _run_type(run) == "agent_run"
+        and normalize_run_status(run.get("status")) == "running"
+        and bool(_run_session_id(run))
+    )
+
+
+def _recorded_only_cancel_result(*, reason_code: str, detail: object | None = None) -> dict:
+    result = {
+        "code": "cancel_request_recorded_only",
+        "live_cancel_attempted": reason_code not in {"not_running_agent_run", "missing_session_id"},
+        "live_cancel_confirmed": False,
+        "reason_code": reason_code,
+        "message": "Cancel request was recorded, but no live backend turn was stopped.",
+    }
+    if detail is not None:
+        result["detail"] = detail
+    return result
+
+
+def _initial_cancel_result(run: dict | None) -> dict:
+    if not isinstance(run, dict):
+        return _recorded_only_cancel_result(reason_code="run_not_found")
+    status = normalize_run_status(run.get("status"))
+    if status == "queued":
+        return {
+            "code": "queued_canceled",
+            "live_cancel_attempted": False,
+            "live_cancel_confirmed": False,
+            "message": "Queued run was canceled before it started.",
+        }
+    if _run_type(run) != "agent_run" or status != "running":
+        return _recorded_only_cancel_result(reason_code="not_running_agent_run")
+    if not _run_session_id(run):
+        return _recorded_only_cancel_result(reason_code="missing_session_id")
+    return {
+        "code": "cancel_request_recorded",
+        "live_cancel_attempted": False,
+        "live_cancel_confirmed": False,
+        "message": "Cancel request was recorded.",
+    }
+
+
+def _live_cancel_failure_code(status_code: int | None, body: object) -> str:
+    body_code = ""
+    body_status = ""
+    if isinstance(body, dict):
+        body_code = str(body.get("code") or "").strip()
+        body_status = str(body.get("status") or "").strip()
+    if body_code == "not_in_flight" or status_code == 404:
+        return "not_in_flight"
+    if body_code == "stop_failed" or status_code == 409:
+        return "stop_failed"
+    if body_status:
+        return body_status
+    if status_code is None:
+        return body_code or "live_cancel_failed"
+    if status_code >= 500:
+        return body_code or "internal_error"
+    return body_code or "live_cancel_not_confirmed"
+
+
+def _live_cancel_was_confirmed(status_code: int | None, body: object) -> bool:
+    if status_code is None or status_code < 200 or status_code >= 300:
+        return False
+    if isinstance(body, dict) and body.get("ok") is False:
+        return False
+    if not isinstance(body, dict):
+        return False
+    return str(body.get("status") or "").strip() in {"cancel_requested", "stale_released"}
+
+
+async def _request_live_run_cancel(session_id: str) -> dict:
+    from vibe import internal_client
+
+    return await internal_client.cancel_dispatch(session_id)
+
+
+def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
+    session_id = _run_session_id(run)
+    from vibe import internal_client
+
+    try:
+        controller_result = asyncio.run(_request_live_run_cancel(session_id))
+    except internal_client.InternalServerUnavailable as exc:
+        return _recorded_only_cancel_result(reason_code="internal_unavailable", detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _recorded_only_cancel_result(reason_code="live_cancel_failed", detail=str(exc))
+
+    status_code = controller_result.get("status_code")
+    try:
+        normalized_status_code = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        normalized_status_code = None
+    body = controller_result.get("body") or {}
+    if not _live_cancel_was_confirmed(normalized_status_code, body):
+        return _recorded_only_cancel_result(
+            reason_code=_live_cancel_failure_code(normalized_status_code, body),
+            detail={
+                "controller_status_code": normalized_status_code,
+                "controller_response": body,
+            },
+        )
+
+    run_terminalized = store.mark_run_canceled(str(run.get("id") or ""))
+    return {
+        "code": "live_cancel_confirmed",
+        "live_cancel_attempted": True,
+        "live_cancel_confirmed": True,
+        "run_terminalized": run_terminalized,
+        "controller_status_code": normalized_status_code,
+        "controller_response": body,
+        "message": "Live backend turn was stopped and the run was marked canceled.",
+    }
+
+
 def cmd_runs_cancel(args):
-    canceled = _task_request_store().cancel_run(args.run_id)
+    store = _task_request_store()
+    existing = store.get_run(args.run_id)
+    if existing is None:
+        _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
+        return 1
+    canceled = store.cancel_run(args.run_id)
     if not canceled:
         _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
         return 1
-    run = _task_request_store().get_run(args.run_id)
-    _print_cli_payload("agent_run", cancel_requested=True, run=_run_payload(run or {"id": args.run_id}))
+    cancel_result = _initial_cancel_result(existing)
+    if _should_attempt_live_run_cancel(existing):
+        cancel_result = _cancel_live_agent_run(store, existing)
+    run = store.get_run(args.run_id)
+    _print_cli_payload(
+        "agent_run",
+        cancel_requested=True,
+        cancel_code=cancel_result["code"],
+        cancel_result=cancel_result,
+        run=_run_payload(run or {"id": args.run_id}),
+    )
     return 0
 
 
