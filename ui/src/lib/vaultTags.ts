@@ -29,13 +29,17 @@ export function toSkillTag(name: string): string {
 
 /**
  * Normalize a tag entry the way the backend does (`_normalize_tag`): trimmed,
- * non-empty, no interior whitespace. Returns `null` to reject — the shape the
- * {@link TagInput} `normalize` prop expects.
+ * non-empty, no interior whitespace. Also rejects the reserved `skill:` prefix — skills
+ * belong in the dedicated skills input, which owns the prefix and the `links.skills` bridge.
+ * Accepting `skill:` here would store a skill tag with no matching skill link (rendered/
+ * filtered as a skill but invisible to skill-scoped access on the pre-refactor backend).
+ * Returns `null` to reject — the shape the {@link TagInput} `normalize` prop expects.
  */
 export function normalizeTagEntry(raw: string): string | null {
   const tag = raw.trim();
   if (!tag) return null;
   if (/\s/.test(tag)) return null;
+  if (isSkillTag(tag)) return null;
   return tag;
 }
 

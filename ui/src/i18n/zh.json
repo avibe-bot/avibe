@@ -2311,7 +2311,7 @@
       "fetchAuthHelp": "默认使用 Authorization: Bearer <value>。如果目标 API 要求其他位置,可改用 Header 或 Query。",
       "tags": "标签",
       "tagsPlaceholder": "输入标签后回车",
-      "tagsHelp": "用于查找密钥，也可在运行和授权中按标签选择密钥。",
+      "tagsHelp": "用于查找密钥，也可在运行和授权中按标签选择密钥。技能请在“技能”栏添加。",
       "skills": "技能",
       "skillsPlaceholder": "输入技能名称后回车",
       "skillsHelp": "以 skill:<名称> 标签存储。按该技能选择的运行或授权会包含这条密钥。",

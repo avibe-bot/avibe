@@ -35,6 +35,12 @@ describe('tag entry normalization', () => {
     expect(normalizeTagEntry('two words')).toBeNull();
   });
 
+  it('rejects reserved skill: tags in the tag field (skills belong in the skills input)', () => {
+    expect(normalizeTagEntry('skill:deploy')).toBeNull();
+    // The skills input strips the prefix first, so it still accepts the same entry.
+    expect(normalizeSkillEntry('skill:deploy')).toBe('deploy');
+  });
+
   it('normalizes skill entries to a bare, prefix-free name', () => {
     expect(normalizeSkillEntry('github-release')).toBe('github-release');
     // A pasted `skill:` entry is accepted but not double-prefixed.
