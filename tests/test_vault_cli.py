@@ -1348,6 +1348,36 @@ def test_run_mixed_tiers_reserves_standard_one_shot_batch(tmp_path, capfd, monke
     assert protected_status == "active"
 
 
+def test_run_mixed_tiers_releases_standard_one_shot_when_protected_cache_missing(capfd, monkeypatch):
+    from vibe import api
+
+    standard_grant = _set_always_ask_standard_tag_grant(["ASK_A", "ASK_B"], session_id="ses_cli")
+    protected_grant = _set_protected_grant("PROTECTED_KEY", session_id="ses_cli")
+    monkeypatch.setattr(api, "avault_agent_deliver_run", Mock(side_effect=api.AvaultError("grant is missing or expired")))
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(
+        _ns(
+            env=["A=ASK_A", "B=ASK_B", "PROTECTED_KEY"],
+            command_argv=["python3", "-c", "pass"],
+            session_id="ses_cli",
+        )
+    )
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        standard_status = conn.execute(vault_grants.select().where(vault_grants.c.id == standard_grant["id"])).mappings().one()["status"]
+        protected_status = conn.execute(vault_grants.select().where(vault_grants.c.id == protected_grant["id"])).mappings().one()["status"]
+        requests = vault_service.list_requests(conn, status="pending")
+    assert standard_status == "active"
+    assert protected_status == "expired"
+    assert len(requests) == 1
+    assert requests[0]["secret_name"] == "PROTECTED_KEY"
+    assert requests[0]["card"]["grant_options"][0]["member_snapshot"] == ["PROTECTED_KEY"]
+
+
 def test_run_tag_request_offers_fixed_protected_set_grant(capfd, monkeypatch):
     from vibe import api
 
@@ -1424,6 +1454,7 @@ def test_run_tag_protected_request_allows_preapproved_standard_always_ask(capfd,
     from vibe import api
 
     _create_standard_secret("PROTECTED_DEPLOY", protection="protected", tags=["deploy"], sealed=_sealed("protected"))
+    _create_standard_secret("NORMAL_DEPLOY", protection="standard", tags=["deploy"], sealed=_sealed("normal"))
     _create_standard_secret(
         "ASK_DEPLOY",
         protection="standard",
@@ -1514,6 +1545,35 @@ def test_run_reopens_one_selector_set_when_agent_cache_is_missing(capfd, monkeyp
     option = requests[0]["card"]["grant_options"][0]
     assert option["source_selector"] == {"env": ["A_KEY", "B_KEY"]}
     assert option["member_snapshot"] == ["A_KEY", "B_KEY"]
+
+
+def test_run_releases_standard_one_shot_when_protected_cache_is_missing(capfd, monkeypatch):
+    from vibe import api
+
+    standard_grant = _set_always_ask_standard_tag_grant(["ASK_DEPLOY"], tag="deploy", session_id="ses_cli")
+    protected_grant = _set_tag_grant(["PROTECTED_DEPLOY"], tag="deploy", session_id="ses_cli")
+    monkeypatch.setattr(api, "avault_agent_deliver_run", Mock(side_effect=api.AvaultError("grant is missing or expired")))
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(_ns(tag=["deploy"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        statuses = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                vault_grants.select().where(vault_grants.c.id.in_([standard_grant["id"], protected_grant["id"]]))
+            ).mappings()
+        }
+        requests = vault_service.list_requests(conn, status="pending")
+    assert statuses == {standard_grant["id"]: "active", protected_grant["id"]: "expired"}
+    assert len(requests) == 1
+    assert requests[0]["secret_name"] == "PROTECTED_DEPLOY"
+    assert requests[0]["delivery"]["source_selector"] == {"tags": ["deploy"]}
+    assert requests[0]["delivery"]["protected_secret_names"] == ["PROTECTED_DEPLOY"]
+    assert requests[0]["card"]["grant_options"][0]["member_snapshot"] == ["PROTECTED_DEPLOY"]
 
 
 def test_fetch_reopens_session_bound_approval_when_agent_cache_is_missing(capfd, monkeypatch):

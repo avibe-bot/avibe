@@ -5464,18 +5464,19 @@ def _resolve_vault_run_delivery(
                     for name in dict.fromkeys(mapping.values())
                     if name not in protected_names and str(metas[name].get("protection") or "standard") == "standard"
                 ]
+                selector_standard_approval_names = _always_ask_names(metas, selector_standard_names)
                 common_standard_grant = None
-                if selector_standard_names:
+                if selector_standard_approval_names:
                     common_standard_grant = vault_service.find_active_grant_for_secrets(
                         conn,
-                        selector_standard_names,
+                        selector_standard_approval_names,
                         session_id=session_id,
                         purpose="run",
                         reserve_one_shot=True,
                     )
                     if isinstance(common_standard_grant, dict) and common_standard_grant.get("one_shot") is True:
                         one_shot_grants.append(common_standard_grant)
-                        for standard_name in selector_standard_names:
+                        for standard_name in selector_standard_approval_names:
                             resolved_by_name[standard_name] = {
                                 "status": "standard",
                                 "secret": metas[standard_name],
@@ -5491,7 +5492,7 @@ def _resolve_vault_run_delivery(
                 )
                 if grant is None:
                     always_ask_names = _always_ask_names(metas, protected_names) if needs_selector_set else []
-                    unresolved_standard_names = [name for name in selector_standard_names if name not in resolved_by_name]
+                    unresolved_standard_names = [name for name in selector_standard_approval_names if name not in resolved_by_name]
                     standard_always_ask_names = (
                         _always_ask_names(metas, unresolved_standard_names) if needs_selector_set else []
                     )
@@ -5815,8 +5816,11 @@ def cmd_vault_run(args):
         _print_task_error(exc)
         return 1
     except api.AvaultError as exc:
-        _finish_one_shot_after_avault_error(engine, one_shot_grants, exc, reason="vault-run-one-shot")
         if grant is not None and _agent_missing_grant(exc):
+            _release_one_shot_reservations(
+                engine,
+                [one_shot_grant for one_shot_grant in one_shot_grants if one_shot_grant.get("id") != grant.get("id")],
+            )
             requester, delivery, _session_id = _vault_cli_delivery_context(args, mode="run", command=command_argv)
             protected_names = [
                 str(secret["name"])
@@ -5826,7 +5830,7 @@ def cmd_vault_run(args):
             protected_names = list(dict.fromkeys(protected_names))
             if source_selector:
                 delivery["source_selector"] = source_selector
-            if _needs_protected_selector_set(protected_names, source_selector):
+            if protected_names:
                 delivery["protected_secret_names"] = protected_names
             _expire_agent_grant_after_missing(
                 engine,
@@ -5838,6 +5842,7 @@ def cmd_vault_run(args):
             )
             _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
             return 1
+        _finish_one_shot_after_avault_error(engine, one_shot_grants, exc, reason="vault-run-one-shot")
         _print_task_error(TaskCliError(f"avault deliver failed: {exc}", code="avault_failed", help_command=help_command))
         return 1
     except Exception as exc:
