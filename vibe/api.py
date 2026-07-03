@@ -1336,8 +1336,11 @@ def get_vault_secrets(*, tag: Optional[str] = None) -> dict:
     from storage import vault_service
 
     engine = _vault_engine()
-    with engine.connect() as conn:
-        secrets = vault_service.list_secrets(conn, tag=tag)
+    try:
+        with engine.connect() as conn:
+            secrets = vault_service.list_secrets(conn, tag=tag)
+    except vault_service.VaultServiceError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     return {"ok": True, "secrets": secrets}
 
 
@@ -1413,8 +1416,11 @@ def create_vault_secret(payload: dict) -> dict:
     policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else None
     public_meta = payload.get("public_meta") if isinstance(payload.get("public_meta"), dict) else None
     links = payload.get("links") if isinstance(payload.get("links"), dict) else None
-    if links and isinstance(links.get("skills"), list):
-        tags.extend(vault_service.skill_tag(str(skill)) for skill in links["skills"] if isinstance(skill, str))
+    try:
+        if links and isinstance(links.get("skills"), list):
+            tags.extend(vault_service.skill_tag(str(skill)) for skill in links["skills"] if isinstance(skill, str))
+    except vault_service.VaultServiceError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     protection = str(payload.get("protection") or "standard").strip().lower()
     establishing_vmk = bool(payload.get("establishing_vmk"))
     kind = str(payload.get("kind") or "static").strip().lower()
@@ -1674,6 +1680,8 @@ def request_vault_access(payload: dict) -> dict:
     except vault_service.KeypairNotValueDeliverableError as exc:
         raise VaultApiError(str(exc), code="keypair_not_value_deliverable", status=409) from exc
     except vault_service.InvalidRequestError as exc:
+        raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
+    except vault_service.VaultServiceError as exc:
         raise VaultApiError(str(exc), code="invalid_request", status=409) from exc
     return {"ok": True, "request": request}
 

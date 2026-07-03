@@ -5018,7 +5018,8 @@ def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: l
 
     requester, delivery, session_id = _vault_cli_delivery_context(args, mode="run", command=command_argv)
     metas = _preflight_vault_run_batch(engine, mapping)
-    if metas and {str(meta.get("protection") or "standard") for meta in metas.values()} == {"protected"}:
+    tiers = {str(meta.get("protection") or "standard") for meta in metas.values()}
+    if metas and tiers == {"protected"}:
         with engine.begin() as conn:
             common_grant = vault_service.find_active_grant_for_secrets(
                 conn,
@@ -5032,6 +5033,21 @@ def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: l
                     {"name": vault_name, "env": env_name, "envelope": vault_service.get_protected_envelope(conn, vault_name)}
                     for env_name, vault_name in mapping.items()
                 ]
+    if metas and tiers == {"standard"}:
+        with engine.begin() as conn:
+            standard_secrets = [
+                {"name": vault_name, "env": env_name, "envelope": vault_service.get_envelope(conn, vault_name)}
+                for env_name, vault_name in mapping.items()
+            ]
+            common_grant = vault_service.find_active_grant_for_secrets(
+                conn,
+                list(mapping.values()),
+                session_id=session_id,
+                purpose="run",
+                reserve_one_shot=True,
+            )
+            if isinstance(common_grant, dict) and common_grant.get("one_shot") is True:
+                return None, [common_grant], standard_secrets
     secrets = []
     grant: dict | None = None
     one_shot_grants: list[dict] = []

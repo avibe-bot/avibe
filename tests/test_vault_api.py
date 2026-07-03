@@ -218,6 +218,32 @@ def test_create_with_links_persists_skill_link(monkeypatch):
     assert api.get_vault_secrets()["secrets"][0]["tags"] == ["skill:github-pr-review"]
 
 
+def test_create_with_invalid_skill_link_returns_vault_api_error(monkeypatch):
+    seal = Mock(return_value=_sealed())
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_secret(
+            {
+                "name": "GH_PAT",
+                "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                "links": {"skills": ["github review"]},
+            }
+        )
+
+    assert exc.value.code == "invalid_request"
+    assert exc.value.status == 409
+    seal.assert_not_called()
+
+
+def test_get_vault_secrets_invalid_tag_filter_returns_vault_api_error():
+    with pytest.raises(api.VaultApiError) as exc:
+        api.get_vault_secrets(tag="bad tag")
+
+    assert exc.value.code == "invalid_request"
+    assert exc.value.status == 409
+
+
 def test_get_provision_request_by_name_returns_pending_spec():
     with api._vault_engine().begin() as conn:
         req = vault_service.create_provision_request(
@@ -722,6 +748,14 @@ def test_agent_access_request_ignores_client_source_for_hydration(monkeypatch):
 
     assert requested["request"]["requester"]["source"] == "agent-cli"
     _assert_no_unlock_material(requested["request"]["card"])
+
+
+def test_request_vault_access_malformed_selector_returns_vault_api_error():
+    with pytest.raises(api.VaultApiError) as exc:
+        api.request_vault_access({"source_selector": {"tags": "deploy"}, "session_id": "ses_1"})
+
+    assert exc.value.code == "invalid_request"
+    assert exc.value.status == 409
 
 
 def test_agent_access_sibling_request_result_returns_covering_grant(monkeypatch):

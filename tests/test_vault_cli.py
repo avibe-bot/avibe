@@ -140,6 +140,33 @@ def _set_always_ask_standard_grant(name: str, *, session_id: str | None = None, 
         return _grant_from_request(conn, req, session_id=session_id)
 
 
+def _set_always_ask_standard_tag_grant(
+    names: list[str],
+    *,
+    tag: str = "batch",
+    session_id: str | None = None,
+    purpose: str = "run",
+) -> dict:
+    with cli._open_vault_engine().begin() as conn:
+        for name in names:
+            vault_service.create_secret(
+                conn,
+                name=name,
+                protection="standard",
+                sealed=_sealed(name.lower()),
+                tags=[tag],
+                policy={"always_ask": True},
+            )
+        req = vault_service.create_access_request(
+            conn,
+            source_selector={"tags": [tag]},
+            purpose=purpose,
+            requester={"source": "cli", "session_id": session_id} if session_id else {"source": "cli"},
+            delivery={"session_id": session_id, "mode": purpose} if session_id else {"mode": purpose},
+        )
+        return _grant_from_request(conn, req, session_id=session_id)
+
+
 @pytest.mark.parametrize(
     "specs,expected",
     [
@@ -776,6 +803,34 @@ def test_run_reuses_reserved_grant_for_duplicate_always_ask_secret(tmp_path, cap
         [
             {"name": "ASK_KEY", "env": "A", "envelope": _sealed("ask_key")},
             {"name": "ASK_KEY", "env": "B", "envelope": _sealed("ask_key")},
+        ],
+        ["python3", "-c", "pass"],
+    )
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
+    assert status == "expired"
+
+
+def test_run_reuses_multi_secret_standard_one_shot_grant(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    grant = _set_always_ask_standard_tag_grant(["ASK_A", "ASK_B"], session_id="ses_cli")
+    deliver = Mock(return_value={"exit_code": 0, "delivered": True})
+    monkeypatch.setattr(api, "avault_deliver_run", deliver)
+
+    code = cli.cmd_vault_run(
+        _ns(
+            env=["A=ASK_A", "B=ASK_B"],
+            command_argv=["python3", "-c", "pass"],
+            session_id="ses_cli",
+        )
+    )
+
+    assert code == 0
+    deliver.assert_called_once_with(
+        [
+            {"name": "ASK_A", "env": "A", "envelope": _sealed("ask_a")},
+            {"name": "ASK_B", "env": "B", "envelope": _sealed("ask_b")},
         ],
         ["python3", "-c", "pass"],
     )
