@@ -339,6 +339,10 @@ def _trusted_forwarded_port() -> int | None:
     return port
 
 
+def _has_trusted_forwarded_metadata() -> bool:
+    return _is_explicitly_trusted_proxy_peer() and _has_forwarded_metadata()
+
+
 def _has_untrusted_forwarded_metadata() -> bool:
     return _has_forwarded_metadata() and not _is_explicitly_trusted_proxy_peer()
 
@@ -349,6 +353,28 @@ def _effective_loopback_host() -> bool:
 
 def _effective_normalized_host() -> str:
     return _normalized_host(_effective_request_host())
+
+
+def _trusted_forwarded_client_address() -> ipaddress._BaseAddress | None:
+    if not _is_explicitly_trusted_proxy_peer():
+        return None
+    raw_client = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    if not raw_client:
+        return None
+    try:
+        address = ipaddress.ip_address(raw_client)
+    except ValueError:
+        return None
+    mapped = getattr(address, "ipv4_mapped", None)
+    return mapped or address
+
+
+def _local_trust_peer_address() -> ipaddress._BaseAddress | None:
+    if not _has_trusted_forwarded_metadata():
+        return _request_peer_address()
+    if _trusted_forwarded_host() is None:
+        return None
+    return _trusted_forwarded_client_address()
 
 
 def _is_explicitly_trusted_proxy_peer() -> bool:
@@ -498,9 +524,8 @@ def _has_forwarded_metadata() -> bool:
 def _is_loopback_origin_proxy_request() -> bool:
     if not _is_loopback_peer() or not _is_loopback_host(request.host):
         return False
-    if _is_explicitly_trusted_proxy_peer():
-        forwarded_proto = request.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower()
-        return bool(_trusted_forwarded_host() or forwarded_proto in {"http", "https"})
+    if _has_trusted_forwarded_metadata():
+        return False
     if request.headers.get("Forwarded") or request.headers.get("X-Forwarded-For"):
         return False
     client_ip_headers = (
@@ -606,7 +631,10 @@ def _is_containerized_runtime() -> bool:
 
 
 def _is_private_peer() -> bool:
-    address = _request_peer_address()
+    return _is_private_peer_address(_request_peer_address())
+
+
+def _is_private_peer_address(address: ipaddress._BaseAddress | None) -> bool:
     return address is not None and _is_private_address(address)
 
 
@@ -719,7 +747,10 @@ def _setup_host_trust_network(setup_address: ipaddress._BaseAddress) -> ipaddres
     return _local_interface_network(setup_address)
 
 
-def _peer_shares_setup_host_network(setup_address: ipaddress._BaseAddress) -> bool:
+def _peer_shares_setup_host_network(
+    setup_address: ipaddress._BaseAddress,
+    peer: ipaddress._BaseAddress | None = None,
+) -> bool:
     """Require the peer to share setup_host's interface-level subnet.
 
     Compensates for the wildcard bind in the tunnel-on path. Without this,
@@ -729,12 +760,8 @@ def _peer_shares_setup_host_network(setup_address: ipaddress._BaseAddress) -> bo
     (Tailscale, link-local) broad and otherwise mirrors the actual
     interface netmask via :func:`_local_interface_network`.
     """
-    remote_addr = (request.remote_addr or "").strip()
-    if not remote_addr or remote_addr == "localhost":
-        return False
-    try:
-        peer = ipaddress.ip_address(remote_addr)
-    except ValueError:
+    peer = peer or _request_peer_address()
+    if peer is None:
         return False
     if peer.version != setup_address.version:
         mapped = getattr(peer, "ipv4_mapped", None)
@@ -1065,7 +1092,8 @@ def _is_setup_host_request(config: V2Config | None) -> bool:
     # the actual client, so refuse the setup-host trust path entirely.
     if _has_untrusted_forwarded_metadata():
         return False
-    if not _is_private_peer():
+    peer_address = _local_trust_peer_address()
+    if not _is_private_peer_address(peer_address):
         return False
     # When the Avibe Cloud tunnel is on, the UI binds to a wildcard so the
     # local cloudflared origin can reach setup_host regardless of which
@@ -1078,7 +1106,7 @@ def _is_setup_host_request(config: V2Config | None) -> bool:
     # here would just block legitimate routed peers (e.g. a 10.50/16
     # client reaching setup_host=10.1.2.3 across a routed corporate net).
     if _is_tunnel_wildcard_bind(config):
-        return _peer_shares_setup_host_network(setup_address)
+        return _peer_shares_setup_host_network(setup_address, peer_address)
     return True
 
 
@@ -1090,7 +1118,9 @@ def _is_tunnel_wildcard_bind(config: V2Config) -> bool:
 def _is_local_request(config: V2Config | None = None) -> bool:
     if _has_untrusted_forwarded_metadata():
         return False
-    if _is_loopback_peer() and _effective_loopback_host():
+    if _has_trusted_forwarded_metadata() and _trusted_forwarded_host() is None:
+        return False
+    if not _has_trusted_forwarded_metadata() and _is_loopback_peer() and _effective_loopback_host():
         return True
     if _is_trusted_docker_loopback_request():
         return True

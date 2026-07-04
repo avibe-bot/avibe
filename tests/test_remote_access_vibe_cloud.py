@@ -15,10 +15,13 @@ from vibe import runtime
 
 @pytest.fixture(autouse=True)
 def _resolve_backend_test_to_public_address(monkeypatch):
+    for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+
     def resolve(hostname: str, port: int):
         if hostname == "backend.test":
-            return {ipaddress.ip_address("93.184.216.34")}
-        return set()
+            return (ipaddress.ip_address("93.184.216.34"),)
+        return ()
 
     monkeypatch.setattr(remote_access, "_resolve_pairing_backend_addresses", resolve)
 
@@ -425,6 +428,84 @@ def test_validated_backend_request_retries_next_pinned_address(monkeypatch) -> N
 
     assert result == {"ok": True}
     assert attempts == ["93.184.216.34", "93.184.216.35"]
+
+
+def test_validated_backend_request_uses_https_proxy_connect_to_pinned_ip(monkeypatch) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:pass@proxy.test:8080")
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status = 200
+
+        def read(self):
+            return b'{"ok": true}'
+
+    class FakeProxyConnection:
+        def __init__(
+            self,
+            proxy_host: str,
+            proxy_port: int,
+            *,
+            proxy_scheme: str,
+            connect_host: str,
+            connect_port: int,
+            server_hostname: str,
+            proxy_headers: dict[str, str] | None,
+            timeout: float,
+            context,
+        ):
+            captured["proxy_host"] = proxy_host
+            captured["proxy_port"] = proxy_port
+            captured["proxy_scheme"] = proxy_scheme
+            captured["connect_host"] = connect_host
+            captured["connect_port"] = connect_port
+            captured["server_hostname"] = server_hostname
+            captured["proxy_headers"] = proxy_headers
+            captured["timeout"] = timeout
+            captured["context"] = context
+
+        def request(self, method: str, path: str, body: bytes | None = None, headers: dict | None = None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["headers"] = headers
+
+        def getresponse(self):
+            return FakeResponse()
+
+        def close(self):
+            captured["closed"] = True
+
+    monkeypatch.setattr(remote_access, "_PinnedHTTPSProxyConnection", FakeProxyConnection)
+    monkeypatch.setattr(
+        remote_access,
+        "_PinnedHTTPSConnection",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("proxy path must not direct-connect")),
+    )
+    target = remote_access._ValidatedPairingBackend(
+        base_url="https://backend.test",
+        hostname="backend.test",
+        port=443,
+        host_header="backend.test",
+        connect_hosts=("93.184.216.34",),
+    )
+
+    result = remote_access._json_request_to_validated_backend(
+        "https://backend.test/api/v1/pairing/redeem",
+        {"pairing_key": "vrp_test"},
+        target,
+        timeout=3.0,
+    )
+
+    assert result == {"ok": True}
+    assert captured["proxy_host"] == "proxy.test"
+    assert captured["proxy_port"] == 8080
+    assert captured["proxy_scheme"] == "http"
+    assert captured["connect_host"] == "93.184.216.34"
+    assert captured["connect_port"] == 443
+    assert captured["server_hostname"] == "backend.test"
+    assert captured["proxy_headers"] == {"Proxy-Authorization": "Basic dXNlcjpwYXNz"}
+    assert captured["headers"]["Host"] == "backend.test"
+    assert captured["closed"] is True
 
 
 def test_json_request_disables_redirects(monkeypatch) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import base64
 from dataclasses import dataclass
 import hashlib
 import hmac
@@ -720,15 +721,10 @@ def _json_request_to_validated_backend(
 
     request_path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
     body = json.dumps(payload).encode("utf-8")
+    proxy_url = _validated_backend_proxy_url(url)
     last_network_error: Exception | None = None
     for connect_host in connection_target.connect_hosts:
-        connection = _PinnedHTTPSConnection(
-            connect_host,
-            connection_target.port,
-            server_hostname=connection_target.hostname,
-            timeout=timeout,
-            context=ssl.create_default_context(),
-        )
+        connection = _validated_backend_connection(connect_host, connection_target, timeout, proxy_url)
         try:
             connection.request("POST", request_path, body=body, headers=request_headers)
             response = connection.getresponse()
@@ -755,6 +751,49 @@ def _json_request_to_validated_backend(
     raise RuntimeError("validated backend has no addresses")
 
 
+def _validated_backend_proxy_url(url: str) -> str | None:
+    proxies = requests.utils.get_environ_proxies(url)
+    proxy_url = requests.utils.select_proxy(url, proxies)
+    if not proxy_url:
+        return None
+    parsed = urllib.parse.urlsplit(proxy_url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise RuntimeError("unsupported_https_proxy_scheme")
+    return proxy_url
+
+
+def _validated_backend_connection(
+    connect_host: str,
+    connection_target: _ValidatedPairingBackend,
+    timeout: float,
+    proxy_url: str | None,
+) -> http.client.HTTPConnection:
+    context = ssl.create_default_context()
+    if proxy_url:
+        proxy = urllib.parse.urlsplit(proxy_url)
+        proxy_scheme = proxy.scheme.lower()
+        if proxy_scheme not in {"http", "https"} or not proxy.hostname:
+            raise RuntimeError("unsupported_https_proxy_scheme")
+        return _PinnedHTTPSProxyConnection(
+            proxy.hostname,
+            proxy.port or (443 if proxy_scheme == "https" else 80),
+            proxy_scheme=proxy_scheme,
+            connect_host=connect_host,
+            connect_port=connection_target.port,
+            server_hostname=connection_target.hostname,
+            proxy_headers=_proxy_tunnel_headers(proxy),
+            timeout=timeout,
+            context=context,
+        )
+    return _PinnedHTTPSConnection(
+        connect_host,
+        connection_target.port,
+        server_hostname=connection_target.hostname,
+        timeout=timeout,
+        context=context,
+    )
+
+
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     def __init__(self, host: str, port: int, *, server_hostname: str, **kwargs: Any) -> None:
         super().__init__(host, port=port, **kwargs)
@@ -763,6 +802,51 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     def connect(self) -> None:
         http.client.HTTPConnection.connect(self)
         self.sock = self._context.wrap_socket(self.sock, server_hostname=self._validated_server_hostname)
+
+
+class _PinnedHTTPSProxyConnection(http.client.HTTPConnection):
+    def __init__(
+        self,
+        proxy_host: str,
+        proxy_port: int,
+        *,
+        proxy_scheme: str,
+        connect_host: str,
+        connect_port: int,
+        server_hostname: str,
+        proxy_headers: dict[str, str] | None,
+        **kwargs: Any,
+    ) -> None:
+        context = kwargs.pop("context")
+        proxy_context = kwargs.pop("proxy_context", None)
+        super().__init__(proxy_host, port=proxy_port, **kwargs)
+        self._context = context
+        self._proxy_context = proxy_context or ssl.create_default_context()
+        self._proxy_scheme = proxy_scheme
+        self._validated_server_hostname = server_hostname
+        self.set_tunnel(connect_host, connect_port, headers=proxy_headers)
+
+    def connect(self) -> None:
+        self.sock = self._create_connection((self.host, self.port), self.timeout, self.source_address)
+        try:
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        if self._proxy_scheme == "https":
+            self.sock = self._proxy_context.wrap_socket(self.sock, server_hostname=self.host)
+        if self._tunnel_host:
+            self._tunnel()
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self._validated_server_hostname)
+
+
+def _proxy_tunnel_headers(proxy: urllib.parse.SplitResult) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    if proxy.username is not None:
+        username = urllib.parse.unquote(proxy.username)
+        password = urllib.parse.unquote(proxy.password or "")
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        headers["Proxy-Authorization"] = f"Basic {token}"
+    return headers
 
 
 def _backend_error_payload(response_body: bytes) -> dict[str, Any]:
