@@ -1759,6 +1759,10 @@ class ScheduledTaskService:
         engine = get_cached_sqlite_engine(paths.get_sqlite_state_path())
         try:
             with engine.begin() as conn:
+                # Expiry is lazy (only on request reads), so proactively expire overdue pending
+                # requests here — otherwise an unattended timed-out request would never arm its
+                # callback until some unrelated read touched it. Both happen in one pass.
+                vault_service.expire_overdue_requests(conn)
                 pending = vault_service.list_pending_request_callbacks(conn)
         except Exception as exc:
             logger.error("Vault request callback sweep failed to load: %s", exc, exc_info=True)
@@ -1771,6 +1775,12 @@ class ScheduledTaskService:
             # forever) and does not abort the rest of the batch.
             status = "skipped"
             try:
+                with engine.begin() as conn:
+                    ready = vault_service.request_callback_ready(conn, row)
+                if not ready:
+                    # Approved access grant not delivery-ready yet (protected relay in flight);
+                    # leave callback_status='pending' and retry on a later tick.
+                    continue
                 plan = vault_service.resolve_request_callback(row)
                 if plan is not None:
                     enqueue_session_callback(

@@ -991,6 +991,36 @@ def resolve_request_callback(row: dict[str, Any]) -> PendingRequestCallback | No
     return PendingRequestCallback(request_id=request_id, session_id=session_id, message=message)
 
 
+def request_callback_ready(conn: Connection, row: dict[str, Any]) -> bool:
+    """Whether a resolved request's callback may be delivered yet (vs. deferred to a later sweep).
+
+    An approved *access* request is only usable once its grant is delivery-ready: for a protected
+    secret the DEKs are relayed to the resident agent AFTER approval, so resuming the agent before
+    then would hand it a grant whose ``delivery_ready`` is still false. Defer until the grant is
+    ready. Every other terminal state (provision/sign/deny/expire, and standard grants which are
+    ready on approval) is deliverable immediately; a missing grant (revoked, or relay-failed →
+    request restored to pending) does not block — a restored request is no longer ``approved`` and
+    is skipped by :func:`resolve_request_callback` anyway.
+    """
+    if str(row.get("request_type") or "") == "access" and str(row.get("status") or "") == "approved":
+        request_id = str(row.get("id") or "").strip()
+        if request_id:
+            grant = get_grant_created_by_request(conn, request_id)
+            if grant is not None and not grant.get("delivery_ready"):
+                return False
+    return True
+
+
+def expire_overdue_requests(conn: Connection) -> None:
+    """Flip any overdue pending requests to ``expired`` (arming their callback) proactively.
+
+    Expiry is otherwise lazy (only on request reads), so an unattended timed-out request would
+    never auto-resume its session until some unrelated read happened to touch it. The callback
+    sweep calls this first so overdue requests are expired and picked up in the same pass.
+    """
+    _expire_pending_requests(conn)
+
+
 def list_pending_request_callbacks(conn: Connection, *, limit: int = 50) -> list[dict[str, Any]]:
     """Terminal requests owed an auto-resume callback (``callback_status='pending'``)."""
     rows = conn.execute(

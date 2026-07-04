@@ -177,17 +177,50 @@ def test_message_and_session_by_type_status(request_type, status, needle):
     assert needle in plan.message.lower()
 
 
-def test_wait_or_no_callback_disables_auto_resume():
-    # --wait blocks synchronously and --no-callback is explicit; either suppresses the async
-    # resume so the CLI's synchronous result and a callback turn can't double-resume one turn.
+def test_only_no_callback_disables_auto_resume_at_creation():
+    # Only --no-callback pre-disables. --wait must NOT: a finite wait can time out with the
+    # request still pending, and the agent must still be auto-resumed when it later resolves.
+    # (A wait that observes fulfillment suppresses the redundant callback at that point instead.)
     from types import SimpleNamespace
 
     from vibe import cli
 
     assert cli._vault_callback_disabled(SimpleNamespace(no_callback=True, wait=None)) is True
-    assert cli._vault_callback_disabled(SimpleNamespace(no_callback=False, wait=5.0)) is True
+    assert cli._vault_callback_disabled(SimpleNamespace(no_callback=False, wait=5.0)) is False
     assert cli._vault_callback_disabled(SimpleNamespace(no_callback=False, wait=None)) is False
-    assert cli._vault_callback_disabled(SimpleNamespace(no_callback=False, wait=0)) is False
+
+
+def test_expire_overdue_requests_arms_callback(vault):
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    with vault.begin() as conn:
+        req = vs.create_provision_request(conn, "T_KEY", requester={"session_id": "ses_t"})
+        conn.execute(vault_requests.update().where(vault_requests.c.id == req["id"]).values(expires_at=past))
+        # Untouched: still pending, no callback armed yet (expiry is lazy).
+        assert _callback_status(conn, req["id"]) is None
+        vs.expire_overdue_requests(conn)
+        assert _row(conn, req["id"])["status"] == "expired"
+        assert _callback_status(conn, req["id"]) == "pending"
+
+
+def test_request_callback_ready_defers_approved_access_until_grant_ready(vault, monkeypatch):
+    with vault.begin() as conn:
+        vs.create_secret(conn, name="GR_KEY", sealed=_sealed(), protection="protected")
+        req = vs.create_access_request(conn, "GR_KEY", requester={"session_id": "ses_gr"})
+        conn.execute(vault_requests.update().where(vault_requests.c.id == req["id"]).values(status="approved"))
+        row = _row(conn, req["id"])
+
+        monkeypatch.setattr(vs, "get_grant_created_by_request", lambda c, rid: {"delivery_ready": False})
+        assert vs.request_callback_ready(conn, row) is False  # protected relay in flight → defer
+
+        monkeypatch.setattr(vs, "get_grant_created_by_request", lambda c, rid: {"delivery_ready": True})
+        assert vs.request_callback_ready(conn, row) is True  # grant ready → deliver
+
+        monkeypatch.setattr(vs, "get_grant_created_by_request", lambda c, rid: None)
+        assert vs.request_callback_ready(conn, row) is True  # grant gone → don't block forever
+
+    # Non-access or non-approved terminal states are always deliverable (no grant lookup).
+    assert vs.request_callback_ready(None, {"request_type": "provision", "status": "fulfilled", "id": "x"}) is True
+    assert vs.request_callback_ready(None, {"request_type": "access", "status": "denied", "id": "y"}) is True
 
 
 def test_non_terminal_status_has_no_callback():

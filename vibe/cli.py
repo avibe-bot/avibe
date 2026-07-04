@@ -4665,12 +4665,14 @@ def _vault_cli_requester(args) -> dict:
 
 
 def _vault_callback_disabled(args) -> bool:
-    """Whether this request should skip the auto-resume callback.
+    """Whether this request opts out of the auto-resume callback at creation time.
 
-    Explicit ``--no-callback``, or ``--wait`` (the agent is blocking synchronously in this CLI
-    call, so an async resume of the same turn would be a duplicate).
+    Only explicit ``--no-callback``. ``--wait`` must NOT pre-disable it: a finite wait can time
+    out with the request still pending, and the agent must then still be auto-resumed when it
+    later resolves. The redundant callback for a wait that DOES observe fulfillment is suppressed
+    at that point instead (see ``cmd_vault_request``).
     """
-    return bool(getattr(args, "no_callback", False)) or bool(getattr(args, "wait", None))
+    return bool(getattr(args, "no_callback", False))
 
 
 def _vault_cli_delivery(args, **fields) -> dict:
@@ -6049,6 +6051,15 @@ def cmd_vault_request(args):
                         )
                     )
                     return 1
+                # The wait delivered the outcome synchronously, so suppress the now-redundant
+                # async auto-resume callback for this request (best-effort — a race with the ~2s
+                # sweep risks at most one benign duplicate resume). A wait that TIMES OUT skips
+                # this and leaves the callback armed, so a later resolution still wakes the agent.
+                try:
+                    with _open_vault_engine().begin() as conn:
+                        vault_service.mark_request_callback(conn, str(req["id"]), status="skipped")
+                except Exception:
+                    pass
                 _print_cli_payload(
                     "vault_request",
                     request_id=req["id"],
