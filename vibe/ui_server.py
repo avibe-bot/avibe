@@ -1842,6 +1842,11 @@ def protect_mutating_ui_requests():
 
 
 @app.after_request
+def compress_materialized_api_response(response: Response) -> Response:
+    return _compress_materialized_api_response(response)
+
+
+@app.after_request
 def add_api_timing_headers(response: Response) -> Response:
     started_at = getattr(g, "api_request_started_at", None)
     if started_at is None:
@@ -7582,6 +7587,10 @@ def _compress_response_content(content: bytes, headers: dict[str, str], starlett
         return content
     if _response_header(headers, "content-encoding"):
         return content
+    if _show_response_is_attachment(_response_header(headers, "content-disposition")):
+        return content
+    if starlette_request.headers.get("upgrade", "").lower() == "websocket":
+        return content
     content_type = _response_header(headers, "content-type") or ""
     if not _show_response_is_compressible(content_type):
         return content
@@ -7594,7 +7603,24 @@ def _compress_response_content(content: bytes, headers: dict[str, str], starlett
     _remove_response_header(headers, "content-length")
     _remove_response_header(headers, "etag")
     _set_response_header(headers, "Content-Encoding", "gzip")
+    _set_response_header(headers, "Content-Length", str(len(compressed)))
     return compressed
+
+
+def _compress_materialized_api_response(response: Response) -> Response:
+    if not (request.path or "").startswith("/api/"):
+        return response
+    body = getattr(response, "body", None)
+    if body is None:
+        return response
+    if not isinstance(body, bytes | bytearray | memoryview):
+        return response
+    content = bytes(body)
+    compressed = _compress_response_content(content, response.headers, request._request)
+    if compressed is content:
+        return response
+    response.body = compressed
+    return response
 
 
 def _accept_encoding_allows_gzip(accept_encoding: str | None) -> bool:
@@ -7633,6 +7659,8 @@ def _show_response_is_compressible(content_type: str | None) -> bool:
     if not content_type:
         return False
     lowered = content_type.lower()
+    if "text/event-stream" in lowered:
+        return False
     return any(
         marker in lowered
         for marker in (

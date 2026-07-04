@@ -19,6 +19,18 @@ from tests.test_api_save_config_merge import _full_config_payload
 from tests.ui_server_test_helpers import csrf_headers
 
 
+def _raw_client_get(client, path: str, *, headers: dict[str, str] | None = None):
+    request_headers = {TEST_REMOTE_ADDR_HEADER: "127.0.0.1"}
+    request_headers.update(headers or {})
+    with client._client.stream(
+        "GET",
+        f"http://127.0.0.1{path}",
+        headers=request_headers,
+    ) as response:
+        body = b"".join(response.iter_raw())
+    return response, body
+
+
 def test_websocket_echo_is_disabled_by_default(monkeypatch):
     monkeypatch.delenv("VIBE_UI_ENABLE_WS_ECHO", raising=False)
 
@@ -713,6 +725,104 @@ def test_static_ui_asset_gzip_skips_small_and_binary_files(monkeypatch, tmp_path
     assert binary_response.content == png
     assert "Content-Encoding" not in binary_response.headers
     assert "Vary" not in binary_response.headers
+
+
+def test_json_api_gzip_uses_shared_response_rules(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+
+    client = app.test_client()
+    identity_response = client.get("/api/config", headers={"Accept-Encoding": ""})
+    original = identity_response.content
+
+    assert identity_response.status_code == 200
+    assert identity_response.is_json
+    assert len(original) >= ui_server._SHOW_RUNTIME_COMPRESSIBLE_MIN_BYTES
+    assert "Content-Encoding" not in identity_response.headers
+    assert "Accept-Encoding" in identity_response.headers["Vary"]
+
+    gzip_disabled_response = client.get("/api/config", headers={"Accept-Encoding": "br, gzip;q=0"})
+    assert gzip_disabled_response.status_code == 200
+    assert gzip_disabled_response.content == original
+    assert "Content-Encoding" not in gzip_disabled_response.headers
+    assert "Accept-Encoding" in gzip_disabled_response.headers["Vary"]
+
+    gzip_client = app.test_client()
+    gzip_response, compressed = _raw_client_get(
+        gzip_client,
+        "/api/config",
+        headers={"Accept-Encoding": "gzip"},
+    )
+
+    assert gzip_response.status_code == 200
+    assert gzip_response.headers["Content-Encoding"] == "gzip"
+    assert gzip_response.headers["Content-Length"] == str(len(compressed))
+    assert "Accept-Encoding" in gzip_response.headers["Vary"]
+    assert gzip.decompress(compressed) == original
+    assert any(header.startswith("vibe_csrf_token=") for header in gzip_response.headers.get_list("Set-Cookie"))
+
+
+def test_json_api_gzip_skips_small_responses(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+
+    response = app.test_client().get("/api/csrf-token", headers={"Accept-Encoding": "gzip"})
+
+    assert response.status_code == 200
+    assert response.is_json
+    assert len(response.content) < ui_server._SHOW_RUNTIME_COMPRESSIBLE_MIN_BYTES
+    assert "Content-Encoding" not in response.headers
+
+
+def test_json_api_gzip_skips_sse_streaming_response():
+    from fastapi.responses import StreamingResponse
+
+    async def generate():
+        yield b": stream connected\n\n"
+
+    response = StreamingResponse(generate(), media_type="text/event-stream")
+
+    with app.test_request_context("/api/events", headers={"Accept-Encoding": "gzip"}):
+        compressed_response = ui_server._compress_materialized_api_response(response)
+
+    assert compressed_response is response
+    assert "Content-Encoding" not in response.headers
+    assert response.media_type == "text/event-stream"
+
+    body = b"event: message\ndata: {}\n\n" * 100
+    materialized = ui_server.Response(content=body, mimetype="text/event-stream")
+    with app.test_request_context("/api/events", headers={"Accept-Encoding": "gzip"}):
+        materialized_response = ui_server._compress_materialized_api_response(materialized)
+
+    assert materialized_response is materialized
+    assert materialized_response.body == body
+    assert "Content-Encoding" not in materialized_response.headers
+
+
+def test_json_api_gzip_skips_attachments_and_existing_encoding():
+    body = b'{"items":[' + (b'"payload",' * 300) + b'"end"]}'
+    attachment = ui_server.Response(
+        content=body,
+        mimetype="application/json",
+        headers={"Content-Disposition": "attachment; filename=data.json"},
+    )
+    with app.test_request_context("/api/export", headers={"Accept-Encoding": "gzip"}):
+        attachment_response = ui_server._compress_materialized_api_response(attachment)
+
+    assert attachment_response is attachment
+    assert attachment_response.body == body
+    assert "Content-Encoding" not in attachment_response.headers
+    assert "Vary" not in attachment_response.headers
+
+    encoded = ui_server.Response(
+        content=body,
+        mimetype="application/json",
+        headers={"Content-Encoding": "br"},
+    )
+    with app.test_request_context("/api/precompressed", headers={"Accept-Encoding": "gzip"}):
+        encoded_response = ui_server._compress_materialized_api_response(encoded)
+
+    assert encoded_response is encoded
+    assert encoded_response.body == body
+    assert encoded_response.headers["Content-Encoding"] == "br"
 
 
 def test_run_maybe_async_offloads_sync_handlers_without_losing_context():
