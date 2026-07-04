@@ -108,6 +108,7 @@ export const VaultSecretForm: React.FC<{
   onCancel: () => void;
   onCreated: (name: string, reason?: 'created' | 'already_exists') => void;
   className?: string;
+  cancelLabel?: string;
   defaultProtection?: VaultProtection;
   provisionRequestId?: string | null;
   requestSpec?: VaultRequestSpec | null;
@@ -117,6 +118,7 @@ export const VaultSecretForm: React.FC<{
   onCancel,
   onCreated,
   className,
+  cancelLabel,
   defaultProtection = 'standard',
   provisionRequestId,
   requestSpec,
@@ -770,7 +772,7 @@ export const VaultSecretForm: React.FC<{
 
         <div className="mt-1 flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={onCancel} disabled={submitting}>
-            {t('vaults.request.dismiss')}
+            {cancelLabel ?? t('vaults.request.dismiss')}
           </Button>
           <Button type="submit" disabled={!canSubmit}>
             {submitting ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}

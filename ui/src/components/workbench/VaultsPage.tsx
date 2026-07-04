@@ -19,11 +19,15 @@ const PENDING_REQUEST_POLL_INTERVAL_MS = 5000;
 const PENDING_REQUEST_EXPIRY_GRACE_MS = 100;
 const MAX_BROWSER_TIMEOUT_MS = 2_147_483_647;
 
+const messageFromError = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
 const AddSecretDialog: React.FC<{
   onClose: () => void;
+  onCancel?: () => void;
+  cancelLabel?: string;
   onCreated: (name: string, reason?: 'created' | 'already_exists') => void;
   request?: VaultRequest | null;
-}> = ({ onClose, onCreated, request }) => {
+}> = ({ onClose, onCancel, cancelLabel, onCreated, request }) => {
   const { t } = useTranslation();
   const requestCard = (request?.card ?? null) as { default_protection?: unknown; spec?: VaultRequestSpec } | null;
   const requestSpec = (requestCard?.spec ?? null) as VaultRequestSpec | null;
@@ -49,7 +53,8 @@ const AddSecretDialog: React.FC<{
           provisionRequestId={request?.id ?? null}
           requestSpec={requestSpec}
           defaultProtection={defaultProtection}
-          onCancel={onClose}
+          onCancel={onCancel ?? onClose}
+          cancelLabel={cancelLabel}
           onCreated={onCreated}
           treatExistingAsFulfilled={Boolean(request)}
         />
@@ -284,7 +289,6 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
   const [requests, setRequests] = useState<VaultRequest[]>([]);
   const [reviewing, setReviewing] = useState<VaultRequest | null>(null);
   const [provisioning, setProvisioning] = useState<VaultRequest | null>(null);
-  const [eventBridgeConnected, setEventBridgeConnected] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -309,21 +313,19 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
     return api.connectWorkbenchEvents({
       onConnected: (data) => {
         if (data.source === 'controller') {
-          setEventBridgeConnected(true);
           load();
         }
       },
       onEventBridgeStatus: ({ connected }) => {
-        setEventBridgeConnected(connected);
         if (connected) load();
       },
-      onError: () => setEventBridgeConnected(false),
       onVaultsUpdated: () => load(),
     });
   }, [api, load]);
 
   useEffect(() => {
-    if (eventBridgeConnected) return;
+    // CLI-created requests can arrive without a browser bridge event, so keep
+    // a light fallback poll even when SSE is connected.
     let timer: number | undefined;
     let cancelled = false;
     let inFlight = false;
@@ -368,7 +370,7 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
       document.removeEventListener('visibilitychange', refreshNow);
       window.removeEventListener('focus', refreshNow);
     };
-  }, [eventBridgeConnected, load]);
+  }, [load]);
 
   useEffect(() => {
     const expiresAt = earliestRequestExpiry(requests);
@@ -400,6 +402,22 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
       onResolved();
     },
     [reviewing, showToast, t, load, onResolved],
+  );
+
+  const denyProvisionRequest = useCallback(
+    async (request: VaultRequest) => {
+      try {
+        await api.denyVaultRequest(request.id);
+        setProvisioning(null);
+        setRequests((prev) => prev.filter((r) => r.id !== request.id));
+        showToast(t('vaults.requests.denied'), 'warning');
+        load();
+        onResolved();
+      } catch (err: unknown) {
+        showToast(messageFromError(err), 'warning');
+      }
+    },
+    [api, showToast, t, load, onResolved],
   );
 
   if (requests.length === 0) return null;
@@ -445,6 +463,10 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
         <AddSecretDialog
           request={provisioning}
           onClose={() => setProvisioning(null)}
+          onCancel={() => {
+            void denyProvisionRequest(provisioning);
+          }}
+          cancelLabel={t('vaults.approval.deny')}
           onCreated={(name, reason) => {
             setProvisioning(null);
             if (reason !== 'already_exists') {
@@ -497,8 +519,8 @@ export const VaultsPage: React.FC = () => {
     try {
       const res = await api.listVaultSecrets();
       setSecrets(res.secrets ?? []);
-    } catch (err: any) {
-      setError(err?.message ?? String(err));
+    } catch (err: unknown) {
+      setError(messageFromError(err));
     } finally {
       setLoading(false);
     }
@@ -634,8 +656,8 @@ export const VaultsPage: React.FC = () => {
       try {
         const res = await api.getVaultAudit({ limit: 50 });
         setAudit(res.events ?? []);
-      } catch (err: any) {
-        setError(err?.message ?? String(err));
+      } catch (err: unknown) {
+        setError(messageFromError(err));
       }
     }
   }, [api, showAudit]);
@@ -646,8 +668,8 @@ export const VaultsPage: React.FC = () => {
       await api.deleteVaultSecret(name);
       showToast(t('vaults.deleted', { name }), 'success');
       refresh();
-    } catch (err: any) {
-      setError(err?.message ?? String(err));
+    } catch (err: unknown) {
+      setError(messageFromError(err));
     }
   };
 
@@ -660,8 +682,8 @@ export const VaultsPage: React.FC = () => {
       await api.revokeVaultGrant(g.id);
       showToast(t('vaults.grants.revoked', { target: label }), 'success');
       refresh();
-    } catch (err: any) {
-      setError(err?.message ?? String(err));
+    } catch (err: unknown) {
+      setError(messageFromError(err));
     }
   };
 
