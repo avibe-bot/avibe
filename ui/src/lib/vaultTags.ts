@@ -53,6 +53,22 @@ export function normalizeSkillEntry(raw: string): string | null {
   return normalizeTagEntry(name);
 }
 
+/**
+ * Normalize an entry for the unified Tags field, which holds both plain tags and
+ * reserved `skill:<name>` tags in one flat list (skills are picked from the field's
+ * suggestions). A `skill:` entry keeps its prefix (the bare name is validated like a
+ * normal tag); a plain entry is validated as a tag. Returns `null` to reject — the
+ * shape the {@link import('@/components/ui/tag-input').TagInput} `normalize` prop expects.
+ */
+export function normalizeTagOrSkillEntry(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (isSkillTag(trimmed)) {
+    const name = normalizeTagEntry(skillName(trimmed));
+    return name ? toSkillTag(name) : null;
+  }
+  return normalizeTagEntry(trimmed);
+}
+
 const dedupe = (values: string[]): string[] => [...new Set(values)];
 
 /**

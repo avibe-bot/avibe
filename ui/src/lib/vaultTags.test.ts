@@ -6,6 +6,7 @@ import {
   mergeTags,
   normalizeSkillEntry,
   normalizeTagEntry,
+  normalizeTagOrSkillEntry,
   partitionTags,
   skillName,
   toSkillTag,
@@ -46,6 +47,22 @@ describe('tag entry normalization', () => {
     // A pasted `skill:` entry is accepted but not double-prefixed.
     expect(normalizeSkillEntry('skill:deploy')).toBe('deploy');
     expect(normalizeSkillEntry('bad name')).toBeNull();
+  });
+});
+
+describe('unified tag-or-skill entry normalization', () => {
+  it('accepts plain tags and keeps skill: entries prefixed', () => {
+    expect(normalizeTagOrSkillEntry('  prod ')).toBe('prod');
+    expect(normalizeTagOrSkillEntry('skill:github-release')).toBe('skill:github-release');
+    // A trimmed skill entry validates its bare name and re-wraps it once.
+    expect(normalizeTagOrSkillEntry('  skill:deploy  ')).toBe('skill:deploy');
+  });
+
+  it('rejects empty, whitespace-bearing, and bare skill: entries', () => {
+    expect(normalizeTagOrSkillEntry('')).toBeNull();
+    expect(normalizeTagOrSkillEntry('two words')).toBeNull();
+    expect(normalizeTagOrSkillEntry('skill:')).toBeNull();
+    expect(normalizeTagOrSkillEntry('skill:two words')).toBeNull();
   });
 });
 
