@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from storage import vault_service as vs
 from storage.db import create_sqlite_engine
@@ -71,6 +72,28 @@ def test_secret_names_preserve_case_and_reject_case_only_duplicates(vault):
     with pytest.raises(vs.SecretNameCaseConflictError) as exc:
         _create(vault, name="OpenAIKey")
     assert exc.value.existing_name == "openAiKey"
+
+
+def test_secret_name_case_uniqueness_is_enforced_by_database(vault):
+    _create(vault, name="openAiKey")
+
+    with vault.begin() as conn:
+        with pytest.raises(IntegrityError):
+            conn.execute(
+                vault_secrets.insert().values(
+                    id="vlt_case_race",
+                    name="OpenAIKey",
+                    kind="static",
+                    protection="standard",
+                    source="manual",
+                    ciphertext="ct",
+                    nonce="nonce",
+                    wrap_meta="wrap",
+                    use_count=0,
+                    created_at="now",
+                    updated_at="now",
+                )
+            )
 
 
 def test_provision_request_rejects_case_only_duplicate_secret(vault):

@@ -1146,9 +1146,13 @@ def create_secret(
             )
         )
     except IntegrityError as exc:
-        # Two concurrent creates (e.g. Web dialog + inline card) can both pass the existence
-        # check above; the loser hits the UNIQUE(name) constraint here. Surface it as the same
-        # SecretExistsError → 409 so the racing already-fulfilled ask is handled, not a 500.
+        # Two concurrent creates (e.g. Web dialog + inline card) can both pass the
+        # existence check above; the loser hits the exact UNIQUE(name) or the
+        # folded-name unique index here. Re-read the winning name so callers keep
+        # the same exact-duplicate vs case-conflict semantics instead of seeing a 500.
+        existing_name = _find_secret_name_case_insensitive(conn, name)
+        if existing_name is not None and existing_name != name:
+            raise SecretNameCaseConflictError(name, existing_name) from exc
         raise SecretExistsError(name) from exc
     audit(conn, "created", secret_name=name)
     decided_at = _now()

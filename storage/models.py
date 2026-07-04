@@ -11,6 +11,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    func,
     text,
 )
 
@@ -467,7 +468,9 @@ vault_secrets = Table(
     metadata,
     Column("id", String, primary_key=True),
     # Globally unique, case-preserving shell name ``^[A-Za-z_][A-Za-z0-9_]*$``.
-    # Application logic rejects case-only duplicates so lookup stays exact.
+    # The exact UNIQUE(name) keeps existing exact lookup semantics, while the
+    # unique lower(name) expression index below atomically rejects case-only
+    # duplicates so exact lookup stays unambiguous under concurrent creates.
     Column("name", String, nullable=False),
     Column("tags", Text, nullable=True),  # JSON array
     Column("kind", String, nullable=False, server_default="static"),  # static | keypair (P2)
@@ -488,6 +491,7 @@ vault_secrets = Table(
     UniqueConstraint("name", name="uq_vault_secrets_name"),
     Index("ix_vault_secrets_name_kind", "name", "kind"),
 )
+Index("uq_vault_secrets_name_folded", func.lower(vault_secrets.c.name), unique=True)
 
 # One queue for everything that needs a human: P0 uses ``provision`` (dynamic ask via
 # ``$<NAME>``); ``access``/``sign``/``proxy``/``keygen`` are P1+.

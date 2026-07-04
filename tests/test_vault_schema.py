@@ -22,6 +22,8 @@ def test_vault_metadata_schema_matches_grant_id_tag_model(tmp_path):
         secret_cols = {row[1] for row in conn.execute(text("pragma table_info(vault_secrets)"))}
         assert {"name", "tags", "kind", "protection", "ciphertext", "nonce", "wrap_meta"} <= secret_cols
         assert "group_name" not in secret_cols
+        secret_indexes = {row[1] for row in conn.execute(text("select seq, name from pragma_index_list('vault_secrets')"))}
+        assert "uq_vault_secrets_name_folded" in secret_indexes
 
         grant_cols = {row[1] for row in conn.execute(text("pragma table_info(vault_grants)"))}
         assert {
