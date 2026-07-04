@@ -865,6 +865,27 @@ def test_trusted_proxy_unmatched_forwarded_host_fails_closed(monkeypatch, tmp_pa
     assert response.get_json()["error"] == "remote_access_host_mismatch"
 
 
+def test_trusted_proxy_malformed_forwarded_host_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    _save_config(tmp_path)
+
+    response = app.test_client().get(
+        "/dashboard",
+        base_url="http://127.0.0.1:5123",
+        headers={
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "[bad",
+            "X-Forwarded-For": "8.8.8.8",
+        },
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error"] == "remote_access_host_mismatch"
+
+
 def test_remote_host_fails_closed_when_disabled_but_hostname_still_matches(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
@@ -1836,6 +1857,38 @@ def test_terminal_websocket_accepts_setup_host_origin_from_same_port(monkeypatch
             "host": "192.168.2.3:5123",
             "origin": "http://192.168.2.3:5123",
             "x-vibe-test-remote-addr": "192.168.2.5",
+        },
+    ):
+        pass
+
+    assert accepted is True
+
+
+@pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
+def test_terminal_websocket_accepts_setup_host_from_trusted_proxy(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    _save_config_with_setup_host(tmp_path, "192.168.2.3")
+    _mock_interface(monkeypatch, "192.168.2.3", 24)
+
+    accepted = False
+
+    async def fake_handle_websocket(websocket, session_id):
+        nonlocal accepted
+        accepted = True
+
+    monkeypatch.setattr(ui_server.get_terminal_service(), "handle_websocket", fake_handle_websocket)
+
+    with app.test_client().websocket_connect(
+        "/api/terminal/test",
+        headers={
+            "host": "127.0.0.1:5123",
+            "origin": "http://192.168.2.3:5123",
+            "x-forwarded-proto": "http",
+            "x-forwarded-host": "192.168.2.3:5123",
+            "x-forwarded-for": "192.168.2.5",
+            "x-vibe-test-remote-addr": "127.0.0.1",
         },
     ):
         pass

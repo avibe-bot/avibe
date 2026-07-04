@@ -318,8 +318,7 @@ def _trusted_forwarded_host() -> str | None:
     forwarded_host = request.headers.get("X-Forwarded-Host", "").split(",")[0].strip()
     if not _forwarded_host_is_safe(forwarded_host):
         return None
-    parsed = urlparse(f"//{forwarded_host}")
-    if parsed.port is not None:
+    if _forwarded_host_has_explicit_port(forwarded_host):
         return forwarded_host
     forwarded_port = _trusted_forwarded_port()
     if forwarded_port is None:
@@ -403,12 +402,19 @@ def _forwarded_host_is_safe(value: str) -> bool:
         return False
     if "/" in value or "\\" in value or "@" in value:
         return False
-    parsed = urlparse(f"//{value}")
     try:
+        parsed = urlparse(f"//{value}")
         parsed.port
     except ValueError:
         return False
     return bool(parsed.netloc and parsed.hostname and not parsed.username and not parsed.password)
+
+
+def _forwarded_host_has_explicit_port(value: str) -> bool:
+    try:
+        return urlparse(f"//{value}").port is not None
+    except ValueError:
+        return False
 
 
 def _is_mutation_guard_exempt() -> bool:
@@ -2364,10 +2370,11 @@ def _terminal_origin_allowed(websocket: Any) -> bool:
             return False
         return _remote_access_public_origin_matches(origin, config)
     origin_port = _origin_port(parsed_origin.netloc, parsed_origin.scheme)
-    request_port = _origin_port(websocket.headers.get("host"), websocket.url.scheme)
+    websocket_scheme = _websocket_effective_scheme(websocket)
+    request_port = _origin_port(_websocket_effective_request_host(websocket), websocket_scheme)
     return origin_port == request_port and _terminal_origin_scheme_matches_socket(
         parsed_origin.scheme,
-        websocket.url.scheme,
+        websocket_scheme,
     )
 
 
@@ -2396,16 +2403,23 @@ def _terminal_origin_scheme_matches_socket(origin_scheme: str | None, socket_sch
 
 
 def _websocket_is_local_request(websocket: Any, config: V2Config | None = None) -> bool:
-    if _websocket_has_forwarded_metadata(websocket):
+    if _websocket_has_untrusted_forwarded_metadata(websocket):
+        return False
+    if _websocket_has_trusted_forwarded_metadata(websocket) and _websocket_trusted_forwarded_host(websocket) is None:
         return False
     client_host = _websocket_client_host(websocket)
-    if client_host == "testclient":
+    if not _websocket_has_trusted_forwarded_metadata(websocket) and client_host == "testclient":
         return _is_loopback_host(websocket.headers.get("host"))
     try:
         client_address = ipaddress.ip_address(client_host)
     except ValueError:
         client_address = None
-    if client_address is not None and client_address.is_loopback and _is_loopback_host(websocket.headers.get("host")):
+    if (
+        not _websocket_has_trusted_forwarded_metadata(websocket)
+        and client_address is not None
+        and client_address.is_loopback
+        and _is_loopback_host(_websocket_effective_request_host(websocket))
+    ):
         return True
     if _websocket_is_trusted_docker_loopback_request(websocket):
         return True
@@ -2430,6 +2444,14 @@ def _websocket_has_forwarded_metadata(websocket: Any) -> bool:
     return any(websocket.headers.get(header) for header in forwarded_headers)
 
 
+def _websocket_has_trusted_forwarded_metadata(websocket: Any) -> bool:
+    return _websocket_is_explicitly_trusted_proxy_peer(websocket) and _websocket_has_forwarded_metadata(websocket)
+
+
+def _websocket_has_untrusted_forwarded_metadata(websocket: Any) -> bool:
+    return _websocket_has_forwarded_metadata(websocket) and not _websocket_is_explicitly_trusted_proxy_peer(websocket)
+
+
 def _websocket_client_host(websocket: Any) -> str:
     client_host = websocket.client.host if websocket.client else ""
     if client_host == "testclient":
@@ -2447,6 +2469,91 @@ def _websocket_peer_address(websocket: Any) -> ipaddress._BaseAddress | None:
         return None
     mapped = getattr(address, "ipv4_mapped", None)
     return mapped or address
+
+
+def _websocket_is_explicitly_trusted_proxy_peer(websocket: Any) -> bool:
+    configured = os.environ.get(TRUSTED_PROXY_IPS_ENV, "")
+    if not configured.strip():
+        return False
+    peer = _websocket_peer_address(websocket)
+    if peer is None:
+        return False
+    for raw_entry in configured.split(","):
+        entry = raw_entry.strip()
+        if not entry:
+            continue
+        try:
+            network = ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            logger.warning("Ignoring invalid %s entry: %s", TRUSTED_PROXY_IPS_ENV, entry)
+            continue
+        if peer in network:
+            return True
+    return False
+
+
+def _websocket_trusted_forwarded_host(websocket: Any) -> str | None:
+    if not _websocket_is_explicitly_trusted_proxy_peer(websocket):
+        return None
+    forwarded_host = websocket.headers.get("X-Forwarded-Host", "").split(",")[0].strip()
+    if not _forwarded_host_is_safe(forwarded_host):
+        return None
+    if _forwarded_host_has_explicit_port(forwarded_host):
+        return forwarded_host
+    forwarded_port = _websocket_trusted_forwarded_port(websocket)
+    if forwarded_port is None:
+        return forwarded_host
+    return f"{forwarded_host}:{forwarded_port}"
+
+
+def _websocket_trusted_forwarded_port(websocket: Any) -> int | None:
+    raw_port = websocket.headers.get("X-Forwarded-Port", "").split(",")[0].strip()
+    if not raw_port:
+        return None
+    if not raw_port.isdigit():
+        return None
+    port = int(raw_port)
+    if port < 1 or port > 65535:
+        return None
+    return port
+
+
+def _websocket_effective_request_host(websocket: Any) -> str:
+    return _websocket_trusted_forwarded_host(websocket) or websocket.headers.get("host")
+
+
+def _websocket_effective_scheme(websocket: Any) -> str:
+    if _websocket_is_explicitly_trusted_proxy_peer(websocket):
+        forwarded_proto = websocket.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower()
+        if forwarded_proto == "https":
+            return "wss"
+        if forwarded_proto == "http":
+            return "ws"
+        if forwarded_proto in {"ws", "wss"}:
+            return forwarded_proto
+    return websocket.url.scheme
+
+
+def _websocket_trusted_forwarded_client_address(websocket: Any) -> ipaddress._BaseAddress | None:
+    if not _websocket_is_explicitly_trusted_proxy_peer(websocket):
+        return None
+    raw_client = websocket.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    if not raw_client:
+        return None
+    try:
+        address = ipaddress.ip_address(raw_client)
+    except ValueError:
+        return None
+    mapped = getattr(address, "ipv4_mapped", None)
+    return mapped or address
+
+
+def _websocket_local_trust_peer_address(websocket: Any) -> ipaddress._BaseAddress | None:
+    if not _websocket_has_trusted_forwarded_metadata(websocket):
+        return _websocket_peer_address(websocket)
+    if _websocket_trusted_forwarded_host(websocket) is None:
+        return None
+    return _websocket_trusted_forwarded_client_address(websocket)
 
 
 def _websocket_is_trusted_docker_peer(websocket: Any) -> bool:
@@ -2474,8 +2581,16 @@ def _websocket_is_private_peer(websocket: Any) -> bool:
     return address is not None and _is_private_address(address)
 
 
-def _websocket_peer_shares_setup_host_network(websocket: Any, setup_address: ipaddress._BaseAddress) -> bool:
-    peer = _websocket_peer_address(websocket)
+def _websocket_is_private_peer_address(address: ipaddress._BaseAddress | None) -> bool:
+    return address is not None and _is_private_address(address)
+
+
+def _websocket_peer_shares_setup_host_network(
+    websocket: Any,
+    setup_address: ipaddress._BaseAddress,
+    peer: ipaddress._BaseAddress | None = None,
+) -> bool:
+    peer = peer or _websocket_peer_address(websocket)
     if peer is None:
         return False
     if peer.version != setup_address.version:
@@ -2534,17 +2649,18 @@ def _websocket_is_setup_host_request(websocket: Any, config: V2Config | None) ->
         return False
     if _websocket_normalized_host(websocket) != setup_host:
         return False
-    if _websocket_has_forwarded_metadata(websocket):
+    if _websocket_has_untrusted_forwarded_metadata(websocket):
         return False
-    if not _websocket_is_private_peer(websocket):
+    peer_address = _websocket_local_trust_peer_address(websocket)
+    if not _websocket_is_private_peer_address(peer_address):
         return False
     if _is_tunnel_wildcard_bind(config):
-        return _websocket_peer_shares_setup_host_network(websocket, setup_address)
+        return _websocket_peer_shares_setup_host_network(websocket, setup_address, peer_address)
     return True
 
 
 def _websocket_normalized_host(websocket: Any) -> str:
-    return _normalized_host(websocket.headers.get("x-forwarded-host") or websocket.headers.get("host"))
+    return _normalized_host(_websocket_effective_request_host(websocket))
 
 
 async def _proxy_show_runtime_websocket(
