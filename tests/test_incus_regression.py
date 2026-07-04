@@ -244,6 +244,7 @@ def test_cloud_init_configures_systemd_service_without_source_code() -> None:
     assert "name: avibe" in data
     assert "Description=Avibe regression service" in data
     assert "Environment=VIBE_DEPLOYMENT_ENV=regression" in data
+    assert "Environment=AVIBE_ALLOW_DEV_STATE_MIGRATION=1" in data
     assert "EnvironmentFile=-/etc/avibe-regression.env" in data
     assert "ExecStart=/opt/avibe/venv/bin/python scripts/incus_regression_supervisor.py" in data
     assert "Delegate=yes" in data
@@ -514,6 +515,7 @@ def test_runtime_env_payload_maps_show_runtime_and_llm_env(monkeypatch: pytest.M
 
     assert "SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0.dev0" in payload
     assert "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=0.0.0.dev0" in payload
+    assert "AVIBE_ALLOW_DEV_STATE_MIGRATION=1" in payload
     assert "VIBE_SHOW_RUNTIME_SOURCE=github-source" in payload
     assert "VIBE_SHOW_RUNTIME_GITHUB_REF=main" in payload
     assert "REGRESSION_SLACK_CHANNEL=C123" in payload

@@ -153,3 +153,11 @@ def test_runtime_ensure_config_guard_blocks_before_default_workdir(monkeypatch, 
     assert not (home / "work").exists()
     assert not db_path.exists()
     assert not db_path.parent.exists()
+
+
+def test_regression_deployment_env_alone_does_not_bypass_default_state_guard(monkeypatch, tmp_path: Path) -> None:
+    db_path = _set_default_home_guard(monkeypatch, tmp_path)
+    monkeypatch.setenv("VIBE_DEPLOYMENT_ENV", "regression")
+
+    with pytest.raises(UnsafeDefaultStateMigrationError):
+        migrations.guard_source_checkout_default_state_migration(db_path)

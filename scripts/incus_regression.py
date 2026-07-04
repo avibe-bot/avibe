@@ -506,6 +506,7 @@ def regression_service_unit() -> str:
         Environment=HOME={SERVICE_HOME}
         Environment=AVIBE_HOME=
         Environment=VIBE_DEPLOYMENT_ENV=regression
+        Environment=AVIBE_ALLOW_DEV_STATE_MIGRATION=1
         Environment=VIBE_INTERNAL_DISPATCH_SOCKET=/tmp/vibe_remote/dispatch.sock
         Environment=PYTHONUNBUFFERED=1
         Environment=PATH={VENV_DIR}/bin:{SERVICE_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin
@@ -844,6 +845,7 @@ def runtime_env_payload(repo_root: Path | None = None) -> bytes:
         "SETUPTOOLS_SCM_PRETEND_VERSION": scm_version,
         "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS": scm_version,
         "REGRESSION_UI_HOST": CONTAINER_UI_HOST,
+        "AVIBE_ALLOW_DEV_STATE_MIGRATION": "1",
         "VIBE_SHOW_RUNTIME_SOURCE": regression_env("SHOW_RUNTIME_SOURCE", "github-source"),
         "VIBE_SHOW_RUNTIME_GITHUB_REPO": regression_env("SHOW_RUNTIME_GITHUB_REPO", "https://github.com/avibe-bot/vibe-show-runtime.git"),
         "VIBE_SHOW_RUNTIME_GITHUB_REF": regression_env("SHOW_RUNTIME_GITHUB_REF", "main"),
