@@ -3,6 +3,7 @@ import contextlib
 import json
 import logging
 import os
+import platform
 import re
 import shutil
 import ssl
@@ -5328,6 +5329,10 @@ def _require_avault_grant_delivery_surface(feature: str) -> None:
 # avibe's wait must outlast avault's own fetch timeout (10s connect + 30s total).
 _AVAULT_TIMEOUT_SECONDS = 20.0
 _AVAULT_FETCH_TIMEOUT_SECONDS = 60.0
+_AVAULT_STORE = "file"
+_AVAULT_LINUX_TPM_DEVICE_PATHS = (Path("/dev/tpm0"), Path("/dev/tpmrm0"))
+
+
 class AvaultError(Exception):
     """An ``avault`` invocation failed. Messages never carry secret material —
     avault is designed to keep secrets out of its stdout/stderr and errors."""
@@ -5370,6 +5375,18 @@ def _avault_agent_manager():
     return manager
 
 
+def _avault_store_args() -> list[str]:
+    if platform.system().lower() != "linux":
+        return []
+    if any(path.exists() for path in _AVAULT_LINUX_TPM_DEVICE_PATHS):
+        return []
+    return ["--store", _AVAULT_STORE]
+
+
+def _avault_args(args: list[str]) -> list[str]:
+    return [*_avault_store_args(), *args]
+
+
 def _run_avault(
     args: list[str],
     *,
@@ -5380,7 +5397,7 @@ def _run_avault(
     path = _require_avault_path()
     try:
         return subprocess.run(
-            [path, *args],
+            [path, *_avault_args(args)],
             input=stdin,
             capture_output=True,
             timeout=timeout,
@@ -5521,7 +5538,7 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> dict:
     ).encode("utf-8")
     try:
         proc = subprocess.Popen(
-            [path, "deliver", "run", "--", *command],
+            [path, *_avault_args(["deliver", "run"]), "--", *command],
             stdin=subprocess.PIPE,
             env=_command_env_for(path),
             **isolated_subprocess_kwargs(),
