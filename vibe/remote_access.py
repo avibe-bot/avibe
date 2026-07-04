@@ -881,7 +881,10 @@ def _backend_error_payload(response_body: bytes) -> dict[str, Any]:
 
 def _normalize_pairing_backend_url(raw_backend_url: str) -> tuple[_ValidatedPairingBackend | None, str | None]:
     raw_value = (raw_backend_url or "https://avibe.bot").strip()
-    parsed = urllib.parse.urlsplit(raw_value)
+    try:
+        parsed = urllib.parse.urlsplit(raw_value)
+    except ValueError:
+        return None, "invalid_pairing_backend_url"
     if parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username or parsed.password:
         return None, "invalid_pairing_backend_url"
     if parsed.query or parsed.fragment:

@@ -1857,11 +1857,17 @@ _auth_ratelimit: OrderedDict[str, list[float]] = OrderedDict()
 def _auth_client_id() -> str:
     """Client identity for rate limiting.
 
-    Trust the Cloudflare-forwarded client IP only when the request arrived via the
-    local tunnel (loopback peer = cloudflared). A direct peer reaching the origin
-    port could otherwise set/rotate ``CF-Connecting-IP`` to dodge the limit, so for
-    such peers we key on the real connecting address instead.
+    Trust forwarded client IPs only on proxy paths we explicitly trust: the
+    configured trusted proxy chain with an accepted forwarded host, or the local
+    Cloudflare tunnel peer. A direct peer reaching the origin port could
+    otherwise set/rotate forwarded headers to dodge the limit, so for such peers
+    we key on the real connecting address instead.
     """
+    if _has_trusted_forwarded_metadata() and _trusted_forwarded_host() is not None:
+        forwarded_client = _trusted_forwarded_client_address()
+        if forwarded_client is not None:
+            return f"xff:{forwarded_client.compressed}"
+
     forwarded = (request.headers.get("CF-Connecting-IP") or "").strip()
     if forwarded and _is_loopback_peer():
         return f"cf:{forwarded}"

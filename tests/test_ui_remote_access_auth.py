@@ -1559,6 +1559,37 @@ def test_auth_rate_limit_ignores_untrusted_forwarded_ip(monkeypatch, tmp_path):
     assert statuses[3:] == [429, 429]  # still limited despite the rotating header
 
 
+def test_auth_rate_limit_keys_trusted_proxy_by_forwarded_client(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    _save_config(tmp_path)
+    monkeypatch.setattr(ui_server, "_AUTH_RATELIMIT_MAX_PER_WINDOW", 3)
+    with ui_server._auth_ratelimit_lock:
+        ui_server._auth_ratelimit.clear()
+    client = app.test_client()
+
+    def get_status(client_ip: str) -> int:
+        return client.get(
+            "/dashboard",
+            base_url="http://127.0.0.1:5123",
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+            headers={
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "alex.avibe.bot",
+                "X-Forwarded-For": client_ip,
+            },
+            follow_redirects=False,
+        ).status_code
+
+    first_client = [get_status("203.0.113.10") for _ in range(3)]
+    second_client = [get_status("203.0.113.11") for _ in range(3)]
+    first_client_over_budget = get_status("203.0.113.10")
+
+    assert first_client == [302, 302, 302]
+    assert second_client == [302, 302, 302]
+    assert first_client_over_budget == 429
+
+
 def test_auth_rate_limit_table_is_bounded(monkeypatch, tmp_path):
     # The limiter's own table is hard-capped (LRU eviction), so a burst of distinct
     # clients can't drive unbounded in-process memory growth.

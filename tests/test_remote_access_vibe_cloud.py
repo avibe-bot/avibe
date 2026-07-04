@@ -262,6 +262,7 @@ def test_pair_origin_service_follows_effective_ui_port(monkeypatch, tmp_path) ->
     ("backend_url", "expected_error"),
     [
         ("http://avibe.bot", "invalid_pairing_backend_url"),
+        ("https://[::1", "invalid_pairing_backend_url"),
         ("https://127.0.0.1", "pairing_backend_url_not_allowed"),
         ("https://[::1]", "pairing_backend_url_not_allowed"),
         ("https://10.0.0.5", "pairing_backend_url_not_allowed"),
