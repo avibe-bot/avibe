@@ -2832,6 +2832,80 @@ def test_scheduled_task_service_dirty_tick_drains_without_store_reload(tmp_path:
     assert service._drain_dirty is False
 
 
+def test_scheduled_task_service_rearms_after_skipped_and_failed_callback_batches(
+    tmp_path: Path, monkeypatch
+) -> None:
+    original_sleep = asyncio.sleep
+
+    class IdleTaskStore(ScheduledTaskStore):
+        def maybe_reload(self) -> bool:
+            return False
+
+    class CallbackRequestStore(TaskExecutionStore):
+        def __init__(self, root: Path):
+            super().__init__(root)
+            self.callback_calls = 0
+            self.status_updates: list[tuple[str, str]] = []
+
+        def maybe_reload(self) -> bool:
+            return False
+
+        def list_pending_callbacks(self, *, limit: int = 20):
+            self.callback_calls += 1
+            if self.callback_calls == 1:
+                return [{"id": "run-1", "callback_session_id": "ses-callback"}]
+            if self.callback_calls == 2:
+                return [{"id": "run-2", "callback_session_id": "ses-callback"}]
+            return []
+
+        def update_callback_status(
+            self,
+            run_id: str,
+            *,
+            status: str,
+            error: str | None = None,
+            callback_run_id: str | None = None,
+        ) -> None:
+            self.status_updates.append((run_id, status))
+
+    store = IdleTaskStore(tmp_path / "scheduled_tasks.json")
+    request_store = CallbackRequestStore(tmp_path / "task_requests")
+    service = ScheduledTaskService(
+        controller=SimpleNamespace(platform_settings_managers={}),
+        store=store,
+        request_store=request_store,
+    )
+    service.scheduler = _StubScheduler()
+    service._running = True
+    service._drain_dirty = True
+    ticks = 0
+
+    async def _drain_requests() -> None:
+        return None
+
+    def _enqueue_callback_run(run: dict):
+        if run["id"] == "run-1":
+            return None
+        raise RuntimeError("callback boom")
+
+    async def _stop_after_two_sleeps(_seconds):
+        nonlocal ticks
+        ticks += 1
+        if ticks >= 2:
+            service._running = False
+        await original_sleep(0)
+
+    service._drain_requests = _drain_requests
+    service._enqueue_callback_run = _enqueue_callback_run
+    monkeypatch.setattr("core.scheduled_tasks.asyncio.sleep", _stop_after_two_sleeps)
+
+    asyncio.run(service._watch_store())
+
+    assert request_store.status_updates == [("run-1", "skipped"), ("run-2", "failed")]
+    assert request_store.callback_calls == 2
+    assert service._drain_dirty is True
+
+
 def test_drain_does_not_block_on_hung_execution(tmp_path: Path) -> None:
     """A turn that never returns must not stall delivery of other sessions.
 

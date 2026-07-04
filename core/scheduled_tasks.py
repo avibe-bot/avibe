@@ -1693,9 +1693,11 @@ class ScheduledTaskService:
             except Exception as exc:
                 logger.error("Agent run callback failed for %s: %s", run_id, exc, exc_info=True)
                 self.request_store.update_callback_status(run_id, status="failed", error=str(exc))
+                self._drain_dirty = True
                 continue
             if callback_run is None:
                 self.request_store.update_callback_status(run_id, status="skipped")
+                self._drain_dirty = True
                 continue
             self.request_store.update_callback_status(run_id, status="sent", callback_run_id=callback_run.id)
             self._drain_dirty = True
