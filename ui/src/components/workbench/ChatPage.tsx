@@ -64,9 +64,12 @@ const isTranscriptMessage = (msg: WorkbenchMessage): boolean =>
 // long streaming session (or a deep upward scroll) doesn't keep thousands of full
 // react-markdown subtrees in the DOM. The trimmed rows stay in SQLite and page
 // back in on demand (scroll up re-fetches older; the jump-to-latest button reloads
-// the live tail). Generous enough that normal chats never hit it. See the trim
-// logic in ``appendMessage`` (drop oldest while pinned) and ``loadOlderMessages``
-// (drop newest while reading history).
+// the live tail). Generous enough that normal chats never hit it. Enforced at two
+// kinds of site: while following the tail, ``appendMessage`` / ``reconcile`` drop
+// the OLDEST overflow (above the pinned viewport); while the reader is scrolled up,
+// the ingest points (``onMessageNew`` / ``reconcile``) and ``loadOlderMessages``
+// detach the live tail (historical-window) instead of growing the DOM with rows
+// below the viewport.
 const MAX_RETAINED_MESSAGES = 300;
 
 // Mirrors design.pen kxEkn — the inline header replaces the old "Session
@@ -206,11 +209,11 @@ export const ChatPage: React.FC = () => {
   const [loadingOlder, setLoadingOlder] = useState(false);
   const loadingOlderRef = useRef(false);
   // True while the loaded window does NOT reach the live tail: entered by a
-  // deep-link/search jump into a middle window, AND now by the retained-window
-  // cap when it drops the newest rows while the reader is scrolled up (see the
-  // MAX_RETAINED_MESSAGES trims). Suppresses live append/reconcile and shows the
-  // jump-to-latest button, which reloads the tail. Consumers: the SSE-append skip,
-  // reconcile skip, the send-path reloadLatest, and the inbox mark-read gate.
+  // deep-link/search jump into a middle window, AND by the retained-window cap
+  // detaching the tail while the reader is scrolled up (see MAX_RETAINED_MESSAGES).
+  // Suppresses live append/reconcile and shows the jump-to-latest button, which
+  // reloads the tail. Consumers: the SSE-append skip, reconcile skip, the
+  // send-path reloadLatest, and the inbox mark-read gate.
   const [historicalWindow, setHistoricalWindow] = useState(false);
   const historicalWindowRef = useRef(false);
   historicalWindowRef.current = historicalWindow;
@@ -222,12 +225,12 @@ export const ChatPage: React.FC = () => {
   // dropping the oldest rows is invisible only when the reader is pinned to the
   // bottom, far below them.
   const followingTailRef = useRef(true);
-  // Set inside the trim updaters so the [messages] effect can finish the
-  // two-part state change against the COMMITTED transcript (robust to any racing
-  // append): re-point the older cursor after a pinned oldest-trim, and flip into
-  // the historical-window state after an upward newest-trim.
+  // Set inside the pinned oldest-trim updater so the [messages] effect can
+  // re-point the older cursor against the COMMITTED transcript (robust to a racing
+  // append, and idempotent under a double-invoked updater). The newest-side trim
+  // detaches the tail synchronously at its ingest point, so it needs no deferred
+  // signal here.
   const trimmedOldestRef = useRef(false);
-  const trimmedNewestRef = useRef(false);
   // Deep-link jump (see deepLinkMessageId): the message id the transcript should
   // scroll to once its window is in the DOM, the id to highlight (~3s fade), and
   // the last ``msg`` value already handled so the jump effect runs once per value.
@@ -295,26 +298,18 @@ export const ChatPage: React.FC = () => {
       // live event can't render a reply ahead of its prompt.
       const next = insertMessageOrdered(prev, msg);
       if (next === prev) return prev; // dup — same reference, React skips
-      if (next.length <= MAX_RETAINED_MESSAGES) return next;
-      // Over the cap — trim the end AWAY from the reader so a long streaming
-      // session can't keep thousands of rows mounted, whichever way they're
-      // looking:
-      //   • following the tail → drop the OLDEST (far above the pinned viewport,
-      //     invisible); the [messages] effect re-points the older cursor at the
-      //     new oldest (before_id is exclusive) so scroll-up pages them back.
-      //   • scrolled up reading history → drop the NEWEST (below the viewport;
-      //     the manual scroll-anchor tracks the TOP visible row, so removing tail
-      //     rows can't shift the reader) and detach the tail via the historical-
-      //     window state so the jump-to-latest button reloads it. This also bounds
-      //     the reader-parked-scrolled-up-mid-stream case (the row stays in SQLite
-      //     and returns on reload). Only reachable in 300+ row sessions, so normal
-      //     scroll-up-in-a-live-chat behavior is unchanged.
-      if (followingTailRef.current) {
+      // Bounded retained window: while following the live tail, drop the oldest
+      // overflow (far above the pinned viewport, invisible); the [messages] effect
+      // re-points the older cursor at the new oldest (before_id is exclusive) so
+      // scroll-up pages them back exactly. The scrolled-up case is handled at the
+      // ingest points (onMessageNew / reconcile), which detach the tail instead of
+      // growing the DOM — so this path never drops a row the reader can see, and
+      // the user's own optimistically-appended sends are always kept.
+      if (followingTailRef.current && next.length > MAX_RETAINED_MESSAGES) {
         trimmedOldestRef.current = true;
         return next.slice(next.length - MAX_RETAINED_MESSAGES);
       }
-      trimmedNewestRef.current = true;
-      return next.slice(0, MAX_RETAINED_MESSAGES);
+      return next;
     });
   }, []);
 
@@ -345,21 +340,16 @@ export const ChatPage: React.FC = () => {
   useEffect(() => {
     oldestLoadedIdRef.current = messages[0]?.id ?? null;
     newestLoadedIdRef.current = messages[messages.length - 1]?.id ?? null;
-    // Finish a retained-window trim against the COMMITTED transcript. Both flags
-    // are only set when rows were actually dropped, so the paired state change is
-    // always valid and idempotent under a double-invoked updater.
+    // Finish a pinned oldest-trim against the COMMITTED transcript. The flag is
+    // only set when rows were actually dropped while following the tail, so older
+    // rows certainly remain on the server: re-point the older cursor at the new
+    // oldest (paging invariant olderCursor === messages[0].id; before_id is
+    // exclusive). Idempotent under a double-invoked updater. The newest-side trim
+    // (scrolled up) instead detaches the tail synchronously at the ingest point,
+    // so there is no deferred historical flip to reconcile here.
     if (trimmedOldestRef.current) {
       trimmedOldestRef.current = false;
-      // Oldest rows dropped while following the tail → older rows certainly remain
-      // on the server; the paging invariant is olderCursor === messages[0].id.
       setOlderCursor(messages[0]?.id ?? null);
-    }
-    if (trimmedNewestRef.current) {
-      trimmedNewestRef.current = false;
-      // Newest rows dropped while paging up → the live tail is no longer loaded,
-      // so behave like a historical window: the jump-to-latest button reloads the
-      // tail and live appends are (correctly) skipped until then.
-      setHistoricalWindow(true);
     }
   }, [messages]);
 
@@ -376,6 +366,15 @@ export const ChatPage: React.FC = () => {
   const reconcile = useCallback(async () => {
     if (!sessionId) return;
     if (historicalWindowRef.current) return;
+    // Reader scrolled up in an already-capped window: don't recover tail rows they
+    // aren't looking at into the DOM — detach the live tail so jump-to-latest
+    // reloads it. Synchronous flip (not via the [messages] effect) so the same
+    // commit gates mark-read. Bounds repeated-gap growth: once historical, this
+    // early-returns above. Mirrors the onMessageNew ingest policy.
+    if (!followingTailRef.current && messagesRef.current.length >= MAX_RETAINED_MESSAGES) {
+      setHistoricalWindow(true);
+      return;
+    }
     try {
       // tail: the RECENT window (not the oldest page), so a missed latest row in
       // a long chat is actually recovered (Codex P2).
@@ -386,7 +385,19 @@ export const ChatPage: React.FC = () => {
         const tailOldestId = fresh[0].id;
         const previousOldestId = oldestLoadedIdRef.current;
         const previousNewestId = newestLoadedIdRef.current;
-        setMessages((prev) => mergeById(prev, fresh));
+        setMessages((prev) => {
+          const merged = mergeById(prev, fresh);
+          // Following the tail: keep the window capped. A gap larger than the tail
+          // fetch, recovered here, would otherwise blow past the cap until the next
+          // live append (Codex). Drop the oldest; the [messages] effect re-points
+          // the older cursor (it overrides the cursor set below, which stays for
+          // the no-trim case).
+          if (followingTailRef.current && merged.length > MAX_RETAINED_MESSAGES) {
+            trimmedOldestRef.current = true;
+            return merged.slice(merged.length - MAX_RETAINED_MESSAGES);
+          }
+          return merged;
+        });
         if (!previousOldestId || !previousNewestId || tailOldestId > previousNewestId) {
           setOlderCursor(res.next_before_id ?? null);
         }
@@ -420,19 +431,21 @@ export const ChatPage: React.FC = () => {
       if (sessionId !== sessionIdRef.current) return true; // switched chats mid-fetch
       const older = res.messages.filter(isTranscriptMessage);
       if (older.length) {
+        // Bounded retained window: paging up only fires while scrolled to the top
+        // (not pinned), so drop the newest overflow — those rows sit far BELOW the
+        // viewport, and the manual scroll-anchor tracks the TOP visible row, so
+        // removing them can't shift the reader. Older rows are strictly before the
+        // current head (before_id is exclusive), so they never overlap and the
+        // merged length is deterministic — detach the live tail SYNCHRONOUSLY when
+        // it will exceed the cap (not via the [messages] effect) so the same commit
+        // that hides the tail also gates mark-read, keeping an unseen trimmed reply
+        // unread. jump-to-latest reloads the tail.
+        const willDetachTail = messagesRef.current.length + older.length > MAX_RETAINED_MESSAGES;
         setMessages((prev) => {
           const merged = mergeById(prev, older);
-          // Bounded retained window: paging up only fires while scrolled to the
-          // top (not pinned), so drop the newest overflow — those rows sit far
-          // BELOW the viewport, and the manual scroll-anchor tracks the TOP
-          // visible row, so removing them can't shift the reader's position. The
-          // effect flips into the historical-window state (the live tail is gone).
-          if (merged.length > MAX_RETAINED_MESSAGES) {
-            trimmedNewestRef.current = true;
-            return merged.slice(0, MAX_RETAINED_MESSAGES);
-          }
-          return merged;
+          return merged.length > MAX_RETAINED_MESSAGES ? merged.slice(0, MAX_RETAINED_MESSAGES) : merged;
         });
+        if (willDetachTail) setHistoricalWindow(true);
       }
       setOlderCursor(res.next_before_id ?? null);
       return true;
@@ -610,7 +623,6 @@ export const ChatPage: React.FC = () => {
     // the previous chat leaks into the fresh one (the Transcript re-pins on open).
     followingTailRef.current = true;
     trimmedOldestRef.current = false;
-    trimmedNewestRef.current = false;
     // Drop any pending jump/highlight so it can't fire against the new session.
     setJumpTarget(null);
     setHighlightedId(null);
@@ -646,6 +658,15 @@ export const ChatPage: React.FC = () => {
         if (msg.session_id !== sessionIdRef.current) return;
         if (!isTranscriptMessage(msg)) return;
         if (historicalWindowRef.current) return;
+        // Reader scrolled up in an already-capped window: don't grow the DOM with a
+        // live row they aren't looking at — detach the live tail so jump-to-latest
+        // reloads it. Flip synchronously (not append-then-trim) so the SAME commit
+        // gates mark-read: an unseen tail reply stays unread. The row is in SQLite
+        // and returns on reload. Only reachable in 300+ row sessions.
+        if (!followingTailRef.current && messagesRef.current.length >= MAX_RETAINED_MESSAGES) {
+          setHistoricalWindow(true);
+          return;
+        }
         appendMessage(msg);
         // Don't clear ``working`` from a result row here: with the queue, a
         // result can belong to an EARLIER turn while a newer queued turn is
@@ -1902,6 +1923,16 @@ const Transcript: React.FC<TranscriptProps> = ({
   useEffect(() => {
     reloadLatestRef.current = onReloadLatest;
   }, [onReloadLatest]);
+
+  // Whenever the loaded window stops reaching the live tail — a search deep-link
+  // window OR the retained-window cap detaching the tail while the reader is
+  // scrolled up — force the jump-to-latest control visible. handleScroll only
+  // recomputes ``showJump`` on scroll events, so a detach with no subsequent
+  // scroll (the cap dropping an incoming row) would otherwise leave the reader
+  // with no way back to the live tail until they scroll again.
+  useEffect(() => {
+    if (needsLatestReload) setShowJump(true);
+  }, [needsLatestReload]);
 
   // The reply arrives atomically as a persisted ``result`` row (no streaming
   // card), so the thinking bubble shows for the whole gap between send and
