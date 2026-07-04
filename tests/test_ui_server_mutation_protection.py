@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import ipaddress
 from http.cookies import SimpleCookie
 
-from config.v2_config import AgentsConfig, PlatformsConfig, RuntimeConfig, SlackConfig, V2Config
+from config.v2_config import AgentsConfig, PlatformsConfig, RemoteAccessConfig, RuntimeConfig, SlackConfig, V2Config
+from vibe import ui_server
+from vibe.ui_compat import TEST_REMOTE_ADDR_HEADER
 from vibe.ui_server import app, protect_mutating_ui_requests
 
 from tests.ui_server_test_helpers import csrf_headers
@@ -117,7 +120,7 @@ def test_config_post_accepts_vendor_json_content_type(monkeypatch, tmp_path):
     assert response.get_json()["mode"] == "self_host"
 
 
-def test_config_post_allows_forwarded_origin(monkeypatch, tmp_path):
+def test_config_post_rejects_untrusted_forwarded_origin(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     V2Config(
         mode="self_host",
@@ -129,7 +132,7 @@ def test_config_post_allows_forwarded_origin(monkeypatch, tmp_path):
     client = app.test_client()
     headers = csrf_headers(client, "http://127.0.0.1:15131")
     headers["Origin"] = "https://vibe.example"
-    headers["X-Forwarded-Proto"] = "https"
+    headers["X-Forwarded-Proto"] = "HTTPS"
     headers["X-Forwarded-Host"] = "vibe.example"
 
     response = client.post(
@@ -148,7 +151,97 @@ def test_config_post_allows_forwarded_origin(monkeypatch, tmp_path):
         base_url="http://127.0.0.1:15131",
     )
 
+    assert response.status_code == 403
+    assert response.get_json()["message"] == "Forbidden: invalid origin"
+
+
+def test_config_post_allows_forwarded_origin_from_explicit_trusted_proxy(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+    )
+    config.ui.setup_host = "192.168.2.3"
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:15131")
+    headers["Origin"] = "http://192.168.2.3"
+    headers["X-Forwarded-Proto"] = "http"
+    headers["X-Forwarded-Host"] = "192.168.2.3"
+    headers["X-Forwarded-For"] = "192.168.2.5"
+
+    response = client.post(
+        "/api/config",
+        json={
+            "mode": "self_host",
+            "runtime": {"default_cwd": "/tmp/test"},
+            "agents": {
+                "default_backend": "opencode",
+                "opencode": {"enabled": True, "cli_path": "opencode"},
+                "claude": {"enabled": False, "cli_path": "claude"},
+                "codex": {"enabled": False, "cli_path": "codex"},
+            },
+        },
+        headers=headers,
+        base_url="http://127.0.0.1:15131",
+    )
+
     assert response.status_code == 200
+
+
+def test_current_origin_uses_configured_remote_public_origin(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        remote_access=RemoteAccessConfig(),
+    )
+    config.remote_access.vibe_cloud.enabled = True
+    config.remote_access.vibe_cloud.public_url = "https://alex.avibe.bot"
+    config.save()
+
+    with app.test_request_context(
+        "/api/config",
+        base_url="https://alex.avibe.bot",
+        headers={
+            TEST_REMOTE_ADDR_HEADER: "203.0.113.10",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "evil.example",
+        },
+    ):
+        assert ui_server._current_origin() == "https://alex.avibe.bot"
+
+
+def test_current_origin_uses_trusted_forwarded_port(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    monkeypatch.setattr(ui_server, "_request_peer_address", lambda: ipaddress.ip_address("127.0.0.1"))
+    V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+    ).save()
+
+    with app.test_request_context(
+        "/api/config",
+        base_url="http://127.0.0.1:15131",
+        headers={
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "proxy.example",
+            "X-Forwarded-Port": "8443",
+        },
+    ):
+        assert ui_server._current_origin() == "https://proxy.example:8443"
 
 
 def test_config_post_returns_400_for_enabled_platform_missing_credentials(monkeypatch, tmp_path):

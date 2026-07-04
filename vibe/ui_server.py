@@ -137,6 +137,7 @@ REMOTE_OAUTH_HANDSHAKE_TTL_SECONDS = 300
 REMOTE_OAUTH_DEVICE_COOKIE_NAME = "__Host-vibe_oauth_device"
 REMOTE_OAUTH_DEVICE_TTL_SECONDS = 180 * 24 * 60 * 60
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+TRUSTED_PROXY_IPS_ENV = "VIBE_UI_TRUSTED_PROXY_IPS"
 LOG_SOURCES = (
     ("service", "vibe_remote.log", lambda: paths.get_logs_dir() / "vibe_remote.log"),
     ("service_stdout", "service_stdout.log", lambda: paths.get_runtime_dir() / "service_stdout.log"),
@@ -288,15 +289,132 @@ def _current_origin() -> str:
     scheme = parsed.scheme
     netloc = parsed.netloc
 
-    forwarded_proto = request.headers.get("X-Forwarded-Proto", "").split(",")[0].strip()
-    forwarded_host = request.headers.get("X-Forwarded-Host", "").split(",")[0].strip()
+    config = _load_remote_access_config()
+    if config is not None and _is_remote_access_request(config):
+        public_origin = _remote_access_public_origin(config)
+        if public_origin:
+            return public_origin
 
-    if forwarded_proto:
+    trusted_forwarded_host = _trusted_forwarded_host()
+    if trusted_forwarded_host is None:
+        return f"{scheme}://{netloc}"
+
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower()
+
+    if forwarded_proto in {"http", "https"}:
         scheme = forwarded_proto
-    if forwarded_host:
-        netloc = forwarded_host
+    netloc = trusted_forwarded_host
 
     return f"{scheme}://{netloc}"
+
+
+def _effective_request_host() -> str:
+    return _trusted_forwarded_host() or request.host
+
+
+def _trusted_forwarded_host() -> str | None:
+    if not _is_explicitly_trusted_proxy_peer():
+        return None
+    forwarded_host = request.headers.get("X-Forwarded-Host", "").split(",")[0].strip()
+    if not _forwarded_host_is_safe(forwarded_host):
+        return None
+    if _forwarded_host_has_explicit_port(forwarded_host):
+        return forwarded_host
+    forwarded_port = _trusted_forwarded_port()
+    if forwarded_port is None:
+        return forwarded_host
+    return f"{forwarded_host}:{forwarded_port}"
+
+
+def _trusted_forwarded_port() -> int | None:
+    raw_port = request.headers.get("X-Forwarded-Port", "").split(",")[0].strip()
+    if not raw_port:
+        return None
+    if not raw_port.isdigit():
+        return None
+    port = int(raw_port)
+    if port < 1 or port > 65535:
+        return None
+    return port
+
+
+def _has_trusted_forwarded_metadata() -> bool:
+    return _is_explicitly_trusted_proxy_peer() and _has_forwarded_metadata()
+
+
+def _has_untrusted_forwarded_metadata() -> bool:
+    return _has_forwarded_metadata() and not _is_explicitly_trusted_proxy_peer()
+
+
+def _effective_loopback_host() -> bool:
+    return _is_loopback_host(_effective_request_host())
+
+
+def _effective_normalized_host() -> str:
+    return _normalized_host(_effective_request_host())
+
+
+def _trusted_forwarded_client_address() -> ipaddress._BaseAddress | None:
+    if not _is_explicitly_trusted_proxy_peer():
+        return None
+    raw_client = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    if not raw_client:
+        return None
+    try:
+        address = ipaddress.ip_address(raw_client)
+    except ValueError:
+        return None
+    mapped = getattr(address, "ipv4_mapped", None)
+    return mapped or address
+
+
+def _local_trust_peer_address() -> ipaddress._BaseAddress | None:
+    if not _has_trusted_forwarded_metadata():
+        return _request_peer_address()
+    if _trusted_forwarded_host() is None:
+        return None
+    return _trusted_forwarded_client_address()
+
+
+def _is_explicitly_trusted_proxy_peer() -> bool:
+    configured = os.environ.get(TRUSTED_PROXY_IPS_ENV, "")
+    if not configured.strip():
+        return False
+    peer = _request_peer_address()
+    if peer is None:
+        return False
+    for raw_entry in configured.split(","):
+        entry = raw_entry.strip()
+        if not entry:
+            continue
+        try:
+            network = ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            logger.warning("Ignoring invalid %s entry: %s", TRUSTED_PROXY_IPS_ENV, entry)
+            continue
+        if peer in network:
+            return True
+    return False
+
+
+def _forwarded_host_is_safe(value: str) -> bool:
+    if not value or any(ch.isspace() for ch in value):
+        return False
+    if "/" in value or "\\" in value or "@" in value:
+        return False
+    try:
+        parsed = urlparse(f"//{value}")
+        parsed.port
+    except ValueError:
+        return False
+    return bool(parsed.netloc and parsed.hostname and not parsed.username and not parsed.password)
+
+
+def _forwarded_host_has_explicit_port(value: str) -> bool:
+    try:
+        return urlparse(f"//{value}").port is not None
+    except ValueError:
+        return False
 
 
 def _is_mutation_guard_exempt() -> bool:
@@ -412,6 +530,8 @@ def _has_forwarded_metadata() -> bool:
 def _is_loopback_origin_proxy_request() -> bool:
     if not _is_loopback_peer() or not _is_loopback_host(request.host):
         return False
+    if _has_trusted_forwarded_metadata():
+        return False
     if request.headers.get("Forwarded") or request.headers.get("X-Forwarded-For"):
         return False
     client_ip_headers = (
@@ -517,7 +637,10 @@ def _is_containerized_runtime() -> bool:
 
 
 def _is_private_peer() -> bool:
-    address = _request_peer_address()
+    return _is_private_peer_address(_request_peer_address())
+
+
+def _is_private_peer_address(address: ipaddress._BaseAddress | None) -> bool:
     return address is not None and _is_private_address(address)
 
 
@@ -630,7 +753,10 @@ def _setup_host_trust_network(setup_address: ipaddress._BaseAddress) -> ipaddres
     return _local_interface_network(setup_address)
 
 
-def _peer_shares_setup_host_network(setup_address: ipaddress._BaseAddress) -> bool:
+def _peer_shares_setup_host_network(
+    setup_address: ipaddress._BaseAddress,
+    peer: ipaddress._BaseAddress | None = None,
+) -> bool:
     """Require the peer to share setup_host's interface-level subnet.
 
     Compensates for the wildcard bind in the tunnel-on path. Without this,
@@ -640,12 +766,8 @@ def _peer_shares_setup_host_network(setup_address: ipaddress._BaseAddress) -> bo
     (Tailscale, link-local) broad and otherwise mirrors the actual
     interface netmask via :func:`_local_interface_network`.
     """
-    remote_addr = (request.remote_addr or "").strip()
-    if not remote_addr or remote_addr == "localhost":
-        return False
-    try:
-        peer = ipaddress.ip_address(remote_addr)
-    except ValueError:
+    peer = peer or _request_peer_address()
+    if peer is None:
         return False
     if peer.version != setup_address.version:
         mapped = getattr(peer, "ipv4_mapped", None)
@@ -969,14 +1091,15 @@ def _is_setup_host_request(config: V2Config | None) -> bool:
         return False
     if not _is_private_address(setup_address):
         return False
-    if _normalized_host(request.host) != setup_host:
+    if _effective_normalized_host() != setup_host:
         return False
     # Any forwarded header (including non-Cloudflare proxies like nginx /
     # Caddy / Traefik) means we cannot trust request.remote_addr to identify
     # the actual client, so refuse the setup-host trust path entirely.
-    if _has_forwarded_metadata():
+    if _has_untrusted_forwarded_metadata():
         return False
-    if not _is_private_peer():
+    peer_address = _local_trust_peer_address()
+    if not _is_private_peer_address(peer_address):
         return False
     # When the Avibe Cloud tunnel is on, the UI binds to a wildcard so the
     # local cloudflared origin can reach setup_host regardless of which
@@ -989,7 +1112,7 @@ def _is_setup_host_request(config: V2Config | None) -> bool:
     # here would just block legitimate routed peers (e.g. a 10.50/16
     # client reaching setup_host=10.1.2.3 across a routed corporate net).
     if _is_tunnel_wildcard_bind(config):
-        return _peer_shares_setup_host_network(setup_address)
+        return _peer_shares_setup_host_network(setup_address, peer_address)
     return True
 
 
@@ -999,9 +1122,11 @@ def _is_tunnel_wildcard_bind(config: V2Config) -> bool:
 
 
 def _is_local_request(config: V2Config | None = None) -> bool:
-    if _has_forwarded_metadata():
+    if _has_untrusted_forwarded_metadata():
         return False
-    if _is_loopback_peer() and _is_loopback_host(request.host):
+    if _has_trusted_forwarded_metadata() and _trusted_forwarded_host() is None:
+        return False
+    if not _has_trusted_forwarded_metadata() and _is_loopback_peer() and _effective_loopback_host():
         return True
     if _is_trusted_docker_loopback_request():
         return True
@@ -1023,7 +1148,7 @@ def _is_remote_access_request(config: V2Config) -> bool:
     public_host = _remote_access_public_host(config)
     if not public_host:
         return False
-    return _normalized_host(request.host) == public_host
+    return _normalized_host(_effective_request_host()) == public_host
 
 
 def _remote_access_public_host(config: V2Config) -> str | None:
@@ -1053,11 +1178,17 @@ def _origin_identity(value: str) -> tuple[str, str, int | None] | None:
     return (parsed.scheme.lower(), _normalized_host(parsed.hostname), _origin_port(parsed.netloc, parsed.scheme))
 
 
+def _same_origin(left: str, right: str) -> bool:
+    left_identity = _origin_identity(left)
+    right_identity = _origin_identity(right)
+    return left_identity is not None and left_identity == right_identity
+
+
 def _remote_access_public_origin_matches(origin: str, config: V2Config) -> bool:
     trusted_origin = _remote_access_public_origin(config)
     if not trusted_origin:
         return False
-    return _origin_identity(origin) == _origin_identity(trusted_origin)
+    return _same_origin(origin, trusted_origin)
 
 
 def _remote_access_public_url_invalid(config: V2Config) -> bool:
@@ -1726,11 +1857,17 @@ _auth_ratelimit: OrderedDict[str, list[float]] = OrderedDict()
 def _auth_client_id() -> str:
     """Client identity for rate limiting.
 
-    Trust the Cloudflare-forwarded client IP only when the request arrived via the
-    local tunnel (loopback peer = cloudflared). A direct peer reaching the origin
-    port could otherwise set/rotate ``CF-Connecting-IP`` to dodge the limit, so for
-    such peers we key on the real connecting address instead.
+    Trust forwarded client IPs only on proxy paths we explicitly trust: the
+    configured trusted proxy chain with an accepted forwarded host, or the local
+    Cloudflare tunnel peer. A direct peer reaching the origin port could
+    otherwise set/rotate forwarded headers to dodge the limit, so for such peers
+    we key on the real connecting address instead.
     """
+    if _has_trusted_forwarded_metadata() and _trusted_forwarded_host() is not None:
+        forwarded_client = _trusted_forwarded_client_address()
+        if forwarded_client is not None:
+            return f"xff:{forwarded_client.compressed}"
+
     forwarded = (request.headers.get("CF-Connecting-IP") or "").strip()
     if forwarded and _is_loopback_peer():
         return f"cf:{forwarded}"
@@ -1827,7 +1964,7 @@ def protect_mutating_ui_requests():
     if not source:
         return jsonify({"ok": False, "message": "Forbidden: missing origin header"}), 403
 
-    if source != _current_origin():
+    if not _same_origin(source, _current_origin()):
         return jsonify({"ok": False, "message": "Forbidden: invalid origin"}), 403
 
     if _is_show_api_mutation():
@@ -2239,10 +2376,11 @@ def _terminal_origin_allowed(websocket: Any) -> bool:
             return False
         return _remote_access_public_origin_matches(origin, config)
     origin_port = _origin_port(parsed_origin.netloc, parsed_origin.scheme)
-    request_port = _origin_port(websocket.headers.get("host"), websocket.url.scheme)
+    websocket_scheme = _websocket_effective_scheme(websocket)
+    request_port = _origin_port(_websocket_effective_request_host(websocket), websocket_scheme)
     return origin_port == request_port and _terminal_origin_scheme_matches_socket(
         parsed_origin.scheme,
-        websocket.url.scheme,
+        websocket_scheme,
     )
 
 
@@ -2271,16 +2409,23 @@ def _terminal_origin_scheme_matches_socket(origin_scheme: str | None, socket_sch
 
 
 def _websocket_is_local_request(websocket: Any, config: V2Config | None = None) -> bool:
-    if _websocket_has_forwarded_metadata(websocket):
+    if _websocket_has_untrusted_forwarded_metadata(websocket):
+        return False
+    if _websocket_has_trusted_forwarded_metadata(websocket) and _websocket_trusted_forwarded_host(websocket) is None:
         return False
     client_host = _websocket_client_host(websocket)
-    if client_host == "testclient":
+    if not _websocket_has_trusted_forwarded_metadata(websocket) and client_host == "testclient":
         return _is_loopback_host(websocket.headers.get("host"))
     try:
         client_address = ipaddress.ip_address(client_host)
     except ValueError:
         client_address = None
-    if client_address is not None and client_address.is_loopback and _is_loopback_host(websocket.headers.get("host")):
+    if (
+        not _websocket_has_trusted_forwarded_metadata(websocket)
+        and client_address is not None
+        and client_address.is_loopback
+        and _is_loopback_host(_websocket_effective_request_host(websocket))
+    ):
         return True
     if _websocket_is_trusted_docker_loopback_request(websocket):
         return True
@@ -2305,6 +2450,14 @@ def _websocket_has_forwarded_metadata(websocket: Any) -> bool:
     return any(websocket.headers.get(header) for header in forwarded_headers)
 
 
+def _websocket_has_trusted_forwarded_metadata(websocket: Any) -> bool:
+    return _websocket_is_explicitly_trusted_proxy_peer(websocket) and _websocket_has_forwarded_metadata(websocket)
+
+
+def _websocket_has_untrusted_forwarded_metadata(websocket: Any) -> bool:
+    return _websocket_has_forwarded_metadata(websocket) and not _websocket_is_explicitly_trusted_proxy_peer(websocket)
+
+
 def _websocket_client_host(websocket: Any) -> str:
     client_host = websocket.client.host if websocket.client else ""
     if client_host == "testclient":
@@ -2322,6 +2475,91 @@ def _websocket_peer_address(websocket: Any) -> ipaddress._BaseAddress | None:
         return None
     mapped = getattr(address, "ipv4_mapped", None)
     return mapped or address
+
+
+def _websocket_is_explicitly_trusted_proxy_peer(websocket: Any) -> bool:
+    configured = os.environ.get(TRUSTED_PROXY_IPS_ENV, "")
+    if not configured.strip():
+        return False
+    peer = _websocket_peer_address(websocket)
+    if peer is None:
+        return False
+    for raw_entry in configured.split(","):
+        entry = raw_entry.strip()
+        if not entry:
+            continue
+        try:
+            network = ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            logger.warning("Ignoring invalid %s entry: %s", TRUSTED_PROXY_IPS_ENV, entry)
+            continue
+        if peer in network:
+            return True
+    return False
+
+
+def _websocket_trusted_forwarded_host(websocket: Any) -> str | None:
+    if not _websocket_is_explicitly_trusted_proxy_peer(websocket):
+        return None
+    forwarded_host = websocket.headers.get("X-Forwarded-Host", "").split(",")[0].strip()
+    if not _forwarded_host_is_safe(forwarded_host):
+        return None
+    if _forwarded_host_has_explicit_port(forwarded_host):
+        return forwarded_host
+    forwarded_port = _websocket_trusted_forwarded_port(websocket)
+    if forwarded_port is None:
+        return forwarded_host
+    return f"{forwarded_host}:{forwarded_port}"
+
+
+def _websocket_trusted_forwarded_port(websocket: Any) -> int | None:
+    raw_port = websocket.headers.get("X-Forwarded-Port", "").split(",")[0].strip()
+    if not raw_port:
+        return None
+    if not raw_port.isdigit():
+        return None
+    port = int(raw_port)
+    if port < 1 or port > 65535:
+        return None
+    return port
+
+
+def _websocket_effective_request_host(websocket: Any) -> str:
+    return _websocket_trusted_forwarded_host(websocket) or websocket.headers.get("host")
+
+
+def _websocket_effective_scheme(websocket: Any) -> str:
+    if _websocket_is_explicitly_trusted_proxy_peer(websocket):
+        forwarded_proto = websocket.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower()
+        if forwarded_proto == "https":
+            return "wss"
+        if forwarded_proto == "http":
+            return "ws"
+        if forwarded_proto in {"ws", "wss"}:
+            return forwarded_proto
+    return websocket.url.scheme
+
+
+def _websocket_trusted_forwarded_client_address(websocket: Any) -> ipaddress._BaseAddress | None:
+    if not _websocket_is_explicitly_trusted_proxy_peer(websocket):
+        return None
+    raw_client = websocket.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    if not raw_client:
+        return None
+    try:
+        address = ipaddress.ip_address(raw_client)
+    except ValueError:
+        return None
+    mapped = getattr(address, "ipv4_mapped", None)
+    return mapped or address
+
+
+def _websocket_local_trust_peer_address(websocket: Any) -> ipaddress._BaseAddress | None:
+    if not _websocket_has_trusted_forwarded_metadata(websocket):
+        return _websocket_peer_address(websocket)
+    if _websocket_trusted_forwarded_host(websocket) is None:
+        return None
+    return _websocket_trusted_forwarded_client_address(websocket)
 
 
 def _websocket_is_trusted_docker_peer(websocket: Any) -> bool:
@@ -2349,8 +2587,16 @@ def _websocket_is_private_peer(websocket: Any) -> bool:
     return address is not None and _is_private_address(address)
 
 
-def _websocket_peer_shares_setup_host_network(websocket: Any, setup_address: ipaddress._BaseAddress) -> bool:
-    peer = _websocket_peer_address(websocket)
+def _websocket_is_private_peer_address(address: ipaddress._BaseAddress | None) -> bool:
+    return address is not None and _is_private_address(address)
+
+
+def _websocket_peer_shares_setup_host_network(
+    websocket: Any,
+    setup_address: ipaddress._BaseAddress,
+    peer: ipaddress._BaseAddress | None = None,
+) -> bool:
+    peer = peer or _websocket_peer_address(websocket)
     if peer is None:
         return False
     if peer.version != setup_address.version:
@@ -2409,17 +2655,18 @@ def _websocket_is_setup_host_request(websocket: Any, config: V2Config | None) ->
         return False
     if _websocket_normalized_host(websocket) != setup_host:
         return False
-    if _websocket_has_forwarded_metadata(websocket):
+    if _websocket_has_untrusted_forwarded_metadata(websocket):
         return False
-    if not _websocket_is_private_peer(websocket):
+    peer_address = _websocket_local_trust_peer_address(websocket)
+    if not _websocket_is_private_peer_address(peer_address):
         return False
     if _is_tunnel_wildcard_bind(config):
-        return _websocket_peer_shares_setup_host_network(websocket, setup_address)
+        return _websocket_peer_shares_setup_host_network(websocket, setup_address, peer_address)
     return True
 
 
 def _websocket_normalized_host(websocket: Any) -> str:
-    return _normalized_host(websocket.headers.get("x-forwarded-host") or websocket.headers.get("host"))
+    return _normalized_host(_websocket_effective_request_host(websocket))
 
 
 async def _proxy_show_runtime_websocket(

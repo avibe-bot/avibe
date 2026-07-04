@@ -803,6 +803,89 @@ def test_cloudflare_forwarded_request_with_loopback_host_fails_closed(monkeypatc
     assert response.get_json()["error"] == "remote_access_host_mismatch"
 
 
+def test_trusted_proxy_forwarded_host_routes_remote_access(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    config = _save_config(tmp_path)
+
+    response = app.test_client().get(
+        "/dashboard",
+        base_url="http://127.0.0.1:5123",
+        headers={
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "alex.avibe.bot",
+            "X-Forwarded-For": "203.0.113.10",
+        },
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["Location"].startswith(config.remote_access.vibe_cloud.authorization_endpoint)
+
+
+def test_trusted_proxy_missing_forwarded_host_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    _save_config(tmp_path)
+
+    response = app.test_client().get(
+        "/dashboard",
+        base_url="http://127.0.0.1:5123",
+        headers={
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-For": "8.8.8.8",
+        },
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error"] == "remote_access_host_mismatch"
+
+
+def test_trusted_proxy_unmatched_forwarded_host_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    _save_config(tmp_path)
+
+    response = app.test_client().get(
+        "/dashboard",
+        base_url="http://127.0.0.1:5123",
+        headers={
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "evil.example",
+            "X-Forwarded-For": "8.8.8.8",
+        },
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error"] == "remote_access_host_mismatch"
+
+
+def test_trusted_proxy_malformed_forwarded_host_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    _save_config(tmp_path)
+
+    response = app.test_client().get(
+        "/dashboard",
+        base_url="http://127.0.0.1:5123",
+        headers={
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "[bad",
+            "X-Forwarded-For": "8.8.8.8",
+        },
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error"] == "remote_access_host_mismatch"
+
+
 def test_remote_host_fails_closed_when_disabled_but_hostname_still_matches(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_config(tmp_path)
@@ -956,6 +1039,30 @@ def test_config_post_skips_reconcile_when_remote_access_is_unchanged(monkeypatch
 
     assert response.status_code == 200
     assert reconcile_calls == []
+
+
+def test_remote_config_post_accepts_public_origin_default_https_port(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = _save_config(tmp_path)
+    config.remote_access.vibe_cloud.public_url = "https://alex.avibe.bot:443"
+    config.save()
+    client = app.test_client()
+    client.set_cookie(
+        remote_access.SESSION_COOKIE_NAME,
+        remote_access.make_session_cookie(config, "alex@example.com", "user-1"),
+        domain="alex.avibe.bot",
+    )
+    headers = csrf_headers(client, "https://alex.avibe.bot")
+
+    response = client.post(
+        "/api/config",
+        json=api.config_to_payload(config),
+        headers=headers,
+        base_url="https://alex.avibe.bot",
+        environ_base=_remote_peer(),
+    )
+
+    assert response.status_code == 200
 
 
 def test_config_post_returns_saved_config_when_remote_reconcile_fails(monkeypatch, tmp_path):
@@ -1452,6 +1559,37 @@ def test_auth_rate_limit_ignores_untrusted_forwarded_ip(monkeypatch, tmp_path):
     assert statuses[3:] == [429, 429]  # still limited despite the rotating header
 
 
+def test_auth_rate_limit_keys_trusted_proxy_by_forwarded_client(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    _save_config(tmp_path)
+    monkeypatch.setattr(ui_server, "_AUTH_RATELIMIT_MAX_PER_WINDOW", 3)
+    with ui_server._auth_ratelimit_lock:
+        ui_server._auth_ratelimit.clear()
+    client = app.test_client()
+
+    def get_status(client_ip: str) -> int:
+        return client.get(
+            "/dashboard",
+            base_url="http://127.0.0.1:5123",
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+            headers={
+                "X-Forwarded-Proto": "https",
+                "X-Forwarded-Host": "alex.avibe.bot",
+                "X-Forwarded-For": client_ip,
+            },
+            follow_redirects=False,
+        ).status_code
+
+    first_client = [get_status("203.0.113.10") for _ in range(3)]
+    second_client = [get_status("203.0.113.11") for _ in range(3)]
+    first_client_over_budget = get_status("203.0.113.10")
+
+    assert first_client == [302, 302, 302]
+    assert second_client == [302, 302, 302]
+    assert first_client_over_budget == 429
+
+
 def test_auth_rate_limit_table_is_bounded(monkeypatch, tmp_path):
     # The limiter's own table is hard-capped (LRU eviction), so a burst of distinct
     # clients can't drive unbounded in-process memory growth.
@@ -1750,6 +1888,38 @@ def test_terminal_websocket_accepts_setup_host_origin_from_same_port(monkeypatch
             "host": "192.168.2.3:5123",
             "origin": "http://192.168.2.3:5123",
             "x-vibe-test-remote-addr": "192.168.2.5",
+        },
+    ):
+        pass
+
+    assert accepted is True
+
+
+@pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
+def test_terminal_websocket_accepts_setup_host_from_trusted_proxy(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    _save_config_with_setup_host(tmp_path, "192.168.2.3")
+    _mock_interface(monkeypatch, "192.168.2.3", 24)
+
+    accepted = False
+
+    async def fake_handle_websocket(websocket, session_id):
+        nonlocal accepted
+        accepted = True
+
+    monkeypatch.setattr(ui_server.get_terminal_service(), "handle_websocket", fake_handle_websocket)
+
+    with app.test_client().websocket_connect(
+        "/api/terminal/test",
+        headers={
+            "host": "127.0.0.1:5123",
+            "origin": "http://192.168.2.3:5123",
+            "x-forwarded-proto": "http",
+            "x-forwarded-host": "192.168.2.3:5123",
+            "x-forwarded-for": "192.168.2.5",
+            "x-vibe-test-remote-addr": "127.0.0.1",
         },
     ):
         pass
@@ -2602,6 +2772,51 @@ def test_setup_host_with_reverse_proxy_header_is_not_local(monkeypatch, tmp_path
         base_url="http://192.168.2.3:5123",
         environ_base={"REMOTE_ADDR": "127.0.0.1"},
         headers={"X-Forwarded-For": "203.0.113.10"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error"] == "remote_access_host_mismatch"
+
+
+def test_setup_host_trusts_forwarded_host_from_explicit_trusted_proxy(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    config = _save_config_with_setup_host(tmp_path, "192.168.2.3")
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+
+    response = app.test_client().get(
+        "/health",
+        base_url="http://127.0.0.1:5123",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        headers={
+            "X-Forwarded-Proto": "http",
+            "X-Forwarded-Host": "192.168.2.3",
+            "X-Forwarded-For": "192.168.2.5",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+
+
+def test_setup_host_rejects_public_forwarded_client_from_trusted_proxy(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    config = _save_config_with_setup_host(tmp_path, "192.168.2.3")
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+
+    response = app.test_client().get(
+        "/health",
+        base_url="http://127.0.0.1:5123",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        headers={
+            "X-Forwarded-Proto": "http",
+            "X-Forwarded-Host": "192.168.2.3",
+            "X-Forwarded-For": "8.8.8.8",
+        },
         follow_redirects=False,
     )
 

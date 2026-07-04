@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import atexit
+import base64
+from dataclasses import dataclass
 import hashlib
 import hmac
+import http.client
 import ipaddress
 import json
 import logging
@@ -15,6 +18,8 @@ import re
 import shlex
 import secrets
 import shutil
+import socket
+import ssl
 import stat
 import subprocess
 import tarfile
@@ -47,6 +52,14 @@ _STATUS_REPORT_ATEXIT_REGISTERED = False
 STATUS_HEARTBEAT_SECONDS = 5 * 60
 STATUS_LOG_TAIL_BYTES = 64 * 1024
 STATUS_REPORT_DRAIN_SECONDS = 1.0
+_BLOCKED_PAIRING_BACKEND_HOSTS = {
+    "localhost",
+    "localhost.localdomain",
+    "ip6-localhost",
+    "metadata",
+    "metadata.google.internal",
+}
+_PROXY_RESOLVED_PAIRING_BACKEND_HOSTS = {"avibe.bot"}
 
 
 class BackendRequestError(Exception):
@@ -54,6 +67,20 @@ class BackendRequestError(Exception):
         super().__init__(payload.get("detail") or payload.get("error") or f"HTTP {status}")
         self.status = status
         self.payload = payload
+
+
+@dataclass(frozen=True)
+class _ValidatedPairingBackend:
+    base_url: str
+    hostname: str
+    port: int
+    host_header: str
+    connect_hosts: tuple[str, ...]
+    requires_proxy: bool = False
+
+    @property
+    def connect_host(self) -> str:
+        return self.connect_hosts[0] if self.connect_hosts else ""
 
 
 class OAuthCodeExchangeError(Exception):
@@ -631,7 +658,10 @@ def _json_request(
     payload: dict[str, Any],
     timeout: float = 20.0,
     headers: dict[str, str] | None = None,
+    connection_target: _ValidatedPairingBackend | None = None,
 ) -> dict[str, Any]:
+    if connection_target is not None:
+        return _json_request_to_validated_backend(url, payload, connection_target, timeout=timeout, headers=headers)
     try:
         request_headers = {
             "Accept": "application/json",
@@ -644,7 +674,10 @@ def _json_request(
             json=payload,
             headers=request_headers,
             timeout=timeout,
+            allow_redirects=False,
         )
+        if 300 <= response.status_code < 400:
+            raise BackendRequestError(response.status_code, {"error": "backend_http_redirect_blocked"})
         response.raise_for_status()
         return response.json()
     except requests.HTTPError as exc:
@@ -662,6 +695,304 @@ def _json_request(
         raise BackendRequestError(status, parsed) from exc
     except requests.RequestException as exc:
         raise RuntimeError(str(exc)) from exc
+
+
+def _json_request_to_validated_backend(
+    url: str,
+    payload: dict[str, Any],
+    connection_target: _ValidatedPairingBackend,
+    *,
+    timeout: float,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    parsed = urllib.parse.urlsplit(url)
+    target_port = parsed.port or 443
+    target_hostname = (parsed.hostname or "").rstrip(".").lower()
+    if parsed.scheme.lower() != "https" or target_hostname != connection_target.hostname or target_port != connection_target.port:
+        raise RuntimeError("validated backend target mismatch")
+
+    request_headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Host": connection_target.host_header,
+        "User-Agent": "avibe/dev",
+    }
+    if headers:
+        request_headers.update(headers)
+    request_headers["Host"] = connection_target.host_header
+
+    request_path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+    body = json.dumps(payload).encode("utf-8")
+    proxy_url = _validated_backend_proxy_url(url)
+    if connection_target.requires_proxy and not proxy_url:
+        raise RuntimeError("pairing_backend_proxy_required")
+    last_network_error: Exception | None = None
+    for connect_host in connection_target.connect_hosts:
+        connection = _validated_backend_connection(connect_host, connection_target, timeout, proxy_url)
+        try:
+            connection.request("POST", request_path, body=body, headers=request_headers)
+            response = connection.getresponse()
+            response_body = response.read()
+            if 300 <= response.status < 400:
+                raise BackendRequestError(response.status, {"error": "backend_http_redirect_blocked"})
+            if response.status >= 400:
+                raise BackendRequestError(response.status, _backend_error_payload(response_body))
+            try:
+                parsed_response = json.loads(response_body.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise RuntimeError(str(exc)) from exc
+            if not isinstance(parsed_response, dict):
+                raise RuntimeError("backend returned non-object JSON")
+            return parsed_response
+        except BackendRequestError:
+            raise
+        except (OSError, http.client.HTTPException, ssl.SSLError) as exc:
+            last_network_error = exc
+        finally:
+            connection.close()
+    if last_network_error is not None:
+        raise RuntimeError(str(last_network_error)) from last_network_error
+    raise RuntimeError("validated backend has no addresses")
+
+
+def _validated_backend_proxy_url(url: str) -> str | None:
+    proxies = requests.utils.get_environ_proxies(url)
+    proxy_url = requests.utils.select_proxy(url, proxies)
+    if not proxy_url:
+        return None
+    parsed = urllib.parse.urlsplit(proxy_url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise RuntimeError("unsupported_https_proxy_scheme")
+    return proxy_url
+
+
+def _validated_backend_connection(
+    connect_host: str,
+    connection_target: _ValidatedPairingBackend,
+    timeout: float,
+    proxy_url: str | None,
+) -> http.client.HTTPConnection:
+    context = _validated_backend_ssl_context()
+    if proxy_url:
+        proxy = urllib.parse.urlsplit(proxy_url)
+        proxy_scheme = proxy.scheme.lower()
+        if proxy_scheme not in {"http", "https"} or not proxy.hostname:
+            raise RuntimeError("unsupported_https_proxy_scheme")
+        return _PinnedHTTPSProxyConnection(
+            proxy.hostname,
+            proxy.port or (443 if proxy_scheme == "https" else 80),
+            proxy_scheme=proxy_scheme,
+            connect_host=connect_host,
+            connect_port=connection_target.port,
+            server_hostname=connection_target.hostname,
+            proxy_headers=_proxy_tunnel_headers(proxy),
+            timeout=timeout,
+            context=context,
+            proxy_context=_validated_backend_ssl_context(),
+        )
+    return _PinnedHTTPSConnection(
+        connect_host,
+        connection_target.port,
+        server_hostname=connection_target.hostname,
+        timeout=timeout,
+        context=context,
+    )
+
+
+def _validated_backend_ssl_context() -> ssl.SSLContext:
+    ca_bundle = os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("CURL_CA_BUNDLE") or requests.certs.where()
+    if ca_bundle:
+        if Path(ca_bundle).is_dir():
+            return ssl.create_default_context(capath=ca_bundle)
+        return ssl.create_default_context(cafile=ca_bundle)
+    return ssl.create_default_context()
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host: str, port: int, *, server_hostname: str, **kwargs: Any) -> None:
+        super().__init__(host, port=port, **kwargs)
+        self._validated_server_hostname = server_hostname
+
+    def connect(self) -> None:
+        http.client.HTTPConnection.connect(self)
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self._validated_server_hostname)
+
+
+class _PinnedHTTPSProxyConnection(http.client.HTTPConnection):
+    def __init__(
+        self,
+        proxy_host: str,
+        proxy_port: int,
+        *,
+        proxy_scheme: str,
+        connect_host: str,
+        connect_port: int,
+        server_hostname: str,
+        proxy_headers: dict[str, str] | None,
+        **kwargs: Any,
+    ) -> None:
+        context = kwargs.pop("context")
+        proxy_context = kwargs.pop("proxy_context", None)
+        super().__init__(proxy_host, port=proxy_port, **kwargs)
+        self._context = context
+        self._proxy_context = proxy_context or ssl.create_default_context()
+        self._proxy_scheme = proxy_scheme
+        self._validated_server_hostname = server_hostname
+        self.set_tunnel(connect_host, connect_port, headers=proxy_headers)
+
+    def connect(self) -> None:
+        self.sock = self._create_connection((self.host, self.port), self.timeout, self.source_address)
+        try:
+            self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        if self._proxy_scheme == "https":
+            self.sock = self._proxy_context.wrap_socket(self.sock, server_hostname=self.host)
+        if self._tunnel_host:
+            self._tunnel()
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self._validated_server_hostname)
+
+
+def _proxy_tunnel_headers(proxy: urllib.parse.SplitResult) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    if proxy.username is not None:
+        username = urllib.parse.unquote(proxy.username)
+        password = urllib.parse.unquote(proxy.password or "")
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        headers["Proxy-Authorization"] = f"Basic {token}"
+    return headers
+
+
+def _backend_error_payload(response_body: bytes) -> dict[str, Any]:
+    try:
+        parsed = json.loads(response_body.decode("utf-8")) if response_body else {}
+    except (UnicodeDecodeError, ValueError):
+        parsed = {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+    parsed.setdefault("error", "backend_http_error")
+    if response_body and "detail" not in parsed:
+        try:
+            parsed["detail"] = response_body.decode("utf-8")
+        except UnicodeDecodeError:
+            parsed["detail"] = response_body.decode("utf-8", errors="replace")
+    return parsed
+
+
+def _normalize_pairing_backend_url(raw_backend_url: str) -> tuple[_ValidatedPairingBackend | None, str | None]:
+    raw_value = (raw_backend_url or "https://avibe.bot").strip()
+    try:
+        parsed = urllib.parse.urlsplit(raw_value)
+    except ValueError:
+        return None, "invalid_pairing_backend_url"
+    if parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username or parsed.password:
+        return None, "invalid_pairing_backend_url"
+    if parsed.query or parsed.fragment:
+        return None, "invalid_pairing_backend_url"
+
+    try:
+        port = parsed.port or 443
+    except ValueError:
+        return None, "invalid_pairing_backend_url"
+
+    hostname = parsed.hostname.rstrip(".").lower()
+    try:
+        normalized_hostname = hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        return None, "invalid_pairing_backend_url"
+
+    if _pairing_backend_host_is_forbidden(normalized_hostname):
+        return None, "pairing_backend_url_not_allowed"
+
+    netloc = f"[{normalized_hostname}]" if ":" in normalized_hostname else normalized_hostname
+    if port != 443:
+        netloc = f"{netloc}:{port}"
+    path = parsed.path.rstrip("/")
+    base_url = urllib.parse.urlunsplit(("https", netloc, path, "", "")).rstrip("/")
+
+    try:
+        literal_address = ipaddress.ip_address(normalized_hostname)
+    except ValueError:
+        addresses = _resolve_pairing_backend_addresses(normalized_hostname, port)
+    else:
+        addresses = (literal_address,)
+
+    if not addresses:
+        if _pairing_backend_allows_proxy_name_resolution(base_url, normalized_hostname):
+            return (
+                _ValidatedPairingBackend(
+                    base_url=base_url,
+                    hostname=normalized_hostname,
+                    port=port,
+                    host_header=netloc,
+                    connect_hosts=(normalized_hostname,),
+                    requires_proxy=True,
+                ),
+                None,
+            )
+        return None, "pairing_backend_unresolvable"
+    if any(_pairing_backend_address_is_forbidden(address) for address in addresses):
+        return None, "pairing_backend_url_not_allowed"
+
+    return (
+        _ValidatedPairingBackend(
+            base_url=base_url,
+            hostname=normalized_hostname,
+            port=port,
+            host_header=netloc,
+            connect_hosts=tuple(str(address) for address in addresses),
+        ),
+        None,
+    )
+
+
+def _pairing_backend_allows_proxy_name_resolution(base_url: str, hostname: str) -> bool:
+    if hostname not in _PROXY_RESOLVED_PAIRING_BACKEND_HOSTS:
+        return False
+    try:
+        return _validated_backend_proxy_url(base_url) is not None
+    except RuntimeError:
+        return False
+
+
+def _resolve_pairing_backend_addresses(hostname: str, port: int) -> tuple[ipaddress._BaseAddress, ...]:
+    try:
+        results = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    except OSError:
+        return ()
+    addresses: list[ipaddress._BaseAddress] = []
+    seen: set[ipaddress._BaseAddress] = set()
+    for result in results:
+        sockaddr = result[4]
+        if not sockaddr:
+            continue
+        try:
+            address = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            continue
+        if address in seen:
+            continue
+        seen.add(address)
+        addresses.append(address)
+    return tuple(addresses)
+
+
+def _pairing_backend_host_is_forbidden(hostname: str) -> bool:
+    return hostname in _BLOCKED_PAIRING_BACKEND_HOSTS or hostname.endswith(".localhost")
+
+
+def _pairing_backend_address_is_forbidden(address: ipaddress._BaseAddress) -> bool:
+    return any(
+        (
+            not address.is_global,
+            address.is_loopback,
+            address.is_private,
+            address.is_link_local,
+            address.is_multicast,
+            address.is_reserved,
+            address.is_unspecified,
+        )
+    )
 
 
 def _effective_ui_port(config: V2Config) -> int:
@@ -707,22 +1038,25 @@ def origin_service_for_pairing(config: V2Config | None = None) -> str:
 
 def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict[str, Any]:
     pairing_key = (pairing_key or "").strip()
-    backend_url = (backend_url or "https://avibe.bot").strip().rstrip("/")
     if not pairing_key:
         return {"ok": False, "error": "missing_pairing_key"}
+    backend, backend_url_error = _normalize_pairing_backend_url(backend_url)
+    if backend_url_error or backend is None:
+        return {"ok": False, "error": backend_url_error or "invalid_pairing_backend_url"}
     try:
         origin_service = origin_service_for_pairing()
     except Exception:
         origin_service = "http://127.0.0.1:5123"
     try:
         result = _json_request(
-            f"{backend_url}/api/v1/pairing/redeem",
+            f"{backend.base_url}/api/v1/pairing/redeem",
             {
                 "pairing_key": pairing_key,
                 "device_name": device_name,
                 "local_version": "dev",
                 "origin_service": origin_service,
             },
+            connection_target=backend,
         )
     except BackendRequestError as exc:
         return {"ok": False, **exc.payload, "status": exc.status}
@@ -745,7 +1079,7 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
                 "provider": "vibe_cloud",
                 "vibe_cloud": {
                     "enabled": True,
-                    "backend_url": backend_url,
+                    "backend_url": backend.base_url,
                     "instance_id": result["instance_id"],
                     "client_id": result["client_id"],
                     "issuer": result["issuer"],
