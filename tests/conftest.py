@@ -73,6 +73,19 @@ def _isolate_vibe_remote_home(request, tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_cached_sqlite_engines():
+    """Keep process-local SQLite engine caches scoped to each isolated test."""
+    try:
+        from storage.db import dispose_cached_sqlite_engines
+    except Exception:
+        yield
+        return
+    dispose_cached_sqlite_engines()
+    yield
+    dispose_cached_sqlite_engines()
+
+
+@pytest.fixture(autouse=True)
 def _reset_oauth_runtime_state():
     """Reset module-level in-memory OAuth caches between tests.
 

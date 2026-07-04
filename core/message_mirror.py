@@ -30,7 +30,7 @@ from sqlalchemy.exc import IntegrityError
 
 from modules.im.base import MessageContext
 from storage import agent_events_service, messages_service, settings_service
-from storage.db import create_sqlite_engine
+from storage.db import get_cached_sqlite_engine
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +203,7 @@ def persist_agent_message(
         return
     session_id = (context.platform_specific or {}).get("agent_session_id")
     try:
-        engine = create_sqlite_engine()
+        engine = get_cached_sqlite_engine()
         inbox_row = None
         appended_row = None
         with engine.begin() as conn:
@@ -340,7 +340,7 @@ def mirror_harness_inbound(context: MessageContext, text: str) -> None:
     definition_id = spec.get("task_definition_id")
     session_id = spec.get("agent_session_id")
     try:
-        engine = create_sqlite_engine()
+        engine = get_cached_sqlite_engine()
         appended_row = None
         inbox_row = None
         with engine.begin() as conn:
@@ -421,7 +421,7 @@ def mirror_inbound(context: MessageContext, text: str) -> None:
         # mirroring here would double-count the row.
         return
     try:
-        engine = create_sqlite_engine()
+        engine = get_cached_sqlite_engine()
         with engine.begin() as conn:
             scope_id = _resolve_scope_id(conn, context)
             if scope_id is None:
@@ -462,7 +462,7 @@ def link_inbound_message_session(*, platform: str, native_message_id: str, sessi
 
         from storage.models import messages as _messages
 
-        engine = create_sqlite_engine()
+        engine = get_cached_sqlite_engine()
         with engine.begin() as conn:
             conn.execute(
                 _sa_update(_messages)

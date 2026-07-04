@@ -116,6 +116,43 @@ def test_persist_agent_writes_typed_agent_row_on_same_scope(isolated_state):
     assert agent_row["scope_id"] == user_row["scope_id"]
 
 
+def test_persist_agent_reuses_cached_sqlite_engine(isolated_state, monkeypatch):
+    import storage.db as sqlite_db
+
+    sqlite_db.dispose_cached_sqlite_engines()
+    create_calls = 0
+    real_create = sqlite_db.create_sqlite_engine
+
+    def counting_create(db_path=None):
+        nonlocal create_calls
+        create_calls += 1
+        return real_create(db_path)
+
+    monkeypatch.setattr(sqlite_db, "create_sqlite_engine", counting_create)
+    ctx = _slack_ctx()
+
+    persist_agent_message(ctx, "assistant", "first stream chunk")
+    persist_agent_message(ctx, "assistant", "second stream chunk")
+
+    assert create_calls == 1
+
+    engine = real_create()
+    try:
+        with engine.connect() as conn:
+            rows = (
+                conn.execute(
+                    select(messages)
+                    .where(messages.c.platform == "slack", messages.c.author == "agent")
+                    .order_by(messages.c.created_at, messages.c.id)
+                )
+                .mappings()
+                .all()
+            )
+    finally:
+        engine.dispose()
+    assert [row["content_text"] for row in rows] == ["first stream chunk", "second stream chunk"]
+
+
 def test_persist_agent_toolcall_writes_event_not_message(isolated_state):
     ctx = _slack_ctx()
     mirror_inbound(ctx, "ping")
