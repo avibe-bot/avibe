@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, useRef } from 'react';
+import React, { createContext, useContext, useState, useCallback, useMemo, useRef } from 'react';
 import { AlertTriangle, CheckCircle, XCircle, X } from 'lucide-react';
 
 type ToastType = 'success' | 'error' | 'warning';
@@ -62,8 +62,13 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
+  // Stable value identity so the ~34 consumers of useToast don't re-render every
+  // time a toast is added/removed/auto-dismissed (which re-renders this provider):
+  // showToast is useCallback-stable, so the exposed value never needs to change.
+  const value = useMemo(() => ({ showToast }), [showToast]);
+
   return (
-    <ToastContext.Provider value={{ showToast }}>
+    <ToastContext.Provider value={value}>
       {children}
       {/* Toast container - fixed at bottom right; lifted above mobile bottom nav */}
       <div className="fixed bottom-[calc(5.5rem+env(safe-area-inset-bottom))] right-4 z-50 flex flex-col gap-2 md:bottom-4">

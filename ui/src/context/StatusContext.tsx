@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch } from '../lib/apiFetch';
 
 interface RuntimeStatus {
@@ -6,6 +6,16 @@ interface RuntimeStatus {
   last_action?: string;
   [key: string]: any;
 }
+
+// The GET /status payload is content-stable across idle polls (no per-request
+// timestamp/uptime — see runtime.render_status), yet ``res.json()`` yields a
+// fresh object each poll. Returning the SAME reference when the content is
+// unchanged lets React bail the StatusProvider re-render, so this provider — which
+// wraps the whole logged-in app — stops re-rendering its consumers every
+// IDLE_POLL_MS for identical data. Cheap: a small object, once per poll; a false
+// negative (e.g. server key reorder) merely degrades to the previous behavior.
+const isSameStatus = (a: RuntimeStatus, b: RuntimeStatus): boolean =>
+  JSON.stringify(a) === JSON.stringify(b);
 
 interface StatusContextType {
   status: RuntimeStatus;
@@ -58,7 +68,9 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       const res = await fetch('/status');
       if (res.ok) {
         const data = await res.json();
-        setStatus(data);
+        // Keep the previous reference on an unchanged poll so StatusProvider
+        // (and thus its consumers) doesn't re-render for identical data.
+        setStatus((prev) => (isSameStatus(prev, data) ? prev : data));
         setHealth(true);
         return data;
       }
@@ -193,9 +205,13 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     };
   }, [refreshStatus]);
 
-  return (
-    <StatusContext.Provider value={{ status, health, refreshStatus, control }}>
-      {children}
-    </StatusContext.Provider>
+  // Stable value identity: refreshStatus/control are already useCallback-stable,
+  // so this only changes when status/health actually change (status itself is
+  // reference-stabilized above), sparing consumers the per-poll churn.
+  const value = useMemo(
+    () => ({ status, health, refreshStatus, control }),
+    [status, health, refreshStatus, control],
   );
+
+  return <StatusContext.Provider value={value}>{children}</StatusContext.Provider>;
 };
