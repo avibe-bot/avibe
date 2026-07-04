@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from importlib import import_module
 from pathlib import Path
@@ -14,6 +15,7 @@ from storage.db import create_sqlite_engine, sqlite_url
 INITIAL_REVISION = "20260501_0001"
 LATEST_SCHEMA_REVISION = "20260622_0023"
 REMOVE_LEGACY_DEFAULT_AGENT_REVISION = "20260530_0008"
+ALLOW_DEV_STATE_MIGRATION_ENV = "AVIBE_ALLOW_DEV_STATE_MIGRATION"
 INITIAL_TABLES = {
     "state_meta",
     "agents",
@@ -23,6 +25,12 @@ INITIAL_TABLES = {
     "agent_sessions",
     "runtime_records",
 }
+
+
+class UnsafeDefaultStateMigrationError(RuntimeError):
+    """Raised when source-checkout code would migrate the user's default state."""
+
+
 HEAD_TABLES = INITIAL_TABLES | {
     "run_definitions",
     "agent_runs",
@@ -113,6 +121,7 @@ def alembic_config(db_path: Path | None = None) -> Config:
 
 def run_migrations(db_path: Path | None = None, *, revision: str = "head") -> None:
     target_db = db_path or paths.get_sqlite_state_path()
+    guard_source_checkout_default_state_migration(target_db)
     cfg = alembic_config(target_db)
     _reset_unreleased_initial_schema_drift(target_db)
     _repair_unreleased_head_schema_drift(target_db)
@@ -131,11 +140,60 @@ def background_tables_ready(db_path: Path | None = None) -> bool:
 
 def initialize_background_tables(db_path: Path | None = None) -> None:
     target_db = db_path or paths.get_sqlite_state_path()
+    guard_source_checkout_default_state_migration(target_db)
     cfg = alembic_config(target_db)
     command.ensure_version(cfg)
     _repair_unreleased_head_schema_drift(target_db)
     _stamp_existing_initial_schema(target_db, cfg)
     command.upgrade(cfg, "head")
+
+
+def guard_source_checkout_default_state_migration(db_path: Path) -> None:
+    if _env_flag_enabled(ALLOW_DEV_STATE_MIGRATION_ENV):
+        return
+    if not _running_from_source_checkout():
+        return
+    if not _is_default_user_state_db(db_path):
+        return
+
+    source_root = Path(__file__).resolve().parents[1]
+    raise UnsafeDefaultStateMigrationError(
+        "Refusing to run SQLite migrations from an Avibe source checkout "
+        f"against the default user state DB at {db_path.expanduser().resolve()}. "
+        f"Source root: {source_root}. "
+        "Set AVIBE_HOME to an isolated development directory before running "
+        "worktree/source CLI commands. If you intentionally need to migrate the "
+        f"default local state from source, set {ALLOW_DEV_STATE_MIGRATION_ENV}=1."
+    )
+
+
+def guard_source_checkout_default_state_bootstrap() -> None:
+    guard_source_checkout_default_state_migration(paths.get_sqlite_state_path())
+
+
+def _running_from_source_checkout() -> bool:
+    source_root = Path(__file__).resolve().parents[1]
+    return (source_root / "pyproject.toml").exists() and (source_root / "storage" / "migrations.py").exists()
+
+
+def _is_default_user_state_db(db_path: Path) -> bool:
+    target = db_path.expanduser().resolve()
+    return target in _default_user_state_db_candidates()
+
+
+def _default_user_state_db_candidates() -> set[Path]:
+    home = Path.home().expanduser().resolve()
+    return {
+        (home / paths.AVIBE_HOME_DIRNAME / "state" / "vibe.sqlite").resolve(),
+        (home / paths.LEGACY_HOME_DIRNAME / "state" / "vibe.sqlite").resolve(),
+    }
+
+
+def _env_flag_enabled(name: str) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _reset_unreleased_initial_schema_drift(db_path: Path) -> None:

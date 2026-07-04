@@ -99,8 +99,10 @@ def _read_recorded_pid() -> int | None:
     try:
         pid = int(pid_path.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
-        return None
-    return pid if pid > 0 else None
+        pid = None
+    if pid and pid > 0:
+        return pid
+    return runtime.resolve_service_owner_pid()
 
 
 def _read_recorded_ui_pid() -> int | None:
@@ -110,6 +112,15 @@ def _read_recorded_ui_pid() -> int | None:
     except (OSError, ValueError):
         return None
     return pid if pid > 0 else None
+
+
+def _remaining_service_pids_after_stop() -> list[int]:
+    owner_pid = runtime.resolve_service_owner_pid(include_starting=True)
+    pids: list[int] = []
+    if owner_pid:
+        pids.append(owner_pid)
+    pids.extend(runtime.extra_service_process_pids(owner_pid=owner_pid))
+    return sorted(set(pids))
 
 
 def _read_starting_service_status() -> dict | None:
@@ -236,6 +247,9 @@ def _run_restart_job(
     # running (a config change shouldn't tear down the open Web UI). "all"
     # (default, e.g. CLI `vibe restart` / upgrades) restarts both.
     restart_ui = scope != "service"
+    from storage.migrations import guard_source_checkout_default_state_bootstrap
+
+    guard_source_checkout_default_state_bootstrap()
     log_path = _restart_log_path(job_id)
     safe_cwd = get_safe_cwd()
     _prune_restart_logs()
@@ -304,8 +318,18 @@ def _run_restart_job(
         mark_duration("stop_runtime_seconds", stop_runtime_started_at)
         if restart_ui and ui_pid and ui_stopped is False and runtime.pid_alive(ui_pid):
             return _fail(payload, f"UI pid {ui_pid} did not stop", log, 2, started_at=restart_started_at)
-        if old_pid and stopped is False and runtime.pid_alive(old_pid):
-            return _fail(payload, f"service pid {old_pid} did not stop", log, 2, started_at=restart_started_at)
+        if stopped is False:
+            remaining_service_pids = _remaining_service_pids_after_stop()
+            if remaining_service_pids:
+                payload["remaining_service_pids"] = remaining_service_pids
+                pid_list = ",".join(str(pid) for pid in remaining_service_pids)
+                return _fail(
+                    payload,
+                    f"service stop failed; remaining service pid(s): {pid_list}",
+                    log,
+                    2,
+                    started_at=restart_started_at,
+                )
 
         wait_lock_release_started_at = time.monotonic()
         if not _wait_for_service_lock_release():
@@ -409,6 +433,9 @@ def schedule_restart(
     scope: str = "all",
     prepare_show_runtime: bool = False,
 ) -> dict:
+    from storage.migrations import guard_source_checkout_default_state_bootstrap
+
+    guard_source_checkout_default_state_bootstrap()
     job_id = uuid.uuid4().hex[:12]
     invocation = get_restart_invocation_command(vibe_path=vibe_path)
     command = [*invocation[:-1], "__restart-supervisor"] if invocation and invocation[-1] == "restart" else [

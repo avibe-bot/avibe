@@ -71,8 +71,7 @@ def test_agent_client_round_trips_pubkey_grant_deliver_and_release(tmp_path):
 
         assert client.pubkey() == {"public_key": "pk", "fingerprint": "fp"}
         assert client.grant(
-            scope_type="secret",
-            scope_ref="API_TOKEN",
+            grant_id="vgr_api",
             ttl_secs=300,
             deks=[
                 {
@@ -83,8 +82,7 @@ def test_agent_client_round_trips_pubkey_grant_deliver_and_release(tmp_path):
             ],
         ) == {"granted": 1, "ttl_secs": 300}
         assert client.deliver_inject(
-            scope_type="secret",
-            scope_ref="API_TOKEN",
+            grant_id="vgr_api",
             path=str(tmp_path / "out.env"),
             fmt="dotenv",
             secrets=[
@@ -95,9 +93,10 @@ def test_agent_client_round_trips_pubkey_grant_deliver_and_release(tmp_path):
                 }
             ],
         ) == {"ok": True}
-        assert client.release(scope_type="secret", scope_ref="API_TOKEN") == {"released": True}
+        assert client.release(grant_id="vgr_api") == {"released": True}
 
-    assert [request["type"] for request in server.requests] == ["pubkey", "grant", "deliver", "release"]
+    assert [request["type"] for request in server.requests] == ["pubkey", "grant", "deliver.inject", "release"]
+    assert server.requests[1]["purpose"] == "deliver"
     assert server.requests[1]["ttl_secs"] == 300
     assert "value" not in json.dumps(server.requests)
 
@@ -109,8 +108,7 @@ def test_agent_client_surfaces_agent_errors(tmp_path):
 
         with pytest.raises(AvaultAgentError, match="grant is missing or expired"):
             client.deliver_run(
-                scope_type="secret",
-                scope_ref="API_TOKEN",
+                grant_id="vgr_api",
                 command=["/bin/true"],
                 secrets=[
                     {
@@ -258,8 +256,7 @@ def test_agent_client_does_not_retry_deliver_after_frame_write_timeout(tmp_path)
     client = AvaultAgentClient(socket_path, timeout=0.05, ensure_agent=_ensure)
     with pytest.raises(AvaultAgentError, match="request failed"):
         client.deliver_fetch(
-            scope_type="secret",
-            scope_ref="API_TOKEN",
+            grant_id="vgr_api",
             name="API_TOKEN",
             envelope={"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
             request={"headers": []},
@@ -267,7 +264,7 @@ def test_agent_client_does_not_retry_deliver_after_frame_write_timeout(tmp_path)
 
     thread.join(1)
     assert len(requests) == 1
-    assert requests[0]["type"] == "deliver"
+    assert requests[0]["type"] == "deliver.fetch"
     assert ensure_calls == 0
 
 

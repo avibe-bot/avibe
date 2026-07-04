@@ -1,5 +1,11 @@
 # Vaults — secret management for agents
 
+> Superseded for current implementation: the group and scope-typed grant model
+> in this older draft has been replaced by
+> `vaults-grant-delivery-refactor.md`. New work should implement the final model
+> there: no product `group`, tags plus `skill:<name>` tags, first-class
+> `grant_id`, and unified avault delivery for mixed standard/protected runs.
+
 Status: **v7 draft — architecture converged; P0 build plan drafted** (no code yet)
 Owner: Alex + agent session `sestvmy6e5c8e`
 Date: 2026-06-16 (v7, after review round 6 — scope-typed grants)
@@ -215,7 +221,10 @@ not promoted.
 fences) → `provision` request. Web: inline **SecureInputCard** (out-of-band TLS
 submit). IM: `🔐 Agent requests OPENAI_API_KEY → [Open Vaults](…?request=id)`.
 `vibe vault request NAME --wait` long-polls; `--no-wait` → `hook_send` on
-fulfillment. **Wake-up carries the name only, never the value.**
+fulfillment. Creation hints use `--spec file|-` or `--spec-json` and may include
+non-secret fields such as `protection`, `group`, `tags`, `policy`, and
+`links.skills`; the request CLI intentionally has no `--skill` flag. **Wake-up
+carries the name only, never the value.**
 
 ## 7. Crypto & auth (Q1: password + passkey, layered)
 
@@ -458,7 +467,7 @@ Internal UDS `/internal/vault/*`: `resolve`, `provision`, `sign`, `fetch`,
 
 CLI `vibe vault …`: create/set is intentionally not exposed to agents; values
 enter through browser-side sealed/blind-box payloads. `list [--skill S] [--group G] [--tag t] [--json]` · `rm` · `run` (promoted) ·
-`fetch` (promoted) · `sign` (promoted) · `request` · `link/unlink --skill S NAME` ·
+`fetch` (promoted) · `sign` (promoted) · `request [--spec file|- | --spec-json json]` · `link/unlink --skill S NAME` ·
 `audit` · `key export/import` · `import 1password [--vault V]` (§13.5) · `export` /
 `inject` (help-only, not promoted). No `vibe vault get`; no command prints a value.
 

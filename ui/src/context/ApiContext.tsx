@@ -18,7 +18,7 @@ export type GlobalPromptFile = {
 
 export type VaultSecret = {
   name: string;
-  group: string;
+  /** Flat tag list; skill association is a reserved `skill:<name>` tag (see lib/vaultTags). */
   tags: string[];
   kind: string;
   protection: string;
@@ -58,19 +58,48 @@ export type VaultRequest = {
   card?: Record<string, unknown> | null;
 };
 
+export type VaultRequestSpec = {
+  kind?: 'static';
+  protection?: 'standard' | 'protected';
+  description?: string;
+  /** May already include `skill:<name>` tags; `links.skills` is a bare-name convenience mirror. */
+  tags?: string[];
+  policy?: {
+    allowed_hosts?: string[];
+    auth?: { type?: 'bearer' | 'header' | 'query'; name?: string };
+  };
+  links?: { skills?: string[] };
+};
+
+/**
+ * How a grant's protected set was selected. Env selectors are explicit secret/env
+ * names (`OPENAI_API_KEY`, `DB_URL=PROD_DB_URL`); tag selectors group by tag, with
+ * skill selectors carried as `skill:<name>` tags.
+ */
+export type VaultSourceSelector = { env?: string[]; tags?: string[] };
+
+/**
+ * A grant is a first-class, time-limited authorization for avault to use a fixed set
+ * of protected secrets (design: docs/plans/vaults-grant-delivery-refactor.md §6). It
+ * is keyed by `id` (the grant_id); `member_snapshot` is the frozen protected set and
+ * `source_selector` records how it was chosen. Tag edits never mutate an active grant.
+ */
 export type VaultGrant = {
   id: string;
-  scope_type: 'secret' | 'skill' | 'group';
-  scope_ref: string;
+  source_selector: VaultSourceSelector;
   session_id: string | null;
+  purpose: string;
   status: string;
-  created_by_request_id: string | null;
+  request_id: string | null;
   created_at: string;
   expires_at: string;
   revoked_at: string | null;
   member_snapshot: string[];
   member_count: number;
   runtime_member_count: number;
+  delivery_ready?: boolean;
+  delivery_status?: string;
+  one_shot?: boolean;
 };
 
 type VaultBlindBox = {
@@ -83,18 +112,14 @@ type VaultBlindBox = {
  * Browser-relayed protected access fulfillment. The browser releases each protected
  * DEK as an opaque HPKE blind box addressed to the resident avault agent and submits
  * ONLY `{name, dek_blindbox, approval}` per secret — never a raw DEK or plaintext.
- * Mirrors the backend contract in PR #711 so the two additions dedupe cleanly on merge.
  */
 export type VaultAccessFulfillmentPayload = {
-  scope_type?: 'secret' | 'skill' | 'group';
-  scope_ref?: string;
+  grant_id?: string;
   session_id?: string | null;
   ttl_seconds?: number;
   this_session_only?: boolean;
   agent_pubkey?: { public_key?: string; fingerprint?: string };
   deks?: Array<{ name: string; dek_blindbox: VaultBlindBox; approval: Record<string, unknown> }>;
-  agent_deks?: Array<{ name: string; dek_blindbox: VaultBlindBox; approval: Record<string, unknown> }>;
-  deks_by_secret?: Record<string, { dek_blindbox: VaultBlindBox; approval: Record<string, unknown> } | VaultBlindBox>;
 };
 
 type VaultSealedEnvelope = {
@@ -115,13 +140,18 @@ export type VaultCreatePayload = {
   blind_box?: VaultBlindBox;
   sealed?: VaultSealedEnvelope;
   envelope?: VaultSealedEnvelope;
-  group?: string;
   description?: string;
+  /** Flat tag list; skill association is folded in as `skill:<name>` tags (see lib/vaultTags). */
   tags?: string[];
   kind?: string;
   signer_kind?: string | null;
   policy?: Record<string, unknown>;
   public_meta?: Record<string, unknown>;
+  /** Bare skill names. Sent alongside the folded `skill:<name>` tags so skill scopes work on
+   *  the pre-refactor backend (which populates vault_links from links.skills); `links.skills`
+   *  is also part of the final request spec (design §5). */
+  links?: { skills?: string[] };
+  provision_request_id?: string;
   /** Set on the first protected secret so the daemon atomically guards single VMK init. */
   establishing_vmk?: boolean;
 };
@@ -330,12 +360,17 @@ export type ApiContextType = {
   updateVibeAgent: (name: string, payload: VibeAgentUpdatePayload) => Promise<{ ok: boolean; agent: VibeAgentFull }>;
   setDefaultVibeAgent: (name: string) => Promise<{ ok: boolean; default_agent_name: string; agent: VibeAgentBrief }>;
   removeVibeAgent: (name: string) => Promise<{ ok: boolean; code?: string; message?: string; references?: Record<string, number>; removed_agent?: string }>;
-  listVaultSecrets: (params?: { group?: string }) => Promise<{ ok: boolean; secrets: VaultSecret[] }>;
+  listVaultSecrets: () => Promise<{ ok: boolean; secrets: VaultSecret[] }>;
   getVaultVmk: () => Promise<VaultVmkResult>;
   getVaultPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   getVaultAgentPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
+  getVaultProvisionRequest: (
+    name: string,
+    opts?: { handleError?: boolean },
+  ) => Promise<{ ok: boolean; request: VaultRequest | null; ambiguous?: boolean }>;
+  getVaultProvisionRequestById: (requestId: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; request: VaultRequest | null }>;
   getVaultRequests: (params?: { status?: string; type?: string; limit?: number }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; requests: VaultRequest[] }>;
   denyVaultRequest: (requestId: string) => Promise<{ ok: boolean; request?: VaultRequest; code?: string; message?: string }>;
   fulfillVaultAccessRequest: (requestId: string, payload: VaultAccessFulfillmentPayload) => Promise<{ ok: boolean; request_id?: string; grant?: VaultGrant; result?: { type: string; grant?: VaultGrant }; code?: string; message?: string }>;
@@ -2039,16 +2074,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setDefaultVibeAgent: (name) => postJson('/api/agents/default', { name }),
     removeVibeAgent: (name) => deleteJson(`/api/agents/${encodeURIComponent(name)}`),
     getVaultVmk: () => getCachedJson('/api/vault/vmk', 1500, { handleError: false }),
-    listVaultSecrets: (params) => {
-      const search = new URLSearchParams();
-      if (params?.group) search.set('group', params.group);
-      const qs = search.toString();
-      return getCachedJson(qs ? `/api/vault/secrets?${qs}` : '/api/vault/secrets', 1500);
-    },
+    listVaultSecrets: () => getCachedJson('/api/vault/secrets', 1500),
     getVaultPubkey: () => getCachedJson('/api/vault/pubkey', 1500),
     getVaultAgentPubkey: () => getCachedJson('/api/vault/agent/pubkey', 1500),
     createVaultSecret: (payload, opts) => postJson('/api/vault/secrets', payload, opts),
     deleteVaultSecret: (name) => deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}`),
+    getVaultProvisionRequest: (name, opts) =>
+      getCachedJson(`/api/vault/provision-requests/${encodeURIComponent(name)}`, 1500, opts),
+    getVaultProvisionRequestById: (requestId, opts) =>
+      getCachedJson(`/api/vault/provision-requests/by-id/${encodeURIComponent(requestId)}`, 1500, opts),
     getVaultRequests: (params, opts) => {
       const search = new URLSearchParams();
       if (params?.status) search.set('status', params.status);

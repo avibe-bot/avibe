@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from config import paths as config_paths
+
 logger = logging.getLogger(__name__)
 
 CGROUP_ROOT = Path("/sys/fs/cgroup")
@@ -21,6 +23,10 @@ MIN_AGENT_MEMORY_MAX_BYTES = 512 * 1024 * 1024
 MIB = 1024 * 1024
 AGENT_CONTROLLERS = ("memory", "cpu", "io", "pids")
 CONTROLLER_GOVERNOR_ATTR = "_avibe_controller_owned_resource_governor"
+AVIBE_RUNTIME_CWD_CMD_MARKERS = (
+    "incus_regression_supervisor.py",
+    "from vibe.ui_server import run_ui_server",
+)
 
 
 @dataclass(frozen=True)
@@ -48,6 +54,16 @@ def _parse_memory_value(value: str | None) -> int | None:
     except ValueError:
         return None
     return parsed if parsed > 0 else None
+
+
+def _parse_pid(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        pid = int(value.strip())
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
 
 
 def _round_down_mib(value: int) -> int:
@@ -200,6 +216,111 @@ def _cgroup_member_pids(cgroup: Path) -> list[int]:
 def _runtime_process_tree_pids(pid: int | None = None) -> set[int]:
     root_pid = pid or os.getpid()
     return {root_pid, *_descendant_pids(root_pid)}
+
+
+def _pid_cmdline(pid: int) -> str | None:
+    try:
+        data = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    return data.replace(b"\0", b" ").decode(errors="replace").strip()
+
+
+def _first_cmd_arg(cmdline: str) -> str:
+    parts = cmdline.split(maxsplit=1)
+    return parts[0] if parts else ""
+
+
+def _is_cloudflared_cmd(cmdline: str) -> bool:
+    executable = Path(_first_cmd_arg(cmdline)).name.lower()
+    return executable in {"cloudflared", "cloudflared.exe"}
+
+
+def _pid_uid(pid: int) -> int | None:
+    status = _read_text(Path(f"/proc/{pid}/status"))
+    if not status:
+        return None
+    for line in status.splitlines():
+        if not line.startswith("Uid:"):
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            return None
+        try:
+            return int(parts[1])
+        except ValueError:
+            return None
+    return None
+
+
+def _pid_cwd(pid: int) -> Path | None:
+    try:
+        return Path(f"/proc/{pid}/cwd").resolve()
+    except OSError:
+        return None
+
+
+def _current_runtime_cwd() -> Path | None:
+    try:
+        return Path.cwd().resolve()
+    except OSError:
+        return None
+
+
+def _path_variants(path: Path) -> set[str]:
+    variants = {str(path)}
+    try:
+        variants.add(str(path.resolve()))
+    except OSError:
+        pass
+    return variants
+
+
+def _is_under_runtime_dir(cmdline: str) -> bool:
+    for runtime_dir in _path_variants(config_paths.get_runtime_dir()):
+        if f"{runtime_dir}/" in cmdline:
+            return True
+    return False
+
+
+def _is_managed_cloudflared(pid: int, cmdline: str) -> bool:
+    if not _is_cloudflared_cmd(cmdline):
+        return False
+    expected_pid = _parse_pid(_read_text(config_paths.get_runtime_remote_access_pid_path()))
+    if expected_pid == pid:
+        return True
+    for home_dir in _path_variants(config_paths.get_vibe_remote_dir()):
+        managed_binary = f"{home_dir}/bin/{_first_cmd_arg(cmdline).split('/')[-1]}"
+        if cmdline == managed_binary or cmdline.startswith(f"{managed_binary} "):
+            return True
+    return False
+
+
+def _is_known_avibe_runtime_member(pid: int, *, uid: int | None = None) -> bool:
+    expected_uid = os.geteuid() if uid is None else uid
+    pid_uid = _pid_uid(pid)
+    if pid_uid != expected_uid:
+        return False
+    cmdline = _pid_cmdline(pid)
+    if not cmdline:
+        return False
+    if _is_under_runtime_dir(cmdline):
+        return True
+    if _is_managed_cloudflared(pid, cmdline):
+        return True
+
+    runtime_cwd = _current_runtime_cwd()
+    pid_cwd = _pid_cwd(pid)
+    if runtime_cwd is None or pid_cwd != runtime_cwd:
+        return False
+    if f"{runtime_cwd}/main.py" in cmdline:
+        return True
+    return any(marker in cmdline for marker in AVIBE_RUNTIME_CWD_CMD_MARKERS)
+
+
+def _known_avibe_runtime_sibling_pids(pids: list[int]) -> set[int]:
+    current_uid = os.geteuid()
+    return {pid for pid in pids if _is_known_avibe_runtime_member(pid, uid=current_uid)}
 
 
 def _descendant_pids(pid: int) -> list[int]:
@@ -403,7 +524,8 @@ class AgentResourceGovernor:
             if not pids:
                 return
             runtime_pids = _runtime_process_tree_pids()
-            managed_pids = runtime_pids | known_agent_pids
+            runtime_sibling_pids = _known_avibe_runtime_sibling_pids(pids)
+            managed_pids = runtime_pids | runtime_sibling_pids | known_agent_pids
             foreign_pids = [pid for pid in pids if pid not in managed_pids]
             if foreign_pids:
                 raise OSError(f"runtime cgroup has non-Avibe member pids: {base}")

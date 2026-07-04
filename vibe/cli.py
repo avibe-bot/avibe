@@ -53,6 +53,7 @@ from vibe import __version__, api, runtime
 from vibe.restart_supervisor import schedule_restart
 from vibe.screenshot import ScreenshotError, capture_screenshot
 from vibe.upgrade import (
+    CURRENT_VIBE_EXECUTABLE_ENV,
     LEGACY_PACKAGE_NAME,
     PACKAGE_NAME,
     build_upgrade_plan,
@@ -72,6 +73,20 @@ logger = logging.getLogger(__name__)
 UV_TOOL_PACKAGE_NAMES = (PACKAGE_NAME, LEGACY_PACKAGE_NAME)
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 _FALSY_ENV_VALUES = {"0", "false", "no", "off"}
+DOCTOR_RESTART_RESULT_RETENTION_SECONDS = 10 * 60
+DOCTOR_RESTART_SEED_GRACE_SECONDS = 60.0
+DOCTOR_REPAIR_TARGETS = (
+    "home-migration",
+    "stale-install-runtime",
+    "duplicate-service-processes",
+    "stale-restart-state",
+)
+DOCTOR_REPAIR_DRY_RUN_MESSAGES = {
+    "home-migration": "Would migrate ~/.vibe_remote to ~/.avibe when safe, or recreate the legacy compatibility symlink.",
+    "stale-install-runtime": "Would stop a running legacy vibe-remote service and start the current Avibe service.",
+    "duplicate-service-processes": "Would stop extra Avibe service processes outside the service lock.",
+    "stale-restart-state": "Would remove stale restart metadata and refresh runtime status.",
+}
 
 WATCH_STARTUP_STABLE_RUNNING_SECONDS = 1.5
 WATCH_STARTUP_JITTER_BUFFER_SECONDS = 1.0
@@ -446,6 +461,306 @@ def _runtime_architecture_items() -> list[dict[str, str]]:
             "message": f"Host architecture: {host_arch}",
         }
     )
+    return items
+
+
+def _safe_resolve(path: Path) -> Path | None:
+    try:
+        return path.expanduser().resolve()
+    except OSError:
+        return None
+
+
+def _path_points_to(path: Path, target: Path) -> bool:
+    resolved_path = _safe_resolve(path)
+    resolved_target = _safe_resolve(target)
+    return resolved_path is not None and resolved_target is not None and resolved_path == resolved_target
+
+
+def _home_migration_items() -> list[dict]:
+    items: list[dict] = []
+    explicit_home = os.environ.get(paths.AVIBE_HOME_ENV)
+    if explicit_home:
+        _add_doctor_item(
+            items,
+            "pass",
+            f"AVIBE_HOME is set explicitly: {Path(explicit_home).expanduser()}",
+            code="runtime.explicit_home",
+        )
+        return items
+
+    avibe_home = Path.home() / paths.AVIBE_HOME_DIRNAME
+    legacy_home = Path.home() / paths.LEGACY_HOME_DIRNAME
+    avibe_present = avibe_home.exists() or avibe_home.is_symlink()
+    legacy_present = legacy_home.exists() or legacy_home.is_symlink()
+
+    if not avibe_present and not legacy_present:
+        _add_doctor_item(
+            items,
+            "pass",
+            f"Default runtime home is ready to initialize at {avibe_home}",
+            code="runtime.home_ready",
+        )
+        return items
+
+    if avibe_present:
+        if legacy_home.is_symlink() and _path_points_to(legacy_home, avibe_home):
+            _add_doctor_item(
+                items,
+                "pass",
+                f"Legacy home compatibility symlink is healthy: {legacy_home} -> {avibe_home}",
+                code="runtime.legacy_home_link_ok",
+            )
+        elif not legacy_present:
+            _add_doctor_item(
+                items,
+                "warn",
+                f"Legacy home compatibility path is missing: {legacy_home}",
+                "Run `vibe doctor repair home-migration` to create the compatibility symlink.",
+                code="runtime.legacy_home_link_missing",
+                repair_target="home-migration",
+                repair_risk="low",
+            )
+        elif legacy_home.is_symlink():
+            _add_doctor_item(
+                items,
+                "warn",
+                f"Legacy home symlink does not point to the active home: {legacy_home}",
+                "Run `vibe doctor repair home-migration` to recreate the compatibility symlink.",
+                code="runtime.legacy_home_link_wrong",
+                repair_target="home-migration",
+                repair_risk="low",
+            )
+        else:
+            _add_doctor_item(
+                items,
+                "fail",
+                f"Both {avibe_home} and {legacy_home} are real directories",
+                "Back up and merge the two homes manually before running repair.",
+                code="runtime.home_conflict",
+            )
+        return items
+
+    if legacy_home.is_symlink():
+        _add_doctor_item(
+            items,
+            "warn",
+            f"Legacy home symlink exists but canonical {avibe_home} is missing",
+            "Inspect the symlink target before repair; Avibe will not guess which state to keep.",
+            code="runtime.legacy_home_symlink_without_canonical",
+        )
+        return items
+
+    _add_doctor_item(
+        items,
+        "warn",
+        f"Runtime home still uses the legacy path: {legacy_home}",
+        "Run `vibe doctor repair home-migration` to move it to ~/.avibe and keep a back-symlink.",
+        code="runtime.legacy_home_unmigrated",
+        repair_target="home-migration",
+        repair_risk="low",
+    )
+    return items
+
+
+def _tool_family_from_text(text: str | None) -> str | None:
+    candidates = [text] if text else []
+    try:
+        candidates.extend(shlex.split(text or "", posix=(os.name != "nt")))
+    except ValueError:
+        pass
+
+    for candidate in candidates:
+        normalized = (candidate or "").replace("\\", "/").lower()
+        for package_name in (PACKAGE_NAME, LEGACY_PACKAGE_NAME):
+            if f"/tools/{package_name}/" in normalized:
+                return package_name
+        if not candidate or not any(separator in candidate for separator in ("/", "\\")):
+            continue
+        resolved = _safe_resolve(Path(candidate))
+        normalized_resolved = str(resolved or "").replace("\\", "/").lower()
+        for package_name in (PACKAGE_NAME, LEGACY_PACKAGE_NAME):
+            if f"/tools/{package_name}/" in normalized_resolved:
+                return package_name
+    return None
+
+
+def _current_cli_install_family() -> str | None:
+    candidates = [
+        sys.executable,
+        os.environ.get(CURRENT_VIBE_EXECUTABLE_ENV),
+        *(str(path) for path in _path_entries_for_executable("vibe")[:1]),
+    ]
+    for candidate in candidates:
+        family = _tool_family_from_text(candidate)
+        if family:
+            return family
+    return None
+
+
+def _service_install_family_items() -> list[dict]:
+    items: list[dict] = []
+    current_family = _current_cli_install_family()
+    owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
+    service_pids = [pid for pid in [owner_pid] if pid]
+    service_pids.extend(runtime.extra_service_process_pids(owner_pid=owner_pid))
+
+    stale_pids: list[int] = []
+    for pid in sorted(set(service_pids)):
+        command = runtime.get_process_command(pid)
+        service_family = _tool_family_from_text(command)
+        if current_family == PACKAGE_NAME and service_family == LEGACY_PACKAGE_NAME:
+            stale_pids.append(pid)
+
+    if stale_pids:
+        _add_doctor_item(
+            items,
+            "warn",
+            "Running service process still comes from the legacy vibe-remote installation: "
+            f"pids={','.join(map(str, stale_pids))}",
+            "Run `vibe doctor repair stale-install-runtime` to stop the stale service and start the current Avibe install.",
+            code="runtime.stale_install_process",
+            repair_target="stale-install-runtime",
+            repair_risk="medium",
+        )
+    elif owner_pid and current_family:
+        _add_doctor_item(items, "pass", f"No legacy install mismatch detected for running service: pid={owner_pid}")
+    elif owner_pid:
+        _add_doctor_item(items, "pass", f"Current CLI install family is not a uv tool install; skipped install mismatch check: pid={owner_pid}")
+    else:
+        _add_doctor_item(items, "pass", "No running service install mismatch detected")
+    return items
+
+
+def _restart_status_is_stale(payload: dict, path: Path) -> bool:
+    state = payload.get("state")
+    if state in {"scheduled", "running"}:
+        supervisor_pid = payload.get("supervisor_pid")
+        if isinstance(supervisor_pid, int) and runtime.pid_alive(supervisor_pid):
+            started_at = payload.get("supervisor_started_at")
+            if started_at is not None:
+                current_started_at = runtime.process_create_time(supervisor_pid)
+                return current_started_at is not None and current_started_at != started_at
+        try:
+            age = time.time() - path.stat().st_mtime
+        except OSError:
+            return False
+        return age > DOCTOR_RESTART_SEED_GRACE_SECONDS
+
+    if state in {"succeeded", "failed", "error", "cancelled"}:
+        try:
+            age = time.time() - path.stat().st_mtime
+        except OSError:
+            return False
+        return age > DOCTOR_RESTART_RESULT_RETENTION_SECONDS
+    return False
+
+
+def _restart_state_items() -> list[dict]:
+    items: list[dict] = []
+    restart_path = runtime.get_restart_status_path()
+    payload = runtime.read_json(restart_path) or {}
+    if not payload:
+        _add_doctor_item(items, "pass", "No restart metadata is present", code="runtime.restart_state_absent")
+        return items
+
+    if _restart_status_is_stale(payload, restart_path):
+        state = payload.get("state") or "unknown"
+        _add_doctor_item(
+            items,
+            "warn",
+            f"Stale restart metadata is present: state={state}",
+            "Run `vibe doctor repair stale-restart-state` to clear the stale restart marker and refresh status.",
+            code="runtime.stale_restart_state",
+            repair_target="stale-restart-state",
+            repair_risk="low",
+        )
+    else:
+        state = payload.get("state") or "unknown"
+        _add_doctor_item(items, "pass", f"Restart metadata is current: state={state}")
+    return items
+
+
+def _service_lifecycle_items() -> list[dict]:
+    items: list[dict] = []
+    pid_path = paths.get_runtime_pid_path()
+    recorded_pid: int | None = None
+    try:
+        recorded_pid = int(pid_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        recorded_pid = None
+
+    owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
+    lock_holder_pid = runtime.service_lock_holder_pid()
+    extra_service_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
+    unverified_service_pids = runtime.extra_service_process_pids(
+        owner_pid=owner_pid,
+        include_unverified=True,
+    )
+    unverified_service_pids = [pid for pid in unverified_service_pids if pid not in set(extra_service_pids)]
+    status = runtime.read_status()
+    status_pid = status.get("service_pid")
+
+    if owner_pid:
+        _add_doctor_item(items, "pass", f"Service lock owner: pid={owner_pid}", code="runtime.service_lock_owner")
+    elif lock_holder_pid:
+        _add_doctor_item(
+            items,
+            "warn",
+            f"Service lock is held by pid={lock_holder_pid}, but the owner could not be verified",
+            "Run `vibe status` and inspect service logs before starting another service.",
+            code="runtime.unverified_service_lock",
+        )
+    else:
+        _add_doctor_item(items, "pass", "Service lock is free", code="runtime.service_lock_free")
+
+    if owner_pid and recorded_pid != owner_pid:
+        _add_doctor_item(
+            items,
+            "warn",
+            f"Service pid file does not match the lock owner: pidfile={recorded_pid or 'missing'} lock_owner={owner_pid}",
+            "Run `vibe restart` once the current work is idle so Avibe can rewrite runtime ownership files.",
+            code="runtime.service_pidfile_mismatch",
+        )
+    elif recorded_pid:
+        _add_doctor_item(items, "pass", f"Service pid file points to pid={recorded_pid}")
+    else:
+        _add_doctor_item(items, "pass", "Service pid file is absent")
+
+    if owner_pid and status_pid != owner_pid:
+        _add_doctor_item(
+            items,
+            "warn",
+            f"Runtime status service_pid does not match the lock owner: status={status_pid or 'missing'} lock_owner={owner_pid}",
+            "Refresh status; if it remains stale, restart Avibe when safe.",
+            code="runtime.status_pid_mismatch",
+        )
+    elif status_pid:
+        _add_doctor_item(items, "pass", f"Runtime status service_pid: {status_pid}")
+    else:
+        _add_doctor_item(items, "pass", "Runtime status service_pid is absent")
+
+    if extra_service_pids:
+        _add_doctor_item(
+            items,
+            "warn",
+            f"Extra Avibe service process detected outside the service lock: pids={','.join(map(str, extra_service_pids))}",
+            "Run `vibe doctor repair duplicate-service-processes` to stop extra service processes.",
+            code="runtime.extra_service_process",
+            repair_target="duplicate-service-processes",
+            repair_risk="medium",
+        )
+    elif unverified_service_pids:
+        _add_doctor_item(
+            items,
+            "warn",
+            f"Possible extra Avibe service process could not be matched to AVIBE_HOME: pids={','.join(map(str, unverified_service_pids))}",
+            "Inspect the process environment before starting another service.",
+            code="runtime.unverified_service_process",
+        )
+    else:
+        _add_doctor_item(items, "pass", "No extra Avibe service process detected")
+
     return items
 
 
@@ -1168,6 +1483,12 @@ def _ensure_cli_sqlite_state() -> None:
     from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
 
     ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
+
+
+def _guard_cli_default_state_migration() -> None:
+    from storage.migrations import guard_source_checkout_default_state_bootstrap
+
+    guard_source_checkout_default_state_bootstrap()
 
 
 def _primary_platform() -> str:
@@ -3931,13 +4252,158 @@ def cmd_runs_show(args):
     return 0
 
 
+def _run_type(run: dict | None) -> str:
+    if not isinstance(run, dict):
+        return ""
+    return str(run.get("run_type") or run.get("request_type") or "").strip()
+
+
+def _run_session_id(run: dict | None) -> str:
+    if not isinstance(run, dict):
+        return ""
+    return str(run.get("session_id") or "").strip()
+
+
+def _should_attempt_live_run_cancel(run: dict | None) -> bool:
+    if not isinstance(run, dict):
+        return False
+    return (
+        _run_type(run) == "agent_run"
+        and normalize_run_status(run.get("status")) == "running"
+        and bool(_run_session_id(run))
+    )
+
+
+def _recorded_only_cancel_result(*, reason_code: str, detail: object | None = None) -> dict:
+    result = {
+        "code": "cancel_request_recorded_only",
+        "live_cancel_attempted": reason_code not in {"not_running_agent_run", "missing_session_id"},
+        "live_cancel_confirmed": False,
+        "reason_code": reason_code,
+        "message": "Cancel request was recorded, but no live backend turn was stopped.",
+    }
+    if detail is not None:
+        result["detail"] = detail
+    return result
+
+
+def _initial_cancel_result(run: dict | None) -> dict:
+    if not isinstance(run, dict):
+        return _recorded_only_cancel_result(reason_code="run_not_found")
+    status = normalize_run_status(run.get("status"))
+    if status == "queued":
+        return {
+            "code": "queued_canceled",
+            "live_cancel_attempted": False,
+            "live_cancel_confirmed": False,
+            "message": "Queued run was canceled before it started.",
+        }
+    if _run_type(run) != "agent_run" or status != "running":
+        return _recorded_only_cancel_result(reason_code="not_running_agent_run")
+    if not _run_session_id(run):
+        return _recorded_only_cancel_result(reason_code="missing_session_id")
+    return {
+        "code": "cancel_request_recorded",
+        "live_cancel_attempted": False,
+        "live_cancel_confirmed": False,
+        "message": "Cancel request was recorded.",
+    }
+
+
+def _live_cancel_failure_code(status_code: int | None, body: object) -> str:
+    body_code = ""
+    body_status = ""
+    if isinstance(body, dict):
+        body_code = str(body.get("code") or "").strip()
+        body_status = str(body.get("status") or "").strip()
+    if body_code == "not_in_flight" or status_code == 404:
+        return "not_in_flight"
+    if body_code == "stop_failed" or status_code == 409:
+        return "stop_failed"
+    if body_status:
+        return body_status
+    if status_code is None:
+        return body_code or "live_cancel_failed"
+    if status_code >= 500:
+        return body_code or "internal_error"
+    return body_code or "live_cancel_not_confirmed"
+
+
+def _live_cancel_was_confirmed(status_code: int | None, body: object) -> bool:
+    if status_code is None or status_code < 200 or status_code >= 300:
+        return False
+    if isinstance(body, dict) and body.get("ok") is False:
+        return False
+    if not isinstance(body, dict):
+        return False
+    return str(body.get("status") or "").strip() in {"cancel_requested", "stale_released"}
+
+
+async def _request_live_run_cancel(session_id: str) -> dict:
+    from vibe import internal_client
+
+    return await internal_client.cancel_dispatch(session_id)
+
+
+def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
+    session_id = _run_session_id(run)
+    from vibe import internal_client
+
+    try:
+        controller_result = asyncio.run(_request_live_run_cancel(session_id))
+    except internal_client.InternalServerUnavailable as exc:
+        return _recorded_only_cancel_result(reason_code="internal_unavailable", detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _recorded_only_cancel_result(reason_code="live_cancel_failed", detail=str(exc))
+
+    status_code = controller_result.get("status_code")
+    try:
+        normalized_status_code = int(status_code) if status_code is not None else None
+    except (TypeError, ValueError):
+        normalized_status_code = None
+    body = controller_result.get("body") or {}
+    if not _live_cancel_was_confirmed(normalized_status_code, body):
+        return _recorded_only_cancel_result(
+            reason_code=_live_cancel_failure_code(normalized_status_code, body),
+            detail={
+                "controller_status_code": normalized_status_code,
+                "controller_response": body,
+            },
+        )
+
+    run_terminalized = store.mark_run_canceled(str(run.get("id") or ""))
+    return {
+        "code": "live_cancel_confirmed",
+        "live_cancel_attempted": True,
+        "live_cancel_confirmed": True,
+        "run_terminalized": run_terminalized,
+        "controller_status_code": normalized_status_code,
+        "controller_response": body,
+        "message": "Live backend turn was stopped and the run was marked canceled.",
+    }
+
+
 def cmd_runs_cancel(args):
-    canceled = _task_request_store().cancel_run(args.run_id)
+    store = _task_request_store()
+    existing = store.get_run(args.run_id)
+    if existing is None:
+        _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
+        return 1
+    canceled = store.cancel_run(args.run_id)
     if not canceled:
         _print_task_error(TaskCliError(f"run '{args.run_id}' not found", code="run_not_found", details={"run_id": args.run_id}))
         return 1
-    run = _task_request_store().get_run(args.run_id)
-    _print_cli_payload("agent_run", cancel_requested=True, run=_run_payload(run or {"id": args.run_id}))
+    cancel_result = _initial_cancel_result(existing)
+    if _should_attempt_live_run_cancel(existing):
+        cancel_result = _cancel_live_agent_run(store, existing)
+    run = store.get_run(args.run_id)
+    _print_cli_payload(
+        "agent_run",
+        cancel_requested=True,
+        cancel_code=cancel_result["code"],
+        cancel_result=cancel_result,
+        run=_run_payload(run or {"id": args.run_id}),
+    )
     return 0
 
 
@@ -4219,13 +4685,15 @@ def _is_env_name(name: str) -> bool:
     return all(c.isascii() and (c.isalnum() or c == "_") for c in name)
 
 
-def _parse_env_specs(specs) -> dict:
+def _parse_env_specs_parts(specs) -> tuple[dict[str, str], list[str]]:
     """Map ENV var name -> vault secret name from ``--env`` specs.
 
     Accepts ``NAME`` (inject as the same name), ``LOCAL=NAME`` (rename), and
     comma-separated ``A,B`` within one flag.
     """
     mapping: dict[str, str] = {}
+    env_by_secret: dict[str, str] = {}
+    normalized: list[str] = []
     for spec in specs or []:
         for part in str(spec).split(","):
             part = part.strip()
@@ -4243,8 +4711,135 @@ def _parse_env_specs(specs) -> dict:
             # break the shell or smuggle in extra commands.
             if not _is_env_name(local):
                 raise TaskCliError(f"invalid env var name: {local!r} (use [A-Za-z_][A-Za-z0-9_]*)", code="invalid_env_name", help_command="vibe vault run --help")
+            existing = mapping.get(local)
+            if existing is not None and existing != vault_name:
+                raise TaskCliError(
+                    f"env var {local!r} maps to both {existing!r} and {vault_name!r}",
+                    code="conflicting_env_alias",
+                    help_command="vibe vault run --help",
+                )
+            existing_env = env_by_secret.get(vault_name)
+            if existing_env is not None and existing_env != local:
+                raise TaskCliError(
+                    f"secret '{vault_name}' was selected as both {existing_env!r} and {local!r}",
+                    code="conflicting_env_alias",
+                    hint="Use one --env alias for each selected secret.",
+                    help_command="vibe vault run --help",
+                )
+            if existing == vault_name:
+                continue
             mapping[local] = vault_name
-    return mapping
+            env_by_secret[vault_name] = local
+            normalized.append(vault_name if local == vault_name else f"{local}={vault_name}")
+    return mapping, normalized
+
+
+def _parse_env_specs(specs) -> dict:
+    return _parse_env_specs_parts(specs)[0]
+
+
+def _arg_list(args, name: str) -> list[str]:
+    value = getattr(args, name, None)
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def _add_vault_run_selection(
+    selections: dict[str, str],
+    *,
+    vault_name: str,
+    env_name: str,
+) -> None:
+    if not vault_name or not env_name:
+        raise TaskCliError("vault run selector produced an empty secret or env name", code="invalid_selector")
+    existing_secret = selections.get(env_name)
+    if existing_secret is not None:
+        if existing_secret != vault_name:
+            raise TaskCliError(
+                f"env var {env_name!r} is selected for both {existing_secret!r} and {vault_name!r}",
+                code="conflicting_env_alias",
+                help_command="vibe vault run --help",
+            )
+        return
+    existing_env = next((selected_env for selected_env, selected_secret in selections.items() if selected_secret == vault_name), None)
+    if existing_env is not None and existing_env != env_name:
+        raise TaskCliError(
+            f"secret '{vault_name}' was selected as both {existing_env!r} and {env_name!r}",
+            code="conflicting_env_alias",
+            hint="Use one --env alias for each selected secret.",
+            help_command="vibe vault run --help",
+        )
+    selections[env_name] = vault_name
+
+
+def _resolve_vault_run_selectors(engine, args) -> tuple[dict[str, str], dict]:
+    """Expand --env/--tag/--skill to a fixed env-name -> vault-name plan."""
+
+    from storage import vault_service
+
+    env_specs = list(getattr(args, "env", None) or [])
+    explicit_mapping, normalized_env_specs = _parse_env_specs_parts(env_specs)
+    tag_specs = _arg_list(args, "tag")
+    skill_specs = _arg_list(args, "skill")
+    selector_requested = bool(normalized_env_specs or tag_specs or skill_specs)
+    selections: dict[str, str] = {}
+    for env_name, vault_name in explicit_mapping.items():
+        _add_vault_run_selection(selections, vault_name=vault_name, env_name=env_name)
+
+    source_selector: dict = {"env": normalized_env_specs}
+    if tag_specs or skill_specs:
+        with engine.connect() as conn:
+            expanded = vault_service.expand_value_delivery_selector(conn, tags=tag_specs, skills=skill_specs)
+        source_selector["tags"] = list(expanded["source_selector"].get("tags") or [])
+        for item in expanded.get("secrets") or []:
+            _add_vault_run_selection(
+                selections,
+                vault_name=str(item.get("name") or ""),
+                env_name=str(item.get("env") or ""),
+            )
+    else:
+        source_selector["tags"] = []
+
+    if not selections and selector_requested:
+        raise TaskCliError(
+            "vault run selector matched no value-deliverable secrets",
+            code="no_matching_secrets",
+            hint="Check the --env, --tag, or --skill selector, or ask the user to store/link the secret first.",
+            help_command="vibe vault run --help",
+        )
+    if not selections:
+        raise TaskCliError(
+            "at least one --env NAME, --tag TAG, or --skill SKILL is required",
+            code="missing_selector",
+            help_command="vibe vault run --help",
+        )
+    return selections, source_selector
+
+
+def _source_selector_tags(source_selector: dict | None) -> list[str]:
+    if not isinstance(source_selector, dict):
+        return []
+    tags = source_selector.get("tags")
+    if not isinstance(tags, list):
+        return []
+    return [str(tag) for tag in tags if isinstance(tag, str) and tag]
+
+
+def _needs_protected_selector_set(protected_names: list[str], source_selector: dict | None) -> bool:
+    return bool(protected_names) and (len(protected_names) > 1 or bool(_source_selector_tags(source_selector)))
+
+
+def _always_ask_names(metas: dict[str, dict], names: list[str]) -> list[str]:
+    selected: list[str] = []
+    for name in names:
+        policy = metas.get(name, {}).get("policy")
+        if isinstance(policy, dict) and policy.get("always_ask"):
+            selected.append(name)
+    return selected
 
 
 def cmd_vault_list(args):
@@ -4253,7 +4848,7 @@ def cmd_vault_list(args):
     try:
         engine = _open_vault_engine()
         with engine.connect() as conn:
-            secrets = vault_service.list_secrets(conn, group=getattr(args, "group", None))
+            secrets = vault_service.list_secrets(conn, tag=getattr(args, "tag", None))
         _print_cli_payload("vault_secrets", secrets=secrets)
         return 0
     except Exception as exc:
@@ -4267,7 +4862,7 @@ def cmd_vault_discover(args):
     try:
         engine = _open_vault_engine()
         with engine.connect() as conn:
-            secrets = vault_service.list_secrets(conn, group=getattr(args, "group", None))
+            secrets = vault_service.list_secrets(conn, tag=getattr(args, "tag", None))
         kind = (getattr(args, "kind", None) or "").strip()
         if kind:
             secrets = [secret for secret in secrets if secret.get("kind") == kind]
@@ -4359,6 +4954,7 @@ def _expire_agent_grant_after_missing(
     *,
     requester: dict | None = None,
     delivery: dict | None = None,
+    purpose: str = "run",
 ) -> dict | None:
     from storage import vault_service
 
@@ -4366,12 +4962,26 @@ def _expire_agent_grant_after_missing(
     try:
         with engine.begin() as conn:
             vault_service.expire_grant(conn, grant_id, reason="grant-expired-agent-cache-missing")
+            delivery_payload = dict(delivery or {})
+            source_selector = delivery_payload.get("source_selector")
+            if isinstance(source_selector, dict):
+                try:
+                    return vault_service.create_access_request(
+                        conn,
+                        source_selector=source_selector,
+                        requester=requester or {"source": "cli", "pid": os.getpid()},
+                        delivery=delivery_payload,
+                        purpose=purpose,
+                    )
+                except vault_service.NotGrantableError:
+                    pass
             for name in names:
                 resolved = vault_service.resolve_secret_access(
                     conn,
                     name,
                     requester=requester or {"source": "cli", "pid": os.getpid()},
                     delivery=delivery or {},
+                    purpose=purpose,
                 )
                 if first_request is None and isinstance(resolved.get("request"), dict):
                     first_request = resolved["request"]
@@ -4410,11 +5020,17 @@ def _preflight_vault_names(engine, names: list[str], *, mixed_message: str, mixe
 
 
 def _preflight_vault_run_batch(engine, mapping: dict[str, str]) -> dict[str, dict]:
-    return _preflight_vault_names(
-        engine,
-        list(mapping.values()),
-        mixed_message="mixing protected and standard secrets in one vault run is not wired yet",
-    )
+    from storage import vault_service
+
+    metas: dict[str, dict] = {}
+    with engine.connect() as conn:
+        for name in dict.fromkeys(mapping.values()):
+            metas[name] = vault_service.get_secret_meta(conn, name)
+            if metas[name].get("kind") == "keypair":
+                raise vault_service.KeypairNotValueDeliverableError(
+                    f"{name} is a signing key; use vibe vault sign instead of value delivery"
+                )
+    return metas
 
 
 def _preflight_vault_inject_batch(engine, names: list[str]) -> dict[str, dict]:
@@ -4790,38 +5406,153 @@ def _finish_one_shot_after_avault_error(
         _consume_after_possible_use(grants, reason=reason)
 
 
-def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: list[str], *, args=None):
+def _resolve_vault_run_delivery(
+    engine,
+    mapping: dict[str, str],
+    command_argv: list[str],
+    *,
+    args=None,
+    source_selector: dict | None = None,
+):
     from storage import vault_service
 
     requester, delivery, session_id = _vault_cli_delivery_context(args, mode="run", command=command_argv)
+    if source_selector:
+        delivery["source_selector"] = source_selector
     metas = _preflight_vault_run_batch(engine, mapping)
-    if metas and {str(meta.get("protection") or "standard") for meta in metas.values()} == {"protected"}:
+    protected_names = [
+        name
+        for name in dict.fromkeys(mapping.values())
+        if str(metas[name].get("protection") or "standard") == "protected"
+    ]
+    standard_approval_error: TaskCliError | None = None
+    if metas and not protected_names:
         with engine.begin() as conn:
+            standard_names = list(dict.fromkeys(mapping.values()))
+            approval_names = _always_ask_names(metas, standard_names)
             common_grant = vault_service.find_active_grant_for_secrets(
                 conn,
-                list(mapping.values()),
+                approval_names or standard_names,
                 session_id=session_id,
+                purpose="run",
                 reserve_one_shot=True,
             )
-            if common_grant is not None:
-                return common_grant, [common_grant] if common_grant.get("one_shot") is True else [], [
-                    {"name": vault_name, "env": env_name, "envelope": vault_service.get_protected_envelope(conn, vault_name)}
+            if isinstance(common_grant, dict) and common_grant.get("one_shot") is True:
+                return None, [common_grant], [
+                    {"name": vault_name, "env": env_name, "envelope": vault_service.get_envelope(conn, vault_name)}
                     for env_name, vault_name in mapping.items()
                 ]
+            if approval_names and _source_selector_tags(source_selector):
+                req = vault_service.create_access_request(
+                    conn,
+                    None,
+                    source_selector=source_selector,
+                    requester=requester,
+                    delivery=delivery,
+                    purpose="run",
+                )
+                standard_approval_error = TaskCliError(
+                    "standard always_ask secrets need approval before vault run delivery",
+                    code="approval_required",
+                    details={"request_id": req.get("id"), "secret_names": approval_names},
+                )
+        if standard_approval_error is not None:
+            raise standard_approval_error
     secrets = []
     grant: dict | None = None
     one_shot_grants: list[dict] = []
     approval_error: TaskCliError | None = None
-    pre_delivery_error: TaskCliError | None = None
     resolved_by_name: dict[str, dict] = {}
     try:
         with engine.begin() as conn:
+            if protected_names:
+                needs_selector_set = _needs_protected_selector_set(protected_names, source_selector)
+                selector_standard_names = [
+                    name
+                    for name in dict.fromkeys(mapping.values())
+                    if name not in protected_names and str(metas[name].get("protection") or "standard") == "standard"
+                ]
+                selector_standard_approval_names = _always_ask_names(metas, selector_standard_names)
+                common_standard_grant = None
+                if selector_standard_approval_names:
+                    common_standard_grant = vault_service.find_active_grant_for_secrets(
+                        conn,
+                        selector_standard_approval_names,
+                        session_id=session_id,
+                        purpose="run",
+                        reserve_one_shot=True,
+                    )
+                    if isinstance(common_standard_grant, dict) and common_standard_grant.get("one_shot") is True:
+                        one_shot_grants.append(common_standard_grant)
+                        for standard_name in selector_standard_approval_names:
+                            resolved_by_name[standard_name] = {
+                                "status": "standard",
+                                "secret": metas[standard_name],
+                                "grant": common_standard_grant,
+                                "envelope": vault_service.get_envelope(conn, standard_name),
+                            }
+                grant = vault_service.find_active_grant_for_secrets(
+                    conn,
+                    protected_names,
+                    session_id=session_id,
+                    purpose="run",
+                    reserve_one_shot=True,
+                )
+                if grant is None:
+                    always_ask_names = _always_ask_names(metas, protected_names) if needs_selector_set else []
+                    unresolved_standard_names = [name for name in selector_standard_approval_names if name not in resolved_by_name]
+                    standard_always_ask_names = (
+                        _always_ask_names(metas, unresolved_standard_names) if needs_selector_set else []
+                    )
+                    if always_ask_names or standard_always_ask_names:
+                        approval_error = TaskCliError(
+                            "always_ask secrets cannot be approved as one protected selector-set grant",
+                            code="always_ask_selector_set",
+                            details={
+                                "protected_secret_names": protected_names,
+                                "always_ask_secret_names": always_ask_names,
+                                "standard_always_ask_secret_names": standard_always_ask_names,
+                            },
+                            hint="Run always_ask secrets individually so each per-use approval can be consumed once.",
+                        )
+                    else:
+                        request_delivery = dict(delivery)
+                        if needs_selector_set:
+                            request_delivery["protected_secret_names"] = protected_names
+                        req = vault_service.create_access_request(
+                            conn,
+                            None if needs_selector_set else protected_names[0],
+                            source_selector=source_selector if needs_selector_set else None,
+                            requester=requester,
+                            delivery=request_delivery,
+                            purpose="run",
+                        )
+                        approval_error = TaskCliError(
+                            "protected secrets need approval before vault run delivery",
+                            code="approval_required",
+                            details={"request_id": req.get("id"), "protected_secret_names": protected_names},
+                        )
+                elif grant.get("one_shot") is True:
+                    one_shot_grants.append(grant)
             for env_name, vault_name in mapping.items():
+                if approval_error is not None:
+                    break
+                if vault_name in protected_names:
+                    secrets.append(
+                        {
+                            "name": vault_name,
+                            "env": env_name,
+                            "envelope": vault_service.get_protected_envelope(conn, vault_name),
+                            "tier": "protected",
+                        }
+                    )
+                    continue
                 resolved = resolved_by_name.get(vault_name)
                 if resolved is None:
                     resolved = vault_service.resolve_secret_access(
                         conn,
                         vault_name,
+                        purpose="run",
                         requester=requester,
                         delivery=delivery,
                         reserve_one_shot=True,
@@ -4839,42 +5570,20 @@ def _resolve_vault_run_delivery(engine, mapping: dict[str, str], command_argv: l
                     current_grant = resolved.get("grant")
                     if isinstance(current_grant, dict) and current_grant.get("one_shot") is True:
                         one_shot_grants.append(current_grant)
-                    secrets.append({"name": vault_name, "env": env_name, "envelope": resolved["envelope"], "protected": False})
+                    item = {"name": vault_name, "env": env_name, "envelope": resolved["envelope"]}
+                    if protected_names:
+                        item["tier"] = "standard"
+                    secrets.append(item)
                     continue
                 if resolved["status"] == "agent_delivery_ready":
-                    current_grant = resolved["grant"]
-                    if grant is None:
-                        grant = current_grant
-                    elif grant["scope_type"] != current_grant["scope_type"] or grant["scope_ref"] != current_grant["scope_ref"]:
-                        if current_grant.get("one_shot") is True:
-                            one_shot_grants.append(current_grant)
-                        pre_delivery_error = _mixed_grants_error(
-                            "protected vault run currently requires all protected secrets to share one active grant",
-                        )
-                        break
-                    if current_grant.get("one_shot") is True:
-                        one_shot_grants.append(current_grant)
-                    secrets.append({"name": vault_name, "env": env_name, "envelope": resolved["envelope"], "protected": True})
-                    continue
+                    raise TaskCliError("protected vault run requires one grant covering the protected selector set", code="mixed_grants")
                 raise TaskCliError(f"unsupported vault access status: {resolved['status']}", code="vault_access_error")
     except Exception as exc:
         _raise_after_releasing_one_shot_reservations(engine, one_shot_grants, exc)
     if approval_error is not None:
         _release_one_shot_reservations(engine, one_shot_grants)
         raise approval_error
-    if pre_delivery_error is not None:
-        _release_one_shot_reservations(engine, one_shot_grants)
-        raise pre_delivery_error
-    protected = [item for item in secrets if item["protected"]]
-    standard = [item for item in secrets if not item["protected"]]
-    if protected and standard:
-        _release_one_shot_reservations(engine, one_shot_grants)
-        raise TaskCliError(
-            "mixing protected and standard secrets in one vault run is not wired yet",
-            code="mixed_protection_tiers",
-        )
-    selected = protected or standard
-    return grant, one_shot_grants, [{key: value for key, value in item.items() if key != "protected"} for item in selected]
+    return grant, one_shot_grants, secrets
 
 
 def _resolve_single_vault_delivery(
@@ -4883,6 +5592,7 @@ def _resolve_single_vault_delivery(
     *,
     requester: dict,
     delivery: dict,
+    purpose: str = "run",
 ) -> tuple[dict | None, dict | None, object]:
     from storage import vault_service
 
@@ -4890,6 +5600,7 @@ def _resolve_single_vault_delivery(
         resolved = vault_service.resolve_secret_access(
             conn,
             name,
+            purpose=purpose,
             requester=requester,
             delivery=delivery,
             reserve_one_shot=True,
@@ -4915,12 +5626,14 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
 
     requester, delivery, session_id = _vault_cli_delivery_context(args, mode="inject", path=path, format=fmt)
     metas = _preflight_vault_inject_batch(engine, names)
-    if metas and {str(meta.get("protection") or "standard") for meta in metas.values()} == {"protected"}:
+    tiers = {str(meta.get("protection") or "standard") for meta in metas.values()}
+    if metas and tiers == {"protected"}:
         with engine.begin() as conn:
             common_grant = vault_service.find_active_grant_for_secrets(
                 conn,
                 names,
                 session_id=session_id,
+                purpose="inject",
                 reserve_one_shot=True,
             )
             if common_grant is not None:
@@ -4928,6 +5641,21 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
                     {"name": name, "key": name, "envelope": vault_service.get_protected_envelope(conn, name)}
                     for name in names
                 ]
+    if metas and tiers == {"standard"}:
+        with engine.begin() as conn:
+            standard_secrets = [
+                {"name": name, "key": name, "envelope": vault_service.get_envelope(conn, name)}
+                for name in names
+            ]
+            common_grant = vault_service.find_active_grant_for_secrets(
+                conn,
+                names,
+                session_id=session_id,
+                purpose="inject",
+                reserve_one_shot=True,
+            )
+            if isinstance(common_grant, dict) and common_grant.get("one_shot") is True:
+                return None, [common_grant], standard_secrets
     secrets = []
     grant: dict | None = None
     one_shot_grants: list[dict] = []
@@ -4942,6 +5670,7 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
                     resolved = vault_service.resolve_secret_access(
                         conn,
                         name,
+                        purpose="inject",
                         requester=requester,
                         delivery=delivery,
                         reserve_one_shot=True,
@@ -4965,7 +5694,7 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
                     current_grant = resolved["grant"]
                     if grant is None:
                         grant = current_grant
-                    elif grant["scope_type"] != current_grant["scope_type"] or grant["scope_ref"] != current_grant["scope_ref"]:
+                    elif grant["id"] != current_grant["id"]:
                         if current_grant.get("one_shot") is True:
                             one_shot_grants.append(current_grant)
                         pre_delivery_error = _mixed_grants_error(
@@ -5002,9 +5731,8 @@ def cmd_vault_run(args):
 
     help_command = "vibe vault run --help"
     try:
-        mapping = _parse_env_specs(getattr(args, "env", None))
-        if not mapping:
-            raise TaskCliError("at least one --env NAME is required", code="missing_env", help_command=help_command)
+        engine = _open_vault_engine()
+        mapping, source_selector = _resolve_vault_run_selectors(engine, args)
         command_argv = list(getattr(args, "command_argv", None) or [])
         if command_argv and command_argv[0] == "--":
             command_argv = command_argv[1:]
@@ -5025,13 +5753,25 @@ def cmd_vault_run(args):
                 help_command=help_command,
                 example="vibe vault run --env OPENAI_API_KEY -- python sync.py",
             )
-        engine = _open_vault_engine()
-        grant, one_shot_grants, secrets = _resolve_vault_run_delivery(engine, mapping, command_argv, args=args)
+        grant, one_shot_grants, secrets = _resolve_vault_run_delivery(
+            engine,
+            mapping,
+            command_argv,
+            args=args,
+            source_selector=source_selector,
+        )
     except vault_service.SecretNotFoundError as exc:
         _print_task_error(TaskCliError(f"secret '{exc}' not found", code="secret_not_found", help_command=help_command))
         return 1
     except vault_service.KeypairNotValueDeliverableError as exc:
-        _print_task_error(TaskCliError(str(exc), code="keypair_not_value_deliverable", help_command=help_command))
+        _print_task_error(
+            TaskCliError(
+                str(exc),
+                code="keypair_not_value_deliverable",
+                hint="Use 'vibe vault sign' for keypair secrets.",
+                help_command=help_command,
+            )
+        )
         return 1
     except vault_service.UnsupportedProtectionError as exc:
         _print_task_error(TaskCliError(str(exc), code="protected_tier_unavailable", help_command=help_command))
@@ -5059,9 +5799,9 @@ def cmd_vault_run(args):
             ) as output_bridge:
                 handoff_started = True
                 result = api.avault_agent_deliver_run(
-                    scope_type=grant["scope_type"],
-                    scope_ref=grant["scope_ref"],
+                    grant_id=grant["id"],
                     secrets=secrets,
+                    context={"session_id": grant.get("session_id"), "purpose": "run"},
                     command=_agent_run_command(
                         command_argv,
                         stdout_path=str(output_bridge.stdout_path),
@@ -5084,18 +5824,33 @@ def cmd_vault_run(args):
         _print_task_error(exc)
         return 1
     except api.AvaultError as exc:
-        _finish_one_shot_after_avault_error(engine, one_shot_grants, exc, reason="vault-run-one-shot")
         if grant is not None and _agent_missing_grant(exc):
+            _release_one_shot_reservations(
+                engine,
+                [one_shot_grant for one_shot_grant in one_shot_grants if one_shot_grant.get("id") != grant.get("id")],
+            )
             requester, delivery, _session_id = _vault_cli_delivery_context(args, mode="run", command=command_argv)
+            protected_names = [
+                str(secret["name"])
+                for secret in secrets
+                if secret.get("tier") == "protected" and secret.get("name")
+            ]
+            protected_names = list(dict.fromkeys(protected_names))
+            if source_selector:
+                delivery["source_selector"] = source_selector
+            if protected_names:
+                delivery["protected_secret_names"] = protected_names
             _expire_agent_grant_after_missing(
                 engine,
                 grant["id"],
-                sorted(set(mapping.values())),
+                protected_names or sorted(set(mapping.values())),
                 requester=requester,
                 delivery=delivery,
+                purpose="run",
             )
             _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
             return 1
+        _finish_one_shot_after_avault_error(engine, one_shot_grants, exc, reason="vault-run-one-shot")
         _print_task_error(TaskCliError(f"avault deliver failed: {exc}", code="avault_failed", help_command=help_command))
         return 1
     except Exception as exc:
@@ -5119,21 +5874,24 @@ def cmd_vault_run(args):
     return exit_code
 
 
-def _wait_for_provision(request_id: str, *, timeout: float, poll_interval: float = 2.0) -> bool:
-    from storage.models import vault_requests
+def _wait_for_provision(request_id: str, *, timeout: float, poll_interval: float = 2.0) -> dict | None:
+    from storage import vault_service
 
     deadline = time.monotonic() + timeout
     engine = _open_vault_engine()
     while time.monotonic() < deadline:
-        with engine.connect() as conn:
-            row = conn.execute(select(vault_requests.c.status).where(vault_requests.c.id == request_id)).first()
-        if row and row[0] == "fulfilled":
-            return True
+        with engine.begin() as conn:
+            try:
+                request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+            except vault_service.RequestNotFoundError:
+                raise
+        if request.get("status") == "fulfilled":
+            return request
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         time.sleep(min(poll_interval, remaining))
-    return False
+    return None
 
 
 def _wait_for_vault_request(request_id: str, *, timeout: float, poll_interval: float = 2.0) -> dict | None:
@@ -5167,13 +5925,14 @@ def cmd_vault_request(args):
         name = args.name
         if not vault_crypto.is_valid_secret_name(name):
             raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name", help_command=help_command)
+        spec = _load_vault_request_spec(args, help_command=help_command)
         engine = _open_vault_engine()
         with engine.begin() as conn:
             req = vault_service.create_provision_request(
                 conn,
                 name,
                 reason=getattr(args, "reason", None),
-                skill=getattr(args, "skill", None),
+                spec=spec,
                 requester={"source": "cli", "pid": os.getpid()},
             )
         if req.get("status") == "fulfilled":
@@ -5183,17 +5942,20 @@ def cmd_vault_request(args):
                 request_id=req["id"],
                 secret_name=name,
                 status="fulfilled",
+                request=req,
                 message=f"'{name}' is already in the vault — use it via: vibe vault run --env {name} -- <command>",
             )
             return 0
         wait_seconds = getattr(args, "wait", None)
         if wait_seconds:
-            if _wait_for_provision(req["id"], timeout=float(wait_seconds)):
+            waited = _wait_for_provision(req["id"], timeout=float(wait_seconds))
+            if waited:
                 _print_cli_payload(
                     "vault_request",
                     request_id=req["id"],
                     secret_name=name,
                     status="fulfilled",
+                    request=waited,
                     message=f"'{name}' is now available — use it via: vibe vault run --env {name} -- <command>",
                 )
                 return 0
@@ -5211,15 +5973,15 @@ def cmd_vault_request(args):
             request_id=req["id"],
             secret_name=name,
             status="pending",
-            message=(
-                f"Recorded a request for '{name}'. The user fulfills it by adding a secret named "
-                f"{name} on the Vaults page (Add secret) — saving it marks this request fulfilled. "
-                f"Then use: vibe vault run --env {name} -- <command>"
-            ),
+            request=req,
+            message=_vault_request_pending_message(name, req, has_spec=bool(spec)),
         )
         return 0
     except TaskCliError as exc:
         _print_task_error(exc)
+        return 1
+    except vault_service.VaultServiceError as exc:
+        _print_task_error(TaskCliError(str(exc), code="invalid_spec", help_command=help_command))
         return 1
     except Exception as exc:
         _print_task_error(exc, help_command=help_command)
@@ -5342,6 +6104,56 @@ def cmd_vault_await(args):
     except Exception as exc:
         _print_task_error(exc, help_command=help_command)
         return 1
+
+
+def _vault_request_pending_message(name: str, request: dict[str, object], *, has_spec: bool) -> str:
+    if has_spec:
+        return (
+            f"Recorded a request for '{name}'. The user fulfills request {request['id']} from the Vaults page pending "
+            f"requests list by opening its Provide secret row; that request-specific form preserves the requested "
+            f"tags, policy, and skill links. Then use: vibe vault run --env {name} -- <command>"
+        )
+    return (
+        f"Recorded a request for '{name}'. The user fulfills it from the Vaults page pending requests list "
+        f"(Provide secret) or by adding a secret named {name}; saving it marks this request fulfilled. "
+        f"Then use: vibe vault run --env {name} -- <command>"
+    )
+
+
+def _load_vault_request_spec(args, *, help_command: str) -> dict | None:
+    spec_sources = [
+        value
+        for value in (
+            getattr(args, "spec_json", None),
+            getattr(args, "spec", None),
+        )
+        if value
+    ]
+    if len(spec_sources) > 1:
+        raise TaskCliError("use only one of --spec-json or --spec", code="invalid_spec", help_command=help_command)
+
+    raw: str | None = None
+    if getattr(args, "spec_json", None):
+        raw = str(args.spec_json)
+    elif getattr(args, "spec", None):
+        spec_arg = str(args.spec)
+        if spec_arg == "-":
+            raw = sys.stdin.read()
+        else:
+            try:
+                raw = Path(spec_arg).read_text(encoding="utf-8")
+            except OSError as exc:
+                raise TaskCliError(f"cannot read --spec: {exc}", code="spec_unreadable", help_command=help_command) from exc
+
+    if raw is None:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        raise TaskCliError(f"invalid request spec JSON: {exc}", code="invalid_spec", help_command=help_command) from exc
+    if not isinstance(parsed, dict):
+        raise TaskCliError("request spec must be a JSON object", code="invalid_spec", help_command=help_command)
+    return parsed
 
 
 def _host_allowed(host, allowed) -> bool:
@@ -5528,15 +6340,16 @@ def cmd_vault_fetch(args):
             name,
             requester=requester,
             delivery=delivery,
+            purpose="fetch",
         )
         handoff_started = True
         if grant is not None:
             result = api.avault_agent_deliver_fetch(
-                scope_type=grant["scope_type"],
-                scope_ref=grant["scope_ref"],
+                grant_id=grant["id"],
                 name=name,
                 sealed=sealed,
                 request=request,
+                context={"session_id": grant.get("session_id"), "purpose": "fetch"},
             )
         else:
             result = api.avault_deliver_fetch(name, sealed, request)
@@ -5589,6 +6402,7 @@ def cmd_vault_fetch(args):
                     [name],
                     requester=requester,
                     delivery=delivery,
+                    purpose="fetch",
                 )
                 _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
                 return 1
@@ -5703,8 +6517,7 @@ def cmd_vault_inject(args):
         handoff_started = True
         if grant is not None:
             api.avault_agent_deliver_inject(
-                scope_type=grant["scope_type"],
-                scope_ref=grant["scope_ref"],
+                grant_id=grant["id"],
                 path=resolved_out,
                 fmt=fmt,
                 secrets=secrets,
@@ -5752,6 +6565,7 @@ def cmd_vault_inject(args):
                 keys,
                 requester=requester,
                 delivery=delivery,
+                purpose="inject",
             )
             _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
             return 1
@@ -6351,6 +7165,13 @@ def _doctor():
     groups = []
     summary = {"pass": 0, "warn": 0, "fail": 0}
 
+    home_items = _home_migration_items()
+    for item in home_items:
+        status = item.get("status")
+        if status in summary:
+            summary[status] += 1
+    groups.append({"name": "Runtime Home", "items": home_items})
+
     # Configuration Group
     config_items = []
     config_path = paths.get_config_path()
@@ -6638,7 +7459,12 @@ def _doctor():
         )
         summary["pass"] += 1
 
-    for item in _runtime_architecture_items():
+    for item in [
+        *_service_lifecycle_items(),
+        *_service_install_family_items(),
+        *_restart_state_items(),
+        *_runtime_architecture_items(),
+    ]:
         runtime_items.append(item)
         status = item.get("status")
         if status in summary:
@@ -6666,10 +7492,28 @@ def _doctor():
     return result
 
 
-def _add_doctor_item(items: list[dict], status: str, message: str, action: str | None = None) -> None:
+def _add_doctor_item(
+    items: list[dict],
+    status: str,
+    message: str,
+    action: str | None = None,
+    *,
+    code: str | None = None,
+    repair_target: str | None = None,
+    repair_risk: str | None = None,
+) -> None:
     item = {"status": status, "message": message}
+    if code:
+        item["code"] = code
     if action:
         item["action"] = action
+    if repair_target:
+        item["repairable"] = True
+        item["repair"] = {
+            "target": repair_target,
+            "command": f"vibe doctor repair {repair_target}",
+            "risk": repair_risk or "medium",
+        }
     items.append(item)
 
 
@@ -6915,7 +7759,292 @@ def _local_cli_installation_items() -> list[dict]:
     return items
 
 
+def _doctor_repair_result(target: str, status: str, message: str, **details) -> dict:
+    payload = {"target": target, "status": status, "message": message}
+    payload.update({key: value for key, value in details.items() if value is not None})
+    return payload
+
+
+def _write_refreshed_runtime_status() -> None:
+    status = runtime.read_status()
+    ui_pid = status.get("ui_pid")
+    owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
+    extra_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
+    if owner_pid:
+        detail = f"pid={owner_pid}"
+        if extra_pids:
+            detail = f"{detail}; extra_service_pids={','.join(map(str, extra_pids))}"
+        runtime.write_status("running", detail, owner_pid, ui_pid)
+    elif extra_pids:
+        runtime.write_status("degraded", f"lockless service process detected pid={extra_pids[0]}", extra_pids[0], ui_pid)
+    else:
+        runtime.write_status("stopped", "process not running", None, ui_pid)
+
+
+def _start_service_after_repair(target: str, success_message: str, failure_message: str, *, stopped_pids: list[int]) -> dict:
+    try:
+        new_pid = runtime.start_service()
+    except Exception as exc:
+        _write_refreshed_runtime_status()
+        return _doctor_repair_result(
+            target,
+            "failed",
+            f"{failure_message}: {exc}",
+            stopped_pids=stopped_pids,
+        )
+    runtime.write_status("running", f"pid={new_pid}", new_pid, runtime.read_status().get("ui_pid"))
+    return _doctor_repair_result(
+        target,
+        "repaired",
+        success_message,
+        stopped_pids=stopped_pids,
+        service_pid=new_pid,
+    )
+
+
+def _repair_home_migration(*, dry_run: bool = False) -> dict:
+    target = "home-migration"
+    if os.environ.get(paths.AVIBE_HOME_ENV):
+        return _doctor_repair_result(target, "skipped", "AVIBE_HOME is explicit; default home migration does not apply.")
+
+    avibe_home = Path.home() / paths.AVIBE_HOME_DIRNAME
+    legacy_home = Path.home() / paths.LEGACY_HOME_DIRNAME
+    avibe_present = avibe_home.exists() or avibe_home.is_symlink()
+    legacy_present = legacy_home.exists() or legacy_home.is_symlink()
+
+    if not avibe_present and not legacy_present:
+        return _doctor_repair_result(target, "skipped", "No runtime home exists yet; nothing needs migration.")
+
+    if avibe_present and legacy_present and not legacy_home.is_symlink():
+        return _doctor_repair_result(
+            target,
+            "failed",
+            "Both ~/.avibe and ~/.vibe_remote are real directories; manual merge is required.",
+        )
+
+    if not avibe_present and legacy_home.is_symlink():
+        return _doctor_repair_result(
+            target,
+            "failed",
+            "Legacy home is a symlink but ~/.avibe is missing; inspect the symlink target manually.",
+        )
+
+    if avibe_present and legacy_home.is_symlink() and _path_points_to(legacy_home, avibe_home):
+        return _doctor_repair_result(target, "skipped", "Runtime home migration is already healthy.")
+
+    if dry_run:
+        if not avibe_present and legacy_present and not legacy_home.is_symlink():
+            return _doctor_repair_result(target, "planned", "Would move ~/.vibe_remote to ~/.avibe and create a back-symlink.")
+        if avibe_present:
+            return _doctor_repair_result(target, "planned", "Would recreate the ~/.vibe_remote compatibility symlink.")
+        return _doctor_repair_result(target, "skipped", "No runtime home migration is needed.")
+
+    if avibe_present:
+        if legacy_home.is_symlink() or not legacy_present:
+            legacy_home.unlink(missing_ok=True)
+            try:
+                legacy_home.symlink_to(avibe_home, target_is_directory=True)
+            except OSError as exc:
+                return _doctor_repair_result(target, "failed", f"Failed to create compatibility symlink: {exc}")
+            return _doctor_repair_result(target, "repaired", "Created ~/.vibe_remote compatibility symlink.")
+        return _doctor_repair_result(target, "skipped", "No runtime home migration is needed.")
+
+    migrated_home = paths.migrate_default_home()
+    if not _path_points_to(migrated_home, avibe_home):
+        return _doctor_repair_result(target, "failed", f"Default home remains at {migrated_home}; migration did not complete.")
+    if not _path_points_to(legacy_home, avibe_home):
+        return _doctor_repair_result(
+            target,
+            "failed",
+            "Migrated ~/.vibe_remote to ~/.avibe, but failed to create the compatibility symlink.",
+        )
+    paths.ensure_data_dirs()
+    return _doctor_repair_result(target, "repaired", "Migrated ~/.vibe_remote to ~/.avibe.")
+
+
+def _repair_stale_restart_state(*, dry_run: bool = False) -> dict:
+    target = "stale-restart-state"
+    restart_path = runtime.get_restart_status_path()
+    payload = runtime.read_json(restart_path) or {}
+    if not payload:
+        return _doctor_repair_result(target, "skipped", "No restart metadata is present.")
+    if not _restart_status_is_stale(payload, restart_path):
+        return _doctor_repair_result(target, "skipped", "Restart metadata is still current.")
+    if dry_run:
+        return _doctor_repair_result(target, "planned", "Would remove stale restart metadata and refresh runtime status.")
+    restart_path.unlink(missing_ok=True)
+    _write_refreshed_runtime_status()
+    return _doctor_repair_result(target, "repaired", "Removed stale restart metadata and refreshed runtime status.")
+
+
+def _repair_duplicate_service_processes(*, dry_run: bool = False) -> dict:
+    target = "duplicate-service-processes"
+    if runtime.service_instance_lock_attached_to_process():
+        return _doctor_repair_result(target, "failed", "Run this repair from the CLI, not from inside the service process.")
+
+    owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
+    extra_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
+    if not extra_pids:
+        return _doctor_repair_result(target, "skipped", "No extra Avibe service process was detected.")
+    if dry_run:
+        return _doctor_repair_result(
+            target,
+            "planned",
+            f"Would stop extra Avibe service process(es): {','.join(map(str, extra_pids))}.",
+            pids=extra_pids,
+        )
+
+    stopped: list[int] = []
+    failed: list[int] = []
+    for pid in extra_pids:
+        if runtime.stop_pid(pid, timeout=5):
+            stopped.append(pid)
+        else:
+            failed.append(pid)
+
+    if not owner_pid and stopped and not failed:
+        return _start_service_after_repair(
+            target,
+            "Stopped lockless service process(es) and started a clean service.",
+            "Stopped lockless service process(es), but failed to start a clean service",
+            stopped_pids=stopped,
+        )
+
+    _write_refreshed_runtime_status()
+    if failed:
+        return _doctor_repair_result(
+            target,
+            "failed",
+            "Some extra service processes could not be stopped.",
+            stopped_pids=stopped,
+            failed_pids=failed,
+        )
+    return _doctor_repair_result(target, "repaired", "Stopped extra Avibe service process(es).", stopped_pids=stopped)
+
+
+def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
+    target = "stale-install-runtime"
+    if runtime.service_instance_lock_attached_to_process():
+        return _doctor_repair_result(target, "failed", "Run this repair from the CLI, not from inside the service process.")
+
+    current_family = _current_cli_install_family()
+    owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
+    service_pids = [pid for pid in [owner_pid] if pid]
+    service_pids.extend(runtime.extra_service_process_pids(owner_pid=owner_pid))
+    stale_pids: list[int] = []
+    current_pids: list[int] = []
+    for pid in sorted(set(service_pids)):
+        family = _tool_family_from_text(runtime.get_process_command(pid))
+        if current_family == PACKAGE_NAME and family == LEGACY_PACKAGE_NAME:
+            stale_pids.append(pid)
+        elif family == PACKAGE_NAME:
+            current_pids.append(pid)
+    if not stale_pids:
+        return _doctor_repair_result(target, "skipped", "No legacy vibe-remote service process was detected.")
+    if dry_run:
+        return _doctor_repair_result(
+            target,
+            "planned",
+            f"Would stop legacy service process(es) and start current Avibe: {','.join(map(str, stale_pids))}.",
+            pids=stale_pids,
+        )
+
+    stopped: list[int] = []
+    failed: list[int] = []
+    for pid in stale_pids:
+        if runtime.stop_pid(pid, timeout=5):
+            stopped.append(pid)
+        else:
+            failed.append(pid)
+
+    if failed:
+        _write_refreshed_runtime_status()
+        return _doctor_repair_result(
+            target,
+            "failed",
+            "Some legacy vibe-remote service processes could not be stopped.",
+            stopped_pids=stopped,
+            failed_pids=failed,
+        )
+
+    if current_pids or (owner_pid is not None and owner_pid not in stale_pids):
+        _write_refreshed_runtime_status()
+        return _doctor_repair_result(
+            target,
+            "repaired",
+            "Stopped legacy vibe-remote service process(es).",
+            stopped_pids=stopped,
+        )
+
+    return _start_service_after_repair(
+        target,
+        "Stopped legacy vibe-remote service process and started the current Avibe service.",
+        "Stopped legacy vibe-remote service process, but failed to start the current Avibe service",
+        stopped_pids=stopped,
+    )
+
+
+def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False) -> dict:
+    requested_targets = targets or list(DOCTOR_REPAIR_TARGETS)
+    unknown = [target for target in requested_targets if target not in DOCTOR_REPAIR_TARGETS]
+    if unknown:
+        return {
+            "ok": False,
+            "kind": "doctor_repair",
+            "dry_run": dry_run,
+            "results": [
+                _doctor_repair_result(
+                    target,
+                    "failed",
+                    f"Unknown repair target. Known targets: {', '.join(DOCTOR_REPAIR_TARGETS)}.",
+                )
+                for target in unknown
+            ],
+        }
+
+    if dry_run:
+        return {
+            "ok": True,
+            "kind": "doctor_repair",
+            "dry_run": True,
+            "results": [
+                _doctor_repair_result(
+                    target,
+                    "planned",
+                    DOCTOR_REPAIR_DRY_RUN_MESSAGES[target],
+                )
+                for target in requested_targets
+            ],
+        }
+
+    handlers = {
+        "home-migration": _repair_home_migration,
+        "stale-install-runtime": _repair_stale_install_runtime,
+        "duplicate-service-processes": _repair_duplicate_service_processes,
+        "stale-restart-state": _repair_stale_restart_state,
+    }
+    results = [handlers[target](dry_run=dry_run) for target in requested_targets]
+    payload = {
+        "ok": not any(result["status"] == "failed" for result in results),
+        "kind": "doctor_repair",
+        "dry_run": dry_run,
+        "results": results,
+    }
+    if not dry_run:
+        payload["doctor"] = _doctor()
+    return payload
+
+
+def _confirm_doctor_repair(targets: list[str]) -> bool:
+    if not sys.stdin.isatty():
+        return False
+    target_text = ", ".join(targets or DOCTOR_REPAIR_TARGETS)
+    answer = input(f"Repair Avibe doctor target(s): {target_text}? Type 'yes' to continue: ")
+    return answer.strip().lower() == "yes"
+
+
 def cmd_start():
+    _guard_cli_default_state_migration()
     paths.ensure_data_dirs()
     config = _ensure_config()
 
@@ -7007,6 +8136,10 @@ def _stop_opencode_server():
 
 
 def _pid_file_points_to_live_process(pid_path: Path) -> bool:
+    if pid_path == paths.get_runtime_pid_path():
+        return runtime.resolve_service_owner_pid(include_starting=True) is not None or bool(
+            runtime.extra_service_process_pids()
+        )
     try:
         raw_pid = pid_path.read_text(encoding="utf-8").strip()
         pid = int(raw_pid)
@@ -7016,7 +8149,7 @@ def _pid_file_points_to_live_process(pid_path: Path) -> bool:
 
 
 def _runtime_process_was_running() -> bool:
-    return runtime.service_pid_file_points_to_running_service() or runtime.ui_pid_file_points_to_running_ui()
+    return runtime.service_process_running() or runtime.ui_pid_file_points_to_running_ui()
 
 
 def cmd_stop():
@@ -7993,7 +9126,42 @@ def cmd_show(args):
     )
 
 
-def cmd_doctor():
+def _doctor_repair_requested(args) -> bool:
+    return bool(
+        getattr(args, "fix", False)
+        or getattr(args, "doctor_action", None) == "repair"
+    )
+
+
+def _print_doctor_repair_result(result: dict) -> None:
+    title = "Avibe Doctor Repair"
+    if result.get("dry_run"):
+        title = f"{title} (dry run)"
+    print(f"\n  {title}")
+    print("  " + "=" * 40)
+    for item in result.get("results", []):
+        status = item.get("status")
+        if status in {"repaired", "planned"}:
+            icon = "\033[32m✓\033[0m"
+        elif status == "skipped":
+            icon = "\033[33m!\033[0m"
+        else:
+            icon = "\033[31m✗\033[0m"
+        print(f"  {icon} {item.get('target')}: {item.get('message')}")
+    print()
+
+
+def cmd_doctor(args=None):
+    if args is not None and _doctor_repair_requested(args):
+        targets = list(getattr(args, "doctor_repair_targets", []) or [])
+        dry_run = bool(getattr(args, "dry_run", False))
+        if not dry_run and not getattr(args, "yes", False) and not _confirm_doctor_repair(targets):
+            print("Doctor repair was not run. Pass --yes to confirm non-interactively.", file=sys.stderr)
+            return 2
+        result = _repair_doctor_targets(targets, dry_run=dry_run)
+        _print_doctor_repair_result(result)
+        return 0 if result.get("ok") else 1
+
     result = _doctor()
 
     # Terminal-friendly output
@@ -8393,7 +9561,26 @@ def build_parser():
     supervisor_parser.add_argument("--vibe-path")
     supervisor_parser.add_argument("--prepare-show-runtime", action="store_true")
     subparsers.add_parser("status", help="Show service status")
-    subparsers.add_parser("doctor", help="Run diagnostics")
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Run diagnostics and optional safe repairs",
+        description="Run Avibe diagnostics. Use the explicit repair action to apply common runtime fixes.",
+    )
+    doctor_parser.add_argument(
+        "doctor_action",
+        nargs="?",
+        choices=("repair",),
+        help="Run common repair playbooks instead of only reporting diagnostics.",
+    )
+    doctor_parser.add_argument(
+        "doctor_repair_targets",
+        nargs="*",
+        choices=DOCTOR_REPAIR_TARGETS,
+        help="Repair target(s). Defaults to all safe first-phase repair targets.",
+    )
+    doctor_parser.add_argument("--fix", action="store_true", help="Alias for 'vibe doctor repair'.")
+    doctor_parser.add_argument("--dry-run", action="store_true", help="Show repair actions without changing state.")
+    doctor_parser.add_argument("-y", "--yes", action="store_true", help="Confirm repair actions non-interactively.")
     subparsers.add_parser("version", help="Show version")
     subparsers.add_parser("check-update", help="Check for updates")
     subparsers.add_parser("upgrade", help="Upgrade to latest version")
@@ -8784,7 +9971,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault list --help",
     )
-    vault_list_parser.add_argument("--group", help="Only list secrets in this group")
+    vault_list_parser.add_argument("--tag", help="Only list secrets with this tag")
     _add_json_noop(vault_list_parser)
 
     vault_discover_parser = vault_subparsers.add_parser(
@@ -8794,7 +9981,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault discover --help",
     )
-    vault_discover_parser.add_argument("--group", help="Only list secrets in this group")
+    vault_discover_parser.add_argument("--tag", help="Only list secrets with this tag")
     vault_discover_parser.add_argument("--kind", choices=["static", "keypair"], help="Only show this secret kind")
     vault_discover_parser.add_argument("--protection", choices=["standard", "protected"], help="Only show this protection tier")
     _add_json_noop(vault_discover_parser)
@@ -8817,7 +10004,7 @@ def build_parser():
             "printed to stdout; the command's own output passes through. Safest mode: the value "
             "lives only in the child process and never enters the agent's text channel."
         ),
-        epilog="Example: vibe vault run --env OPENAI_API_KEY --env DB=PROD_DB_URL -- python sync.py",
+        epilog="Example: vibe vault run --env OPENAI_API_KEY --tag deploy --skill github-release -- python sync.py",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault run --help",
     )
@@ -8827,6 +10014,8 @@ def build_parser():
         metavar="NAME[,N2]|LOCAL=NAME",
         help="Inject secret NAME as env var NAME (LOCAL=NAME to rename; comma-separates several). Repeatable.",
     )
+    vault_run_parser.add_argument("--tag", action="append", metavar="TAG", help="Inject all value-deliverable secrets with this tag. Repeatable.")
+    vault_run_parser.add_argument("--skill", action="append", metavar="SKILL", help="Sugar for --tag skill:SKILL. Repeatable.")
     vault_run_parser.add_argument("command_argv", nargs=argparse.REMAINDER, help="-- followed by the command to run")
     _add_json_noop(vault_run_parser)
 
@@ -8978,7 +10167,8 @@ def build_parser():
     )
     vault_request_parser.add_argument("name", help="Secret name being requested")
     vault_request_parser.add_argument("--reason", help="Why the secret is needed (shown to the user)")
-    vault_request_parser.add_argument("--skill", help="Skill that needs it (shown to the user)")
+    vault_request_parser.add_argument("--spec", help="Read non-secret creation hints from this JSON file, or '-' for stdin")
+    vault_request_parser.add_argument("--spec-json", help="Inline JSON object with non-secret creation hints")
     vault_request_parser.add_argument("--wait", type=float, metavar="SECONDS", help="Block until fulfilled, up to SECONDS")
     vault_request_parser.add_argument("--no-wait", action="store_true", help="Return immediately (default)")
     _add_json_noop(vault_request_parser)
@@ -9644,7 +10834,7 @@ def main():
     if args.command == "status":
         sys.exit(cmd_status())
     if args.command == "doctor":
-        sys.exit(cmd_doctor())
+        sys.exit(cmd_doctor(args))
     if args.command == "screenshot":
         sys.exit(cmd_screenshot(args))
     if args.command == "show":

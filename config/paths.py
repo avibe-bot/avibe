@@ -218,6 +218,9 @@ Keep entries short, factual, reusable, deduplicated, and free of secrets unless 
 
 
 def ensure_data_dirs() -> None:
+    from storage.migrations import guard_source_checkout_default_state_bootstrap
+
+    guard_source_checkout_default_state_bootstrap()
     migrate_default_home()
     get_config_dir().mkdir(parents=True, exist_ok=True)
     get_state_dir().mkdir(parents=True, exist_ok=True)

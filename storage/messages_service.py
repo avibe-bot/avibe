@@ -865,86 +865,47 @@ def list_inbox_sessions(
     cursor returned as ``next_cursor``).
     """
 
-    m = messages
-
-    # Rank every message in a session by recency (any author) → latest = activity clock.
-    # Exclude the ephemeral queue/draft rows: they live in this table (Step 5)
-    # but aren't sent conversation, so a saved draft or a pending queued message
-    # must NOT bump the session to the top of the inbox or flip its "replied"
-    # badge (Codex P2).
-    any_ranked = (
-        select(
-            m.c.session_id.label("session_id"),
-            m.c.scope_id.label("scope_id"),
-            m.c.author.label("last_author"),
-            m.c.created_at.label("last_activity_at"),
-            func.row_number()
-            .over(partition_by=m.c.session_id, order_by=(m.c.created_at.desc(), m.c.id.desc()))
-            .label("rn"),
+    def _latest_message_value(
+        column_name: str,
+        *,
+        author: Optional[str] = None,
+        types: Optional[tuple[str, ...]] = None,
+        conversation_only: bool = False,
+    ) -> Any:
+        msg = messages.alias()
+        query = (
+            select(getattr(msg.c, column_name))
+            .where(msg.c.session_id == agent_sessions.c.id)
+            .where(msg.c.session_id.is_not(None))
+            .order_by(msg.c.created_at.desc(), msg.c.id.desc())
+            .limit(1)
         )
-        .where(m.c.session_id.is_not(None))
-        .where(m.c.type.notin_(NON_CONVERSATION_TYPES))
-    )
-    if platform is not None:
-        any_ranked = any_ranked.where(m.c.platform == platform)
-    any_ranked = any_ranked.subquery()
-    latest_any = select(any_ranked).where(any_ranked.c.rn == 1).subquery()
+        if platform is not None:
+            query = query.where(msg.c.platform == platform)
+        if author is not None:
+            query = query.where(msg.c.author == author)
+        if types is not None:
+            query = query.where(msg.c.type.in_(types))
+        if conversation_only:
+            query = query.where(msg.c.type.notin_(NON_CONVERSATION_TYPES))
+        return query.scalar_subquery()
 
-    # Rank agent messages by recency → latest agent reply = preview (also proves
-    # eligibility). Include ``notify`` + ``error`` as well as ``result``: a turn
-    # that FAILS persists a terminal ``error`` (or, for an interrupt/info, a
-    # ``notify``), and that failed conversation must still surface in the inbox
-    # (with its error) rather than disappear once the user leaves the Chat page
-    # (Codex P2). Unread counts below stay result-only — a failure isn't an unread
-    # reply.
-    agent_ranked = (
-        select(
-            m.c.session_id.label("session_id"),
-            m.c.content_text.label("preview_text"),
-            m.c.content_json.label("preview_json"),
-            m.c.created_at.label("preview_at"),
-            m.c.id.label("preview_id"),
-            func.row_number()
-            .over(partition_by=m.c.session_id, order_by=(m.c.created_at.desc(), m.c.id.desc()))
-            .label("rn"),
-        )
-        .where(m.c.session_id.is_not(None))
-        .where(m.c.type.in_(("result", "notify", "error")))
-    )
-    if platform is not None:
-        agent_ranked = agent_ranked.where(m.c.platform == platform)
-    agent_ranked = agent_ranked.subquery()
-    latest_agent = select(agent_ranked).where(agent_ranked.c.rn == 1).subquery()
-
-    # Latest *user* message per session (real sends only — exclude the ephemeral
-    # draft/queue/pending rows). Drives the persistent "awaiting the agent" badge:
-    # a session is awaiting a reply when the user's latest message is newer than
-    # the agent's latest reply. That stays true for the whole time the agent is
-    # working (not just the instant before it starts streaming) and survives a
-    # reload — unlike a "who literally spoke last" check that the agent's mid-turn
-    # streaming rows would immediately flip off.
-    user_ranked = (
-        select(
-            m.c.session_id.label("session_id"),
-            m.c.created_at.label("last_user_at"),
-            m.c.id.label("last_user_id"),
-            func.row_number()
-            .over(partition_by=m.c.session_id, order_by=(m.c.created_at.desc(), m.c.id.desc()))
-            .label("rn"),
-        )
-        .where(m.c.session_id.is_not(None))
-        .where(m.c.author == "user")
-        .where(m.c.type.notin_(NON_CONVERSATION_TYPES))
-    )
-    if platform is not None:
-        user_ranked = user_ranked.where(m.c.platform == platform)
-    user_ranked = user_ranked.subquery()
-    latest_user = select(user_ranked).where(user_ranked.c.rn == 1).subquery()
+    # Drive from the small session set and do top-1 index probes per session.
+    # This preserves the inbox contract while avoiding full message-window
+    # materialization as history grows.
+    last_activity_at = _latest_message_value("created_at", conversation_only=True)
+    last_author = _latest_message_value("author", conversation_only=True)
+    preview_id = _latest_message_value("id", types=("result", "notify", "error"))
+    preview_at = _latest_message_value("created_at", types=("result", "notify", "error"))
+    last_user_at = _latest_message_value("created_at", author="user", conversation_only=True)
+    last_user_id = _latest_message_value("id", author="user", conversation_only=True)
 
     # Unread agent messages per session.
+    m = messages
     unread_q = (
         select(m.c.session_id.label("session_id"), func.count().label("unread_count"))
         .where(m.c.session_id.is_not(None))
+        .where(m.c.author == "agent")
         .where(m.c.type == "result")
         .where(m.c.read_at.is_(None))
         .group_by(m.c.session_id)
@@ -953,55 +914,65 @@ def list_inbox_sessions(
         unread_q = unread_q.where(m.c.platform == platform)
     unread_sub = unread_q.subquery()
 
-    unread_count_col = func.coalesce(unread_sub.c.unread_count, 0)
-    query = (
+    unread_count_col = func.coalesce(unread_sub.c.unread_count, 0).label("unread_count")
+    session_rows = (
         select(
-            latest_agent.c.session_id,
-            latest_agent.c.preview_text,
-            latest_agent.c.preview_json,
-            latest_agent.c.preview_at,
-            latest_any.c.last_author,
-            latest_any.c.last_activity_at,
+            agent_sessions.c.id.label("session_id"),
+            last_activity_at.label("last_activity_at"),
+            last_author.label("last_author"),
             agent_sessions.c.title,
             agent_sessions.c.scope_id,
             scopes.c.native_id.label("project_id"),
             scopes.c.display_name.label("project_name"),
-            unread_count_col.label("unread_count"),
-            latest_agent.c.preview_id,
-            latest_user.c.last_user_at,
-            latest_user.c.last_user_id,
+            unread_count_col,
+            preview_id.label("preview_id"),
+            preview_at.label("preview_at"),
+            last_user_at.label("last_user_at"),
+            last_user_id.label("last_user_id"),
         )
         .select_from(
-            latest_agent.join(latest_any, latest_any.c.session_id == latest_agent.c.session_id)
-            .join(agent_sessions, agent_sessions.c.id == latest_agent.c.session_id)
-            .join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True)
-            .join(unread_sub, unread_sub.c.session_id == latest_agent.c.session_id, isouter=True)
-            .join(latest_user, latest_user.c.session_id == latest_agent.c.session_id, isouter=True)
+            agent_sessions.join(scopes, scopes.c.id == agent_sessions.c.scope_id, isouter=True).join(
+                unread_sub, unread_sub.c.session_id == agent_sessions.c.id, isouter=True
+            )
         )
     )
     # Archived sessions are hidden everywhere — keep them out of the inbox feed too.
-    query = query.where(agent_sessions.c.status != "archived")
-    if unread_only:
-        query = query.where(unread_count_col > 0)
+    session_rows = session_rows.where(agent_sessions.c.status != "archived")
     if only_session:
-        query = query.where(latest_agent.c.session_id == only_session)
+        session_rows = session_rows.where(agent_sessions.c.id == only_session)
+
+    session_rows_sub = session_rows.subquery()
+    query = select(session_rows_sub).where(session_rows_sub.c.preview_id.is_not(None))
+    if unread_only:
+        query = query.where(session_rows_sub.c.unread_count > 0)
     if before:
         cursor_at, _, cursor_session = before.partition("|")
         if cursor_at and cursor_session:
             query = query.where(
                 or_(
-                    latest_any.c.last_activity_at < cursor_at,
+                    session_rows_sub.c.last_activity_at < cursor_at,
                     and_(
-                        latest_any.c.last_activity_at == cursor_at,
-                        latest_agent.c.session_id < cursor_session,
+                        session_rows_sub.c.last_activity_at == cursor_at,
+                        session_rows_sub.c.session_id < cursor_session,
                     ),
                 )
             )
 
     effective_limit = min(max(int(limit), 1), 100)
     query = query.order_by(
-        latest_any.c.last_activity_at.desc(), latest_agent.c.session_id.desc()
+        session_rows_sub.c.last_activity_at.desc(), session_rows_sub.c.session_id.desc()
     ).limit(effective_limit)
+    limited_sessions = query.subquery()
+    preview_msg = messages.alias()
+    query = (
+        select(
+            limited_sessions,
+            preview_msg.c.content_text.label("preview_text"),
+            preview_msg.c.content_json.label("preview_json"),
+        )
+        .select_from(limited_sessions.join(preview_msg, preview_msg.c.id == limited_sessions.c.preview_id))
+        .order_by(limited_sessions.c.last_activity_at.desc(), limited_sessions.c.session_id.desc())
+    )
 
     rows = conn.execute(query).mappings().all()
     sessions: list[dict[str, Any]] = []

@@ -112,3 +112,55 @@ def test_refresh_config_updates_remote_access_for_audio_asr(tmp_path, monkeypatc
 
     assert controller.config.remote_access.vibe_cloud.instance_secret == "secret"
     assert controller.audio_asr_service.config is controller.config
+
+
+def test_refresh_config_updates_agent_progress_style(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    controller = Controller.__new__(Controller)
+    controller.config = V2Config.from_payload(
+        {**_config_payload({"bot_token": "discord-token"}), "agent_progress_style": "off"}
+    )
+    controller.im_clients = {}
+    controller._config_mtime = None
+    assert controller.config.agent_progress_style == "off"
+
+    latest_config = V2Config.from_payload(
+        {
+            **_config_payload({"bot_token": "discord-token"}),
+            "agent_progress_style": "concise",
+            "agent_status_heartbeat_ms": 9000,
+            "agent_status_no_output_ms": 45000,
+        }
+    )
+    latest_config.save()
+
+    controller._refresh_config_from_disk()
+
+    assert controller.config.agent_progress_style == "concise"
+    assert controller.config.agent_status_heartbeat_ms == 9000
+    assert controller.config.agent_status_no_output_ms == 45000
+
+
+def test_progress_style_getter_self_refreshes_from_disk(tmp_path, monkeypatch) -> None:
+    # Background / scheduled runs never pass through an IM inbound handler, so
+    # nothing calls _refresh_config_from_disk before the style gate. The getter
+    # must reload on its own so a Web UI off->concise change takes effect without
+    # an unrelated refresh or restart.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+
+    controller = Controller.__new__(Controller)
+    controller.config = V2Config.from_payload(
+        {**_config_payload({"bot_token": "discord-token"}), "agent_progress_style": "off"}
+    )
+    controller.im_clients = {}
+    controller._config_mtime = None
+
+    latest_config = V2Config.from_payload(
+        {**_config_payload({"bot_token": "discord-token"}), "agent_progress_style": "concise"}
+    )
+    latest_config.save()
+
+    # No prior _refresh_config_from_disk call; the getter itself must pick it up.
+    assert controller.get_progress_style_for_context(None) == "concise"
+    assert controller.get_heartbeat_interval_ms_for_context(None) == 15000

@@ -501,7 +501,7 @@ bind vr-a3x9k2
 | `vibe stop` | 停止服务与 UI，同时终止 OpenCode server |
 | `vibe restart` | 停止后重新启动 |
 | `vibe status` | 输出运行状态 JSON |
-| `vibe doctor` | 运行诊断 |
+| `vibe doctor` | 运行诊断；`vibe doctor repair` 显式执行安全修复 |
 | `vibe remote` | 引导式配置 Avibe Cloud 远程 Web UI |
 | `vibe screenshot` | 截取本机桌面截图 |
 | `vibe version` | 查看当前版本 |
@@ -585,7 +585,18 @@ vibe doctor
 - 校验配置
 - 检查平台凭据
 - 检查 backend CLI 是否可用
-- 检查运行环境
+- 检查 runtime home 迁移状态
+- 检查 runtime 进程、安装来源和重启元数据状态
+
+修复模式需要显式执行，并支持 dry-run：
+
+```bash
+vibe doctor repair --dry-run
+vibe doctor repair home-migration --yes
+vibe doctor repair duplicate-service-processes --yes
+vibe doctor repair stale-install-runtime --yes
+vibe doctor repair stale-restart-state --yes
+```
 
 ### `vibe remote`
 

@@ -70,6 +70,19 @@ def _insert_run(conn, *, run_id: str, session_id: str, status: str) -> None:
     )
 
 
+def _grant_from_request(conn, request: dict, *, session_id: str, cache) -> dict:
+    option = request["card"]["grant_options"][0]
+    return vs.create_grant(
+        conn,
+        member_names=option["member_snapshot"],
+        source_selector=option["source_selector"],
+        purpose=option["purpose"],
+        session_id=session_id,
+        request_id=request["id"],
+        cache=cache,
+    )
+
+
 def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
@@ -144,28 +157,14 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
             delivery={"session_id": "ses_other"},
         )
         cache = vs.GRANT_RUNTIME_CACHE
-        grant = vs.create_grant(
-            conn,
-            scope_type="secret",
-            scope_ref="ARCHIVE_KEY",
-            session_id=sid,
-            created_by_request_id=req["id"],
-            cache=cache,
-        )
+        grant = _grant_from_request(conn, req, session_id=sid, cache=cache)
         reserved_req = vs.create_access_request(
             conn,
             "ARCHIVE_RESERVED_KEY",
             requester={"session_id": sid},
             delivery={"session_id": sid, "command": "python reserved.py"},
         )
-        reserved_grant = vs.create_grant(
-            conn,
-            scope_type="secret",
-            scope_ref="ARCHIVE_RESERVED_KEY",
-            session_id=sid,
-            created_by_request_id=reserved_req["id"],
-            cache=cache,
-        )
+        reserved_grant = _grant_from_request(conn, reserved_req, session_id=sid, cache=cache)
         reserved = vs.resolve_secret_access(
             conn,
             "ARCHIVE_RESERVED_KEY",
@@ -183,10 +182,7 @@ def test_archive_reclaims_bound_resources(tmp_path: Path) -> None:
     assert result["status"] == "archived"
     assert result["agent_status"] == "idle"
     assert result["reclaimed"] == {"tasks": 1, "watches": 1, "runs": 2, "queued": 0}
-    assert {(scope["scope_type"], scope["scope_ref"]) for scope in result["revoked_vault_grant_scopes"]} == {
-        ("secret", "ARCHIVE_KEY"),
-        ("secret", "ARCHIVE_RESERVED_KEY"),
-    }
+    assert {scope["grant_id"] for scope in result["revoked_vault_grant_scopes"]} == {grant["id"], reserved_grant["id"]}
 
     with engine.connect() as conn:
         live_defs = (
@@ -252,13 +248,13 @@ def test_archive_release_vault_scopes_runs_in_threadpool(monkeypatch) -> None:
     asyncio.run(
         ui_server._archive_release_vault_scopes(
             "ses_archive",
-            [{"scope_type": "secret", "scope_ref": "ARCHIVE_KEY"}],
+            [{"grant_id": "vgr_archive"}],
         )
     )
 
     assert calls
     release.assert_called_once_with(
-        [{"scope_type": "secret", "scope_ref": "ARCHIVE_KEY"}],
+        [{"grant_id": "vgr_archive"}],
         reason="archive_session:ses_archive",
     )
 

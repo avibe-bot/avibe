@@ -5,7 +5,7 @@ import types
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -685,6 +685,77 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent_name, "codex")
         self.assertIsNone(request.vibe_agent_model)
         self.assertIsNone(request.vibe_agent_reasoning_effort)
+
+    async def test_workbench_inherited_route_materializes_at_turn_start(self):
+        """A workbench session created on an inherited default (empty model /
+        effort) gets the resolved Agent defaults pinned onto its row when the
+        turn STARTS, so the chat-header picker keeps showing the full route."""
+        controller = _StubController(platform="avibe", ack_mode="reaction", typing_result=True)
+        controller.settings_manager.sessions.materialize_agent_session_route = Mock(return_value=True)
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1",
+            channel_id="ses_wb",
+            message_id="m1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_target": {
+                    "id": "ses_wb",
+                    "agent_name": None,
+                    "agent_backend": None,
+                    "model": None,
+                    "reasoning_effort": None,
+                }
+            },
+        )
+
+        await handler.handle_user_message(context, "hello")
+
+        controller.settings_manager.sessions.materialize_agent_session_route.assert_called_once_with(
+            "ses_wb", model="gpt-5.4", reasoning_effort="high"
+        )
+
+    async def test_workbench_explicit_route_skips_materialization(self):
+        """A session whose row already carries an explicit model / effort must
+        not be touched at turn start — materialization is fill-if-empty only."""
+        controller = _StubController(platform="avibe", ack_mode="reaction", typing_result=True)
+        controller.settings_manager.sessions.materialize_agent_session_route = Mock(return_value=True)
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(
+            user_id="U1",
+            channel_id="ses_wb",
+            message_id="m1",
+            platform="avibe",
+            platform_specific={
+                "agent_session_target": {
+                    "id": "ses_wb",
+                    "agent_name": "codex",
+                    "agent_backend": "codex",
+                    "model": "gpt-5.5",
+                    "reasoning_effort": "xhigh",
+                }
+            },
+        )
+
+        await handler.handle_user_message(context, "hello")
+
+        controller.settings_manager.sessions.materialize_agent_session_route.assert_not_called()
+
+    async def test_im_turn_never_materializes_session_route(self):
+        """IM turns carry no ``agent_session_target``; their model semantics
+        belong to channel routing and must never be pinned onto session rows."""
+        controller = _StubController(platform="slack", ack_mode="reaction", typing_result=True)
+        controller.settings_manager.sessions.materialize_agent_session_route = Mock(return_value=True)
+        handler = MessageHandler(controller)
+        handler.set_session_handler(_StubSessionHandler())
+        context = MessageContext(user_id="U1", channel_id="C1", message_id="m1", platform="slack")
+
+        await handler.handle_user_message(context, "hello")
+
+        self.assertEqual(len(controller.agent_service.requests), 1)
+        controller.settings_manager.sessions.materialize_agent_session_route.assert_not_called()
 
     async def test_lark_typing_preference_uses_registry_reaction_capability(self):
         controller = _StubController(platform="lark", ack_mode="typing", typing_result=True)

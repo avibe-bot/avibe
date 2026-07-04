@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, Cpu, Loader2, LockKeyhole, PenTool, ShieldCheck, Wallet } from 'lucide-react';
+import { Check, Clock, Cpu, KeyRound, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { useApi, type VaultRequest } from '@/context/ApiContext';
+import { useApi, type VaultRequest, type VaultSourceSelector } from '@/context/ApiContext';
+import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
 import {
   blindBoxAgentDeliverOperationHash,
@@ -17,16 +18,19 @@ import { Button } from './button';
 import { Switch } from './switch';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 
-/** The approval `card` the daemon attaches to a request's delivery payload. */
-type ScopeOption = {
-  scope_type: 'secret' | 'skill' | 'group';
-  scope_ref: string;
-  default_ttl_seconds: number;
-  ttl_options_seconds: number[];
-  session_binding_default: boolean;
-  member_count: number;
-  member_snapshot: string[];
-  /** Hydrated for UI audience: the protected members of this scope to release. */
+/**
+ * The fixed protected grant the daemon attaches to an access request's card. In the
+ * grant-id model there is exactly one: the protected set covered by the request's
+ * selector. `grant_id` is the avault runtime scope and the DEK blind-box AAD binding.
+ */
+type GrantOption = {
+  grant_id: string;
+  default_ttl_seconds?: number;
+  session_binding_default?: boolean;
+  member_count?: number;
+  member_snapshot?: string[];
+  source_selector?: VaultSourceSelector;
+  /** Hydrated for UI audience: the protected members of this set to DEK-release. */
   unlock_material?: ProtectedUnlockMaterial[];
 };
 
@@ -34,12 +38,19 @@ type ApprovalCard = {
   card_type?: string;
   request_type?: 'access' | 'sign';
   secret_name?: string;
+  secret_names?: string[];
+  protected_secret_names?: string[];
   kind?: string | null;
   protection?: string | null;
   command?: string | null;
   egress?: string | null;
   session_id?: string | null;
-  scope_options?: ScopeOption[];
+  purpose?: string | null;
+  /** How the protected set was selected: explicit env names vs tags/skills. */
+  source_selector?: VaultSourceSelector;
+  default_ttl_seconds?: number;
+  /** The fixed protected grant. */
+  grant_options?: GrantOption[];
   /** Hydrated for UI audience when the requested secret is protected. */
   secret_unlock_material?: ProtectedUnlockMaterial | null;
 };
@@ -96,28 +107,46 @@ export const VaultApprovalCard: React.FC<{
 
   // The request is passed in already hydrated by the UI-audience inbox list
   // (`getVaultRequests`, #708), so `card.secret_unlock_material` /
-  // `scope_options[].unlock_material` are present for protected requests. No fetch or
+  // `grant_options[].unlock_material` are present for protected requests. No fetch or
   // loading state is needed here — the single-request GET is agent-audience (value-free).
   const card = (request.card ?? null) as ApprovalCard | null;
   const delivery = (request.delivery ?? {}) as { digest?: string; scheme?: string };
   const isSign = (card?.request_type ?? request.request_type) === 'sign';
-  const isProtected = card?.protection === 'protected';
   const isKeypair = card?.kind === 'keypair';
-  const scopeOptions = card?.scope_options ?? [];
 
-  const [scopeIdx, setScopeIdx] = useState(0);
-  const [thisSessionOnly, setThisSessionOnly] = useState(
-    () => scopeOptions.length === 0 || scopeOptions[0].session_binding_default !== false,
-  );
+  // A grant covers a fixed protected set — there is no scope picker.
+  const grantOptions = useMemo(() => card?.grant_options ?? [], [card]);
+  const option = useMemo(() => grantOptions[0], [grantOptions]);
+  const materials = useMemo(() => option?.unlock_material ?? [], [option]);
+  const memberNames = useMemo(() => {
+    if (isSign) return card?.secret_name ? [card.secret_name] : [];
+    return option?.member_snapshot?.length ? option.member_snapshot : (card?.secret_names ?? (card?.secret_name ? [card.secret_name] : []));
+  }, [card, isSign, option]);
+  // Protected secret names to be granted (design: "show the protected secret names covered").
+  const protectedNames = useMemo(() => {
+    const materialNames = materials.map((m) => m.name);
+    return materialNames.length ? materialNames : (card?.protected_secret_names ?? []);
+  }, [card, materials]);
+  const isProtected = isSign ? card?.protection === 'protected' : protectedNames.length > 0 || card?.protection === 'protected';
+  const source = useMemo<VaultSourceSelector>(() => card?.source_selector ?? option?.source_selector ?? {}, [card, option]);
+  const sourceChips = useMemo(() => {
+    const chips: Array<{ key: string; label: string; icon: typeof KeyRound; mono?: boolean }> = [];
+    for (const env of source.env ?? []) chips.push({ key: `env:${env}`, label: env, icon: KeyRound, mono: true });
+    const { tags, skills } = partitionTags(source.tags);
+    for (const skill of skills) chips.push({ key: `skill:${skill}`, label: t('vaults.approval.sourceSkill', { name: skill }), icon: Puzzle });
+    for (const tag of tags) chips.push({ key: `tag:${tag}`, label: t('vaults.approval.sourceTag', { name: tag }), icon: Tag });
+    return chips;
+  }, [source, t]);
+  // TTL is a fixed product default (env-list 300s, tag/skill 900s), not a user control.
+  const ttlSeconds = option?.default_ttl_seconds ?? card?.default_ttl_seconds ?? (source.tags?.length ? 900 : 300);
+
+  const [thisSessionOnly, setThisSessionOnly] = useState(() => option?.session_binding_default !== false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const selectedOption = scopeOptions[scopeIdx];
-  const selectedMaterials = useMemo(() => selectedOption?.unlock_material ?? [], [selectedOption]);
-
   // A request needs the browser VMK unlocked when it touches protected key material:
-  // a protected sign, or an access whose chosen scope includes protected members.
-  const needsUnlock = isSign ? isProtected : selectedMaterials.length > 0;
+  // a protected sign, or an access whose fixed set includes protected members.
+  const needsUnlock = isSign ? isProtected : protectedNames.length > 0;
   const unlocked = vault.status === 'unlocked';
 
   useEffect(() => {
@@ -143,21 +172,19 @@ export const VaultApprovalCard: React.FC<{
 
   const approveAccess = () =>
     finish(async () => {
-      const option = selectedOption;
       if (!option) throw new Error(t('vaults.approval.errors.noScope'));
-      const ttlSeconds = option.default_ttl_seconds;
-      const materials = option.unlock_material ?? [];
+      const grantId = option.grant_id?.trim();
+      if (!grantId) throw new Error(t('vaults.approval.errors.failed'));
       // A protected secret with no hydrated unlock material means the request was read
       // without UI-audience hydration — fail clearly instead of taking the standard path
       // (which the daemon rejects for a protected secret anyway).
       if (isProtected && materials.length === 0) throw new Error(t('vaults.approval.errors.missingMaterial'));
       if (materials.length === 0) {
-        // Standard members only — a metadata-only scope grant, no DEK release.
+        // No protected members (a hidden always-ask standard case) — metadata-only grant, no DEK.
         failIfNotOk(
           await api.createVaultGrant({
             request_id: request.id,
-            scope_type: option.scope_type,
-            scope_ref: option.scope_ref,
+            grant_id: grantId,
             ttl_seconds: ttlSeconds,
             this_session_only: thisSessionOnly,
           }),
@@ -173,8 +200,8 @@ export const VaultApprovalCard: React.FC<{
           const approvalNonce = crypto.getRandomValues(new Uint8Array(16));
           const context = await protectedDekReleaseBlindBoxContext(material.name, {
             kind: 'agent-deliver',
-            scopeType: option.scope_type,
-            scopeRef: option.scope_ref,
+            scopeType: 'grant',
+            scopeRef: grantId,
             ttlSecs: ttlSeconds,
             approval: { nonce: approvalNonce, expiresAtUnix },
             operationHash: await blindBoxAgentDeliverOperationHash(material.name, ttlSeconds),
@@ -190,8 +217,7 @@ export const VaultApprovalCard: React.FC<{
         }
         failIfNotOk(
           await api.fulfillVaultAccessRequest(request.id, {
-            scope_type: option.scope_type,
-            scope_ref: option.scope_ref,
+            grant_id: grantId,
             ttl_seconds: ttlSeconds,
             this_session_only: thisSessionOnly,
             agent_pubkey: agentPubkey,
@@ -247,7 +273,7 @@ export const VaultApprovalCard: React.FC<{
     );
   }
 
-  const approveDisabled = busy || (needsUnlock && !unlocked) || (!isSign && !selectedOption);
+  const approveDisabled = busy || (needsUnlock && !unlocked) || (!isSign && !option);
 
   return (
     <div className="flex flex-col gap-4">
@@ -276,7 +302,15 @@ export const VaultApprovalCard: React.FC<{
       {/* Details — borderless list, sentence-case labels. */}
       <div className="flex flex-col gap-3.5">
         <DetailRow label={isSign ? t('vaults.approval.key') : t('vaults.approval.secret')}>
-          <span className="truncate font-mono text-[13px] font-semibold">{card.secret_name}</span>
+          {memberNames.length > 1 ? (
+            memberNames.map((name) => (
+              <Badge key={name} variant="outline" className="font-mono">
+                {name}
+              </Badge>
+            ))
+          ) : (
+            <span className="truncate font-mono text-[13px] font-semibold">{memberNames[0] ?? card?.secret_name ?? ''}</span>
+          )}
           {isProtected ? (
             <Badge variant="warning">{t('vaults.protected')}</Badge>
           ) : (
@@ -319,62 +353,39 @@ export const VaultApprovalCard: React.FC<{
 
       <div className="h-px bg-border" />
 
-      {/* Approval scope (access only) */}
-      {!isSign && scopeOptions.length > 0 ? (
-        <div className="flex flex-col gap-2">
-          <span className="px-1 text-xs font-semibold uppercase tracking-wide text-muted">
-            {t('vaults.approval.scopeTitle')}
-          </span>
-          <div
-            role="radiogroup"
-            aria-label={t('vaults.approval.scopeTitle')}
-            className="flex flex-col gap-2"
-            onKeyDown={(e) => {
-              if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
-                e.preventDefault();
-                setScopeIdx((i) => (i + 1) % scopeOptions.length);
-              } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
-                e.preventDefault();
-                setScopeIdx((i) => (i - 1 + scopeOptions.length) % scopeOptions.length);
-              }
-            }}
-          >
-            {scopeOptions.map((option, idx) => {
-              const selected = idx === scopeIdx;
-              return (
-                <button
-                  key={`${option.scope_type}:${option.scope_ref}`}
-                  type="button"
-                  role="radio"
-                  aria-checked={selected}
-                  tabIndex={selected ? 0 : -1}
-                  onClick={() => setScopeIdx(idx)}
-                  className={cn(
-                    'flex items-center gap-2.5 rounded-lg border p-2.5 text-left transition-colors',
-                    selected ? 'border-mint bg-mint-soft' : 'border-border bg-surface hover:bg-surface-2',
-                  )}
-                >
-                  <span
-                    className={cn(
-                      'flex size-[18px] shrink-0 items-center justify-center rounded-full border-[1.5px]',
-                      selected ? 'border-2 border-mint' : 'border-border-strong',
-                    )}
-                  >
-                    {selected ? <span className="size-2 rounded-full bg-mint" /> : null}
-                  </span>
-                  <span className="flex min-w-0 flex-col gap-px">
-                    <span className={cn('flex flex-wrap items-center gap-1.5 text-[13px]', selected ? 'font-semibold' : 'font-medium')}>
-                      {t(`vaults.approval.scope.${option.scope_type}`, { ref: option.scope_ref })}
-                      <Badge variant="secondary">{ttlLabel(option.default_ttl_seconds)}</Badge>
-                    </span>
-                    <span className="text-[11px] text-muted-foreground">
-                      {t('vaults.approval.scopeMembers', { count: option.member_count })}
-                    </span>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
+      {/* Access grant summary (access only): how the set was selected, the fixed protected
+          secret names to be granted, and the fixed access duration. There is no scope
+          picker — the grant is a fixed protected set determined by the request's selector. */}
+      {!isSign ? (
+        <div className="flex flex-col gap-3.5">
+          {sourceChips.length > 0 ? (
+            <DetailRow label={t('vaults.approval.source')}>
+              {sourceChips.map((chip) => {
+                const Icon = chip.icon;
+                return (
+                  <Badge key={chip.key} variant="outline" className={cn('gap-1', chip.mono && 'font-mono')}>
+                    <Icon className="size-3 shrink-0 text-muted" />
+                    {chip.label}
+                  </Badge>
+                );
+              })}
+            </DetailRow>
+          ) : null}
+          {protectedNames.length > 0 ? (
+            <DetailRow label={t('vaults.approval.protectedSecrets')}>
+              {protectedNames.map((name) => (
+                <Badge key={name} variant="warning" className="font-mono">
+                  {name}
+                </Badge>
+              ))}
+            </DetailRow>
+          ) : null}
+          <DetailRow label={t('vaults.approval.duration')}>
+            <span className="flex items-center gap-1.5 text-[13px] text-foreground">
+              <Clock className="size-3.5 shrink-0 text-muted" />
+              {t('vaults.approval.durationValue', { time: ttlLabel(ttlSeconds) })}
+            </span>
+          </DetailRow>
         </div>
       ) : null}
 

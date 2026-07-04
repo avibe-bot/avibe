@@ -244,8 +244,11 @@ def test_cloud_init_configures_systemd_service_without_source_code() -> None:
     assert "name: avibe" in data
     assert "Description=Avibe regression service" in data
     assert "Environment=VIBE_DEPLOYMENT_ENV=regression" in data
+    assert "Environment=AVIBE_ALLOW_DEV_STATE_MIGRATION=1" in data
     assert "EnvironmentFile=-/etc/avibe-regression.env" in data
     assert "ExecStart=/opt/avibe/venv/bin/python scripts/incus_regression_supervisor.py" in data
+    assert "Delegate=yes" in data
+    assert "MemoryAccounting=yes" in data
     assert "/opt/avibe/source" in data
     assert "/home/avibe/.vibe_remote" in data
 
@@ -267,6 +270,24 @@ def test_project_config_marks_regression_target() -> None:
     assert "restricted.devices.proxy=allow" in config
     assert "user.avibe_regression.target=worktree" in config
     assert "user.avibe_regression.host_port=15200" in config
+
+
+def test_tenant_exec_exports_regression_guard_override() -> None:
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15130,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+
+    command = " ".join(incus_regression.tenant_exec(target, "/opt/avibe/venv/bin/vibe status"))
+
+    assert "[ ! -f /etc/avibe-regression.env ] || . /etc/avibe-regression.env" in command
+    assert "VIBE_DEPLOYMENT_ENV=regression" in command
+    assert "AVIBE_ALLOW_DEV_STATE_MIGRATION=1" in command
 
 
 def test_remote_ref_prefixes_resource_names_only() -> None:
@@ -512,6 +533,7 @@ def test_runtime_env_payload_maps_show_runtime_and_llm_env(monkeypatch: pytest.M
 
     assert "SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0.dev0" in payload
     assert "SETUPTOOLS_SCM_PRETEND_VERSION_FOR_AVIBE_OS=0.0.0.dev0" in payload
+    assert "AVIBE_ALLOW_DEV_STATE_MIGRATION=1" in payload
     assert "VIBE_SHOW_RUNTIME_SOURCE=github-source" in payload
     assert "VIBE_SHOW_RUNTIME_GITHUB_REF=main" in payload
     assert "REGRESSION_SLACK_CHANNEL=C123" in payload

@@ -63,6 +63,7 @@ def _isolate_vibe_remote_home(request, tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CACHE_HOME", str(isolated_home / ".cache"))
     monkeypatch.setenv("XDG_STATE_HOME", str(isolated_home / ".local" / "state"))
     monkeypatch.setenv("AVIBE_HOME", str(isolated_home / ".avibe"))
+    monkeypatch.setenv("AVIBE_ALLOW_DEV_STATE_MIGRATION", "1")
     # Keep Codex / Claude Code credential writes off the developer's real
     # home. Tests that manage these env vars themselves (e.g. the
     # ``get_codex_home`` env-precedence tests) override these via their own

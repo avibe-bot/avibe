@@ -29,11 +29,14 @@ from modules.im.formatters.slack_formatter import SlackFormatter
 
 
 class _StubSettingsManager:
+    def __init__(self, hidden_types=None):
+        self._hidden_types = set(hidden_types or ())
+
     def _canonicalize_message_type(self, message_type):
         return message_type
 
     def is_message_type_hidden(self, settings_key, canonical_type):
-        return False
+        return canonical_type in self._hidden_types
 
 
 class _StubSessionHandler:
@@ -71,7 +74,15 @@ class _EditClient:
 
 
 class _StubController:
-    def __init__(self, *, platform="slack", im_client=None, progress_style="concise", backend_alive=None):
+    def __init__(
+        self,
+        *,
+        platform="slack",
+        im_client=None,
+        progress_style="concise",
+        backend_alive=None,
+        hidden_types=None,
+    ):
         self.config = type(
             "Config", (), {"platform": platform, "language": "en", "reply_enhancements": False}
         )()
@@ -80,6 +91,7 @@ class _StubController:
         self.agent_service = None
         self._progress_style_value = progress_style
         self._backend_alive_value = backend_alive
+        self._hidden_types = hidden_types
 
     def _get_settings_key(self, context):
         return context.channel_id
@@ -88,7 +100,7 @@ class _StubController:
         return f"{context.platform}::{context.channel_id}"
 
     def get_settings_manager_for_context(self, context):
-        return _StubSettingsManager()
+        return _StubSettingsManager(self._hidden_types)
 
     def get_im_client_for_context(self, context):
         return self.im_client
@@ -178,6 +190,86 @@ class StatusBubbleProcessTests(unittest.IsolatedAsyncioTestCase):
         d = _dispatcher(controller)
         self.assertEqual(d._concise_progress_style(_ctx("lark")), "verbose")
 
+    async def test_concise_toolcall_renders_despite_hidden_toolcall(self):
+        # Regression: the concise status bubble is an ephemeral status line, not
+        # the verbose per-message log that ``show_message_types`` governs. A
+        # toolcall emit must render into the bubble even when the channel hides
+        # the toolcall message type (the default show_message_types=['assistant']).
+        controller = _StubController(platform="slack", hidden_types={"toolcall"})
+        d = _dispatcher(controller)
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            mid = await d.emit_agent_message(
+                _ctx(), "toolcall", "🔧 `Read` `{}`", status_label="🔧 Read: a.py"
+            )
+        self.assertEqual(mid, "msg-1")
+        self.assertEqual(controller.im_client.sent[0][1], "🔧 Read: a.py")
+
+    async def test_concise_renders_empty_chunk_with_status_label(self):
+        # File-link-only body strips to empty, but a non-empty status_label still
+        # renders the bubble (footer/label), so tool steps are never dropped.
+        controller = _StubController(platform="slack", hidden_types={"toolcall"})
+        d = _dispatcher(controller)
+        with mock.patch("core.message_dispatcher.strip_file_links", return_value=""):
+            with mock.patch("core.message_dispatcher.persist_agent_message"):
+                mid = await d.emit_agent_message(
+                    _ctx(), "toolcall", "[f](file:///tmp/x)", status_label="🔧 Read: x"
+                )
+        self.assertEqual(mid, "msg-1")
+        self.assertEqual(controller.im_client.sent[0][1], "🔧 Read: x")
+
+    async def test_concise_empty_chunk_and_no_label_does_not_render(self):
+        # Empty body AND no status_label → nothing to show; no bubble is posted.
+        controller = _StubController(platform="slack", hidden_types={"toolcall"})
+        d = _dispatcher(controller)
+        with mock.patch("core.message_dispatcher.strip_file_links", return_value=""):
+            with mock.patch("core.message_dispatcher.persist_agent_message"):
+                mid = await d.emit_agent_message(_ctx(), "toolcall", "[f](file:///tmp/x)")
+        self.assertIsNone(mid)
+        self.assertEqual(controller.im_client.sent, [])
+
+    async def test_concise_assistant_renders_despite_hidden_assistant(self):
+        # Concise mode bypasses the visibility toggle for assistant mutterings too;
+        # users who want zero process output use progress_style=off.
+        controller = _StubController(platform="slack", hidden_types={"assistant", "toolcall"})
+        d = _dispatcher(controller)
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            mid = await d.emit_agent_message(_ctx(), "assistant", "thinking about it")
+        self.assertEqual(mid, "msg-1")
+        self.assertEqual(controller.im_client.sent[0][1], "thinking about it")
+
+    async def test_concise_toolcall_persisted_only_when_target_blocks_toolcall_delivery(self):
+        # A Slack concise turn routed via delivery_override to a target that
+        # cannot deliver toolcalls (WeChat) must stay persisted-only: the target
+        # toolcall-delivery gate runs BEFORE the concise shortcut, so no status
+        # bubble send is attempted to a platform that can't deliver toolcalls.
+        controller = _StubController(platform="slack", hidden_types={"toolcall"})
+        d = _dispatcher(controller)
+        ctx = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={
+                "delivery_override": {"platform": "wechat", "channel_id": "wx1", "user_id": "wxu"}
+            },
+        )
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            mid = await d.emit_agent_message(
+                ctx, "toolcall", "🔧 `Read` `{}`", status_label="🔧 Read: a.py"
+            )
+        self.assertIsNone(mid)
+        self.assertEqual(controller.im_client.sent, [])
+
+    async def test_off_still_respects_no_bubble_when_toolcall_hidden(self):
+        # off must remain fully silent regardless of the visibility toggle.
+        controller = _StubController(
+            platform="slack", progress_style="off", hidden_types={"toolcall"}
+        )
+        d = _dispatcher(controller)
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            mid = await d.emit_agent_message(_ctx(), "toolcall", "🔧 `Read` `{}`")
+        self.assertIsNone(mid)
+        self.assertEqual(controller.im_client.sent, [])
+
 
 class StatusBubbleResultTests(unittest.IsolatedAsyncioTestCase):
     async def test_result_posts_fresh_message_and_deletes_bubble(self):
@@ -198,6 +290,85 @@ class StatusBubbleResultTests(unittest.IsolatedAsyncioTestCase):
         # Persisted text is the clean answer (no footer).
         result_persists = [c for c in persist.call_args_list if c.args[1] == "result"]
         self.assertEqual(result_persists[-1].args[2], "Final answer")
+
+    async def test_style_snapshot_keeps_concise_when_config_flips_to_off(self):
+        # The effective progress style is snapshotted per turn: a Web UI flip to
+        # off mid-turn does NOT take effect until the next turn, so the concise
+        # bubble is rendered and retired normally (no stranded bubble).
+        controller = _StubController(platform="slack")
+        d = _dispatcher(controller)
+        ctx = _ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await d.emit_agent_message(ctx, "toolcall", "🔧 `Bash` `{}`")  # bubble msg-1
+            controller._progress_style_value = "off"  # Web UI change mid-turn (deferred)
+            self.assertEqual(d._concise_progress_style(ctx), "concise")  # snapshot unchanged
+            result_id = await d.emit_agent_message(ctx, "result", "Final answer")
+        self.assertEqual(result_id, "msg-2")  # fresh result message
+        self.assertEqual(controller.im_client.deletes, ["msg-1"])  # bubble retired, not stuck
+
+    async def test_verbose_result_does_not_delete_process_log(self):
+        # Verbose mode stores its consolidated process-log id in the SAME dict as
+        # concise bubbles. The result path must NOT mistake that log for a status
+        # bubble and delete/collapse it — verbose users keep their process log.
+        controller = _StubController(platform="slack", progress_style="verbose")
+        d = _dispatcher(controller)
+        ctx = _ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await d.emit_agent_message(ctx, "toolcall", "🔧 `Bash` `{}`")  # verbose log msg-1
+            await d.emit_agent_message(ctx, "result", "Final answer")
+        self.assertEqual(controller.im_client.deletes, [])  # process log NOT deleted
+        self.assertIn("msg-1", [m for m, _, _ in controller.im_client.sent])  # log still present
+
+    async def test_style_snapshot_keeps_verbose_when_config_flips_to_concise(self):
+        # Turn starts verbose (log posted). A Web UI flip to concise mid-turn is
+        # deferred to the next turn by the per-turn snapshot, so the next emit keeps
+        # appending to the SAME verbose log (no fresh concise bubble) and the result
+        # never retires it.
+        controller = _StubController(platform="slack", progress_style="verbose")
+        d = _dispatcher(controller)
+        ctx = _ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await d.emit_agent_message(ctx, "toolcall", "🔧 `Bash` `{}`")  # verbose log msg-1
+            controller._progress_style_value = "concise"  # Web UI flip mid-turn (deferred)
+            self.assertEqual(d._concise_progress_style(ctx), "verbose")  # snapshot unchanged
+            await d.emit_agent_message(ctx, "toolcall", "🔧 `Read` `{}`")  # appended to msg-1, no new bubble
+            result_id = await d.emit_agent_message(ctx, "result", "Final answer")
+        self.assertEqual(result_id, "msg-2")  # only the log (msg-1) + result (msg-2) were sent
+        self.assertEqual([m for m, _, _ in controller.im_client.sent], ["msg-1", "msg-2"])
+        self.assertEqual(controller.im_client.deletes, [])  # verbose log NOT retired
+
+    async def test_style_snapshot_keeps_concise_when_config_flips_to_verbose(self):
+        # Turn starts concise (bubble posted). A Web UI flip to verbose mid-turn is
+        # deferred by the snapshot, so the next emit keeps editing the SAME concise
+        # bubble and the result retires it normally.
+        controller = _StubController(platform="slack", progress_style="concise")
+        d = _dispatcher(controller)
+        ctx = _ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await d.emit_agent_message(
+                ctx, "toolcall", "🔧 `Bash` `{}`", status_label="🔧 Bash"
+            )  # concise bubble msg-1
+            controller._progress_style_value = "verbose"  # Web UI flip mid-turn (deferred)
+            self.assertEqual(d._concise_progress_style(ctx), "concise")  # snapshot unchanged
+            await d.emit_agent_message(
+                ctx, "toolcall", "🔧 `Read` `{}`", status_label="🔧 Read"
+            )  # edits the same bubble msg-1, no new message
+            result_id = await d.emit_agent_message(ctx, "result", "Final answer")
+        self.assertEqual(result_id, "msg-2")  # result is its own new message
+        self.assertEqual(controller.im_client.deletes, ["msg-1"])  # concise bubble retired normally
+
+    async def test_style_snapshot_cleared_after_turn(self):
+        # The per-turn snapshot is dropped in teardown so the NEXT turn re-reads
+        # config — i.e. a Web UI change still takes effect, just at turn boundaries.
+        controller = _StubController(platform="slack", progress_style="concise")
+        d = _dispatcher(controller)
+        ctx = _ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await d.emit_agent_message(ctx, "toolcall", "🔧 `Bash` `{}`")
+            key = d._get_consolidated_message_key(ctx)
+            self.assertEqual(d._turn_progress_style.get(key), "concise")  # snapshot taken
+            await d.emit_agent_message(ctx, "result", "Done")
+        self.assertNotIn(key, d._turn_progress_style)  # cleared at turn end
 
     async def test_result_done_footer_keeps_session_tokens(self):
         # A backend that reports session tokens before the result → the fresh
@@ -422,6 +593,21 @@ class StatusBubbleResultTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(key, d._status_heartbeat_tasks)  # heartbeat running
             await d.emit_agent_message(ctx, "result", "Done")
         self.assertNotIn(key, d._status_heartbeat_tasks)  # cancelled + cleared
+
+    async def test_heartbeat_render_bails_when_key_no_longer_concise(self):
+        # After a concise->verbose mid-turn flip the message is reused as a verbose
+        # log and the concise marker is dropped; a still-scheduled heartbeat tick
+        # must not stamp a status footer onto that log.
+        controller = _StubController(platform="slack")
+        d = _dispatcher(controller)
+        ctx = _ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await d.emit_agent_message(ctx, "toolcall", "🔧 `Bash` `{}`")  # bubble msg-1
+        key = d._get_consolidated_message_key(ctx)
+        d._concise_bubble_keys.discard(key)  # simulate the verbose-path marker drop
+        controller.im_client.edits.clear()
+        await d._status_heartbeat_render_once(ctx, controller.im_client, key, "msg-1")
+        self.assertEqual(controller.im_client.edits, [])  # no footer stamped on the log
 
 
 class BeginStatusBubbleTests(unittest.IsolatedAsyncioTestCase):

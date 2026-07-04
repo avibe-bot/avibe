@@ -67,6 +67,18 @@ def _create_standard_secret(
         )
 
 
+def _grant_from_request(conn, request: dict, *, session_id: str | None = None) -> dict:
+    option = request["card"]["grant_options"][0]
+    return vault_service.create_grant(
+        conn,
+        member_names=option["member_snapshot"],
+        source_selector=option["source_selector"],
+        purpose=option["purpose"],
+        session_id=session_id,
+        request_id=request["id"],
+    )
+
+
 def _set_protected_grant(name: str, *, allow_host: list[str], session_id: str | None = None) -> dict:
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(
@@ -79,16 +91,11 @@ def _set_protected_grant(name: str, *, allow_host: list[str], session_id: str | 
         req = vault_service.create_access_request(
             conn,
             name,
+            purpose="fetch",
             requester={"source": "cli", "session_id": session_id} if session_id else {"source": "cli"},
             delivery={"session_id": session_id, "mode": "fetch"} if session_id else {"mode": "fetch"},
         )
-        return vault_service.create_grant(
-            conn,
-            scope_type="secret",
-            scope_ref=name,
-            session_id=session_id,
-            created_by_request_id=req["id"],
-        )
+        return _grant_from_request(conn, req, session_id=session_id)
 
 
 def _set_always_ask_grant(name: str, *, allow_host: list[str]) -> dict:
@@ -102,15 +109,11 @@ def _set_always_ask_grant(name: str, *, allow_host: list[str]) -> dict:
         req = vault_service.create_access_request(
             conn,
             name,
+            purpose="fetch",
             requester={"source": "cli"},
             delivery={"mode": "fetch"},
         )
-        return vault_service.create_grant(
-            conn,
-            scope_type="secret",
-            scope_ref=name,
-            created_by_request_id=req["id"],
-        )
+        return _grant_from_request(conn, req)
 
 
 def test_fetch_passes_bearer_request_to_avault_and_writes_stdout(tmp_path, capfd, monkeypatch):
@@ -181,8 +184,7 @@ def test_fetch_uses_agent_delivery_for_protected_grant(capfd, monkeypatch):
     assert code == 0
     assert captured.out == '{"ok":true}'
     fetch.assert_called_once()
-    assert fetch.call_args.kwargs["scope_type"] == grant["scope_type"]
-    assert fetch.call_args.kwargs["scope_ref"] == grant["scope_ref"]
+    assert fetch.call_args.kwargs["grant_id"] == grant["id"]
     assert fetch.call_args.kwargs["sealed"] == _sealed("gh_pat")
     assert "value" not in repr(fetch.call_args.kwargs)
 

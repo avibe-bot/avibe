@@ -2637,6 +2637,33 @@ def test_show_runtime_vendor_asset_proxy_is_immutable(monkeypatch, tmp_path):
     )
 
 
+def test_show_runtime_vendor_asset_proxy_honors_gzip_q0(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _save_config(tmp_path)
+    body = b"export const React = {};\n" * 200
+    manager = _FakeShowRuntimeManager(
+        body=body,
+        extra_headers={
+            "content-type": "text/javascript; charset=utf-8",
+            "cache-control": "public, max-age=31536000, immutable",
+        },
+    )
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        response = app.test_client().get(
+            "/_show-runtime/vendor/abc123/react.js",
+            base_url="http://127.0.0.1:5123",
+            headers={"Accept-Encoding": "br, gzip;q=0"},
+        )
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert response.status_code == 200
+    assert response.content == body
+    assert "content-encoding" not in response.headers
+    assert "Accept-Encoding" in response.headers["vary"]
+
+
 def test_show_runtime_vendor_asset_proxy_forwards_query_and_is_public(monkeypatch, tmp_path):
     # No remote login configured here: the vendor namespace is referenced by the
     # anonymous public `/p/<share>/` surface via the runtime's import map, so it must be

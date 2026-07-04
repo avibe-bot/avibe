@@ -454,34 +454,20 @@ web_push_subscriptions = Table(
     Index("ix_web_push_subscriptions_user_device", "user_key", "device_id"),
 )
 
-# Vaults — secret management for agents (design: docs/plans/vaults.md).
-# A named secret is referenced by a globally-unique env-style ``name``; ``group_name``
-# is a lightweight organizational + unlock-scope axis (NOT a separate keyspace, NOT a
-# 1Password-style multi-vault container). Values are envelope-encrypted at rest
-# (storage/vault_crypto.py): standard tier under a machine key, protected tier (P1)
-# under a password/passkey-derived key. ``ciphertext``/``nonce`` are base64 text and
-# ``wrap_meta`` is a JSON blob of the wrapped DEK + scheme — there is deliberately no
-# plaintext column. The ``vault_secrets`` table is denylisted in ``vibe data query``.
-vault_groups = Table(
-    "vault_groups",
-    metadata,
-    Column("name", String, primary_key=True),
-    Column("description", Text, nullable=True),
-    # Whether secrets in this group may be covered by a scope grant (P1). Stored as
-    # Integer (0/1) per the codebase boolean convention. Forced 0 if the group holds
-    # a keypair (signing is never grantable).
-    Column("grantable", Integer, nullable=False, server_default="1"),
-    Column("max_grant_ttl_seconds", Integer, nullable=False, server_default="900"),
-    Column("created_at", String, nullable=False),
-)
-
+# Vaults — secret management for agents.
+# A named secret is referenced by a globally-unique env-style ``name``. Tags are
+# the only grouping selector; skill association is stored as reserved
+# ``skill:<name>`` tags. Values are envelope-encrypted at rest (storage/vault_crypto.py):
+# standard tier under a machine key, protected tier under a password/passkey-derived key.
+# ``ciphertext``/``nonce`` are base64 text and ``wrap_meta`` is a JSON blob of the
+# wrapped DEK + scheme — there is deliberately no plaintext column. The
+# ``vault_secrets`` table is denylisted in ``vibe data query``.
 vault_secrets = Table(
     "vault_secrets",
     metadata,
     Column("id", String, primary_key=True),
     # Globally-unique reference key, ENV-style ``^[A-Z][A-Z0-9_]*$``.
     Column("name", String, nullable=False),
-    Column("group_name", String, ForeignKey("vault_groups.name"), nullable=False, server_default="default"),
     Column("tags", Text, nullable=True),  # JSON array
     Column("kind", String, nullable=False, server_default="static"),  # static | keypair (P2)
     Column("protection", String, nullable=False, server_default="standard"),  # standard (P0) | protected (P1)
@@ -499,24 +485,7 @@ vault_secrets = Table(
     Column("created_at", String, nullable=False),
     Column("updated_at", String, nullable=False),
     UniqueConstraint("name", name="uq_vault_secrets_name"),
-    Index("ix_vault_secrets_group", "group_name"),
-)
-
-# Skills <-> secrets is an M:N declared-dependency relation (a skill declares the
-# secrets it needs), NOT ownership: one secret used by three skills is one row here
-# plus three link rows, never duplicated. ``source`` distinguishes skill-meta-derived
-# links from agent/user-made ones. (P1.)
-vault_links = Table(
-    "vault_links",
-    metadata,
-    Column("id", String, primary_key=True),
-    Column("secret_name", String, ForeignKey("vault_secrets.name", ondelete="CASCADE"), nullable=False),
-    Column("skill_name", String, nullable=False),
-    Column("source", String, nullable=False),  # skill_meta | agent | user
-    Column("required", Integer, nullable=False, server_default="1"),
-    Column("created_at", String, nullable=False),
-    UniqueConstraint("secret_name", "skill_name", name="uq_vault_links_secret_skill"),
-    Index("ix_vault_links_skill", "skill_name"),
+    Index("ix_vault_secrets_name_kind", "name", "kind"),
 )
 
 # One queue for everything that needs a human: P0 uses ``provision`` (dynamic ask via
@@ -537,26 +506,28 @@ vault_requests = Table(
     Index("ix_vault_requests_status_created", "status", "created_at"),
 )
 
-# Metadata + audit of active scope-typed unlock grants. Key material is NEVER stored
-# here; resident avault agent delivery material wires in later as process-local opaque
-# state. This row records the scope + bounds for the UI and audit; the member set is
-# frozen at grant time.
+# Metadata + audit of active unlock grants. Key material is NEVER stored here;
+# resident avault agent delivery material wires in later as process-local opaque
+# state. The member set is frozen at grant time and keyed by the first-class grant id.
 vault_grants = Table(
     "vault_grants",
     metadata,
     Column("id", String, primary_key=True),
-    Column("scope_type", String, nullable=False),  # secret | skill | group
-    Column("scope_ref", String, nullable=False),
-    Column("member_snapshot", Text, nullable=True),  # JSON: frozen secret-name set (audit)
-    Column("session_id", String, nullable=True),  # null = any-session
-    Column("status", String, nullable=False, server_default="active"),  # active | expired | revoked
-    Column("created_by_request_id", String, nullable=True),
+    Column("member_snapshot", Text, nullable=False),  # JSON: frozen protected secret-name set
+    Column("source_selector", Text, nullable=True),  # JSON: env/tag/skill source that produced the grant
+    Column("request_id", String, nullable=True),
+    Column("session_id", String, nullable=True),
+    Column("purpose", String, nullable=False, server_default="run"),  # run | fetch | inject
+    Column("status", String, nullable=False, server_default="active"),  # active | reserved | expired | revoked
+    Column("one_shot", Integer, nullable=False, server_default=text("0")),
     Column("created_at", String, nullable=False),
     Column("expires_at", String, nullable=False),
     Column("revoked_at", String, nullable=True),
     Column("agent_ready", Integer, nullable=False, server_default=text("0")),
     Column("agent_ready_at", String, nullable=True),
     Index("ix_vault_grants_status_expires", "status", "expires_at"),
+    Index("ix_vault_grants_request", "request_id"),
+    Index("ix_vault_grants_session_purpose", "session_id", "purpose"),
 )
 
 # Append-only audit log. Secret VALUES never appear here — only names, requesters,

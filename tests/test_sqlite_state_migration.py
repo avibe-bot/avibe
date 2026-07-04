@@ -11,12 +11,13 @@ from config import paths
 from config.v2_settings import ChannelSettings, RoutingSettings, SettingsState, SettingsStore
 from storage.db import SqliteInvalidationProbe, create_sqlite_engine
 from storage.importer import JSON_IMPORT_MARKER, ensure_sqlite_state
-from storage.migrations import background_tables_ready, run_migrations
+from storage import migrations
+from storage.migrations import UnsafeDefaultStateMigrationError, background_tables_ready, run_migrations
 from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260627_0025"
+HEAD_REVISION = "20260703_0026"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -97,6 +98,94 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "deleted_at" in background_columns
         version = conn.execute("select version_num from alembic_version").fetchone()
         assert version == (HEAD_REVISION,)
+
+
+def test_run_migrations_blocks_source_checkout_default_user_state(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    db_path = home / ".avibe" / "state" / "vibe.sqlite"
+
+    monkeypatch.setattr(migrations.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv(paths.AVIBE_HOME_ENV, raising=False)
+    monkeypatch.delenv(migrations.ALLOW_DEV_STATE_MIGRATION_ENV, raising=False)
+    monkeypatch.setattr(migrations, "_running_from_source_checkout", lambda: True)
+
+    with pytest.raises(UnsafeDefaultStateMigrationError) as exc:
+        run_migrations(db_path)
+
+    message = str(exc.value)
+    assert "Refusing to run SQLite migrations from an Avibe source checkout" in message
+    assert str(db_path) in message
+    assert not db_path.exists()
+
+
+def test_run_migrations_blocks_default_state_when_override_is_falsey(monkeypatch, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    db_path = home / ".avibe" / "state" / "vibe.sqlite"
+
+    monkeypatch.setattr(migrations.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv(paths.AVIBE_HOME_ENV, raising=False)
+    monkeypatch.setenv(migrations.ALLOW_DEV_STATE_MIGRATION_ENV, "0")
+    monkeypatch.setattr(migrations, "_running_from_source_checkout", lambda: True)
+
+    with pytest.raises(UnsafeDefaultStateMigrationError):
+        run_migrations(db_path)
+
+    assert not db_path.exists()
+
+
+def test_ensure_sqlite_state_blocks_source_checkout_default_user_state_before_dirs(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    db_path = home / ".avibe" / "state" / "vibe.sqlite"
+
+    monkeypatch.setattr(migrations.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv(paths.AVIBE_HOME_ENV, raising=False)
+    monkeypatch.delenv(migrations.ALLOW_DEV_STATE_MIGRATION_ENV, raising=False)
+    monkeypatch.setattr(migrations, "_running_from_source_checkout", lambda: True)
+
+    with pytest.raises(UnsafeDefaultStateMigrationError):
+        ensure_sqlite_state()
+
+    assert not db_path.exists()
+    assert not db_path.parent.exists()
+
+
+def test_ensure_sqlite_state_blocks_explicit_avibe_home_pointing_at_default_state(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    avibe_home = home / ".avibe"
+    db_path = avibe_home / "state" / "vibe.sqlite"
+
+    monkeypatch.setattr(migrations.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv(paths.AVIBE_HOME_ENV, str(avibe_home))
+    monkeypatch.delenv(migrations.ALLOW_DEV_STATE_MIGRATION_ENV, raising=False)
+    monkeypatch.setattr(migrations, "_running_from_source_checkout", lambda: True)
+
+    with pytest.raises(UnsafeDefaultStateMigrationError):
+        ensure_sqlite_state()
+
+    assert not db_path.exists()
+    assert not db_path.parent.exists()
+
+
+def test_run_migrations_allows_source_checkout_with_explicit_avibe_home(monkeypatch, tmp_path: Path) -> None:
+    avibe_home = tmp_path / "dev-home"
+    db_path = avibe_home / "state" / "vibe.sqlite"
+
+    monkeypatch.setenv(paths.AVIBE_HOME_ENV, str(avibe_home))
+    monkeypatch.delenv(migrations.ALLOW_DEV_STATE_MIGRATION_ENV, raising=False)
+    monkeypatch.setattr(migrations, "_running_from_source_checkout", lambda: True)
+
+    db_path.parent.mkdir(parents=True)
+    run_migrations()
+
+    with sqlite3.connect(db_path) as conn:
+        version = conn.execute("select version_num from alembic_version").fetchone()
+    assert version == (HEAD_REVISION,)
 
 
 def test_initial_migration_is_schema_snapshot() -> None:
@@ -243,10 +332,10 @@ def test_run_migrations_strips_vault_secret_preview_metadata(tmp_path: Path) -> 
         conn.executemany(
             """
             insert into vault_secrets (
-                id, name, group_name, tags, kind, protection, source,
+                id, name, tags, kind, protection, source,
                 ciphertext, nonce, wrap_meta, public_meta, policy,
                 use_count, created_at, updated_at
-            ) values (?, ?, 'default', null, 'static', 'standard', 'manual',
+            ) values (?, ?, null, 'static', 'standard', 'manual',
                 'ct', 'nonce', 'wrap', ?, null, 0, 'now', 'now')
             """,
             [
@@ -279,17 +368,29 @@ def test_run_migrations_strips_vault_secret_preview_metadata(tmp_path: Path) -> 
     assert "9999" not in json.dumps(rows)
 
 
-def test_run_migrations_adds_vault_grant_agent_readiness_columns(tmp_path: Path) -> None:
+def test_vault_snapshot_uses_final_grant_id_readiness_model(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
 
-    run_migrations(db_path, revision="20260626_0024")
+    run_migrations(db_path, revision="20260621_0023")
     with sqlite3.connect(db_path) as conn:
         version = conn.execute("select version_num from alembic_version").fetchone()
-        before_columns = {row[1] for row in conn.execute('pragma table_info("vault_grants")')}
+        columns = {row[1] for row in conn.execute('pragma table_info("vault_grants")')}
 
-    assert version == ("20260626_0024",)
-    assert "agent_ready" not in before_columns
-    assert "agent_ready_at" not in before_columns
+    assert version == ("20260621_0023",)
+    assert {
+        "id",
+        "member_snapshot",
+        "source_selector",
+        "request_id",
+        "session_id",
+        "purpose",
+        "one_shot",
+        "expires_at",
+        "agent_ready",
+        "agent_ready_at",
+    } <= columns
+    assert "scope_type" not in columns
+    assert "scope_ref" not in columns
 
     run_migrations(db_path)
     run_migrations(db_path)
@@ -299,7 +400,124 @@ def test_run_migrations_adds_vault_grant_agent_readiness_columns(tmp_path: Path)
         columns = {row[1] for row in conn.execute('pragma table_info("vault_grants")')}
 
     assert version == (HEAD_REVISION,)
-    assert {"agent_ready", "agent_ready_at"} <= columns
+    assert {"request_id", "session_id", "purpose", "agent_ready", "agent_ready_at"} <= columns
+    assert "scope_type" not in columns
+    assert "scope_ref" not in columns
+
+
+def test_vault_links_are_preserved_as_skill_tags_before_drop(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260627_0025")
+
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(
+            """
+            insert into vault_secrets (
+                id, name, tags, kind, protection, source,
+                ciphertext, nonce, wrap_meta, public_meta, policy,
+                use_count, created_at, updated_at
+            ) values (?, ?, ?, 'static', 'standard', 'manual',
+                'ct', 'nonce', 'wrap', null, null, 0, 'now', 'now')
+            """,
+            [
+                ("vlt_a", "A_KEY", json.dumps(["existing"])),
+                ("vlt_b", "B_KEY", None),
+            ],
+        )
+        conn.execute(
+            """
+            create table vault_links (
+                id text primary key,
+                secret_name text not null,
+                skill_name text not null,
+                source text not null default 'agent',
+                required integer not null default 0,
+                created_at text not null,
+                unique(secret_name, skill_name)
+            )
+            """
+        )
+        conn.execute("create index ix_vault_links_skill on vault_links(skill_name)")
+        conn.executemany(
+            """
+            insert into vault_links (id, secret_name, skill_name, source, required, created_at)
+            values (?, ?, ?, 'agent', 0, 'now')
+            """,
+            [
+                ("lnk_1", "A_KEY", "deploy"),
+                ("lnk_2", "A_KEY", "skill:release"),
+                ("lnk_3", "B_KEY", "deploy"),
+            ],
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        tables = {row[0] for row in conn.execute("select name from sqlite_master where type = 'table'")}
+        rows = dict(conn.execute("select name, tags from vault_secrets order by name").fetchall())
+
+    assert "vault_links" not in tables
+    assert json.loads(rows["A_KEY"]) == ["existing", "skill:deploy", "skill:release"]
+    assert json.loads(rows["B_KEY"]) == ["skill:deploy"]
+
+
+def test_run_migrations_expires_legacy_pending_access_cards(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260627_0025")
+
+    now = "2026-07-03T00:00:00+00:00"
+    legacy_delivery = json.dumps(
+        {
+            "card": {
+                "card_type": "approval",
+                "scope_options": [{"scope_type": "secret", "scope_ref": "A_KEY"}],
+            }
+        }
+    )
+    current_delivery = json.dumps(
+        {
+            "card": {
+                "card_type": "approval",
+                "grant_options": [
+                    {
+                        "grant_id": "vgr_ready",
+                        "member_snapshot": ["B_KEY"],
+                        "source_selector": {"env": ["B_KEY"]},
+                    }
+                ],
+            }
+        }
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(
+            """
+            insert into vault_requests (
+                id, request_type, secret_name, requester, delivery, status,
+                message_id, created_at, decided_at, expires_at
+            ) values (?, ?, ?, null, ?, 'pending', null, ?, null, null)
+            """,
+            [
+                ("req_legacy", "access", "A_KEY", legacy_delivery, now),
+                ("req_current", "access", "B_KEY", current_delivery, now),
+                ("req_sign", "sign", "SIGNING_KEY", legacy_delivery, now),
+            ],
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        rows = {
+            row[0]: (row[1], row[2])
+            for row in conn.execute("select id, status, decided_at from vault_requests order by id").fetchall()
+        }
+
+    assert rows["req_legacy"][0] == "expired"
+    assert rows["req_legacy"][1] is not None
+    assert rows["req_current"] == ("pending", None)
+    assert rows["req_sign"] == ("pending", None)
 
 
 def test_scope_agent_backfill_migrates_explicit_agent_routes(tmp_path: Path) -> None:

@@ -433,6 +433,35 @@ def test_total_unread_sums_all_sessions(isolated_state):
         assert messages_service.total_unread(conn, platform="avibe") == 3
 
 
+def test_list_inbox_sessions_unread_count_matches_session_badges(isolated_state):
+    """Inbox cards and sidebar badges use the same result-only unread semantics
+    for every visible, non-archived session."""
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_scope(conn)
+        _seed_titled_session(conn, scope_id, "ses_a", "A")
+        _seed_titled_session(conn, scope_id, "ses_b", "B")
+        _seed_titled_session(conn, scope_id, "ses_notify", "Notify")
+        _seed_titled_session(conn, scope_id, "ses_archived", "Archived")
+        conn.execute(agent_sessions.update().where(agent_sessions.c.id == "ses_archived").values(status="archived"))
+
+        _insert_msg(conn, scope_id, "ses_a", "agent", "A result", "2026-05-30T10:00:00Z", read=False)
+        _insert_msg(conn, scope_id, "ses_a", "agent", "thinking", "2026-05-30T10:01:00Z", read=False, msg_type="assistant")
+        _insert_msg(conn, scope_id, "ses_b", "agent", "B1", "2026-05-30T10:02:00Z", read=False)
+        _insert_msg(conn, scope_id, "ses_b", "agent", "B2", "2026-05-30T10:03:00Z", read=False)
+        _insert_msg(conn, scope_id, "ses_notify", "agent", "failed", "2026-05-30T10:04:00Z", read=False, msg_type="notify")
+        _insert_msg(conn, scope_id, "ses_archived", "agent", "old", "2026-05-30T10:05:00Z", read=False)
+
+    with engine.connect() as conn:
+        feed = messages_service.list_inbox_sessions(conn, platform="avibe")["sessions"]
+        by_session = messages_service.unread_counts_by_session(conn, platform="avibe")
+
+    feed_counts = {row["session_id"]: row["unread_count"] for row in feed}
+    assert feed_counts == {"ses_notify": 0, "ses_b": 2, "ses_a": 1}
+    assert by_session == {"ses_a": 1, "ses_b": 2}
+    assert all(row["unread_count"] == by_session.get(row["session_id"], 0) for row in feed)
+
+
 def _seed_titled_session(conn, scope_id: str, session_id: str, title: str) -> None:
     now = messages_service._utc_now_iso()
     conn.execute(

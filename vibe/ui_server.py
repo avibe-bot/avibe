@@ -258,10 +258,11 @@ def _runtime_pid_file_points_to_live_process(pid_path: Path) -> bool:
 def _stop_runtime_process_or_error(pid_path: Path, label: str) -> tuple[bool, str | None]:
     from vibe import runtime
 
-    was_running = _runtime_pid_file_points_to_live_process(pid_path)
     if pid_path == paths.get_runtime_pid_path():
+        was_running = runtime.resolve_service_owner_pid() is not None or bool(runtime.extra_service_process_pids())
         stopped = runtime.stop_service()
     else:
+        was_running = _runtime_pid_file_points_to_live_process(pid_path)
         stopped = runtime.stop_process(pid_path)
     if was_running and stopped is False:
         return False, f"{label} did not stop"
@@ -342,7 +343,7 @@ def _is_show_api_mutation() -> bool:
 
 
 def _ensure_csrf_cookie(response: Response) -> Response:
-    if _is_current_show_runtime_immutable_asset_request():
+    if _is_current_immutable_static_asset_request():
         return response
     if response.headers.getlist("Set-Cookie"):
         for cookie_header in response.headers.getlist("Set-Cookie"):
@@ -1841,6 +1842,11 @@ def protect_mutating_ui_requests():
 
 
 @app.after_request
+def compress_materialized_api_response(response: Response) -> Response:
+    return _compress_materialized_api_response(response)
+
+
+@app.after_request
 def add_api_timing_headers(response: Response) -> Response:
     started_at = getattr(g, "api_request_started_at", None)
     if started_at is None:
@@ -1872,7 +1878,7 @@ def renew_remote_access_cookie(response: Response) -> Response:
     # Logout handler explicitly clears the session cookie; never re-issue it.
     if getattr(g, "remote_session_logout", False):
         return response
-    if _is_current_show_runtime_immutable_asset_request():
+    if _is_current_immutable_static_asset_request():
         return response
     renew = getattr(g, "remote_session_renew", None)
     if not renew:
@@ -2003,23 +2009,10 @@ def health():
 def status():
     from vibe import runtime
 
-    payload = runtime.read_status()
-    pid_path = paths.get_runtime_pid_path()
-    pid = pid_path.read_text(encoding="utf-8").strip() if pid_path.exists() else None
-    try:
-        running = bool(pid and pid.isdigit() and runtime.service_pid_recorded(int(pid)))
-    except Exception as exc:
-        logger.warning("Failed to inspect service pid %s: %s", pid, exc)
-        running = False
-    payload["running"] = running
-    payload["pid"] = int(pid) if pid and pid.isdigit() else None
-    if running:
-        payload["service_pid"] = payload.get("service_pid") or payload["pid"]
-    elif payload.get("state") == "running":
+    payload = json.loads(runtime.render_status())
+    if not payload.get("running") and runtime.read_status().get("state") == "running":
         runtime.write_status("stopped", "process not running", None, payload.get("ui_pid"))
-        payload = runtime.read_status()
-        payload["running"] = False
-        payload["pid"] = None
+        payload = json.loads(runtime.render_status())
     return jsonify(payload)
 
 
@@ -2669,7 +2662,10 @@ def _vault_error_response(exc):
 def vault_secrets_get():
     from vibe import api
 
-    return jsonify(api.get_vault_secrets(group=request.args.get("group") or None))
+    try:
+        return jsonify(api.get_vault_secrets(tag=request.args.get("tag") or None))
+    except ValueError as exc:
+        return _vault_error_response(exc)
 
 
 @app.route("/api/vault/pubkey", methods=["GET"])
@@ -2740,6 +2736,26 @@ def vault_request_get(request_id):
 
     try:
         return jsonify(api.get_vault_request(request_id, audience=vault_service.REQUEST_AUDIENCE_UI))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/provision-requests/<name>", methods=["GET"])
+def vault_provision_request_by_name_get(name):
+    from vibe import api
+
+    try:
+        return jsonify(api.get_vault_provision_request_by_name(name))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
+@app.route("/api/vault/provision-requests/by-id/<request_id>", methods=["GET"])
+def vault_provision_request_get(request_id):
+    from vibe import api
+
+    try:
+        return jsonify(api.get_vault_provision_request(request_id))
     except ValueError as exc:
         return _vault_error_response(exc)
 
@@ -7368,7 +7384,7 @@ async def show_runtime_vendor_asset(vendor_path: str):
         _remove_response_header(response_headers, "cache-control")
         _remove_response_header(response_headers, "set-cookie")
         response_headers["Cache-Control"] = _SHOW_RUNTIME_IMMUTABLE_CACHE_CONTROL
-    content = _compress_show_runtime_response(proxied.content, response_headers, request._request)
+    content = _compress_response_content(proxied.content, response_headers, request._request)
     return FastAPIResponse(content=content, status_code=proxied.status_code, headers=response_headers)
 
 
@@ -7543,7 +7559,7 @@ async def _show_page_runtime_response(
         # and base path); never let it be cached. App modules and per-session deps keep
         # the runtime's own cache headers (Vite marks optimized deps immutable).
         _mark_show_runtime_document_no_store(response_headers)
-    content = _compress_show_runtime_response(content, response_headers, starlette_request)
+    content = _compress_response_content(content, response_headers, starlette_request)
     return FastAPIResponse(content=content, status_code=proxied.status_code, headers=response_headers)
 
 
@@ -7566,24 +7582,70 @@ def _mark_show_runtime_document_no_store(headers: dict[str, str]) -> None:
     headers["Cache-Control"] = "no-store"
 
 
-def _compress_show_runtime_response(content: bytes, headers: dict[str, str], starlette_request: FastAPIRequest) -> bytes:
+def _compress_response_content(content: bytes, headers: dict[str, str], starlette_request: FastAPIRequest) -> bytes:
     if len(content) < _SHOW_RUNTIME_COMPRESSIBLE_MIN_BYTES:
         return content
     if _response_header(headers, "content-encoding"):
         return content
-    if "gzip" not in (starlette_request.headers.get("accept-encoding") or "").lower():
+    if _show_response_is_attachment(_response_header(headers, "content-disposition")):
+        return content
+    if starlette_request.headers.get("upgrade", "").lower() == "websocket":
         return content
     content_type = _response_header(headers, "content-type") or ""
     if not _show_response_is_compressible(content_type):
+        return content
+    _set_response_header(headers, "Vary", _append_vary_header(_response_header(headers, "vary"), "Accept-Encoding"))
+    if not _accept_encoding_allows_gzip(starlette_request.headers.get("accept-encoding")):
         return content
     compressed = gzip.compress(content, compresslevel=6)
     if len(compressed) >= len(content):
         return content
     _remove_response_header(headers, "content-length")
     _remove_response_header(headers, "etag")
-    headers["Content-Encoding"] = "gzip"
-    headers["Vary"] = _append_vary_header(_response_header(headers, "vary"), "Accept-Encoding")
+    _set_response_header(headers, "Content-Encoding", "gzip")
+    _set_response_header(headers, "Content-Length", str(len(compressed)))
     return compressed
+
+
+def _compress_materialized_api_response(response: Response) -> Response:
+    if not (request.path or "").startswith("/api/"):
+        return response
+    body = getattr(response, "body", None)
+    if body is None:
+        return response
+    if not isinstance(body, bytes | bytearray | memoryview):
+        return response
+    content = bytes(body)
+    compressed = _compress_response_content(content, response.headers, request._request)
+    if compressed is content:
+        return response
+    response.body = compressed
+    return response
+
+
+def _accept_encoding_allows_gzip(accept_encoding: str | None) -> bool:
+    if not accept_encoding:
+        return False
+    for item in accept_encoding.split(","):
+        parts = [part.strip() for part in item.split(";") if part.strip()]
+        if not parts or parts[0].lower() != "gzip":
+            continue
+        q = 1.0
+        for param in parts[1:]:
+            name, separator, value = param.partition("=")
+            if separator and name.strip().lower() == "q":
+                try:
+                    q = float(value.strip())
+                except ValueError:
+                    q = 0.0
+                break
+        return q > 0
+    return False
+
+
+def _set_response_header(headers: dict[str, str], name: str, value: str) -> None:
+    _remove_response_header(headers, name)
+    headers[name] = value
 
 
 def _append_vary_header(existing: str | None, value: str) -> str:
@@ -7597,6 +7659,8 @@ def _show_response_is_compressible(content_type: str | None) -> bool:
     if not content_type:
         return False
     lowered = content_type.lower()
+    if "text/event-stream" in lowered:
+        return False
     return any(
         marker in lowered
         for marker in (
@@ -7719,11 +7783,15 @@ def _is_current_show_runtime_immutable_asset_request() -> bool:
     return _is_show_runtime_immutable_asset_path(parts[2])
 
 
+def _is_current_immutable_static_asset_request() -> bool:
+    return (request.path or "").startswith("/assets/") or _is_current_show_runtime_immutable_asset_request()
+
+
 def _remove_response_header(headers: dict[str, str], name: str) -> None:
     normalized = name.lower()
     for key in list(headers):
         if key.lower() == normalized:
-            headers.pop(key, None)
+            del headers[key]
 
 
 def _response_header(headers: dict[str, str], name: str) -> str | None:
@@ -7969,6 +8037,22 @@ async def serve_public_show_page(share_id, asset_path):
         store.close()
 
 
+def _ui_static_file_response(resolved_path: Path, *, content_type: str, cache_control: str) -> Response:
+    response = send_file(resolved_path, mimetype=content_type)
+    response.headers["Cache-Control"] = cache_control
+    if hasattr(response, "set_stat_headers"):
+        response.set_stat_headers(resolved_path.stat())
+    if request.method != "GET" or request.headers.get("range"):
+        return response
+    headers = response.headers
+    content = resolved_path.read_bytes()
+    compressed = _compress_response_content(content, headers, request._request)
+    if compressed is content:
+        return response
+    _remove_response_header(headers, "accept-ranges")
+    return Response(content=compressed, headers=headers)
+
+
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def serve_static(path):
@@ -7990,22 +8074,27 @@ def serve_static(path):
 
     if resolved_path.exists() and resolved_path.is_file():
         mime_type, _ = mimetypes.guess_type(str(resolved_path))
-        response = send_file(resolved_path, mimetype=mime_type or "application/octet-stream")
         if path.startswith("assets/"):
-            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            cache_control = "public, max-age=31536000, immutable"
         elif resolved_path.name == "index.html":
-            response.headers["Cache-Control"] = "no-store, private"
+            cache_control = "no-store, private"
         else:
-            response.headers["Cache-Control"] = "public, max-age=3600"
-        return response
+            cache_control = "public, max-age=3600"
+        return _ui_static_file_response(
+            resolved_path,
+            content_type=mime_type or "application/octet-stream",
+            cache_control=cache_control,
+        )
 
     # SPA fallback: serve index.html for routes without file extension
     if "." not in path:
         index_path = ui_dist / "index.html"
         if index_path.exists():
-            response = send_file(index_path, mimetype="text/html")
-            response.headers["Cache-Control"] = "no-store, private"
-            return response
+            return _ui_static_file_response(
+                index_path,
+                content_type="text/html",
+                cache_control="no-store, private",
+            )
 
     return jsonify({"error": "not_found"}), 404
 

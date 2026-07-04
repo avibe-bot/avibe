@@ -1,13 +1,34 @@
+import gzip
+
 import pytest
 
 from storage.importer import ensure_sqlite_state
-from vibe.ui_compat import CompatApp, normalize_response, route_path_to_fastapi, run_maybe_async, request
+from vibe.ui_compat import (
+    TEST_REMOTE_ADDR_HEADER,
+    CompatApp,
+    normalize_response,
+    route_path_to_fastapi,
+    run_maybe_async,
+    request,
+)
 from starlette.websockets import WebSocketDisconnect
 
 from vibe import ui_server
 from vibe.ui_server import app
 from tests.test_api_save_config_merge import _full_config_payload
 from tests.ui_server_test_helpers import csrf_headers
+
+
+def _raw_client_get(client, path: str, *, headers: dict[str, str] | None = None):
+    request_headers = {TEST_REMOTE_ADDR_HEADER: "127.0.0.1"}
+    request_headers.update(headers or {})
+    with client._client.stream(
+        "GET",
+        f"http://127.0.0.1{path}",
+        headers=request_headers,
+    ) as response:
+        body = b"".join(response.iter_raw())
+    return response, body
 
 
 def test_websocket_echo_is_disabled_by_default(monkeypatch):
@@ -555,6 +576,7 @@ def test_config_restart_fallback_schedules_when_in_flight_finishes_after_marker(
 
 
 def test_static_ui_assets_use_cache_headers(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
     ui_dist = tmp_path / "dist"
     assets_dir = ui_dist / "assets"
     assets_dir.mkdir(parents=True)
@@ -578,6 +600,229 @@ def test_static_ui_assets_use_cache_headers(monkeypatch, tmp_path):
     assert index_response.headers["Cache-Control"] == "no-store, private"
     assert spa_response.status_code == 200
     assert spa_response.headers["Cache-Control"] == "no-store, private"
+
+
+def test_static_ui_asset_omits_csrf_cookie(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    ui_dist = tmp_path / "dist"
+    assets_dir = ui_dist / "assets"
+    assets_dir.mkdir(parents=True)
+    (assets_dir / "index-abc123.js").write_text("console.log('ok')", encoding="utf-8")
+
+    monkeypatch.setattr(ui_server, "get_ui_dist_path", lambda: ui_dist)
+
+    response = app.test_client().get("/assets/index-abc123.js")
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+    assert not any(header.startswith("vibe_csrf_token=") for header in response.headers.getlist("Set-Cookie"))
+
+
+def test_static_ui_documents_keep_csrf_cookie(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    ui_dist = tmp_path / "dist"
+    ui_dist.mkdir(parents=True)
+    (ui_dist / "index.html").write_text("<html>app</html>", encoding="utf-8")
+
+    monkeypatch.setattr(ui_server, "get_ui_dist_path", lambda: ui_dist)
+
+    index_response = app.test_client().get("/")
+    spa_response = app.test_client().get("/workbench/session-1")
+
+    assert index_response.status_code == 200
+    assert any(header.startswith("vibe_csrf_token=") for header in index_response.headers.getlist("Set-Cookie"))
+    assert spa_response.status_code == 200
+    assert any(header.startswith("vibe_csrf_token=") for header in spa_response.headers.getlist("Set-Cookie"))
+
+
+def test_static_ui_asset_gzip_uses_shared_response_rules(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    ui_dist = tmp_path / "dist"
+    assets_dir = ui_dist / "assets"
+    assets_dir.mkdir(parents=True)
+    original = b"console.log('edge cache');\n" * 200
+    (assets_dir / "index-abc123.js").write_bytes(original)
+
+    monkeypatch.setattr(ui_server, "get_ui_dist_path", lambda: ui_dist)
+
+    client = app.test_client()
+    identity_response = client.get("/assets/index-abc123.js", headers={"Accept-Encoding": ""})
+    assert identity_response.status_code == 200
+    assert identity_response.content == original
+    assert "Content-Encoding" not in identity_response.headers
+    assert "Accept-Encoding" in identity_response.headers["Vary"]
+    assert identity_response.headers["Accept-Ranges"] == "bytes"
+    assert identity_response.headers["ETag"]
+    assert identity_response.headers["Last-Modified"]
+
+    gzip_disabled_response = client.get("/assets/index-abc123.js", headers={"Accept-Encoding": "br, gzip;q=0"})
+    assert gzip_disabled_response.status_code == 200
+    assert gzip_disabled_response.content == original
+    assert "Content-Encoding" not in gzip_disabled_response.headers
+    assert "Accept-Encoding" in gzip_disabled_response.headers["Vary"]
+
+    with client._client.stream(
+        "GET",
+        "http://127.0.0.1/assets/index-abc123.js",
+        headers={
+            "Accept-Encoding": "gzip",
+            TEST_REMOTE_ADDR_HEADER: "127.0.0.1",
+        },
+    ) as gzip_response:
+        compressed = b"".join(gzip_response.iter_raw())
+
+    assert gzip_response.status_code == 200
+    assert gzip_response.headers["Content-Encoding"] == "gzip"
+    assert "Accept-Encoding" in gzip_response.headers["Vary"]
+    assert gzip.decompress(compressed) == original
+
+
+def test_static_ui_asset_range_request_keeps_file_response_semantics(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    ui_dist = tmp_path / "dist"
+    assets_dir = ui_dist / "assets"
+    assets_dir.mkdir(parents=True)
+    original = b"0123456789abcdef"
+    (assets_dir / "index-abc123.js").write_bytes(original)
+
+    monkeypatch.setattr(ui_server, "get_ui_dist_path", lambda: ui_dist)
+
+    response = app.test_client().get(
+        "/assets/index-abc123.js",
+        headers={
+            "Accept-Encoding": "gzip",
+            "Range": "bytes=0-9",
+        },
+    )
+
+    assert response.status_code == 206
+    assert response.content == b"0123456789"
+    assert response.headers["Content-Range"] == f"bytes 0-9/{len(original)}"
+    assert response.headers["Accept-Ranges"] == "bytes"
+    assert "Content-Encoding" not in response.headers
+
+
+def test_static_ui_asset_gzip_skips_small_and_binary_files(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    ui_dist = tmp_path / "dist"
+    assets_dir = ui_dist / "assets"
+    assets_dir.mkdir(parents=True)
+    small_js = b"console.log('small')"
+    png = b"\x89PNG\r\n\x1a\n" + (b"\x00" * 2048)
+    (assets_dir / "small-abc123.js").write_bytes(small_js)
+    (assets_dir / "logo-abc123.png").write_bytes(png)
+
+    monkeypatch.setattr(ui_server, "get_ui_dist_path", lambda: ui_dist)
+
+    client = app.test_client()
+    small_response = client.get("/assets/small-abc123.js", headers={"Accept-Encoding": "gzip"})
+    binary_response = client.get("/assets/logo-abc123.png", headers={"Accept-Encoding": "gzip"})
+
+    assert small_response.status_code == 200
+    assert small_response.content == small_js
+    assert "Content-Encoding" not in small_response.headers
+    assert binary_response.status_code == 200
+    assert binary_response.content == png
+    assert "Content-Encoding" not in binary_response.headers
+    assert "Vary" not in binary_response.headers
+
+
+def test_json_api_gzip_uses_shared_response_rules(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+
+    client = app.test_client()
+    identity_response = client.get("/api/config", headers={"Accept-Encoding": ""})
+    original = identity_response.content
+
+    assert identity_response.status_code == 200
+    assert identity_response.is_json
+    assert len(original) >= ui_server._SHOW_RUNTIME_COMPRESSIBLE_MIN_BYTES
+    assert "Content-Encoding" not in identity_response.headers
+    assert "Accept-Encoding" in identity_response.headers["Vary"]
+
+    gzip_disabled_response = client.get("/api/config", headers={"Accept-Encoding": "br, gzip;q=0"})
+    assert gzip_disabled_response.status_code == 200
+    assert gzip_disabled_response.content == original
+    assert "Content-Encoding" not in gzip_disabled_response.headers
+    assert "Accept-Encoding" in gzip_disabled_response.headers["Vary"]
+
+    gzip_client = app.test_client()
+    gzip_response, compressed = _raw_client_get(
+        gzip_client,
+        "/api/config",
+        headers={"Accept-Encoding": "gzip"},
+    )
+
+    assert gzip_response.status_code == 200
+    assert gzip_response.headers["Content-Encoding"] == "gzip"
+    assert gzip_response.headers["Content-Length"] == str(len(compressed))
+    assert "Accept-Encoding" in gzip_response.headers["Vary"]
+    assert gzip.decompress(compressed) == original
+    assert any(header.startswith("vibe_csrf_token=") for header in gzip_response.headers.get_list("Set-Cookie"))
+
+
+def test_json_api_gzip_skips_small_responses(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+
+    response = app.test_client().get("/api/csrf-token", headers={"Accept-Encoding": "gzip"})
+
+    assert response.status_code == 200
+    assert response.is_json
+    assert len(response.content) < ui_server._SHOW_RUNTIME_COMPRESSIBLE_MIN_BYTES
+    assert "Content-Encoding" not in response.headers
+
+
+def test_json_api_gzip_skips_sse_streaming_response():
+    from fastapi.responses import StreamingResponse
+
+    async def generate():
+        yield b": stream connected\n\n"
+
+    response = StreamingResponse(generate(), media_type="text/event-stream")
+
+    with app.test_request_context("/api/events", headers={"Accept-Encoding": "gzip"}):
+        compressed_response = ui_server._compress_materialized_api_response(response)
+
+    assert compressed_response is response
+    assert "Content-Encoding" not in response.headers
+    assert response.media_type == "text/event-stream"
+
+    body = b"event: message\ndata: {}\n\n" * 100
+    materialized = ui_server.Response(content=body, mimetype="text/event-stream")
+    with app.test_request_context("/api/events", headers={"Accept-Encoding": "gzip"}):
+        materialized_response = ui_server._compress_materialized_api_response(materialized)
+
+    assert materialized_response is materialized
+    assert materialized_response.body == body
+    assert "Content-Encoding" not in materialized_response.headers
+
+
+def test_json_api_gzip_skips_attachments_and_existing_encoding():
+    body = b'{"items":[' + (b'"payload",' * 300) + b'"end"]}'
+    attachment = ui_server.Response(
+        content=body,
+        mimetype="application/json",
+        headers={"Content-Disposition": "attachment; filename=data.json"},
+    )
+    with app.test_request_context("/api/export", headers={"Accept-Encoding": "gzip"}):
+        attachment_response = ui_server._compress_materialized_api_response(attachment)
+
+    assert attachment_response is attachment
+    assert attachment_response.body == body
+    assert "Content-Encoding" not in attachment_response.headers
+    assert "Vary" not in attachment_response.headers
+
+    encoded = ui_server.Response(
+        content=body,
+        mimetype="application/json",
+        headers={"Content-Encoding": "br"},
+    )
+    with app.test_request_context("/api/precompressed", headers={"Accept-Encoding": "gzip"}):
+        encoded_response = ui_server._compress_materialized_api_response(encoded)
+
+    assert encoded_response is encoded
+    assert encoded_response.body == body
+    assert encoded_response.headers["Content-Encoding"] == "br"
 
 
 def test_run_maybe_async_offloads_sync_handlers_without_losing_context():

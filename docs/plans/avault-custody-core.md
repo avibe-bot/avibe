@@ -5,7 +5,13 @@
 design** is `avault/docs/DESIGN.md` (mirrored from this document). **This doc now tracks the
 Avibe side** — how the Python daemon integrates avault — and stays in sync with the repo.
 **Owners:** Vaults workstream
-**Related:** #631 (Vaults P0), #632 (the "base avibe on vt" proposal that prompted this), `docs/plans/vaults.md`, `docs/plans/vaults-p2-signer.md`
+**Related:** #631 (Vaults P0), #632 (the "base avibe on vt" proposal that prompted this), `docs/plans/vaults.md`, `docs/plans/vaults-grant-delivery-refactor.md`, `docs/plans/vaults-p2-signer.md`
+
+> Current implementation note: grant and delivery work should follow
+> `vaults-grant-delivery-refactor.md`, which supersedes the older group /
+> scope-typed grant model with tag selectors, skill tags, first-class
+> `grant_id`, and unified resident-agent delivery for mixed standard/protected
+> runs.
 
 > Avibe-side integration surface to build (P1): route `storage/vault_crypto.py`'s value path
 > through the `avault` CLI; `ensure_avault_installed` in `vibe runtime prepare`;

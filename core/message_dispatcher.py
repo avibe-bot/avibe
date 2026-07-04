@@ -157,6 +157,19 @@ class ConsolidatedMessageDispatcher:
         # per-key consolidated lock so finalize and a concurrent process render
         # can't interleave (C1).
         self._status_finalized: set[str] = set()
+        # Turn-keys whose tracked ``_consolidated_message_ids`` entry is a CONCISE
+        # status bubble (as opposed to a verbose consolidated process-log message,
+        # which shares the same dict). Cleanup keys on this — not the current
+        # progress style — so a mid-turn concise->off/verbose flip still retires
+        # the bubble, while a genuine verbose log is never mistaken for a bubble
+        # and deleted. Dropped per turn in ``_drop_status_keys``.
+        self._concise_bubble_keys: set[str] = set()
+        # Per-turn (consolidated_key) snapshot of the effective progress style, so
+        # a single turn cannot flip concise<->verbose<->off mid-way even if the Web
+        # UI setting changes while the backend is still emitting. Resolved lazily on
+        # first use per turn (see ``_concise_progress_style``), dropped in
+        # ``_drop_status_keys``.
+        self._turn_progress_style: dict[str, str] = {}
         # Injectable monotonic-ish clock (wall time) so tests get deterministic
         # elapsed/stale values without sleeping.
         self._now = time.time
@@ -286,6 +299,8 @@ class ConsolidatedMessageDispatcher:
             self._status_last_activity_at.pop(key, None)
             self._status_render_tick.pop(key, None)
             self._status_step_count.pop(key, None)
+            self._concise_bubble_keys.discard(key)
+            self._turn_progress_style.pop(key, None)
             # NOTE: the finalized marker is intentionally NOT discarded here. The
             # runtime gate is released only AFTER this teardown (in the agent
             # service's finally), so a late same-token process emit during that
@@ -323,15 +338,36 @@ class ConsolidatedMessageDispatcher:
         return DEFAULT_AGENT_PROGRESS_STYLE
 
     def _concise_progress_style(self, context: MessageContext) -> str:
-        """Effective progress style for the process-message path.
+        """Effective progress style for the process-message path, SNAPSHOTTED per
+        turn.
 
         Only platforms with the ``supports_status_bubble`` capability (Slack/
         Discord today) opt into concise/off; every other platform keeps the
         existing ``verbose`` append path, so their output stays byte-identical.
-        """
+
+        The effective style is resolved ONCE per turn (keyed by the turn's
+        consolidated key) and cached for the rest of that turn. ``self.config`` may
+        still be hot-reloaded mid-turn (via ``_t()`` or the controller getters) so
+        the NEXT turn starts fresh — that satisfies the "scheduled/background turns
+        pick up Web UI changes at their START" requirement — but a single turn can
+        never flip style halfway. That intra-turn stability is what keeps the
+        concise-bubble vs verbose-log lifecycle self-consistent (a mid-turn flip
+        would otherwise strand a bubble, delete a verbose log, or leave a heartbeat
+        stamping a log)."""
         if not self._capabilities(context).supports_status_bubble:
             return "verbose"
-        return self._progress_style(context)
+        key = self._get_consolidated_message_key(context)
+        cached = self._turn_progress_style.get(key)
+        if cached is not None:
+            return cached
+        style = self._progress_style(context)
+        # Bound the cache: entries are dropped per turn in ``_drop_status_keys``,
+        # but clear proactively if it ever grows large so a missed teardown can't
+        # leak unboundedly (mirrors the ``_status_finalized`` guard).
+        if len(self._turn_progress_style) > 512:
+            self._turn_progress_style.clear()
+        self._turn_progress_style[key] = style
+        return style
 
     async def _render_concise_status(
         self,
@@ -375,7 +411,17 @@ class ConsolidatedMessageDispatcher:
                 # process emit was in flight. Bailing here keeps the terminal
                 # bubble from being resurrected back to a "working" line (C1).
                 return None
-            existing_id = self._consolidated_message_ids.get(consolidated_key)
+            # Only reuse the tracked id when it was itself created as a concise
+            # bubble. If the turn started in ``verbose`` and the Web UI flipped to
+            # ``concise`` mid-turn, the tracked id is the verbose consolidated
+            # process-log message; reusing (and later retiring) it would delete the
+            # user's log. Treat that as "no bubble yet" and post a FRESH concise
+            # bubble, leaving the verbose log untracked and intact.
+            existing_id = (
+                self._consolidated_message_ids.get(consolidated_key)
+                if consolidated_key in self._concise_bubble_keys
+                else None
+            )
             # Buffer holds the latest rendered label so the heartbeat can
             # re-render it with an elapsed-time footer without a new event.
             self._consolidated_message_buffers[consolidated_key] = label
@@ -414,6 +460,12 @@ class ConsolidatedMessageDispatcher:
                 except Exception as err:
                     logger.error(f"Failed to send status bubble: {err}", exc_info=True)
                     return None
+
+            # Mark this turn-key as a concise bubble so terminal cleanup retires it
+            # by identity even after a mid-turn style flip, without mistaking a
+            # verbose process-log id (same dict) for a bubble.
+            if message_id:
+                self._concise_bubble_keys.add(consolidated_key)
 
         # Keep the elapsed timer alive even when the agent goes quiet (long tool).
         if message_id:
@@ -700,6 +752,11 @@ class ConsolidatedMessageDispatcher:
                 # Stop if the turn was superseded or the bubble is gone.
                 if not self._is_current_runtime_turn(context):
                     return
+                # Stop if the key is no longer a concise bubble — e.g. a mid-turn
+                # concise->verbose flip reused this message as the verbose log; the
+                # heartbeat must not keep stamping a status footer onto a log.
+                if consolidated_key not in self._concise_bubble_keys:
+                    return
                 message_id = self._consolidated_message_ids.get(consolidated_key)
                 if not message_id:
                     return
@@ -721,6 +778,10 @@ class ConsolidatedMessageDispatcher:
             # can't re-render a bubble that's being retired (mirrors the C1 guard
             # in _render_concise_status).
             if consolidated_key in self._status_finalized:
+                return
+            # Also bail if the key stopped being a concise bubble since this tick
+            # was scheduled (mid-turn concise->verbose flip reused the message).
+            if consolidated_key not in self._concise_bubble_keys:
                 return
             if self._consolidated_message_ids.get(consolidated_key) != message_id:
                 return
@@ -748,10 +809,19 @@ class ConsolidatedMessageDispatcher:
             pass
 
     def _concise_status_bubble_id(self, context: MessageContext) -> Optional[str]:
-        """The live concise status-bubble id for this turn, if any (else None)."""
-        if self._concise_progress_style(context) != "concise":
+        """The live concise status-bubble id for this turn, if any (else None).
+
+        Keyed on whether a CONCISE bubble was actually posted for this turn, not
+        the current progress style: a Web UI ``concise`` -> ``off``/``verbose``
+        change mid-turn (now visible immediately via the getter self-refresh) must
+        still let the result path retire an already-posted bubble. Gating on the
+        concise-bubble key set (rather than plain ``_consolidated_message_ids``
+        membership) avoids mistaking a verbose consolidated process-log id — which
+        lives in the same dict — for a status bubble and deleting it."""
+        key = self._get_consolidated_message_key(context)
+        if key not in self._concise_bubble_keys:
             return None
-        return self._consolidated_message_ids.get(self._get_consolidated_message_key(context))
+        return self._consolidated_message_ids.get(key)
 
     async def _finalize_status_key(self, consolidated_key: str) -> Optional[str]:
         """Atomically mark a turn-key finalized and capture its current bubble id.
@@ -792,9 +862,14 @@ class ConsolidatedMessageDispatcher:
         if a bubble exists — edits it to the terminal footer. The footer marker
         (✅ for ``done`` else ⏹, time only when ``show_duration``) is owned by
         ``_status_footer_text``. ``reason`` ∈ {"done","stopped","failed"}."""
-        if self._concise_progress_style(context) != "concise":
-            return
         key = self._get_consolidated_message_key(context)
+        # Gate on whether a CONCISE bubble was posted for this turn, not the current
+        # style: a Web UI concise -> off/verbose change mid-turn must still collapse
+        # an already-posted bubble. Keying on the concise-bubble set (not plain
+        # _consolidated_message_ids membership) avoids collapsing a verbose
+        # consolidated process-log message, which shares that dict.
+        if key not in self._concise_bubble_keys:
+            return
         # Heartbeat first: the render also takes the per-key lock, so stopping it
         # before _finalize_status_key avoids contending with a live tick.
         await self._stop_status_heartbeat(key)
@@ -1549,12 +1624,34 @@ class ConsolidatedMessageDispatcher:
         # requirement: the process log is complete even when a channel hides it).
         persist_agent_message(target_context, canonical_type, persist_text)
 
+        # Target platform toolcall-delivery gate stays in FRONT of the concise
+        # shortcut: when a turn is routed via ``delivery_override`` to a target
+        # that cannot deliver toolcalls (e.g. the WeChat override flow), the
+        # toolcall stays persisted-only and must NOT attempt a status bubble.
         if canonical_type == "toolcall" and not self._supports_toolcall_delivery(target_context):
             logger.info(
                 "Skipping toolcall delivery for platform %s; persisted local process log only.",
                 self._get_platform(target_context),
             )
             return None
+
+        # The concise status bubble is a single ephemeral status line, NOT the
+        # verbose per-message log that ``show_message_types`` governs. When a
+        # status-bubble platform (Slack/Discord) is in ``concise`` style, render
+        # tool-step / muttering emits into the bubble regardless of the
+        # ``is_message_type_hidden`` visibility toggle below: persistence already
+        # happened above so nothing is lost, and users who want zero process
+        # output use ``off``. This bypasses ONLY the visibility toggle — the
+        # target toolcall-delivery gate above still applies. ``system`` emits
+        # carry no status label and stay on the gated path.
+        if canonical_type in {"assistant", "toolcall"} and self._concise_progress_style(context) == "concise":
+            # ``_render_concise_status`` renders a footer-only bubble when the
+            # stripped body is empty but ``status_label`` is present, so do not
+            # drop empty-body toolcall emits here.
+            concise_chunk = strip_file_links(text).strip()
+            return await self._render_concise_status(
+                im_client, context, concise_chunk, status_label=status_label
+            )
 
         if settings_manager.is_message_type_hidden(settings_key, canonical_type):
             preview = text if len(text) <= 500 else f"{text[:500]}…"
@@ -1588,6 +1685,11 @@ class ConsolidatedMessageDispatcher:
         lock = self._get_consolidated_message_lock(consolidated_key)
 
         async with lock:
+            # Verbose consolidation path. Because the progress style is snapshotted
+            # per turn (see ``_concise_progress_style``), a turn that reaches here is
+            # verbose for its whole lifetime — it never posted a concise bubble — so
+            # ``_consolidated_message_ids[key]`` here is only ever a verbose log id,
+            # never a status bubble to reconcile.
             max_bytes = self._get_consolidated_max_bytes(context)
             split_threshold = self._get_consolidated_split_threshold(context)
             existing = self._consolidated_message_buffers.get(consolidated_key, "")

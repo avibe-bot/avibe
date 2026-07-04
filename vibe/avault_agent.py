@@ -1,7 +1,7 @@
 """Resident avault agent socket client.
 
 The resident agent is the protected-tier delivery boundary: Python sends names,
-sealed envelopes, scopes, and browser-sealed DEK blind boxes over a Unix socket.
+    sealed envelopes, grant ids, and browser-sealed DEK blind boxes over a Unix socket.
 Plaintext and DEKs stay inside ``avault``.
 """
 
@@ -103,79 +103,81 @@ class AvaultAgentClient:
     def grant(
         self,
         *,
-        scope_type: str,
-        scope_ref: str,
+        grant_id: str,
         ttl_secs: int,
         deks: list[dict[str, Any]],
+        purpose: str = "deliver",
+        scope_type: str | None = None,
+        scope_ref: str | None = None,
     ) -> dict[str, Any]:
-        return self.request(
-            {
-                "type": "grant",
-                "scope_type": scope_type,
-                "scope_ref": scope_ref,
-                "ttl_secs": ttl_secs,
-                "deks": deks,
-            }
-        )
+        payload = {
+            "type": "grant",
+            "grant_id": grant_id,
+            "purpose": purpose,
+            "ttl_secs": ttl_secs,
+            "deks": deks,
+        }
+        if scope_type and scope_ref:
+            payload["scope_type"] = scope_type
+            payload["scope_ref"] = scope_ref
+        return self.request(payload)
 
-    def release(self, *, scope_type: str, scope_ref: str) -> dict[str, Any]:
-        return self.request({"type": "release", "scope_type": scope_type, "scope_ref": scope_ref})
+    def release(self, *, grant_id: str) -> dict[str, Any]:
+        return self.request({"type": "release", "grant_id": grant_id})
 
     def deliver_run(
         self,
         *,
-        scope_type: str,
-        scope_ref: str,
+        grant_id: str,
         command: list[str],
         secrets: list[dict[str, Any]],
+        context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return self.request(
-            {
-                "type": "deliver",
-                "scope_type": scope_type,
-                "scope_ref": scope_ref,
-                "mode": "run",
-                "command": command,
-                "secrets": secrets,
-            }
-        )
+        payload = {
+            "type": "deliver.run",
+            "grant_id": grant_id,
+            "command": command,
+            "secrets": secrets,
+        }
+        if context is not None:
+            payload["context"] = context
+        return self.request(payload)
 
     def deliver_fetch(
         self,
         *,
-        scope_type: str,
-        scope_ref: str,
+        grant_id: str,
         name: str,
         envelope: dict[str, Any],
         request: dict[str, Any],
+        context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return self.request(
-            {
-                "type": "deliver",
-                "scope_type": scope_type,
-                "scope_ref": scope_ref,
-                "mode": "fetch",
+        payload = {
+            "type": "deliver.fetch",
+            "grant_id": grant_id,
+            "auth": {
                 "name": name,
+                "tier": "protected",
                 "envelope": envelope,
-                "request": request,
-            }
-        )
+            },
+            "request": request,
+        }
+        if context is not None:
+            payload["context"] = context
+        return self.request(payload)
 
     def deliver_inject(
         self,
         *,
-        scope_type: str,
-        scope_ref: str,
+        grant_id: str,
         path: str,
         fmt: str,
         secrets: list[dict[str, Any]],
     ) -> dict[str, Any]:
         return self.request(
             {
-                "type": "deliver",
-                "scope_type": scope_type,
-                "scope_ref": scope_ref,
-                "mode": "inject",
+                "type": "deliver.inject",
+                "grant_id": grant_id,
                 "path": path,
                 "format": fmt,
                 "secrets": secrets,

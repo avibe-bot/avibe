@@ -26,6 +26,7 @@ from storage.db import create_sqlite_engine
 from storage.background import SQLiteBackgroundTaskStore
 from storage.models import agent_sessions, scope_settings, scopes
 from storage.pagination import PageRequest, PageResult, page_sequence
+from vibe import runtime
 
 logger = logging.getLogger(__name__)
 
@@ -1239,6 +1240,59 @@ class TaskExecutionStore:
             return True
         return False
 
+    def mark_run_canceled(self, run_id: str, *, completed_at: Optional[str] = None) -> bool:
+        now = completed_at or _utc_now_iso()
+        existing = self.get_run(run_id)
+        if existing is None:
+            return False
+        cancel_requested_at = str(existing.get("cancel_requested_at") or now)
+        if self._sqlite is not None:
+            self._sqlite.update_run_status(
+                run_id,
+                status="canceled",
+                completed_at=now,
+                updated_at=now,
+                cancel_requested=True,
+                cancel_requested_at=cancel_requested_at,
+            )
+            return True
+
+        for state in ("pending", "processing", "completed"):
+            source_path = self._request_path(run_id, state=state)
+            if not source_path.exists():
+                continue
+            try:
+                payload = json.loads(source_path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {"id": run_id}
+            if not isinstance(payload, dict):
+                payload = {"id": run_id}
+            payload.update(
+                {
+                    "id": run_id,
+                    "status": "canceled",
+                    "cancel_requested": True,
+                    "cancel_requested_at": payload.get("cancel_requested_at") or now,
+                    "completed_at": now,
+                    "updated_at": now,
+                }
+            )
+            completed_path = self._request_path(run_id, state="completed")
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                dir=self.completed_dir,
+                suffix=".tmp",
+                delete=False,
+                encoding="utf-8",
+            ) as handle:
+                json.dump(payload, handle, indent=2)
+                tmp_path = Path(handle.name)
+            tmp_path.replace(completed_path)
+            if state != "completed":
+                source_path.unlink(missing_ok=True)
+            return True
+        return False
+
     def claim(self, request_id: str) -> Optional[TaskExecutionRequest]:
         if self._sqlite is not None:
             now = _utc_now_iso()
@@ -1373,6 +1427,7 @@ class ScheduledTaskService:
         self._inflight_sessions: set[str] = set()
         # Cache of session_id -> canonical lock key (resolution hits SQLite).
         self._session_lock_cache: Dict[str, str] = {}
+        self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
         self.request_store.recover_processing()
 
     def validate_platform(self, platform: str) -> None:
@@ -1419,8 +1474,36 @@ class ScheduledTaskService:
         )
         self._spawn_watch_store()
 
-    async def stop(self) -> None:
+    def _current_asyncio_task(self) -> Optional["asyncio.Task[Any]"]:
+        try:
+            return asyncio.current_task()
+        except RuntimeError:
+            return None
+
+    def _begin_stop(self, *, cancel_reconcile: bool = True) -> None:
         self._running = False
+        current_task = self._current_asyncio_task()
+        if cancel_reconcile and self._reconcile_task and self._reconcile_task is not current_task:
+            self._reconcile_task.cancel()
+        for task in list(self._inflight_executions.values()):
+            if task is not current_task:
+                task.cancel()
+        try:
+            self.scheduler.shutdown(wait=False)
+        except Exception:
+            logger.debug("Failed to shut down scheduler", exc_info=True)
+
+    def _owns_service_instance(self) -> bool:
+        if not self._requires_service_lease:
+            return True
+        if runtime.current_process_owns_service_instance():
+            return True
+        logger.error("Scheduled task service stopping because this process no longer owns the service lock")
+        self._begin_stop()
+        return False
+
+    async def stop(self) -> None:
+        self._begin_stop()
         if self._reconcile_task:
             self._reconcile_task.cancel()
             try:
@@ -1434,18 +1517,17 @@ class ScheduledTaskService:
         # init backstops anything left ``running`` after a hard crash).
         inflight = list(self._inflight_executions.values())
         for task in inflight:
-            task.cancel()
-        for task in inflight:
             try:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
         self._inflight_executions.clear()
         self._inflight_sessions.clear()
-        self.scheduler.shutdown(wait=False)
 
     async def _watch_store(self) -> None:
         while self._running:
+            if not self._owns_service_instance():
+                return
             try:
                 if self.store.maybe_reload():
                     self.reconcile_jobs()
@@ -1462,6 +1544,8 @@ class ScheduledTaskService:
                     raise
 
     def reconcile_jobs(self) -> None:
+        if not self._owns_service_instance():
+            return
         desired_ids = set()
         for task in self.store.list_tasks():
             if not task.enabled:
@@ -1516,6 +1600,8 @@ class ScheduledTaskService:
         raise ValueError(f"unknown schedule type: {task.schedule_type}")
 
     async def _run_task(self, task_id: str) -> None:
+        if not self._owns_service_instance():
+            return
         self.store.maybe_reload()
         task = self.store.get_task(task_id)
         if not task or not task.enabled:
@@ -1524,9 +1610,21 @@ class ScheduledTaskService:
         request = self.request_store.claim(queued.id)
         if request is None:
             return
-        await self._execute_claimed_request(request)
+        lock_key = self._execution_lock_key(request)
+        if len(self._inflight_executions) >= self._MAX_CONCURRENT_EXECUTIONS:
+            self.request_store.requeue(request.id)
+            return
+        if lock_key is not None and lock_key in self._inflight_sessions:
+            self.request_store.requeue(request.id)
+            return
+        self._spawn_execution(request, lock_key)
+        execution = self._inflight_executions.get(request.id)
+        if execution is not None:
+            await execution
 
     async def _drain_requests(self) -> None:
+        if not self._owns_service_instance():
+            return
         # Claim eligible pending requests and dispatch each as its own task,
         # then return immediately. The previous implementation awaited every
         # execution inline in this loop, so one turn that hung (e.g. an agent
@@ -1552,6 +1650,8 @@ class ScheduledTaskService:
             self._spawn_execution(request, lock_key)
 
     async def _drain_callbacks(self) -> None:
+        if not self._owns_service_instance():
+            return
         for run in self.request_store.list_pending_callbacks():
             run_id = str(run.get("id") or "")
             if not run_id:
