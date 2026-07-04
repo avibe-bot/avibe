@@ -194,14 +194,12 @@ class AvaultAgentManager:
         socket_path: str | Path | None = None,
         binary_resolver: Callable[[], str] | None = None,
         command_env: Callable[[str], dict[str, str] | None] | None = None,
-        store: str = "file",
         idle_timeout_secs: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECS,
         start_timeout: float = DEFAULT_AGENT_START_TIMEOUT,
     ) -> None:
         self.socket_path = Path(socket_path) if socket_path is not None else default_agent_socket_path()
         self._binary_resolver = binary_resolver or _missing_binary_resolver
         self._command_env = command_env
-        self.store = store
         self.idle_timeout_secs = idle_timeout_secs
         self.start_timeout = start_timeout
         self._lock = threading.RLock()
@@ -239,7 +237,7 @@ class AvaultAgentManager:
                     binary,
                     "agent",
                     "--store",
-                    self.store,
+                    "file",
                     "--socket",
                     str(self.socket_path),
                     "--idle-timeout-secs",

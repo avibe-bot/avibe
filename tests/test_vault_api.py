@@ -574,7 +574,22 @@ def test_pubkey_wrapper_parses_avault(monkeypatch):
     assert api.avault_pubkey() == {"public_key": "pk", "fingerprint": "fp"}
 
 
-def test_one_shot_avault_uses_managed_file_store(monkeypatch):
+def test_avault_args_uses_file_store_only_on_linux_without_tpm(monkeypatch, tmp_path):
+    missing_tpm = tmp_path / "missing-tpm0"
+    existing_tpm = tmp_path / "tpmrm0"
+    existing_tpm.touch()
+    monkeypatch.setattr(api, "_AVAULT_LINUX_TPM_DEVICE_PATHS", (missing_tpm,))
+    monkeypatch.setattr(api.platform, "system", lambda: "Linux")
+    assert api._avault_args(["pubkey"]) == ["--store", "file", "pubkey"]
+
+    monkeypatch.setattr(api, "_AVAULT_LINUX_TPM_DEVICE_PATHS", (existing_tpm,))
+    assert api._avault_args(["pubkey"]) == ["pubkey"]
+
+    monkeypatch.setattr(api.platform, "system", lambda: "Darwin")
+    assert api._avault_args(["pubkey"]) == ["pubkey"]
+
+
+def test_one_shot_avault_uses_file_store_for_linux_without_tpm(monkeypatch, tmp_path):
     from types import SimpleNamespace
 
     seen: dict[str, object] = {}
@@ -586,6 +601,8 @@ def test_one_shot_avault_uses_managed_file_store(monkeypatch):
 
     monkeypatch.setattr(api, "_require_avault_path", lambda: "/tmp/avault")
     monkeypatch.setattr(api, "_command_env_for", lambda path: {"AVAULT_PATH": path})
+    monkeypatch.setattr(api.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(api, "_AVAULT_LINUX_TPM_DEVICE_PATHS", (tmp_path / "missing-tpm0",))
     monkeypatch.setattr(api.subprocess, "run", fake_run)
 
     api._run_avault(["pubkey"], stdin=b"{}", timeout=3)
@@ -598,7 +615,7 @@ def test_one_shot_avault_uses_managed_file_store(monkeypatch):
     assert kwargs["env"] == {"AVAULT_PATH": "/tmp/avault"}
 
 
-def test_deliver_run_uses_managed_file_store(monkeypatch):
+def test_deliver_run_uses_file_store_for_linux_without_tpm(monkeypatch, tmp_path):
     seen: dict[str, object] = {}
 
     class FakeStdin:
@@ -621,6 +638,8 @@ def test_deliver_run_uses_managed_file_store(monkeypatch):
 
     monkeypatch.setattr(api, "_require_avault_path", lambda: "/tmp/avault")
     monkeypatch.setattr(api, "_command_env_for", lambda path: {"AVAULT_PATH": path})
+    monkeypatch.setattr(api.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(api, "_AVAULT_LINUX_TPM_DEVICE_PATHS", (tmp_path / "missing-tpm0",))
     monkeypatch.setattr(api.subprocess, "Popen", fake_popen)
 
     result = api.avault_deliver_run(

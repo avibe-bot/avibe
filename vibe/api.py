@@ -3,6 +3,7 @@ import contextlib
 import json
 import logging
 import os
+import platform
 import re
 import shutil
 import ssl
@@ -5203,6 +5204,7 @@ def _require_avault_grant_delivery_surface(feature: str) -> None:
 _AVAULT_TIMEOUT_SECONDS = 20.0
 _AVAULT_FETCH_TIMEOUT_SECONDS = 60.0
 _AVAULT_STORE = "file"
+_AVAULT_LINUX_TPM_DEVICE_PATHS = (Path("/dev/tpm0"), Path("/dev/tpmrm0"))
 
 
 class AvaultError(Exception):
@@ -5242,14 +5244,21 @@ def _avault_agent_manager():
             _AVAULT_AGENT_MANAGER = AvaultAgentManager(
                 binary_resolver=_require_avault_path,
                 command_env=_command_env_for,
-                store=_AVAULT_STORE,
             )
         manager = _AVAULT_AGENT_MANAGER
     return manager
 
 
+def _avault_store_args() -> list[str]:
+    if platform.system().lower() != "linux":
+        return []
+    if any(path.exists() for path in _AVAULT_LINUX_TPM_DEVICE_PATHS):
+        return []
+    return ["--store", _AVAULT_STORE]
+
+
 def _avault_args(args: list[str]) -> list[str]:
-    return ["--store", _AVAULT_STORE, *args]
+    return [*_avault_store_args(), *args]
 
 
 def _run_avault(
