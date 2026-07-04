@@ -380,7 +380,7 @@ export type ApiContextType = {
     opts?: { handleError?: boolean },
   ) => Promise<{ ok: boolean; request: VaultRequest | null; ambiguous?: boolean }>;
   getVaultProvisionRequestById: (requestId: string, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; request: VaultRequest | null }>;
-  getVaultRequests: (params?: { status?: string; type?: string; limit?: number }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; requests: VaultRequest[] }>;
+  getVaultRequests: (params?: { status?: string; type?: string; limit?: number; session?: string }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; requests: VaultRequest[] }>;
   denyVaultRequest: (requestId: string) => Promise<{ ok: boolean; request?: VaultRequest; code?: string; message?: string }>;
   fulfillVaultAccessRequest: (requestId: string, payload: VaultAccessFulfillmentPayload) => Promise<{ ok: boolean; request_id?: string; grant?: VaultGrant; result?: { type: string; grant?: VaultGrant }; code?: string; message?: string }>;
   getVaultGrants: (params?: { status?: string; sessionId?: string }, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; grants: VaultGrant[] }>;
@@ -2173,6 +2173,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (params?.status) search.set('status', params.status);
       if (params?.type) search.set('type', params.type);
       if (params?.limit) search.set('limit', String(params.limit));
+      if (params?.session) search.set('session', params.session);
       const qs = search.toString();
       return getCachedJson(qs ? `/api/vault/requests?${qs}` : '/api/vault/requests', 1500, opts);
     },

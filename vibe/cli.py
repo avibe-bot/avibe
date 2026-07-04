@@ -5987,7 +5987,9 @@ def cmd_vault_request(args):
                 name,
                 reason=getattr(args, "reason", None),
                 spec=spec,
-                requester={"source": "cli", "pid": os.getpid()},
+                # Carry the caller session (AVIBE_SESSION_ID) so the provision card can be
+                # scoped to the originating chat, like access/sign requests.
+                requester=_vault_cli_requester(args),
             )
         _publish_cli_vaults_updated(scope="request", request=req, secret_name=name)
         if req.get("status") == "fulfilled":

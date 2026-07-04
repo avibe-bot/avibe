@@ -2732,11 +2732,12 @@ def vault_requests_get():
     raw_status = request.args.get("status")
     status = None if raw_status == "all" else raw_status or "pending"
     req_type = request.args.get("type") or None
+    session = request.args.get("session") or None
     try:
         limit = int(request.args.get("limit") or 100)
     except ValueError:
         limit = 100
-    return jsonify(api.get_vault_requests(status=status, request_type=req_type, limit=limit))
+    return jsonify(api.get_vault_requests(status=status, request_type=req_type, limit=limit, session=session))
 
 
 @app.route("/api/vault/requests/<request_id>", methods=["GET"])

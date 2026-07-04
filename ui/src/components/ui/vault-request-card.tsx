@@ -3,6 +3,7 @@ import { ArrowRight, KeyRound, LockKeyhole, PenTool, Wallet } from 'lucide-react
 import { useTranslation } from 'react-i18next';
 
 import type { VaultRequest } from '@/context/ApiContext';
+import { partitionTags } from '@/lib/vaultTags';
 import { Badge } from './badge';
 import { Button } from './button';
 import { VaultApprovalDialog } from './vault-approval-dialog';
@@ -24,9 +25,25 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const type = useMemo(() => requestType(request), [request]);
-  const card = (request.card ?? {}) as { kind?: string; protection?: string };
-  const isProtected = card.protection === 'protected';
-  const name = request.secret_name ?? '';
+  const card = (request.card ?? {}) as {
+    kind?: string;
+    protection?: string;
+    secret_names?: string[];
+    protected_secret_names?: string[];
+    source_selector?: { env?: string[]; tags?: string[] };
+  };
+  const isProtected = card.protection === 'protected' || (card.protected_secret_names?.length ?? 0) > 0;
+  // A selector-based access request matches multiple secrets, so `secret_name` is null and the
+  // members/selector live on the card. Fall back to those so the card is never nameless.
+  const { name, extra } = useMemo(() => {
+    if (request.secret_name) return { name: request.secret_name, extra: 0 };
+    const names = card.secret_names ?? [];
+    if (names.length) return { name: names[0], extra: names.length - 1 };
+    const selector = card.source_selector ?? {};
+    const { tags, skills } = partitionTags(selector.tags);
+    const token = skills[0] ? `skill:${skills[0]}` : tags[0] ? `#${tags[0]}` : (selector.env ?? [])[0];
+    return { name: token ?? '', extra: 0 };
+  }, [request.secret_name, card]);
 
   const meta =
     type === 'provision'
@@ -43,6 +60,7 @@ export const VaultRequestCard: React.FC<{ request: VaultRequest; onResolved: () 
           <span className="text-[12px] text-muted">{meta.title}</span>
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="truncate font-mono text-[13px] font-semibold text-foreground">{name}</span>
+            {extra > 0 ? <Badge variant="secondary">+{extra}</Badge> : null}
             {isProtected ? <Badge variant="warning">{t('vaults.protected')}</Badge> : null}
             {card.kind === 'keypair' ? (
               <Badge variant="outline" className="gap-1 border-violet/40 bg-violet-soft text-violet">

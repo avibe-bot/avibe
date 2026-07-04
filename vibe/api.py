@@ -1567,12 +1567,14 @@ def get_vault_audit(*, secret_name: Optional[str] = None, limit: int = 100) -> d
     return {"ok": True, "events": events}
 
 
-def get_vault_requests(*, status: Optional[str] = "pending", request_type: Optional[str] = None, limit: int = 100) -> dict:
+def get_vault_requests(
+    *, status: Optional[str] = "pending", request_type: Optional[str] = None, limit: int = 100, session: Optional[str] = None
+) -> dict:
     from storage import vault_service
 
     engine = _vault_engine()
     with engine.begin() as conn:
-        requests = vault_service.list_requests(conn, status=status, request_type=request_type, limit=limit)
+        requests = vault_service.list_requests(conn, status=status, request_type=request_type, limit=limit, session=session)
     return {"ok": True, "requests": requests}
 
 

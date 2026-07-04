@@ -1454,7 +1454,7 @@ export const ChatPage: React.FC = () => {
           followingTailRef={followingTailRef}
         />
         <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
-        {sessionId ? <VaultChatRequests sessionId={sessionId} /> : null}
+        {sessionId ? <VaultChatRequests key={sessionId} sessionId={sessionId} /> : null}
         {/* key by session so the composer remounts per session — its draft-seeding
             + local value reset, instead of carrying across sessions (Codex P2). */}
         <Compose

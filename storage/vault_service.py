@@ -2080,17 +2080,22 @@ def list_requests(
     status: str | None = "pending",
     request_type: str | None = None,
     limit: int = 100,
+    session: str | None = None,
 ) -> list[dict[str, Any]]:
     _expire_pending_requests(conn)
-    query = select(vault_requests).order_by(vault_requests.c.created_at.desc(), vault_requests.c.id.desc()).limit(limit)
+    query = select(vault_requests).order_by(vault_requests.c.created_at.desc(), vault_requests.c.id.desc())
     if status is not None:
         query = query.where(vault_requests.c.status == status)
     if request_type is not None:
         query = query.where(vault_requests.c.request_type == request_type)
-    return [
-        _request_row_payload(dict(row), conn=conn, audience=REQUEST_AUDIENCE_UI)
-        for row in conn.execute(query).mappings()
-    ]
+    # session_id lives in the request JSON (not a column), so a session-scoped query must filter
+    # in Python BEFORE limiting — else a global page could truncate this session's older rows.
+    if session is None:
+        query = query.limit(limit)
+    rows = [dict(row) for row in conn.execute(query).mappings()]
+    if session is not None:
+        rows = [row for row in rows if _request_session_id(row) == session][:limit]
+    return [_request_row_payload(row, conn=conn, audience=REQUEST_AUDIENCE_UI) for row in rows]
 
 
 def resolve_pending_provision_request_by_name(conn: Connection, name: str) -> tuple[dict[str, Any] | None, bool]:

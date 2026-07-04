@@ -18,12 +18,12 @@ export const VaultChatRequests: React.FC<{ sessionId: string }> = ({ sessionId }
 
   const load = useCallback(async () => {
     try {
-      // Suppress errors: an older backend without the route must not toast on every refresh.
-      const res = await api.getVaultRequests({ status: 'pending' }, { handleError: false });
+      // Server-side session scoping (before the global limit); suppress errors so an older
+      // backend without the route doesn't toast on every refresh.
+      const res = await api.getVaultRequests({ status: 'pending', session: sessionId }, { handleError: false });
       const mine = (res.requests ?? []).filter((r) => {
-        const card = r.card as { request_type?: string; session_id?: string } | null;
-        const type = card?.request_type ?? r.request_type;
-        return (type === 'access' || type === 'sign' || type === 'provision') && card?.session_id === sessionId;
+        const type = (r.card as { request_type?: string } | null)?.request_type ?? r.request_type;
+        return type === 'access' || type === 'sign' || type === 'provision';
       });
       setRequests(mine);
     } catch {
@@ -71,6 +71,22 @@ export const VaultChatRequests: React.FC<{ sessionId: string }> = ({ sessionId }
       window.clearInterval(id);
     };
   }, [connected, load]);
+
+  // Expiry doesn't publish a `vaults.updated` event, so schedule a refresh at the earliest
+  // visible expiry — otherwise an expired card lingers and clicking it hits a server-side
+  // lazy-expire failure. Runs even while SSE is connected.
+  useEffect(() => {
+    const now = Date.now();
+    let earliest = Infinity;
+    for (const request of requests) {
+      const expiresAt = request.expires_at ? Date.parse(request.expires_at) : NaN;
+      if (!Number.isNaN(expiresAt) && expiresAt > now) earliest = Math.min(earliest, expiresAt);
+    }
+    if (earliest === Infinity) return;
+    // +250ms so the server has flipped the row; clamp to the setTimeout max.
+    const id = window.setTimeout(load, Math.min(earliest - now + 250, 2_000_000_000));
+    return () => window.clearTimeout(id);
+  }, [requests, load]);
 
   if (requests.length === 0) return null;
   return (
