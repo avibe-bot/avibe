@@ -1818,7 +1818,8 @@ def test_export_is_deprecated_and_does_not_touch_db(capfd):
         assert vault_service.list_secrets(conn) == []
 
 
-def test_request_creates_pending(capfd):
+def test_request_creates_pending(capfd, monkeypatch):
+    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
     code = cli.cmd_vault_request(_ns(name="WANTED_KEY", reason="need it"))
     captured = capfd.readouterr()
     assert code == 0
@@ -1826,6 +1827,7 @@ def test_request_creates_pending(capfd):
     assert payload["secret_name"] == "WANTED_KEY"
     assert payload["status"] == "pending"
     assert payload["request_id"].startswith("vrq_")
+    assert "vibe vault await" in payload["message"]
 
 
 def test_request_accepts_spec_path(tmp_path, capfd):
@@ -1842,7 +1844,9 @@ def test_request_accepts_spec_path(tmp_path, capfd):
         encoding="utf-8",
     )
 
-    code = cli.cmd_vault_request(_ns(name="GITHUB_TOKEN", reason="need PR status", spec=str(spec_path)))
+    code = cli.cmd_vault_request(
+        _ns(name="GITHUB_TOKEN", reason="need PR status", spec=str(spec_path), session_id="ses_cli")
+    )
     payload = json.loads(capfd.readouterr().out)
 
     assert code == 0
