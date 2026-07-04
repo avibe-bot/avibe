@@ -748,6 +748,7 @@ class SessionTurnManager:
         from core.inbox_events import bus
         from core.workbench_media import file_attachments_from_specs, resolve_attachment_specs
         from storage import messages_service
+        from storage.background import run_update_event_transaction
         from storage.db import create_sqlite_engine
 
         if not session_id:
@@ -767,7 +768,7 @@ class SessionTurnManager:
         claimed_agent_run_ids: list[str] = []
         try:
             engine = create_sqlite_engine()
-            with engine.begin() as conn:
+            with run_update_event_transaction(engine) as conn:
                 rows = messages_service.list_queued(conn, session_id)
                 if not rows:
                     return False
@@ -949,7 +950,7 @@ class SessionTurnManager:
                 retry_agent_run_flush = False
                 try:
                     engine = create_sqlite_engine()
-                    with engine.begin() as conn:
+                    with run_update_event_transaction(engine) as conn:
                         claimed_run_ids = _claim_agent_run_segment_and_retire_queue(
                             conn,
                             run_ids=pending_agent_run_ids,
@@ -995,7 +996,7 @@ class SessionTurnManager:
                         from storage.background import reset_workbench_claimed_runs_in_connection
 
                         engine = create_sqlite_engine()
-                        with engine.begin() as conn:
+                        with run_update_event_transaction(engine) as conn:
                             reset_workbench_claimed_runs_in_connection(conn, claimed_agent_run_ids)
                             _restore_queued_rows(conn, pending_scheduled_segment)
                     except Exception:

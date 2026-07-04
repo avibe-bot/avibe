@@ -181,6 +181,14 @@ export const HarnessPage: React.FC = () => {
     refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    return api.connectWorkbenchEvents({
+      onRunsUpdated: () => {
+        void refresh();
+      },
+    });
+  }, [api, refresh]);
+
   // Resolve agent_name → backend/model/effort for the detail panels: the
   // task/watch payload stores only the name. Fetched once on mount.
   const [agentsByName, setAgentsByName] = useState<Record<string, VibeAgentBrief>>({});

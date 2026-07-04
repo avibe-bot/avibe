@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -94,6 +95,7 @@ RUN_STATUS_ALIASES: dict[str, str] = {
 _LIKE_ESCAPE = "\\"
 DEFINITION_STATUS_COUNTS = ("all", "enabled", "disabled")
 RUN_STATUS_COUNTS = ("all", "queued", "running", "succeeded", "failed", "canceled")
+_DEFERRED_RUN_EVENT_ROWS_KEY = "avibe.deferred_run_event_rows"
 
 
 def normalize_run_status(status: Any) -> str:
@@ -143,6 +145,41 @@ def _publish_run_rows_updated(rows: list[Any]) -> None:
             logger.debug("failed to publish runs.updated for %s", run_id, exc_info=True)
 
 
+def _defer_run_rows_updated_from_connection(conn: Any, rows: list[Any]) -> None:
+    if not rows:
+        return
+    pending = conn.info.setdefault(_DEFERRED_RUN_EVENT_ROWS_KEY, {})
+    for raw_row in rows:
+        if raw_row is None:
+            continue
+        row = dict(raw_row)
+        run_id = str(row.get("id") or "").strip()
+        if run_id:
+            pending[run_id] = row
+
+
+def pop_deferred_run_event_rows_from_connection(conn: Any) -> list[dict[str, Any]]:
+    pending = conn.info.pop(_DEFERRED_RUN_EVENT_ROWS_KEY, {})
+    if not isinstance(pending, dict):
+        return []
+    return [dict(row) for row in pending.values() if row is not None]
+
+
+@contextmanager
+def run_update_event_transaction(engine: Any):
+    """Commit DB writes before publishing deferred ``runs.updated`` snapshots."""
+
+    pending_rows: list[dict[str, Any]] = []
+    with engine.begin() as conn:
+        try:
+            yield conn
+            pending_rows = pop_deferred_run_event_rows_from_connection(conn)
+        except Exception:
+            conn.info.pop(_DEFERRED_RUN_EVENT_ROWS_KEY, None)
+            raise
+    _publish_run_rows_updated(pending_rows)
+
+
 def _run_rows_for_ids(conn: Any, run_ids: list[str]) -> list[Any]:
     normalized_ids: list[str] = []
     seen: set[str] = set()
@@ -157,8 +194,8 @@ def _run_rows_for_ids(conn: Any, run_ids: list[str]) -> list[Any]:
     return list(conn.execute(select(agent_runs).where(agent_runs.c.id.in_(normalized_ids))).mappings())
 
 
-def _publish_run_ids_updated_from_connection(conn: Any, run_ids: list[str]) -> None:
-    _publish_run_rows_updated(_run_rows_for_ids(conn, run_ids))
+def _defer_run_ids_updated_from_connection(conn: Any, run_ids: list[str]) -> None:
+    _defer_run_rows_updated_from_connection(conn, _run_rows_for_ids(conn, run_ids))
 
 
 def _like_contains_pattern(value: str) -> str:
@@ -229,7 +266,7 @@ def complete_coalesced_agent_runs_for_workbench_in_connection(
         result = conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(**values))
         if result.rowcount:
             completed_ids.append(run_id)
-    _publish_run_ids_updated_from_connection(conn, completed_ids)
+    _defer_run_ids_updated_from_connection(conn, completed_ids)
     return completed_ids
 
 
@@ -294,7 +331,7 @@ def claim_queued_runs_for_workbench_in_connection(
         )
         if not result.rowcount:
             raise RuntimeError(f"failed to claim queued agent run {run_id}")
-    _publish_run_ids_updated_from_connection(conn, normalized_run_ids)
+    _defer_run_ids_updated_from_connection(conn, normalized_run_ids)
     return normalized_run_ids
 
 
@@ -409,7 +446,7 @@ def inspect_queued_runs_for_workbench_in_connection(conn: Any, run_ids: list[str
             .where(agent_runs.c.status.in_(_status_query_values("queued")))
             .values(status="canceled", completed_at=now, updated_at=now)
         )
-        _publish_run_ids_updated_from_connection(conn, cancel_requested_run_ids)
+        _defer_run_ids_updated_from_connection(conn, cancel_requested_run_ids)
     return queued_run_ids, stale_run_ids
 
 
@@ -444,7 +481,7 @@ def reset_workbench_claimed_runs_in_connection(conn: Any, run_ids: list[str]) ->
             .values(**values)
         )
         changed_ids.append(run_id)
-    _publish_run_ids_updated_from_connection(conn, changed_ids)
+    _defer_run_ids_updated_from_connection(conn, changed_ids)
 
 
 class SQLiteBackgroundTaskStore:
@@ -1109,11 +1146,11 @@ class SQLiteBackgroundTaskStore:
         *,
         started_at: Optional[str] = None,
     ) -> list[str]:
-        with self.engine.begin() as conn:
+        with run_update_event_transaction(self.engine) as conn:
             return claim_queued_runs_for_workbench_in_connection(conn, run_ids, started_at=started_at)
 
     def inspect_queued_runs_for_workbench(self, run_ids: list[str]) -> tuple[list[str], list[str]]:
-        with self.engine.begin() as conn:
+        with run_update_event_transaction(self.engine) as conn:
             return inspect_queued_runs_for_workbench_in_connection(conn, run_ids)
 
     def record_run_message(
@@ -1126,6 +1163,7 @@ class SQLiteBackgroundTaskStore:
         updated_at: Optional[str] = None,
     ) -> None:
         now = updated_at or _utc_now_iso()
+        row_to_publish = None
         with self.engine.begin() as conn:
             row = conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
             if not row:
@@ -1153,11 +1191,13 @@ class SQLiteBackgroundTaskStore:
                 .values(**values)
             )
             if terminal_status and result.rowcount:
-                updated = conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().one()
-                _publish_run_rows_updated([updated])
+                row_to_publish = dict(
+                    conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().one()
+                )
+        _publish_run_rows_updated([row_to_publish])
 
     def recover_processing_runs(self) -> None:
-        with self.engine.begin() as conn:
+        with run_update_event_transaction(self.engine) as conn:
             now = _utc_now_iso()
             rows = list(
                 conn.execute(
@@ -1174,7 +1214,7 @@ class SQLiteBackgroundTaskStore:
                 .values(status="queued", started_at=None, pid=None, updated_at=now)
             )
             _refresh_recovered_coalesced_workbench_runs_in_connection(conn, now=now)
-            _publish_run_ids_updated_from_connection(conn, recovered_ids)
+            _defer_run_ids_updated_from_connection(conn, recovered_ids)
 
     def write_watch_runtime(self, payload: dict[str, Any], *, updated_at: str) -> None:
         watches = payload.get("watches", {}) if isinstance(payload, dict) else {}

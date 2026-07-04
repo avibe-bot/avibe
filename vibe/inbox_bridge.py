@@ -31,6 +31,19 @@ logger = logging.getLogger(__name__)
 # it so a long-down controller doesn't busy-spin.
 _BACKOFF_INITIAL = 1.0
 _BACKOFF_MAX = 15.0
+_bridge_connected = False
+
+
+def is_bridge_connected() -> bool:
+    return _bridge_connected
+
+
+def _set_bridge_connected(connected: bool) -> None:
+    global _bridge_connected
+    if _bridge_connected == connected:
+        return
+    _bridge_connected = connected
+    broker.publish(WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT, {"connected": connected})
 
 
 async def run_inbox_bridge() -> None:
@@ -42,18 +55,17 @@ async def run_inbox_bridge() -> None:
     """
 
     backoff = _BACKOFF_INITIAL
-    bridge_connected = False
     while True:
         try:
             async for event_type, data in internal_client.stream_events():
                 # A flowing event proves the link is healthy → reset backoff so
                 # the next genuine drop reconnects promptly.
                 backoff = _BACKOFF_INITIAL
-                if event_type == "connected" and not bridge_connected:
-                    bridge_connected = True
-                    broker.publish(WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT, {"connected": True})
+                if event_type == "connected":
+                    _set_bridge_connected(True)
                 broker.publish(event_type, data)
         except asyncio.CancelledError:
+            _set_bridge_connected(False)
             raise
         except internal_client.InternalServerUnavailable:
             logger.debug("inbox bridge: controller socket unavailable; retry in %.1fs", backoff)
@@ -61,8 +73,6 @@ async def run_inbox_bridge() -> None:
             logger.warning("inbox bridge: stream error; retry in %.1fs", backoff, exc_info=True)
         else:
             logger.debug("inbox bridge: controller feed closed; reconnect in %.1fs", backoff)
-        if bridge_connected:
-            bridge_connected = False
-            broker.publish(WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT, {"connected": False})
+        _set_bridge_connected(False)
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, _BACKOFF_MAX)

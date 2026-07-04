@@ -2342,6 +2342,32 @@ def test_inspect_queued_runs_finalizes_cancel_requested_queued_agent_run(monkeyp
     assert stored["completed_at"] is not None
 
 
+def test_claim_queued_runs_publishes_after_commit(monkeypatch, tmp_path) -> None:
+    import storage.background as background_module
+
+    _make_avibe_session(monkeypatch, tmp_path)
+    request_store = TaskExecutionStore()
+    request = request_store.enqueue_agent_run(
+        session_id="placeholder",
+        message="queued run",
+        agent_name="codex",
+        metadata={"workbench_queue_holds_run": True},
+    )
+    bg = request_store._sqlite
+    assert bg is not None
+
+    observed_statuses: list[str | None] = []
+
+    def capture_publish(_rows):
+        stored = bg.get_run(request.id)
+        observed_statuses.append(stored["status"] if stored else None)
+
+    monkeypatch.setattr(background_module, "_publish_run_rows_updated", capture_publish)
+
+    assert bg.claim_queued_runs_for_workbench([request.id]) == [request.id]
+    assert observed_statuses == ["running"]
+
+
 def test_drain_requests_reserves_watch_create_per_run_before_session_validation(tmp_path: Path) -> None:
     request_store = TaskExecutionStore(tmp_path / "task_requests")
     request = request_store.enqueue_definition_run(

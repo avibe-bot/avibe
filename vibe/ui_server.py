@@ -6277,6 +6277,8 @@ async def workbench_events():
 
     from fastapi.responses import StreamingResponse
 
+    from core.inbox_events import WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT
+    from vibe.inbox_bridge import is_bridge_connected
     from vibe.sse_broker import broker
 
     async def generate():
@@ -6286,6 +6288,15 @@ async def workbench_events():
             # subsequent debug logs / cancel calls if we ever need them.
             yield ": stream connected\n\n"
             yield f"event: connected\ndata: {{\"sub_id\": {sub_id}}}\n\n"
+            payload = json.dumps(
+                {
+                    "type": WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT,
+                    "data": {"connected": is_bridge_connected()},
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            yield f"event: {WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT}\ndata: {payload}\n\n"
             while True:
                 try:
                     event_type, payload = await asyncio.wait_for(queue.get(), timeout=15.0)

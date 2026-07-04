@@ -1382,9 +1382,12 @@ class TaskExecutionStore:
         error: Optional[str] = None,
     ) -> None:
         if self._sqlite is not None:
-            from storage.background import complete_coalesced_agent_runs_for_workbench_in_connection
+            from storage.background import (
+                complete_coalesced_agent_runs_for_workbench_in_connection,
+                run_update_event_transaction,
+            )
 
-            with self._sqlite.engine.begin() as conn:
+            with run_update_event_transaction(self._sqlite.engine) as conn:
                 complete_coalesced_agent_runs_for_workbench_in_connection(
                     conn,
                     run_ids,

@@ -30,6 +30,7 @@ import {
 
 // Degraded-mode refresh cadence while SSE is disconnected.
 const POLL_INTERVAL_MS = 4000;
+const LIVENESS_POLL_INTERVAL_MS = 30000;
 const RENDER_TICK_INTERVAL_MS = 1000;
 
 type DisplayRunningAgent = RunningAgent & {
@@ -222,8 +223,12 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
     return () => window.clearInterval(timer);
   }, [hasElapsedRows]);
 
+  // SSE covers lifecycle writes, and the render ticker covers elapsed labels.
+  // External process death/orphan detection is a sampled snapshot, so keep a
+  // low-rate reconciliation poll only while visible rows can go stale.
   useEffect(() => {
-    if (eventBridgeConnected) return;
+    const intervalMs = eventBridgeConnected ? LIVENESS_POLL_INTERVAL_MS : POLL_INTERVAL_MS;
+    if (eventBridgeConnected && agents.length === 0) return;
     let timer: number | undefined;
     let cancelled = false;
     let inFlight = false;
@@ -232,7 +237,7 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
     const tick = async () => {
       if (cancelled) return;
       if (document.visibilityState !== 'visible') {
-        timer = window.setTimeout(tick, POLL_INTERVAL_MS);
+        timer = window.setTimeout(tick, intervalMs);
         return;
       }
       if (inFlight) {
@@ -252,7 +257,7 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
         void tick();
         return;
       }
-      timer = window.setTimeout(tick, POLL_INTERVAL_MS);
+      timer = window.setTimeout(tick, intervalMs);
     };
 
     const refreshNow = () => {
@@ -268,7 +273,7 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
       document.removeEventListener('visibilitychange', refreshNow);
       window.removeEventListener('focus', refreshNow);
     };
-  }, [eventBridgeConnected, fetchData]);
+  }, [agents.length, eventBridgeConnected, fetchData]);
 
   if (loading) {
     return (
