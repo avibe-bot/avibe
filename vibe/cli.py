@@ -4678,6 +4678,37 @@ def _vault_cli_delivery(args, **fields) -> dict:
     return delivery
 
 
+def _publish_cli_vaults_updated(
+    *,
+    scope: str,
+    request: dict | None = None,
+    grant: dict | None = None,
+    secret_name: str | None = None,
+) -> None:
+    """Best-effort bridge for CLI/agent vault writes into browser SSE."""
+
+    if request is None and grant is None and not secret_name:
+        return
+    try:
+        from core.inbox_events import VAULTS_UPDATED_EVENT, vaults_updated_payload
+        from vibe import internal_client
+
+        internal_client.publish_event_sync(
+            VAULTS_UPDATED_EVENT,
+            vaults_updated_payload(
+                scope=scope,
+                request_id=str(request.get("id") or "") if request else None,
+                request_status=str(request.get("status") or "") if request else None,
+                grant_id=str(grant.get("id") or "") if grant else None,
+                grant_status=str(grant.get("status") or "") if grant else None,
+                secret_name=secret_name or (str(request.get("secret_name") or "") if request else None),
+            ),
+            timeout=1.5,
+        )
+    except Exception:
+        logger.debug("failed to publish CLI vault update event", exc_info=True)
+
+
 def _is_env_name(name: str) -> bool:
     """ASCII shell/env identifier: a letter or underscore, then letters/digits/underscores."""
     if not name or not name[0].isascii() or not (name[0].isalpha() or name[0] == "_"):
@@ -4891,6 +4922,7 @@ def cmd_vault_rm(args):
             vault_service.delete_secret(conn, args.name)
             release_scopes = vault_service.agent_release_scopes_after_rows(conn, grant_rows)
         api.release_vault_agent_scopes(release_scopes, reason="vault_rm")
+        _publish_cli_vaults_updated(scope="secret", secret_name=args.name)
         _print_cli_payload("vault_secret", removed=True, name=args.name)
         return 0
     except vault_service.SecretNotFoundError:
@@ -4918,6 +4950,7 @@ def cmd_vault_access(args):
                 requester=_vault_cli_requester(args),
                 delivery=_vault_cli_delivery(args, mode="access"),
             )
+        _publish_cli_vaults_updated(scope="request", request=request)
         _print_cli_payload(
             "vault_access_request",
             request_id=request["id"],
@@ -4958,7 +4991,7 @@ def _expire_agent_grant_after_missing(
             source_selector = delivery_payload.get("source_selector")
             if isinstance(source_selector, dict):
                 try:
-                    return vault_service.create_access_request(
+                    first_request = vault_service.create_access_request(
                         conn,
                         source_selector=source_selector,
                         requester=requester or {"source": "cli", "pid": os.getpid()},
@@ -4967,19 +5000,23 @@ def _expire_agent_grant_after_missing(
                     )
                 except vault_service.NotGrantableError:
                     pass
-            for name in names:
-                resolved = vault_service.resolve_secret_access(
-                    conn,
-                    name,
-                    requester=requester or {"source": "cli", "pid": os.getpid()},
-                    delivery=delivery or {},
-                    purpose=purpose,
-                )
-                if first_request is None and isinstance(resolved.get("request"), dict):
-                    first_request = resolved["request"]
-                    break
+            if first_request is None:
+                for name in names:
+                    resolved = vault_service.resolve_secret_access(
+                        conn,
+                        name,
+                        requester=requester or {"source": "cli", "pid": os.getpid()},
+                        delivery=delivery or {},
+                        purpose=purpose,
+                    )
+                    if first_request is None and isinstance(resolved.get("request"), dict):
+                        first_request = resolved["request"]
+                        break
     except Exception:
         pass
+    else:
+        _publish_cli_vaults_updated(scope="grant", grant={"id": grant_id, "status": "expired"})
+        _publish_cli_vaults_updated(scope="request", request=first_request)
     return first_request
 
 
@@ -5418,6 +5455,7 @@ def _resolve_vault_run_delivery(
         if str(metas[name].get("protection") or "standard") == "protected"
     ]
     standard_approval_error: TaskCliError | None = None
+    approval_request_to_publish: dict | None = None
     if metas and not protected_names:
         with engine.begin() as conn:
             standard_names = list(dict.fromkeys(mapping.values()))
@@ -5443,12 +5481,14 @@ def _resolve_vault_run_delivery(
                     delivery=delivery,
                     purpose="run",
                 )
+                approval_request_to_publish = req
                 standard_approval_error = TaskCliError(
                     "standard always_ask secrets need approval before vault run delivery",
                     code="approval_required",
                     details={"request_id": req.get("id"), "secret_names": approval_names},
                 )
         if standard_approval_error is not None:
+            _publish_cli_vaults_updated(scope="request", request=approval_request_to_publish)
             raise standard_approval_error
     secrets = []
     grant: dict | None = None
@@ -5519,6 +5559,7 @@ def _resolve_vault_run_delivery(
                             delivery=request_delivery,
                             purpose="run",
                         )
+                        approval_request_to_publish = req
                         approval_error = TaskCliError(
                             "protected secrets need approval before vault run delivery",
                             code="approval_required",
@@ -5552,6 +5593,8 @@ def _resolve_vault_run_delivery(
                     resolved_by_name[vault_name] = resolved
                 if resolved["status"] == "approval_required":
                     req = resolved.get("request") or {}
+                    if isinstance(req, dict):
+                        approval_request_to_publish = req
                     approval_error = TaskCliError(
                         f"secret '{vault_name}' needs approval before protected delivery",
                         code="approval_required",
@@ -5573,6 +5616,7 @@ def _resolve_vault_run_delivery(
     except Exception as exc:
         _raise_after_releasing_one_shot_reservations(engine, one_shot_grants, exc)
     if approval_error is not None:
+        _publish_cli_vaults_updated(scope="request", request=approval_request_to_publish)
         _release_one_shot_reservations(engine, one_shot_grants)
         raise approval_error
     return grant, one_shot_grants, secrets
@@ -5927,6 +5971,7 @@ def cmd_vault_request(args):
                 spec=spec,
                 requester={"source": "cli", "pid": os.getpid()},
             )
+        _publish_cli_vaults_updated(scope="request", request=req, secret_name=name)
         if req.get("status") == "fulfilled":
             # Secret already existed — no point waiting.
             _print_cli_payload(
@@ -6009,6 +6054,7 @@ def cmd_vault_sign(args):
                 requester=_vault_cli_requester(args),
                 delivery=_vault_cli_delivery(args, mode="sign"),
             )
+        _publish_cli_vaults_updated(scope="request", request=request)
         _print_cli_payload(
             "vault_sign_request",
             request_id=request["id"],

@@ -67,6 +67,7 @@ export const AgentsPage: React.FC = () => {
   const { showToast } = useToast();
   const [agentsTab, setAgentsTab] = useState<AgentsTabKey>('definitions');
   const [runningActiveCount, setRunningActiveCount] = useState<number | null>(null);
+  const [eventsConnected, setEventsConnected] = useState(false);
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [defaultName, setDefaultName] = useState<string | null>(null);
   const [selected, setSelected] = useState<VibeAgentFull | null>(null);
@@ -122,36 +123,85 @@ export const AgentsPage: React.FC = () => {
     if (!selected) setDetailOpen(false);
   }, [selected]);
 
-  // Fetch the active-count for the Running tab badge. Runs once on mount
-  // and polls every 8s so the pill reflects live state without hammering the server.
-  useEffect(() => {
-    let cancelled = false;
-    const fetchCount = async () => {
-      try {
-        const result = await api.getRunningAgents();
-        if (!cancelled) {
-          if (result.ok && result.counts) {
-            setRunningActiveCount((result.counts as any).active ?? 0);
-          } else {
-            setRunningActiveCount(null); // unreachable → show "—"
-          }
-        }
-      } catch {
-        // Any fetch failure (unreachable/401/500): show "—" rather than a stale
-        // count, matching the tab body's explicit unreachable handling.
-        if (!cancelled) setRunningActiveCount(null);
+  const fetchRunningActiveCount = useCallback(async () => {
+    try {
+      const result = await api.getRunningAgents();
+      if (result.ok && result.counts) {
+        setRunningActiveCount((result.counts as any).active ?? 0);
+      } else {
+        setRunningActiveCount(null);
       }
+    } catch {
+      setRunningActiveCount(null);
+    }
+  }, [api]);
+
+  useEffect(() => {
+    if (agentsTab !== 'running') void fetchRunningActiveCount();
+  }, [agentsTab, fetchRunningActiveCount]);
+
+  useEffect(() => {
+    if (agentsTab === 'running') return;
+    return api.connectWorkbenchEvents({
+      onConnected: () => {
+        setEventsConnected(true);
+        fetchRunningActiveCount();
+      },
+      onError: () => setEventsConnected(false),
+      onRunsUpdated: () => fetchRunningActiveCount(),
+      onTurnStart: () => fetchRunningActiveCount(),
+      onTurnEnd: () => fetchRunningActiveCount(),
+      onSessionStatus: () => fetchRunningActiveCount(),
+    });
+  }, [api, agentsTab, fetchRunningActiveCount]);
+
+  useEffect(() => {
+    if (agentsTab === 'running' || eventsConnected) return;
+    let timer: number | undefined;
+    let cancelled = false;
+    let inFlight = false;
+    let pendingWake = false;
+
+    const tick = async () => {
+      if (cancelled) return;
+      if (document.visibilityState !== 'visible') {
+        timer = window.setTimeout(tick, 8000);
+        return;
+      }
+      if (inFlight) {
+        pendingWake = true;
+        return;
+      }
+      inFlight = true;
+      window.clearTimeout(timer);
+      try {
+        await fetchRunningActiveCount();
+      } finally {
+        inFlight = false;
+      }
+      if (cancelled) return;
+      if (pendingWake) {
+        pendingWake = false;
+        void tick();
+        return;
+      }
+      timer = window.setTimeout(tick, 8000);
     };
-    fetchCount();
-    // While the Running tab is open it already polls the same endpoint (4s), so
-    // skip the redundant badge poll then; one fetch on tab-switch keeps the pill
-    // fresh enough (it re-runs on the next switch back to Definitions).
-    const id = agentsTab === 'running' ? null : window.setInterval(fetchCount, 8000);
+
+    const refreshNow = () => {
+      if (document.visibilityState === 'visible') void tick();
+    };
+
+    void tick();
+    document.addEventListener('visibilitychange', refreshNow);
+    window.addEventListener('focus', refreshNow);
     return () => {
       cancelled = true;
-      if (id != null) window.clearInterval(id);
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', refreshNow);
+      window.removeEventListener('focus', refreshNow);
     };
-  }, [api, agentsTab]);
+  }, [eventsConnected, agentsTab, fetchRunningActiveCount]);
 
   const selectAgent = useCallback(
     async (name: string, openDetail = false) => {

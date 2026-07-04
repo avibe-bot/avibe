@@ -666,6 +666,23 @@ export type WorkbenchEventHandlers = {
   onSessionStatus?: (data: { session_id: string; agent_status: 'idle' | 'running' | 'failed' }) => void;
   // The send-while-busy queue for a session changed (enqueue / flush / remove).
   onQueueUpdated?: (data: { session_id: string }) => void;
+  onRunsUpdated?: (data: {
+    run_id: string;
+    status: HarnessRunStatus;
+    run_type?: string;
+    session_id?: string;
+    definition_id?: string;
+    updated_at?: string;
+    cancel_requested?: boolean;
+  }) => void;
+  onVaultsUpdated?: (data: {
+    scope: string;
+    request_id?: string;
+    request_status?: string;
+    grant_id?: string;
+    grant_status?: string;
+    secret_name?: string;
+  }) => void;
   onAny?: (event: WorkbenchEventEnvelope) => void;
   onError?: (err: Event) => void;
 };
@@ -1543,7 +1560,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     eventSourceRef.current = source;
     source.addEventListener('connected', (e: MessageEvent) => {
       try {
-        eventConnectionRef.current = JSON.parse(e.data) as { sub_id: number };
+        const parsed = JSON.parse(e.data) as { sub_id?: number; type?: string; data?: unknown };
+        eventConnectionRef.current = { sub_id: typeof parsed.sub_id === 'number' ? parsed.sub_id : -1 };
       } catch (err) {
         console.error('[workbench-events] connected parse failed', err, e.data);
         eventConnectionRef.current = null;
@@ -1636,7 +1654,41 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         handlers.onQueueUpdated?.(envelope.data);
       });
     });
+    source.addEventListener('runs.updated', (e: MessageEvent) => {
+      const envelope = parseWorkbenchEnvelope<{
+        run_id: string;
+        status: HarnessRunStatus;
+        run_type?: string;
+        session_id?: string;
+        definition_id?: string;
+        updated_at?: string;
+        cancel_requested?: boolean;
+      }>(e.data);
+      if (!envelope) return;
+      clearReadCacheMatching((path) => path.startsWith('/api/harness'));
+      dispatchToWorkbenchHandlers((handlers) => {
+        handlers.onAny?.(envelope);
+        handlers.onRunsUpdated?.(envelope.data);
+      });
+    });
+    source.addEventListener('vaults.updated', (e: MessageEvent) => {
+      const envelope = parseWorkbenchEnvelope<{
+        scope: string;
+        request_id?: string;
+        request_status?: string;
+        grant_id?: string;
+        grant_status?: string;
+        secret_name?: string;
+      }>(e.data);
+      if (!envelope) return;
+      clearReadCacheMatching((path) => path.startsWith('/api/vault/'));
+      dispatchToWorkbenchHandlers((handlers) => {
+        handlers.onAny?.(envelope);
+        handlers.onVaultsUpdated?.(envelope.data);
+      });
+    });
     source.onerror = (err) => {
+      eventConnectionRef.current = null;
       dispatchToWorkbenchHandlers((handlers) => handlers.onError?.(err));
     };
   };

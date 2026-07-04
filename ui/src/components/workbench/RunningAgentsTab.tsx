@@ -28,7 +28,7 @@ import {
   type Backend,
 } from '../../lib/backendAccent';
 
-// How often to refresh while mounted (ms)
+// Degraded-mode refresh cadence while SSE is disconnected.
 const POLL_INTERVAL_MS = 4000;
 
 // Humanize elapsed_seconds: 12 → "12s", 185 → "3m", 3700 → "1h"
@@ -102,6 +102,7 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
   const [agents, setAgents] = useState<RunningAgent[]>([]);
   const [unreachable, setUnreachable] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [eventsConnected, setEventsConnected] = useState(false);
   // Guards against setState after unmount: an in-flight poll can resolve after
   // the user leaves the Running tab (the component unmounts) — without this the
   // resolved fetch would call setState on an unmounted component.
@@ -176,16 +177,71 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
     [api, fetchData, showToast, t],
   );
 
-  // Initial fetch
   useEffect(() => {
     fetchData(false);
   }, [fetchData]);
 
-  // Polling interval
   useEffect(() => {
-    const id = window.setInterval(() => fetchData(true), POLL_INTERVAL_MS);
-    return () => window.clearInterval(id);
-  }, [fetchData]);
+    return api.connectWorkbenchEvents({
+      onConnected: () => {
+        setEventsConnected(true);
+        fetchData(true);
+      },
+      onError: () => setEventsConnected(false),
+      onRunsUpdated: () => fetchData(true),
+      onTurnStart: () => fetchData(true),
+      onTurnEnd: () => fetchData(true),
+      onSessionStatus: () => fetchData(true),
+    });
+  }, [api, fetchData]);
+
+  useEffect(() => {
+    if (eventsConnected) return;
+    let timer: number | undefined;
+    let cancelled = false;
+    let inFlight = false;
+    let pendingWake = false;
+
+    const tick = async () => {
+      if (cancelled) return;
+      if (document.visibilityState !== 'visible') {
+        timer = window.setTimeout(tick, POLL_INTERVAL_MS);
+        return;
+      }
+      if (inFlight) {
+        pendingWake = true;
+        return;
+      }
+      inFlight = true;
+      window.clearTimeout(timer);
+      try {
+        await fetchData(true);
+      } finally {
+        inFlight = false;
+      }
+      if (cancelled) return;
+      if (pendingWake) {
+        pendingWake = false;
+        void tick();
+        return;
+      }
+      timer = window.setTimeout(tick, POLL_INTERVAL_MS);
+    };
+
+    const refreshNow = () => {
+      if (document.visibilityState === 'visible') void tick();
+    };
+
+    void tick();
+    document.addEventListener('visibilitychange', refreshNow);
+    window.addEventListener('focus', refreshNow);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', refreshNow);
+      window.removeEventListener('focus', refreshNow);
+    };
+  }, [eventsConnected, fetchData]);
 
   if (loading) {
     return (

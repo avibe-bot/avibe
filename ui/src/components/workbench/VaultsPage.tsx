@@ -286,6 +286,7 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
   const [requests, setRequests] = useState<VaultRequest[]>([]);
   const [reviewing, setReviewing] = useState<VaultRequest | null>(null);
   const [provisioning, setProvisioning] = useState<VaultRequest | null>(null);
+  const [eventsConnected, setEventsConnected] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -302,12 +303,68 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
     }
   }, [api]);
 
-  // Poll so a request an agent raises while the hub is open appears without a manual refresh.
   useEffect(() => {
     load();
-    const id = setInterval(load, 5000);
-    return () => clearInterval(id);
   }, [load]);
+
+  useEffect(() => {
+    return api.connectWorkbenchEvents({
+      onConnected: () => {
+        setEventsConnected(true);
+        load();
+      },
+      onError: () => setEventsConnected(false),
+      onVaultsUpdated: () => load(),
+    });
+  }, [api, load]);
+
+  useEffect(() => {
+    if (eventsConnected) return;
+    let timer: number | undefined;
+    let cancelled = false;
+    let inFlight = false;
+    let pendingWake = false;
+
+    const tick = async () => {
+      if (cancelled) return;
+      if (document.visibilityState !== 'visible') {
+        timer = window.setTimeout(tick, 5000);
+        return;
+      }
+      if (inFlight) {
+        pendingWake = true;
+        return;
+      }
+      inFlight = true;
+      window.clearTimeout(timer);
+      try {
+        await load();
+      } finally {
+        inFlight = false;
+      }
+      if (cancelled) return;
+      if (pendingWake) {
+        pendingWake = false;
+        void tick();
+        return;
+      }
+      timer = window.setTimeout(tick, 5000);
+    };
+
+    const refreshNow = () => {
+      if (document.visibilityState === 'visible') void tick();
+    };
+
+    void tick();
+    document.addEventListener('visibilitychange', refreshNow);
+    window.addEventListener('focus', refreshNow);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', refreshNow);
+      window.removeEventListener('focus', refreshNow);
+    };
+  }, [eventsConnected, load]);
 
   const handleOutcome = useCallback(
     (outcome: ApprovalOutcome) => {
@@ -415,6 +472,7 @@ export const VaultsPage: React.FC = () => {
   const [activeTags, setActiveTags] = useState<string[]>([]);
   const [activeSkills, setActiveSkills] = useState<string[]>([]);
   const [now, setNow] = useState(() => Date.now());
+  const [eventsConnected, setEventsConnected] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -441,6 +499,65 @@ export const VaultsPage: React.FC = () => {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    return api.connectWorkbenchEvents({
+      onConnected: () => {
+        setEventsConnected(true);
+        refresh();
+      },
+      onError: () => setEventsConnected(false),
+      onVaultsUpdated: () => refresh(),
+    });
+  }, [api, refresh]);
+
+  useEffect(() => {
+    if (eventsConnected) return;
+    let timer: number | undefined;
+    let cancelled = false;
+    let inFlight = false;
+    let pendingWake = false;
+
+    const tick = async () => {
+      if (cancelled) return;
+      if (document.visibilityState !== 'visible') {
+        timer = window.setTimeout(tick, 5000);
+        return;
+      }
+      if (inFlight) {
+        pendingWake = true;
+        return;
+      }
+      inFlight = true;
+      window.clearTimeout(timer);
+      try {
+        await refresh();
+      } finally {
+        inFlight = false;
+      }
+      if (cancelled) return;
+      if (pendingWake) {
+        pendingWake = false;
+        void tick();
+        return;
+      }
+      timer = window.setTimeout(tick, 5000);
+    };
+
+    const refreshNow = () => {
+      if (document.visibilityState === 'visible') void tick();
+    };
+
+    void tick();
+    document.addEventListener('visibilitychange', refreshNow);
+    window.addEventListener('focus', refreshNow);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', refreshNow);
+      window.removeEventListener('focus', refreshNow);
+    };
+  }, [eventsConnected, refresh]);
 
   // Tick once a second while there are live grants: advance the countdown and
   // drop any grant that has reached its expiry. The backend's status=active

@@ -110,6 +110,24 @@ def test_create_list_delete_roundtrip(monkeypatch):
     assert api.get_vault_secrets()["secrets"] == []
 
 
+def test_create_vault_secret_publishes_update_event(monkeypatch):
+    published = []
+    monkeypatch.setattr(
+        "vibe.sse_broker.broker.publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+
+    api.create_vault_secret(
+        {
+            "name": "EVENT_KEY",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        }
+    )
+
+    assert ("vaults.updated", {"scope": "secret", "secret_name": "EVENT_KEY"}) in published
+
+
 def test_standard_rest_create_rejects_plaintext_value(monkeypatch):
     from unittest.mock import Mock
 

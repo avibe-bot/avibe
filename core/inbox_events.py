@@ -19,6 +19,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+RUNS_UPDATED_EVENT = "runs.updated"
+VAULTS_UPDATED_EVENT = "vaults.updated"
+
 
 class InboxEventBus:
     def __init__(self) -> None:
@@ -63,3 +66,58 @@ class InboxEventBus:
 # Process-wide singleton (Controller process). ``message_mirror`` publishes;
 # ``internal_server`` subscribes.
 bus = InboxEventBus()
+
+
+def run_updated_payload(
+    *,
+    run_id: str,
+    status: str,
+    run_type: str | None = None,
+    session_id: str | None = None,
+    definition_id: str | None = None,
+    updated_at: str | None = None,
+    cancel_requested: bool | None = None,
+) -> dict[str, Any]:
+    """Minimal run-lifecycle payload for browser refetch-on-event consumers."""
+
+    payload: dict[str, Any] = {"run_id": run_id, "status": status}
+    if run_type:
+        payload["run_type"] = run_type
+    if session_id:
+        payload["session_id"] = session_id
+    if definition_id:
+        payload["definition_id"] = definition_id
+    if updated_at:
+        payload["updated_at"] = updated_at
+    if cancel_requested is not None:
+        payload["cancel_requested"] = cancel_requested
+    return payload
+
+
+def vaults_updated_payload(
+    *,
+    scope: str,
+    request_id: str | None = None,
+    request_status: str | None = None,
+    grant_id: str | None = None,
+    grant_status: str | None = None,
+    secret_name: str | None = None,
+) -> dict[str, Any]:
+    """Minimal vault-state payload for browser refetch-on-event consumers."""
+
+    payload: dict[str, Any] = {"scope": scope}
+    if request_id:
+        payload["request_id"] = request_id
+    if request_status:
+        payload["request_status"] = request_status
+    if grant_id:
+        payload["grant_id"] = grant_id
+    if grant_status:
+        payload["grant_status"] = grant_status
+    if secret_name:
+        payload["secret_name"] = secret_name
+    return payload
+
+
+def publish_run_updated(**kwargs: Any) -> None:
+    bus.publish(RUNS_UPDATED_EVENT, run_updated_payload(**kwargs))

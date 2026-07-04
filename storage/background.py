@@ -106,6 +106,53 @@ def _status_query_values(status: str) -> list[str]:
     return values or [normalized]
 
 
+def _publish_run_rows_updated(rows: list[Any]) -> None:
+    if not rows:
+        return
+    try:
+        from core.inbox_events import publish_run_updated
+    except Exception:
+        logger.debug("failed to import run event publisher", exc_info=True)
+        return
+    for raw_row in rows:
+        if raw_row is None:
+            continue
+        row = dict(raw_row)
+        run_id = str(row.get("id") or "").strip()
+        if not run_id:
+            continue
+        try:
+            publish_run_updated(
+                run_id=run_id,
+                status=normalize_run_status(row.get("status")),
+                run_type=row.get("run_type"),
+                session_id=row.get("session_id"),
+                definition_id=row.get("definition_id"),
+                updated_at=row.get("updated_at"),
+                cancel_requested=bool(row.get("cancel_requested")),
+            )
+        except Exception:
+            logger.debug("failed to publish runs.updated for %s", run_id, exc_info=True)
+
+
+def _run_rows_for_ids(conn: Any, run_ids: list[str]) -> list[Any]:
+    normalized_ids: list[str] = []
+    seen: set[str] = set()
+    for raw_run_id in run_ids:
+        run_id = str(raw_run_id or "").strip()
+        if not run_id or run_id in seen:
+            continue
+        seen.add(run_id)
+        normalized_ids.append(run_id)
+    if not normalized_ids:
+        return []
+    return list(conn.execute(select(agent_runs).where(agent_runs.c.id.in_(normalized_ids))).mappings())
+
+
+def _publish_run_ids_updated_from_connection(conn: Any, run_ids: list[str]) -> None:
+    _publish_run_rows_updated(_run_rows_for_ids(conn, run_ids))
+
+
 def _like_contains_pattern(value: str) -> str:
     escaped = (
         value.replace(_LIKE_ESCAPE, _LIKE_ESCAPE + _LIKE_ESCAPE)
@@ -174,6 +221,7 @@ def complete_coalesced_agent_runs_for_workbench_in_connection(
         result = conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(**values))
         if result.rowcount:
             completed_ids.append(run_id)
+    _publish_run_ids_updated_from_connection(conn, completed_ids)
     return completed_ids
 
 
@@ -238,6 +286,7 @@ def claim_queued_runs_for_workbench_in_connection(
         )
         if not result.rowcount:
             raise RuntimeError(f"failed to claim queued agent run {run_id}")
+    _publish_run_ids_updated_from_connection(conn, normalized_run_ids)
     return normalized_run_ids
 
 
@@ -352,12 +401,14 @@ def inspect_queued_runs_for_workbench_in_connection(conn: Any, run_ids: list[str
             .where(agent_runs.c.status.in_(_status_query_values("queued")))
             .values(status="canceled", completed_at=now, updated_at=now)
         )
+        _publish_run_ids_updated_from_connection(conn, cancel_requested_run_ids)
     return queued_run_ids, stale_run_ids
 
 
 def reset_workbench_claimed_runs_in_connection(conn: Any, run_ids: list[str]) -> None:
     now = _utc_now_iso()
     seen: set[str] = set()
+    changed_ids: list[str] = []
     for raw_run_id in run_ids:
         run_id = str(raw_run_id or "").strip()
         if not run_id or run_id in seen:
@@ -384,6 +435,8 @@ def reset_workbench_claimed_runs_in_connection(conn: Any, run_ids: list[str]) ->
             .where(agent_runs.c.id == run_id)
             .values(**values)
         )
+        changed_ids.append(run_id)
+    _publish_run_ids_updated_from_connection(conn, changed_ids)
 
 
 class SQLiteBackgroundTaskStore:
@@ -563,6 +616,7 @@ class SQLiteBackgroundTaskStore:
 
     def enqueue_run(self, payload: dict[str, Any]) -> None:
         values = self._run_values(payload)
+        row_to_publish = None
         with self.engine.begin() as conn:
             existing = conn.execute(
                 select(agent_runs.c.id).where(agent_runs.c.id == values["id"]).limit(1)
@@ -571,6 +625,10 @@ class SQLiteBackgroundTaskStore:
                 conn.execute(update(agent_runs).where(agent_runs.c.id == values["id"]).values(**values))
             else:
                 conn.execute(insert(agent_runs).values(**values))
+            row_to_publish = dict(
+                conn.execute(select(agent_runs).where(agent_runs.c.id == values["id"]).limit(1)).mappings().one()
+            )
+        _publish_run_rows_updated([row_to_publish])
 
     def list_runs(self, *, status: Optional[str] = None) -> list[dict[str, Any]]:
         stmt = self._runs_query(status=status).order_by(agent_runs.c.created_at, agent_runs.c.id)
@@ -820,6 +878,7 @@ class SQLiteBackgroundTaskStore:
 
     def cancel_run(self, run_id: str, *, requested_at: Optional[str] = None) -> bool:
         now = requested_at or _utc_now_iso()
+        row_to_publish = None
         with self.engine.begin() as conn:
             row = conn.execute(select(agent_runs.c.status).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
             if not row:
@@ -838,9 +897,16 @@ class SQLiteBackgroundTaskStore:
                 .where(agent_runs.c.id == run_id)
                 .values(**values)
             )
-            return bool(result.rowcount)
+            if result.rowcount:
+                row_to_publish = dict(
+                    conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().one()
+                )
+        _publish_run_rows_updated([row_to_publish])
+        return row_to_publish is not None
 
     def claim_pending_run(self, run_id: str, *, started_at: str) -> Optional[dict[str, Any]]:
+        row_to_publish = None
+        payload = None
         with self.engine.begin() as conn:
             row = conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
             if not row:
@@ -851,17 +917,25 @@ class SQLiteBackgroundTaskStore:
                     .where(agent_runs.c.id == run_id)
                     .values(status="canceled", completed_at=started_at, updated_at=started_at)
                 )
-                return None
-            result = conn.execute(
-                update(agent_runs)
-                .where(agent_runs.c.id == run_id)
-                .where(agent_runs.c.status.in_(_status_query_values("queued")))
-                .values(status="running", started_at=started_at, updated_at=started_at)
-            )
-            if not result.rowcount:
-                return None
-            row = conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
-            return self._run_from_row(row) if row else None
+                row_to_publish = dict(
+                    conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().one()
+                )
+                payload = None
+            else:
+                result = conn.execute(
+                    update(agent_runs)
+                    .where(agent_runs.c.id == run_id)
+                    .where(agent_runs.c.status.in_(_status_query_values("queued")))
+                    .values(status="running", started_at=started_at, updated_at=started_at)
+                )
+                if not result.rowcount:
+                    return None
+                row = conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().first()
+                if row:
+                    row_to_publish = dict(row)
+                    payload = self._run_from_row(row)
+        _publish_run_rows_updated([row_to_publish])
+        return payload
 
     def update_run_status(
         self,
@@ -939,8 +1013,14 @@ class SQLiteBackgroundTaskStore:
             values["callback_run_id"] = callback_run_id
         if callback_completed_at is not None:
             values["callback_completed_at"] = callback_completed_at
+        row_to_publish = None
         with self.engine.begin() as conn:
-            conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(**values))
+            result = conn.execute(update(agent_runs).where(agent_runs.c.id == run_id).values(**values))
+            if result.rowcount:
+                row_to_publish = dict(
+                    conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().one()
+                )
+        _publish_run_rows_updated([row_to_publish])
 
     def update_callback_status(
         self,
@@ -992,6 +1072,7 @@ class SQLiteBackgroundTaskStore:
             merged = dict(existing.get("metadata") or {})
             merged.update(metadata)
             values["metadata_json"] = _json_dumps(merged)
+        row_to_publish = None
         with self.engine.begin() as conn:
             result = conn.execute(
                 update(agent_runs)
@@ -999,7 +1080,12 @@ class SQLiteBackgroundTaskStore:
                 .where(agent_runs.c.status.in_(_status_query_values("running")))
                 .values(**values)
             )
-            return bool(result.rowcount)
+            if result.rowcount:
+                row_to_publish = dict(
+                    conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().one()
+                )
+        _publish_run_rows_updated([row_to_publish])
+        return row_to_publish is not None
 
     def claim_queued_run_for_workbench(
         self,
@@ -1053,15 +1139,26 @@ class SQLiteBackgroundTaskStore:
             if terminal_status:
                 values["status"] = normalize_run_status(terminal_status)
                 values["completed_at"] = now
-            conn.execute(
+            result = conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.id == run_id)
                 .values(**values)
             )
+            if terminal_status and result.rowcount:
+                updated = conn.execute(select(agent_runs).where(agent_runs.c.id == run_id).limit(1)).mappings().one()
+                _publish_run_rows_updated([updated])
 
     def recover_processing_runs(self) -> None:
         with self.engine.begin() as conn:
             now = _utc_now_iso()
+            rows = list(
+                conn.execute(
+                    select(agent_runs.c.id)
+                    .where(agent_runs.c.status.in_(_status_query_values("running")))
+                    .where(agent_runs.c.run_type != "watch_runtime")
+                ).mappings()
+            )
+            recovered_ids = [str(row["id"]) for row in rows]
             conn.execute(
                 update(agent_runs)
                 .where(agent_runs.c.status.in_(_status_query_values("running")))
@@ -1069,6 +1166,7 @@ class SQLiteBackgroundTaskStore:
                 .values(status="queued", started_at=None, pid=None, updated_at=now)
             )
             _refresh_recovered_coalesced_workbench_runs_in_connection(conn, now=now)
+            _publish_run_ids_updated_from_connection(conn, recovered_ids)
 
     def write_watch_runtime(self, payload: dict[str, Any], *, updated_at: str) -> None:
         watches = payload.get("watches", {}) if isinstance(payload, dict) else {}
