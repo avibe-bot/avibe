@@ -1,5 +1,6 @@
 import json
 import logging
+import hmac
 import secrets
 import string
 import threading
@@ -22,8 +23,9 @@ SCOPED_KEY_SEP = "::"
 
 # Bind code prefix and length
 _BIND_CODE_PREFIX = "vr-"
-_BIND_CODE_RANDOM_LENGTH = 6
-_BIND_CODE_ALPHABET = string.ascii_lowercase + string.digits
+_BIND_CODE_RANDOM_LENGTH = 10
+_BIND_CODE_ALPHABET = string.ascii_letters + string.digits
+_MAX_ACTIVE_BIND_CODES = 10
 
 
 def normalize_show_message_types(show_message_types: Optional[List[str]]) -> List[str]:
@@ -33,7 +35,7 @@ def normalize_show_message_types(show_message_types: Optional[List[str]]) -> Lis
 
 
 def _generate_bind_code() -> str:
-    """Generate a random bind code like 'vr-a3x9k2'."""
+    """Generate a random bind code like 'vr-a3X9k2LmN'."""
     random_part = "".join(secrets.choice(_BIND_CODE_ALPHABET) for _ in range(_BIND_CODE_RANDOM_LENGTH))
     return f"{_BIND_CODE_PREFIX}{random_part}"
 
@@ -41,6 +43,30 @@ def _generate_bind_code() -> str:
 def _now_iso() -> str:
     """Return current UTC time as ISO 8601 string."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_bind_code_expiry(bind_code: "BindCode") -> Optional[datetime]:
+    if not bind_code.expires_at:
+        return None
+    try:
+        expires = datetime.fromisoformat(bind_code.expires_at)
+    except (ValueError, TypeError):
+        logger.warning("Bind code has unparseable expires_at: %s", bind_code.expires_at)
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if expires.hour == 0 and expires.minute == 0 and expires.second == 0 and "T" not in bind_code.expires_at:
+        expires = expires.replace(hour=23, minute=59, second=59)
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    return expires
+
+
+def _is_bind_code_valid(bind_code: "BindCode", *, now: Optional[datetime] = None) -> bool:
+    if not bind_code.is_active:
+        return False
+    expires = _parse_bind_code_expiry(bind_code)
+    if expires is not None and (now or datetime.now(timezone.utc)) > expires:
+        return False
+    return True
 
 
 def _make_scoped_key(platform: str, item_id: str) -> str:
@@ -720,42 +746,39 @@ class SettingsStore:
 
     def create_bind_code(self, code_type: str = "one_time", expires_at: Optional[str] = None) -> BindCode:
         """Create a new bind code."""
-        code = _generate_bind_code()
-        bc = BindCode(
-            code=code,
-            type=code_type,
-            created_at=_now_iso(),
-            expires_at=expires_at if code_type == "expiring" else None,
-            is_active=True,
-        )
-        self.settings.bind_codes.append(bc)
-        self.save()
-        return bc
+        with self._bind_lock:
+            self.maybe_reload()
+            now = datetime.now(timezone.utc)
+            active_count = sum(1 for bc in self.settings.bind_codes if _is_bind_code_valid(bc, now=now))
+            if active_count >= _MAX_ACTIVE_BIND_CODES:
+                raise ValueError(f"active bind code limit reached ({_MAX_ACTIVE_BIND_CODES})")
+
+            existing_codes = [bc.code for bc in self.settings.bind_codes]
+            code = _generate_bind_code()
+            while any(hmac.compare_digest(candidate, code) for candidate in existing_codes):
+                code = _generate_bind_code()
+
+            bc = BindCode(
+                code=code,
+                type=code_type,
+                created_at=_now_iso(),
+                expires_at=expires_at if code_type == "expiring" else None,
+                is_active=True,
+            )
+            self.settings.bind_codes.append(bc)
+            self.save()
+            return bc
 
     def validate_bind_code(self, code: str) -> Optional[BindCode]:
         """Validate a bind code. Returns the BindCode if valid, None otherwise."""
+        candidate = str(code or "")
+        matched: Optional[BindCode] = None
         for bc in self.settings.bind_codes:
-            if bc.code != code:
-                continue
-            if not bc.is_active:
-                return None
-            if bc.type == "expiring" and bc.expires_at:
-                try:
-                    expires = datetime.fromisoformat(bc.expires_at)
-                    # If only a date was provided (no time component), treat as end-of-day
-                    if expires.hour == 0 and expires.minute == 0 and expires.second == 0 and "T" not in bc.expires_at:
-                        expires = expires.replace(hour=23, minute=59, second=59)
-                    # Ensure timezone-aware comparison
-                    if expires.tzinfo is None:
-                        expires = expires.replace(tzinfo=timezone.utc)
-                    if datetime.now(timezone.utc) > expires:
-                        return None
-                except (ValueError, TypeError):
-                    # Fail closed: reject codes with unparseable expiration
-                    logger.warning("Bind code %s has unparseable expires_at: %s", code, bc.expires_at)
-                    return None
-            return bc
-        return None
+            if hmac.compare_digest(str(bc.code or ""), candidate):
+                matched = matched or bc
+        if matched is None or not _is_bind_code_valid(matched):
+            return None
+        return matched
 
     def use_bind_code(self, code: str, user_id: str) -> bool:
         """Mark a bind code as used by a user. Returns True on success."""
@@ -770,8 +793,9 @@ class SettingsStore:
 
     def deactivate_bind_code(self, code: str) -> bool:
         """Deactivate a bind code. Returns True if found and deactivated."""
+        candidate = str(code or "")
         for bc in self.settings.bind_codes:
-            if bc.code == code:
+            if hmac.compare_digest(str(bc.code or ""), candidate):
                 bc.is_active = False
                 self.save()
                 return True

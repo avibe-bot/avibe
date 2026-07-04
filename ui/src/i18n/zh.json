@@ -614,7 +614,8 @@
     "cloudflared_spawn_failed": "连接器启动失败。请检查 cloudflared 是否可执行，或查看运行日志。",
     "cloudflared_exited": "连接器启动后立即退出。通常是 Tunnel 凭证无效或 Cloudflare 配置未生效，请重新配对后再试。",
     "cloudflared_stop_failed": "连接器暂时无法停止。请稍后重试，或在系统进程里手动结束 cloudflared。",
-    "cloudflared_process_unknown": "检测到一个无法确认归属的连接器进程。为避免误杀其它进程，Avibe 没有自动处理。请手动检查 cloudflared 进程后再启动。"
+    "cloudflared_process_unknown": "检测到一个无法确认归属的连接器进程。为避免误杀其它进程，Avibe 没有自动处理。请手动检查 cloudflared 进程后再启动。",
+    "bind_code_limit_reached": "可用绑定码过多，请先撤销一个未使用的绑定码，再创建新的绑定码。"
   },
   "apps": {
     "title": "应用",

@@ -415,6 +415,7 @@
     "menuHintStart": "发送 `/start` 即可唤起更多操作菜单。",
     "alreadyBound": "你已经绑定过了，无需再次操作。",
     "invalidCode": "❌ 无效或已过期的绑定码，请检查后重试。",
+    "rateLimited": "❌ 绑定码错误次数过多，请 {seconds} 秒后再试。",
     "usage": "用法：`bind <绑定码>`\n\n也兼容 `/bind <绑定码>`。请输入管理员提供的绑定码。",
     "dmOnly": "绑定命令只能在私信中使用。请私聊机器人并发送 `bind <绑定码>`。",
     "dmNotBound": "🔒 你还未绑定账号。\n使用 `bind <绑定码>` 开始使用。（也兼容 `/bind <绑定码>`）",
