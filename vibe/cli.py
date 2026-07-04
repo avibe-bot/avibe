@@ -5939,7 +5939,7 @@ def _wait_for_provision(request_id: str, *, timeout: float, poll_interval: float
                 request = vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
             except vault_service.RequestNotFoundError:
                 raise
-        if request.get("status") == "fulfilled":
+        if request.get("status") in {"fulfilled", "denied", "expired", "failed"}:
             return request
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -6005,6 +6005,36 @@ def cmd_vault_request(args):
         if wait_seconds:
             waited = _wait_for_provision(req["id"], timeout=float(wait_seconds))
             if waited:
+                if waited.get("status") == "denied":
+                    _print_task_error(
+                        TaskCliError(
+                            f"request for '{name}' was denied",
+                            code="request_denied",
+                            help_command=help_command,
+                            details={"request_id": req["id"]},
+                        )
+                    )
+                    return 1
+                if waited.get("status") == "expired":
+                    _print_task_error(
+                        TaskCliError(
+                            f"request for '{name}' expired",
+                            code="request_expired",
+                            help_command=help_command,
+                            details={"request_id": req["id"]},
+                        )
+                    )
+                    return 1
+                if waited.get("status") == "failed":
+                    _print_task_error(
+                        TaskCliError(
+                            f"request for '{name}' failed",
+                            code="request_failed",
+                            help_command=help_command,
+                            details={"request_id": req["id"]},
+                        )
+                    )
+                    return 1
                 _print_cli_payload(
                     "vault_request",
                     request_id=req["id"],

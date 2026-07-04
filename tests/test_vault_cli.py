@@ -1891,6 +1891,29 @@ def test_request_wait_outputs_fulfilled_request(capfd, monkeypatch):
     assert payload["request"]["status"] == "fulfilled"
 
 
+def test_request_wait_returns_denied_without_timeout(capfd, monkeypatch):
+    def wait_mock(request_id, *, timeout, poll_interval=2.0):
+        return {"id": request_id, "status": "denied", "request_type": "provision", "secret_name": "WAIT_KEY"}
+
+    monkeypatch.setattr(cli, "_wait_for_provision", wait_mock)
+
+    assert cli.cmd_vault_request(_ns(name="WAIT_KEY", wait=30)) == 1
+    payload = json.loads(capfd.readouterr().err)
+    assert payload["code"] == "request_denied"
+    assert payload["details"]["request_id"]
+
+
+def test_wait_for_provision_returns_denied_request():
+    with cli._open_vault_engine().begin() as conn:
+        req = vault_service.create_provision_request(conn, "WAIT_KEY")
+        vault_service.deny_request(conn, req["id"])
+
+    waited = cli._wait_for_provision(req["id"], timeout=1, poll_interval=0.01)
+
+    assert waited is not None
+    assert waited["status"] == "denied"
+
+
 def test_key_export_calls_avault_and_audits(tmp_path, capfd, monkeypatch):
     from unittest.mock import Mock
 
