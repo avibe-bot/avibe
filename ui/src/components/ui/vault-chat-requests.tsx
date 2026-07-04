@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { KeyRound } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -7,41 +7,82 @@ import { Button } from './button';
 import { VaultApprovalDialog } from './vault-approval-dialog';
 import { VaultRequestCard } from './vault-request-card';
 
+const isApproval = (request: VaultRequest): boolean => {
+  const type = (request.card as { request_type?: string } | null)?.request_type ?? request.request_type;
+  return type === 'access' || type === 'sign';
+};
+
 /**
  * In-scroll list of a session's pending request cards (design: Form A), rendered at the end of
- * the chat transcript. Presentational — data comes from `usePendingVaultRequests`. Reports
- * whether the card area is off-viewport so the floating bar can appear when it scrolls away.
+ * the chat transcript. Presentational — data comes from `usePendingVaultRequests`. Each APPROVAL
+ * card is observed individually so the floating bar reflects exactly which approvals have
+ * scrolled off-viewport (a visible provision card mustn't suppress an off-screen approval).
  */
 export const VaultChatRequests: React.FC<{
   requests: VaultRequest[];
   onResolved: () => void;
-  onOffscreenChange?: (offscreen: boolean) => void;
-}> = ({ requests, onResolved, onOffscreenChange }) => {
-  const ref = useRef<HTMLDivElement | null>(null);
-  const has = requests.length > 0;
+  onOffscreenApprovalsChange?: (offscreen: VaultRequest[]) => void;
+}> = ({ requests, onResolved, onOffscreenApprovalsChange }) => {
+  const cardRefs = useRef<Map<string, HTMLElement>>(new Map());
+  const offscreen = useRef<Set<string>>(new Set());
 
+  const report = useCallback(() => {
+    onOffscreenApprovalsChange?.(requests.filter((request) => offscreen.current.has(request.id)));
+  }, [requests, onOffscreenApprovalsChange]);
+
+  // Observe each approval card; an approval is "off-screen" when its own card doesn't intersect.
   useEffect(() => {
-    const el = ref.current;
-    if (!el || !onOffscreenChange) return;
-    const observer = new IntersectionObserver(([entry]) => onOffscreenChange(!entry.isIntersecting), { threshold: 0 });
-    observer.observe(el);
+    if (!onOffscreenApprovalsChange) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const id = (entry.target as HTMLElement).dataset.requestId;
+          if (!id) continue;
+          if (entry.isIntersecting) offscreen.current.delete(id);
+          else offscreen.current.add(id);
+        }
+        report();
+      },
+      { threshold: 0 },
+    );
+    cardRefs.current.forEach((el) => observer.observe(el));
     return () => observer.disconnect();
-  }, [onOffscreenChange, has]);
+  }, [requests, onOffscreenApprovalsChange, report]);
 
-  if (!has) return null;
+  // Drop stale ids for resolved/removed requests, then re-report.
+  useEffect(() => {
+    const ids = new Set(requests.map((request) => request.id));
+    for (const id of [...offscreen.current]) if (!ids.has(id)) offscreen.current.delete(id);
+    report();
+  }, [requests, report]);
+
+  if (requests.length === 0) return null;
   return (
-    <div ref={ref} className="flex flex-col gap-2">
+    <div className="flex flex-col gap-2">
       {requests.map((request) => (
-        <VaultRequestCard key={request.id} request={request} onResolved={onResolved} />
+        <div
+          key={request.id}
+          data-request-id={request.id}
+          ref={
+            isApproval(request)
+              ? (el) => {
+                  if (el) cardRefs.current.set(request.id, el);
+                  else cardRefs.current.delete(request.id);
+                }
+              : undefined
+          }
+        >
+          <VaultRequestCard request={request} onResolved={onResolved} />
+        </div>
       ))}
     </div>
   );
 };
 
 /**
- * Floating approval bar (design: Form B). Shown above the composer only for approval
- * (access / sign) requests whose in-scroll card has scrolled off-viewport, so a waiting
- * approval is never missed. Clicking opens the oldest one in the shared approval dialog.
+ * Floating approval bar (design: Form B). Shown above the composer for approval (access / sign)
+ * requests whose in-scroll card has scrolled off-viewport, so a waiting approval is never missed.
+ * Clicking opens the oldest one in the shared approval dialog.
  */
 export const VaultApprovalFloat: React.FC<{ approvals: VaultRequest[]; onResolved: () => void }> = ({ approvals, onResolved }) => {
   const { t } = useTranslation();

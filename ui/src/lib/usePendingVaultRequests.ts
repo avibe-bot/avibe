@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useApi, type VaultRequest } from '@/context/ApiContext';
 
@@ -14,23 +14,29 @@ export function usePendingVaultRequests(sessionId: string): { requests: VaultReq
   const api = useApi();
   const [requests, setRequests] = useState<VaultRequest[]>([]);
   const [connected, setConnected] = useState(false);
+  // Monotonic load token: a load started for session A must not install its result after a
+  // newer load (e.g. session B, or a refresh) has begun — else A's requests land in B's chat.
+  const loadSeq = useRef(0);
 
   const load = useCallback(async () => {
     if (!sessionId) {
+      loadSeq.current += 1;
       setRequests([]);
       return;
     }
+    const seq = (loadSeq.current += 1);
     try {
       // Server-side session scoping (before the global limit); suppress errors so an older
       // backend without the route doesn't toast on every refresh.
       const res = await api.getVaultRequests({ status: 'pending', session: sessionId }, { handleError: false });
+      if (seq !== loadSeq.current) return; // superseded by a newer load
       const mine = (res.requests ?? []).filter((r) => {
         const type = (r.card as { request_type?: string } | null)?.request_type ?? r.request_type;
         return type === 'access' || type === 'sign' || type === 'provision';
       });
       setRequests(mine);
     } catch {
-      setRequests([]);
+      if (seq === loadSeq.current) setRequests([]);
     }
   }, [api, sessionId]);
 
