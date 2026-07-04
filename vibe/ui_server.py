@@ -137,6 +137,7 @@ REMOTE_OAUTH_HANDSHAKE_TTL_SECONDS = 300
 REMOTE_OAUTH_DEVICE_COOKIE_NAME = "__Host-vibe_oauth_device"
 REMOTE_OAUTH_DEVICE_TTL_SECONDS = 180 * 24 * 60 * 60
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+TRUSTED_PROXY_IPS_ENV = "VIBE_UI_TRUSTED_PROXY_IPS"
 LOG_SOURCES = (
     ("service", "vibe_remote.log", lambda: paths.get_logs_dir() / "vibe_remote.log"),
     ("service_stdout", "service_stdout.log", lambda: paths.get_runtime_dir() / "service_stdout.log"),
@@ -288,15 +289,100 @@ def _current_origin() -> str:
     scheme = parsed.scheme
     netloc = parsed.netloc
 
-    forwarded_proto = request.headers.get("X-Forwarded-Proto", "").split(",")[0].strip()
-    forwarded_host = request.headers.get("X-Forwarded-Host", "").split(",")[0].strip()
+    config = _load_remote_access_config()
+    if config is not None and _is_remote_access_request(config):
+        public_origin = _remote_access_public_origin(config)
+        if public_origin:
+            return public_origin
 
-    if forwarded_proto:
+    trusted_forwarded_host = _trusted_forwarded_host()
+    if trusted_forwarded_host is None:
+        return f"{scheme}://{netloc}"
+
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower()
+
+    if forwarded_proto in {"http", "https"}:
         scheme = forwarded_proto
-    if forwarded_host:
-        netloc = forwarded_host
+    netloc = trusted_forwarded_host
 
     return f"{scheme}://{netloc}"
+
+
+def _effective_request_host() -> str:
+    return _trusted_forwarded_host() or request.host
+
+
+def _trusted_forwarded_host() -> str | None:
+    if not _is_explicitly_trusted_proxy_peer():
+        return None
+    forwarded_host = request.headers.get("X-Forwarded-Host", "").split(",")[0].strip()
+    if not _forwarded_host_is_safe(forwarded_host):
+        return None
+    parsed = urlparse(f"//{forwarded_host}")
+    if parsed.port is not None:
+        return forwarded_host
+    forwarded_port = _trusted_forwarded_port()
+    if forwarded_port is None:
+        return forwarded_host
+    return f"{forwarded_host}:{forwarded_port}"
+
+
+def _trusted_forwarded_port() -> int | None:
+    raw_port = request.headers.get("X-Forwarded-Port", "").split(",")[0].strip()
+    if not raw_port:
+        return None
+    if not raw_port.isdigit():
+        return None
+    port = int(raw_port)
+    if port < 1 or port > 65535:
+        return None
+    return port
+
+
+def _has_untrusted_forwarded_metadata() -> bool:
+    return _has_forwarded_metadata() and not _is_explicitly_trusted_proxy_peer()
+
+
+def _effective_loopback_host() -> bool:
+    return _is_loopback_host(_effective_request_host())
+
+
+def _effective_normalized_host() -> str:
+    return _normalized_host(_effective_request_host())
+
+
+def _is_explicitly_trusted_proxy_peer() -> bool:
+    configured = os.environ.get(TRUSTED_PROXY_IPS_ENV, "")
+    if not configured.strip():
+        return False
+    peer = _request_peer_address()
+    if peer is None:
+        return False
+    for raw_entry in configured.split(","):
+        entry = raw_entry.strip()
+        if not entry:
+            continue
+        try:
+            network = ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            logger.warning("Ignoring invalid %s entry: %s", TRUSTED_PROXY_IPS_ENV, entry)
+            continue
+        if peer in network:
+            return True
+    return False
+
+
+def _forwarded_host_is_safe(value: str) -> bool:
+    if not value or any(ch.isspace() for ch in value):
+        return False
+    if "/" in value or "\\" in value or "@" in value:
+        return False
+    parsed = urlparse(f"//{value}")
+    try:
+        parsed.port
+    except ValueError:
+        return False
+    return bool(parsed.netloc and parsed.hostname and not parsed.username and not parsed.password)
 
 
 def _is_mutation_guard_exempt() -> bool:
@@ -412,6 +498,9 @@ def _has_forwarded_metadata() -> bool:
 def _is_loopback_origin_proxy_request() -> bool:
     if not _is_loopback_peer() or not _is_loopback_host(request.host):
         return False
+    if _is_explicitly_trusted_proxy_peer():
+        forwarded_proto = request.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower()
+        return bool(_trusted_forwarded_host() or forwarded_proto in {"http", "https"})
     if request.headers.get("Forwarded") or request.headers.get("X-Forwarded-For"):
         return False
     client_ip_headers = (
@@ -969,12 +1058,12 @@ def _is_setup_host_request(config: V2Config | None) -> bool:
         return False
     if not _is_private_address(setup_address):
         return False
-    if _normalized_host(request.host) != setup_host:
+    if _effective_normalized_host() != setup_host:
         return False
     # Any forwarded header (including non-Cloudflare proxies like nginx /
     # Caddy / Traefik) means we cannot trust request.remote_addr to identify
     # the actual client, so refuse the setup-host trust path entirely.
-    if _has_forwarded_metadata():
+    if _has_untrusted_forwarded_metadata():
         return False
     if not _is_private_peer():
         return False
@@ -999,9 +1088,9 @@ def _is_tunnel_wildcard_bind(config: V2Config) -> bool:
 
 
 def _is_local_request(config: V2Config | None = None) -> bool:
-    if _has_forwarded_metadata():
+    if _has_untrusted_forwarded_metadata():
         return False
-    if _is_loopback_peer() and _is_loopback_host(request.host):
+    if _is_loopback_peer() and _effective_loopback_host():
         return True
     if _is_trusted_docker_loopback_request():
         return True
@@ -1023,7 +1112,7 @@ def _is_remote_access_request(config: V2Config) -> bool:
     public_host = _remote_access_public_host(config)
     if not public_host:
         return False
-    return _normalized_host(request.host) == public_host
+    return _normalized_host(_effective_request_host()) == public_host
 
 
 def _remote_access_public_host(config: V2Config) -> str | None:
@@ -1053,11 +1142,17 @@ def _origin_identity(value: str) -> tuple[str, str, int | None] | None:
     return (parsed.scheme.lower(), _normalized_host(parsed.hostname), _origin_port(parsed.netloc, parsed.scheme))
 
 
+def _same_origin(left: str, right: str) -> bool:
+    left_identity = _origin_identity(left)
+    right_identity = _origin_identity(right)
+    return left_identity is not None and left_identity == right_identity
+
+
 def _remote_access_public_origin_matches(origin: str, config: V2Config) -> bool:
     trusted_origin = _remote_access_public_origin(config)
     if not trusted_origin:
         return False
-    return _origin_identity(origin) == _origin_identity(trusted_origin)
+    return _same_origin(origin, trusted_origin)
 
 
 def _remote_access_public_url_invalid(config: V2Config) -> bool:
@@ -1827,7 +1922,7 @@ def protect_mutating_ui_requests():
     if not source:
         return jsonify({"ok": False, "message": "Forbidden: missing origin header"}), 403
 
-    if source != _current_origin():
+    if not _same_origin(source, _current_origin()):
         return jsonify({"ok": False, "message": "Forbidden: invalid origin"}), 403
 
     if _is_show_api_mutation():

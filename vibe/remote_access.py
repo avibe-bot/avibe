@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import atexit
+from dataclasses import dataclass
 import hashlib
 import hmac
+import http.client
 import ipaddress
 import json
 import logging
@@ -15,6 +17,8 @@ import re
 import shlex
 import secrets
 import shutil
+import socket
+import ssl
 import stat
 import subprocess
 import tarfile
@@ -47,6 +51,13 @@ _STATUS_REPORT_ATEXIT_REGISTERED = False
 STATUS_HEARTBEAT_SECONDS = 5 * 60
 STATUS_LOG_TAIL_BYTES = 64 * 1024
 STATUS_REPORT_DRAIN_SECONDS = 1.0
+_BLOCKED_PAIRING_BACKEND_HOSTS = {
+    "localhost",
+    "localhost.localdomain",
+    "ip6-localhost",
+    "metadata",
+    "metadata.google.internal",
+}
 
 
 class BackendRequestError(Exception):
@@ -54,6 +65,19 @@ class BackendRequestError(Exception):
         super().__init__(payload.get("detail") or payload.get("error") or f"HTTP {status}")
         self.status = status
         self.payload = payload
+
+
+@dataclass(frozen=True)
+class _ValidatedPairingBackend:
+    base_url: str
+    hostname: str
+    port: int
+    host_header: str
+    connect_hosts: tuple[str, ...]
+
+    @property
+    def connect_host(self) -> str:
+        return self.connect_hosts[0] if self.connect_hosts else ""
 
 
 class OAuthCodeExchangeError(Exception):
@@ -631,7 +655,10 @@ def _json_request(
     payload: dict[str, Any],
     timeout: float = 20.0,
     headers: dict[str, str] | None = None,
+    connection_target: _ValidatedPairingBackend | None = None,
 ) -> dict[str, Any]:
+    if connection_target is not None:
+        return _json_request_to_validated_backend(url, payload, connection_target, timeout=timeout, headers=headers)
     try:
         request_headers = {
             "Accept": "application/json",
@@ -644,7 +671,10 @@ def _json_request(
             json=payload,
             headers=request_headers,
             timeout=timeout,
+            allow_redirects=False,
         )
+        if 300 <= response.status_code < 400:
+            raise BackendRequestError(response.status_code, {"error": "backend_http_redirect_blocked"})
         response.raise_for_status()
         return response.json()
     except requests.HTTPError as exc:
@@ -662,6 +692,183 @@ def _json_request(
         raise BackendRequestError(status, parsed) from exc
     except requests.RequestException as exc:
         raise RuntimeError(str(exc)) from exc
+
+
+def _json_request_to_validated_backend(
+    url: str,
+    payload: dict[str, Any],
+    connection_target: _ValidatedPairingBackend,
+    *,
+    timeout: float,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    parsed = urllib.parse.urlsplit(url)
+    target_port = parsed.port or 443
+    target_hostname = (parsed.hostname or "").rstrip(".").lower()
+    if parsed.scheme.lower() != "https" or target_hostname != connection_target.hostname or target_port != connection_target.port:
+        raise RuntimeError("validated backend target mismatch")
+
+    request_headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Host": connection_target.host_header,
+        "User-Agent": "avibe/dev",
+    }
+    if headers:
+        request_headers.update(headers)
+    request_headers["Host"] = connection_target.host_header
+
+    request_path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+    body = json.dumps(payload).encode("utf-8")
+    last_network_error: Exception | None = None
+    for connect_host in connection_target.connect_hosts:
+        connection = _PinnedHTTPSConnection(
+            connect_host,
+            connection_target.port,
+            server_hostname=connection_target.hostname,
+            timeout=timeout,
+            context=ssl.create_default_context(),
+        )
+        try:
+            connection.request("POST", request_path, body=body, headers=request_headers)
+            response = connection.getresponse()
+            response_body = response.read()
+            if 300 <= response.status < 400:
+                raise BackendRequestError(response.status, {"error": "backend_http_redirect_blocked"})
+            if response.status >= 400:
+                raise BackendRequestError(response.status, _backend_error_payload(response_body))
+            try:
+                parsed_response = json.loads(response_body.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise RuntimeError(str(exc)) from exc
+            if not isinstance(parsed_response, dict):
+                raise RuntimeError("backend returned non-object JSON")
+            return parsed_response
+        except BackendRequestError:
+            raise
+        except (OSError, http.client.HTTPException, ssl.SSLError) as exc:
+            last_network_error = exc
+        finally:
+            connection.close()
+    if last_network_error is not None:
+        raise RuntimeError(str(last_network_error)) from last_network_error
+    raise RuntimeError("validated backend has no addresses")
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host: str, port: int, *, server_hostname: str, **kwargs: Any) -> None:
+        super().__init__(host, port=port, **kwargs)
+        self._validated_server_hostname = server_hostname
+
+    def connect(self) -> None:
+        http.client.HTTPConnection.connect(self)
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self._validated_server_hostname)
+
+
+def _backend_error_payload(response_body: bytes) -> dict[str, Any]:
+    try:
+        parsed = json.loads(response_body.decode("utf-8")) if response_body else {}
+    except (UnicodeDecodeError, ValueError):
+        parsed = {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+    parsed.setdefault("error", "backend_http_error")
+    if response_body and "detail" not in parsed:
+        try:
+            parsed["detail"] = response_body.decode("utf-8")
+        except UnicodeDecodeError:
+            parsed["detail"] = response_body.decode("utf-8", errors="replace")
+    return parsed
+
+
+def _normalize_pairing_backend_url(raw_backend_url: str) -> tuple[_ValidatedPairingBackend | None, str | None]:
+    raw_value = (raw_backend_url or "https://avibe.bot").strip()
+    parsed = urllib.parse.urlsplit(raw_value)
+    if parsed.scheme.lower() != "https" or not parsed.hostname or parsed.username or parsed.password:
+        return None, "invalid_pairing_backend_url"
+    if parsed.query or parsed.fragment:
+        return None, "invalid_pairing_backend_url"
+
+    try:
+        port = parsed.port or 443
+    except ValueError:
+        return None, "invalid_pairing_backend_url"
+
+    hostname = parsed.hostname.rstrip(".").lower()
+    try:
+        normalized_hostname = hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        return None, "invalid_pairing_backend_url"
+
+    if _pairing_backend_host_is_forbidden(normalized_hostname):
+        return None, "pairing_backend_url_not_allowed"
+
+    try:
+        literal_address = ipaddress.ip_address(normalized_hostname)
+    except ValueError:
+        addresses = _resolve_pairing_backend_addresses(normalized_hostname, port)
+    else:
+        addresses = (literal_address,)
+
+    if not addresses:
+        return None, "pairing_backend_unresolvable"
+    if any(_pairing_backend_address_is_forbidden(address) for address in addresses):
+        return None, "pairing_backend_url_not_allowed"
+
+    netloc = f"[{normalized_hostname}]" if ":" in normalized_hostname else normalized_hostname
+    if port != 443:
+        netloc = f"{netloc}:{port}"
+    path = parsed.path.rstrip("/")
+    return (
+        _ValidatedPairingBackend(
+            base_url=urllib.parse.urlunsplit(("https", netloc, path, "", "")).rstrip("/"),
+            hostname=normalized_hostname,
+            port=port,
+            host_header=netloc,
+            connect_hosts=tuple(str(address) for address in addresses),
+        ),
+        None,
+    )
+
+
+def _resolve_pairing_backend_addresses(hostname: str, port: int) -> tuple[ipaddress._BaseAddress, ...]:
+    try:
+        results = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    except OSError:
+        return ()
+    addresses: list[ipaddress._BaseAddress] = []
+    seen: set[ipaddress._BaseAddress] = set()
+    for result in results:
+        sockaddr = result[4]
+        if not sockaddr:
+            continue
+        try:
+            address = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            continue
+        if address in seen:
+            continue
+        seen.add(address)
+        addresses.append(address)
+    return tuple(addresses)
+
+
+def _pairing_backend_host_is_forbidden(hostname: str) -> bool:
+    return hostname in _BLOCKED_PAIRING_BACKEND_HOSTS or hostname.endswith(".localhost")
+
+
+def _pairing_backend_address_is_forbidden(address: ipaddress._BaseAddress) -> bool:
+    return any(
+        (
+            not address.is_global,
+            address.is_loopback,
+            address.is_private,
+            address.is_link_local,
+            address.is_multicast,
+            address.is_reserved,
+            address.is_unspecified,
+        )
+    )
 
 
 def _effective_ui_port(config: V2Config) -> int:
@@ -707,22 +914,25 @@ def origin_service_for_pairing(config: V2Config | None = None) -> str:
 
 def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict[str, Any]:
     pairing_key = (pairing_key or "").strip()
-    backend_url = (backend_url or "https://avibe.bot").strip().rstrip("/")
     if not pairing_key:
         return {"ok": False, "error": "missing_pairing_key"}
+    backend, backend_url_error = _normalize_pairing_backend_url(backend_url)
+    if backend_url_error or backend is None:
+        return {"ok": False, "error": backend_url_error or "invalid_pairing_backend_url"}
     try:
         origin_service = origin_service_for_pairing()
     except Exception:
         origin_service = "http://127.0.0.1:5123"
     try:
         result = _json_request(
-            f"{backend_url}/api/v1/pairing/redeem",
+            f"{backend.base_url}/api/v1/pairing/redeem",
             {
                 "pairing_key": pairing_key,
                 "device_name": device_name,
                 "local_version": "dev",
                 "origin_service": origin_service,
             },
+            connection_target=backend,
         )
     except BackendRequestError as exc:
         return {"ok": False, **exc.payload, "status": exc.status}
@@ -745,7 +955,7 @@ def pair(pairing_key: str, backend_url: str, device_name: str = "avibe") -> dict
                 "provider": "vibe_cloud",
                 "vibe_cloud": {
                     "enabled": True,
-                    "backend_url": backend_url,
+                    "backend_url": backend.base_url,
                     "instance_id": result["instance_id"],
                     "client_id": result["client_id"],
                     "issuer": result["issuer"],
