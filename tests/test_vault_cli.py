@@ -194,6 +194,36 @@ def test_vault_parser_does_not_expose_plaintext_set_command():
         parser.parse_args(["vault", "set", "OPENAI_API_KEY", "--stdin"])
 
 
+def test_vault_access_command_flag_does_not_shadow_root_command():
+    args = cli.build_parser().parse_args(
+        ["vault", "access", "OPENAI_API_KEY", "--command", "deploy sync"],
+    )
+
+    assert args.command == "vault"
+    assert args.vault_command == "access"
+    assert args.operation_command == "deploy sync"
+    assert cli._vault_cli_delivery(args)["command"] == "deploy sync"
+
+
+def test_vault_sign_command_flag_does_not_shadow_root_command():
+    args = cli.build_parser().parse_args(
+        [
+            "vault",
+            "sign",
+            "ETH_KEY",
+            "--digest",
+            "00" * 32,
+            "--command",
+            "wallet sign",
+        ],
+    )
+
+    assert args.command == "vault"
+    assert args.vault_command == "sign"
+    assert args.operation_command == "wallet sign"
+    assert cli._vault_cli_delivery(args)["command"] == "wallet sign"
+
+
 def test_discover_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
     _create_standard_secret("STANDARD_KEY")
     with cli._open_vault_engine().begin() as conn:

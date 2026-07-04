@@ -4669,7 +4669,11 @@ def _vault_cli_delivery(args, **fields) -> dict:
     skill = (getattr(args, "skill", None) or "").strip()
     if skill:
         delivery["skill"] = skill
-    command = getattr(args, "command", None)
+    command = getattr(args, "operation_command", None)
+    if command is None:
+        command = getattr(args, "command", None)
+        if command == "vault":
+            command = None
     if command:
         delivery["command"] = command
     egress = getattr(args, "egress", None)
@@ -10107,7 +10111,7 @@ def build_parser():
     vault_access_parser.add_argument("name", help="Static secret name to request")
     vault_access_parser.add_argument("--session-id", help="Agent Session ID. Defaults from AVIBE_SESSION_ID inside an Agent shell.")
     vault_access_parser.add_argument("--skill", help="Skill requesting the secret")
-    vault_access_parser.add_argument("--command", help="Command or operation shown to the user")
+    vault_access_parser.add_argument("--command", dest="operation_command", help="Command or operation shown to the user")
     vault_access_parser.add_argument("--egress", help="Egress description shown to the user")
     _add_json_noop(vault_access_parser)
 
@@ -10132,7 +10136,7 @@ def build_parser():
     )
     vault_sign_parser.add_argument("--session-id", help="Agent Session ID. Defaults from AVIBE_SESSION_ID inside an Agent shell.")
     vault_sign_parser.add_argument("--skill", help="Skill requesting the signature")
-    vault_sign_parser.add_argument("--command", help="Operation shown to the user")
+    vault_sign_parser.add_argument("--command", dest="operation_command", help="Operation shown to the user")
     vault_sign_parser.add_argument("--egress", help="Egress description shown to the user")
     _add_json_noop(vault_sign_parser)
 
