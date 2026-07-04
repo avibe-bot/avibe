@@ -692,7 +692,7 @@ export const VaultSecretForm: React.FC<{
   // agent prefilled before anything is saved.
   if (isProvision) {
     return (
-      <form className={cn('flex flex-col gap-4', className)} onSubmit={onSubmit}>
+      <form className={cn('flex min-w-0 flex-col gap-4', className)} onSubmit={onSubmit}>
         {/* Name highlight — the secret the agent is waiting on (design.pen `F4N19`). */}
         <div className="flex items-center gap-3 rounded-xl bg-accent/15 p-3.5">
           <Asterisk className="size-[18px] shrink-0 text-accent" />
@@ -757,7 +757,7 @@ export const VaultSecretForm: React.FC<{
 
   // ---- Create mode — design.pen `vyed5` ----------------------------------------------
   return (
-    <form className={cn('flex flex-col gap-4', className)} onSubmit={onSubmit}>
+    <form className={cn('flex min-w-0 flex-col gap-4', className)} onSubmit={onSubmit}>
       {/* Kind — 2-segment toggle (Static value | Signing key). */}
       <div className="flex flex-col gap-1.5">
         <span className={FIELD_LABEL}>{t('vaults.dialog.kindLabel')}</span>
@@ -873,7 +873,7 @@ export const VaultSecretForm: React.FC<{
           {signingKey && (
             <div className="flex flex-col gap-1.5">
               <span className="text-xs font-medium text-muted-foreground">{t('vaults.dialog.signingPublicKey')}</span>
-              <div className="flex items-center gap-2">
+              <div className="flex min-w-0 items-center gap-2">
                 <code className="min-w-0 flex-1 truncate rounded-md border border-border bg-surface px-2 py-1.5 font-mono text-xs">
                   {signingKey.publicKey}
                 </code>

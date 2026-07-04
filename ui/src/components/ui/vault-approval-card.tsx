@@ -276,7 +276,7 @@ export const VaultApprovalCard: React.FC<{
   const approveDisabled = busy || (needsUnlock && !unlocked) || (!isSign && !option);
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex min-w-0 flex-col gap-4">
       {/* Header — design.pen `SKBld` (access, gold lock) / `pRtHq` (sign, violet pen). */}
       <div className="flex items-start gap-3">
         <div
@@ -330,7 +330,11 @@ export const VaultApprovalCard: React.FC<{
         ) : null}
         {!isSign && card.command ? (
           <DetailRow label={t('vaults.approval.command')}>
-            <span className="min-w-0 flex-1 truncate rounded-md bg-surface-2 px-2 py-1 font-mono text-xs">{card.command}</span>
+            {/* Full command in a wrapping code box — break-all so a long unbroken token
+                (URL, flag) can't push the dialog wide. */}
+            <code className="block w-full whitespace-pre-wrap break-all rounded-md bg-surface-2 px-2 py-1.5 font-mono text-xs leading-relaxed">
+              {card.command}
+            </code>
           </DetailRow>
         ) : null}
         {!isSign && card.egress ? (
