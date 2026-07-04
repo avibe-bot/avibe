@@ -95,6 +95,7 @@ class _StubIMClient:
 class _StubSettingsManager:
     def __init__(self):
         self.bind_calls = []
+        self.bind_result = (True, False)
         self.custom_cwd_calls = []
         self.session_row = None
         self.session_lookup_calls = []
@@ -104,7 +105,7 @@ class _StubSettingsManager:
 
     def bind_user_with_code(self, user_id, display_name, code, dm_chat_id="", platform=None):
         self.bind_calls.append((user_id, display_name, code, dm_chat_id, platform))
-        return True, False
+        return self.bind_result
 
     def set_custom_cwd(self, settings_key, cwd):
         self.custom_cwd_calls.append((settings_key, cwd))
@@ -183,6 +184,53 @@ class CommandHandlerUserNameTests(unittest.IsolatedAsyncioTestCase):
                 )
             ],
         )
+
+    async def test_bind_rate_limit_blocks_before_code_validation(self):
+        controller = _StubController({"display_name": "Alex"})
+        handler = CommandHandlers(controller)
+        handler._bind_attempt_limiter = type(
+            "Limiter",
+            (),
+            {
+                "check": lambda _self, **_kwargs: types.SimpleNamespace(
+                    allowed=False,
+                    retry_after_seconds=42,
+                ),
+                "record_failure": lambda _self, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected")),
+                "reset": lambda _self, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected")),
+            },
+        )()
+        context = MessageContext(user_id="U0E0FM3QT", channel_id="D123")
+
+        await handler.handle_bind(context, "bad-code")
+
+        self.assertEqual(controller.settings_manager.bind_calls, [])
+        self.assertEqual(controller.im_client.sent_messages, [("D123", "❌ 绑定码错误次数过多，请 42 秒后再试。")])
+
+    async def test_bind_invalid_code_records_failed_attempt(self):
+        controller = _StubController({"display_name": "Alex"})
+        controller.settings_manager.bind_result = (False, False)
+        handler = CommandHandlers(controller)
+        calls = []
+
+        class Limiter:
+            def check(self, **kwargs):
+                return types.SimpleNamespace(allowed=True)
+
+            def record_failure(self, **kwargs):
+                calls.append(kwargs)
+                return types.SimpleNamespace(allowed=False, retry_after_seconds=30)
+
+            def reset(self, **kwargs):
+                raise AssertionError("unexpected")
+
+        handler._bind_attempt_limiter = Limiter()
+        context = MessageContext(user_id="U0E0FM3QT", channel_id="D123")
+
+        await handler.handle_bind(context, "bad-code")
+
+        self.assertEqual(calls, [{"platform": "slack", "user_id": "U0E0FM3QT", "channel_id": "D123"}])
+        self.assertEqual(controller.im_client.sent_messages, [("D123", "❌ 绑定码错误次数过多，请 30 秒后再试。")])
 
     async def test_wechat_bind_success_points_to_start_menu(self):
         controller = _StubController({"display_name": "小王"})

@@ -43,6 +43,7 @@ from sqlalchemy.exc import IntegrityError
 from config import paths
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
 from modules.im.base import MessageContext
+from storage.db import get_cached_sqlite_engine
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from core.controller import Controller
@@ -136,9 +137,8 @@ def create_app(controller: "Controller") -> FastAPI:
             if active_message_id == native_message_id:
                 return "duplicate"
             from storage import messages_service
-            from storage.db import create_sqlite_engine
 
-            engine = create_sqlite_engine()
+            engine = get_cached_sqlite_engine()
             with engine.connect() as conn:
                 if messages_service.native_message_exists(
                     conn,
@@ -151,14 +151,13 @@ def create_app(controller: "Controller") -> FastAPI:
             from core.message_mirror import _scope_id_for_session
             from core.session_turns import SCHEDULED_PROVENANCE_KEY, capture_scheduled_provenance
             from storage import messages_service
-            from storage.db import create_sqlite_engine
 
             # Persist the scheduled run's delivery / attribution provenance on the
             # queued row's metadata so flush_queue re-runs it as SOURCE_SCHEDULED with
             # that restored — keeping suppress_delivery / the delivery target / the task
             # attribution instead of degrading to a plain user turn (#84). The key's
             # PRESENCE also marks this row as a scheduled segment for the flush.
-            engine = create_sqlite_engine()
+            engine = get_cached_sqlite_engine()
             with engine.begin() as conn:
                 scope_id = _scope_id_for_session(conn, session_id)
                 if scope_id is not None:
@@ -244,7 +243,7 @@ def create_app(controller: "Controller") -> FastAPI:
         ``show.dispatch`` for the open Show page."""
         payload = await _safe_json(request)
         try:
-            text, context = _build_dispatch_payload(payload)
+            text, context = await _build_dispatch_payload(payload)
         except ValueError as err:
             return JSONResponse(status_code=400, content={"ok": False, "error": str(err)})
 
@@ -357,7 +356,7 @@ def create_app(controller: "Controller") -> FastAPI:
         """
         payload = await _safe_json(request)
         try:
-            text, context = _build_dispatch_payload(payload)
+            text, context = await _build_dispatch_payload(payload)
         except ValueError as err:
             return JSONResponse(status_code=400, content={"ok": False, "error": str(err)})
 
@@ -370,9 +369,8 @@ def create_app(controller: "Controller") -> FastAPI:
             # it to ``queued`` so it drains via the queue after the active turn.
             if isinstance(user_message_id, str) and user_message_id:
                 from storage import messages_service
-                from storage.db import create_sqlite_engine
 
-                engine = create_sqlite_engine()
+                engine = get_cached_sqlite_engine()
                 with engine.begin() as conn:
                     messages_service.promote_pending(conn, user_message_id, messages_service.QUEUED_TYPE)
 
@@ -605,7 +603,7 @@ async def _safe_json(request: Request) -> dict[str, Any]:
     return body if isinstance(body, dict) else {}
 
 
-def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, MessageContext]:
+async def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, MessageContext]:
     """Translate the JSON payload into a ``(text, MessageContext)`` pair.
 
     Raises ``ValueError`` with a caller-friendly message when the
@@ -636,7 +634,8 @@ def _build_dispatch_payload(payload: dict[str, Any]) -> tuple[str, MessageContex
     if not text.strip() and not files:
         raise ValueError("text or files is required")
 
-    context = _build_session_context(
+    context = await asyncio.to_thread(
+        _build_session_context,
         session_id,
         user_id=payload.get("user_id"),
         channel_id=payload.get("channel_id"),
@@ -720,9 +719,8 @@ def _lookup_session(session_id: str) -> Optional[dict[str, Any]]:
 
     try:
         from core.services import sessions as sessions_service
-        from storage.db import create_sqlite_engine
 
-        engine = create_sqlite_engine()
+        engine = get_cached_sqlite_engine()
         with engine.connect() as conn:
             return sessions_service.get_session(conn, session_id)
     except LookupError:

@@ -614,7 +614,8 @@
     "cloudflared_spawn_failed": "连接器启动失败。请检查 cloudflared 是否可执行，或查看运行日志。",
     "cloudflared_exited": "连接器启动后立即退出。通常是 Tunnel 凭证无效或 Cloudflare 配置未生效，请重新配对后再试。",
     "cloudflared_stop_failed": "连接器暂时无法停止。请稍后重试，或在系统进程里手动结束 cloudflared。",
-    "cloudflared_process_unknown": "检测到一个无法确认归属的连接器进程。为避免误杀其它进程，Avibe 没有自动处理。请手动检查 cloudflared 进程后再启动。"
+    "cloudflared_process_unknown": "检测到一个无法确认归属的连接器进程。为避免误杀其它进程，Avibe 没有自动处理。请手动检查 cloudflared 进程后再启动。",
+    "bind_code_limit_reached": "可用绑定码过多，请先撤销一个未使用的绑定码，再创建新的绑定码。"
   },
   "apps": {
     "title": "应用",
@@ -2270,6 +2271,7 @@
     },
     "dialog": {
       "title": "添加密钥",
+      "subtitle": "加密存储;值不会进入聊天或模型。",
       "name": "名称",
       "value": "值",
       "valuePlaceholder": "粘贴密钥值",
@@ -2289,7 +2291,7 @@
       "kindStaticHelp": "令牌、密码,或任意文本值。",
       "kindKeypair": "签名密钥",
       "kindKeypairHelp": "在你浏览器里生成的签名私钥。",
-      "nameHint": "大写 A–Z 0–9 _ · 全局唯一",
+      "nameHint": "首字符必须是字母或下划线；后续可用字母、数字、下划线 · 保留大小写",
       "signingKeyHelp": "会在你的浏览器里新生成一把 secp256k1 签名密钥。私钥在浏览器中封存——标准密钥由本机 avault 签名,保护层密钥在浏览器中签名——只有公钥明文保存。",
       "signingGenerate": "生成",
       "signingImport": "导入",
@@ -2342,7 +2344,8 @@
         "fileEmpty": "请选择非空文件。",
         "fileTooLarge": "请选择不超过 {{size}} 的文件。",
         "fileReadFailed": "读取文件失败。",
-        "secretExists": "同名密钥已存在。"
+        "secretExists": "同名密钥已存在。",
+        "secretNameCaseConflict": "已有密钥使用了仅大小写不同的名称。"
       }
     },
     "requests": {

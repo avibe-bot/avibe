@@ -614,7 +614,8 @@
     "cloudflared_spawn_failed": "Connector startup failed. Check that cloudflared is executable, or inspect the runtime logs.",
     "cloudflared_exited": "The connector exited immediately after startup. This usually means the Tunnel credential is invalid or the Cloudflare config is not ready. Pair again and retry.",
     "cloudflared_stop_failed": "The connector could not be stopped. Try again later, or manually stop the cloudflared process.",
-    "cloudflared_process_unknown": "Avibe found a connector-like process but could not verify ownership. To avoid killing the wrong process, it did not change it. Check the cloudflared process manually and retry."
+    "cloudflared_process_unknown": "Avibe found a connector-like process but could not verify ownership. To avoid killing the wrong process, it did not change it. Check the cloudflared process manually and retry.",
+    "bind_code_limit_reached": "Too many active bind codes. Revoke an unused code before creating another."
   },
   "apps": {
     "title": "Apps",
@@ -2271,6 +2272,7 @@
     },
     "dialog": {
       "title": "Add a secret",
+      "subtitle": "Stored encrypted; the value never reaches the chat or the model.",
       "name": "Name",
       "value": "Value",
       "valuePlaceholder": "Paste the secret value",
@@ -2290,7 +2292,7 @@
       "kindStaticHelp": "A token, password, or any text value.",
       "kindKeypair": "Signing key",
       "kindKeypairHelp": "A signing key generated in your browser.",
-      "nameHint": "Uppercase A–Z 0–9 _ · globally unique",
+      "nameHint": "Start with a letter or underscore; then use letters, numbers, or underscore · case preserved",
       "signingKeyHelp": "A new secp256k1 signing key is created in your browser. The private key is sealed in your browser — standard keys are signed by avault locally, protected keys are signed in your browser — and only the public key is stored in the clear.",
       "signingGenerate": "Generate",
       "signingImport": "Import",
@@ -2343,7 +2345,8 @@
         "fileEmpty": "Choose a non-empty file.",
         "fileTooLarge": "Choose a file up to {{size}}.",
         "fileReadFailed": "Couldn't read that file.",
-        "secretExists": "A secret with this name already exists."
+        "secretExists": "A secret with this name already exists.",
+        "secretNameCaseConflict": "A secret already uses this name with different letter casing."
       }
     },
     "requests": {

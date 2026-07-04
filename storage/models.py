@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     Column,
+    DDL,
     Float,
     ForeignKey,
     Index,
@@ -11,6 +12,8 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    event,
+    func,
     text,
 )
 
@@ -466,7 +469,10 @@ vault_secrets = Table(
     "vault_secrets",
     metadata,
     Column("id", String, primary_key=True),
-    # Globally-unique reference key, ENV-style ``^[A-Z][A-Z0-9_]*$``.
+    # Globally unique, case-preserving shell name ``^[A-Za-z_][A-Za-z0-9_]*$``.
+    # The exact UNIQUE(name) keeps existing exact lookup semantics, while the
+    # unique lower(name) expression index below atomically rejects case-only
+    # duplicates so exact lookup stays unambiguous under concurrent creates.
     Column("name", String, nullable=False),
     Column("tags", Text, nullable=True),  # JSON array
     Column("kind", String, nullable=False, server_default="static"),  # static | keypair (P2)
@@ -487,6 +493,7 @@ vault_secrets = Table(
     UniqueConstraint("name", name="uq_vault_secrets_name"),
     Index("ix_vault_secrets_name_kind", "name", "kind"),
 )
+Index("uq_vault_secrets_name_folded", func.lower(vault_secrets.c.name), unique=True)
 
 # One queue for everything that needs a human: P0 uses ``provision`` (dynamic ask via
 # ``$<NAME>``); ``access``/``sign``/``proxy``/``keygen`` are P1+.
@@ -504,6 +511,57 @@ vault_requests = Table(
     Column("decided_at", String, nullable=True),
     Column("expires_at", String, nullable=True),
     Index("ix_vault_requests_status_created", "status", "created_at"),
+)
+event.listen(
+    vault_requests,
+    "after_create",
+    DDL(
+        """
+        create trigger if not exists trg_vault_requests_pending_provision_name_case_insert
+        before insert on vault_requests
+        when new.request_type = 'provision'
+          and new.status = 'pending'
+          and new.secret_name is not null
+          and exists (
+            select 1
+            from vault_requests
+            where request_type = 'provision'
+              and status = 'pending'
+              and secret_name is not null
+              and lower(secret_name) = lower(new.secret_name)
+              and secret_name <> new.secret_name
+          )
+        begin
+          select raise(abort, 'vault pending provision name case conflict');
+        end
+        """
+    ),
+)
+event.listen(
+    vault_requests,
+    "after_create",
+    DDL(
+        """
+        create trigger if not exists trg_vault_requests_pending_provision_name_case_update
+        before update of request_type, status, secret_name on vault_requests
+        when new.request_type = 'provision'
+          and new.status = 'pending'
+          and new.secret_name is not null
+          and exists (
+            select 1
+            from vault_requests
+            where id <> new.id
+              and request_type = 'provision'
+              and status = 'pending'
+              and secret_name is not null
+              and lower(secret_name) = lower(new.secret_name)
+              and secret_name <> new.secret_name
+          )
+        begin
+          select raise(abort, 'vault pending provision name case conflict');
+        end
+        """
+    ),
 )
 
 # Metadata + audit of active unlock grants. Key material is NEVER stored here;

@@ -58,7 +58,7 @@ vault_groups = Table(
 vault_secrets = Table(
     "vault_secrets", metadata,
     Column("id", String, primary_key=True),
-    Column("name", String, nullable=False, unique=True),     # ^[A-Z][A-Z0-9_]*$
+    Column("name", String, nullable=False, unique=True),     # ^[A-Za-z_][A-Za-z0-9_]*$, case-preserving
     Column("group_name", String, ForeignKey("vault_groups.name"), nullable=False, server_default="default"),
     Column("tags", Text),                                    # JSON array
     Column("kind", String, nullable=False, server_default="static"),        # static | keypair (P2)

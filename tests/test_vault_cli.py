@@ -1862,6 +1862,17 @@ def test_request_rejects_spec_with_plaintext_value(capfd):
     assert payload["code"] == "invalid_spec"
 
 
+def test_request_case_conflict_uses_name_conflict_code(capfd):
+    _create_standard_secret("openAiKey")
+
+    code = cli.cmd_vault_request(_ns(name="OpenAIKey", reason="need it"))
+    payload = json.loads(capfd.readouterr().err)
+
+    assert code == 1
+    assert payload["code"] == "secret_name_case_conflict"
+    assert "openAiKey" in payload["error"]
+
+
 def test_request_for_existing_secret_returns_fulfilled(tmp_path, capfd, monkeypatch):
     _create_standard_secret("HAVE_KEY")
     assert cli.cmd_vault_request(_ns(name="HAVE_KEY", wait=30)) == 0

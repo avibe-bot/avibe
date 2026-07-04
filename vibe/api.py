@@ -1465,7 +1465,7 @@ def create_vault_secret(payload: dict) -> dict:
     _reject_plaintext_value_fields(payload)
     name = str(payload.get("name") or "").strip()
     if not vault_crypto.is_valid_secret_name(name):
-        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     tags = [str(tag) for tag in payload.get("tags", []) if isinstance(tag, str)] if isinstance(payload.get("tags"), list) else []
     policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else None
     public_meta = payload.get("public_meta") if isinstance(payload.get("public_meta"), dict) else None
@@ -1481,6 +1481,36 @@ def create_vault_secret(payload: dict) -> dict:
     signer_kind = payload.get("signer_kind")
     if signer_kind is not None:
         signer_kind = str(signer_kind)
+    provision_request_id = str(payload.get("provision_request_id") or "") or None
+    engine = _vault_engine()
+    try:
+        with engine.begin() as conn:
+            vault_service.preflight_secret_create(
+                conn,
+                name=name,
+                provision_request_id=provision_request_id,
+            )
+    except vault_service.InvalidSecretNameError as exc:
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name") from exc
+    except vault_service.SecretNameCaseConflictError as exc:
+        raise VaultApiError(
+            f"secret name '{name}' conflicts with existing secret '{exc.existing_name}'",
+            code="secret_name_case_conflict",
+            status=409,
+        ) from exc
+    except vault_service.SecretExistsError as exc:
+        fulfilled_count = 0
+        try:
+            with engine.begin() as conn:
+                fulfilled_count = vault_service.fulfill_pending_provision_requests_for_secret(conn, name)
+        except Exception:
+            logger.warning("failed to settle pending provision requests for existing secret %s", name, exc_info=True)
+        if fulfilled_count > 0:
+            _publish_vaults_updated(scope="secret", secret_name=name, request_status="fulfilled")
+        raise VaultApiError(f"secret '{name}' already exists", code="secret_exists", status=409) from exc
+    except vault_service.VaultServiceError as exc:
+        raise VaultApiError(str(exc), code="vault_error") from exc
+
     if protection == "standard":
         blind_box = payload.get("blind_box")
         if isinstance(blind_box, dict):
@@ -1499,7 +1529,6 @@ def create_vault_secret(payload: dict) -> dict:
         sealed = _sealed_from_payload(payload.get("sealed") or payload.get("envelope") or payload)
     else:
         raise VaultApiError("invalid protection tier", code="invalid_protection")
-    engine = _vault_engine()
     try:
         with engine.begin() as conn:
             meta = vault_service.create_secret(
@@ -1514,10 +1543,16 @@ def create_vault_secret(payload: dict) -> dict:
                 policy=policy,
                 public_meta=public_meta,
                 establishing_vmk=establishing_vmk,
-                provision_request_id=str(payload.get("provision_request_id") or "") or None,
+                provision_request_id=provision_request_id,
             )
     except vault_service.InvalidSecretNameError as exc:
-        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name") from exc
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name") from exc
+    except vault_service.SecretNameCaseConflictError as exc:
+        raise VaultApiError(
+            f"secret name '{name}' conflicts with existing secret '{exc.existing_name}'",
+            code="secret_name_case_conflict",
+            status=409,
+        ) from exc
     except vault_service.SecretExistsError as exc:
         fulfilled_count = 0
         try:
@@ -1581,7 +1616,7 @@ def get_vault_provision_request_by_name(name: str) -> dict:
 
     requested_name = str(name or "").strip()
     if not vault_crypto.is_valid_secret_name(requested_name):
-        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     engine = _vault_engine()
     with engine.begin() as conn:
         request, ambiguous = vault_service.resolve_pending_provision_request_by_name(conn, requested_name)
@@ -1720,7 +1755,7 @@ def request_vault_access(payload: dict) -> dict:
     if not name and source_selector is None:
         raise VaultApiError("name or source_selector is required", code="invalid_request", status=409)
     if name and not vault_crypto.is_valid_secret_name(name):
-        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     purpose = str(payload.get("purpose") or "run")
     engine = _vault_engine()
     try:
@@ -1768,7 +1803,7 @@ def request_vault_sign(payload: dict) -> dict:
     if scheme not in vault_service.SUPPORTED_SIGNATURE_SCHEMES:
         raise VaultApiError(f"unsupported signature scheme: {scheme}", code="invalid_request", status=409)
     if not vault_crypto.is_valid_secret_name(name):
-        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     engine = _vault_engine()
     try:
         with engine.begin() as conn:
@@ -2617,7 +2652,7 @@ def vault_sign(payload: dict) -> dict:
     if scheme not in vault_service.SUPPORTED_SIGNATURE_SCHEMES:
         raise VaultApiError(f"unsupported signature scheme: {scheme}", code="invalid_request", status=409)
     if not vault_crypto.is_valid_secret_name(name):
-        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     engine = _vault_engine()
     protected_response: dict | None = None
     protected_event: dict | None = None
@@ -9742,7 +9777,16 @@ def create_bind_code(code_type: str = "one_time", expires_at: Optional[str] = No
     if code_type == "expiring" and not expires_at:
         return {"ok": False, "error": "expires_at is required for expiring bind codes"}
     store = SettingsStore.get_instance()
-    bc = store.create_bind_code(code_type, expires_at)
+    try:
+        bc = store.create_bind_code(code_type, expires_at)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "error": {
+                "code": "bind_code_limit_reached",
+                "message": str(exc),
+            },
+        }
     return {
         "ok": True,
         "bind_code": {

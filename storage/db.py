@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import RLock
 
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.engine import URL
@@ -19,13 +20,17 @@ def escape_sql_like(value: str) -> str:
     return str(value).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _resolve_sqlite_path(db_path: Path | None = None) -> Path:
+    return (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
+
+
 def sqlite_url(db_path: Path | None = None) -> str:
-    path = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
+    path = _resolve_sqlite_path(db_path)
     return URL.create("sqlite", database=str(path)).render_as_string(hide_password=False)
 
 
 def create_sqlite_engine(db_path: Path | None = None) -> Engine:
-    path = (db_path or paths.get_sqlite_state_path()).expanduser().resolve()
+    path = _resolve_sqlite_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(sqlite_url(path), future=True)
 
@@ -38,6 +43,40 @@ def create_sqlite_engine(db_path: Path | None = None) -> Engine:
         cursor.close()
 
     return engine
+
+
+_cached_engine_lock = RLock()
+_cached_engines: dict[Path, Engine] = {}
+
+
+def get_cached_sqlite_engine(db_path: Path | None = None) -> Engine:
+    """Return a process-local SQLite engine for hot write paths.
+
+    ``create_sqlite_engine`` intentionally remains a fresh-engine factory for
+    tests, migrations, and short one-off tools. Controller hot paths should use
+    this cache so every emitted chunk or queue tick does not allocate a new
+    SQLAlchemy engine and SQLite connection pool.
+    """
+    path = _resolve_sqlite_path(db_path)
+    with _cached_engine_lock:
+        engine = _cached_engines.get(path)
+        if engine is None:
+            engine = create_sqlite_engine(path)
+            _cached_engines[path] = engine
+        return engine
+
+
+def dispose_cached_sqlite_engines() -> None:
+    """Dispose process-local cached SQLite engines.
+
+    Production relies on process lifetime cleanup. Tests call this around
+    isolated homes so cached connections never point at a previous test's state.
+    """
+    with _cached_engine_lock:
+        engines = list(_cached_engines.values())
+        _cached_engines.clear()
+    for engine in engines:
+        engine.dispose()
 
 
 class SqliteInvalidationProbe:

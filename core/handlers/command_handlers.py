@@ -5,6 +5,7 @@ import os
 import time
 from typing import Any, Optional
 from config.platform_registry import get_platform_descriptor
+from core.bind_security import BindAttemptLimiter
 from core.message_context import requires_typed_user_session_key
 from modules.agents import get_agent_display_name
 from modules.agents.native_sessions.types import NativeResumeSession
@@ -26,6 +27,7 @@ class CommandHandlers(BaseHandler):
         self._resume_snapshots: dict[str, dict[str, Any]] = {}
         self._resume_snapshot_ttl_seconds = 600.0
         self._wechat_resume_page_size = 5
+        self._bind_attempt_limiter = BindAttemptLimiter()
 
     def _get_channel_context(self, context: MessageContext) -> MessageContext:
         """Get context for channel messages (no thread)"""
@@ -928,6 +930,19 @@ class CommandHandlers(BaseHandler):
                 await im_client.send_message(channel_context, self._t("bind.alreadyBound"))
                 return
 
+            limit_decision = self._bind_attempt_limiter.check(
+                platform=platform,
+                user_id=context.user_id,
+                channel_id=context.channel_id,
+            )
+            if not limit_decision.allowed:
+                channel_context = self._get_channel_context(context)
+                await im_client.send_message(
+                    channel_context,
+                    self._t("bind.rateLimited", seconds=limit_decision.retry_after_seconds),
+                )
+                return
+
             # Fetch user info for display name
             try:
                 user_info = await im_client.get_user_info(context.user_id)
@@ -943,13 +958,34 @@ class CommandHandlers(BaseHandler):
             if not success:
                 # Could be already bound (race) or invalid code
                 if _is_bound_user():
+                    self._bind_attempt_limiter.reset(
+                        platform=platform,
+                        user_id=context.user_id,
+                        channel_id=context.channel_id,
+                    )
                     channel_context = self._get_channel_context(context)
                     await im_client.send_message(channel_context, self._t("bind.alreadyBound"))
                 else:
+                    failure_decision = self._bind_attempt_limiter.record_failure(
+                        platform=platform,
+                        user_id=context.user_id,
+                        channel_id=context.channel_id,
+                    )
                     channel_context = self._get_channel_context(context)
-                    await im_client.send_message(channel_context, self._t("bind.invalidCode"))
+                    if failure_decision.allowed:
+                        await im_client.send_message(channel_context, self._t("bind.invalidCode"))
+                    else:
+                        await im_client.send_message(
+                            channel_context,
+                            self._t("bind.rateLimited", seconds=failure_decision.retry_after_seconds),
+                        )
                 return
 
+            self._bind_attempt_limiter.reset(
+                platform=platform,
+                user_id=context.user_id,
+                channel_id=context.channel_id,
+            )
             msg = self._build_bind_success_message(
                 name=display_name,
                 is_admin=is_admin,

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
 export type ThemeMode = 'system' | 'light' | 'dark';
 type ResolvedTheme = 'light' | 'dark';
@@ -95,7 +95,10 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return () => mediaQuery.removeListener(handleChange);
   }, []);
 
-  const setMode = (nextMode: ThemeMode) => {
+  // useCallback so the exposed functions keep a stable identity, letting the
+  // memoized value below change only on an actual theme change. Deps are all
+  // stable (state setters + module-level helpers), so setMode never changes.
+  const setMode = useCallback((nextMode: ThemeMode) => {
     setModeState(nextMode);
     setSystemTheme(resolveTheme(DEFAULT_MODE));
 
@@ -109,18 +112,21 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
 
     applyTheme(nextMode);
-  };
+  }, []);
 
-  const cycleMode = () => {
+  const cycleMode = useCallback(() => {
     const nextMode: ThemeMode = mode === 'system' ? 'light' : mode === 'light' ? 'dark' : 'system';
     setMode(nextMode);
-  };
+  }, [mode, setMode]);
 
-  return (
-    <ThemeContext.Provider value={{ mode, resolvedTheme, setMode, cycleMode }}>
-      {children}
-    </ThemeContext.Provider>
+  // Stable value identity (functions are useCallback-stable) so consumers only
+  // re-render when the resolved theme actually changes.
+  const value = useMemo(
+    () => ({ mode, resolvedTheme, setMode, cycleMode }),
+    [mode, resolvedTheme, setMode, cycleMode],
   );
+
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 };
 
 export function useTheme() {

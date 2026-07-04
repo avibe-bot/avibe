@@ -237,7 +237,7 @@ export const VaultSecretForm: React.FC<{
   }, [requestSpec]);
 
   const p2Ready = useMemo(() => avaultP2Ready(avaultDep), [avaultDep]);
-  const secretName = (fixedName ?? name).trim().toUpperCase();
+  const secretName = (fixedName ?? name).trim();
   const protectedCreateReady = protectedVault.status === 'unlocked';
   const isKeypair = kind === 'keypair';
   const isProvision = Boolean(fixedName);
@@ -461,6 +461,10 @@ export const VaultSecretForm: React.FC<{
           handleExistingSecret();
           return;
         }
+        if (created.code === 'secret_name_case_conflict') {
+          setError(created.message || t('vaults.dialog.errors.secretNameCaseConflict'));
+          return;
+        }
         if (created.code === 'vault_already_initialized') {
           // Another tab established the vault first — drop the rejected local VMK and
           // reload the server's wrap_meta so the user unlocks it instead of splitting keys.
@@ -488,6 +492,8 @@ export const VaultSecretForm: React.FC<{
         setError(t('vaults.dialog.errors.invalidPublicKey'));
       } else if (err instanceof ApiError && err.code === 'secret_exists') {
         handleExistingSecret();
+      } else if (err instanceof ApiError && err.code === 'secret_name_case_conflict') {
+        setError(err.message || t('vaults.dialog.errors.secretNameCaseConflict'));
       } else {
         setError(err instanceof Error ? err.message : String(err));
       }

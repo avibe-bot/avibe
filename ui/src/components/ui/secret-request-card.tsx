@@ -2,22 +2,20 @@ import { useEffect, useState } from 'react';
 import { CheckCircle2, KeyRound, Loader2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { badgeVariants } from './badge';
-import { Dialog, DialogContent, DialogTitle } from './dialog';
-import { VaultSecretForm } from './vault-secret-form';
-import { useApi, type VaultRequest, type VaultRequestSpec } from '@/context/ApiContext';
+import { VaultSecretDialog } from './vault-secret-dialog';
+import { useApi, type VaultRequest } from '@/context/ApiContext';
 import { cn } from '@/lib/utils';
 
 /**
- * Inline rendering of a `$<NAME>` dynamic-ask marker in an agent message. The agent
- * asked for a secret; this card is self-contained so it can live inline inside the
- * markdown renderer. Browser-side sealing is required before the UI can submit values.
+ * Inline rendering of a `$<NAME>` dynamic-ask marker in an agent message. The badge
+ * opens the shared {@link VaultSecretDialog} (same dialog as the Vaults "Add" flow), so
+ * the provide experience is identical everywhere. Browser-side sealing happens in the form.
  */
 export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> = ({ name, requestId }) => {
   const { t } = useTranslation();
   const api = useApi();
   const [open, setOpen] = useState(false);
   const [fulfilled, setFulfilled] = useState(false);
-  const [requestSpec, setRequestSpec] = useState<VaultRequestSpec | null>(null);
   const [resolvedRequest, setResolvedRequest] = useState<VaultRequest | null>(null);
   const [requestLoaded, setRequestLoaded] = useState(false);
   const [requestAmbiguous, setRequestAmbiguous] = useState(false);
@@ -34,13 +32,11 @@ export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> =
       .then((res) => {
         if (!alive) return;
         setResolvedRequest(res.request ?? null);
-        setRequestSpec(((res.request?.card as { spec?: VaultRequestSpec } | null)?.spec ?? null) as VaultRequestSpec | null);
         setRequestAmbiguous(!requestId && Boolean('ambiguous' in res && res.ambiguous));
       })
       .catch(() => {
         if (!alive) return;
         setResolvedRequest(null);
-        setRequestSpec(null);
         setRequestAmbiguous(false);
       })
       .finally(() => {
@@ -59,11 +55,6 @@ export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> =
       </span>
     );
   }
-  const requestCard = (resolvedRequest?.card ?? null) as { default_protection?: unknown } | null;
-  const defaultProtection =
-    requestCard?.default_protection === 'standard' || requestCard?.default_protection === 'protected'
-      ? requestCard.default_protection
-      : undefined;
 
   return (
     <>
@@ -75,48 +66,28 @@ export const SecretRequestCard: React.FC<{ name: string; requestId?: string }> =
         <KeyRound className="mr-1 inline size-3" />
         {name} — {t('vaults.request.provide')}
       </button>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent>
-          {/* Accessible name for the Radix dialog — the visible title below is styled per
-              design.pen `F4N19`, so keep a screen-reader-only DialogTitle for a11y. */}
-          <DialogTitle className="sr-only">{t('vaults.request.title')}</DialogTitle>
-          {/* Header — design.pen `F4N19` (SecureInputCard): cyan key + ask copy. */}
-          <div className="flex items-start gap-3 pr-6">
-            <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-accent/15 text-accent">
-              <KeyRound className="size-5" />
-            </span>
-            <div className="flex flex-col gap-0.5">
-              <span className="text-[15px] font-semibold text-foreground">{t('vaults.request.title')}</span>
-              <span className="text-xs text-muted-foreground">{t('vaults.request.help')}</span>
-            </div>
-          </div>
-          {requestLoaded ? (
-            requestAmbiguous ? (
-              <div className="rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">
-                {t('vaults.request.ambiguousProvision')}
-              </div>
-            ) : (
-              <VaultSecretForm
-                fixedName={name}
-                provisionRequestId={resolvedRequest?.id ?? requestId ?? null}
-                requestSpec={requestSpec}
-                defaultProtection={defaultProtection}
-                onCancel={() => setOpen(false)}
-                onCreated={() => {
-                  setFulfilled(true);
-                  setOpen(false);
-                }}
-                treatExistingAsFulfilled
-              />
-            )
-          ) : (
+      <VaultSecretDialog
+        open={open}
+        onOpenChange={setOpen}
+        name={name}
+        request={resolvedRequest}
+        notice={
+          !requestLoaded ? (
             <div className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">
               <Loader2 className="size-4 animate-spin" />
               {t('common.loading')}
             </div>
-          )}
-        </DialogContent>
-      </Dialog>
+          ) : requestAmbiguous ? (
+            <div className="rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-muted">
+              {t('vaults.request.ambiguousProvision')}
+            </div>
+          ) : undefined
+        }
+        onCreated={() => {
+          setFulfilled(true);
+          setOpen(false);
+        }}
+      />
     </>
   );
 };

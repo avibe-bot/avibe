@@ -28,9 +28,11 @@ def test_vault_crypto_error_kept_for_back_compat():
     ("name", "valid"),
     [
         ("OPENAI_API_KEY", True),
+        ("openAiKey", True),
+        ("_localKey", True),
         ("A", True),
         ("A1_B2", True),
-        ("lowercase", False),
+        ("lowercase", True),
         ("1LEADING_DIGIT", False),
         ("HAS-DASH", False),
         ("HAS SPACE", False),

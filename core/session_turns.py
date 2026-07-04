@@ -24,11 +24,13 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from sqlalchemy import select
+from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
 from core.web_push_notifications import WEB_PUSH_USER_KEY_METADATA, WEB_PUSH_USER_KEYS_METADATA
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn
 from storage import messages_service
+from storage.db import get_cached_sqlite_engine
 from storage.models import messages
 from vibe.i18n import t as i18n_t
 
@@ -554,6 +556,7 @@ class SessionTurnManager:
     ) -> None:
         self.controller = controller
         self._build_context = build_context
+        self._engine: Engine | None = None
         self.in_flight: dict[str, Turn] = {}
         # The live streaming turn sink per SESSION KEY (avibe/web-Chat only; IM/CLI
         # turns register none). Each is ``{on_chunk, done_event, turn_token}`` — the
@@ -561,6 +564,11 @@ class SessionTurnManager:
         # session_key (stable across a session's turns) so a reused agent receiver
         # carrying a stale per-turn context still resolves the current turn's sink.
         self.active_turn_sinks: dict[str, dict] = {}
+
+    def _sqlite_engine(self) -> Engine:
+        if self._engine is None:
+            self._engine = get_cached_sqlite_engine()
+        return self._engine
 
     def is_in_flight(self, session_id: Optional[str]) -> bool:
         """True when ``session_id`` has an active (RUNNING) turn."""
@@ -602,9 +610,6 @@ class SessionTurnManager:
             await self._run(None, context, text, source=source)
             return "ran"
 
-        from storage import messages_service
-        from storage.db import create_sqlite_engine
-
         entry = self.in_flight.get(session_id)
         busy = entry is not None and not entry.task.done()
         # Enqueue when a turn is running OR a prior Stop left queued rows behind — the
@@ -612,8 +617,7 @@ class SessionTurnManager:
         if busy:
             should_enqueue = True
         else:
-            engine = create_sqlite_engine()
-            with engine.connect() as conn:
+            with self._sqlite_engine().connect() as conn:
                 should_enqueue = bool(messages_service.list_queued(conn, session_id))
         if should_enqueue:
             if enqueue is not None:
@@ -747,9 +751,7 @@ class SessionTurnManager:
         on an empty queue / failure."""
         from core.inbox_events import bus
         from core.workbench_media import file_attachments_from_specs, resolve_attachment_specs
-        from storage import messages_service
         from storage.background import run_update_event_transaction
-        from storage.db import create_sqlite_engine
 
         if not session_id:
             return False
@@ -766,8 +768,8 @@ class SessionTurnManager:
         pending_agent_run_ids: list[str] = []
         pending_scheduled_segment: list[dict] = []
         claimed_agent_run_ids: list[str] = []
+        engine = self._sqlite_engine()
         try:
-            engine = create_sqlite_engine()
             with run_update_event_transaction(engine) as conn:
                 rows = messages_service.list_queued(conn, session_id)
                 if not rows:
@@ -921,7 +923,7 @@ class SessionTurnManager:
             logger.error("queue flush: no build_context bound for session=%s", session_id)
             return False
         try:
-            context = self._build_context(session_id)
+            context = await asyncio.to_thread(self._build_context, session_id)
         except Exception:
             logger.exception("queue flush: failed to build context for session=%s", session_id)
             return False
@@ -949,7 +951,6 @@ class SessionTurnManager:
             if pending_agent_run_ids:
                 retry_agent_run_flush = False
                 try:
-                    engine = create_sqlite_engine()
                     with run_update_event_transaction(engine) as conn:
                         claimed_run_ids = _claim_agent_run_segment_and_retire_queue(
                             conn,
@@ -995,7 +996,6 @@ class SessionTurnManager:
                     try:
                         from storage.background import reset_workbench_claimed_runs_in_connection
 
-                        engine = create_sqlite_engine()
                         with run_update_event_transaction(engine) as conn:
                             reset_workbench_claimed_runs_in_connection(conn, claimed_agent_run_ids)
                             _restore_queued_rows(conn, pending_scheduled_segment)
@@ -1005,12 +1005,10 @@ class SessionTurnManager:
                 return False
             if not pending_agent_run_ids:
                 if pending_scheduled_segment:
-                    engine = create_sqlite_engine()
                     with engine.begin() as conn:
                         messages_service.delete_queued(conn, [r["id"] for r in pending_scheduled_segment])
                     bus.publish("queue.updated", {"session_id": session_id})
                 try:
-                    engine = create_sqlite_engine()
                     with engine.begin() as conn:
                         _write_coalesced_native_id_markers(conn, segment)
                 except Exception:
@@ -1168,16 +1166,12 @@ class SessionTurnManager:
         the queue is empty. Returns a result dict (``code='stop_failed'`` → 409 for
         the HTTP adapter).
         """
-        from storage import messages_service
-        from storage.db import create_sqlite_engine
-
         turn = self.in_flight.get(session_id)
         if turn is not None and not turn.task.done():
             # Don't interrupt a live turn unless there is actually something queued to
             # cut in with — a stale queue item already flushed by another tab would
             # otherwise make send-now an unintended Stop (Codex P2).
-            engine = create_sqlite_engine()
-            with engine.connect() as conn:
+            with self._sqlite_engine().connect() as conn:
                 has_queue = bool(messages_service.list_queued(conn, session_id))
             if not has_queue:
                 return {"ok": True, "session_id": session_id, "status": "empty"}
@@ -1509,14 +1503,10 @@ class SessionTurnManager:
         reconciles by refetching sessions when its inbox stream (re)connects."""
         try:
             from core.services import sessions as workbench_sessions_service
-            from storage.db import create_sqlite_engine
 
-            engine = create_sqlite_engine()
-            try:
-                with engine.begin() as conn:
-                    reset = workbench_sessions_service.reset_running_agent_status(conn)
-            finally:
-                engine.dispose()
+            engine = get_cached_sqlite_engine()
+            with engine.begin() as conn:
+                reset = workbench_sessions_service.reset_running_agent_status(conn)
             if reset:
                 logger.info("Reset %s stale 'running' agent session(s) to idle on startup", reset)
         except Exception:

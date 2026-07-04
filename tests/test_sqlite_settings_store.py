@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from sqlalchemy import select
 
 from config import paths
+from config import v2_settings
 from config.v2_settings import ChannelSettings, RoutingSettings, SettingsState, SettingsStore, UserSettings
 from storage import projects_service
 from storage.db import create_sqlite_engine
@@ -126,6 +128,54 @@ def test_bind_user_promotes_when_only_admin_is_disabled(tmp_path: Path) -> None:
         assert success is True
         assert is_admin is True
         assert store.get_user("U-new", platform="slack").is_admin is True
+    finally:
+        store.close()
+
+
+def test_create_bind_code_uses_high_entropy_format(tmp_path: Path) -> None:
+    store = SettingsStore(tmp_path / "settings.json")
+    try:
+        code = store.create_bind_code().code
+
+        assert code.startswith("vr-")
+        random_part = code.removeprefix("vr-")
+        assert len(random_part) >= 8
+        assert set(random_part) <= set(v2_settings._BIND_CODE_ALPHABET)
+    finally:
+        store.close()
+
+
+def test_validate_bind_code_uses_constant_time_compare(tmp_path: Path, monkeypatch) -> None:
+    store = SettingsStore(tmp_path / "settings.json")
+    try:
+        first_code = store.create_bind_code()
+        bind_code = store.create_bind_code()
+        comparisons: list[tuple[str, str]] = []
+
+        def compare_digest(left: str, right: str) -> bool:
+            comparisons.append((left, right))
+            return left == right
+
+        monkeypatch.setattr(v2_settings.hmac, "compare_digest", compare_digest)
+
+        assert store.validate_bind_code(bind_code.code) == bind_code
+        assert comparisons == [(first_code.code, bind_code.code), (bind_code.code, bind_code.code)]
+    finally:
+        store.close()
+
+
+def test_create_bind_code_limits_active_codes(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(v2_settings, "_MAX_ACTIVE_BIND_CODES", 2)
+    store = SettingsStore(tmp_path / "settings.json")
+    try:
+        first = store.create_bind_code()
+        store.create_bind_code()
+
+        with pytest.raises(ValueError, match="active bind code limit reached"):
+            store.create_bind_code()
+
+        assert store.deactivate_bind_code(first.code) is True
+        assert store.create_bind_code().is_active is True
     finally:
         store.close()
 

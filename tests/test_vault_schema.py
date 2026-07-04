@@ -22,6 +22,16 @@ def test_vault_metadata_schema_matches_grant_id_tag_model(tmp_path):
         secret_cols = {row[1] for row in conn.execute(text("pragma table_info(vault_secrets)"))}
         assert {"name", "tags", "kind", "protection", "ciphertext", "nonce", "wrap_meta"} <= secret_cols
         assert "group_name" not in secret_cols
+        secret_indexes = {row[1] for row in conn.execute(text("select seq, name from pragma_index_list('vault_secrets')"))}
+        assert "uq_vault_secrets_name_folded" in secret_indexes
+        request_triggers = {
+            row[0]
+            for row in conn.execute(
+                text("select name from sqlite_master where type = 'trigger' and tbl_name = 'vault_requests'")
+            )
+        }
+        assert "trg_vault_requests_pending_provision_name_case_insert" in request_triggers
+        assert "trg_vault_requests_pending_provision_name_case_update" in request_triggers
 
         grant_cols = {row[1] for row in conn.execute(text("pragma table_info(vault_grants)"))}
         assert {

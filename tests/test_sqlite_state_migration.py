@@ -17,7 +17,7 @@ from storage.models import metadata
 from storage.settings_service import SQLiteSettingsService
 
 
-HEAD_REVISION = "20260703_0026"
+HEAD_REVISION = "20260704_0027"
 
 
 def _index_sql(conn: sqlite3.Connection, name: str) -> str:
@@ -66,6 +66,18 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
                 "select seq, name from pragma_index_list('messages')",
             )
         }
+        vault_secret_indexes = {
+            row[1]
+            for row in conn.execute(
+                "select seq, name from pragma_index_list('vault_secrets')",
+            )
+        }
+        vault_request_triggers = {
+            row[0]
+            for row in conn.execute(
+                "select name from sqlite_master where type = 'trigger' and tbl_name = 'vault_requests'",
+            )
+        }
         assert "ix_messages_session_created_id" in message_indexes
         assert "ix_messages_session_type_created_id" in message_indexes
         assert "ix_messages_platform_session_created_id" in message_indexes
@@ -76,6 +88,10 @@ def test_run_migrations_creates_initial_schema(tmp_path: Path) -> None:
         assert "ix_messages_inbox_user_send" in message_indexes
         assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_activity")
         assert "harness_dedupe" in _index_sql(conn, "ix_messages_inbox_user_send")
+        assert "uq_vault_secrets_name_folded" in vault_secret_indexes
+        assert "lower(name)" in _index_sql(conn, "uq_vault_secrets_name_folded").lower()
+        assert "trg_vault_requests_pending_provision_name_case_insert" in vault_request_triggers
+        assert "trg_vault_requests_pending_provision_name_case_update" in vault_request_triggers
         agent_session_indexes = {
             row[1]
             for row in conn.execute(
@@ -518,6 +534,78 @@ def test_run_migrations_expires_legacy_pending_access_cards(tmp_path: Path) -> N
     assert rows["req_legacy"][1] is not None
     assert rows["req_current"] == ("pending", None)
     assert rows["req_sign"] == ("pending", None)
+
+
+def test_run_migrations_adds_case_folded_vault_secret_name_index(tmp_path: Path) -> None:
+    db_path = tmp_path / "vibe.sqlite"
+    run_migrations(db_path, revision="20260703_0026")
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            insert into vault_secrets (
+                id, name, tags, kind, protection, source,
+                ciphertext, nonce, wrap_meta, public_meta, policy,
+                use_count, created_at, updated_at
+            ) values ('vlt_a', 'openAiKey', null, 'static', 'standard', 'manual',
+                'ct', 'nonce', 'wrap', null, null, 0, 'now', 'now')
+            """
+        )
+        conn.commit()
+
+    run_migrations(db_path)
+    run_migrations(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        version = conn.execute("select version_num from alembic_version").fetchone()
+        indexes = {row[1] for row in conn.execute("select seq, name from pragma_index_list('vault_secrets')")}
+        triggers = {
+            row[0]
+            for row in conn.execute(
+                "select name from sqlite_master where type = 'trigger' and tbl_name = 'vault_requests'"
+            )
+        }
+        assert version == (HEAD_REVISION,)
+        assert "uq_vault_secrets_name_folded" in indexes
+        assert "lower(name)" in _index_sql(conn, "uq_vault_secrets_name_folded").lower()
+        assert "trg_vault_requests_pending_provision_name_case_insert" in triggers
+        assert "trg_vault_requests_pending_provision_name_case_update" in triggers
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                insert into vault_secrets (
+                    id, name, tags, kind, protection, source,
+                    ciphertext, nonce, wrap_meta, public_meta, policy,
+                    use_count, created_at, updated_at
+                ) values ('vlt_b', 'OpenAIKey', null, 'static', 'standard', 'manual',
+                    'ct', 'nonce', 'wrap', null, null, 0, 'now', 'now')
+                """
+            )
+        conn.execute(
+            """
+            insert into vault_requests (
+                id, request_type, secret_name, requester, delivery, status,
+                message_id, created_at, decided_at, expires_at
+            ) values ('vrq_a', 'provision', 'openAiKey', null, '{}', 'pending', null, 'now', null, null)
+            """
+        )
+        conn.execute(
+            """
+            insert into vault_requests (
+                id, request_type, secret_name, requester, delivery, status,
+                message_id, created_at, decided_at, expires_at
+            ) values ('vrq_exact_duplicate', 'provision', 'openAiKey', null, '{}', 'pending', null, 'now', null, null)
+            """
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """
+                insert into vault_requests (
+                    id, request_type, secret_name, requester, delivery, status,
+                    message_id, created_at, decided_at, expires_at
+                ) values ('vrq_b', 'provision', 'OpenAIKey', null, '{}', 'pending', null, 'now', null, null)
+                """
+            )
 
 
 def test_scope_agent_backfill_migrates_explicit_agent_routes(tmp_path: Path) -> None:

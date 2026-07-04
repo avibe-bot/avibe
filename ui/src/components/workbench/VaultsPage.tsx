@@ -6,63 +6,20 @@ import { CapabilityTabs } from './CapabilityTabs';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
 import { cn } from '../../lib/utils';
 import { partitionTags } from '../../lib/vaultTags';
-import { useApi, type VaultAuditEvent, type VaultGrant, type VaultRequest, type VaultRequestSpec, type VaultSecret } from '../../context/ApiContext';
+import { useApi, type VaultAuditEvent, type VaultGrant, type VaultRequest, type VaultSecret } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
-import { VaultApprovalCard, type ApprovalOutcome } from '../ui/vault-approval-card';
-import { VaultSecretForm } from '../ui/vault-secret-form';
+import type { ApprovalOutcome } from '../ui/vault-approval-card';
 import { SigningAddressList } from '../ui/signing-address-list';
+import { VaultApprovalDialog } from '../ui/vault-approval-dialog';
+import { VaultSecretDialog } from '../ui/vault-secret-dialog';
 
 const PENDING_REQUEST_POLL_INTERVAL_MS = 5000;
 const PENDING_REQUEST_EXPIRY_GRACE_MS = 100;
 const MAX_BROWSER_TIMEOUT_MS = 2_147_483_647;
 
 const messageFromError = (err: unknown) => (err instanceof Error ? err.message : String(err));
-
-const AddSecretDialog: React.FC<{
-  onClose: () => void;
-  onCancel?: () => void;
-  cancelLabel?: string;
-  onCreated: (name: string, reason?: 'created' | 'already_exists') => void;
-  request?: VaultRequest | null;
-}> = ({ onClose, onCancel, cancelLabel, onCreated, request }) => {
-  const { t } = useTranslation();
-  const requestCard = (request?.card ?? null) as { default_protection?: unknown; spec?: VaultRequestSpec } | null;
-  const requestSpec = (requestCard?.spec ?? null) as VaultRequestSpec | null;
-  const defaultProtection =
-    requestCard?.default_protection === 'standard' || requestCard?.default_protection === 'protected'
-      ? requestCard.default_protection
-      : undefined;
-  const fixedName = request?.secret_name ?? undefined;
-
-  return (
-    <Dialog
-      open
-      onOpenChange={(o) => {
-        if (!o) onClose();
-      }}
-    >
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{request ? t('vaults.request.title') : t('vaults.dialog.title')}</DialogTitle>
-        </DialogHeader>
-        <VaultSecretForm
-          fixedName={fixedName}
-          provisionRequestId={request?.id ?? null}
-          requestSpec={requestSpec}
-          defaultProtection={defaultProtection}
-          onCancel={onCancel ?? onClose}
-          cancelLabel={cancelLabel}
-          onCreated={onCreated}
-          treatExistingAsFulfilled={Boolean(request)}
-        />
-      </DialogContent>
-    </Dialog>
-  );
-};
-
 /** All allowed proxy-fetch hosts on a secret (for the `proxy · <host> +N` badge). */
 const proxyHosts = (s: VaultSecret): string[] => {
   const hosts = (s.policy as { allowed_hosts?: string[] })?.allowed_hosts;
@@ -445,25 +402,14 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
           }}
         />
       ))}
-      <Dialog
-        open={reviewing != null}
-        onOpenChange={(o) => {
-          if (!o) setReviewing(null);
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t('vaults.requests.reviewTitle')}</DialogTitle>
-          </DialogHeader>
-          {reviewing != null ? (
-            <VaultApprovalCard key={reviewing.id} request={reviewing} onResolved={handleOutcome} onCancel={() => setReviewing(null)} />
-          ) : null}
-        </DialogContent>
-      </Dialog>
+      <VaultApprovalDialog request={reviewing} onResolved={handleOutcome} onClose={() => setReviewing(null)} />
       {provisioning != null ? (
-        <AddSecretDialog
+        <VaultSecretDialog
+          open
+          onOpenChange={(o) => {
+            if (!o) setProvisioning(null);
+          }}
           request={provisioning}
-          onClose={() => setProvisioning(null)}
           onCancel={() => {
             void denyProvisionRequest(provisioning);
           }}
@@ -795,17 +741,18 @@ export const VaultsPage: React.FC = () => {
           )}
         </div>
       )}
-      {adding && (
-        <AddSecretDialog
-          onClose={() => setAdding(false)}
-          onCreated={(name, reason) => {
-            if (reason === 'already_exists') return;
-            setAdding(false);
-            showToast(t('vaults.created', { name }), 'success');
-            refresh();
-          }}
-        />
-      )}
+      <VaultSecretDialog
+        open={adding}
+        onOpenChange={(o) => {
+          if (!o) setAdding(false);
+        }}
+        onCreated={(name, reason) => {
+          if (reason === 'already_exists') return;
+          setAdding(false);
+          showToast(t('vaults.created', { name }), 'success');
+          refresh();
+        }}
+      />
     </div>
   );
 };

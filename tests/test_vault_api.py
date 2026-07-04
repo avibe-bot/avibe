@@ -358,6 +358,29 @@ def test_create_secret_with_fulfilled_provision_request_returns_secret_exists(mo
     assert exc.value.status == 409
 
 
+def test_create_secret_exact_duplicate_still_returns_secret_exists(monkeypatch):
+    from unittest.mock import Mock
+
+    seal = Mock(return_value=_sealed())
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    api.create_vault_secret(
+        {
+            "name": "openAiKey",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        }
+    )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_secret(
+            {
+                "name": "openAiKey",
+                "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc2", "ct": "ct2"},
+            }
+        )
+    assert exc.value.code == "secret_exists"
+    assert exc.value.status == 409
+
+
 def test_secret_exists_response_commits_stale_pending_provision_cleanup(monkeypatch):
     seal = Mock(side_effect=[_sealed("first"), _sealed("second")])
     monkeypatch.setattr(api, "avault_seal_blind_box", seal)
@@ -424,13 +447,89 @@ def test_duplicate_name_conflict(monkeypatch):
     assert exc.value.status == 409
 
 
+def test_mixed_case_name_is_preserved_and_case_duplicate_rejected(monkeypatch):
+    from unittest.mock import Mock
+
+    seal = Mock(return_value=_sealed())
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    created = api.create_vault_secret(
+        {
+            "name": "openAiKey",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        }
+    )
+    assert created["secret"]["name"] == "openAiKey"
+    seal.assert_called_once_with(
+        "openAiKey",
+        {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+    )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_secret(
+            {
+                "name": "OpenAIKey",
+                "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc2", "ct": "ct2"},
+            }
+        )
+    assert exc.value.code == "secret_name_case_conflict"
+    assert exc.value.status == 409
+    assert "openAiKey" in str(exc.value)
+
+
+def test_case_conflict_is_rejected_before_standard_seal(monkeypatch):
+    from unittest.mock import Mock
+
+    seal = Mock(side_effect=api.AvaultError("seal failed"))
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    with api._vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="openAiKey", sealed=_sealed("existing"))
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_secret(
+            {
+                "name": "OpenAIKey",
+                "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            }
+        )
+
+    assert exc.value.code == "secret_name_case_conflict"
+    assert exc.value.status == 409
+    seal.assert_not_called()
+
+
+def test_create_secret_rejects_case_only_pending_provision(monkeypatch):
+    from unittest.mock import Mock
+
+    seal = Mock(return_value=_sealed())
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    with api._vault_engine().begin() as conn:
+        vault_service.create_provision_request(conn, "openAiKey")
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_secret(
+            {
+                "name": "OpenAIKey",
+                "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            }
+        )
+
+    assert exc.value.code == "secret_name_case_conflict"
+    assert exc.value.status == 409
+    assert "openAiKey" in str(exc.value)
+
+
 def test_invalid_name_rejected_before_avault(monkeypatch):
     from unittest.mock import Mock
 
     seal = Mock(return_value=_sealed())
     monkeypatch.setattr(api, "avault_seal_blind_box", seal)
     with pytest.raises(api.VaultApiError) as exc:
-        api.create_vault_secret({"name": "lower", "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"}})
+        api.create_vault_secret(
+            {
+                "name": "bad-name",
+                "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            }
+        )
     assert exc.value.code == "invalid_name"
     seal.assert_not_called()
 

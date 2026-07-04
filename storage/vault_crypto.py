@@ -2,7 +2,7 @@
 
 P1 moved **all value cryptography out of Python** into the ``avault`` custody core
 (design: avibe ``docs/plans/avault-custody-core.md`` §18). This module is now
-intentionally tiny: it owns only the ENV-style secret-name rule and the
+intentionally tiny: it owns only the shell-style secret-name rule and the
 :class:`Sealed` envelope shape that the ``vault_secrets`` table stores and that the
 avault client (``vibe/api.py``) produces (``avault seal``) and hands back to avault
 to deliver. No keys, no plaintext, and no cryptography ever live here anymore — the
@@ -21,7 +21,8 @@ from dataclasses import dataclass
 # The wrap scheme avault stamps into wrap_meta. Kept here only as a documented
 # reference for the stored envelope; nothing in Python reads or enforces it.
 WRAP_SCHEME = "machine-aesgcm-v1"
-_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+SECRET_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
+_NAME_RE = re.compile(SECRET_NAME_PATTERN)
 
 
 class VaultCryptoError(Exception):
@@ -43,5 +44,5 @@ class Sealed:
 
 
 def is_valid_secret_name(name: str | None) -> bool:
-    """ENV-style names only: an uppercase letter then uppercase/digit/underscore."""
+    """Case-preserving shell identifiers only."""
     return bool(name and _NAME_RE.match(name))

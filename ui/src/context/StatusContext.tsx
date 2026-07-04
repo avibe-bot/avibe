@@ -58,6 +58,12 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       const res = await fetch('/status');
       if (res.ok) {
         const data = await res.json();
+        // Set a fresh object every poll ON PURPOSE. Consumers (notably Dashboard)
+        // recompute "started … ago" / "last updated … ago" relative-time labels
+        // from Date.now() during render and have no timer of their own, so they
+        // rely on this per-poll re-render to keep those labels ticking. Do NOT
+        // content-dedup this (reusing the reference for byte-identical polls
+        // freezes those labels until an unrelated status change).
         setStatus(data);
         setHealth(true);
         return data;
@@ -193,6 +199,11 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     };
   }, [refreshStatus]);
 
+  // Intentionally NOT memoized (unlike the other providers in this PR). ``status``
+  // is a fresh object every poll by design (see refreshStatus), so consumers
+  // re-render on the 30s cadence to tick their relative-time labels — a useMemo
+  // here would be a no-op, and reference-stabilizing status to make it meaningful
+  // would freeze those labels. The re-render is load-bearing, not waste.
   return (
     <StatusContext.Provider value={{ status, health, refreshStatus, control }}>
       {children}

@@ -18,7 +18,7 @@ const NONCE_BYTES = 12;
 const ARGON2_VERSION = 19;
 const PASSKEY_PRF_SALT_BYTES = 32;
 const PASSKEY_HKDF_INFO = 'avault:protected-vmk:kek-passkey:v1';
-const SECRET_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
+const SECRET_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const DEFAULT_SCRYPT = {
   n: 2 ** 15,
   r: 8,
@@ -951,7 +951,7 @@ export function importSigningKey(privateKey: BytesLike | string): SigningKeyMate
 
 function validateSecretName(name: string): string {
   if (typeof name !== 'string' || !SECRET_NAME_PATTERN.test(name)) {
-    throw new Error('vault secret name must match ^[A-Z][A-Z0-9_]*$');
+    throw new Error('vault secret name must match ^[A-Za-z_][A-Za-z0-9_]*$');
   }
   return name;
 }

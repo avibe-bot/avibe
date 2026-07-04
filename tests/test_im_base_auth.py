@@ -84,6 +84,11 @@ def test_parse_text_command():
     assert BaseIMClient.parse_text_command("/set_cwd /tmp") == ("set_cwd", "/tmp")
     assert BaseIMClient.parse_text_command("bind code") is None
     assert BaseIMClient.parse_text_command("bind code", allow_plain_bind=True) == ("bind", "code")
+    assert BaseIMClient.parse_text_command("bind vr-aB3X9kLmN0", allow_plain_bind=True) == (
+        "bind",
+        "vr-aB3X9kLmN0",
+    )
+    assert BaseIMClient.parse_text_command("/bind vr-aB3X9kLmN0") == ("bind", "vr-aB3X9kLmN0")
     assert BaseIMClient.parse_text_command("hello") is None
     assert BaseIMClient.parse_text_command("/") is None
 

@@ -811,6 +811,94 @@ def test_managed_watch_service_fuses_reconcile_after_store_read_error(tmp_path: 
     assert service._active_tasks == {}
 
 
+def test_managed_watch_service_idle_tick_does_not_write_runtime_state(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("core.watches.WATCH_RECONCILE_INTERVAL_SECONDS", 0.01)
+
+    class IdleStore(ManagedWatchStore):
+        def __init__(self, path: Path):
+            super().__init__(path)
+            self.reloads = 0
+            self.lists = 0
+
+        def maybe_reload(self) -> bool:
+            self.reloads += 1
+            return False
+
+        def list_watches(self):
+            self.lists += 1
+            return super().list_watches()
+
+    class CountingRuntimeStore(WatchRuntimeStateStore):
+        def __init__(self) -> None:
+            self.writes = 0
+
+        def write(self, payload: dict) -> None:
+            self.writes += 1
+
+        def load(self) -> dict:
+            return {"watches": {}}
+
+    store = IdleStore(tmp_path / "watches.json")
+    runtime_store = CountingRuntimeStore()
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=runtime_store,
+    )
+    service._running = True
+    service._reconcile_dirty = False
+    service._runtime_state_dirty = False
+
+    async def _run() -> None:
+        task = asyncio.create_task(service._watch_store())
+        await asyncio.sleep(0.05)
+        service._running = False
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(_run())
+
+    assert store.reloads > 0
+    assert store.lists == 0
+    assert runtime_store.writes == 0
+
+
+def test_managed_watch_service_start_clears_stale_runtime_state(tmp_path: Path) -> None:
+    store = ManagedWatchStore(tmp_path / "watches.json")
+    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
+    runtime_store.write(
+        {
+            "watches": {
+                "stale-watch": {
+                    "running": True,
+                    "pid": 1234,
+                    "started_at": "2026-05-15T00:00:00+00:00",
+                    "updated_at": "2026-05-15T00:00:01+00:00",
+                }
+            }
+        }
+    )
+    service = ManagedWatchService(
+        controller=SimpleNamespace(),
+        store=store,
+        request_store=TaskExecutionStore(tmp_path / "task_requests"),
+        runtime_store=runtime_store,
+    )
+
+    async def _run() -> None:
+        service.start()
+        try:
+            assert runtime_store.load()["watches"] == {}
+        finally:
+            await service.stop()
+
+    asyncio.run(_run())
+
+
 def test_managed_watch_service_retries_transient_reconcile_errors(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("core.watches.WATCH_RECONCILE_INTERVAL_SECONDS", 0.01)
 

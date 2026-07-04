@@ -10,7 +10,7 @@ def _names(text: str) -> list[str]:
 
 
 def test_extracts_marker():
-    assert _names("I need $<OPENAI_API_KEY> to continue.") == ["OPENAI_API_KEY"]
+    assert _names("I need $<openAiKey> to continue.") == ["openAiKey"]
 
 
 def test_marker_stays_in_text_for_frontend():
@@ -33,8 +33,8 @@ def test_ignored_inside_fenced_code():
 
 
 def test_invalid_names_not_matched():
-    # lowercase, leading digit, dashes are not ENV-style names
-    assert _names("$<lower> $<1LEAD> $<has-dash>") == []
+    # Leading digits and dashes are not shell-style secret names.
+    assert _names("$<lower> $<1LEAD> $<has-dash>") == ["lower"]
 
 
 def test_none_when_absent():

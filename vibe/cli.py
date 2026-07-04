@@ -4952,7 +4952,7 @@ def cmd_vault_access(args):
     name = getattr(args, "name", "")
     try:
         if not vault_crypto.is_valid_secret_name(name):
-            raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name", help_command=help_command)
+            raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name", help_command=help_command)
         engine = _open_vault_engine()
         with engine.begin() as conn:
             vault_service.get_secret_meta(conn, name)
@@ -5978,7 +5978,7 @@ def cmd_vault_request(args):
     try:
         name = args.name
         if not vault_crypto.is_valid_secret_name(name):
-            raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name", help_command=help_command)
+            raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name", help_command=help_command)
         spec = _load_vault_request_spec(args, help_command=help_command)
         engine = _open_vault_engine()
         with engine.begin() as conn:
@@ -6035,6 +6035,9 @@ def cmd_vault_request(args):
     except TaskCliError as exc:
         _print_task_error(exc)
         return 1
+    except vault_service.SecretNameCaseConflictError as exc:
+        _print_task_error(TaskCliError(str(exc), code="secret_name_case_conflict", help_command=help_command))
+        return 1
     except vault_service.VaultServiceError as exc:
         _print_task_error(TaskCliError(str(exc), code="invalid_spec", help_command=help_command))
         return 1
@@ -6050,7 +6053,7 @@ def cmd_vault_sign(args):
     name = getattr(args, "name", "")
     try:
         if not vault_crypto.is_valid_secret_name(name):
-            raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name", help_command=help_command)
+            raise TaskCliError(f"invalid secret name: {name!r} (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name", help_command=help_command)
         digest = api._sign_digest_from_payload(getattr(args, "digest", None))
         scheme = getattr(args, "scheme", None) or "ecdsa-secp256k1-recoverable"
         engine = _open_vault_engine()
@@ -7858,6 +7861,11 @@ def _start_service_after_repair(target: str, success_message: str, failure_messa
     )
 
 
+def _runtime_home_exists_for_repair() -> bool:
+    runtime_home = paths.get_vibe_remote_dir()
+    return runtime_home.is_dir()
+
+
 def _repair_home_migration(*, dry_run: bool = False) -> dict:
     target = "home-migration"
     if os.environ.get(paths.AVIBE_HOME_ENV):
@@ -7937,6 +7945,8 @@ def _repair_duplicate_service_processes(*, dry_run: bool = False) -> dict:
     target = "duplicate-service-processes"
     if runtime.service_instance_lock_attached_to_process():
         return _doctor_repair_result(target, "failed", "Run this repair from the CLI, not from inside the service process.")
+    if not _runtime_home_exists_for_repair():
+        return _doctor_repair_result(target, "skipped", "No runtime home exists yet; no service process state needs repair.")
 
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
     extra_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
@@ -7982,6 +7992,8 @@ def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
     target = "stale-install-runtime"
     if runtime.service_instance_lock_attached_to_process():
         return _doctor_repair_result(target, "failed", "Run this repair from the CLI, not from inside the service process.")
+    if not _runtime_home_exists_for_repair():
+        return _doctor_repair_result(target, "skipped", "No runtime home exists yet; no service process state needs repair.")
 
     current_family = _current_cli_install_family()
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
@@ -8086,7 +8098,7 @@ def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False) -> dict
         "dry_run": dry_run,
         "results": results,
     }
-    if not dry_run:
+    if not dry_run and any(result["status"] != "skipped" for result in results):
         payload["doctor"] = _doctor()
     return payload
 

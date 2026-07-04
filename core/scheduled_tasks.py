@@ -761,6 +761,7 @@ class TaskExecutionStore:
         self.processing_dir = self.root / "processing"
         self.completed_dir = self.root / "completed"
         self._ensure_dirs()
+        self._signature = self._state_signature()
 
     def _ensure_dirs(self) -> None:
         if self._sqlite is not None:
@@ -768,6 +769,24 @@ class TaskExecutionStore:
         self.pending_dir.mkdir(parents=True, exist_ok=True)
         self.processing_dir.mkdir(parents=True, exist_ok=True)
         self.completed_dir.mkdir(parents=True, exist_ok=True)
+
+    def _state_signature(self) -> tuple[Optional[tuple[int, int, int]], ...] | None:
+        if self._sqlite is not None:
+            return None
+        return (
+            _path_signature(self.pending_dir),
+            _path_signature(self.processing_dir),
+            _path_signature(self.completed_dir),
+        )
+
+    def maybe_reload(self) -> bool:
+        if self._sqlite is not None:
+            return self._sqlite.maybe_reload()
+        signature = self._state_signature()
+        if signature == self._signature:
+            return False
+        self._signature = signature
+        return True
 
     def _request_path(self, request_id: str, *, state: str) -> Path:
         directory = {
@@ -1431,6 +1450,7 @@ class ScheduledTaskService:
         # Cache of session_id -> canonical lock key (resolution hits SQLite).
         self._session_lock_cache: Dict[str, str] = {}
         self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
+        self._drain_dirty = True
         self.request_store.recover_processing()
 
     def validate_platform(self, platform: str) -> None:
@@ -1532,10 +1552,19 @@ class ScheduledTaskService:
             if not self._owns_service_instance():
                 return
             try:
-                if self.store.maybe_reload():
+                store_changed = self.store.maybe_reload()
+                request_store_changed = self.request_store.maybe_reload()
+                should_drain = store_changed or request_store_changed or self._drain_dirty
+                if store_changed:
                     self.reconcile_jobs()
-                await self._drain_requests()
-                await self._drain_callbacks()
+                if should_drain:
+                    self._drain_dirty = False
+                    try:
+                        await self._drain_requests()
+                        await self._drain_callbacks()
+                    except Exception:
+                        self._drain_dirty = True
+                        raise
                 await asyncio.sleep(2)
             except asyncio.CancelledError:
                 raise
@@ -1664,11 +1693,14 @@ class ScheduledTaskService:
             except Exception as exc:
                 logger.error("Agent run callback failed for %s: %s", run_id, exc, exc_info=True)
                 self.request_store.update_callback_status(run_id, status="failed", error=str(exc))
+                self._drain_dirty = True
                 continue
             if callback_run is None:
                 self.request_store.update_callback_status(run_id, status="skipped")
+                self._drain_dirty = True
                 continue
             self.request_store.update_callback_status(run_id, status="sent", callback_run_id=callback_run.id)
+            self._drain_dirty = True
 
     def _enqueue_callback_run(self, run: dict[str, Any]) -> Optional[TaskExecutionRequest]:
         callback_session_id = str(run.get("callback_session_id") or "").strip()
@@ -1795,6 +1827,7 @@ class ScheduledTaskService:
         self._inflight_executions.pop(request_id, None)
         if lock_key is not None:
             self._inflight_sessions.discard(lock_key)
+        self._drain_dirty = True
         # ``_execute_claimed_request`` already records failures and requeues on
         # cancellation; this only surfaces unexpected crashes in the wrapper.
         if task.cancelled():
