@@ -2270,6 +2270,7 @@
     },
     "dialog": {
       "title": "添加密钥",
+      "subtitle": "加密存储;值不会进入聊天或模型。",
       "name": "名称",
       "value": "值",
       "valuePlaceholder": "粘贴密钥值",

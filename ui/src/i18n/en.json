@@ -2271,6 +2271,7 @@
     },
     "dialog": {
       "title": "Add a secret",
+      "subtitle": "Stored encrypted; the value never reaches the chat or the model.",
       "name": "Name",
       "value": "Value",
       "valuePlaceholder": "Paste the secret value",
