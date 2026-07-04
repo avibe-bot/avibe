@@ -132,9 +132,11 @@ def test_sqlite_background_store_publishes_run_updates(tmp_path):
 
 
 def test_sqlite_background_store_bridges_run_updates_without_local_subscribers(tmp_path, monkeypatch):
+    from core import inbox_events
     from storage.background import SQLiteBackgroundTaskStore
 
     bridged = []
+    monkeypatch.setattr(inbox_events, "_CONTROLLER_PROCESS", False)
     monkeypatch.setattr(
         "vibe.internal_client.publish_event_sync",
         lambda event_type, data, **kwargs: bridged.append((event_type, data, kwargs)),
@@ -167,3 +169,31 @@ def test_sqlite_background_store_bridges_run_updates_without_local_subscribers(t
             {"timeout": 1.5},
         )
     ]
+
+
+def test_sqlite_background_store_does_not_bridge_controller_self_updates(tmp_path, monkeypatch):
+    from core import inbox_events
+    from storage.background import SQLiteBackgroundTaskStore
+
+    bridged = []
+    monkeypatch.setattr(inbox_events, "_CONTROLLER_PROCESS", True)
+    monkeypatch.setattr(
+        "vibe.internal_client.publish_event_sync",
+        lambda event_type, data, **kwargs: bridged.append((event_type, data, kwargs)),
+    )
+    store = SQLiteBackgroundTaskStore(tmp_path / "state.sqlite")
+    try:
+        store.enqueue_run(
+            {
+                "id": "run_evt_controller",
+                "request_type": "agent_run",
+                "status": "queued",
+                "message": "hello",
+                "created_at": "2026-07-04T00:00:00+00:00",
+                "updated_at": "2026-07-04T00:00:00+00:00",
+            }
+        )
+    finally:
+        store.close()
+
+    assert bridged == []

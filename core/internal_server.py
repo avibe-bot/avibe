@@ -71,6 +71,9 @@ def create_app(controller: "Controller") -> FastAPI:
     Factored out so tests can mount the same routes against a fake
     controller without spinning up uvicorn.
     """
+    from core.inbox_events import mark_controller_process
+
+    mark_controller_process()
 
     app = FastAPI(
         title="avibe internal dispatch",

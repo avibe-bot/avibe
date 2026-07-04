@@ -22,6 +22,16 @@ logger = logging.getLogger(__name__)
 RUNS_UPDATED_EVENT = "runs.updated"
 VAULTS_UPDATED_EVENT = "vaults.updated"
 WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT = "workbench.events.bridge.status"
+_CONTROLLER_PROCESS = False
+
+
+def mark_controller_process() -> None:
+    global _CONTROLLER_PROCESS
+    _CONTROLLER_PROCESS = True
+
+
+def is_controller_process() -> bool:
+    return _CONTROLLER_PROCESS
 
 
 class InboxEventBus:

@@ -110,7 +110,7 @@ def _publish_run_rows_updated(rows: list[Any]) -> None:
     if not rows:
         return
     try:
-        from core.inbox_events import RUNS_UPDATED_EVENT, bus, run_updated_payload
+        from core.inbox_events import RUNS_UPDATED_EVENT, bus, is_controller_process, run_updated_payload
     except Exception:
         logger.debug("failed to import run event publisher", exc_info=True)
         return
@@ -132,7 +132,7 @@ def _publish_run_rows_updated(rows: list[Any]) -> None:
                 cancel_requested=bool(row.get("cancel_requested")),
             )
             bus.publish(RUNS_UPDATED_EVENT, payload)
-            if bus.subscriber_count() == 0:
+            if bus.subscriber_count() == 0 and not is_controller_process():
                 try:
                     from vibe import internal_client
 
