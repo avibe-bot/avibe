@@ -2193,9 +2193,9 @@ const Transcript: React.FC<TranscriptProps> = ({
         </div>
       );
     return (
-      <div className="flex min-h-0 flex-1 flex-col px-4 py-5 md:px-8">
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-5 [overflow-anchor:none] md:px-8">
         {emptyBody}
-        {footer ? <div className="mx-auto mt-3 w-full max-w-[1080px]">{footer}</div> : null}
+        {footer ? <div className="mx-auto mt-3 w-full max-w-[1080px] shrink-0">{footer}</div> : null}
       </div>
     );
   }

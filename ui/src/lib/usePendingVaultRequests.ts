@@ -17,6 +17,11 @@ export function usePendingVaultRequests(sessionId: string): { requests: VaultReq
   // Monotonic load token: a load started for session A must not install its result after a
   // newer load (e.g. session B, or a refresh) has begun — else A's requests land in B's chat.
   const loadSeq = useRef(0);
+  // Latest requested session, updated synchronously during render. Effects (including the load
+  // effect that bumps loadSeq) run only after commit, so a session-A load can resolve after we've
+  // navigated to B but before B's load effect fires; comparing against this ref rejects it.
+  const currentSessionRef = useRef(sessionId);
+  currentSessionRef.current = sessionId;
 
   const load = useCallback(async () => {
     if (!sessionId) {
@@ -25,18 +30,21 @@ export function usePendingVaultRequests(sessionId: string): { requests: VaultReq
       return;
     }
     const seq = (loadSeq.current += 1);
+    const forSession = sessionId;
     try {
       // Server-side session scoping (before the global limit); suppress errors so an older
       // backend without the route doesn't toast on every refresh.
-      const res = await api.getVaultRequests({ status: 'pending', session: sessionId }, { handleError: false });
-      if (seq !== loadSeq.current) return; // superseded by a newer load
+      const res = await api.getVaultRequests({ status: 'pending', session: forSession }, { handleError: false });
+      // Reject if a newer load started (same session, overlapping refresh) OR the session
+      // changed under us before this resolved.
+      if (seq !== loadSeq.current || forSession !== currentSessionRef.current) return;
       const mine = (res.requests ?? []).filter((r) => {
         const type = (r.card as { request_type?: string } | null)?.request_type ?? r.request_type;
         return type === 'access' || type === 'sign' || type === 'provision';
       });
       setRequests(mine);
     } catch {
-      if (seq === loadSeq.current) setRequests([]);
+      if (seq === loadSeq.current && forSession === currentSessionRef.current) setRequests([]);
     }
   }, [api, sessionId]);
 

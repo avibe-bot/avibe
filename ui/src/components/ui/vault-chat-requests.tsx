@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { KeyRound } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import { cn } from '@/lib/utils';
 import type { VaultRequest } from '@/context/ApiContext';
-import { Button } from './button';
+import { buttonVariants } from './button';
 import { VaultApprovalDialog } from './vault-approval-dialog';
 import { VaultRequestCard } from './vault-request-card';
 
@@ -87,6 +88,13 @@ export const VaultChatRequests: React.FC<{
 export const VaultApprovalFloat: React.FC<{ approvals: VaultRequest[]; onResolved: () => void }> = ({ approvals, onResolved }) => {
   const { t } = useTranslation();
   const [reviewing, setReviewing] = useState<VaultRequest | null>(null);
+
+  // If the open request expires or is resolved elsewhere while other approvals remain, close the
+  // dialog rather than leaving it on a no-longer-pending request (a stale approve/deny would 4xx).
+  useEffect(() => {
+    if (reviewing && !approvals.some((approval) => approval.id === reviewing.id)) setReviewing(null);
+  }, [approvals, reviewing]);
+
   if (approvals.length === 0) return null;
   const oldest = approvals[approvals.length - 1];
   return (
@@ -102,9 +110,10 @@ export const VaultApprovalFloat: React.FC<{ approvals: VaultRequest[]; onResolve
         <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">
           {t('vaults.chat.floatApprovals', { count: approvals.length })}
         </span>
-        <Button size="sm" className="pointer-events-none shrink-0" tabIndex={-1}>
+        {/* Decorative pill — the whole bar is the button, so this must not be interactive. */}
+        <span className={cn(buttonVariants({ size: 'sm' }), 'pointer-events-none shrink-0')} aria-hidden="true">
           {t('vaults.requests.review')}
-        </Button>
+        </span>
       </button>
       <VaultApprovalDialog
         request={reviewing}
