@@ -995,23 +995,55 @@ def resolve_request_callback(row: dict[str, Any]) -> PendingRequestCallback | No
     return PendingRequestCallback(request_id=request_id, session_id=session_id, message=message)
 
 
+def _request_covering_grant_payloads(
+    conn: Connection,
+    row: dict[str, Any],
+    *,
+    cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
+) -> list[dict[str, Any]]:
+    request_members = set(_request_member_names(row))
+    session_id = _request_session_id(row)
+    if not request_members or not session_id:
+        return []
+    try:
+        purpose = _request_grant_option(row).purpose
+    except InvalidRequestError:
+        return []
+
+    expire_grants(conn, cache=cache)
+    rows = conn.execute(
+        select(vault_grants)
+        .where(
+            vault_grants.c.status.in_(ACTIVE_GRANT_STATES),
+            vault_grants.c.session_id == session_id,
+            vault_grants.c.purpose == purpose,
+        )
+        .order_by(vault_grants.c.created_at.desc(), vault_grants.c.id.desc())
+    ).mappings()
+    grants: list[dict[str, Any]] = []
+    for grant_row in rows:
+        grant = dict(grant_row)
+        grant_members = {str(name) for name in (_loads(grant.get("member_snapshot")) or []) if str(name)}
+        if request_members.issubset(grant_members):
+            grants.append(_grant_payload(conn, grant, cache=cache))
+    return grants
+
+
 def request_callback_ready(conn: Connection, row: dict[str, Any]) -> bool:
     """Whether a resolved request's callback may be delivered yet (vs. deferred to a later sweep).
 
-    An approved *access* request is only usable once its grant is delivery-ready: for a protected
-    secret the DEKs are relayed to the resident agent AFTER approval, so resuming the agent before
-    then would hand it a grant whose ``delivery_ready`` is still false. Defer until the grant is
-    ready. Every other terminal state (provision/sign/deny/expire, and standard grants which are
-    ready on approval) is deliverable immediately; a missing grant (revoked, or relay-failed →
-    request restored to pending) does not block — a restored request is no longer ``approved`` and
-    is skipped by :func:`resolve_request_callback` anyway.
+    An approved *access* request is only usable once a covering grant is delivery-ready: for a
+    protected secret the DEKs are relayed to the resident agent AFTER approval, so resuming the
+    agent before then would hand it a grant whose ``delivery_ready`` is still false. Sibling access
+    requests approved by the same grant do not own ``vault_grants.request_id``, so readiness follows
+    the active grant for the request's session/purpose whose member snapshot covers the request's
+    members. Every other terminal state (provision/sign/deny/expire, and standard grants which are
+    ready on approval) is deliverable immediately; no active covering grant does not block forever.
     """
     if str(row.get("request_type") or "") == "access" and str(row.get("status") or "") == "approved":
-        request_id = str(row.get("id") or "").strip()
-        if request_id:
-            grant = get_grant_created_by_request(conn, request_id)
-            if grant is not None and not grant.get("delivery_ready"):
-                return False
+        grants = _request_covering_grant_payloads(conn, row)
+        if grants and not any(grant.get("delivery_ready") for grant in grants):
+            return False
     return True
 
 
@@ -1025,14 +1057,16 @@ def expire_overdue_requests(conn: Connection) -> None:
     _expire_pending_requests(conn)
 
 
-def list_pending_request_callbacks(conn: Connection, *, limit: int = 50) -> list[dict[str, Any]]:
+def list_pending_request_callbacks(conn: Connection, *, limit: int | None = None) -> list[dict[str, Any]]:
     """Terminal requests owed an auto-resume callback (``callback_status='pending'``)."""
-    rows = conn.execute(
+    query = (
         select(vault_requests)
         .where(vault_requests.c.callback_status == "pending")
         .order_by(vault_requests.c.decided_at, vault_requests.c.id)
-        .limit(limit)
-    ).mappings()
+    )
+    if limit is not None:
+        query = query.limit(limit)
+    rows = conn.execute(query).mappings()
     return [dict(row) for row in rows]
 
 
@@ -2676,7 +2710,7 @@ def restore_access_request_after_failed_grant(
         result = conn.execute(
             vault_requests.update()
             .where(vault_requests.c.id == row["id"], vault_requests.c.status == "approved")
-            .values(status="pending", decided_at=None)
+            .values(status="pending", decided_at=None, callback_status=None)
         )
         if result.rowcount != 1:
             continue
@@ -2795,7 +2829,7 @@ def create_grant(
         conn.execute(
             vault_requests.update()
             .where(vault_requests.c.id == request_id)
-            .values(status="pending", decided_at=None)
+            .values(status="pending", decided_at=None, callback_status=None)
         )
         raise
     audit(

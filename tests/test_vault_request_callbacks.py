@@ -53,6 +53,18 @@ def _grant_from_request(conn, request: dict) -> dict:
     )
 
 
+def _grant_from_request_with_cache_ready(conn, request: dict, *, cache_ready: bool) -> dict:
+    option = request["card"]["grant_options"][0]
+    return vs.create_grant(
+        conn,
+        member_names=option["member_snapshot"],
+        source_selector=option["source_selector"],
+        purpose=option["purpose"],
+        request_id=request["id"],
+        cache_ready=cache_ready,
+    )
+
+
 # --- terminal transitions arm the callback --------------------------------------------------
 
 
@@ -135,6 +147,17 @@ def test_list_and_mark_are_exclusive(vault):
         assert _callback_status(conn, req["id"]) == "sent"
 
 
+def test_list_pending_request_callbacks_returns_all_pending_rows(vault):
+    with vault.begin() as conn:
+        for index in range(55):
+            req = vs.create_provision_request(conn, f"PAGE_KEY_{index}", requester={"session_id": f"ses_{index}"})
+            vs.fulfill_pending_provision_requests_for_secret(conn, f"PAGE_KEY_{index}")
+            assert _callback_status(conn, req["id"]) == "pending"
+
+        assert len(vs.list_pending_request_callbacks(conn, limit=50)) == 50
+        assert len(vs.list_pending_request_callbacks(conn)) == 55
+
+
 def test_reresolve_does_not_rearm(vault):
     with vault.begin() as conn:
         vs.create_secret(conn, name="R_KEY", sealed=_sealed(), protection="protected")
@@ -202,25 +225,108 @@ def test_expire_overdue_requests_arms_callback(vault):
         assert _callback_status(conn, req["id"]) == "pending"
 
 
-def test_request_callback_ready_defers_approved_access_until_grant_ready(vault, monkeypatch):
+def test_request_callback_ready_defers_approved_access_until_grant_ready(vault):
     with vault.begin() as conn:
         vs.create_secret(conn, name="GR_KEY", sealed=_sealed(), protection="protected")
         req = vs.create_access_request(conn, "GR_KEY", requester={"session_id": "ses_gr"})
-        conn.execute(vault_requests.update().where(vault_requests.c.id == req["id"]).values(status="approved"))
+        grant = _grant_from_request_with_cache_ready(conn, req, cache_ready=False)
         row = _row(conn, req["id"])
 
-        monkeypatch.setattr(vs, "get_grant_created_by_request", lambda c, rid: {"delivery_ready": False})
         assert vs.request_callback_ready(conn, row) is False  # protected relay in flight → defer
 
-        monkeypatch.setattr(vs, "get_grant_created_by_request", lambda c, rid: {"delivery_ready": True})
+        vs.mark_grant_agent_ready(conn, grant["id"])
+        row = _row(conn, req["id"])
         assert vs.request_callback_ready(conn, row) is True  # grant ready → deliver
 
-        monkeypatch.setattr(vs, "get_grant_created_by_request", lambda c, rid: None)
-        assert vs.request_callback_ready(conn, row) is True  # grant gone → don't block forever
+        req_without_grant = vs.create_access_request(conn, "GR_KEY", requester={"session_id": "ses_missing"})
+        conn.execute(vault_requests.update().where(vault_requests.c.id == req_without_grant["id"]).values(status="approved"))
+        assert vs.request_callback_ready(conn, _row(conn, req_without_grant["id"])) is True
 
     # Non-access or non-approved terminal states are always deliverable (no grant lookup).
     assert vs.request_callback_ready(None, {"request_type": "provision", "status": "fulfilled", "id": "x"}) is True
     assert vs.request_callback_ready(None, {"request_type": "access", "status": "denied", "id": "y"}) is True
+
+
+def test_request_callback_ready_defers_sibling_access_until_covering_grant_ready(vault):
+    with vault.begin() as conn:
+        vs.create_secret(conn, name="GR_A", sealed=_sealed("a"), protection="protected", tags=["deploy"])
+        vs.create_secret(conn, name="GR_B", sealed=_sealed("b"), protection="protected", tags=["deploy"])
+        primary = vs.create_access_request(
+            conn,
+            source_selector={"tags": ["deploy"]},
+            requester={"session_id": "ses_gr"},
+            delivery={"session_id": "ses_gr"},
+        )
+        sibling = vs.create_access_request(
+            conn,
+            "GR_A",
+            requester={"session_id": "ses_gr"},
+            delivery={"session_id": "ses_gr"},
+        )
+
+        grant = _grant_from_request_with_cache_ready(conn, primary, cache_ready=False)
+        sibling_row = _row(conn, sibling["id"])
+
+        assert sibling_row["status"] == "approved"
+        assert _callback_status(conn, sibling["id"]) == "pending"
+        assert vs.get_grant_created_by_request(conn, sibling["id"]) is None
+        assert vs.request_callback_ready(conn, sibling_row) is False
+
+        vs.mark_grant_agent_ready(conn, grant["id"])
+        assert vs.request_callback_ready(conn, _row(conn, sibling["id"])) is True
+
+
+def test_access_request_restore_clears_callback_status_for_retry(vault):
+    with vault.begin() as conn:
+        vs.create_secret(conn, name="RB_A", sealed=_sealed("a"), protection="protected", tags=["deploy"])
+        vs.create_secret(conn, name="RB_B", sealed=_sealed("b"), protection="protected", tags=["deploy"])
+        primary = vs.create_access_request(
+            conn,
+            source_selector={"tags": ["deploy"]},
+            requester={"session_id": "ses_rb"},
+            delivery={"session_id": "ses_rb"},
+        )
+        sibling = vs.create_access_request(
+            conn,
+            "RB_A",
+            requester={"session_id": "ses_rb"},
+            delivery={"session_id": "ses_rb"},
+        )
+        grant = _grant_from_request_with_cache_ready(conn, primary, cache_ready=False)
+
+        restored = vs.restore_access_request_after_failed_grant(
+            conn,
+            request_id=primary["id"],
+            member_names=grant["member_snapshot"],
+            session_id=grant["session_id"],
+        )
+
+        assert restored == 2
+        assert _row(conn, primary["id"])["status"] == "pending"
+        assert _row(conn, sibling["id"])["status"] == "pending"
+        assert _callback_status(conn, primary["id"]) is None
+        assert _callback_status(conn, sibling["id"]) is None
+
+
+def test_access_grant_create_rollback_clears_callback_status(vault):
+    with vault.begin() as conn:
+        vs.create_secret(conn, name="RB_CONFLICT", sealed=_sealed(), protection="protected")
+        first = vs.create_access_request(conn, "RB_CONFLICT", requester={"session_id": "ses_one"})
+        existing = _grant_from_request(conn, first)
+        second = vs.create_access_request(conn, "RB_CONFLICT", requester={"session_id": "ses_two"})
+
+        second["card"]["grant_options"][0]["grant_id"] = existing["id"]
+        delivery = json.loads(_row(conn, second["id"])["delivery"])
+        delivery["card"]["grant_options"][0]["grant_id"] = existing["id"]
+        conn.execute(vault_requests.update().where(vault_requests.c.id == second["id"]).values(delivery=json.dumps(delivery)))
+
+        with pytest.raises(vs.InvalidGrantError):
+            _grant_from_request(conn, second)
+
+        row = _row(conn, second["id"])
+        assert row["status"] == "pending"
+        assert row["decided_at"] is None
+        assert row["callback_status"] is None
 
 
 def test_sign_approved_callback_points_to_the_signature():
@@ -238,22 +344,28 @@ def test_sign_approved_callback_points_to_the_signature():
     assert "vrq_sig" in plan.message and "vault await" in plan.message
 
 
-def test_callback_enabled_followup_does_not_suggest_await():
+def test_callback_enabled_followup_does_not_suggest_await(monkeypatch):
     from types import SimpleNamespace
 
     from vibe import cli
 
     # Callback armed → must NOT suggest `vault await` (awaiting would double-resume).
     enabled = cli._vault_request_followup_message(
-        SimpleNamespace(no_callback=False, wait=None), "vrq_x", resolved_verb="approves or denies it"
+        SimpleNamespace(no_callback=False, wait=None, session_id="ses_x"), "vrq_x", resolved_verb="approves or denies it"
     )
     assert "await" not in enabled.lower()
     assert "--no-callback" in enabled  # points at the correct way to block synchronously
     # Opt-out path (no callback armed) DOES point at await.
     opted_out = cli._vault_request_followup_message(
-        SimpleNamespace(no_callback=True, wait=None), "vrq_x", resolved_verb="approves or denies it"
+        SimpleNamespace(no_callback=True, wait=None, session_id="ses_x"), "vrq_x", resolved_verb="approves or denies it"
     )
     assert "vault await" in opted_out
+
+    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+    no_session = cli._vault_request_followup_message(
+        SimpleNamespace(no_callback=False, wait=None, session_id=None), "vrq_x", resolved_verb="approves or denies it"
+    )
+    assert "vault await" in no_session
 
 
 def test_non_terminal_status_has_no_callback():

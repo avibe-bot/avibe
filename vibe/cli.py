@@ -6021,6 +6021,16 @@ def cmd_vault_request(args):
         if wait_seconds:
             waited = _wait_for_provision(req["id"], timeout=float(wait_seconds))
             if waited:
+                # The wait delivered a terminal outcome synchronously, so suppress the
+                # now-redundant async auto-resume callback for this request (best-effort — a
+                # race with the ~2s sweep risks at most one benign duplicate resume). A wait
+                # that TIMES OUT skips this and leaves the callback armed, so a later resolution
+                # still wakes the agent.
+                try:
+                    with _open_vault_engine().begin() as conn:
+                        vault_service.mark_request_callback(conn, str(req["id"]), status="skipped")
+                except Exception:
+                    pass
                 if waited.get("status") == "denied":
                     _print_task_error(
                         TaskCliError(
@@ -6051,15 +6061,6 @@ def cmd_vault_request(args):
                         )
                     )
                     return 1
-                # The wait delivered the outcome synchronously, so suppress the now-redundant
-                # async auto-resume callback for this request (best-effort — a race with the ~2s
-                # sweep risks at most one benign duplicate resume). A wait that TIMES OUT skips
-                # this and leaves the callback armed, so a later resolution still wakes the agent.
-                try:
-                    with _open_vault_engine().begin() as conn:
-                        vault_service.mark_request_callback(conn, str(req["id"]), status="skipped")
-                except Exception:
-                    pass
                 _print_cli_payload(
                     "vault_request",
                     request_id=req["id"],
@@ -6085,7 +6086,10 @@ def cmd_vault_request(args):
             status="pending",
             request=req,
             message=_vault_request_pending_message(
-                name, req, has_spec=bool(spec), callback_enabled=not _vault_callback_disabled(args)
+                name,
+                req,
+                has_spec=bool(spec),
+                callback_enabled=not _vault_callback_disabled(args) and bool(_vault_cli_session_id(args)),
             ),
         )
         return 0
@@ -6231,7 +6235,7 @@ def _vault_request_followup_message(args, request_id: str, *, resolved_verb: str
     block synchronously the agent must opt out at creation with ``--no-callback`` (then this points
     at ``vault await``).
     """
-    if _vault_callback_disabled(args):
+    if _vault_callback_disabled(args) or not _vault_cli_session_id(args):
         return f"Request recorded. Check the result yourself with: vibe vault await {request_id}"
     return (
         f"Request recorded. This Session resumes automatically once the user {resolved_verb} — "
