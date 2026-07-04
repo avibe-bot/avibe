@@ -1,4 +1,4 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { apiFetch } from '../lib/apiFetch';
 
 interface RuntimeStatus {
@@ -6,16 +6,6 @@ interface RuntimeStatus {
   last_action?: string;
   [key: string]: any;
 }
-
-// The GET /status payload is content-stable across idle polls (no per-request
-// timestamp/uptime — see runtime.render_status), yet ``res.json()`` yields a
-// fresh object each poll. Returning the SAME reference when the content is
-// unchanged lets React bail the StatusProvider re-render, so this provider — which
-// wraps the whole logged-in app — stops re-rendering its consumers every
-// IDLE_POLL_MS for identical data. Cheap: a small object, once per poll; a false
-// negative (e.g. server key reorder) merely degrades to the previous behavior.
-const isSameStatus = (a: RuntimeStatus, b: RuntimeStatus): boolean =>
-  JSON.stringify(a) === JSON.stringify(b);
 
 interface StatusContextType {
   status: RuntimeStatus;
@@ -68,9 +58,13 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       const res = await fetch('/status');
       if (res.ok) {
         const data = await res.json();
-        // Keep the previous reference on an unchanged poll so StatusProvider
-        // (and thus its consumers) doesn't re-render for identical data.
-        setStatus((prev) => (isSameStatus(prev, data) ? prev : data));
+        // Set a fresh object every poll ON PURPOSE. Consumers (notably Dashboard)
+        // recompute "started … ago" / "last updated … ago" relative-time labels
+        // from Date.now() during render and have no timer of their own, so they
+        // rely on this per-poll re-render to keep those labels ticking. Do NOT
+        // content-dedup this (reusing the reference for byte-identical polls
+        // freezes those labels until an unrelated status change).
+        setStatus(data);
         setHealth(true);
         return data;
       }
@@ -205,13 +199,14 @@ export const StatusProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     };
   }, [refreshStatus]);
 
-  // Stable value identity: refreshStatus/control are already useCallback-stable,
-  // so this only changes when status/health actually change (status itself is
-  // reference-stabilized above), sparing consumers the per-poll churn.
-  const value = useMemo(
-    () => ({ status, health, refreshStatus, control }),
-    [status, health, refreshStatus, control],
+  // Intentionally NOT memoized (unlike the other providers in this PR). ``status``
+  // is a fresh object every poll by design (see refreshStatus), so consumers
+  // re-render on the 30s cadence to tick their relative-time labels — a useMemo
+  // here would be a no-op, and reference-stabilizing status to make it meaningful
+  // would freeze those labels. The re-render is load-bearing, not waste.
+  return (
+    <StatusContext.Provider value={{ status, health, refreshStatus, control }}>
+      {children}
+    </StatusContext.Provider>
   );
-
-  return <StatusContext.Provider value={value}>{children}</StatusContext.Provider>;
 };
