@@ -110,7 +110,7 @@ def _publish_run_rows_updated(rows: list[Any]) -> None:
     if not rows:
         return
     try:
-        from core.inbox_events import publish_run_updated
+        from core.inbox_events import RUNS_UPDATED_EVENT, bus, run_updated_payload
     except Exception:
         logger.debug("failed to import run event publisher", exc_info=True)
         return
@@ -122,7 +122,7 @@ def _publish_run_rows_updated(rows: list[Any]) -> None:
         if not run_id:
             continue
         try:
-            publish_run_updated(
+            payload = run_updated_payload(
                 run_id=run_id,
                 status=normalize_run_status(row.get("status")),
                 run_type=row.get("run_type"),
@@ -131,6 +131,14 @@ def _publish_run_rows_updated(rows: list[Any]) -> None:
                 updated_at=row.get("updated_at"),
                 cancel_requested=bool(row.get("cancel_requested")),
             )
+            bus.publish(RUNS_UPDATED_EVENT, payload)
+            if bus.subscriber_count() == 0:
+                try:
+                    from vibe import internal_client
+
+                    internal_client.publish_event_sync(RUNS_UPDATED_EVENT, payload, timeout=1.5)
+                except Exception:
+                    logger.debug("failed to bridge runs.updated for %s", run_id, exc_info=True)
         except Exception:
             logger.debug("failed to publish runs.updated for %s", run_id, exc_info=True)
 

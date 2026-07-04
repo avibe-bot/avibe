@@ -641,7 +641,8 @@ export type WorkbenchEventEnvelope<T = unknown> = {
 };
 
 export type WorkbenchEventHandlers = {
-  onConnected?: (data: { sub_id: number }) => void;
+  onConnected?: (data: { sub_id: number; source?: 'browser' | 'controller' }) => void;
+  onEventBridgeStatus?: (data: { connected: boolean }) => void;
   onMessageNew?: (data: WorkbenchMessage) => void;
   onSessionActivity?: (data: { session_id: string; scope_id: string | null; event: string; title?: string | null }) => void;
   onInboxUnreadChanged?: (data: {
@@ -1435,7 +1436,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const readCacheRef = useRef(new Map<string, { expiresAt: number; promise: Promise<any> }>());
   const eventSourceRef = useRef<EventSource | null>(null);
   const eventHandlersRef = useRef(new Set<WorkbenchEventHandlers>());
-  const eventConnectionRef = useRef<{ sub_id: number } | null>(null);
+  const eventConnectionRef = useRef<{ sub_id: number; source?: 'browser' | 'controller' } | null>(null);
+  const eventBridgeConnectedRef = useRef(false);
 
   const handleApiError = async (res: Response, path: string) => {
     let errorMessage = `Request failed: ${path} (${res.status})`;
@@ -1548,6 +1550,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     eventSourceRef.current?.close();
     eventSourceRef.current = null;
     eventConnectionRef.current = null;
+    eventBridgeConnectedRef.current = false;
   };
 
   const ensureWorkbenchEventSource = (options?: { reconnect?: boolean }) => {
@@ -1561,7 +1564,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     source.addEventListener('connected', (e: MessageEvent) => {
       try {
         const parsed = JSON.parse(e.data) as { sub_id?: number; type?: string; data?: unknown };
-        eventConnectionRef.current = { sub_id: typeof parsed.sub_id === 'number' ? parsed.sub_id : -1 };
+        const sourceKind = typeof parsed.sub_id === 'number' ? 'browser' : 'controller';
+        eventConnectionRef.current = {
+          sub_id: typeof parsed.sub_id === 'number' ? parsed.sub_id : -1,
+          source: sourceKind,
+        };
+        if (sourceKind === 'controller') {
+          eventBridgeConnectedRef.current = true;
+          dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: true }));
+        }
       } catch (err) {
         console.error('[workbench-events] connected parse failed', err, e.data);
         eventConnectionRef.current = null;
@@ -1687,8 +1698,19 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         handlers.onVaultsUpdated?.(envelope.data);
       });
     });
+    source.addEventListener('workbench.events.bridge.status', (e: MessageEvent) => {
+      const envelope = parseWorkbenchEnvelope<{ connected: boolean }>(e.data);
+      if (!envelope) return;
+      eventBridgeConnectedRef.current = envelope.data.connected;
+      dispatchToWorkbenchHandlers((handlers) => {
+        handlers.onAny?.(envelope);
+        handlers.onEventBridgeStatus?.(envelope.data);
+      });
+    });
     source.onerror = (err) => {
       eventConnectionRef.current = null;
+      eventBridgeConnectedRef.current = false;
+      dispatchToWorkbenchHandlers((handlers) => handlers.onEventBridgeStatus?.({ connected: false }));
       dispatchToWorkbenchHandlers((handlers) => handlers.onError?.(err));
     };
   };
@@ -2270,10 +2292,24 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     connectWorkbenchEvents: (handlers, options) => {
       eventHandlersRef.current.add(handlers);
       ensureWorkbenchEventSource(options);
-      if (eventConnectionRef.current) {
+      if (
+        eventConnectionRef.current &&
+        (eventConnectionRef.current.source !== 'controller' || eventBridgeConnectedRef.current)
+      ) {
         queueMicrotask(() => {
-          if (eventHandlersRef.current.has(handlers) && eventConnectionRef.current) {
+          if (
+            eventHandlersRef.current.has(handlers) &&
+            eventConnectionRef.current &&
+            (eventConnectionRef.current.source !== 'controller' || eventBridgeConnectedRef.current)
+          ) {
             handlers.onConnected?.(eventConnectionRef.current);
+          }
+        });
+      }
+      if (eventBridgeConnectedRef.current) {
+        queueMicrotask(() => {
+          if (eventHandlersRef.current.has(handlers)) {
+            handlers.onEventBridgeStatus?.({ connected: true });
           }
         });
       }

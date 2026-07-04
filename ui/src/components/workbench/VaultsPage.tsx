@@ -286,7 +286,7 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
   const [requests, setRequests] = useState<VaultRequest[]>([]);
   const [reviewing, setReviewing] = useState<VaultRequest | null>(null);
   const [provisioning, setProvisioning] = useState<VaultRequest | null>(null);
-  const [eventsConnected, setEventsConnected] = useState(false);
+  const [eventBridgeConnected, setEventBridgeConnected] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -309,17 +309,23 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
 
   useEffect(() => {
     return api.connectWorkbenchEvents({
-      onConnected: () => {
-        setEventsConnected(true);
-        load();
+      onConnected: (data) => {
+        if (data.source === 'controller') {
+          setEventBridgeConnected(true);
+          load();
+        }
       },
-      onError: () => setEventsConnected(false),
+      onEventBridgeStatus: ({ connected }) => {
+        setEventBridgeConnected(connected);
+        if (connected) load();
+      },
+      onError: () => setEventBridgeConnected(false),
       onVaultsUpdated: () => load(),
     });
   }, [api, load]);
 
   useEffect(() => {
-    if (eventsConnected) return;
+    if (eventBridgeConnected) return;
     let timer: number | undefined;
     let cancelled = false;
     let inFlight = false;
@@ -364,7 +370,7 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
       document.removeEventListener('visibilitychange', refreshNow);
       window.removeEventListener('focus', refreshNow);
     };
-  }, [eventsConnected, load]);
+  }, [eventBridgeConnected, load]);
 
   const handleOutcome = useCallback(
     (outcome: ApprovalOutcome) => {
@@ -472,7 +478,7 @@ export const VaultsPage: React.FC = () => {
   const [activeTags, setActiveTags] = useState<string[]>([]);
   const [activeSkills, setActiveSkills] = useState<string[]>([]);
   const [now, setNow] = useState(() => Date.now());
-  const [eventsConnected, setEventsConnected] = useState(false);
+  const [eventBridgeConnected, setEventBridgeConnected] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -502,17 +508,23 @@ export const VaultsPage: React.FC = () => {
 
   useEffect(() => {
     return api.connectWorkbenchEvents({
-      onConnected: () => {
-        setEventsConnected(true);
-        refresh();
+      onConnected: (data) => {
+        if (data.source === 'controller') {
+          setEventBridgeConnected(true);
+          refresh();
+        }
       },
-      onError: () => setEventsConnected(false),
+      onEventBridgeStatus: ({ connected }) => {
+        setEventBridgeConnected(connected);
+        if (connected) refresh();
+      },
+      onError: () => setEventBridgeConnected(false),
       onVaultsUpdated: () => refresh(),
     });
   }, [api, refresh]);
 
   useEffect(() => {
-    if (eventsConnected) return;
+    if (eventBridgeConnected) return;
     let timer: number | undefined;
     let cancelled = false;
     let inFlight = false;
@@ -557,7 +569,7 @@ export const VaultsPage: React.FC = () => {
       document.removeEventListener('visibilitychange', refreshNow);
       window.removeEventListener('focus', refreshNow);
     };
-  }, [eventsConnected, refresh]);
+  }, [eventBridgeConnected, refresh]);
 
   // Tick once a second while there are live grants: advance the countdown and
   // drop any grant that has reached its expiry. The backend's status=active

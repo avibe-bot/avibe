@@ -116,6 +116,7 @@ def test_create_vault_secret_publishes_update_event(monkeypatch):
         "vibe.sse_broker.broker.publish",
         lambda event_type, data: published.append((event_type, data)),
     )
+    monkeypatch.setattr("vibe.internal_client.publish_event_sync", lambda *args, **kwargs: None)
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
 
     api.create_vault_secret(
@@ -1581,6 +1582,12 @@ def test_revoke_grant_releases_only_that_grant_id(monkeypatch):
 
 
 def test_consume_one_shot_releases_only_that_grant_id(monkeypatch):
+    published = []
+    monkeypatch.setattr(
+        "vibe.sse_broker.broker.publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
+    monkeypatch.setattr("vibe.internal_client.publish_event_sync", lambda *args, **kwargs: None)
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
     agent_release = Mock(return_value={"released": True})
     monkeypatch.setattr(api, "avault_agent_release", agent_release)
@@ -1608,9 +1615,19 @@ def test_consume_one_shot_releases_only_that_grant_id(monkeypatch):
         )
         grant_2 = _grant_from_request(conn, req_2)
 
+    published.clear()
     api.consume_one_shot_grants([grant_1], reason="test")
 
     agent_release.assert_called_once_with(grant_id=grant_1["id"])
+    assert (
+        "vaults.updated",
+        {
+            "scope": "grant",
+            "request_id": grant_1["request_id"],
+            "grant_id": grant_1["id"],
+            "grant_status": "expired",
+        },
+    ) in published
     with api._vault_engine().connect() as conn:
         statuses = {
             row["id"]: row["status"]

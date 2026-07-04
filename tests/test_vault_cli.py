@@ -1625,6 +1625,56 @@ def test_inject_reopens_session_bound_approval_when_agent_cache_is_missing(tmp_p
     assert requests[0]["card"]["grant_options"][0]["purpose"] == "inject"
 
 
+def test_fetch_resolver_publishes_pending_request_when_approval_required(monkeypatch):
+    published = []
+    monkeypatch.setattr(cli, "_publish_cli_vaults_updated", lambda **kwargs: published.append(kwargs))
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))
+
+    with pytest.raises(cli.TaskCliError) as exc_info:
+        cli._resolve_single_vault_delivery(
+            cli._open_vault_engine(),
+            "PROTECTED_KEY",
+            requester={"source": "cli", "session_id": "ses_cli"},
+            delivery={"session_id": "ses_cli", "mode": "fetch"},
+            purpose="fetch",
+        )
+
+    assert exc_info.value.code == "approval_required"
+    assert len(published) == 1
+    request = published[0]["request"]
+    assert published[0]["scope"] == "request"
+    assert request["status"] == "pending"
+    assert request["secret_name"] == "PROTECTED_KEY"
+    assert request["delivery"]["session_id"] == "ses_cli"
+    assert request["card"]["grant_options"][0]["purpose"] == "fetch"
+
+
+def test_inject_resolver_publishes_pending_request_when_approval_required(tmp_path, monkeypatch):
+    published = []
+    monkeypatch.setattr(cli, "_publish_cli_vaults_updated", lambda **kwargs: published.append(kwargs))
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))
+
+    with pytest.raises(cli.TaskCliError) as exc_info:
+        cli._resolve_vault_inject_delivery(
+            cli._open_vault_engine(),
+            ["PROTECTED_KEY"],
+            path=str(tmp_path / "out.env"),
+            fmt="dotenv",
+            args=_ns(session_id="ses_cli"),
+        )
+
+    assert exc_info.value.code == "approval_required"
+    assert len(published) == 1
+    request = published[0]["request"]
+    assert published[0]["scope"] == "request"
+    assert request["status"] == "pending"
+    assert request["secret_name"] == "PROTECTED_KEY"
+    assert request["delivery"]["session_id"] == "ses_cli"
+    assert request["card"]["grant_options"][0]["purpose"] == "inject"
+
+
 def test_run_persists_protected_approval_request_without_grant(capfd):
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))

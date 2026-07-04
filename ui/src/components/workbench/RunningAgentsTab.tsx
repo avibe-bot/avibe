@@ -102,7 +102,7 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
   const [agents, setAgents] = useState<RunningAgent[]>([]);
   const [unreachable, setUnreachable] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [eventsConnected, setEventsConnected] = useState(false);
+  const [eventBridgeConnected, setEventBridgeConnected] = useState(false);
   // Guards against setState after unmount: an in-flight poll can resolve after
   // the user leaves the Running tab (the component unmounts) — without this the
   // resolved fetch would call setState on an unmounted component.
@@ -183,11 +183,17 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
 
   useEffect(() => {
     return api.connectWorkbenchEvents({
-      onConnected: () => {
-        setEventsConnected(true);
-        fetchData(true);
+      onConnected: (data) => {
+        if (data.source === 'controller') {
+          setEventBridgeConnected(true);
+          fetchData(true);
+        }
       },
-      onError: () => setEventsConnected(false),
+      onEventBridgeStatus: ({ connected }) => {
+        setEventBridgeConnected(connected);
+        if (connected) fetchData(true);
+      },
+      onError: () => setEventBridgeConnected(false),
       onRunsUpdated: () => fetchData(true),
       onTurnStart: () => fetchData(true),
       onTurnEnd: () => fetchData(true),
@@ -196,7 +202,7 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
   }, [api, fetchData]);
 
   useEffect(() => {
-    if (eventsConnected) return;
+    if (eventBridgeConnected) return;
     let timer: number | undefined;
     let cancelled = false;
     let inFlight = false;
@@ -241,7 +247,7 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
       document.removeEventListener('visibilitychange', refreshNow);
       window.removeEventListener('focus', refreshNow);
     };
-  }, [eventsConnected, fetchData]);
+  }, [eventBridgeConnected, fetchData]);
 
   if (loading) {
     return (

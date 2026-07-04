@@ -67,7 +67,7 @@ export const AgentsPage: React.FC = () => {
   const { showToast } = useToast();
   const [agentsTab, setAgentsTab] = useState<AgentsTabKey>('definitions');
   const [runningActiveCount, setRunningActiveCount] = useState<number | null>(null);
-  const [eventsConnected, setEventsConnected] = useState(false);
+  const [eventBridgeConnected, setEventBridgeConnected] = useState(false);
   const [agents, setAgents] = useState<VibeAgentBrief[]>([]);
   const [defaultName, setDefaultName] = useState<string | null>(null);
   const [selected, setSelected] = useState<VibeAgentFull | null>(null);
@@ -143,11 +143,17 @@ export const AgentsPage: React.FC = () => {
   useEffect(() => {
     if (agentsTab === 'running') return;
     return api.connectWorkbenchEvents({
-      onConnected: () => {
-        setEventsConnected(true);
-        fetchRunningActiveCount();
+      onConnected: (data) => {
+        if (data.source === 'controller') {
+          setEventBridgeConnected(true);
+          fetchRunningActiveCount();
+        }
       },
-      onError: () => setEventsConnected(false),
+      onEventBridgeStatus: ({ connected }) => {
+        setEventBridgeConnected(connected);
+        if (connected) fetchRunningActiveCount();
+      },
+      onError: () => setEventBridgeConnected(false),
       onRunsUpdated: () => fetchRunningActiveCount(),
       onTurnStart: () => fetchRunningActiveCount(),
       onTurnEnd: () => fetchRunningActiveCount(),
@@ -156,7 +162,7 @@ export const AgentsPage: React.FC = () => {
   }, [api, agentsTab, fetchRunningActiveCount]);
 
   useEffect(() => {
-    if (agentsTab === 'running' || eventsConnected) return;
+    if (agentsTab === 'running' || eventBridgeConnected) return;
     let timer: number | undefined;
     let cancelled = false;
     let inFlight = false;
@@ -201,7 +207,7 @@ export const AgentsPage: React.FC = () => {
       document.removeEventListener('visibilitychange', refreshNow);
       window.removeEventListener('focus', refreshNow);
     };
-  }, [eventsConnected, agentsTab, fetchRunningActiveCount]);
+  }, [eventBridgeConnected, agentsTab, fetchRunningActiveCount]);
 
   const selectAgent = useCallback(
     async (name: string, openDetail = false) => {

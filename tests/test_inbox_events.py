@@ -129,3 +129,41 @@ def test_sqlite_background_store_publishes_run_updates(tmp_path):
     assert failed[0] == "runs.updated"
     assert failed[1]["run_id"] == "run_evt_1"
     assert failed[1]["status"] == "failed"
+
+
+def test_sqlite_background_store_bridges_run_updates_without_local_subscribers(tmp_path, monkeypatch):
+    from storage.background import SQLiteBackgroundTaskStore
+
+    bridged = []
+    monkeypatch.setattr(
+        "vibe.internal_client.publish_event_sync",
+        lambda event_type, data, **kwargs: bridged.append((event_type, data, kwargs)),
+    )
+    store = SQLiteBackgroundTaskStore(tmp_path / "state.sqlite")
+    try:
+        store.enqueue_run(
+            {
+                "id": "run_evt_bridge",
+                "request_type": "agent_run",
+                "status": "queued",
+                "message": "hello",
+                "created_at": "2026-07-04T00:00:00+00:00",
+                "updated_at": "2026-07-04T00:00:00+00:00",
+            }
+        )
+    finally:
+        store.close()
+
+    assert bridged == [
+        (
+            "runs.updated",
+            {
+                "run_id": "run_evt_bridge",
+                "status": "queued",
+                "run_type": "agent_run",
+                "updated_at": "2026-07-04T00:00:00+00:00",
+                "cancel_requested": False,
+            },
+            {"timeout": 1.5},
+        )
+    ]

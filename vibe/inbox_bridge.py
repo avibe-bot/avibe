@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from core.inbox_events import WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT
 from vibe import internal_client
 from vibe.sse_broker import broker
 
@@ -41,12 +42,16 @@ async def run_inbox_bridge() -> None:
     """
 
     backoff = _BACKOFF_INITIAL
+    bridge_connected = False
     while True:
         try:
             async for event_type, data in internal_client.stream_events():
                 # A flowing event proves the link is healthy → reset backoff so
                 # the next genuine drop reconnects promptly.
                 backoff = _BACKOFF_INITIAL
+                if event_type == "connected" and not bridge_connected:
+                    bridge_connected = True
+                    broker.publish(WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT, {"connected": True})
                 broker.publish(event_type, data)
         except asyncio.CancelledError:
             raise
@@ -56,5 +61,8 @@ async def run_inbox_bridge() -> None:
             logger.warning("inbox bridge: stream error; retry in %.1fs", backoff, exc_info=True)
         else:
             logger.debug("inbox bridge: controller feed closed; reconnect in %.1fs", backoff)
+        if bridge_connected:
+            bridge_connected = False
+            broker.publish(WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT, {"connected": False})
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, _BACKOFF_MAX)

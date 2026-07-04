@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 RUNS_UPDATED_EVENT = "runs.updated"
 VAULTS_UPDATED_EVENT = "vaults.updated"
+WORKBENCH_EVENTS_BRIDGE_STATUS_EVENT = "workbench.events.bridge.status"
 
 
 class InboxEventBus:
@@ -41,6 +42,10 @@ class InboxEventBus:
     def unsubscribe(self, sub_id: int) -> None:
         with self._lock:
             self._subscribers.pop(sub_id, None)
+
+    def subscriber_count(self) -> int:
+        with self._lock:
+            return len(self._subscribers)
 
     def publish(self, event_type: str, data: Any) -> None:
         """Fan ``(event_type, data)`` out to every subscriber. No-op when none."""

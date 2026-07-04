@@ -5643,6 +5643,8 @@ def _resolve_single_vault_delivery(
         )
     if resolved["status"] == "approval_required":
         req = resolved.get("request") or {}
+        if isinstance(req, dict):
+            _publish_cli_vaults_updated(scope="request", request=req)
         raise TaskCliError(
             f"secret '{name}' needs approval before protected delivery",
             code="approval_required",
@@ -5696,6 +5698,7 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
     grant: dict | None = None
     one_shot_grants: list[dict] = []
     approval_error: TaskCliError | None = None
+    approval_request_to_publish: dict | None = None
     pre_delivery_error: TaskCliError | None = None
     resolved_by_name: dict[str, dict] = {}
     try:
@@ -5714,6 +5717,8 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
                     resolved_by_name[name] = resolved
                 if resolved["status"] == "approval_required":
                     req = resolved.get("request") or {}
+                    if isinstance(req, dict):
+                        approval_request_to_publish = req
                     approval_error = TaskCliError(
                         f"secret '{name}' needs approval before protected delivery",
                         code="approval_required",
@@ -5745,6 +5750,7 @@ def _resolve_vault_inject_delivery(engine, names: list[str], *, path: str, fmt: 
     except Exception as exc:
         _raise_after_releasing_one_shot_reservations(engine, one_shot_grants, exc)
     if approval_error is not None:
+        _publish_cli_vaults_updated(scope="request", request=approval_request_to_publish)
         _release_one_shot_reservations(engine, one_shot_grants)
         raise approval_error
     if pre_delivery_error is not None:
