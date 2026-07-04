@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, Clock, Cpu, KeyRound, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Wallet } from 'lucide-react';
+import { Check, Clock, Copy, Globe, KeyRound, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { useApi, type VaultRequest, type VaultSourceSelector } from '@/context/ApiContext';
+import { useApi, type SigningAddresses, type VaultRequest, type VaultSourceSelector } from '@/context/ApiContext';
 import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
+import { SigningAddressList } from './signing-address-list';
 import {
   blindBoxAgentDeliverOperationHash,
   bytesToBase64,
@@ -57,11 +58,13 @@ type ApprovalCard = {
 
 export type ApprovalOutcome = { kind: 'approved' | 'denied'; requestType: 'access' | 'sign' };
 
-/** A short 0x-prefixed elision of a long hex digest. */
-function shortDigest(hex: string): string {
-  const clean = hex.startsWith('0x') ? hex.slice(2) : hex;
-  if (clean.length <= 20) return `0x${clean}`;
-  return `0x${clean.slice(0, 10)}…${clean.slice(-8)}`;
+/** The receive address(es) a signature scheme produces, for the sign card's "Signing as" row. */
+function addressesForScheme(scheme: string | undefined, addresses: SigningAddresses | null): SigningAddresses {
+  if (!addresses) return {};
+  if (scheme === 'schnorr-secp256k1-bip340') return { btc_taproot: addresses.btc_taproot };
+  if (scheme === 'ecdsa-secp256k1-der') return { btc_segwit: addresses.btc_segwit, btc_legacy: addresses.btc_legacy };
+  // ecdsa-secp256k1-recoverable (Ethereum) and the default.
+  return { eth: addresses.eth };
 }
 
 // design.pen `SKBld` / `pRtHq`: a borderless detail list (no inner card) with sentence-case
@@ -143,6 +146,31 @@ export const VaultApprovalCard: React.FC<{
   const [thisSessionOnly, setThisSessionOnly] = useState(() => option?.session_binding_default !== false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [signAddresses, setSignAddresses] = useState<SigningAddresses | null>(null);
+  const [copiedDigest, setCopiedDigest] = useState(false);
+
+  // Sign approvals: fetch the key's derived addresses (best-effort) so the human sees which
+  // on-chain identity is about to sign — not just an opaque digest. Addresses are public.
+  const signName = isSign ? card?.secret_name : undefined;
+  useEffect(() => {
+    if (!signName) {
+      setSignAddresses(null);
+      return;
+    }
+    let alive = true;
+    api
+      .listVaultSecrets()
+      .then((res) => {
+        if (alive) setSignAddresses(res.secrets?.find((s) => s.name === signName)?.signing_addresses ?? null);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [api, signName]);
+  // Only the address(es) the requested signature scheme actually produces.
+  const schemeAddresses = useMemo(() => addressesForScheme(delivery.scheme, signAddresses), [delivery.scheme, signAddresses]);
+  const hasSchemeAddress = Object.values(schemeAddresses).some(Boolean);
 
   // A request needs the browser VMK unlocked when it touches protected key material:
   // a protected sign, or an access whose fixed set includes protected members.
@@ -323,6 +351,11 @@ export const VaultApprovalCard: React.FC<{
             </Badge>
           ) : null}
         </DetailRow>
+        {isSign && hasSchemeAddress ? (
+          <DetailRow label={t('vaults.approval.signingAs')}>
+            <SigningAddressList addresses={schemeAddresses} />
+          </DetailRow>
+        ) : null}
         {card.session_id ? (
           <DetailRow label={t('vaults.approval.session')}>
             <span className="truncate text-[13px] text-foreground">{card.session_id}</span>
@@ -340,17 +373,36 @@ export const VaultApprovalCard: React.FC<{
         {!isSign && card.egress ? (
           <DetailRow label={t('vaults.approval.egress')}>
             <span className="flex items-center gap-1.5 text-[13px] text-foreground">
-              <Cpu className="size-3.5 shrink-0 text-muted" />
+              <Globe className="size-3.5 shrink-0 text-muted" />
               {card.egress}
             </span>
           </DetailRow>
         ) : null}
         {isSign && delivery.digest ? (
           <DetailRow label={t('vaults.approval.digest')}>
-            <span className="truncate font-mono text-xs text-foreground" title={delivery.digest}>
-              {shortDigest(delivery.digest)}
-            </span>
-            {delivery.scheme ? <Badge variant="secondary">{delivery.scheme}</Badge> : null}
+            <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+              {/* Full digest in a copyable code box (break-all) — it's the exact bytes being
+                  signed, so the user can verify it rather than trust an elision. */}
+              <div className="flex min-w-0 items-start gap-2">
+                <code className="min-w-0 flex-1 break-all rounded-md bg-surface-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed text-foreground">
+                  {delivery.digest}
+                </code>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(delivery.digest ?? '').then(() => {
+                      setCopiedDigest(true);
+                      window.setTimeout(() => setCopiedDigest(false), 1500);
+                    });
+                  }}
+                  aria-label={t('vaults.approval.copyDigest')}
+                  className="shrink-0 pt-1 text-muted transition-colors hover:text-foreground"
+                >
+                  {copiedDigest ? <Check className="size-3.5 text-mint" /> : <Copy className="size-3.5" />}
+                </button>
+              </div>
+              {delivery.scheme ? <Badge variant="secondary" className="self-start">{delivery.scheme}</Badge> : null}
+            </div>
           </DetailRow>
         ) : null}
       </div>
@@ -423,7 +475,7 @@ export const VaultApprovalCard: React.FC<{
           </label>
         ) : null}
         <div className="ml-auto flex items-center gap-2">
-          <Button type="button" variant="ghost" onClick={deny} disabled={busy}>
+          <Button type="button" variant="outline" onClick={deny} disabled={busy}>
             {t('vaults.approval.deny')}
           </Button>
           <Button type="button" onClick={isSign ? approveSign : approveAccess} disabled={approveDisabled}>
