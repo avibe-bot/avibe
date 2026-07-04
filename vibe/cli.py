@@ -4785,6 +4785,7 @@ def _resolve_vault_run_selectors(engine, args) -> tuple[dict[str, str], dict]:
     explicit_mapping, normalized_env_specs = _parse_env_specs_parts(env_specs)
     tag_specs = _arg_list(args, "tag")
     skill_specs = _arg_list(args, "skill")
+    selector_requested = bool(normalized_env_specs or tag_specs or skill_specs)
     selections: dict[str, str] = {}
     for env_name, vault_name in explicit_mapping.items():
         _add_vault_run_selection(selections, vault_name=vault_name, env_name=env_name)
@@ -4803,6 +4804,13 @@ def _resolve_vault_run_selectors(engine, args) -> tuple[dict[str, str], dict]:
     else:
         source_selector["tags"] = []
 
+    if not selections and selector_requested:
+        raise TaskCliError(
+            "vault run selector matched no value-deliverable secrets",
+            code="no_matching_secrets",
+            hint="Check the --env, --tag, or --skill selector, or ask the user to store/link the secret first.",
+            help_command="vibe vault run --help",
+        )
     if not selections:
         raise TaskCliError(
             "at least one --env NAME, --tag TAG, or --skill SKILL is required",

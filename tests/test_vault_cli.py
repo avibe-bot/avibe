@@ -450,6 +450,16 @@ def test_run_skill_selects_skill_link_mirror_tag(monkeypatch):
     assert deliver.call_args.args[0] == [{"name": "LINKED_KEY", "env": "LINKED_KEY", "envelope": _sealed("linked")}]
 
 
+@pytest.mark.parametrize("selector", [{"tag": ["missing"]}, {"skill": ["missing"]}])
+def test_run_reports_empty_tag_or_skill_selector(capfd, selector):
+    code = cli.cmd_vault_run(_ns(**selector, command_argv=["python3", "-c", "pass"]))
+    payload = json.loads(capfd.readouterr().err)
+
+    assert code == 1
+    assert payload["code"] == "no_matching_secrets"
+    assert payload["help_command"] == "vibe vault run --help"
+
+
 def test_run_rejects_conflicting_alias_from_tag_selection(capfd, monkeypatch):
     from vibe import api
 
