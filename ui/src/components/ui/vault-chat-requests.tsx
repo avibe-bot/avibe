@@ -81,40 +81,51 @@ export const VaultChatRequests: React.FC<{
 };
 
 /**
- * Floating approval bar (design: Form B). Shown above the composer for approval (access / sign)
- * requests whose in-scroll card has scrolled off-viewport, so a waiting approval is never missed.
- * Clicking opens the oldest one in the shared approval dialog.
+ * Floating approval bar (design: Form B). The bar shows above the composer for approval (access /
+ * sign) requests whose in-scroll card has scrolled off-viewport, so a waiting approval is never
+ * missed; clicking opens the oldest off-screen one in the shared approval dialog.
+ *
+ * `offscreen` drives the bar; `pending` is the full pending-approval set and governs the dialog's
+ * lifetime — the dialog stays open while its request is still pending even if the card scrolls
+ * back into view (leaving `offscreen`), and closes only once the request truly resolves/expires.
  */
-export const VaultApprovalFloat: React.FC<{ approvals: VaultRequest[]; onResolved: () => void }> = ({ approvals, onResolved }) => {
+export const VaultApprovalFloat: React.FC<{ offscreen: VaultRequest[]; pending: VaultRequest[]; onResolved: () => void }> = ({
+  offscreen,
+  pending,
+  onResolved,
+}) => {
   const { t } = useTranslation();
   const [reviewing, setReviewing] = useState<VaultRequest | null>(null);
 
-  // If the open request expires or is resolved elsewhere while other approvals remain, close the
-  // dialog rather than leaving it on a no-longer-pending request (a stale approve/deny would 4xx).
+  // Close the dialog only when its request is no longer pending (resolved elsewhere / expired) —
+  // NOT merely because its card scrolled back on-screen. A stale approve/deny would 4xx.
   useEffect(() => {
-    if (reviewing && !approvals.some((approval) => approval.id === reviewing.id)) setReviewing(null);
-  }, [approvals, reviewing]);
+    if (reviewing && !pending.some((approval) => approval.id === reviewing.id)) setReviewing(null);
+  }, [pending, reviewing]);
 
-  if (approvals.length === 0) return null;
-  const oldest = approvals[approvals.length - 1];
+  const oldestOffscreen = offscreen.length > 0 ? offscreen[offscreen.length - 1] : null;
   return (
-    <div className="mx-3 mb-1">
-      <button
-        type="button"
-        onClick={() => setReviewing(oldest)}
-        className="flex w-full items-center gap-2.5 rounded-xl border border-gold/40 bg-gold/[0.08] px-3 py-2.5 text-left transition-colors hover:bg-gold/[0.12]"
-      >
-        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-gold/15 text-gold">
-          <KeyRound className="size-4" />
-        </span>
-        <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">
-          {t('vaults.chat.floatApprovals', { count: approvals.length })}
-        </span>
-        {/* Decorative pill — the whole bar is the button, so this must not be interactive. */}
-        <span className={cn(buttonVariants({ size: 'sm' }), 'pointer-events-none shrink-0')} aria-hidden="true">
-          {t('vaults.requests.review')}
-        </span>
-      </button>
+    <>
+      {oldestOffscreen ? (
+        <div className="mx-3 mb-1">
+          <button
+            type="button"
+            onClick={() => setReviewing(oldestOffscreen)}
+            className="flex w-full items-center gap-2.5 rounded-xl border border-gold/40 bg-gold/[0.08] px-3 py-2.5 text-left transition-colors hover:bg-gold/[0.12]"
+          >
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-gold/15 text-gold">
+              <KeyRound className="size-4" />
+            </span>
+            <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">
+              {t('vaults.chat.floatApprovals', { count: offscreen.length })}
+            </span>
+            {/* Decorative pill — the whole bar is the button, so this must not be interactive. */}
+            <span className={cn(buttonVariants({ size: 'sm' }), 'pointer-events-none shrink-0')} aria-hidden="true">
+              {t('vaults.requests.review')}
+            </span>
+          </button>
+        </div>
+      ) : null}
       <VaultApprovalDialog
         request={reviewing}
         onResolved={() => {
@@ -123,6 +134,6 @@ export const VaultApprovalFloat: React.FC<{ approvals: VaultRequest[]; onResolve
         }}
         onClose={() => setReviewing(null)}
       />
-    </div>
+    </>
   );
 };

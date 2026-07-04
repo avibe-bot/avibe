@@ -193,8 +193,17 @@ export const ChatPage: React.FC = () => {
   // Pending vault requests for this session → inline cards at the transcript end (Transcript
   // footer) + a floating approval bar when those cards scroll off-viewport (approvals only).
   const { requests: vaultRequests, refresh: refreshVaultRequests } = usePendingVaultRequests(sessionId ?? '');
-  // Approval (access/sign) requests whose in-scroll card is currently off-viewport; the float
-  // surfaces exactly these (reported per-card by VaultChatRequests).
+  // All pending approval (access/sign) requests for this session — governs the float's mount and
+  // its open dialog's lifetime; the off-screen subset (reported per-card by VaultChatRequests)
+  // only drives whether the bar itself is shown.
+  const pendingApprovals = useMemo(
+    () =>
+      vaultRequests.filter((request) => {
+        const type = (request.card as { request_type?: string } | null)?.request_type ?? request.request_type;
+        return type === 'access' || type === 'sign';
+      }),
+    [vaultRequests],
+  );
   const [offscreenApprovals, setOffscreenApprovals] = useState<VaultRequest[]>([]);
 
   // Back returns to the page the user came from, not a hardcoded inbox.
@@ -1471,8 +1480,8 @@ export const ChatPage: React.FC = () => {
           }
         />
         <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
-        {sessionId && offscreenApprovals.length > 0 ? (
-          <VaultApprovalFloat approvals={offscreenApprovals} onResolved={refreshVaultRequests} />
+        {sessionId && pendingApprovals.length > 0 ? (
+          <VaultApprovalFloat offscreen={offscreenApprovals} pending={pendingApprovals} onResolved={refreshVaultRequests} />
         ) : null}
         {/* key by session so the composer remounts per session — its draft-seeding
             + local value reset, instead of carrying across sessions (Codex P2). */}

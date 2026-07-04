@@ -2,26 +2,34 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useApi, type VaultRequest } from '@/context/ApiContext';
 
-const POLL_FALLBACK_MS = 5000;
+const PENDING_REQUEST_POLL_INTERVAL_MS = 5000;
 
 /**
- * Pending vault requests (access/sign/provision) for one chat session. Fed by the workbench
- * SSE (`vaults.updated`); a 5s poll runs only as a fallback when the event bridge is down;
- * a timer refreshes at the earliest visible `expires_at` (expiry emits no SSE event). Lifted
- * into a hook so the in-scroll cards and the floating approval bar share one source.
+ * Pending vault requests (access/sign/provision) for one chat session. Fed by the workbench SSE
+ * (`vaults.updated`) plus a visibility-aware poll that runs even while SSE is connected — CLI/
+ * agent-created requests can arrive without a browser bridge event (mirrors VaultsPage). A timer
+ * also refreshes at the earliest visible `expires_at` (expiry emits no event). Lifted into a hook
+ * so the in-scroll cards and the floating approval bar share one source.
  */
 export function usePendingVaultRequests(sessionId: string): { requests: VaultRequest[]; refresh: () => void } {
   const api = useApi();
   const [requests, setRequests] = useState<VaultRequest[]>([]);
-  const [connected, setConnected] = useState(false);
-  // Monotonic load token: a load started for session A must not install its result after a
-  // newer load (e.g. session B, or a refresh) has begun — else A's requests land in B's chat.
+  // Monotonic load token: a load started for session A must not install its result after a newer
+  // load (session B, or a refresh) has begun — else A's requests land in B's chat.
   const loadSeq = useRef(0);
-  // Latest requested session, updated synchronously during render. Effects (including the load
-  // effect that bumps loadSeq) run only after commit, so a session-A load can resolve after we've
-  // navigated to B but before B's load effect fires; comparing against this ref rejects it.
+  // Latest requested session, updated synchronously during render so an async load resolving after
+  // a switch (its effect hasn't bumped the token yet) is still rejected.
   const currentSessionRef = useRef(sessionId);
   currentSessionRef.current = sessionId;
+
+  // Reset stale rows *during render* (not a post-commit effect) so switching from session A to B
+  // never paints A's cards/float for a frame — the hook state now outlives the switch. This is
+  // React's supported "adjust state when a prop changes" pattern.
+  const [displayedSession, setDisplayedSession] = useState(sessionId);
+  if (displayedSession !== sessionId) {
+    setDisplayedSession(sessionId);
+    setRequests([]);
+  }
 
   const load = useCallback(async () => {
     if (!sessionId) {
@@ -32,11 +40,10 @@ export function usePendingVaultRequests(sessionId: string): { requests: VaultReq
     const seq = (loadSeq.current += 1);
     const forSession = sessionId;
     try {
-      // Server-side session scoping (before the global limit); suppress errors so an older
-      // backend without the route doesn't toast on every refresh.
+      // Server-side session scoping (before the global limit); suppress errors so an older backend
+      // without the route doesn't toast on every poll.
       const res = await api.getVaultRequests({ status: 'pending', session: forSession }, { handleError: false });
-      // Reject if a newer load started (same session, overlapping refresh) OR the session
-      // changed under us before this resolved.
+      // Reject if a newer load started, or the session changed under us before this resolved.
       if (seq !== loadSeq.current || forSession !== currentSessionRef.current) return;
       const mine = (res.requests ?? []).filter((r) => {
         const type = (r.card as { request_type?: string } | null)?.request_type ?? r.request_type;
@@ -48,50 +55,64 @@ export function usePendingVaultRequests(sessionId: string): { requests: VaultReq
     }
   }, [api, sessionId]);
 
-  // Clear synchronously on a session switch so the previous session's cards/float can't flash
-  // during the async reload for the new session.
-  useEffect(() => {
-    setRequests([]);
-  }, [sessionId]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
   useEffect(() => {
     return api.connectWorkbenchEvents({
       onConnected: (data) => {
-        if (data.source === 'controller') {
-          setConnected(true);
-          load();
-        }
+        if (data.source === 'controller') void load();
       },
-      onEventBridgeStatus: ({ connected: isConnected }) => {
-        setConnected(isConnected);
-        if (isConnected) load();
+      onEventBridgeStatus: ({ connected }) => {
+        if (connected) void load();
       },
-      onError: () => setConnected(false),
-      onVaultsUpdated: () => load(),
+      onVaultsUpdated: () => void load(),
     });
   }, [api, load]);
 
+  // Non-stacking recursive poll; also refreshes immediately on tab focus / visibility.
   useEffect(() => {
-    if (connected) return;
+    let timer: number | undefined;
     let cancelled = false;
     let inFlight = false;
-    const id = window.setInterval(() => {
-      if (cancelled || inFlight || document.visibilityState !== 'visible') return;
+    let pendingWake = false;
+    const tick = async () => {
+      if (cancelled) return;
+      if (document.visibilityState !== 'visible') {
+        timer = window.setTimeout(tick, PENDING_REQUEST_POLL_INTERVAL_MS);
+        return;
+      }
+      if (inFlight) {
+        pendingWake = true;
+        return;
+      }
       inFlight = true;
-      void load().finally(() => {
+      window.clearTimeout(timer);
+      try {
+        await load();
+      } finally {
         inFlight = false;
-      });
-    }, POLL_FALLBACK_MS);
+      }
+      if (cancelled) return;
+      if (pendingWake) {
+        pendingWake = false;
+        void tick();
+        return;
+      }
+      timer = window.setTimeout(tick, PENDING_REQUEST_POLL_INTERVAL_MS);
+    };
+    const refreshNow = () => {
+      if (document.visibilityState === 'visible') void tick();
+    };
+    void tick();
+    document.addEventListener('visibilitychange', refreshNow);
+    window.addEventListener('focus', refreshNow);
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', refreshNow);
+      window.removeEventListener('focus', refreshNow);
     };
-  }, [connected, load]);
+  }, [load]);
 
+  // Expiry has no SSE event → refresh at the earliest visible expires_at.
   useEffect(() => {
     const now = Date.now();
     let earliest = Infinity;
