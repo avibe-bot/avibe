@@ -574,6 +574,85 @@ def test_pubkey_wrapper_parses_avault(monkeypatch):
     assert api.avault_pubkey() == {"public_key": "pk", "fingerprint": "fp"}
 
 
+def test_one_shot_avault_uses_managed_file_store(monkeypatch):
+    from types import SimpleNamespace
+
+    seen: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout=b"{}", stderr=b"")
+
+    monkeypatch.setattr(api, "_require_avault_path", lambda: "/tmp/avault")
+    monkeypatch.setattr(api, "_command_env_for", lambda path: {"AVAULT_PATH": path})
+    monkeypatch.setattr(api.subprocess, "run", fake_run)
+
+    api._run_avault(["pubkey"], stdin=b"{}", timeout=3)
+
+    assert seen["argv"] == ["/tmp/avault", "--store", "file", "pubkey"]
+    kwargs = seen["kwargs"]
+    assert kwargs["input"] == b"{}"
+    assert kwargs["capture_output"] is True
+    assert kwargs["timeout"] == 3
+    assert kwargs["env"] == {"AVAULT_PATH": "/tmp/avault"}
+
+
+def test_deliver_run_uses_managed_file_store(monkeypatch):
+    seen: dict[str, object] = {}
+
+    class FakeStdin:
+        def write(self, payload):
+            seen["stdin"] = payload
+
+        def close(self):
+            seen["stdin_closed"] = True
+
+    class FakeProcess:
+        stdin = FakeStdin()
+
+        def wait(self):
+            return 7
+
+    def fake_popen(argv, **kwargs):
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(api, "_require_avault_path", lambda: "/tmp/avault")
+    monkeypatch.setattr(api, "_command_env_for", lambda path: {"AVAULT_PATH": path})
+    monkeypatch.setattr(api.subprocess, "Popen", fake_popen)
+
+    result = api.avault_deliver_run(
+        [{"name": "API_KEY", "env": "API_KEY", "envelope": _sealed("api")}],
+        ["python3", "-c", "pass"],
+    )
+
+    assert result == {"exit_code": 7, "delivered": True}
+    assert seen["argv"] == [
+        "/tmp/avault",
+        "--store",
+        "file",
+        "deliver",
+        "run",
+        "--",
+        "python3",
+        "-c",
+        "pass",
+    ]
+    kwargs = seen["kwargs"]
+    assert kwargs["stdin"] == api.subprocess.PIPE
+    assert kwargs["env"] == {"AVAULT_PATH": "/tmp/avault"}
+    assert seen["stdin_closed"] is True
+    assert json.loads(seen["stdin"]) == [
+        {
+            "name": "API_KEY",
+            "env": "API_KEY",
+            "envelope": {"ciphertext": "ct-api", "nonce": "n-api", "wrap_meta": "wm-api"},
+        }
+    ]
+
+
 def test_blind_box_wrapper_relays_json_to_avault(monkeypatch):
     from types import SimpleNamespace
 

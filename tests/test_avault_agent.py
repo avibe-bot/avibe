@@ -139,6 +139,41 @@ def test_agent_default_idle_timeout_covers_longest_grant_ttl():
     assert DEFAULT_AGENT_IDLE_TIMEOUT_SECS >= max(GRANT_TTL_OPTIONS_SECONDS)
 
 
+def test_agent_manager_spawns_avault_with_managed_file_store(tmp_path, monkeypatch):
+    socket_path = tmp_path / "avault.sock"
+    seen: dict[str, object] = {}
+
+    def fake_popen(argv, **kwargs):
+        seen["argv"] = argv
+        seen["kwargs"] = kwargs
+        return MockProcess()
+
+    monkeypatch.setattr("vibe.avault_agent.subprocess.Popen", fake_popen)
+    manager = AvaultAgentManager(
+        socket_path=socket_path,
+        binary_resolver=lambda: "/tmp/avault",
+        command_env=lambda path: {"AVAULT_PATH": path},
+    )
+
+    manager._spawn_locked()
+
+    assert seen["argv"] == [
+        "/tmp/avault",
+        "agent",
+        "--store",
+        "file",
+        "--socket",
+        str(socket_path),
+        "--idle-timeout-secs",
+        str(DEFAULT_AGENT_IDLE_TIMEOUT_SECS),
+    ]
+    kwargs = seen["kwargs"]
+    assert kwargs["stdin"] == subprocess.DEVNULL
+    assert kwargs["stdout"] == subprocess.DEVNULL
+    assert kwargs["stderr"] == subprocess.DEVNULL
+    assert kwargs["env"] == {"AVAULT_PATH": "/tmp/avault"}
+
+
 def test_agent_manager_preserves_live_socket_with_cached_grants(tmp_path, monkeypatch):
     socket_path = Path(tempfile.mkdtemp(prefix="avault-live-", dir="/tmp")) / "s"
     with FakeAgentServer(socket_path, [{"ok": True, "result": {"public_key": "pk", "fingerprint": "fp"}}]) as server:
