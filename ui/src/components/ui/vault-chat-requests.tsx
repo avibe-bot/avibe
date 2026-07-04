@@ -1,99 +1,139 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { KeyRound } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
-import { useApi, type VaultRequest } from '@/context/ApiContext';
+import { cn } from '@/lib/utils';
+import type { VaultRequest } from '@/context/ApiContext';
+import { buttonVariants } from './button';
+import { VaultApprovalDialog } from './vault-approval-dialog';
 import { VaultRequestCard } from './vault-request-card';
 
-const POLL_FALLBACK_MS = 5000;
+const isApproval = (request: VaultRequest): boolean => {
+  const type = (request.card as { request_type?: string } | null)?.request_type ?? request.request_type;
+  return type === 'access' || type === 'sign';
+};
 
 /**
- * Pending vault requests for the current chat session, rendered as inline cards at the live
- * end of the conversation (design: Form A). Fed by the workbench SSE (`vaults.updated`); a 5s
- * poll only runs as a fallback when the event bridge is disconnected. Renders nothing when the
- * session has no pending requests.
+ * In-scroll list of a session's pending request cards (design: Form A), rendered at the end of
+ * the chat transcript. Presentational — data comes from `usePendingVaultRequests`. Each APPROVAL
+ * card is observed individually so the floating bar reflects exactly which approvals have
+ * scrolled off-viewport (a visible provision card mustn't suppress an off-screen approval).
  */
-export const VaultChatRequests: React.FC<{ sessionId: string }> = ({ sessionId }) => {
-  const api = useApi();
-  const [requests, setRequests] = useState<VaultRequest[]>([]);
-  const [connected, setConnected] = useState(false);
+export const VaultChatRequests: React.FC<{
+  requests: VaultRequest[];
+  onResolved: () => void;
+  onOffscreenApprovalsChange?: (offscreen: VaultRequest[]) => void;
+}> = ({ requests, onResolved, onOffscreenApprovalsChange }) => {
+  const cardRefs = useRef<Map<string, HTMLElement>>(new Map());
+  const offscreen = useRef<Set<string>>(new Set());
 
-  const load = useCallback(async () => {
-    try {
-      // Server-side session scoping (before the global limit); suppress errors so an older
-      // backend without the route doesn't toast on every refresh.
-      const res = await api.getVaultRequests({ status: 'pending', session: sessionId }, { handleError: false });
-      const mine = (res.requests ?? []).filter((r) => {
-        const type = (r.card as { request_type?: string } | null)?.request_type ?? r.request_type;
-        return type === 'access' || type === 'sign' || type === 'provision';
-      });
-      setRequests(mine);
-    } catch {
-      setRequests([]);
-    }
-  }, [api, sessionId]);
+  const report = useCallback(() => {
+    onOffscreenApprovalsChange?.(requests.filter((request) => offscreen.current.has(request.id)));
+  }, [requests, onOffscreenApprovalsChange]);
 
+  // Observe each approval card; an approval is "off-screen" when its own card doesn't intersect.
   useEffect(() => {
-    load();
-  }, [load]);
-
-  // Live updates over the shared workbench event bridge (same source the Vaults page uses).
-  useEffect(() => {
-    return api.connectWorkbenchEvents({
-      onConnected: (data) => {
-        if (data.source === 'controller') {
-          setConnected(true);
-          load();
+    if (!onOffscreenApprovalsChange) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const id = (entry.target as HTMLElement).dataset.requestId;
+          if (!id) continue;
+          if (entry.isIntersecting) offscreen.current.delete(id);
+          else offscreen.current.add(id);
         }
+        report();
       },
-      onEventBridgeStatus: ({ connected: isConnected }) => {
-        setConnected(isConnected);
-        if (isConnected) load();
-      },
-      onError: () => setConnected(false),
-      onVaultsUpdated: () => load(),
-    });
-  }, [api, load]);
+      { threshold: 0 },
+    );
+    cardRefs.current.forEach((el) => observer.observe(el));
+    return () => observer.disconnect();
+  }, [requests, onOffscreenApprovalsChange, report]);
 
-  // Poll only while the event bridge is down — and only when visible and not mid-load,
-  // so a backgrounded disconnected tab doesn't spin or race overlapping loads.
+  // Drop stale ids for resolved/removed requests, then re-report.
   useEffect(() => {
-    if (connected) return;
-    let cancelled = false;
-    let inFlight = false;
-    const id = window.setInterval(() => {
-      if (cancelled || inFlight || document.visibilityState !== 'visible') return;
-      inFlight = true;
-      void load().finally(() => {
-        inFlight = false;
-      });
-    }, POLL_FALLBACK_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, [connected, load]);
-
-  // Expiry doesn't publish a `vaults.updated` event, so schedule a refresh at the earliest
-  // visible expiry — otherwise an expired card lingers and clicking it hits a server-side
-  // lazy-expire failure. Runs even while SSE is connected.
-  useEffect(() => {
-    const now = Date.now();
-    let earliest = Infinity;
-    for (const request of requests) {
-      const expiresAt = request.expires_at ? Date.parse(request.expires_at) : NaN;
-      if (!Number.isNaN(expiresAt) && expiresAt > now) earliest = Math.min(earliest, expiresAt);
-    }
-    if (earliest === Infinity) return;
-    // +250ms so the server has flipped the row; clamp to the setTimeout max.
-    const id = window.setTimeout(load, Math.min(earliest - now + 250, 2_000_000_000));
-    return () => window.clearTimeout(id);
-  }, [requests, load]);
+    const ids = new Set(requests.map((request) => request.id));
+    for (const id of [...offscreen.current]) if (!ids.has(id)) offscreen.current.delete(id);
+    report();
+  }, [requests, report]);
 
   if (requests.length === 0) return null;
   return (
     <div className="flex flex-col gap-2">
       {requests.map((request) => (
-        <VaultRequestCard key={request.id} request={request} onResolved={load} />
+        <div
+          key={request.id}
+          data-request-id={request.id}
+          ref={
+            isApproval(request)
+              ? (el) => {
+                  if (el) cardRefs.current.set(request.id, el);
+                  else cardRefs.current.delete(request.id);
+                }
+              : undefined
+          }
+        >
+          <VaultRequestCard request={request} onResolved={onResolved} />
+        </div>
       ))}
     </div>
+  );
+};
+
+/**
+ * Floating approval bar (design: Form B). The bar shows above the composer for approval (access /
+ * sign) requests whose in-scroll card has scrolled off-viewport, so a waiting approval is never
+ * missed; clicking opens the oldest off-screen one in the shared approval dialog.
+ *
+ * `offscreen` drives the bar; `pending` is the full pending-approval set and governs the dialog's
+ * lifetime — the dialog stays open while its request is still pending even if the card scrolls
+ * back into view (leaving `offscreen`), and closes only once the request truly resolves/expires.
+ */
+export const VaultApprovalFloat: React.FC<{ offscreen: VaultRequest[]; pending: VaultRequest[]; onResolved: () => void }> = ({
+  offscreen,
+  pending,
+  onResolved,
+}) => {
+  const { t } = useTranslation();
+  const [reviewing, setReviewing] = useState<VaultRequest | null>(null);
+
+  // Close the dialog only when its request is no longer pending (resolved elsewhere / expired) —
+  // NOT merely because its card scrolled back on-screen. A stale approve/deny would 4xx.
+  useEffect(() => {
+    if (reviewing && !pending.some((approval) => approval.id === reviewing.id)) setReviewing(null);
+  }, [pending, reviewing]);
+
+  const oldestOffscreen = offscreen.length > 0 ? offscreen[offscreen.length - 1] : null;
+  return (
+    <>
+      {oldestOffscreen ? (
+        <div className="mx-3 mb-1">
+          <button
+            type="button"
+            onClick={() => setReviewing(oldestOffscreen)}
+            className="flex w-full items-center gap-2.5 rounded-xl border border-gold/40 bg-gold/[0.08] px-3 py-2.5 text-left transition-colors hover:bg-gold/[0.12]"
+          >
+            <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-gold/15 text-gold">
+              <KeyRound className="size-4" />
+            </span>
+            <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">
+              {t('vaults.chat.floatApprovals', { count: offscreen.length })}
+            </span>
+            {/* Decorative pill — the whole bar is the button, so this must not be interactive. */}
+            <span className={cn(buttonVariants({ size: 'sm' }), 'pointer-events-none shrink-0')} aria-hidden="true">
+              {t('vaults.requests.review')}
+            </span>
+          </button>
+        </div>
+      ) : null}
+      <VaultApprovalDialog
+        request={reviewing}
+        onResolved={() => {
+          setReviewing(null);
+          onResolved();
+        }}
+        onClose={() => setReviewing(null)}
+      />
+    </>
   );
 };

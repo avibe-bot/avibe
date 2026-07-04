@@ -8,7 +8,7 @@ import { useApi } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { useWorkbenchInbox } from '../../context/WorkbenchInboxContext';
 import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
-import type { VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
+import type { VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
@@ -29,7 +29,8 @@ import { ImageViewerProvider } from '../ui/image-viewer';
 import { FileViewerProvider } from '../ui/file-viewer';
 import { Input } from '../ui/input';
 import { Markdown } from '../ui/markdown';
-import { VaultChatRequests } from '../ui/vault-chat-requests';
+import { VaultApprovalFloat, VaultChatRequests } from '../ui/vault-chat-requests';
+import { usePendingVaultRequests } from '../../lib/usePendingVaultRequests';
 import { Composer, type ComposerAttachment, type ComposerHandle, type ComposerProps } from './Composer';
 import type { MentionReference } from '../../lib/mentions';
 import { QuickReplies } from './QuickReplies';
@@ -188,6 +189,22 @@ export const ChatPage: React.FC = () => {
     [sessionId, session, showPageMode, insertSessionReference],
   );
   useRegisterComposerTarget(composerTarget);
+
+  // Pending vault requests for this session → inline cards at the transcript end (Transcript
+  // footer) + a floating approval bar when those cards scroll off-viewport (approvals only).
+  const { requests: vaultRequests, refresh: refreshVaultRequests } = usePendingVaultRequests(sessionId ?? '');
+  // All pending approval (access/sign) requests for this session — governs the float's mount and
+  // its open dialog's lifetime; the off-screen subset (reported per-card by VaultChatRequests)
+  // only drives whether the bar itself is shown.
+  const pendingApprovals = useMemo(
+    () =>
+      vaultRequests.filter((request) => {
+        const type = (request.card as { request_type?: string } | null)?.request_type ?? request.request_type;
+        return type === 'access' || type === 'sign';
+      }),
+    [vaultRequests],
+  );
+  const [offscreenApprovals, setOffscreenApprovals] = useState<VaultRequest[]>([]);
 
   // Back returns to the page the user came from, not a hardcoded inbox.
   // location.key === 'default' means /chat was the first history entry (deep
@@ -1452,9 +1469,20 @@ export const ChatPage: React.FC = () => {
           onQuoteSelection={quoteSelectionToComposer}
           onAskInNewSession={askInNewSession}
           followingTailRef={followingTailRef}
+          footer={
+            sessionId ? (
+              <VaultChatRequests
+                requests={vaultRequests}
+                onResolved={refreshVaultRequests}
+                onOffscreenApprovalsChange={setOffscreenApprovals}
+              />
+            ) : null
+          }
         />
         <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
-        {sessionId ? <VaultChatRequests key={sessionId} sessionId={sessionId} /> : null}
+        {sessionId && pendingApprovals.length > 0 ? (
+          <VaultApprovalFloat offscreen={offscreenApprovals} pending={pendingApprovals} onResolved={refreshVaultRequests} />
+        ) : null}
         {/* key by session so the composer remounts per session — its draft-seeding
             + local value reset, instead of carrying across sessions (Codex P2). */}
         <Compose
@@ -1838,6 +1866,9 @@ interface TranscriptProps {
   // tail. Lifted so the retained-window trim (ChatPage.appendMessage) can tell
   // when dropping the oldest rows is safe (reader pinned to the bottom).
   followingTailRef: React.MutableRefObject<boolean>;
+  // Rendered at the end of the scroll content, after the last message (e.g. the in-scroll
+  // vault request cards). Part of the timeline, so it scrolls with the conversation.
+  footer?: React.ReactNode;
 }
 
 const Transcript: React.FC<TranscriptProps> = ({
@@ -1857,6 +1888,7 @@ const Transcript: React.FC<TranscriptProps> = ({
   onQuoteSelection,
   onAskInNewSession,
   followingTailRef,
+  footer,
 }) => {
   const { t } = useTranslation();
   const forkSourceSessionId =
@@ -2151,24 +2183,28 @@ const Transcript: React.FC<TranscriptProps> = ({
   }, [empty]);
 
   if (empty) {
-    if (isForkedSession && forkSourceSessionId) {
-      return (
-        <div className="flex min-h-0 flex-1 flex-col px-4 py-5 md:px-8">
-          <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-3">
-            {forkSourceBanner}
-          </div>
+    // Even with no transcript-visible messages, a session can have pending vault requests —
+    // render the footer (cards + observer) below the empty state so they aren't invisible.
+    const emptyBody =
+      isForkedSession && forkSourceSessionId ? (
+        <>
+          <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-3">{forkSourceBanner}</div>
           <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-muted">
             <GitFork className="size-8 opacity-70" />
             <div className="max-w-[360px] text-[13px] font-semibold text-foreground">{t('chat.forkedEmptyTitle')}</div>
             <div className="max-w-[440px] text-[12px] leading-relaxed">{t('chat.forkedEmptyBody')}</div>
           </div>
+        </>
+      ) : (
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-muted">
+          <MessageSquare className="size-8 opacity-60" />
+          <div className="text-[13px]">{t('chat.transcriptEmpty')}</div>
         </div>
       );
-    }
     return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-muted">
-        <MessageSquare className="size-8 opacity-60" />
-        <div className="text-[13px]">{t('chat.transcriptEmpty')}</div>
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-5 [overflow-anchor:none] md:px-8">
+        {emptyBody}
+        {footer ? <div className="mx-auto mt-3 w-full max-w-[1080px] shrink-0">{footer}</div> : null}
       </div>
     );
   }
@@ -2200,6 +2236,7 @@ const Transcript: React.FC<TranscriptProps> = ({
             />
           ))}
           {showThinking && <ThinkingBubble session={session} />}
+          {footer}
         </div>
       </div>
       {/* Jump-to-latest: appears after scrolling up a clear distance, returns to
