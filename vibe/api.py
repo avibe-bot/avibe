@@ -2075,7 +2075,7 @@ def create_vault_grant(payload: dict) -> dict:
     expected_pubkey = payload.get("agent_pubkey") if isinstance(payload.get("agent_pubkey"), dict) else None
     if needs_agent_deks:
         try:
-            _require_avault_p2_surface("resident agent grant")
+            _require_avault_grant_delivery_surface("resident agent grant")
             validate_avault_agent_pubkey(expected_pubkey)
         except AvaultError as exc:
             raise _vault_api_error_from_avault(exc, prefix="avault agent grant failed") from exc
@@ -4660,10 +4660,14 @@ _AVAULT_INSTALL_LOCK = threading.Lock()
 _AVAULT_AGENT_MANAGER_LOCK = threading.Lock()
 _AVAULT_AGENT_MANAGER = None
 AVAULT_P2_MIN_VERSION = "0.1.3"
-# Installer pin must reference a published manifest-pinned release. It may lag
-# the P2 surface; standard sealing remains usable while P2-only entry points
-# gate on AVAULT_P2_MIN_VERSION below.
-AVAULT_VERSION = "0.1.3"
+# The released 0.1.3 resident-agent protocol still used scope_type/scope_ref
+# delivery frames. The grant_id delivery protocol is intentionally gated on the
+# next avault release so upgraded Avibe installs fail closed instead of sending
+# new frames to an incompatible resident agent.
+AVAULT_GRANT_DELIVERY_MIN_VERSION = "0.1.4"
+# Installer pin must reference a published manifest-pinned release. v0.1.5 is
+# the first managed release carrying the final grant_id resident delivery frames.
+AVAULT_VERSION = "0.1.5"
 _AVAULT_RELEASE_BASE_URL = f"https://github.com/avibe-bot/avault/releases/download/v{AVAULT_VERSION}/"
 
 
@@ -4675,7 +4679,17 @@ def _managed_avault_release_satisfies_p2() -> bool:
     return _version_at_least(AVAULT_VERSION, AVAULT_P2_MIN_VERSION)
 
 
-def _avault_p2_release_unavailable_result(*, existing: str | None = None, existing_version: str | None = None) -> dict:
+def _managed_avault_release_satisfies_grant_delivery() -> bool:
+    return _version_at_least(AVAULT_VERSION, AVAULT_GRANT_DELIVERY_MIN_VERSION)
+
+
+def _avault_p2_release_unavailable_result(
+    *,
+    existing: str | None = None,
+    existing_version: str | None = None,
+    required: str | None = None,
+) -> dict:
+    required = required or AVAULT_P2_MIN_VERSION
     return {
         "ok": False,
         "installed": bool(existing),
@@ -4687,9 +4701,37 @@ def _avault_p2_release_unavailable_result(*, existing: str | None = None, existi
         "message": backend_t(
             "dependencies.avault.p2ReleaseUnavailable",
             pinned=AVAULT_VERSION,
-            required=AVAULT_P2_MIN_VERSION,
+            required=required,
         ),
     }
+
+
+def _avault_ready_min_version() -> str:
+    # Avibe-managed avault readiness follows the resident delivery protocol now
+    # that the managed pin includes grant-id frames. Older P2 binaries can still
+    # seal/sign, but they are not safe as the default dependency for Vaults.
+    return AVAULT_GRANT_DELIVERY_MIN_VERSION
+
+
+def _managed_avault_release_satisfies_ready_minimum() -> bool:
+    return _version_at_least(AVAULT_VERSION, _avault_ready_min_version())
+
+
+def _reset_avault_agent_after_binary_change(*, reason: str) -> None:
+    from vibe.avault_agent import default_agent_socket_path
+
+    with _AVAULT_AGENT_MANAGER_LOCK:
+        manager = _AVAULT_AGENT_MANAGER
+    socket_path = manager.socket_path if manager is not None else default_agent_socket_path()
+    if manager is not None:
+        try:
+            manager.reset()
+        except Exception:  # noqa: BLE001
+            logger.warning("%s: failed to reset resident avault agent after binary change", reason, exc_info=True)
+    try:
+        _quarantine_resident_agent_socket(socket_path)
+    except Exception:  # noqa: BLE001
+        logger.warning("%s: failed to quarantine resident avault agent socket after binary change", reason, exc_info=True)
 
 
 def install_askill() -> dict:
@@ -4963,6 +5005,7 @@ def install_avault(force: bool = False) -> dict:
             install_path.chmod(0o755)
             _clear_macos_quarantine(install_path)
         _persist_avault_cli_path(str(install_path))
+        _reset_avault_agent_after_binary_change(reason="install_avault")
 
         return {
             "ok": True,
@@ -4984,9 +5027,10 @@ def install_avault(force: bool = False) -> dict:
 def ensure_avault_installed(force: bool = False) -> dict:
     """Ensure avault is present.
 
-    The managed pin can be older than the P2 surface while still supporting the
-    standard seal path. P2-only commands call ``_require_avault_p2_surface`` at
-    their own boundary instead of making dependency install fail.
+    The dependency manager keeps Avibe's default avault at the resident delivery
+    protocol minimum. Older P2 binaries can still handle some one-shot commands,
+    but they are not ready for the protected Vaults surfaces that share this
+    managed dependency.
     """
     if not _AVAULT_INSTALL_LOCK.acquire(blocking=False):
         return {
@@ -4998,16 +5042,17 @@ def ensure_avault_installed(force: bool = False) -> dict:
     try:
         existing = _resolve_avault_cli_path()
         existing_version = _probe_avault_version(existing) if existing else None
-        existing_is_p2 = _version_at_least(existing_version, AVAULT_P2_MIN_VERSION)
-        can_managed_install_p2 = _managed_avault_release_satisfies_p2()
+        ready_minimum = _avault_ready_min_version()
+        existing_is_ready = _version_at_least(existing_version, ready_minimum)
+        can_managed_install_ready = _managed_avault_release_satisfies_ready_minimum()
         # Never downgrade: keep an existing binary that is strictly newer than the
         # managed pin, even under ``force``. ``force`` may still reinstall an equal
         # or older managed version to repair a binary, but it must not replace a
-        # newer user/custom avault (e.g. 0.1.4) with the older managed release. A
+        # newer user/custom avault (e.g. 0.1.6) with the older managed release. A
         # genuinely broken binary can't report a version, so it isn't matched here
         # and still gets repaired below.
         existing_newer_than_pin = (
-            existing_is_p2
+            existing_is_ready
             and _version_at_least(existing_version, AVAULT_VERSION)
             and not _version_at_least(AVAULT_VERSION, existing_version)
         )
@@ -5019,11 +5064,15 @@ def ensure_avault_installed(force: bool = False) -> dict:
                 "path": existing,
                 "version": existing_version,
             }
-        if existing and not existing_is_p2 and force and not can_managed_install_p2:
-            return _avault_p2_release_unavailable_result(existing=existing, existing_version=existing_version)
+        if existing and not existing_is_ready and force and not can_managed_install_ready:
+            return _avault_p2_release_unavailable_result(
+                existing=existing,
+                existing_version=existing_version,
+                required=ready_minimum,
+            )
         if existing and (
-            (existing_is_p2 and (not force or not can_managed_install_p2))
-            or (not existing_is_p2 and not force and not can_managed_install_p2)
+            (existing_is_ready and (not force or not can_managed_install_ready))
+            or (not existing_is_ready and not force and not can_managed_install_ready)
         ):
             return {
                 "ok": True,
@@ -5032,7 +5081,7 @@ def ensure_avault_installed(force: bool = False) -> dict:
                 "path": existing,
                 "version": existing_version,
             }
-        needs_upgrade = bool(existing and not existing_is_p2 and can_managed_install_p2)
+        needs_upgrade = bool(existing and not existing_is_ready and can_managed_install_ready)
         result = install_avault(force=force or needs_upgrade)
         resolved = _resolve_avault_cli_path()
         installed = bool(resolved)
@@ -5047,7 +5096,7 @@ def ensure_avault_installed(force: bool = False) -> dict:
             result["message"] = (
                 result.get("message") or backend_t("dependencies.avault.installedNotFound")
             )
-        elif result.get("ok") and not _version_at_least(resolved_version, AVAULT_P2_MIN_VERSION):
+        elif result.get("ok") and not _version_at_least(resolved_version, ready_minimum):
             result["status"] = "upgrade_required"
         return result
     finally:
@@ -5080,7 +5129,7 @@ def avault_status() -> dict:
     if not path:
         return {"id": "avault", "installed": False, "version": None, "status": "missing", "path": None}
     version = _probe_avault_version(path)
-    status = "ready" if _version_at_least(version, AVAULT_P2_MIN_VERSION) else "upgrade_required"
+    status = "ready" if _version_at_least(version, _avault_ready_min_version()) else "upgrade_required"
     return {"id": "avault", "installed": True, "version": version, "status": status, "path": path}
 
 
@@ -5112,16 +5161,32 @@ def _version_at_least(current: str | None, minimum: str) -> bool:
     return cur_parts + (0,) * (width - len(cur_parts)) >= min_parts + (0,) * (width - len(min_parts))
 
 
-def _require_avault_p2_surface(feature: str) -> None:
+def _require_avault_min_version(feature: str, minimum: str, *, managed_available: bool) -> None:
     status = avault_status()
     if not status.get("installed"):
         raise AvaultPreHandoffError(f"avault is required for {feature}")
     version = status.get("version")
-    if not _version_at_least(version, AVAULT_P2_MIN_VERSION):
-        detail = f"{feature} requires avault >= {AVAULT_P2_MIN_VERSION}; installed {version or 'unknown'}"
-        if not _managed_avault_release_satisfies_p2():
+    if not _version_at_least(version, minimum):
+        detail = f"{feature} requires avault >= {minimum}; installed {version or 'unknown'}"
+        if not managed_available:
             detail = f"{detail}; managed avault install is pinned to {AVAULT_VERSION}"
         raise AvaultPreHandoffError(detail)
+
+
+def _require_avault_p2_surface(feature: str) -> None:
+    _require_avault_min_version(
+        feature,
+        AVAULT_P2_MIN_VERSION,
+        managed_available=_managed_avault_release_satisfies_p2(),
+    )
+
+
+def _require_avault_grant_delivery_surface(feature: str) -> None:
+    _require_avault_min_version(
+        feature,
+        AVAULT_GRANT_DELIVERY_MIN_VERSION,
+        managed_available=_managed_avault_release_satisfies_grant_delivery(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -5350,11 +5415,15 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> dict:
 
 
 def _agent_secret_payload(secret: dict, *, target_field: str) -> dict:
-    return {
+    payload = {
         "name": secret["name"],
         target_field: secret[target_field],
         "envelope": _envelope_payload(secret["envelope"]),
     }
+    tier = secret.get("tier")
+    if tier is not None:
+        payload["tier"] = tier
+    return payload
 
 
 def avault_agent_grant(
@@ -5368,12 +5437,12 @@ def avault_agent_grant(
     """Cache browser-released protected DEKs in the resident agent."""
     from vibe.avault_agent import AvaultAgentError
 
-    _require_avault_p2_surface("resident agent grant")
+    _require_avault_grant_delivery_surface("resident agent grant")
     validate_avault_agent_pubkey(expected_pubkey)
     try:
         return _avault_agent_client().grant(
             grant_id=grant_id,
-            purpose=purpose,
+            purpose="deliver",
             ttl_secs=ttl_secs,
             deks=deks,
         )
@@ -5398,7 +5467,7 @@ def avault_agent_release(*, grant_id: str) -> dict:
     """Drop a resident-agent protected grant if present."""
     from vibe.avault_agent import AvaultAgentClient, AvaultAgentError
 
-    _require_avault_p2_surface("resident agent release")
+    _require_avault_grant_delivery_surface("resident agent release")
     try:
         return AvaultAgentClient(_avault_agent_manager().socket_path, timeout=1.0).release(grant_id=grant_id)
     except AvaultAgentError as exc:
@@ -5490,16 +5559,18 @@ def avault_agent_deliver_run(
     grant_id: str,
     secrets: list[dict],
     command: list[str],
+    context: dict | None = None,
 ) -> dict:
     """Run a child under a protected grant. Plaintext stays inside avault."""
     from vibe.avault_agent import AvaultAgentError
 
-    _require_avault_p2_surface("resident agent deliver run")
+    _require_avault_grant_delivery_surface("resident agent deliver run")
     try:
         result = _avault_agent_manager().client(timeout=None).deliver_run(
             grant_id=grant_id,
             command=command,
             secrets=[_agent_secret_payload(secret, target_field="env") for secret in secrets],
+            context=context,
         )
     except AvaultAgentError as exc:
         if _avault_agent_error_is_absent(str(exc)):
@@ -5518,17 +5589,19 @@ def avault_agent_deliver_fetch(
     name: str,
     sealed,
     request: dict,
+    context: dict | None = None,
 ) -> dict:
     """Broker an HTTP request under a protected grant."""
     from vibe.avault_agent import AvaultAgentError
 
-    _require_avault_p2_surface("resident agent deliver fetch")
+    _require_avault_grant_delivery_surface("resident agent deliver fetch")
     try:
         return _avault_agent_manager().client(timeout=_AVAULT_FETCH_TIMEOUT_SECONDS).deliver_fetch(
             grant_id=grant_id,
             name=name,
             envelope=_envelope_payload(sealed),
             request=request,
+            context=context,
         )
     except AvaultAgentError as exc:
         if _avault_agent_error_is_absent(str(exc)):
@@ -5546,7 +5619,7 @@ def avault_agent_deliver_inject(
     """Render a protected-grant secret file inside avault."""
     from vibe.avault_agent import AvaultAgentError
 
-    _require_avault_p2_surface("resident agent deliver inject")
+    _require_avault_grant_delivery_surface("resident agent deliver inject")
     try:
         result = _avault_agent_client().deliver_inject(
             grant_id=grant_id,

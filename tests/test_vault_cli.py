@@ -27,6 +27,7 @@ def _ns(**kw):
         stdin=False,
         from_file=None,
         tag=None,
+        skill=None,
         description=None,
         allow_host=None,
         auth_header=None,
@@ -178,6 +179,13 @@ def _set_always_ask_standard_tag_grant(
 )
 def test_parse_env_specs(specs, expected):
     assert cli._parse_env_specs(specs) == expected
+
+
+def test_parse_env_specs_rejects_duplicate_secret_alias():
+    with pytest.raises(cli.TaskCliError) as exc:
+        cli._parse_env_specs(["A=ASK_KEY", "B=ASK_KEY"])
+
+    assert exc.value.code == "conflicting_env_alias"
 
 
 def test_vault_parser_does_not_expose_plaintext_set_command():
@@ -411,6 +419,52 @@ def test_run_calls_avault_with_env_mapping_and_records_delivery(tmp_path, capfd,
     assert secret["last_used_at"] is not None
 
 
+def test_run_expands_tags_and_skill_tags_as_union(capfd, monkeypatch):
+    from vibe import api
+
+    _create_standard_secret("A_KEY", sealed=_sealed("a"), tags=["deploy"])
+    _create_standard_secret("B_KEY", sealed=_sealed("b"), tags=["skill:deploy"])
+    _create_standard_secret("C_KEY", sealed=_sealed("c"), tags=["deploy", "skill:deploy"])
+    deliver = Mock(return_value=0)
+    monkeypatch.setattr(api, "avault_deliver_run", deliver)
+
+    code = cli.cmd_vault_run(_ns(tag=["deploy"], skill=["deploy"], command_argv=["python3", "-c", "pass"]))
+
+    assert code == 0
+    delivered = {item["name"]: item["env"] for item in deliver.call_args.args[0]}
+    assert delivered == {"A_KEY": "A_KEY", "B_KEY": "B_KEY", "C_KEY": "C_KEY"}
+
+
+def test_run_skill_selects_skill_link_mirror_tag(monkeypatch):
+    from vibe import api
+
+    _create_standard_secret("LINKED_KEY", sealed=_sealed("linked"))
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.link_secret_to_skills(conn, "LINKED_KEY", ["deploy"])
+    deliver = Mock(return_value=0)
+    monkeypatch.setattr(api, "avault_deliver_run", deliver)
+
+    code = cli.cmd_vault_run(_ns(skill=["deploy"], command_argv=["python3", "-c", "pass"]))
+
+    assert code == 0
+    assert deliver.call_args.args[0] == [{"name": "LINKED_KEY", "env": "LINKED_KEY", "envelope": _sealed("linked")}]
+
+
+def test_run_rejects_conflicting_alias_from_tag_selection(capfd, monkeypatch):
+    from vibe import api
+
+    _create_standard_secret("DEPLOY_KEY", tags=["deploy"])
+    deliver = Mock()
+    monkeypatch.setattr(api, "avault_deliver_run", deliver)
+
+    code = cli.cmd_vault_run(_ns(env=["LOCAL=DEPLOY_KEY"], tag=["deploy"], command_argv=["python3", "-c", "pass"]))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "conflicting_env_alias"
+    deliver.assert_not_called()
+
+
 def test_run_rejects_keypair_before_avault_delivery(capfd, monkeypatch):
     from vibe import api
 
@@ -424,6 +478,31 @@ def test_run_rejects_keypair_before_avault_delivery(capfd, monkeypatch):
 
     assert code == 1
     assert json.loads(captured.err)["code"] == "keypair_not_value_deliverable"
+    deliver.assert_not_called()
+
+
+def test_run_rejects_tag_selected_keypair_with_sign_hint(capfd, monkeypatch):
+    from vibe import api
+
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="ETH_KEY",
+            sealed=_sealed("eth"),
+            kind="keypair",
+            signer_kind="local",
+            tags=["deploy"],
+        )
+    deliver = Mock()
+    monkeypatch.setattr(api, "avault_deliver_run", deliver)
+
+    code = cli.cmd_vault_run(_ns(tag=["deploy"], command_argv=["python3", "-c", "pass"]))
+    captured = capfd.readouterr()
+    payload = json.loads(captured.err)
+
+    assert code == 1
+    assert payload["code"] == "keypair_not_value_deliverable"
+    assert "vibe vault sign" in payload["hint"]
     deliver.assert_not_called()
 
 
@@ -468,7 +547,10 @@ def test_run_delivers_protected_secret_under_agent_grant(tmp_path, capfd, monkey
     assert "protected err\n" in captured.err
     deliver.assert_called_once()
     assert deliver.call_args.kwargs["grant_id"] == grant["id"]
-    assert deliver.call_args.kwargs["secrets"] == [{"name": "PROTECTED_KEY", "env": "LOCAL_NAME", "envelope": _sealed("protected")}]
+    assert deliver.call_args.kwargs["context"] == {"session_id": grant.get("session_id"), "purpose": "run"}
+    assert deliver.call_args.kwargs["secrets"] == [
+        {"name": "PROTECTED_KEY", "env": "LOCAL_NAME", "envelope": _sealed("protected"), "tier": "protected"}
+    ]
     command = deliver.call_args.kwargs["command"]
     shell = shutil.which("sh") or "/bin/sh"
     assert command[:2] == [shell, "-c"]
@@ -749,7 +831,7 @@ def test_run_mixed_grants_releases_reserved_always_ask_grants_before_delivery(tm
     captured = capfd.readouterr()
 
     assert code == 1
-    assert json.loads(captured.err)["code"] == "mixed_grants"
+    assert json.loads(captured.err)["code"] == "always_ask_selector_set"
     deliver.assert_not_called()
     with cli._open_vault_engine().connect() as conn:
         statuses = {
@@ -786,11 +868,11 @@ def test_inject_mixed_grants_releases_reserved_always_ask_grants_before_delivery
     assert statuses == {grant_a["id"]: "active", grant_b["id"]: "active"}
 
 
-def test_run_reuses_reserved_grant_for_duplicate_always_ask_secret(tmp_path, capfd, monkeypatch):
+def test_run_rejects_duplicate_env_alias_for_always_ask_secret(tmp_path, capfd, monkeypatch):
     from vibe import api
 
     grant = _set_always_ask_standard_grant("ASK_KEY", session_id="ses_cli")
-    deliver = Mock(return_value={"exit_code": 0, "delivered": True})
+    deliver = Mock()
     monkeypatch.setattr(api, "avault_deliver_run", deliver)
 
     code = cli.cmd_vault_run(
@@ -800,18 +882,14 @@ def test_run_reuses_reserved_grant_for_duplicate_always_ask_secret(tmp_path, cap
             session_id="ses_cli",
         )
     )
+    captured = capfd.readouterr()
 
-    assert code == 0
-    deliver.assert_called_once_with(
-        [
-            {"name": "ASK_KEY", "env": "A", "envelope": _sealed("ask_key")},
-            {"name": "ASK_KEY", "env": "B", "envelope": _sealed("ask_key")},
-        ],
-        ["python3", "-c", "pass"],
-    )
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "conflicting_env_alias"
+    deliver.assert_not_called()
     with cli._open_vault_engine().connect() as conn:
         status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
-    assert status == "expired"
+    assert status == "active"
 
 
 def test_run_reuses_multi_secret_standard_one_shot_grant(tmp_path, capfd, monkeypatch):
@@ -834,6 +912,71 @@ def test_run_reuses_multi_secret_standard_one_shot_grant(tmp_path, capfd, monkey
         [
             {"name": "ASK_A", "env": "A", "envelope": _sealed("ask_a")},
             {"name": "ASK_B", "env": "B", "envelope": _sealed("ask_b")},
+        ],
+        ["python3", "-c", "pass"],
+    )
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
+    assert status == "expired"
+
+
+def test_run_tag_standard_always_ask_request_offers_batch_one_shot_grant(capfd, monkeypatch):
+    from vibe import api
+
+    _create_standard_secret(
+        "ASK_A",
+        protection="standard",
+        sealed=_sealed("ask_a"),
+        tags=["deploy"],
+        policy={"always_ask": True},
+    )
+    _create_standard_secret(
+        "ASK_B",
+        protection="standard",
+        sealed=_sealed("ask_b"),
+        tags=["deploy"],
+        policy={"always_ask": True},
+    )
+    _create_standard_secret("NORMAL_DEPLOY", protection="standard", sealed=_sealed("normal"), tags=["deploy"])
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(_ns(tag=["deploy"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        requests = vault_service.list_requests(conn, status="pending")
+    assert len(requests) == 1
+    assert requests[0]["secret_name"] is None
+    assert requests[0]["delivery"]["source_selector"] == {"tags": ["deploy"]}
+    assert requests[0]["card"]["one_shot"] is True
+    option = requests[0]["card"]["grant_options"][0]
+    assert option["source_selector"] == {"tags": ["deploy"]}
+    assert option["one_shot"] is True
+    assert option["member_snapshot"] == ["ASK_A", "ASK_B"]
+    created = api.create_vault_grant({"request_id": requests[0]["id"], "session_id": "ses_cli"})
+    assert created["grant"]["member_snapshot"] == ["ASK_A", "ASK_B"]
+    assert created["grant"]["one_shot"] is True
+    assert created["grant"]["delivery_status"] == "standard_ready"
+
+
+def test_run_tag_reuses_standard_one_shot_subset_with_normal_secrets(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    grant = _set_always_ask_standard_tag_grant(["ASK_A", "ASK_B"], tag="deploy", session_id="ses_cli")
+    _create_standard_secret("NORMAL_DEPLOY", protection="standard", sealed=_sealed("normal"), tags=["deploy"])
+    deliver = Mock(return_value={"exit_code": 0, "delivered": True})
+    monkeypatch.setattr(api, "avault_deliver_run", deliver)
+
+    code = cli.cmd_vault_run(_ns(tag=["deploy"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
+
+    assert code == 0
+    deliver.assert_called_once_with(
+        [
+            {"name": "ASK_A", "env": "ASK_A", "envelope": _sealed("ask_a")},
+            {"name": "ASK_B", "env": "ASK_B", "envelope": _sealed("ask_b")},
+            {"name": "NORMAL_DEPLOY", "env": "NORMAL_DEPLOY", "envelope": _sealed("normal")},
         ],
         ["python3", "-c", "pass"],
     )
@@ -1130,7 +1273,7 @@ def test_expire_agent_grant_after_missing_does_not_reserve_replacement_grant(tmp
     assert statuses == {first["id"]: "expired", replacement["id"]: "active"}
 
 
-def test_run_rejects_mixed_tiers_before_creating_approval(tmp_path, capfd, monkeypatch):
+def test_run_mixed_tiers_without_grant_creates_one_protected_approval(tmp_path, capfd, monkeypatch):
     _create_standard_secret("STANDARD_KEY")
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("protected"))
@@ -1139,9 +1282,211 @@ def test_run_rejects_mixed_tiers_before_creating_approval(tmp_path, capfd, monke
     captured = capfd.readouterr()
 
     assert code == 1
-    assert json.loads(captured.err)["code"] == "mixed_protection_tiers"
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        requests = vault_service.list_requests(conn, status="pending")
+    assert len(requests) == 1
+    assert requests[0]["secret_name"] == "PROTECTED_KEY"
+    assert requests[0]["card"]["protected_secret_names"] == ["PROTECTED_KEY"]
+    assert requests[0]["card"]["grant_options"][0]["member_snapshot"] == ["PROTECTED_KEY"]
+
+
+def test_run_mixed_tiers_delivers_once_through_resident_agent(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    _create_standard_secret("STANDARD_KEY", sealed=_sealed("standard"))
+    grant = _set_protected_grant("PROTECTED_KEY")
+    deliver = Mock(return_value={"exit_code": 0})
+    legacy_deliver = Mock()
+    monkeypatch.setattr(api, "avault_agent_deliver_run", deliver)
+    monkeypatch.setattr(api, "avault_deliver_run", legacy_deliver)
+
+    code = cli.cmd_vault_run(_ns(env=["STANDARD_KEY", "PROTECTED_KEY"], command_argv=["python3", "-c", "pass"]))
+
+    assert code == 0
+    legacy_deliver.assert_not_called()
+    deliver.assert_called_once()
+    assert deliver.call_args.kwargs["grant_id"] == grant["id"]
+    assert deliver.call_args.kwargs["context"] == {"session_id": grant.get("session_id"), "purpose": "run"}
+    assert deliver.call_args.kwargs["secrets"] == [
+        {"name": "STANDARD_KEY", "env": "STANDARD_KEY", "envelope": _sealed("standard"), "tier": "standard"},
+        {"name": "PROTECTED_KEY", "env": "PROTECTED_KEY", "envelope": _sealed("protected"), "tier": "protected"},
+    ]
+
+
+def test_run_mixed_tiers_reserves_standard_one_shot_batch(tmp_path, capfd, monkeypatch):
+    from vibe import api
+
+    standard_grant = _set_always_ask_standard_tag_grant(["ASK_A", "ASK_B"], session_id="ses_cli")
+    protected_grant = _set_protected_grant("PROTECTED_KEY", session_id="ses_cli")
+    deliver = Mock(return_value={"exit_code": 0})
+    legacy_deliver = Mock()
+    monkeypatch.setattr(api, "avault_agent_deliver_run", deliver)
+    monkeypatch.setattr(api, "avault_deliver_run", legacy_deliver)
+
+    code = cli.cmd_vault_run(
+        _ns(
+            env=["A=ASK_A", "B=ASK_B", "PROTECTED_KEY"],
+            command_argv=["python3", "-c", "pass"],
+            session_id="ses_cli",
+        )
+    )
+
+    assert code == 0
+    legacy_deliver.assert_not_called()
+    deliver.assert_called_once()
+    assert deliver.call_args.kwargs["grant_id"] == protected_grant["id"]
+    assert deliver.call_args.kwargs["secrets"] == [
+        {"name": "ASK_A", "env": "A", "envelope": _sealed("ask_a"), "tier": "standard"},
+        {"name": "ASK_B", "env": "B", "envelope": _sealed("ask_b"), "tier": "standard"},
+        {"name": "PROTECTED_KEY", "env": "PROTECTED_KEY", "envelope": _sealed("protected"), "tier": "protected"},
+    ]
+    with cli._open_vault_engine().connect() as conn:
+        standard_status = conn.execute(vault_grants.select().where(vault_grants.c.id == standard_grant["id"])).mappings().one()["status"]
+        protected_status = conn.execute(vault_grants.select().where(vault_grants.c.id == protected_grant["id"])).mappings().one()["status"]
+    assert standard_status == "expired"
+    assert protected_status == "active"
+
+
+def test_run_mixed_tiers_releases_standard_one_shot_when_protected_cache_missing(capfd, monkeypatch):
+    from vibe import api
+
+    standard_grant = _set_always_ask_standard_tag_grant(["ASK_A", "ASK_B"], session_id="ses_cli")
+    protected_grant = _set_protected_grant("PROTECTED_KEY", session_id="ses_cli")
+    monkeypatch.setattr(api, "avault_agent_deliver_run", Mock(side_effect=api.AvaultError("grant is missing or expired")))
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(
+        _ns(
+            env=["A=ASK_A", "B=ASK_B", "PROTECTED_KEY"],
+            command_argv=["python3", "-c", "pass"],
+            session_id="ses_cli",
+        )
+    )
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        standard_status = conn.execute(vault_grants.select().where(vault_grants.c.id == standard_grant["id"])).mappings().one()["status"]
+        protected_status = conn.execute(vault_grants.select().where(vault_grants.c.id == protected_grant["id"])).mappings().one()["status"]
+        requests = vault_service.list_requests(conn, status="pending")
+    assert standard_status == "active"
+    assert protected_status == "expired"
+    assert len(requests) == 1
+    assert requests[0]["secret_name"] == "PROTECTED_KEY"
+    assert requests[0]["card"]["grant_options"][0]["member_snapshot"] == ["PROTECTED_KEY"]
+
+
+def test_run_tag_request_offers_fixed_protected_set_grant(capfd, monkeypatch):
+    from vibe import api
+
+    _create_standard_secret("A_DEPLOY", protection="protected", tags=["deploy"], sealed=_sealed("a"))
+    _create_standard_secret("B_DEPLOY", protection="protected", tags=["deploy"], sealed=_sealed("b"))
+    monkeypatch.setattr(api, "avault_agent_deliver_run", Mock())
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(_ns(tag=["deploy"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        requests = vault_service.list_requests(conn, status="pending")
+    assert len(requests) == 1
+    assert requests[0]["secret_name"] is None
+    assert requests[0]["delivery"]["source_selector"] == {"tags": ["deploy"]}
+    assert requests[0]["card"]["protected_secret_names"] == ["A_DEPLOY", "B_DEPLOY"]
+    option = requests[0]["card"]["grant_options"][0]
+    assert option["source_selector"] == {"tags": ["deploy"]}
+    assert option["member_snapshot"] == ["A_DEPLOY", "B_DEPLOY"]
+
+
+def test_run_comma_env_request_offers_normalized_protected_set_grant(capfd, monkeypatch):
+    from vibe import api
+
+    _create_standard_secret("A_DEPLOY", protection="protected", sealed=_sealed("a"))
+    _create_standard_secret("B_DEPLOY", protection="protected", sealed=_sealed("b"))
+    monkeypatch.setattr(api, "avault_agent_deliver_run", Mock())
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(_ns(env=["A_DEPLOY,api_key=B_DEPLOY"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        requests = vault_service.list_requests(conn, status="pending")
+    assert len(requests) == 1
+    assert requests[0]["delivery"]["source_selector"] == {"env": ["A_DEPLOY", "api_key=B_DEPLOY"]}
+    option = requests[0]["card"]["grant_options"][0]
+    assert option["source_selector"] == {"env": ["A_DEPLOY", "api_key=B_DEPLOY"]}
+    assert option["member_snapshot"] == ["A_DEPLOY", "B_DEPLOY"]
+
+
+def test_run_tag_request_rejects_standard_always_ask_in_protected_set(capfd, monkeypatch):
+    from vibe import api
+
+    _create_standard_secret("PROTECTED_DEPLOY", protection="protected", tags=["deploy"], sealed=_sealed("protected"))
+    _create_standard_secret(
+        "ASK_DEPLOY",
+        protection="standard",
+        tags=["deploy"],
+        sealed=_sealed("ask"),
+        policy={"always_ask": True},
+    )
+    monkeypatch.setattr(api, "avault_agent_deliver_run", Mock())
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(_ns(tag=["deploy"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    payload = json.loads(captured.err)
+    assert payload["code"] == "always_ask_selector_set"
+    assert payload["details"]["protected_secret_names"] == ["PROTECTED_DEPLOY"]
+    assert payload["details"]["standard_always_ask_secret_names"] == ["ASK_DEPLOY"]
     with cli._open_vault_engine().connect() as conn:
         assert vault_service.list_requests(conn, status="pending") == []
+
+
+def test_run_tag_protected_request_allows_preapproved_standard_always_ask(capfd, monkeypatch):
+    from vibe import api
+
+    _create_standard_secret("PROTECTED_DEPLOY", protection="protected", tags=["deploy"], sealed=_sealed("protected"))
+    _create_standard_secret("NORMAL_DEPLOY", protection="standard", tags=["deploy"], sealed=_sealed("normal"))
+    _create_standard_secret(
+        "ASK_DEPLOY",
+        protection="standard",
+        tags=["deploy"],
+        sealed=_sealed("ask"),
+        policy={"always_ask": True},
+    )
+    with cli._open_vault_engine().begin() as conn:
+        standard_req = vault_service.create_access_request(
+            conn,
+            "ASK_DEPLOY",
+            requester={"source": "cli", "session_id": "ses_cli"},
+            delivery={"session_id": "ses_cli", "mode": "run"},
+        )
+        standard_grant = _grant_from_request(conn, standard_req, session_id="ses_cli")
+    monkeypatch.setattr(api, "avault_agent_deliver_run", Mock())
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(_ns(tag=["deploy"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        requests = vault_service.list_requests(conn, status="pending")
+        status = conn.execute(vault_grants.select().where(vault_grants.c.id == standard_grant["id"])).mappings().one()["status"]
+    assert status == "active"
+    assert len(requests) == 1
+    assert requests[0]["secret_name"] == "PROTECTED_DEPLOY"
+    assert requests[0]["delivery"]["source_selector"] == {"tags": ["deploy"]}
+    assert requests[0]["card"]["protected_secret_names"] == ["PROTECTED_DEPLOY"]
+    assert requests[0]["card"]["grant_options"][0]["member_snapshot"] == ["PROTECTED_DEPLOY"]
 
 
 def test_run_rejects_missing_later_secret_before_creating_approval(capfd):
@@ -1178,7 +1523,7 @@ def test_run_expires_grant_when_agent_cache_is_missing(capfd, monkeypatch):
     assert requests[0]["card"]["grant_options"][0]["purpose"] == "run"
 
 
-def test_run_reopens_only_one_approval_when_tag_agent_cache_is_missing(capfd, monkeypatch):
+def test_run_reopens_one_selector_set_when_agent_cache_is_missing(capfd, monkeypatch):
     from vibe import api
 
     grant = _set_tag_grant(["A_KEY", "B_KEY"])
@@ -1194,7 +1539,41 @@ def test_run_reopens_only_one_approval_when_tag_agent_cache_is_missing(capfd, mo
         requests = vault_service.list_requests(conn, status="pending")
     assert status == "expired"
     assert len(requests) == 1
-    assert requests[0]["secret_name"] == "A_KEY"
+    assert requests[0]["secret_name"] is None
+    assert requests[0]["delivery"]["protected_secret_names"] == ["A_KEY", "B_KEY"]
+    assert requests[0]["delivery"]["source_selector"] == {"env": ["A_KEY", "B_KEY"]}
+    option = requests[0]["card"]["grant_options"][0]
+    assert option["source_selector"] == {"env": ["A_KEY", "B_KEY"]}
+    assert option["member_snapshot"] == ["A_KEY", "B_KEY"]
+
+
+def test_run_releases_standard_one_shot_when_protected_cache_is_missing(capfd, monkeypatch):
+    from vibe import api
+
+    standard_grant = _set_always_ask_standard_tag_grant(["ASK_DEPLOY"], tag="deploy", session_id="ses_cli")
+    protected_grant = _set_tag_grant(["PROTECTED_DEPLOY"], tag="deploy", session_id="ses_cli")
+    monkeypatch.setattr(api, "avault_agent_deliver_run", Mock(side_effect=api.AvaultError("grant is missing or expired")))
+    monkeypatch.setattr(api, "avault_deliver_run", Mock())
+
+    code = cli.cmd_vault_run(_ns(tag=["deploy"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
+    captured = capfd.readouterr()
+
+    assert code == 1
+    assert json.loads(captured.err)["code"] == "approval_required"
+    with cli._open_vault_engine().connect() as conn:
+        statuses = {
+            row["id"]: row["status"]
+            for row in conn.execute(
+                vault_grants.select().where(vault_grants.c.id.in_([standard_grant["id"], protected_grant["id"]]))
+            ).mappings()
+        }
+        requests = vault_service.list_requests(conn, status="pending")
+    assert statuses == {standard_grant["id"]: "active", protected_grant["id"]: "expired"}
+    assert len(requests) == 1
+    assert requests[0]["secret_name"] == "PROTECTED_DEPLOY"
+    assert requests[0]["delivery"]["source_selector"] == {"tags": ["deploy"]}
+    assert requests[0]["delivery"]["protected_secret_names"] == ["PROTECTED_DEPLOY"]
+    assert requests[0]["card"]["grant_options"][0]["member_snapshot"] == ["PROTECTED_DEPLOY"]
 
 
 def test_fetch_reopens_session_bound_approval_when_agent_cache_is_missing(capfd, monkeypatch):

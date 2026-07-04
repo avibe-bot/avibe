@@ -104,19 +104,23 @@ class AvaultAgentClient:
         self,
         *,
         grant_id: str,
-        purpose: str,
         ttl_secs: int,
         deks: list[dict[str, Any]],
+        purpose: str = "deliver",
+        scope_type: str | None = None,
+        scope_ref: str | None = None,
     ) -> dict[str, Any]:
-        return self.request(
-            {
-                "type": "grant",
-                "grant_id": grant_id,
-                "purpose": purpose,
-                "ttl_secs": ttl_secs,
-                "deks": deks,
-            }
-        )
+        payload = {
+            "type": "grant",
+            "grant_id": grant_id,
+            "purpose": purpose,
+            "ttl_secs": ttl_secs,
+            "deks": deks,
+        }
+        if scope_type and scope_ref:
+            payload["scope_type"] = scope_type
+            payload["scope_ref"] = scope_ref
+        return self.request(payload)
 
     def release(self, *, grant_id: str) -> dict[str, Any]:
         return self.request({"type": "release", "grant_id": grant_id})
@@ -127,16 +131,17 @@ class AvaultAgentClient:
         grant_id: str,
         command: list[str],
         secrets: list[dict[str, Any]],
+        context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return self.request(
-            {
-                "type": "deliver",
-                "grant_id": grant_id,
-                "mode": "run",
-                "command": command,
-                "secrets": secrets,
-            }
-        )
+        payload = {
+            "type": "deliver.run",
+            "grant_id": grant_id,
+            "command": command,
+            "secrets": secrets,
+        }
+        if context is not None:
+            payload["context"] = context
+        return self.request(payload)
 
     def deliver_fetch(
         self,
@@ -145,17 +150,21 @@ class AvaultAgentClient:
         name: str,
         envelope: dict[str, Any],
         request: dict[str, Any],
+        context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return self.request(
-            {
-                "type": "deliver",
-                "grant_id": grant_id,
-                "mode": "fetch",
+        payload = {
+            "type": "deliver.fetch",
+            "grant_id": grant_id,
+            "auth": {
                 "name": name,
+                "tier": "protected",
                 "envelope": envelope,
-                "request": request,
-            }
-        )
+            },
+            "request": request,
+        }
+        if context is not None:
+            payload["context"] = context
+        return self.request(payload)
 
     def deliver_inject(
         self,
@@ -167,9 +176,8 @@ class AvaultAgentClient:
     ) -> dict[str, Any]:
         return self.request(
             {
-                "type": "deliver",
+                "type": "deliver.inject",
                 "grant_id": grant_id,
-                "mode": "inject",
                 "path": path,
                 "format": fmt,
                 "secrets": secrets,

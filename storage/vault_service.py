@@ -1504,9 +1504,15 @@ def _parse_env_selector(spec: str) -> tuple[str, str]:
         secret_name = secret_name.strip()
     else:
         env_name = secret_name = raw
-    if not vault_crypto.is_valid_secret_name(env_name) or not vault_crypto.is_valid_secret_name(secret_name):
-        raise InvalidRequestError("env selector must use valid secret names")
+    if not _is_delivery_env_name(env_name) or not vault_crypto.is_valid_secret_name(secret_name):
+        raise InvalidRequestError("env selector must use a valid env alias and secret name")
     return env_name, secret_name
+
+
+def _is_delivery_env_name(name: str) -> bool:
+    if not name or not name[0].isascii() or not (name[0].isalpha() or name[0] == "_"):
+        return False
+    return all(char.isascii() and (char.isalnum() or char == "_") for char in name)
 
 
 def expand_value_delivery_selector(
@@ -1575,6 +1581,33 @@ def _request_member_rows_for_selector(
     return rows
 
 
+def _protected_delivery_names(delivery_payload: dict[str, Any]) -> list[str]:
+    raw_names = delivery_payload.get("protected_secret_names")
+    if not isinstance(raw_names, list):
+        return []
+    names: list[str] = []
+    for raw_name in raw_names:
+        if isinstance(raw_name, str) and raw_name:
+            names.append(raw_name)
+    return list(dict.fromkeys(names))
+
+
+def _filter_request_rows_to_protected_names(
+    rows: list[dict[str, Any]],
+    protected_names: list[str],
+) -> list[dict[str, Any]]:
+    rows_by_name = {str(row["name"]): row for row in rows}
+    filtered: list[dict[str, Any]] = []
+    for name in protected_names:
+        row = rows_by_name.get(name)
+        if row is None:
+            raise InvalidRequestError("protected_secret_names must be selected by source_selector")
+        if row.get("protection") != "protected":
+            raise InvalidRequestError("protected_secret_names must name protected secrets")
+        filtered.append(row)
+    return filtered
+
+
 def _member_rows_for_names(conn: Connection, member_names: list[str]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for name in member_names:
@@ -1599,7 +1632,8 @@ def request_grantable_member_metas(conn: Connection, request_id: str) -> list[di
         expired_message="grant approval request has expired",
     )
     option = _request_grant_option(row)
-    return [_meta_payload(_require_row(conn, name)) for name in option.members]
+    rows = _member_rows_for_names(conn, option.members)
+    return [_meta_payload(row) for row in rows]
 
 
 def _grant_option(
@@ -1693,6 +1727,9 @@ def create_access_request(
     default_selector = {"env": [name]} if name else None
     selector = _source_selector_payload(source_selector or default_selector)
     rows = _request_member_rows_for_selector(conn, source_selector=selector)
+    protected_delivery_names = _protected_delivery_names(delivery_payload)
+    if protected_delivery_names:
+        rows = _filter_request_rows_to_protected_names(rows, protected_delivery_names)
     if name:
         direct_row = _require_row(conn, name)
         if not _secret_access_requestable(direct_row):

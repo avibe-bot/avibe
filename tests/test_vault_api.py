@@ -73,7 +73,7 @@ def _assert_no_unlock_material(payload: object) -> None:
 
 @pytest.fixture
 def avault_p2(monkeypatch):
-    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
 
 
 def test_create_list_delete_roundtrip(monkeypatch):
@@ -702,6 +702,46 @@ def test_agent_access_request_and_standard_always_ask_grant_api(monkeypatch):
     assert fetched["result"]["grant"]["id"] == created["grant"]["id"]
 
 
+def test_agent_access_request_and_tag_standard_always_ask_grant_api(monkeypatch):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("api")))
+    agent_grant = Mock()
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    for name in ("ASK_A", "ASK_B"):
+        api.create_vault_secret(
+            {
+                "name": name,
+                "tags": ["deploy"],
+                "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                "policy": {"always_ask": True},
+            }
+        )
+    api.create_vault_secret(
+        {
+            "name": "NORMAL_DEPLOY",
+            "tags": ["deploy"],
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        }
+    )
+
+    requested = api.request_vault_access({"source_selector": {"tags": ["deploy"]}, "session_id": "ses_1"})
+
+    assert requested["ok"] is True
+    option = requested["request"]["card"]["grant_options"][0]
+    assert option["source_selector"] == {"tags": ["deploy"]}
+    assert option["member_snapshot"] == ["ASK_A", "ASK_B"]
+    assert option["one_shot"] is True
+    created = api.create_vault_grant(
+        {
+            "session_id": "ses_1",
+            "request_id": requested["request"]["id"],
+        }
+    )
+    assert created["grant"]["member_snapshot"] == ["ASK_A", "ASK_B"]
+    assert created["grant"]["delivery_status"] == "standard_ready"
+    assert created["grant"]["one_shot"] is True
+    agent_grant.assert_not_called()
+
+
 def test_agent_access_request_does_not_return_protected_tag_unlock_material(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("standard")))
     api.create_vault_secret(
@@ -769,7 +809,7 @@ def test_request_vault_access_reports_missing_selector_member_name():
 
 def test_agent_access_sibling_request_result_returns_covering_grant(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("api")))
-    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
     monkeypatch.setattr(api, "avault_agent_grant", Mock(return_value={"granted": 1, "ttl_secs": 300}))
     api.create_vault_secret(
         {
@@ -803,7 +843,7 @@ def test_agent_access_sibling_request_result_returns_covering_grant(monkeypatch)
 
 def test_agent_access_selector_sibling_request_result_returns_covering_grant(monkeypatch):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("api")))
-    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
     monkeypatch.setattr(api, "avault_agent_grant", Mock(return_value={"granted": 2, "ttl_secs": 300}))
     for name in ("A_KEY", "B_KEY"):
         api.create_vault_secret(
@@ -1740,7 +1780,7 @@ def test_release_agent_scope_ignores_absent_agent(monkeypatch):
 
 def test_agent_grant_rejects_pubkey_mismatch(monkeypatch):
     agent_client = Mock()
-    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
     monkeypatch.setattr(api, "_avault_agent_client", lambda: agent_client)
     monkeypatch.setattr(api, "avault_agent_pubkey", lambda: {"public_key": "current-pk", "fingerprint": "current-fp"})
 
@@ -1762,11 +1802,35 @@ def test_agent_grant_rejects_pubkey_mismatch(monkeypatch):
     agent_client.grant.assert_not_called()
 
 
+def test_agent_grant_uses_deliver_custody_purpose(monkeypatch):
+    agent_client = Mock()
+    agent_client.grant.return_value = {"granted": 1}
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_avault_agent_client", lambda: agent_client)
+    monkeypatch.setattr(api, "avault_agent_pubkey", lambda: {"public_key": "current-pk", "fingerprint": "current-fp"})
+
+    assert api.avault_agent_grant(
+        grant_id="vgr_grant",
+        purpose="run",
+        ttl_secs=300,
+        deks=[
+            {
+                "name": "GRANT_KEY",
+                "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+            }
+        ],
+    ) == {"granted": 1}
+    assert agent_client.grant.call_args.kwargs["purpose"] == "deliver"
+
+
 def test_agent_deliver_run_reuses_resident_agent_socket(monkeypatch):
     seen_timeout = []
+    seen_kwargs = []
 
     class FakeClient:
         def deliver_run(self, **kwargs):
+            seen_kwargs.append(kwargs)
             return {"exit_code": 7}
 
     class FakeManager:
@@ -1774,17 +1838,32 @@ def test_agent_deliver_run_reuses_resident_agent_socket(monkeypatch):
             seen_timeout.append(timeout)
             return FakeClient()
 
-    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
     monkeypatch.setattr(api, "_avault_agent_manager", lambda: FakeManager())
 
     result = api.avault_agent_deliver_run(
         grant_id="vgr_grant",
-        secrets=[{"name": "GRANT_KEY", "env": "GRANT_KEY", "envelope": _sealed()}],
+        secrets=[{"name": "GRANT_KEY", "env": "GRANT_KEY", "envelope": _sealed(), "tier": "protected"}],
         command=["python3", "-c", "pass"],
     )
 
     assert result == {"exit_code": 7}
     assert seen_timeout == [None]
+    assert seen_kwargs == [
+        {
+            "grant_id": "vgr_grant",
+            "command": ["python3", "-c", "pass"],
+            "secrets": [
+                {
+                    "name": "GRANT_KEY",
+                    "env": "GRANT_KEY",
+                    "envelope": {"ciphertext": "ct-1", "nonce": "n-1", "wrap_meta": "wm-1"},
+                    "tier": "protected",
+                }
+            ],
+            "context": None,
+        }
+    ]
 
 
 def test_agent_deliver_run_treats_connect_failure_as_pre_handoff(monkeypatch):
@@ -1794,7 +1873,7 @@ def test_agent_deliver_run_treats_connect_failure_as_pre_handoff(monkeypatch):
         def client(self, *, timeout=None):
             raise AvaultAgentError("failed to connect to avault agent: [Errno 2] No such file or directory")
 
-    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
     monkeypatch.setattr(api, "_avault_agent_manager", lambda: FakeManager())
 
     with pytest.raises(api.AvaultPreHandoffError):
@@ -1817,7 +1896,7 @@ def test_agent_deliver_fetch_uses_finite_timeout(monkeypatch):
             seen_timeout.append(timeout)
             return FakeClient()
 
-    monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
     monkeypatch.setattr(api, "_avault_agent_manager", lambda: FakeManager())
 
     result = api.avault_agent_deliver_fetch(

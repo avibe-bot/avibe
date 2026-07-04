@@ -72,7 +72,6 @@ def test_agent_client_round_trips_pubkey_grant_deliver_and_release(tmp_path):
         assert client.pubkey() == {"public_key": "pk", "fingerprint": "fp"}
         assert client.grant(
             grant_id="vgr_api",
-            purpose="run",
             ttl_secs=300,
             deks=[
                 {
@@ -96,7 +95,8 @@ def test_agent_client_round_trips_pubkey_grant_deliver_and_release(tmp_path):
         ) == {"ok": True}
         assert client.release(grant_id="vgr_api") == {"released": True}
 
-    assert [request["type"] for request in server.requests] == ["pubkey", "grant", "deliver", "release"]
+    assert [request["type"] for request in server.requests] == ["pubkey", "grant", "deliver.inject", "release"]
+    assert server.requests[1]["purpose"] == "deliver"
     assert server.requests[1]["ttl_secs"] == 300
     assert "value" not in json.dumps(server.requests)
 
@@ -264,7 +264,7 @@ def test_agent_client_does_not_retry_deliver_after_frame_write_timeout(tmp_path)
 
     thread.join(1)
     assert len(requests) == 1
-    assert requests[0]["type"] == "deliver"
+    assert requests[0]["type"] == "deliver.fetch"
     assert ensure_calls == 0
 
 

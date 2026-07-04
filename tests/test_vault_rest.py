@@ -16,6 +16,7 @@ def _sealed(suffix: str = "1") -> Sealed:
 
 def _mock_avault_p2(monkeypatch):
     monkeypatch.setattr(api, "_require_avault_p2_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
 
 
 def test_rest_create_rejects_protected_plaintext_value(monkeypatch):

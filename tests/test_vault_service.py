@@ -101,6 +101,18 @@ def test_selector_rejects_env_conflicts_and_keypairs(vault):
             vs.expand_value_delivery_selector(conn, tags=["deploy"])
 
 
+def test_selector_allows_shell_env_alias_for_secret(vault):
+    _create(vault, name="PROTECTED_KEY", protection="protected")
+
+    with vault.begin() as conn:
+        expanded = vs.expand_value_delivery_selector(conn, env=["api_key=PROTECTED_KEY"])
+
+    assert expanded["source_selector"] == {"env": ["api_key=PROTECTED_KEY"]}
+    assert expanded["secrets"] == [
+        {"name": "PROTECTED_KEY", "env": "api_key", "kind": "static", "protection": "protected"}
+    ]
+
+
 def test_access_request_for_tag_selector_freezes_protected_subset_only(vault):
     _create(vault, name="PROTECTED_A", protection="protected", tags=["deploy"])
     _create(vault, name="STANDARD_B", protection="standard", tags=["deploy"])
