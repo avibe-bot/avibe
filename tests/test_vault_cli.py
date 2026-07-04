@@ -1849,7 +1849,9 @@ def test_request_accepts_spec_path(tmp_path, capfd):
     assert payload["request"]["card"]["spec"]["tags"] == ["github", "skill:github-pr-review"]
     assert payload["request"]["card"]["spec"]["policy"]["allowed_hosts"] == ["api.github.com"]
     assert payload["request"]["card"]["spec"]["links"] == {"skills": ["github-pr-review"]}
-    assert payload["request_id"] in payload["message"]
+    # Default (callback) mode: the agent is auto-resumed on resolution rather than told to poll a
+    # request id; the id stays in payload["request_id"]. The message still names the affordance.
+    assert "resumes automatically" in payload["message"]
     assert "Provide secret" in payload["message"]
     assert "Add secret" not in payload["message"]
 

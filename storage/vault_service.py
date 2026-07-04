@@ -852,7 +852,7 @@ def _expire_pending_request_rows(
         result = conn.execute(
             vault_requests.update()
             .where(vault_requests.c.id == row["id"], vault_requests.c.status == "pending")
-            .values(status="expired", decided_at=now)
+            .values(status="expired", decided_at=now, callback_status="pending")
         )
         if result.rowcount != 1:
             continue
@@ -916,6 +916,99 @@ def _payload_session_id(payload: Any) -> str | None:
     if isinstance(payload, dict) and payload.get("session_id"):
         return str(payload["session_id"])
     return None
+
+
+# --- Auto-resume callbacks (P4) -------------------------------------------------------------
+#
+# When a request reaches a terminal state its transition also sets ``callback_status="pending"``.
+# The daemon sweep (``core.scheduled_tasks``) drains these: for each it resolves a callback plan
+# and enqueues exactly one callback turn to the requesting session — the same entry Agent Run /
+# watch / scheduled tasks use — then marks the row ``sent`` / ``skipped``. The atomic
+# ``WHERE status='pending'`` claim on every transition makes this exactly-once (a re-resolve
+# updates zero rows, so ``callback_status`` is never re-armed).
+
+
+@dataclass(frozen=True)
+class PendingRequestCallback:
+    """A resolved request's auto-resume plan: wake ``session_id`` with ``message``."""
+
+    request_id: str
+    session_id: str
+    message: str
+
+
+def _request_callback_disabled(row: dict[str, Any]) -> bool:
+    requester, _ = _request_json_payloads(row)
+    return bool(isinstance(requester, dict) and requester.get("callback_disabled"))
+
+
+def _build_request_callback_message(row: dict[str, Any]) -> str:
+    """Agent-facing text delivered to the requesting session when a request resolves."""
+    request_type = str(row.get("request_type") or "")
+    status = str(row.get("status") or "")
+    name = str(row.get("secret_name") or "").strip()
+    label = f" '{name}'" if name else ""
+    subject = {
+        "provision": f"vault request for the secret{label}",
+        "access": f"vault access request{label}",
+        "sign": f"signature request{label}",
+    }.get(request_type, f"vault request{label}")
+
+    if status in {"approved", "fulfilled"}:
+        if request_type == "provision":
+            usage = f" You can use it, e.g. `vibe vault run --env {name} -- <command>`." if name else ""
+            return f"The user provided your {subject}; the secret is now available.{usage} Continue the task."
+        if request_type == "access":
+            return f"The user approved your {subject}; the grant is ready. Continue the task."
+        if request_type == "sign":
+            return f"The user approved and completed your {subject}. Continue the task."
+        return f"The user approved your {subject}. Continue the task."
+    if status == "denied":
+        return f"The user declined your {subject}. Do not retry — adjust your approach or ask the user how to proceed."
+    if status == "failed":
+        # 'failed' is a signing error (transient/crypto/browser), NOT a user decision — retry is fine.
+        return f"Your {subject} could not be completed due to a signing error (not a user decision). You may retry if it still makes sense."
+    if status == "expired":
+        return f"Your {subject} expired without a decision. Re-request it if you still need it, or continue without."
+    return ""
+
+
+def resolve_request_callback(row: dict[str, Any]) -> PendingRequestCallback | None:
+    """Plan the auto-resume callback for a resolved request, or ``None`` to skip.
+
+    Skipped when the requester opted out (``--no-callback``), the request has no originating
+    session, or the terminal state maps to no message.
+    """
+    request_id = str(row.get("id") or "").strip()
+    if not request_id or _request_callback_disabled(row):
+        return None
+    session_id = _request_session_id(row)
+    if not session_id:
+        return None
+    message = _build_request_callback_message(row)
+    if not message.strip():
+        return None
+    return PendingRequestCallback(request_id=request_id, session_id=session_id, message=message)
+
+
+def list_pending_request_callbacks(conn: Connection, *, limit: int = 50) -> list[dict[str, Any]]:
+    """Terminal requests owed an auto-resume callback (``callback_status='pending'``)."""
+    rows = conn.execute(
+        select(vault_requests)
+        .where(vault_requests.c.callback_status == "pending")
+        .order_by(vault_requests.c.decided_at, vault_requests.c.id)
+        .limit(limit)
+    ).mappings()
+    return [dict(row) for row in rows]
+
+
+def mark_request_callback(conn: Connection, request_id: str, *, status: str) -> None:
+    """Record the outcome of an auto-resume callback (``sent`` / ``skipped`` / ``failed``)."""
+    conn.execute(
+        vault_requests.update()
+        .where(vault_requests.c.id == request_id)
+        .values(callback_status=status)
+    )
 
 
 def _request_card(row: dict[str, Any]) -> dict[str, Any]:
@@ -1091,7 +1184,7 @@ def fulfill_pending_provision_requests_for_secret(
             vault_requests.c.secret_name == name,
             vault_requests.c.status == "pending",
         )
-        .values(status="fulfilled", decided_at=decided_at or _now())
+        .values(status="fulfilled", decided_at=decided_at or _now(), callback_status="pending")
     )
     return int(result.rowcount or 0)
 
@@ -1187,7 +1280,7 @@ def create_secret(
         result = conn.execute(
             vault_requests.update()
             .where(vault_requests.c.id == provision_row["id"], vault_requests.c.status == "pending")
-            .values(status="fulfilled", decided_at=decided_at)
+            .values(status="fulfilled", decided_at=decided_at, callback_status="pending")
         )
         if result.rowcount != 1:
             raise InvalidRequestError("provision request is not pending")
@@ -2006,7 +2099,7 @@ def complete_sign_request(
     claim = conn.execute(
         vault_requests.update()
         .where(vault_requests.c.id == request_id, vault_requests.c.request_type == "sign", vault_requests.c.status == row_dict["status"])
-        .values(status="approved", decided_at=_now(), delivery=json.dumps(completed_delivery))
+        .values(status="approved", decided_at=_now(), delivery=json.dumps(completed_delivery), callback_status="pending")
     )
     if claim.rowcount != 1:
         raise InvalidRequestError("sign request is not pending")
@@ -2079,7 +2172,7 @@ def fail_sign_request(conn: Connection, request_id: str, *, reason: str | None =
     result = conn.execute(
         vault_requests.update()
         .where(vault_requests.c.id == request_id, vault_requests.c.status == "signing")
-        .values(status="failed", decided_at=_now(), delivery=json.dumps(delivery_payload))
+        .values(status="failed", decided_at=_now(), delivery=json.dumps(delivery_payload), callback_status="pending")
     )
     if result.rowcount != 1:
         raise InvalidRequestError("sign request is not signing")
@@ -2140,7 +2233,7 @@ def deny_request(
     result = conn.execute(
         vault_requests.update()
         .where(vault_requests.c.id == request_id, vault_requests.c.status == "pending")
-        .values(status="denied", decided_at=decided_at)
+        .values(status="denied", decided_at=decided_at, callback_status="pending")
     )
     if result.rowcount != 1:
         raise InvalidRequestError("request is not pending")
@@ -2496,7 +2589,7 @@ def _approve_sibling_access_requests_for_grant(
         result = conn.execute(
             vault_requests.update()
             .where(vault_requests.c.id == row["id"], vault_requests.c.status == "pending")
-            .values(status="approved", decided_at=decided_at)
+            .values(status="approved", decided_at=decided_at, callback_status="pending")
         )
         if result.rowcount != 1:
             continue
@@ -2613,7 +2706,7 @@ def create_grant(
             vault_requests.c.request_type == "access",
             vault_requests.c.status == "pending",
         )
-        .values(status="approved", decided_at=decided_at)
+        .values(status="approved", decided_at=decided_at, callback_status="pending")
     )
     if claim.rowcount != 1:
         raise InvalidRequestError("grant approval request is not pending")

@@ -1,0 +1,242 @@
+"""P4: vault-request auto-resume callbacks.
+
+A request transition to a terminal state arms ``callback_status='pending'``; the daemon sweep
+turns each armed row into exactly one callback turn to the requesting session via the shared
+``enqueue_session_callback`` entry (``source_kind='callback'``), then marks it sent/skipped.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from sqlalchemy import select
+
+from storage import vault_service as vs
+from storage.db import create_sqlite_engine
+from storage.models import metadata, vault_requests
+from storage.vault_crypto import Sealed
+
+
+@pytest.fixture
+def vault(tmp_path):
+    vs.GRANT_RUNTIME_CACHE.clear()
+    engine = create_sqlite_engine(tmp_path / "vault_cb.sqlite")
+    metadata.create_all(engine)
+    return engine
+
+
+def _sealed(suffix: str = "1") -> Sealed:
+    return Sealed(ciphertext=f"ct-{suffix}", nonce=f"n-{suffix}", wrap_meta=f"wm-{suffix}")
+
+
+def _callback_status(conn, request_id: str):
+    return conn.execute(
+        select(vault_requests.c.callback_status).where(vault_requests.c.id == request_id)
+    ).scalar_one()
+
+
+def _row(conn, request_id: str) -> dict:
+    return dict(conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one())
+
+
+def _grant_from_request(conn, request: dict) -> dict:
+    option = request["card"]["grant_options"][0]
+    return vs.create_grant(
+        conn,
+        member_names=option["member_snapshot"],
+        source_selector=option["source_selector"],
+        purpose=option["purpose"],
+        request_id=request["id"],
+        cache_ready=True,
+    )
+
+
+# --- terminal transitions arm the callback --------------------------------------------------
+
+
+def test_access_approval_arms_callback(vault):
+    with vault.begin() as conn:
+        vs.create_secret(conn, name="A_KEY", sealed=_sealed(), protection="protected")
+        req = vs.create_access_request(conn, "A_KEY", requester={"session_id": "ses_a"})
+        _grant_from_request(conn, req)
+        assert _callback_status(conn, req["id"]) == "pending"
+        plan = vs.resolve_request_callback(_row(conn, req["id"]))
+        assert plan is not None
+        assert plan.session_id == "ses_a"
+        assert "approved" in plan.message.lower()
+
+
+def test_deny_arms_callback(vault):
+    with vault.begin() as conn:
+        vs.create_secret(conn, name="D_KEY", sealed=_sealed(), protection="protected")
+        req = vs.create_access_request(conn, "D_KEY", requester={"session_id": "ses_d"})
+        vs.deny_request(conn, req["id"])
+        assert _callback_status(conn, req["id"]) == "pending"
+        plan = vs.resolve_request_callback(_row(conn, req["id"]))
+        assert plan is not None and "declined" in plan.message.lower()
+
+
+def test_provision_fulfill_arms_callback(vault):
+    with vault.begin() as conn:
+        req = vs.create_provision_request(conn, "NEW_KEY", requester={"session_id": "ses_p"})
+        assert req["status"] == "pending"
+        assert vs.fulfill_pending_provision_requests_for_secret(conn, "NEW_KEY") == 1
+        assert _callback_status(conn, req["id"]) == "pending"
+        plan = vs.resolve_request_callback(_row(conn, req["id"]))
+        assert plan is not None and "provided" in plan.message.lower()
+
+
+def test_expiry_arms_callback(vault):
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    with vault.begin() as conn:
+        vs.create_secret(conn, name="E_KEY", sealed=_sealed(), protection="protected")
+        req = vs.create_access_request(conn, "E_KEY", requester={"session_id": "ses_e"})
+        conn.execute(vault_requests.update().where(vault_requests.c.id == req["id"]).values(expires_at=past))
+        expired = vs._load_request_row(conn, req["id"])  # lazy expiry on read
+        assert expired["status"] == "expired"
+        assert _callback_status(conn, req["id"]) == "pending"
+        plan = vs.resolve_request_callback(_row(conn, req["id"]))
+        assert plan is not None and "expired" in plan.message.lower()
+
+
+# --- skip conditions ------------------------------------------------------------------------
+
+
+def test_optout_arms_but_resolves_to_skip(vault):
+    with vault.begin() as conn:
+        vs.create_secret(conn, name="O_KEY", sealed=_sealed(), protection="protected")
+        req = vs.create_access_request(conn, "O_KEY", requester={"session_id": "ses_o", "callback_disabled": True})
+        _grant_from_request(conn, req)
+        # Transition still arms the row (dumb marker); the sweep decides to skip.
+        assert _callback_status(conn, req["id"]) == "pending"
+        assert vs.resolve_request_callback(_row(conn, req["id"])) is None
+
+
+def test_no_session_resolves_to_skip(vault):
+    with vault.begin() as conn:
+        vs.create_secret(conn, name="N_KEY", sealed=_sealed(), protection="protected")
+        req = vs.create_access_request(conn, "N_KEY")  # no requester → no session
+        _grant_from_request(conn, req)
+        assert vs.resolve_request_callback(_row(conn, req["id"])) is None
+
+
+# --- sweep bookkeeping + exactly-once -------------------------------------------------------
+
+
+def test_list_and_mark_are_exclusive(vault):
+    with vault.begin() as conn:
+        req = vs.create_provision_request(conn, "L_KEY", requester={"session_id": "ses_l"})
+        vs.fulfill_pending_provision_requests_for_secret(conn, "L_KEY")
+        assert [r["id"] for r in vs.list_pending_request_callbacks(conn)] == [req["id"]]
+        vs.mark_request_callback(conn, req["id"], status="sent")
+        assert vs.list_pending_request_callbacks(conn) == []
+        assert _callback_status(conn, req["id"]) == "sent"
+
+
+def test_reresolve_does_not_rearm(vault):
+    with vault.begin() as conn:
+        vs.create_secret(conn, name="R_KEY", sealed=_sealed(), protection="protected")
+        req = vs.create_access_request(conn, "R_KEY", requester={"session_id": "ses_r"})
+        vs.deny_request(conn, req["id"])
+        vs.mark_request_callback(conn, req["id"], status="sent")
+        # The atomic WHERE status='pending' claim rejects a re-resolve, so the callback can't rearm.
+        with pytest.raises(vs.InvalidRequestError):
+            vs.deny_request(conn, req["id"])
+        assert _callback_status(conn, req["id"]) == "sent"
+
+
+# --- message coverage (pure) ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "request_type,status,needle",
+    [
+        ("provision", "fulfilled", "provided"),
+        ("access", "approved", "approved"),
+        ("sign", "approved", "approved"),
+        ("access", "denied", "declined"),
+        ("sign", "failed", "signing error"),
+        ("provision", "expired", "expired"),
+        ("access", "expired", "expired"),
+    ],
+)
+def test_message_and_session_by_type_status(request_type, status, needle):
+    row = {
+        "id": "vrq_msg",
+        "request_type": request_type,
+        "status": status,
+        "secret_name": "K",
+        "requester": json.dumps({"session_id": "ses_m"}),
+        "delivery": None,
+    }
+    plan = vs.resolve_request_callback(row)
+    assert plan is not None
+    assert plan.session_id == "ses_m"
+    assert needle in plan.message.lower()
+
+
+def test_wait_or_no_callback_disables_auto_resume():
+    # --wait blocks synchronously and --no-callback is explicit; either suppresses the async
+    # resume so the CLI's synchronous result and a callback turn can't double-resume one turn.
+    from types import SimpleNamespace
+
+    from vibe import cli
+
+    assert cli._vault_callback_disabled(SimpleNamespace(no_callback=True, wait=None)) is True
+    assert cli._vault_callback_disabled(SimpleNamespace(no_callback=False, wait=5.0)) is True
+    assert cli._vault_callback_disabled(SimpleNamespace(no_callback=False, wait=None)) is False
+    assert cli._vault_callback_disabled(SimpleNamespace(no_callback=False, wait=0)) is False
+
+
+def test_non_terminal_status_has_no_callback():
+    row = {
+        "id": "vrq_pending",
+        "request_type": "access",
+        "status": "pending",
+        "secret_name": "K",
+        "requester": json.dumps({"session_id": "ses_m"}),
+        "delivery": None,
+    }
+    assert vs.resolve_request_callback(row) is None
+
+
+# --- shared enqueue entry uses the same callback path Agent Run uses -------------------------
+
+
+def test_enqueue_session_callback_uses_callback_source(monkeypatch):
+    from core import scheduled_tasks as st
+
+    class _Key:
+        def to_key(self) -> str:
+            return "plat::channel::c1"
+
+    class _Target:
+        session_key = _Key()
+        agent_name = "agentx"
+        agent_id = "aid"
+        agent_backend = "claude"
+        model = None
+        reasoning_effort = None
+
+    calls: dict = {}
+
+    class _Store:
+        def enqueue_agent_run(self, **kw):
+            calls.update(kw)
+            return type("R", (), {"id": "run_1"})()
+
+    monkeypatch.setattr(st, "resolve_session_id_target", lambda sid: _Target())
+
+    out = st.enqueue_session_callback(_Store(), session_id="ses_x", message="resume now", source_actor="vault:vrq_1")
+    assert out is not None and out.id == "run_1"
+    assert calls["source_kind"] == "callback"
+    assert calls["session_policy"] == "existing"
+    assert calls["session_id"] == "ses_x"
+    assert calls["message"] == "resume now"
+    assert calls["source_actor"] == "vault:vrq_1"
+
+    # Nothing to send → no enqueue.
+    assert st.enqueue_session_callback(_Store(), session_id="", message="x", source_actor="a") is None
+    assert st.enqueue_session_callback(_Store(), session_id="ses", message="   ", source_actor="a") is None
