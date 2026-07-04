@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Check, Clock, Copy, Globe, History, Inbox, KeyRound, Link2, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
+import { Clock, Globe, History, Inbox, KeyRound, Link2, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -13,6 +13,7 @@ import { useApi, type VaultAuditEvent, type VaultGrant, type VaultRequest, type 
 import { useToast } from '../../context/ToastContext';
 import { VaultApprovalCard, type ApprovalOutcome } from '../ui/vault-approval-card';
 import { VaultSecretForm } from '../ui/vault-secret-form';
+import { SigningAddressList } from '../ui/signing-address-list';
 
 const PENDING_REQUEST_POLL_INTERVAL_MS = 5000;
 const PENDING_REQUEST_EXPIRY_GRACE_MS = 100;
@@ -67,8 +68,6 @@ const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => voi
   const { t } = useTranslation();
   const isKeypair = s.kind === 'keypair';
   const isProtected = s.protection === 'protected';
-  const [copied, setCopied] = useState(false);
-  const publicKey = s.signing_public_key?.public_key;
   // Skills are stored as reserved `skill:<name>` tags; render them as their own chips.
   const { tags, skills } = useMemo(() => partitionTags(s.tags), [s.tags]);
   return (
@@ -116,23 +115,7 @@ const SecretRow: React.FC<{ secret: VaultSecret; onDelete: (name: string) => voi
           {s.description ? `${s.description} · ` : ''}
           {s.last_used_at ? t('vaults.used', { count: s.use_count }) : t('vaults.neverUsed')}
         </span>
-        {isKeypair && publicKey && (
-          <button
-            type="button"
-            onClick={() => {
-              void navigator.clipboard?.writeText(publicKey).then(() => {
-                setCopied(true);
-                window.setTimeout(() => setCopied(false), 1500);
-              });
-            }}
-            className="flex max-w-full items-center gap-1 text-xs text-muted hover:text-foreground"
-            aria-label={t('vaults.dialog.copyPublicKey')}
-            title={publicKey}
-          >
-            <span className="truncate font-mono">{publicKey}</span>
-            {copied ? <Check className="size-3 shrink-0 text-mint" /> : <Copy className="size-3 shrink-0" />}
-          </button>
-        )}
+        {isKeypair && s.signing_addresses ? <SigningAddressList addresses={s.signing_addresses} className="mt-1" /> : null}
       </div>
       <div className="ml-auto">
         <Button variant="ghost" size="icon" onClick={() => onDelete(s.name)} aria-label={t('vaults.delete')}>

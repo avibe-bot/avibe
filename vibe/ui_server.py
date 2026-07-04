@@ -2695,6 +2695,16 @@ def vault_vmk_get():
     return jsonify(api.get_vault_vmk())
 
 
+@app.route("/api/vault/signing-addresses", methods=["POST"])
+def vault_signing_addresses_post():
+    from vibe import api
+
+    try:
+        return jsonify(api.derive_vault_signing_addresses(str((request.json or {}).get("public_key") or "")))
+    except ValueError as exc:
+        return _vault_error_response(exc)
+
+
 @app.route("/api/vault/secrets", methods=["POST"])
 def vault_secrets_post():
     from vibe import api

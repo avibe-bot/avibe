@@ -15,6 +15,7 @@ the resident avault agent, not by Python.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import uuid
 from dataclasses import dataclass
@@ -28,7 +29,10 @@ from sqlalchemy.exc import IntegrityError
 
 from storage import vault_crypto
 from storage.models import vault_audit, vault_grants, vault_requests, vault_secrets
+from storage.vault_addresses import derive_addresses
 from storage.vault_crypto import Sealed
+
+logger = logging.getLogger(__name__)
 
 SKILL_TAG_PREFIX = "skill:"
 DEFAULT_ENV_GRANT_TTL_SECONDS = 300
@@ -479,11 +483,15 @@ def _meta_payload(row: dict[str, Any]) -> dict[str, Any]:
         }
     signing_public_key = public_meta.get("signing_public_key")
     if isinstance(signing_public_key, dict):
-        payload["signing_public_key"] = {
-            key: value
-            for key, value in signing_public_key.items()
-            if key in {"curve", "public_key"}
-        }
+        # Surface derived receive addresses instead of the raw public key: agents and the
+        # UI identify a signing key by address, not hex. Derivation is a pure function of the
+        # (public) key; a malformed/legacy key degrades to no addresses, never a hard error.
+        public_key = signing_public_key.get("public_key")
+        if isinstance(public_key, str) and signing_public_key.get("curve") == "secp256k1":
+            try:
+                payload["signing_addresses"] = derive_addresses(public_key)
+            except Exception:
+                logger.warning("failed to derive signing addresses for secret %r", row.get("name"))
     return payload
 
 
@@ -1180,6 +1188,18 @@ def update_secret_classification(
 
 def get_secret_meta(conn: Connection, name: str) -> dict[str, Any]:
     return _meta_payload(_require_row(conn, name))
+
+
+def get_signing_public_key(conn: Connection, name: str) -> dict[str, Any] | None:
+    """Raw pinned signing public key ({curve, public_key}) from storage.
+
+    The masked meta payload exposes only derived addresses (not the raw key), so
+    server-side signature verification reads the pinned key from here instead.
+    Returns ``None`` when the secret has no pinned signing key.
+    """
+    public_meta = _public_meta(_require_row(conn, name).get("public_meta"))
+    signing_public_key = public_meta.get("signing_public_key")
+    return signing_public_key if isinstance(signing_public_key, dict) else None
 
 
 def store_pubkey_pin(conn: Connection, name: str, pin: dict[str, Any]) -> dict[str, Any]:

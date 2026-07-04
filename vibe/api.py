@@ -1394,6 +1394,24 @@ def get_vault_agent_pubkey() -> dict:
         raise _vault_api_error_from_avault(exc, prefix="avault agent pubkey failed") from exc
 
 
+def derive_vault_signing_addresses(public_key: str) -> dict:
+    """Derive the receive addresses for a compressed secp256k1 public key.
+
+    Value-free: uses only the public key, so it needs no vault/avault access. Lets the
+    create form preview a signing key's addresses before the secret is saved.
+    """
+    from storage.vault_addresses import derive_addresses
+
+    if not isinstance(public_key, str) or not public_key.strip():
+        raise VaultApiError("public_key is required", code="invalid_request")
+    try:
+        return {"ok": True, "addresses": derive_addresses(public_key)}
+    except VaultApiError:
+        raise
+    except Exception as exc:
+        raise VaultApiError("invalid secp256k1 public key", code="invalid_public_key") from exc
+
+
 def get_vault_vmk() -> dict:
     from storage import vault_service
 
@@ -2639,7 +2657,10 @@ def vault_sign(payload: dict) -> dict:
                         raise VaultApiError("request_id is required to complete protected signing", code="missing_request_id")
                     vault_service.validate_sign_request(conn, request_id, name=name, digest=digest, scheme=scheme)
                     signature = _normalized_protected_signature(signature)
-                    _verify_protected_browser_signature(meta, digest=digest, scheme=scheme, signature=signature)
+                    # `meta` is the masked payload (derived addresses only, no raw key); source
+                    # the pinned public key from storage for server-side verification.
+                    verify_meta = {**meta, "signing_public_key": vault_service.get_signing_public_key(conn, name)}
+                    _verify_protected_browser_signature(verify_meta, digest=digest, scheme=scheme, signature=signature)
                     request = vault_service.complete_sign_request(
                         conn,
                         request_id,

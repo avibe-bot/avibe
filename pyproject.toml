@@ -70,6 +70,9 @@ dependencies = [
     "imagesize>=1.4.1",
     "pywebpush>=2.0.3",
     "cryptography>=42.0",
+    # keccak256 + ripemd160 for vault signing-key address derivation
+    # (storage/vault_addresses.py); cryptography ships neither.
+    "pycryptodome>=3.20",
 ]
 
 [project.urls]

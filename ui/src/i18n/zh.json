@@ -2188,6 +2188,13 @@
     "neverUsed": "从未使用",
     "standard": "标准档",
     "signing": "签名",
+    "addresses": {
+      "eth": "ETH",
+      "btcSegwit": "BTC SegWit",
+      "btcTaproot": "BTC Taproot",
+      "btcLegacy": "BTC Legacy",
+      "copy": "复制 {{label}} 地址"
+    },
     "filter": {
       "clear": "清除筛选",
       "empty": "没有匹配所选标签的密钥。"
@@ -2289,9 +2296,10 @@
       "signingGenerateCta": "生成签名密钥",
       "signingRegenerate": "换一把新密钥",
       "signingImportPlaceholder": "粘贴 32 字节十六进制私钥(64 个字符)",
-      "signingPublicKey": "公钥",
-      "copyPublicKey": "复制公钥",
-      "signingPublicKeyHint": "公钥可以放心分享。私钥始终留在你的保险库里;用哪条链、哪种签名方案,在签名时再定。",
+      "signingAddresses": "地址",
+      "signingAddressesLoading": "正在推导地址…",
+      "signingAddressesUnavailable": "无法为该密钥推导地址。",
+      "signingAddressesHint": "由密钥推导得到。收款时把地址发给对方即可;私钥始终留在你的保险库里,用哪条链、哪种签名方案在签名时再定。",
       "signingNeedsAvault": "签名密钥需要安装 avault {{version}} 或更新版本。",
       "checkingAvault": "正在检查 avault…",
       "p2Unavailable": "浏览器侧保险库创建需要 avault {{version}} 或更新版本。当前安装：{{installed}}。请先安装兼容的 avault 发布版，再保存标准密钥。",

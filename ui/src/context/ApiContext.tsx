@@ -16,6 +16,14 @@ export type GlobalPromptFile = {
   read_error: boolean;
 };
 
+/** Receive addresses derived from a keypair secret's secp256k1 public key. */
+export type SigningAddresses = {
+  eth?: string;
+  btc_legacy?: string;
+  btc_segwit?: string;
+  btc_taproot?: string;
+};
+
 export type VaultSecret = {
   name: string;
   /** Flat tag list; skill association is a reserved `skill:<name>` tag (see lib/vaultTags). */
@@ -23,9 +31,9 @@ export type VaultSecret = {
   kind: string;
   protection: string;
   signer_kind: string | null;
-  /** Pinned public key for keypair secrets (non-secret); surfaced so the saved
-   *  signing key's public key is recoverable after the create dialog closes. */
-  signing_public_key?: { curve?: string; public_key: string } | null;
+  /** Receive addresses derived from a keypair secret's public key. Agents and the UI
+   *  identify a signing key by address; the raw public key is never surfaced here. */
+  signing_addresses?: SigningAddresses | null;
   source: string;
   description?: string | null;
   policy: Record<string, unknown>;
@@ -364,6 +372,7 @@ export type ApiContextType = {
   getVaultVmk: () => Promise<VaultVmkResult>;
   getVaultPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   getVaultAgentPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
+  deriveSigningAddresses: (publicKey: string) => Promise<{ ok: boolean; addresses?: SigningAddresses; code?: string; message?: string }>;
   createVaultSecret: (payload: VaultCreatePayload, opts?: { handleError?: boolean }) => Promise<{ ok: boolean; secret?: VaultSecret; code?: string; message?: string }>;
   deleteVaultSecret: (name: string) => Promise<{ ok: boolean; removed?: boolean; code?: string; message?: string }>;
   getVaultProvisionRequest: (
@@ -2151,6 +2160,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     listVaultSecrets: () => getCachedJson('/api/vault/secrets', 1500),
     getVaultPubkey: () => getCachedJson('/api/vault/pubkey', 1500),
     getVaultAgentPubkey: () => getCachedJson('/api/vault/agent/pubkey', 1500),
+    deriveSigningAddresses: (publicKey) =>
+      postJson('/api/vault/signing-addresses', { public_key: publicKey }, { handleError: false }),
     createVaultSecret: (payload, opts) => postJson('/api/vault/secrets', payload, opts),
     deleteVaultSecret: (name) => deleteJson(`/api/vault/secrets/${encodeURIComponent(name)}`),
     getVaultProvisionRequest: (name, opts) =>

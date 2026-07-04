@@ -2756,6 +2756,38 @@ def test_protected_sign_completion_verifies_schnorr_browser_signature(monkeypatc
     assert result["request"]["status"] == "approved"
 
 
+def test_signing_key_meta_exposes_addresses_not_public_key(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    # privkey = 1 → generator point G, compressed. Reference addresses are pinned in
+    # tests/test_vault_addresses.py.
+    created = api.create_vault_secret(
+        {
+            "name": "ETH_KEY",
+            "protection": "protected",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"},
+            "public_meta": {
+                "signing_public_key": {
+                    "curve": "secp256k1",
+                    "public_key": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+                }
+            },
+        }
+    )
+    secret = created["secret"]
+    # Decision: agents and the UI see derived addresses, never the raw public key.
+    assert "signing_public_key" not in secret
+    assert "signing_public_key" not in json.dumps(secret)
+    addresses = secret["signing_addresses"]
+    assert set(addresses) == {"eth", "btc_legacy", "btc_segwit", "btc_taproot"}
+    assert addresses["eth"] == "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
+    assert addresses["btc_segwit"] == "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+    assert addresses["btc_taproot"].startswith("bc1p")
+
+
 def test_vault_sign_rejects_malformed_digest_before_request_or_avault(monkeypatch):
     from unittest.mock import Mock
 

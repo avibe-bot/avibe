@@ -3,7 +3,6 @@ import type { FormEvent } from 'react';
 import {
   Asterisk,
   Check,
-  Copy,
   Eye,
   EyeOff,
   FileText,
@@ -17,7 +16,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { ApiError, useApi, type DependencyItem, type VaultRequestSpec } from '@/context/ApiContext';
+import { ApiError, useApi, type DependencyItem, type SigningAddresses, type VaultRequestSpec } from '@/context/ApiContext';
 import { cn } from '@/lib/utils';
 import { mergeTags, normalizeTagOrSkillEntry, partitionTags, toSkillTag } from '@/lib/vaultTags';
 import {
@@ -33,6 +32,7 @@ import { Badge } from './badge';
 import { Button } from './button';
 import { Input } from './input';
 import { SegmentedRadio } from './segmented';
+import { SigningAddressList } from './signing-address-list';
 import { TagInput } from './tag-input';
 import { Textarea } from './textarea';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
@@ -133,7 +133,8 @@ export const VaultSecretForm: React.FC<{
   const [importHex, setImportHex] = useState('');
   const [signingKey, setSigningKey] = useState<SigningKeyMaterial | null>(null);
   const [signingError, setSigningError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [signingAddresses, setSigningAddresses] = useState<SigningAddresses | null>(null);
+  const [addressesLoading, setAddressesLoading] = useState(false);
   // A spec's `tags` may already carry `skill:<name>` entries; partition once so the seed
   // can fold in the `links.skills` bare-name mirror without duplicating (lib/vaultTags).
   const specParts = useMemo(() => partitionTags(requestSpec?.tags), [requestSpec]);
@@ -252,7 +253,6 @@ export const VaultSecretForm: React.FC<{
     }
     signingKeyRef.current = next;
     setSigningKey(next);
-    setCopied(false);
   };
 
   // Zero any held private key when the form unmounts.
@@ -263,6 +263,32 @@ export const VaultSecretForm: React.FC<{
     },
     [],
   );
+
+  // Preview the key's receive addresses once generated/imported. The daemon derives them
+  // from the public key alone (same single source as the saved list) — no private key leaves
+  // the browser and a failure just hides the preview.
+  useEffect(() => {
+    if (!signingKey) {
+      setSigningAddresses(null);
+      setAddressesLoading(false);
+      return;
+    }
+    let alive = true;
+    setSigningAddresses(null);
+    setAddressesLoading(true);
+    api
+      .deriveSigningAddresses(signingKey.publicKey)
+      .then((res) => {
+        if (alive && res.ok && res.addresses) setSigningAddresses(res.addresses);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (alive) setAddressesLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [signingKey, api]);
 
   const staticValueReady = staticSource === 'file' ? selectedFile != null && selectedFile.size > 0 : Boolean(value);
   const valueReady = isKeypair ? signingKey != null : staticValueReady;
@@ -871,28 +897,19 @@ export const VaultSecretForm: React.FC<{
           )}
 
           {signingKey && (
-            <div className="flex flex-col gap-1.5">
-              <span className="text-xs font-medium text-muted-foreground">{t('vaults.dialog.signingPublicKey')}</span>
-              <div className="flex min-w-0 items-center gap-2">
-                <code className="min-w-0 flex-1 truncate rounded-md border border-border bg-surface px-2 py-1.5 font-mono text-xs">
-                  {signingKey.publicKey}
-                </code>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  aria-label={t('vaults.dialog.copyPublicKey')}
-                  onClick={() => {
-                    void navigator.clipboard?.writeText(signingKey.publicKey).then(() => {
-                      setCopied(true);
-                      window.setTimeout(() => setCopied(false), 1500);
-                    });
-                  }}
-                >
-                  {copied ? <Check className="size-4 text-mint" /> : <Copy className="size-4" />}
-                </Button>
-              </div>
-              <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingPublicKeyHint')}</span>
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <span className="text-xs font-medium text-muted-foreground">{t('vaults.dialog.signingAddresses')}</span>
+              {addressesLoading ? (
+                <span className="flex items-center gap-1.5 text-xs text-muted">
+                  <Loader2 className="size-3.5 animate-spin" />
+                  {t('vaults.dialog.signingAddressesLoading')}
+                </span>
+              ) : signingAddresses ? (
+                <SigningAddressList addresses={signingAddresses} />
+              ) : (
+                <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingAddressesUnavailable')}</span>
+              )}
+              <span className="text-xs text-muted-foreground">{t('vaults.dialog.signingAddressesHint')}</span>
             </div>
           )}
 

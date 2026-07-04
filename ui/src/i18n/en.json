@@ -2189,6 +2189,13 @@
     "neverUsed": "never used",
     "standard": "Standard",
     "signing": "Signing",
+    "addresses": {
+      "eth": "ETH",
+      "btcSegwit": "BTC SegWit",
+      "btcTaproot": "BTC Taproot",
+      "btcLegacy": "BTC Legacy",
+      "copy": "Copy {{label}} address"
+    },
     "filter": {
       "clear": "Clear filters",
       "empty": "No secrets match the selected tags."
@@ -2290,9 +2297,10 @@
       "signingGenerateCta": "Generate signing key",
       "signingRegenerate": "Generate a different key",
       "signingImportPlaceholder": "Paste a 32-byte hex private key (64 hex chars)",
-      "signingPublicKey": "Public key",
-      "copyPublicKey": "Copy public key",
-      "signingPublicKeyHint": "Share this public key freely. The private key never leaves your vault, and the chain and signature scheme are chosen at signing time.",
+      "signingAddresses": "Addresses",
+      "signingAddressesLoading": "Deriving addresses…",
+      "signingAddressesUnavailable": "Couldn't derive addresses for this key.",
+      "signingAddressesHint": "Derived from the key. Share an address to receive funds; the private key never leaves your vault, and the chain and signature scheme are chosen at signing time.",
       "signingNeedsAvault": "Signing keys need avault {{version}} or newer installed.",
       "checkingAvault": "Checking avault…",
       "p2Unavailable": "Browser-side vault create requires avault {{version}} or newer. Installed: {{installed}}. Install a compatible avault release before saving standard secrets.",
