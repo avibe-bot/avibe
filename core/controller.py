@@ -157,6 +157,23 @@ def _target_agent_variant(value: Any, backend: Any = None, agent_name: Any = Non
     return None if variant in sentinel_values else variant
 
 
+def _refresh_status_bubble_config(controller: Any) -> None:
+    """Best-effort, mtime-guarded reload so Web UI changes to the status-bubble
+    settings (progress style + heartbeat/no-output thresholds) take effect for
+    turns that never pass through an IM inbound handler first (e.g. scheduled /
+    background agent runs), where nothing else calls ``_refresh_config_from_disk``
+    before the getters read ``controller.config``.
+
+    Implemented as a module-level helper taking the controller explicitly and
+    resolving the reload via ``getattr`` so lightweight test stubs that invoke the
+    getters unbound (a bare ``SimpleNamespace`` self) simply skip the refresh
+    instead of raising ``AttributeError``.
+    """
+    refresh = getattr(controller, "_refresh_config_from_disk", None)
+    if callable(refresh):
+        refresh()
+
+
 class Controller:
     """Main controller that coordinates all bot operations"""
 
@@ -499,7 +516,8 @@ class Controller:
 
         Called on every ``_t()`` invocation (guarded by mtime check).
         Refreshes: language, show_duration, ack_mode, include_time_info, include_user_info,
-        reply_enhancements, and mutable platform message filters.
+        reply_enhancements, agent_progress_style, agent_status_heartbeat_ms,
+        agent_status_no_output_ms, and mutable platform message filters.
         """
         try:
             config_path = paths.get_config_path()
@@ -516,6 +534,9 @@ class Controller:
                 self.config.include_time_info = v2_config.include_time_info
                 self.config.include_user_info = v2_config.include_user_info
                 self.config.reply_enhancements = v2_config.reply_enhancements
+                self.config.agent_progress_style = v2_config.agent_progress_style
+                self.config.agent_status_heartbeat_ms = v2_config.agent_status_heartbeat_ms
+                self.config.agent_status_no_output_ms = v2_config.agent_status_no_output_ms
                 self.config.resource_governance = v2_config.runtime.resource_governance
                 governor = getattr(self, "_agent_resource_governor", None)
                 if governor is not None:
@@ -903,6 +924,7 @@ class Controller:
         Currently a global config setting; per-channel overrides can layer on top
         here later without touching the dispatcher.
         """
+        _refresh_status_bubble_config(self)
         value = getattr(self.config, "agent_progress_style", DEFAULT_AGENT_PROGRESS_STYLE)
         return value if value in ("concise", "verbose", "off") else DEFAULT_AGENT_PROGRESS_STYLE
 
@@ -926,10 +948,12 @@ class Controller:
         return self.get_progress_style_for_context(context) == "concise"
 
     def get_heartbeat_interval_ms_for_context(self, context: MessageContext) -> int:
+        _refresh_status_bubble_config(self)
         value = getattr(self.config, "agent_status_heartbeat_ms", 15000)
         return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 15000
 
     def get_no_output_hint_after_ms_for_context(self, context: MessageContext) -> int:
+        _refresh_status_bubble_config(self)
         value = getattr(self.config, "agent_status_no_output_ms", 180000)
         return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 180000
 
