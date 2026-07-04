@@ -415,6 +415,7 @@
     "menuHintStart": "Send `/start` to open more action menus.",
     "alreadyBound": "You are already bound. No action needed.",
     "invalidCode": "❌ Invalid or expired bind code. Please check and try again.",
+    "rateLimited": "❌ Too many invalid bind attempts. Try again in {seconds} second(s).",
     "usage": "Usage: `bind <code>`\n\n`/bind <code>` also works. Please enter the bind code provided by an admin.",
     "dmOnly": "The bind command can only be used in a direct message. Please DM the bot with `bind <code>`.",
     "dmNotBound": "🔒 You haven't bound your account yet.\nUse `bind <code>` to get started. (`/bind <code>` is also supported.)",

@@ -9742,7 +9742,16 @@ def create_bind_code(code_type: str = "one_time", expires_at: Optional[str] = No
     if code_type == "expiring" and not expires_at:
         return {"ok": False, "error": "expires_at is required for expiring bind codes"}
     store = SettingsStore.get_instance()
-    bc = store.create_bind_code(code_type, expires_at)
+    try:
+        bc = store.create_bind_code(code_type, expires_at)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "error": {
+                "code": "bind_code_limit_reached",
+                "message": str(exc),
+            },
+        }
     return {
         "ok": True,
         "bind_code": {
