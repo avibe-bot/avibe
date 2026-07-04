@@ -124,6 +124,13 @@ class SecretExistsError(VaultServiceError):
     pass
 
 
+class SecretNameCaseConflictError(VaultServiceError):
+    def __init__(self, name: str, existing_name: str):
+        self.name = name
+        self.existing_name = existing_name
+        super().__init__(f"secret name {name!r} conflicts with existing name {existing_name!r}")
+
+
 class SecretNotFoundError(VaultServiceError):
     pass
 
@@ -267,6 +274,19 @@ def _find_secret_name_case_insensitive(conn: Connection, name: str) -> str | Non
     return conn.execute(
         select(vault_secrets.c.name)
         .where(func.lower(vault_secrets.c.name) == _secret_name_case_key(name))
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def _find_pending_provision_name_case_insensitive(conn: Connection, name: str) -> str | None:
+    return conn.execute(
+        select(vault_requests.c.secret_name)
+        .where(
+            vault_requests.c.request_type == "provision",
+            vault_requests.c.status == "pending",
+            func.lower(vault_requests.c.secret_name) == _secret_name_case_key(name),
+        )
+        .order_by(vault_requests.c.created_at.desc(), vault_requests.c.id.desc())
         .limit(1)
     ).scalar_one_or_none()
 
@@ -1067,7 +1087,9 @@ def create_secret(
         raise VaultServiceError("signer_kind is only valid for keypair secrets")
     provision_row: dict[str, Any] | None = None
     existing_name = _find_secret_name_case_insensitive(conn, name)
-    existing_secret = existing_name is not None
+    existing_secret = existing_name == name
+    if existing_name is not None and existing_name != name:
+        raise SecretNameCaseConflictError(name, existing_name)
     if provision_request_id:
         _expire_pending_requests(conn)
         provision_row = _load_request_row(conn, provision_request_id)
@@ -1432,8 +1454,11 @@ def create_provision_request(
     now = _now()
     existing_name = _find_secret_name_case_insensitive(conn, name)
     if existing_name is not None and existing_name != name:
-        raise SecretExistsError(name)
+        raise SecretNameCaseConflictError(name, existing_name)
     already = existing_name == name
+    pending_name = _find_pending_provision_name_case_insensitive(conn, name)
+    if pending_name is not None and pending_name != name:
+        raise SecretNameCaseConflictError(name, pending_name)
     status = "fulfilled" if already else "pending"
     normalized_spec = normalize_provision_spec(spec)
     card = _secure_input_card(name, request_id=request_id, reason=reason, spec=normalized_spec)

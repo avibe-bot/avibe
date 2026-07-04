@@ -1518,6 +1518,12 @@ def create_vault_secret(payload: dict) -> dict:
             )
     except vault_service.InvalidSecretNameError as exc:
         raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name") from exc
+    except vault_service.SecretNameCaseConflictError as exc:
+        raise VaultApiError(
+            f"secret name '{name}' conflicts with existing secret '{exc.existing_name}'",
+            code="secret_name_case_conflict",
+            status=409,
+        ) from exc
     except vault_service.SecretExistsError as exc:
         fulfilled_count = 0
         try:

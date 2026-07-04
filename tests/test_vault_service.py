@@ -68,8 +68,9 @@ def test_secret_names_preserve_case_and_reject_case_only_duplicates(vault):
         with pytest.raises(vs.SecretNotFoundError):
             vs.get_secret_meta(conn, "OPENAIKEY")
 
-    with pytest.raises(vs.SecretExistsError):
+    with pytest.raises(vs.SecretNameCaseConflictError) as exc:
         _create(vault, name="OpenAIKey")
+    assert exc.value.existing_name == "openAiKey"
 
 
 def test_provision_request_rejects_case_only_duplicate_secret(vault):
@@ -77,10 +78,28 @@ def test_provision_request_rejects_case_only_duplicate_secret(vault):
 
     with vault.begin() as conn:
         fulfilled = vs.create_provision_request(conn, "OpenAIKey")
-        with pytest.raises(vs.SecretExistsError):
+        with pytest.raises(vs.SecretNameCaseConflictError) as exc:
             vs.create_provision_request(conn, "openAIKey")
 
     assert fulfilled["status"] == "fulfilled"
+    assert exc.value.existing_name == "OpenAIKey"
+
+
+def test_provision_request_rejects_case_only_duplicate_pending_request(vault):
+    with vault.begin() as conn:
+        pending = vs.create_provision_request(conn, "openAiKey")
+        with pytest.raises(vs.SecretNameCaseConflictError) as exc:
+            vs.create_provision_request(conn, "OpenAIKey")
+
+        rows = (
+            conn.execute(select(vault_requests).where(vault_requests.c.request_type == "provision"))
+            .mappings()
+            .all()
+        )
+
+    assert pending["status"] == "pending"
+    assert exc.value.existing_name == "openAiKey"
+    assert [row["secret_name"] for row in rows] == ["openAiKey"]
 
 
 def test_skill_links_are_stored_as_skill_tags(vault):
