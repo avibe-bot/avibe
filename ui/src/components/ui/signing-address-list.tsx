@@ -3,7 +3,7 @@ import { Check, Copy } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { SigningAddresses } from '@/context/ApiContext';
-import { cn } from '@/lib/utils';
+import { cn, copyTextToClipboard } from '@/lib/utils';
 
 // Display order: ETH first, then BTC modern → legacy. Each entry maps a backend
 // signing_addresses key to a short label; missing entries are skipped.
@@ -26,7 +26,10 @@ const AddressRow: React.FC<{ label: string; value: string }> = ({ label, value }
       <button
         type="button"
         onClick={() => {
-          void navigator.clipboard?.writeText(value).then(() => {
+          // Shared helper: falls back to execCommand on LAN-HTTP where navigator.clipboard
+          // is unavailable (non-secure context).
+          void copyTextToClipboard(value).then((ok) => {
+            if (!ok) return;
             setCopied(true);
             window.setTimeout(() => setCopied(false), 1500);
           });

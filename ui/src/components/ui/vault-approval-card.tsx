@@ -13,7 +13,7 @@ import {
   type BlindBox,
   type SignatureScheme,
 } from '@/lib/vaultCrypto';
-import { cn } from '@/lib/utils';
+import { cn, copyTextToClipboard } from '@/lib/utils';
 import { Badge } from './badge';
 import { Button } from './button';
 import { Switch } from './switch';
@@ -390,7 +390,10 @@ export const VaultApprovalCard: React.FC<{
                 <button
                   type="button"
                   onClick={() => {
-                    void navigator.clipboard?.writeText(delivery.digest ?? '').then(() => {
+                    // Shared helper: falls back to execCommand on LAN-HTTP where
+                    // navigator.clipboard is unavailable (non-secure context).
+                    void copyTextToClipboard(delivery.digest ?? '').then((ok) => {
+                      if (!ok) return;
                       setCopiedDigest(true);
                       window.setTimeout(() => setCopiedDigest(false), 1500);
                     });
