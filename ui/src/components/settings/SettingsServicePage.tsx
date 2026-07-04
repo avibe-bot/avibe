@@ -60,7 +60,11 @@ export const SettingsServicePage: React.FC = () => {
         setup_host: config.ui?.setup_host || '127.0.0.1',
         setup_port: config.ui?.setup_port || 5123,
       };
-      await api.saveConfig({ ui: { ...(config.ui || {}), ...uiPayload } });
+      // Send ONLY host/port — not the whole config.ui. Spreading config.ui
+      // would persist any unsaved instance_name draft the user typed but
+      // didn't Save on that row. The backend deep-merges config saves, so
+      // instance_name and chat_message_font_size are preserved regardless.
+      await api.saveConfig({ ui: uiPayload });
       await apiFetch('/api/ui/reload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
