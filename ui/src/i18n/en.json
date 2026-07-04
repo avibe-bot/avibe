@@ -2201,6 +2201,9 @@
       "btcLegacy": "BTC Legacy",
       "copy": "Copy {{label}} address"
     },
+    "chat": {
+      "floatApprovals": "Waiting for your approval · {{count}}"
+    },
     "filter": {
       "clear": "Clear filters",
       "empty": "No secrets match the selected tags."

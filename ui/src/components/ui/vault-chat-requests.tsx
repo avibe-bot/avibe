@@ -1,99 +1,78 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { KeyRound } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
-import { useApi, type VaultRequest } from '@/context/ApiContext';
+import type { VaultRequest } from '@/context/ApiContext';
+import { Button } from './button';
+import { VaultApprovalDialog } from './vault-approval-dialog';
 import { VaultRequestCard } from './vault-request-card';
 
-const POLL_FALLBACK_MS = 5000;
+/**
+ * In-scroll list of a session's pending request cards (design: Form A), rendered at the end of
+ * the chat transcript. Presentational — data comes from `usePendingVaultRequests`. Reports
+ * whether the card area is off-viewport so the floating bar can appear when it scrolls away.
+ */
+export const VaultChatRequests: React.FC<{
+  requests: VaultRequest[];
+  onResolved: () => void;
+  onOffscreenChange?: (offscreen: boolean) => void;
+}> = ({ requests, onResolved, onOffscreenChange }) => {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const has = requests.length > 0;
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || !onOffscreenChange) return;
+    const observer = new IntersectionObserver(([entry]) => onOffscreenChange(!entry.isIntersecting), { threshold: 0 });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [onOffscreenChange, has]);
+
+  if (!has) return null;
+  return (
+    <div ref={ref} className="flex flex-col gap-2">
+      {requests.map((request) => (
+        <VaultRequestCard key={request.id} request={request} onResolved={onResolved} />
+      ))}
+    </div>
+  );
+};
 
 /**
- * Pending vault requests for the current chat session, rendered as inline cards at the live
- * end of the conversation (design: Form A). Fed by the workbench SSE (`vaults.updated`); a 5s
- * poll only runs as a fallback when the event bridge is disconnected. Renders nothing when the
- * session has no pending requests.
+ * Floating approval bar (design: Form B). Shown above the composer only for approval
+ * (access / sign) requests whose in-scroll card has scrolled off-viewport, so a waiting
+ * approval is never missed. Clicking opens the oldest one in the shared approval dialog.
  */
-export const VaultChatRequests: React.FC<{ sessionId: string }> = ({ sessionId }) => {
-  const api = useApi();
-  const [requests, setRequests] = useState<VaultRequest[]>([]);
-  const [connected, setConnected] = useState(false);
-
-  const load = useCallback(async () => {
-    try {
-      // Server-side session scoping (before the global limit); suppress errors so an older
-      // backend without the route doesn't toast on every refresh.
-      const res = await api.getVaultRequests({ status: 'pending', session: sessionId }, { handleError: false });
-      const mine = (res.requests ?? []).filter((r) => {
-        const type = (r.card as { request_type?: string } | null)?.request_type ?? r.request_type;
-        return type === 'access' || type === 'sign' || type === 'provision';
-      });
-      setRequests(mine);
-    } catch {
-      setRequests([]);
-    }
-  }, [api, sessionId]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  // Live updates over the shared workbench event bridge (same source the Vaults page uses).
-  useEffect(() => {
-    return api.connectWorkbenchEvents({
-      onConnected: (data) => {
-        if (data.source === 'controller') {
-          setConnected(true);
-          load();
-        }
-      },
-      onEventBridgeStatus: ({ connected: isConnected }) => {
-        setConnected(isConnected);
-        if (isConnected) load();
-      },
-      onError: () => setConnected(false),
-      onVaultsUpdated: () => load(),
-    });
-  }, [api, load]);
-
-  // Poll only while the event bridge is down — and only when visible and not mid-load,
-  // so a backgrounded disconnected tab doesn't spin or race overlapping loads.
-  useEffect(() => {
-    if (connected) return;
-    let cancelled = false;
-    let inFlight = false;
-    const id = window.setInterval(() => {
-      if (cancelled || inFlight || document.visibilityState !== 'visible') return;
-      inFlight = true;
-      void load().finally(() => {
-        inFlight = false;
-      });
-    }, POLL_FALLBACK_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, [connected, load]);
-
-  // Expiry doesn't publish a `vaults.updated` event, so schedule a refresh at the earliest
-  // visible expiry — otherwise an expired card lingers and clicking it hits a server-side
-  // lazy-expire failure. Runs even while SSE is connected.
-  useEffect(() => {
-    const now = Date.now();
-    let earliest = Infinity;
-    for (const request of requests) {
-      const expiresAt = request.expires_at ? Date.parse(request.expires_at) : NaN;
-      if (!Number.isNaN(expiresAt) && expiresAt > now) earliest = Math.min(earliest, expiresAt);
-    }
-    if (earliest === Infinity) return;
-    // +250ms so the server has flipped the row; clamp to the setTimeout max.
-    const id = window.setTimeout(load, Math.min(earliest - now + 250, 2_000_000_000));
-    return () => window.clearTimeout(id);
-  }, [requests, load]);
-
-  if (requests.length === 0) return null;
+export const VaultApprovalFloat: React.FC<{ approvals: VaultRequest[]; onResolved: () => void }> = ({ approvals, onResolved }) => {
+  const { t } = useTranslation();
+  const [reviewing, setReviewing] = useState<VaultRequest | null>(null);
+  if (approvals.length === 0) return null;
+  const oldest = approvals[approvals.length - 1];
   return (
-    <div className="flex flex-col gap-2">
-      {requests.map((request) => (
-        <VaultRequestCard key={request.id} request={request} onResolved={load} />
-      ))}
+    <div className="mx-3 mb-1">
+      <button
+        type="button"
+        onClick={() => setReviewing(oldest)}
+        className="flex w-full items-center gap-2.5 rounded-xl border border-gold/40 bg-gold/[0.08] px-3 py-2.5 text-left transition-colors hover:bg-gold/[0.12]"
+      >
+        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-gold/15 text-gold">
+          <KeyRound className="size-4" />
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-foreground">
+          {t('vaults.chat.floatApprovals', { count: approvals.length })}
+        </span>
+        <Button size="sm" className="pointer-events-none shrink-0" tabIndex={-1}>
+          {t('vaults.requests.review')}
+        </Button>
+      </button>
+      <VaultApprovalDialog
+        request={reviewing}
+        onResolved={() => {
+          setReviewing(null);
+          onResolved();
+        }}
+        onClose={() => setReviewing(null)}
+      />
     </div>
   );
 };

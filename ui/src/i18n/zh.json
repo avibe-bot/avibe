@@ -2200,6 +2200,9 @@
       "btcLegacy": "BTC Legacy",
       "copy": "复制 {{label}} 地址"
     },
+    "chat": {
+      "floatApprovals": "等你授权 · {{count}}"
+    },
     "filter": {
       "clear": "清除筛选",
       "empty": "没有匹配所选标签的密钥。"
