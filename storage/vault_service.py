@@ -1416,7 +1416,8 @@ def create_provision_request(
     already = conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name)).first() is not None
     status = "fulfilled" if already else "pending"
     normalized_spec = normalize_provision_spec(spec)
-    card = _secure_input_card(name, request_id=request_id, reason=reason, spec=normalized_spec)
+    session_id = requester.get("session_id") if isinstance(requester, dict) else None
+    card = _secure_input_card(name, request_id=request_id, reason=reason, spec=normalized_spec, session_id=session_id)
     delivery_payload: dict[str, Any] = {"card": card}
     if reason:
         delivery_payload["reason"] = reason
@@ -1472,12 +1473,16 @@ def _secure_input_card(
     request_id: str,
     reason: str | None = None,
     spec: dict[str, Any] | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     normalized_spec = normalize_provision_spec(spec)
     card = {
         "card_type": "secure_input",
         "request_id": request_id,
         "secret_name": name,
+        # Carry the requesting session so surfaces can scope the card to its chat
+        # (mirrors approval_card); the Vaults page ignores it.
+        "session_id": session_id,
         "reason": reason,
         "protection_options": ["standard", "protected"],
         "default_protection": normalized_spec.get("protection") or "protected",

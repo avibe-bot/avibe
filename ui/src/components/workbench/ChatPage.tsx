@@ -29,6 +29,7 @@ import { ImageViewerProvider } from '../ui/image-viewer';
 import { FileViewerProvider } from '../ui/file-viewer';
 import { Input } from '../ui/input';
 import { Markdown } from '../ui/markdown';
+import { VaultChatRequests } from '../ui/vault-chat-requests';
 import { Composer, type ComposerAttachment, type ComposerHandle, type ComposerProps } from './Composer';
 import type { MentionReference } from '../../lib/mentions';
 import { QuickReplies } from './QuickReplies';
@@ -1453,6 +1454,7 @@ export const ChatPage: React.FC = () => {
           followingTailRef={followingTailRef}
         />
         <QueueStrip queue={queue} onRemove={removeQueued} onRecall={recallQueued} onSendNow={sendQueueNow} />
+        {sessionId ? <VaultChatRequests sessionId={sessionId} /> : null}
         {/* key by session so the composer remounts per session — its draft-seeding
             + local value reset, instead of carrying across sessions (Codex P2). */}
         <Compose

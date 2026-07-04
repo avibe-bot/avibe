@@ -278,6 +278,20 @@ def test_get_provision_request_by_name_returns_pending_spec():
     assert result["ambiguous"] is False
 
 
+def test_provision_request_card_carries_session_id():
+    # The chat surface scopes request cards by card.session_id; provision must set it from the
+    # requester like access/sign do, or its card is invisible in the originating chat.
+    with api._vault_engine().begin() as conn:
+        req = vault_service.create_provision_request(
+            conn,
+            "DEPLOY_TOKEN",
+            requester={"source": "agent-cli", "session_id": "ses_abc123"},
+        )
+    assert req["card"]["session_id"] == "ses_abc123"
+    result = api.get_vault_provision_request_by_name("DEPLOY_TOKEN")
+    assert (result["request"]["card"] or {}).get("session_id") == "ses_abc123"
+
+
 def test_get_provision_request_returns_request_id_match():
     with api._vault_engine().begin() as conn:
         old_req = vault_service.create_provision_request(
