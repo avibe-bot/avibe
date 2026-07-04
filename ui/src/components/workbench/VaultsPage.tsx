@@ -301,7 +301,8 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
       });
       setRequests(pending);
     } catch {
-      setRequests([]);
+      // Keep the last successful snapshot. A transient poll failure should not
+      // unmount an active approval/provision dialog for a still-pending request.
     }
   }, [api]);
 
