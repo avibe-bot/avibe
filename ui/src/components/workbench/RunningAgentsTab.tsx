@@ -28,8 +28,13 @@ import {
   type Backend,
 } from '../../lib/backendAccent';
 
-// Snapshot refresh cadence for degraded fallback and live rows that age without events.
+// Degraded-mode refresh cadence while SSE is disconnected.
 const POLL_INTERVAL_MS = 4000;
+const RENDER_TICK_INTERVAL_MS = 1000;
+
+type DisplayRunningAgent = RunningAgent & {
+  elapsed_observed_at: number;
+};
 
 // Humanize elapsed_seconds: 12 → "12s", 185 → "3m", 3700 → "1h"
 function formatElapsed(seconds: number | null): string {
@@ -71,6 +76,12 @@ function sortAgents(agents: RunningAgent[]): RunningAgent[] {
   });
 }
 
+function currentElapsedSeconds(agent: DisplayRunningAgent, now: number): number | null {
+  if (agent.elapsed_seconds == null) return null;
+  const age = Math.max(0, (now - agent.elapsed_observed_at) / 1000);
+  return agent.elapsed_seconds + age;
+}
+
 // Per-state presentation, in one place: the state dot/badge AND the End button
 // label/icon/confirm-policy all key off this map instead of parallel ternaries.
 type RunState = 'active' | 'idle' | 'orphan';
@@ -99,7 +110,8 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
-  const [agents, setAgents] = useState<RunningAgent[]>([]);
+  const [agents, setAgents] = useState<DisplayRunningAgent[]>([]);
+  const [renderNow, setRenderNow] = useState(() => Date.now());
   const [unreachable, setUnreachable] = useState(false);
   const [loading, setLoading] = useState(true);
   const [eventBridgeConnected, setEventBridgeConnected] = useState(false);
@@ -125,8 +137,10 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
           setAgents([]);
           onActiveCountChange?.(null);
         } else {
+          const observedAt = Date.now();
           setUnreachable(false);
-          setAgents(sortAgents(result.agents ?? []));
+          setRenderNow(observedAt);
+          setAgents(sortAgents(result.agents ?? []).map((agent) => ({ ...agent, elapsed_observed_at: observedAt })));
           onActiveCountChange?.((result.counts as any)?.active ?? 0);
         }
       } catch {
@@ -201,9 +215,15 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
     });
   }, [api, fetchData]);
 
-  const hasLiveRows = agents.length > 0;
+  const hasElapsedRows = agents.some((agent) => agent.elapsed_seconds != null);
   useEffect(() => {
-    if (eventBridgeConnected && !hasLiveRows) return;
+    if (!hasElapsedRows) return;
+    const timer = window.setInterval(() => setRenderNow(Date.now()), RENDER_TICK_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [hasElapsedRows]);
+
+  useEffect(() => {
+    if (eventBridgeConnected) return;
     let timer: number | undefined;
     let cancelled = false;
     let inFlight = false;
@@ -248,7 +268,7 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
       document.removeEventListener('visibilitychange', refreshNow);
       window.removeEventListener('focus', refreshNow);
     };
-  }, [eventBridgeConnected, fetchData, hasLiveRows]);
+  }, [eventBridgeConnected, fetchData]);
 
   if (loading) {
     return (
@@ -315,6 +335,7 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
           // same key the sort uses; no positional index.
           key={identityKey(agent)}
           agent={agent}
+          renderNow={renderNow}
           onEnd={endAgent}
         />
       ))}
@@ -327,11 +348,12 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
 // ---------------------------------------------------------------------------
 
 interface RunningAgentRowProps {
-  agent: RunningAgent;
+  agent: DisplayRunningAgent;
+  renderNow: number;
   onEnd: (agent: RunningAgent) => Promise<void>;
 }
 
-const RunningAgentRow: React.FC<RunningAgentRowProps> = ({ agent, onEnd }) => {
+const RunningAgentRow: React.FC<RunningAgentRowProps> = ({ agent, renderNow, onEnd }) => {
   const { t } = useTranslation();
   const isOrphan = agent.state === 'orphan';
   const [ending, setEnding] = useState(false);
@@ -380,6 +402,7 @@ const RunningAgentRow: React.FC<RunningAgentRowProps> = ({ agent, onEnd }) => {
     BACKEND_LABEL[agent.backend as Backend] ?? agent.backend;
   const backendClass =
     BACKEND_ICON_CLASS[agent.backend as Backend] ?? 'text-muted';
+  const elapsedSeconds = currentElapsedSeconds(agent, renderNow);
 
   const canOpenChat = agent.openable_in_chat && !!agent.session_id;
 
@@ -405,13 +428,13 @@ const RunningAgentRow: React.FC<RunningAgentRowProps> = ({ agent, onEnd }) => {
         {/* Elapsed — "busy {{elapsed}}" while a turn is in flight (the backend
             anchors this to the turn-start baseline, not last-chunk time), else
             "idle {{elapsed}}". */}
-        {agent.elapsed_seconds != null && (
+        {elapsedSeconds != null && (
           <span className="font-mono text-[11px] text-muted">
             {t(
               agent.state === 'active'
                 ? 'agents.running.busy'
                 : 'agents.running.idleElapsed',
-              { elapsed: formatElapsed(agent.elapsed_seconds) },
+              { elapsed: formatElapsed(elapsedSeconds) },
             )}
           </span>
         )}
