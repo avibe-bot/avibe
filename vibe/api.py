@@ -1465,7 +1465,7 @@ def create_vault_secret(payload: dict) -> dict:
     _reject_plaintext_value_fields(payload)
     name = str(payload.get("name") or "").strip()
     if not vault_crypto.is_valid_secret_name(name):
-        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     tags = [str(tag) for tag in payload.get("tags", []) if isinstance(tag, str)] if isinstance(payload.get("tags"), list) else []
     policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else None
     public_meta = payload.get("public_meta") if isinstance(payload.get("public_meta"), dict) else None
@@ -1517,7 +1517,7 @@ def create_vault_secret(payload: dict) -> dict:
                 provision_request_id=str(payload.get("provision_request_id") or "") or None,
             )
     except vault_service.InvalidSecretNameError as exc:
-        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name") from exc
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name") from exc
     except vault_service.SecretExistsError as exc:
         fulfilled_count = 0
         try:
@@ -1581,7 +1581,7 @@ def get_vault_provision_request_by_name(name: str) -> dict:
 
     requested_name = str(name or "").strip()
     if not vault_crypto.is_valid_secret_name(requested_name):
-        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     engine = _vault_engine()
     with engine.begin() as conn:
         request, ambiguous = vault_service.resolve_pending_provision_request_by_name(conn, requested_name)
@@ -1720,7 +1720,7 @@ def request_vault_access(payload: dict) -> dict:
     if not name and source_selector is None:
         raise VaultApiError("name or source_selector is required", code="invalid_request", status=409)
     if name and not vault_crypto.is_valid_secret_name(name):
-        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     purpose = str(payload.get("purpose") or "run")
     engine = _vault_engine()
     try:
@@ -1768,7 +1768,7 @@ def request_vault_sign(payload: dict) -> dict:
     if scheme not in vault_service.SUPPORTED_SIGNATURE_SCHEMES:
         raise VaultApiError(f"unsupported signature scheme: {scheme}", code="invalid_request", status=409)
     if not vault_crypto.is_valid_secret_name(name):
-        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     engine = _vault_engine()
     try:
         with engine.begin() as conn:
@@ -2617,7 +2617,7 @@ def vault_sign(payload: dict) -> dict:
     if scheme not in vault_service.SUPPORTED_SIGNATURE_SCHEMES:
         raise VaultApiError(f"unsupported signature scheme: {scheme}", code="invalid_request", status=409)
     if not vault_crypto.is_valid_secret_name(name):
-        raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name")
+        raise VaultApiError("invalid secret name (use ^[A-Za-z_][A-Za-z0-9_]*$)", code="invalid_name")
     engine = _vault_engine()
     protected_response: dict | None = None
     protected_event: dict | None = None

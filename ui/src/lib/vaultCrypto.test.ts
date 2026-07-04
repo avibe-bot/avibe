@@ -297,11 +297,11 @@ describe('vaultCrypto blind boxes', () => {
 
   it('enforces the daemon vault secret-name syntax before producing AAD', async () => {
     expect(() => standardCreateBlindBoxContext('OPENAI_API_KEY')).not.toThrow();
+    expect(() => standardCreateBlindBoxContext('openAi_key')).not.toThrow();
     expect(() => standardCreateBlindBoxContext(' OPENAI_API_KEY ')).toThrow(/secret name/);
-    expect(() => standardCreateBlindBoxContext('openai_key')).toThrow(/secret name/);
     expect(() => standardCreateBlindBoxContext('1OPENAI_KEY')).toThrow(/secret name/);
     await expect(
-      protectedDekReleaseBlindBoxContext('openai_key', {
+      protectedDekReleaseBlindBoxContext('1OPENAI_KEY', {
         kind: 'agent-deliver',
         scopeType: 'session',
         scopeRef: 'sess-1',

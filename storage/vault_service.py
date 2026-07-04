@@ -23,7 +23,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import IntegrityError
 
@@ -255,6 +255,20 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
 
 def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+def _secret_name_case_key(name: str) -> str:
+    # Secret names are ASCII shell identifiers, so SQL lower() and Python lower()
+    # have the same case-folding behavior for the enforced domain.
+    return name.lower()
+
+
+def _find_secret_name_case_insensitive(conn: Connection, name: str) -> str | None:
+    return conn.execute(
+        select(vault_secrets.c.name)
+        .where(func.lower(vault_secrets.c.name) == _secret_name_case_key(name))
+        .limit(1)
+    ).scalar_one_or_none()
 
 
 def _loads(raw: str | None) -> Any:
@@ -1052,7 +1066,8 @@ def create_secret(
     if kind != "keypair" and signer_kind is not None:
         raise VaultServiceError("signer_kind is only valid for keypair secrets")
     provision_row: dict[str, Any] | None = None
-    existing_secret = conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name)).first() is not None
+    existing_name = _find_secret_name_case_insensitive(conn, name)
+    existing_secret = existing_name is not None
     if provision_request_id:
         _expire_pending_requests(conn)
         provision_row = _load_request_row(conn, provision_request_id)
@@ -1411,9 +1426,14 @@ def create_provision_request(
     ``request --wait`` would block forever (a create for an existing name is rejected,
     so nothing would ever flip a pending row).
     """
+    if not vault_crypto.is_valid_secret_name(name):
+        raise InvalidSecretNameError(name)
     request_id = _id("vrq")
     now = _now()
-    already = conn.execute(select(vault_secrets.c.id).where(vault_secrets.c.name == name)).first() is not None
+    existing_name = _find_secret_name_case_insensitive(conn, name)
+    if existing_name is not None and existing_name != name:
+        raise SecretExistsError(name)
+    already = existing_name == name
     status = "fulfilled" if already else "pending"
     normalized_spec = normalize_provision_spec(spec)
     card = _secure_input_card(name, request_id=request_id, reason=reason, spec=normalized_spec)

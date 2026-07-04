@@ -114,7 +114,7 @@ already exists as the seam to harden — but we don't pay for it now.
 | column | notes |
 | --- | --- |
 | `id`, `created_at`, `updated_at` | |
-| `name` | **UNIQUE**, ENV-style `^[A-Z][A-Z0-9_]*$` — the reference key |
+| `name` | **UNIQUE**, case-preserving shell name `^[A-Za-z_][A-Za-z0-9_]*$`; case-only duplicates are rejected |
 | `group` | nullable, default `"default"` — org + unlock-scope, **not** part of the name |
 | `tags` | JSON array, optional |
 | `kind` | `static` \| `keypair` |

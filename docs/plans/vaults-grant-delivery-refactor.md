@@ -63,7 +63,7 @@ plaintext for delivery.
 
 `vault_secrets` should keep:
 
-- `name`: globally unique env-style secret name.
+- `name`: globally unique, case-preserving shell-style secret name; case-only duplicates are rejected.
 - `kind`: `static` or `keypair`.
 - `protection`: `standard` or `protected`.
 - `tags`: JSON array of strings.

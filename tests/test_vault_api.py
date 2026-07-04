@@ -424,13 +424,46 @@ def test_duplicate_name_conflict(monkeypatch):
     assert exc.value.status == 409
 
 
+def test_mixed_case_name_is_preserved_and_case_duplicate_rejected(monkeypatch):
+    from unittest.mock import Mock
+
+    seal = Mock(return_value=_sealed())
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    created = api.create_vault_secret(
+        {
+            "name": "openAiKey",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        }
+    )
+    assert created["secret"]["name"] == "openAiKey"
+    seal.assert_called_once_with(
+        "openAiKey",
+        {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+    )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_secret(
+            {
+                "name": "OpenAIKey",
+                "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc2", "ct": "ct2"},
+            }
+        )
+    assert exc.value.code == "secret_exists"
+    assert exc.value.status == 409
+
+
 def test_invalid_name_rejected_before_avault(monkeypatch):
     from unittest.mock import Mock
 
     seal = Mock(return_value=_sealed())
     monkeypatch.setattr(api, "avault_seal_blind_box", seal)
     with pytest.raises(api.VaultApiError) as exc:
-        api.create_vault_secret({"name": "lower", "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"}})
+        api.create_vault_secret(
+            {
+                "name": "bad-name",
+                "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            }
+        )
     assert exc.value.code == "invalid_name"
     seal.assert_not_called()
 

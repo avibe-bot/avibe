@@ -36,13 +36,13 @@ import { cn, copyTextToClipboard } from '@/lib/utils';
 // leave it off for authored markdown (agent replies) where wrapped lines must
 // not sprout stray hard breaks.
 
-// Vault dynamic-ask: an agent reply may contain `$<OPENAI_API_KEY>`. When interactive,
+// Vault dynamic-ask: an agent reply may contain `$<openAiKey>`. When interactive,
 // we rewrite each marker (outside code) to an `avibe-secret:NAME` link that the `a` handler
 // renders as an inline SecretRequestCard. Fenced/inline code spans AND indented (≥4-space / tab)
 // code lines are left verbatim so a marker shown in any code example never becomes a real
 // input card.
 const SECRET_LINK_SCHEME = 'avibe-secret';
-const SECRET_REQUEST_RE = /\$<([A-Z][A-Z0-9_]*)>/g;
+const SECRET_REQUEST_RE = /\$<([A-Za-z_][A-Za-z0-9_]*)>/g;
 const CODE_SPAN_RE = /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g;
 const INDENTED_CODE_LINE_RE = /^(?: {4}|\t)/;
 

@@ -2290,7 +2290,7 @@
       "kindStaticHelp": "A token, password, or any text value.",
       "kindKeypair": "Signing key",
       "kindKeypairHelp": "A signing key generated in your browser.",
-      "nameHint": "Uppercase A–Z 0–9 _ · globally unique",
+      "nameHint": "Letters, numbers, underscore · case preserved",
       "signingKeyHelp": "A new secp256k1 signing key is created in your browser. The private key is sealed in your browser — standard keys are signed by avault locally, protected keys are signed in your browser — and only the public key is stored in the clear.",
       "signingGenerate": "Generate",
       "signingImport": "Import",

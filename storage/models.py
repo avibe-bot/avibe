@@ -466,7 +466,8 @@ vault_secrets = Table(
     "vault_secrets",
     metadata,
     Column("id", String, primary_key=True),
-    # Globally-unique reference key, ENV-style ``^[A-Z][A-Z0-9_]*$``.
+    # Globally unique, case-preserving shell name ``^[A-Za-z_][A-Za-z0-9_]*$``.
+    # Application logic rejects case-only duplicates so lookup stays exact.
     Column("name", String, nullable=False),
     Column("tags", Text, nullable=True),  # JSON array
     Column("kind", String, nullable=False, server_default="static"),  # static | keypair (P2)

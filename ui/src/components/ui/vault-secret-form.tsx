@@ -235,7 +235,7 @@ export const VaultSecretForm: React.FC<{
   }, [requestSpec]);
 
   const p2Ready = useMemo(() => avaultP2Ready(avaultDep), [avaultDep]);
-  const secretName = (fixedName ?? name).trim().toUpperCase();
+  const secretName = (fixedName ?? name).trim();
   const protectedCreateReady = protectedVault.status === 'unlocked';
   const isKeypair = kind === 'keypair';
   const isProvision = Boolean(fixedName);

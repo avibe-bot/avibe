@@ -50,7 +50,7 @@ class QuickReplyButton:
 class SecretRequest:
     """A ``$<NAME>`` dynamic-ask marker found in agent reply text (Vaults).
 
-    The agent writes ``$<OPENAI_API_KEY>`` to ask the user for a secret; the value is
+    The agent writes ``$<openAiKey>`` to ask the user for a secret; the value is
     filled through a trusted UI channel, never the chat. The marker stays in ``.text``
     so the web transcript can render it as a secure input card; IM replaces it with a
     deep link in the platform formatter.
@@ -119,10 +119,10 @@ _PLAIN_LINKS_ONLY_RE = re.compile(r"(?:\s*\[[^\]]+\]\(" + _PLAIN_URL + r"\)\s*)+
 _SILENT_BLOCK_RE = re.compile(r"<silent\b[^>]*>.*?</silent\s*>", re.IGNORECASE | re.DOTALL)
 _UNTERMINATED_SILENT_RE = re.compile(r"<silent\b[^>]*>.*\Z", re.IGNORECASE | re.DOTALL)
 
-# Dynamic secret-ask markers: ``$<OPENAI_API_KEY>`` (ENV-style name). Matched only
+# Dynamic secret-ask markers: ``$<openAiKey>`` (case-preserving shell name). Matched only
 # outside fenced/inline code so a marker shown in an example isn't treated as a real
 # request — code spans are masked first.
-_SECRET_REQUEST_RE = re.compile(r"\$<([A-Z][A-Z0-9_]*)>")
+_SECRET_REQUEST_RE = re.compile(r"\$<([A-Za-z_][A-Za-z0-9_]*)>")
 _CODE_SPAN_RE = re.compile(r"```.*?```|~~~.*?~~~|`[^`\n]*`", re.DOTALL)
 
 

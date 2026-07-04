@@ -2289,7 +2289,7 @@
       "kindStaticHelp": "令牌、密码,或任意文本值。",
       "kindKeypair": "签名密钥",
       "kindKeypairHelp": "在你浏览器里生成的签名私钥。",
-      "nameHint": "大写 A–Z 0–9 _ · 全局唯一",
+      "nameHint": "字母、数字、下划线 · 保留大小写",
       "signingKeyHelp": "会在你的浏览器里新生成一把 secp256k1 签名密钥。私钥在浏览器中封存——标准密钥由本机 avault 签名,保护层密钥在浏览器中签名——只有公钥明文保存。",
       "signingGenerate": "生成",
       "signingImport": "导入",

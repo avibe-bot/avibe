@@ -58,7 +58,7 @@ mint factor-safety note; Cancel. Again **no `<form>`** — onClick buttons.
   key), not two big cards. Use a segmented control (reuse the existing
   Tabs/segmented primitive, or build one consistent with the design system).
 - **Field order**: Kind → Name → Value → Protection → Group → **Advanced**.
-- Name hint: "Uppercase A–Z 0–9 _ · globally unique".
+- Name hint: "Letters, numbers, underscore · case preserved".
 - Value: input + eye toggle; placeholder "Paste the secret value".
 - Protection: two cards Standard / Protected, exact copy — Standard
   "Machine-encrypted. Headless use OK. For API keys.", Protected "Unlocked in

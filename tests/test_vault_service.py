@@ -59,6 +59,30 @@ def test_secret_metadata_is_global_name_plus_tags(vault):
         assert vs.list_secrets(conn, tag="prod")[0]["name"] == "OPENAI_API_KEY"
 
 
+def test_secret_names_preserve_case_and_reject_case_only_duplicates(vault):
+    meta = _create(vault, name="openAiKey", description="key")
+
+    assert meta["name"] == "openAiKey"
+    with vault.connect() as conn:
+        assert vs.get_secret_meta(conn, "openAiKey")["name"] == "openAiKey"
+        with pytest.raises(vs.SecretNotFoundError):
+            vs.get_secret_meta(conn, "OPENAIKEY")
+
+    with pytest.raises(vs.SecretExistsError):
+        _create(vault, name="OpenAIKey")
+
+
+def test_provision_request_rejects_case_only_duplicate_secret(vault):
+    _create(vault, name="OpenAIKey")
+
+    with vault.begin() as conn:
+        fulfilled = vs.create_provision_request(conn, "OpenAIKey")
+        with pytest.raises(vs.SecretExistsError):
+            vs.create_provision_request(conn, "openAIKey")
+
+    assert fulfilled["status"] == "fulfilled"
+
+
 def test_skill_links_are_stored_as_skill_tags(vault):
     _create(vault, name="GH_PAT", tags=["github"])
 
