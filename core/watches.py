@@ -413,6 +413,8 @@ class ManagedWatchService:
         self._store_error_fused = False
         self._store_reconcile_failures = 0
         self._requires_service_lease = runtime.service_instance_lock_attached_to_process()
+        self._reconcile_dirty = True
+        self._runtime_state_dirty = True
 
     def active_process_pids(self) -> set[int]:
         """Return active waiter process roots owned by managed watches."""
@@ -424,8 +426,12 @@ class ManagedWatchService:
         self._running = True
         self._reconcile_task = asyncio.create_task(self._watch_store())
         try:
-            self.reconcile_watches()
+            if self.reconcile_watches():
+                self._runtime_state_dirty = True
+            self._write_runtime_state()
+            self._reconcile_dirty = False
         except Exception as exc:
+            self._reconcile_dirty = True
             self._handle_reconcile_store_error(exc)
 
     async def stop(self) -> None:
@@ -442,6 +448,7 @@ class ManagedWatchService:
         self._active_tasks.clear()
         self._active_pids.clear()
         self._watch_started_at.clear()
+        self._runtime_state_dirty = True
         self._write_runtime_state()
 
     async def _watch_store(self) -> None:
@@ -452,41 +459,52 @@ class ManagedWatchService:
                 await asyncio.sleep(WATCH_RECONCILE_INTERVAL_SECONDS)
                 continue
             try:
-                if self.store.maybe_reload():
-                    self.reconcile_watches()
-                self.reconcile_watches()
+                should_reconcile = self.store.maybe_reload() or self._reconcile_dirty
+                if should_reconcile:
+                    if self.reconcile_watches():
+                        self._runtime_state_dirty = True
+                if self._runtime_state_dirty:
+                    self._write_runtime_state()
                 self._store_reconcile_failures = 0
+                self._reconcile_dirty = False
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                self._reconcile_dirty = True
                 self._handle_reconcile_store_error(exc)
             await asyncio.sleep(WATCH_RECONCILE_INTERVAL_SECONDS)
 
-    def reconcile_watches(self) -> None:
+    def reconcile_watches(self) -> bool:
         if not self._owns_service_instance():
-            return
+            return False
         if self._store_error_fused:
-            return
-        desired_ids = {watch.id for watch in self.store.list_watches() if watch.enabled}
-        for watch in self.store.list_watches():
+            return False
+        watches = self.store.list_watches()
+        desired_ids = {watch.id for watch in watches if watch.enabled}
+        changed = False
+        for watch in watches:
             if not watch.enabled or watch.id in self._active_tasks or watch.id in self._fused_watch_ids:
                 continue
             task = asyncio.create_task(self._run_watch(watch.id))
             self._active_tasks[watch.id] = task
             task.add_done_callback(lambda _task, watch_id=watch.id: self._on_watch_done(watch_id))
+            changed = True
 
         for watch_id, task in list(self._active_tasks.items()):
             if watch_id in desired_ids:
                 continue
             task.cancel()
+            changed = True
 
-        self._write_runtime_state()
+        return changed
 
     def _on_watch_done(self, watch_id: str) -> None:
         self._active_tasks.pop(watch_id, None)
         self._active_pids.pop(watch_id, None)
         self._watch_started_at.pop(watch_id, None)
+        self._runtime_state_dirty = True
         self._write_runtime_state()
+        self._reconcile_dirty = True
 
     def _write_runtime_state(self) -> None:
         payload = {"watches": {}}
@@ -500,7 +518,9 @@ class ManagedWatchService:
             }
         try:
             self.runtime_store.write(payload)
+            self._runtime_state_dirty = False
         except Exception:
+            self._runtime_state_dirty = True
             logger.exception("Failed to persist watch runtime state")
 
     def _fuse_store_after_error(self, operation: str, exc: Exception, *, watch_id: str | None = None) -> None:
@@ -552,6 +572,7 @@ class ManagedWatchService:
         for task in list(self._active_tasks.values()):
             if task is not current_task:
                 task.cancel()
+        self._runtime_state_dirty = True
         self._write_runtime_state()
 
     def _owns_service_instance(self) -> bool:
@@ -566,6 +587,7 @@ class ManagedWatchService:
     async def _run_watch(self, watch_id: str) -> None:
         lifetime_started = asyncio.get_running_loop().time()
         self._watch_started_at[watch_id] = _utc_now_iso()
+        self._runtime_state_dirty = True
         self._write_runtime_state()
 
         while self._running:
@@ -719,6 +741,7 @@ class ManagedWatchService:
                 **isolated_subprocess_kwargs(),
             )
         self._active_pids[watch.id] = process.pid
+        self._runtime_state_dirty = True
         self._write_runtime_state()
         try:
             if timeout_seconds > 0:
@@ -734,6 +757,7 @@ class ManagedWatchService:
             return _CycleResult(exit_code=124, stdout="", stderr=stderr.decode("utf-8", errors="replace"), timed_out=True)
         finally:
             self._active_pids.pop(watch.id, None)
+            self._runtime_state_dirty = True
             self._write_runtime_state()
 
         return _CycleResult(
