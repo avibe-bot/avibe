@@ -272,6 +272,24 @@ def test_project_config_marks_regression_target() -> None:
     assert "user.avibe_regression.host_port=15200" in config
 
 
+def test_tenant_exec_exports_regression_guard_override() -> None:
+    target = incus_regression.RegressionTarget(
+        target="master",
+        slug="master",
+        project="avr-master",
+        instance="avibe-master",
+        host_port=15130,
+        ui_host="127.0.0.1",
+        ui_port=5123,
+    )
+
+    command = " ".join(incus_regression.tenant_exec(target, "/opt/avibe/venv/bin/vibe status"))
+
+    assert "[ ! -f /etc/avibe-regression.env ] || . /etc/avibe-regression.env" in command
+    assert "VIBE_DEPLOYMENT_ENV=regression" in command
+    assert "AVIBE_ALLOW_DEV_STATE_MIGRATION=1" in command
+
+
 def test_remote_ref_prefixes_resource_names_only() -> None:
     assert incus_regression.remote_ref("lab", "demo") == "lab:demo"
     assert incus_regression.remote_ref(None, "demo") == "demo"

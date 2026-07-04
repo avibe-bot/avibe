@@ -667,6 +667,7 @@ def ensure_project_and_instance(
 def tenant_exec(target: RegressionTarget, command: str, *args: str, remote: str | None = None) -> list[str]:
     bash_command = (
         "set -a; [ ! -f /etc/avibe-regression.env ] || . /etc/avibe-regression.env; "
+        "VIBE_DEPLOYMENT_ENV=regression; AVIBE_ALLOW_DEV_STATE_MIGRATION=1; "
         f"set +a; cd {shlex.quote(SOURCE_DIR)} && {command}"
     )
     return incus(
