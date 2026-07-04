@@ -228,8 +228,7 @@ export const VaultApprovalCard: React.FC<{
           const approvalNonce = crypto.getRandomValues(new Uint8Array(16));
           const context = await protectedDekReleaseBlindBoxContext(material.name, {
             kind: 'agent-deliver',
-            scopeType: 'grant',
-            scopeRef: grantId,
+            grantId,
             ttlSecs: ttlSeconds,
             approval: { nonce: approvalNonce, expiresAtUnix },
             operationHash: await blindBoxAgentDeliverOperationHash(material.name, ttlSeconds),

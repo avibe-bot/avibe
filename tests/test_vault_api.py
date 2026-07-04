@@ -2342,7 +2342,8 @@ def test_create_grant_api_rejects_stale_agent_pubkey_before_claiming_request(mon
 
 def test_create_grant_api_expires_grant_when_agent_grant_fails(monkeypatch, avault_p2):
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
-    monkeypatch.setattr(api, "avault_agent_grant", Mock(side_effect=api.AvaultError("grant is missing")))
+    agent_grant = Mock(side_effect=api.AvaultError("grant is missing"))
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
     agent_release = Mock(return_value={"released": True})
     monkeypatch.setattr(api, "avault_agent_release", agent_release)
     api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
@@ -2472,6 +2473,48 @@ def test_create_grant_api_releases_scope_when_mark_ready_fails(monkeypatch, avau
     assert grants[0]["status"] == "expired"
     assert grants[0]["delivery_ready"] is False
     agent_release.assert_called_once_with(grant_id=grants[0]["id"])
+
+
+def test_create_grant_retry_reuses_expired_failed_grant_id(monkeypatch, avault_p2):
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    agent_grant = Mock(side_effect=[api.AvaultError("DEK blind-box open failed"), {"granted": 1, "ttl_secs": 300}])
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    monkeypatch.setattr(api, "avault_agent_release", Mock(return_value={"released": True}))
+    api.create_vault_secret({"name": "GRANT_KEY", "protection": "protected", "sealed": {"ciphertext": "ct", "nonce": "n", "wrap_meta": "wm"}})
+    with api._vault_engine().begin() as conn:
+        req = vault_service.create_access_request(
+            conn,
+            "GRANT_KEY",
+            requester={"session_id": "ses_1"},
+            delivery={"session_id": "ses_1"},
+        )
+    payload = {
+        "session_id": "ses_1",
+        "request_id": req["id"],
+        "deks": [
+            {
+                "name": "GRANT_KEY",
+                "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+            }
+        ],
+    }
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_grant(payload)
+    assert exc.value.code == "avault_failed"
+
+    created = api.create_vault_grant(payload)
+
+    with api._vault_engine().connect() as conn:
+        grants = vault_service.list_grants(conn, status=None)
+        status = conn.execute(select(vault_service.vault_requests.c.status).where(vault_service.vault_requests.c.id == req["id"])).scalar_one()
+    assert status == "approved"
+    assert len(grants) == 1
+    assert grants[0]["id"] == created["grant"]["id"]
+    assert grants[0]["status"] == "active"
+    assert grants[0]["delivery_ready"] is True
+    assert agent_grant.call_count == 2
 
 
 def test_create_grant_api_releases_failed_grant_id_without_touching_existing_grant(monkeypatch, avault_p2):
