@@ -125,6 +125,41 @@ def test_provision_request_rejects_case_only_duplicate_pending_request(vault):
     assert [row["secret_name"] for row in rows] == ["openAiKey"]
 
 
+def test_provision_request_case_guard_is_database_enforced(vault):
+    with vault.begin() as conn:
+        conn.execute(
+            vault_requests.insert().values(
+                id="vrq_a",
+                request_type="provision",
+                secret_name="openAiKey",
+                status="pending",
+                delivery="{}",
+                created_at="now",
+            )
+        )
+        conn.execute(
+            vault_requests.insert().values(
+                id="vrq_exact_duplicate",
+                request_type="provision",
+                secret_name="openAiKey",
+                status="pending",
+                delivery="{}",
+                created_at="now",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            conn.execute(
+                vault_requests.insert().values(
+                    id="vrq_b",
+                    request_type="provision",
+                    secret_name="OpenAIKey",
+                    status="pending",
+                    delivery="{}",
+                    created_at="now",
+                )
+            )
+
+
 def test_create_secret_rejects_case_only_duplicate_pending_request(vault):
     with vault.begin() as conn:
         pending = vs.create_provision_request(conn, "openAiKey")

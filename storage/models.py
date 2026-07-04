@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     Column,
+    DDL,
     Float,
     ForeignKey,
     Index,
@@ -11,6 +12,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    event,
     func,
     text,
 )
@@ -509,6 +511,57 @@ vault_requests = Table(
     Column("decided_at", String, nullable=True),
     Column("expires_at", String, nullable=True),
     Index("ix_vault_requests_status_created", "status", "created_at"),
+)
+event.listen(
+    vault_requests,
+    "after_create",
+    DDL(
+        """
+        create trigger if not exists trg_vault_requests_pending_provision_name_case_insert
+        before insert on vault_requests
+        when new.request_type = 'provision'
+          and new.status = 'pending'
+          and new.secret_name is not null
+          and exists (
+            select 1
+            from vault_requests
+            where request_type = 'provision'
+              and status = 'pending'
+              and secret_name is not null
+              and lower(secret_name) = lower(new.secret_name)
+              and secret_name <> new.secret_name
+          )
+        begin
+          select raise(abort, 'vault pending provision name case conflict');
+        end
+        """
+    ),
+)
+event.listen(
+    vault_requests,
+    "after_create",
+    DDL(
+        """
+        create trigger if not exists trg_vault_requests_pending_provision_name_case_update
+        before update of request_type, status, secret_name on vault_requests
+        when new.request_type = 'provision'
+          and new.status = 'pending'
+          and new.secret_name is not null
+          and exists (
+            select 1
+            from vault_requests
+            where id <> new.id
+              and request_type = 'provision'
+              and status = 'pending'
+              and secret_name is not null
+              and lower(secret_name) = lower(new.secret_name)
+              and secret_name <> new.secret_name
+          )
+        begin
+          select raise(abort, 'vault pending provision name case conflict');
+        end
+        """
+    ),
 )
 
 # Metadata + audit of active unlock grants. Key material is NEVER stored here;

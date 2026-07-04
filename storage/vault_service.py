@@ -291,6 +291,51 @@ def _find_pending_provision_name_case_insensitive(conn: Connection, name: str) -
     ).scalar_one_or_none()
 
 
+def _preflight_secret_create_name(
+    conn: Connection,
+    *,
+    name: str,
+    provision_request_id: str | None = None,
+) -> tuple[dict[str, Any] | None, bool]:
+    existing_name = _find_secret_name_case_insensitive(conn, name)
+    existing_secret = existing_name == name
+    if existing_name is not None and existing_name != name:
+        raise SecretNameCaseConflictError(name, existing_name)
+    provision_row: dict[str, Any] | None = None
+    if provision_request_id:
+        _expire_pending_requests(conn)
+        provision_row = _load_request_row(conn, provision_request_id)
+        if provision_row.get("request_type") != "provision":
+            raise InvalidRequestError("secret create must complete a provision request")
+        if provision_row.get("secret_name") != name:
+            raise InvalidRequestError("provision request secret name does not match")
+        if provision_row.get("status") == "expired":
+            raise InvalidRequestError("provision request has expired")
+        if provision_row.get("status") == "fulfilled" and existing_secret:
+            raise SecretExistsError(name)
+        if provision_row.get("status") != "pending":
+            raise InvalidRequestError("provision request is not pending")
+    pending_name = _find_pending_provision_name_case_insensitive(conn, name)
+    if pending_name is not None and pending_name != name:
+        raise SecretNameCaseConflictError(name, pending_name)
+    if existing_secret:
+        raise SecretExistsError(name)
+    return provision_row, bool(existing_secret)
+
+
+def preflight_secret_create(
+    conn: Connection,
+    *,
+    name: str,
+    provision_request_id: str | None = None,
+) -> None:
+    """Validate name/request conflicts before a caller performs expensive sealing."""
+
+    if not vault_crypto.is_valid_secret_name(name):
+        raise InvalidSecretNameError(name)
+    _preflight_secret_create_name(conn, name=name, provision_request_id=provision_request_id)
+
+
 def _loads(raw: str | None) -> Any:
     if not raw:
         return None
@@ -1085,29 +1130,11 @@ def create_secret(
         raise VaultServiceError(f"invalid vault secret kind: {kind!r}")
     if kind != "keypair" and signer_kind is not None:
         raise VaultServiceError("signer_kind is only valid for keypair secrets")
-    provision_row: dict[str, Any] | None = None
-    existing_name = _find_secret_name_case_insensitive(conn, name)
-    existing_secret = existing_name == name
-    if existing_name is not None and existing_name != name:
-        raise SecretNameCaseConflictError(name, existing_name)
-    if provision_request_id:
-        _expire_pending_requests(conn)
-        provision_row = _load_request_row(conn, provision_request_id)
-        if provision_row.get("request_type") != "provision":
-            raise InvalidRequestError("secret create must complete a provision request")
-        if provision_row.get("secret_name") != name:
-            raise InvalidRequestError("provision request secret name does not match")
-        if provision_row.get("status") == "expired":
-            raise InvalidRequestError("provision request has expired")
-        if provision_row.get("status") == "fulfilled" and existing_secret:
-            raise SecretExistsError(name)
-        if provision_row.get("status") != "pending":
-            raise InvalidRequestError("provision request is not pending")
-    pending_name = _find_pending_provision_name_case_insensitive(conn, name)
-    if pending_name is not None and pending_name != name:
-        raise SecretNameCaseConflictError(name, pending_name)
-    if existing_secret:
-        raise SecretExistsError(name)
+    provision_row, _existing_secret = _preflight_secret_create_name(
+        conn,
+        name=name,
+        provision_request_id=provision_request_id,
+    )
 
     if establishing_vmk and protection == "protected":
         # Atomic single-init guard: this runs inside the write transaction (SQLite
@@ -1474,19 +1501,25 @@ def create_provision_request(
         delivery_payload["reason"] = reason
     if normalized_spec:
         delivery_payload["spec"] = normalized_spec
-    conn.execute(
-        vault_requests.insert().values(
-            id=request_id,
-            request_type="provision",
-            secret_name=name,
-            requester=json.dumps(requester) if requester is not None else None,
-            delivery=json.dumps(delivery_payload),
-            status=status,
-            message_id=message_id,
-            created_at=now,
-            decided_at=now if already else None,
+    try:
+        conn.execute(
+            vault_requests.insert().values(
+                id=request_id,
+                request_type="provision",
+                secret_name=name,
+                requester=json.dumps(requester) if requester is not None else None,
+                delivery=json.dumps(delivery_payload),
+                status=status,
+                message_id=message_id,
+                created_at=now,
+                decided_at=now if already else None,
+            )
         )
-    )
+    except IntegrityError as exc:
+        pending_name = _find_pending_provision_name_case_insensitive(conn, name)
+        if pending_name is not None and pending_name != name:
+            raise SecretNameCaseConflictError(name, pending_name) from exc
+        raise VaultServiceError("failed to create provision request") from exc
     audit(conn, "provision_requested", secret_name=name, requester=requester, request_id=request_id)
     return {
         "id": request_id,

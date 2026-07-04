@@ -6035,6 +6035,9 @@ def cmd_vault_request(args):
     except TaskCliError as exc:
         _print_task_error(exc)
         return 1
+    except vault_service.SecretNameCaseConflictError as exc:
+        _print_task_error(TaskCliError(str(exc), code="secret_name_case_conflict", help_command=help_command))
+        return 1
     except vault_service.VaultServiceError as exc:
         _print_task_error(TaskCliError(str(exc), code="invalid_spec", help_command=help_command))
         return 1
