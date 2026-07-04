@@ -223,6 +223,39 @@ def test_request_callback_ready_defers_approved_access_until_grant_ready(vault, 
     assert vs.request_callback_ready(None, {"request_type": "access", "status": "denied", "id": "y"}) is True
 
 
+def test_sign_approved_callback_points_to_the_signature():
+    # The signature is the deliverable; the wake message must tell the agent how to get it.
+    row = {
+        "id": "vrq_sig",
+        "request_type": "sign",
+        "status": "approved",
+        "secret_name": "KEYPAIR",
+        "requester": json.dumps({"session_id": "ses_s"}),
+        "delivery": None,
+    }
+    plan = vs.resolve_request_callback(row)
+    assert plan is not None
+    assert "vrq_sig" in plan.message and "vault await" in plan.message
+
+
+def test_callback_enabled_followup_does_not_suggest_await():
+    from types import SimpleNamespace
+
+    from vibe import cli
+
+    # Callback armed → must NOT suggest `vault await` (awaiting would double-resume).
+    enabled = cli._vault_request_followup_message(
+        SimpleNamespace(no_callback=False, wait=None), "vrq_x", resolved_verb="approves or denies it"
+    )
+    assert "await" not in enabled.lower()
+    assert "--no-callback" in enabled  # points at the correct way to block synchronously
+    # Opt-out path (no callback armed) DOES point at await.
+    opted_out = cli._vault_request_followup_message(
+        SimpleNamespace(no_callback=True, wait=None), "vrq_x", resolved_verb="approves or denies it"
+    )
+    assert "vault await" in opted_out
+
+
 def test_non_terminal_status_has_no_callback():
     row = {
         "id": "vrq_pending",

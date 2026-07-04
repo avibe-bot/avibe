@@ -6225,14 +6225,18 @@ def cmd_vault_await(args):
 def _vault_request_followup_message(args, request_id: str, *, resolved_verb: str) -> str:
     """Agent-facing follow-up for an access/sign request.
 
-    By default this Session auto-resumes when the request resolves, so the agent can end its turn
-    instead of polling. With ``--no-callback`` there is no wake-up, so point at ``vault await``.
+    By default this Session auto-resumes when the request resolves, so the agent should just end
+    its turn. We deliberately do NOT suggest ``vault await`` here: with the callback armed, awaiting
+    would return the synchronous result AND still leave the callback to fire a second turn. To
+    block synchronously the agent must opt out at creation with ``--no-callback`` (then this points
+    at ``vault await``).
     """
     if _vault_callback_disabled(args):
         return f"Request recorded. Check the result yourself with: vibe vault await {request_id}"
     return (
-        f"Request recorded. This Session resumes automatically once the user {resolved_verb} — you can end "
-        f"your turn now. (To block and wait instead: vibe vault await {request_id}.)"
+        f"Request recorded. This Session resumes automatically once the user {resolved_verb} — "
+        f"end your turn now; you'll be woken with the outcome. (To block synchronously instead, "
+        f"re-issue the request with --no-callback.)"
     )
 
 
