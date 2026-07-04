@@ -996,8 +996,8 @@ def fulfill_pending_provision_requests_for_secret(
     name: str,
     *,
     decided_at: str | None = None,
-) -> None:
-    conn.execute(
+) -> int:
+    result = conn.execute(
         vault_requests.update()
         .where(
             vault_requests.c.request_type == "provision",
@@ -1006,6 +1006,7 @@ def fulfill_pending_provision_requests_for_secret(
         )
         .values(status="fulfilled", decided_at=decided_at or _now())
     )
+    return int(result.rowcount or 0)
 
 
 def create_secret(

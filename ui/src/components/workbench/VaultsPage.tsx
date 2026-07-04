@@ -324,8 +324,9 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
     });
   }, [api, load]);
 
+  const hasPendingRequests = requests.length > 0;
   useEffect(() => {
-    if (eventBridgeConnected) return;
+    if (eventBridgeConnected && !hasPendingRequests) return;
     let timer: number | undefined;
     let cancelled = false;
     let inFlight = false;
@@ -370,7 +371,7 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
       document.removeEventListener('visibilitychange', refreshNow);
       window.removeEventListener('focus', refreshNow);
     };
-  }, [eventBridgeConnected, load]);
+  }, [eventBridgeConnected, load, hasPendingRequests]);
 
   const handleOutcome = useCallback(
     (outcome: ApprovalOutcome) => {

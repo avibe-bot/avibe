@@ -383,6 +383,36 @@ def test_secret_exists_response_commits_stale_pending_provision_cleanup(monkeypa
     assert stale_status == "fulfilled"
 
 
+def test_secret_exists_response_publishes_when_fulfilling_stale_provisions(monkeypatch):
+    published = []
+    monkeypatch.setattr(
+        "vibe.sse_broker.broker.publish",
+        lambda event_type, data: published.append((event_type, data)),
+    )
+    monkeypatch.setattr("vibe.internal_client.publish_event_sync", lambda *args, **kwargs: None)
+    seal = Mock(side_effect=[_sealed("first"), _sealed("second")])
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    with api._vault_engine().begin() as conn:
+        req = vault_service.create_provision_request(conn, "GH_TOKEN")
+
+    payload = {
+        "name": "GH_TOKEN",
+        "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        "provision_request_id": req["id"],
+    }
+    api.create_vault_secret(payload)
+    published.clear()
+    with api._vault_engine().begin() as conn:
+        stale = vault_service.create_provision_request(conn, "GH_TOKEN")
+        conn.execute(vault_requests.update().where(vault_requests.c.id == stale["id"]).values(status="pending"))
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_secret({**payload, "blind_box": {**payload["blind_box"], "enc": "enc2", "ct": "ct2"}})
+
+    assert exc.value.code == "secret_exists"
+    assert ("vaults.updated", {"scope": "secret", "request_status": "fulfilled", "secret_name": "GH_TOKEN"}) in published
+
+
 def test_duplicate_name_conflict(monkeypatch):
     from unittest.mock import Mock
 

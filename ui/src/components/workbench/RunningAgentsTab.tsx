@@ -28,7 +28,7 @@ import {
   type Backend,
 } from '../../lib/backendAccent';
 
-// Degraded-mode refresh cadence while SSE is disconnected.
+// Snapshot refresh cadence for degraded fallback and live rows that age without events.
 const POLL_INTERVAL_MS = 4000;
 
 // Humanize elapsed_seconds: 12 → "12s", 185 → "3m", 3700 → "1h"
@@ -201,8 +201,9 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
     });
   }, [api, fetchData]);
 
+  const hasLiveRows = agents.length > 0;
   useEffect(() => {
-    if (eventBridgeConnected) return;
+    if (eventBridgeConnected && !hasLiveRows) return;
     let timer: number | undefined;
     let cancelled = false;
     let inFlight = false;
@@ -247,7 +248,7 @@ export const RunningAgentsTab: React.FC<RunningAgentsTabProps> = ({ onActiveCoun
       document.removeEventListener('visibilitychange', refreshNow);
       window.removeEventListener('focus', refreshNow);
     };
-  }, [eventBridgeConnected, fetchData]);
+  }, [eventBridgeConnected, fetchData, hasLiveRows]);
 
   if (loading) {
     return (

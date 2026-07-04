@@ -1500,11 +1500,14 @@ def create_vault_secret(payload: dict) -> dict:
     except vault_service.InvalidSecretNameError as exc:
         raise VaultApiError("invalid secret name (use ^[A-Z][A-Z0-9_]*$)", code="invalid_name") from exc
     except vault_service.SecretExistsError as exc:
+        fulfilled_count = 0
         try:
             with engine.begin() as conn:
-                vault_service.fulfill_pending_provision_requests_for_secret(conn, name)
+                fulfilled_count = vault_service.fulfill_pending_provision_requests_for_secret(conn, name)
         except Exception:
             logger.warning("failed to settle pending provision requests for existing secret %s", name, exc_info=True)
+        if fulfilled_count > 0:
+            _publish_vaults_updated(scope="secret", secret_name=name, request_status="fulfilled")
         raise VaultApiError(f"secret '{name}' already exists", code="secret_exists", status=409) from exc
     except vault_service.VaultAlreadyInitializedError as exc:
         raise VaultApiError(str(exc), code="vault_already_initialized", status=409) from exc
