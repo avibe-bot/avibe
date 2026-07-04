@@ -2527,23 +2527,48 @@ def create_grant(
     now_dt = datetime.now(timezone.utc)
     expires_at = (now_dt + timedelta(seconds=ttl)).isoformat()
     grant_id = approval.grant_id
+    grant_values = {
+        "member_snapshot": json.dumps(members),
+        "source_selector": json.dumps(selector),
+        "session_id": session_id,
+        "purpose": purpose,
+        "status": "active",
+        "request_id": request_id,
+        "one_shot": 1 if one_shot_grant else 0,
+        "created_at": now_dt.isoformat(),
+        "expires_at": expires_at,
+        "agent_ready": 1 if resident_cache_ready else 0,
+        "agent_ready_at": now_dt.isoformat() if resident_cache_ready else None,
+    }
     try:
-        conn.execute(
-            vault_grants.insert().values(
-                id=grant_id,
-                member_snapshot=json.dumps(members),
-                source_selector=json.dumps(selector),
-                session_id=session_id,
-                purpose=purpose,
-                status="active",
-                request_id=request_id,
-                one_shot=1 if one_shot_grant else 0,
-                created_at=now_dt.isoformat(),
-                expires_at=expires_at,
-                agent_ready=1 if resident_cache_ready else 0,
-                agent_ready_at=now_dt.isoformat() if resident_cache_ready else None,
-            )
+        existing_grant = (
+            conn.execute(select(vault_grants).where(vault_grants.c.id == grant_id))
+            .mappings()
+            .first()
         )
+        if existing_grant is not None:
+            existing = dict(existing_grant)
+            existing_selector = _loads(existing.get("source_selector")) or {}
+            existing_one_shot = bool(int(existing.get("one_shot") or 0))
+            if (
+                existing.get("status") != "expired"
+                or existing.get("request_id") != request_id
+                or set(_grant_member_names(existing)) != set(members)
+                or _source_selector_payload(existing_selector) != selector
+                or existing.get("session_id") != session_id
+                or existing.get("purpose") != purpose
+                or existing_one_shot != one_shot_grant
+            ):
+                raise InvalidGrantError("grant id already exists")
+            reused = conn.execute(
+                vault_grants.update()
+                .where(vault_grants.c.id == grant_id, vault_grants.c.status == "expired")
+                .values(**grant_values)
+            )
+            if reused.rowcount != 1:
+                raise InvalidGrantError("grant id already exists")
+        else:
+            conn.execute(vault_grants.insert().values(id=grant_id, **grant_values))
     except Exception:
         conn.execute(
             vault_requests.update()

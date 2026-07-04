@@ -133,8 +133,7 @@ export type StandardCreateBlindBoxContext = {
 export type AgentDeliverBlindBoxContext = {
   purpose: 'agent-deliver';
   name: string;
-  scopeType: string;
-  scopeRef: string;
+  grantId: string;
   ttlSecs: number | bigint;
   approvalNonce: BytesLike;
   approvalExpiresAtUnix: number | bigint;
@@ -144,8 +143,7 @@ export type AgentDeliverBlindBoxContext = {
 export type AgentSignBlindBoxContext = {
   purpose: 'agent-sign';
   name: string;
-  scopeType: string;
-  scopeRef: string;
+  grantId: string;
   signScheme: SignatureScheme;
   digest: HexOrBytes;
   ttlSecs: number | bigint;
@@ -162,16 +160,14 @@ export type BlindBoxContext = StandardCreateBlindBoxContext | ProtectedDekReleas
 export type ProtectedDekReleaseOperation =
   | {
       kind: 'agent-deliver';
-      scopeType: string;
-      scopeRef: string;
+      grantId: string;
       ttlSecs: number | bigint;
       approval: BlindBoxApproval;
       operationHash: HexOrBytes;
     }
   | {
       kind: 'agent-sign';
-      scopeType: string;
-      scopeRef: string;
+      grantId: string;
       signatureScheme: SignatureScheme;
       digest: HexOrBytes;
       ttlSecs: number | bigint;
@@ -1028,8 +1024,7 @@ function normalizeBlindBoxContext(context: BlindBoxContext): BlindBoxContext {
       return {
         purpose: 'agent-deliver',
         name: validateSecretName(context.name),
-        scopeType: validateNonEmpty(context.scopeType, 'scope type'),
-        scopeRef: validateNonEmpty(context.scopeRef, 'scope ref'),
+        grantId: validateNonEmpty(context.grantId, 'grant id'),
         ttlSecs: normalizeU64(context.ttlSecs, 'ttl seconds'),
         approvalNonce: approval.approvalNonce,
         approvalExpiresAtUnix: approval.approvalExpiresAtUnix,
@@ -1044,8 +1039,7 @@ function normalizeBlindBoxContext(context: BlindBoxContext): BlindBoxContext {
       return {
         purpose: 'agent-sign',
         name: validateSecretName(context.name),
-        scopeType: validateNonEmpty(context.scopeType, 'scope type'),
-        scopeRef: validateNonEmpty(context.scopeRef, 'scope ref'),
+        grantId: validateNonEmpty(context.grantId, 'grant id'),
         signScheme: context.signScheme,
         digest: normalizeDigest(context.digest),
         ttlSecs: normalizeU64(context.ttlSecs, 'ttl seconds'),
@@ -1099,8 +1093,7 @@ export async function protectedDekReleaseBlindBoxContext(
       return {
         purpose: 'agent-deliver',
         name: normalizedName,
-        scopeType: validateNonEmpty(operation.scopeType, 'scope type'),
-        scopeRef: validateNonEmpty(operation.scopeRef, 'scope ref'),
+        grantId: validateNonEmpty(operation.grantId, 'grant id'),
         ttlSecs,
         approvalNonce: approval.approvalNonce,
         approvalExpiresAtUnix: approval.approvalExpiresAtUnix,
@@ -1116,8 +1109,7 @@ export async function protectedDekReleaseBlindBoxContext(
       return {
         purpose: 'agent-sign',
         name: normalizedName,
-        scopeType: validateNonEmpty(operation.scopeType, 'scope type'),
-        scopeRef: validateNonEmpty(operation.scopeRef, 'scope ref'),
+        grantId: validateNonEmpty(operation.grantId, 'grant id'),
         signScheme: operation.signatureScheme,
         digest,
         ttlSecs,
@@ -1181,15 +1173,11 @@ export function blindBoxAad(context: BlindBoxContext): Uint8Array {
   pushLengthPrefixed(
     out,
     normalized.purpose === 'agent-deliver' || normalized.purpose === 'agent-sign'
-      ? utf8(normalized.scopeType)
+      ? utf8(normalized.grantId)
       : new Uint8Array(),
   );
-  pushLengthPrefixed(
-    out,
-    normalized.purpose === 'agent-deliver' || normalized.purpose === 'agent-sign'
-      ? utf8(normalized.scopeRef)
-      : new Uint8Array(),
-  );
+  // Reserved empty field keeps the v1 AAD layout stable while grant_id is the only scope.
+  pushLengthPrefixed(out, new Uint8Array());
   pushLengthPrefixed(
     out,
     normalized.purpose === 'agent-sign' ? utf8(normalized.signScheme) : new Uint8Array(),
