@@ -102,6 +102,25 @@ def test_provision_request_rejects_case_only_duplicate_pending_request(vault):
     assert [row["secret_name"] for row in rows] == ["openAiKey"]
 
 
+def test_create_secret_rejects_case_only_duplicate_pending_request(vault):
+    with vault.begin() as conn:
+        pending = vs.create_provision_request(conn, "openAiKey")
+        with pytest.raises(vs.SecretNameCaseConflictError) as exc:
+            vs.create_secret(conn, name="OpenAIKey", sealed=_sealed("case"))
+
+        secrets = conn.execute(select(vault_secrets.c.name)).scalars().all()
+        requests = (
+            conn.execute(select(vault_requests.c.secret_name, vault_requests.c.status))
+            .mappings()
+            .all()
+        )
+
+    assert pending["status"] == "pending"
+    assert exc.value.existing_name == "openAiKey"
+    assert secrets == []
+    assert [dict(row) for row in requests] == [{"secret_name": "openAiKey", "status": "pending"}]
+
+
 def test_skill_links_are_stored_as_skill_tags(vault):
     _create(vault, name="GH_PAT", tags=["github"])
 

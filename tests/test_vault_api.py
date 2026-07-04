@@ -476,6 +476,27 @@ def test_mixed_case_name_is_preserved_and_case_duplicate_rejected(monkeypatch):
     assert "openAiKey" in str(exc.value)
 
 
+def test_create_secret_rejects_case_only_pending_provision(monkeypatch):
+    from unittest.mock import Mock
+
+    seal = Mock(return_value=_sealed())
+    monkeypatch.setattr(api, "avault_seal_blind_box", seal)
+    with api._vault_engine().begin() as conn:
+        vault_service.create_provision_request(conn, "openAiKey")
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.create_vault_secret(
+            {
+                "name": "OpenAIKey",
+                "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+            }
+        )
+
+    assert exc.value.code == "secret_name_case_conflict"
+    assert exc.value.status == 409
+    assert "openAiKey" in str(exc.value)
+
+
 def test_invalid_name_rejected_before_avault(monkeypatch):
     from unittest.mock import Mock
 

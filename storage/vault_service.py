@@ -1103,6 +1103,9 @@ def create_secret(
             raise SecretExistsError(name)
         if provision_row.get("status") != "pending":
             raise InvalidRequestError("provision request is not pending")
+    pending_name = _find_pending_provision_name_case_insensitive(conn, name)
+    if pending_name is not None and pending_name != name:
+        raise SecretNameCaseConflictError(name, pending_name)
     if existing_secret:
         raise SecretExistsError(name)
 
