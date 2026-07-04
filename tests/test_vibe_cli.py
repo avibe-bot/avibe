@@ -730,6 +730,7 @@ def test_current_cli_install_family_resolves_cached_launcher_symlink(monkeypatch
 
 def test_repair_duplicate_service_processes_stops_only_extra_process(monkeypatch):
     stopped = []
+    paths.ensure_data_dirs()
     monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1234)
     monkeypatch.setattr(cli.runtime, "extra_service_process_pids", lambda owner_pid=None: [2222])
@@ -746,6 +747,7 @@ def test_repair_duplicate_service_processes_stops_only_extra_process(monkeypatch
 def test_repair_stale_install_runtime_stops_only_legacy_extra_process(monkeypatch):
     stopped = []
     refreshed = []
+    paths.ensure_data_dirs()
     monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
     monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1111)
@@ -772,6 +774,7 @@ def test_repair_stale_install_runtime_stops_only_legacy_extra_process(monkeypatc
 def test_repair_stale_install_runtime_restarts_when_legacy_owner_is_stopped(monkeypatch):
     stopped = []
     statuses = []
+    paths.ensure_data_dirs()
     monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
     monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1111)
@@ -797,6 +800,7 @@ def test_repair_stale_install_runtime_restarts_when_legacy_owner_is_stopped(monk
 def test_repair_stale_install_runtime_restarts_after_lockless_legacy_stopped(monkeypatch):
     stopped = []
     statuses = []
+    paths.ensure_data_dirs()
     monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
     monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: None)
@@ -822,6 +826,7 @@ def test_repair_stale_install_runtime_restarts_after_lockless_legacy_stopped(mon
 def test_repair_stale_install_runtime_reports_failed_when_restart_fails(monkeypatch):
     stopped = []
     refreshed = []
+    paths.ensure_data_dirs()
     monkeypatch.setattr(cli.runtime, "service_instance_lock_attached_to_process", lambda: False)
     monkeypatch.setattr(cli, "_current_cli_install_family", lambda: cli.PACKAGE_NAME)
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 1111)
@@ -853,6 +858,45 @@ def test_repair_home_migration_skips_empty_home_without_initializing(monkeypatch
     result = cli._repair_home_migration()
 
     assert result["status"] == "skipped"
+    assert not (home / ".avibe").exists()
+    assert not (home / ".vibe_remote").exists()
+
+
+def test_repair_doctor_targets_skips_empty_home_without_post_doctor(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    monkeypatch.delenv("AVIBE_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(cli, "_doctor", lambda: (_ for _ in ()).throw(AssertionError("skipped repair must not run doctor")))
+
+    result = cli._repair_doctor_targets(["home-migration"], dry_run=False)
+
+    assert result["ok"] is True
+    assert result["results"][0]["status"] == "skipped"
+    assert "doctor" not in result
+    assert not (home / ".avibe").exists()
+    assert not (home / ".vibe_remote").exists()
+
+
+def test_repair_all_targets_skips_empty_home_without_initializing(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    monkeypatch.delenv("AVIBE_HOME", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("HOME", str(home))
+
+    def fail_probe(*args, **kwargs):
+        raise AssertionError("empty-home repair must not probe runtime state")
+
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", fail_probe)
+    monkeypatch.setattr(cli.runtime, "extra_service_process_pids", fail_probe)
+    monkeypatch.setattr(cli, "_current_cli_install_family", fail_probe)
+    monkeypatch.setattr(cli, "_doctor", fail_probe)
+
+    result = cli._repair_doctor_targets([], dry_run=False)
+
+    assert result["ok"] is True
+    assert {item["status"] for item in result["results"]} == {"skipped"}
+    assert "doctor" not in result
     assert not (home / ".avibe").exists()
     assert not (home / ".vibe_remote").exists()
 
@@ -929,6 +973,27 @@ def test_doctor_repair_dry_run_does_not_probe_runtime(monkeypatch):
 
     assert result["ok"] is True
     assert result["results"][0]["status"] == "planned"
+
+
+def test_doctor_repair_refreshes_diagnostics_after_repair(monkeypatch):
+    paths.ensure_data_dirs()
+    restart_path = runtime.get_restart_status_path()
+    runtime.write_json(restart_path, {"state": "running", "supervisor_pid": 4242})
+    old_timestamp = time.time() - 120
+    os.utime(restart_path, (old_timestamp, old_timestamp))
+    monkeypatch.setattr(cli.runtime, "pid_alive", lambda pid: False)
+    refreshed = []
+    doctor_calls = []
+    monkeypatch.setattr(cli, "_write_refreshed_runtime_status", lambda: refreshed.append(True))
+    monkeypatch.setattr(cli, "_doctor", lambda: doctor_calls.append(True) or {"ok": True, "groups": []})
+
+    result = cli._repair_doctor_targets(["stale-restart-state"], dry_run=False)
+
+    assert result["ok"] is True
+    assert result["results"][0]["status"] == "repaired"
+    assert refreshed == [True]
+    assert doctor_calls == [True]
+    assert result["doctor"] == {"ok": True, "groups": []}
 
 
 def test_restart_parser_accepts_delay_seconds():
