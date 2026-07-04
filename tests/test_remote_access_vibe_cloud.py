@@ -15,7 +15,16 @@ from vibe import runtime
 
 @pytest.fixture(autouse=True)
 def _resolve_backend_test_to_public_address(monkeypatch):
-    for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"):
+    for name in (
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+    ):
         monkeypatch.delenv(name, raising=False)
 
     def resolve(hostname: str, port: int):
@@ -333,6 +342,62 @@ def test_pair_uses_validated_backend_address_for_request(monkeypatch, tmp_path) 
     }
 
 
+def test_pair_preserves_proxy_only_dns_for_default_backend(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.test:8080")
+    config = _config()
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    captured: dict[str, object] = {}
+
+    def fake_request(url: str, payload: dict, timeout: float = 20.0, **kwargs):
+        target = kwargs["connection_target"]
+        captured["url"] = url
+        captured["hostname"] = target.hostname
+        captured["connect_host"] = target.connect_host
+        captured["requires_proxy"] = target.requires_proxy
+        return {
+            "instance_id": "inst_123",
+            "client_id": "vr_client_123",
+            "issuer": "https://avibe.bot",
+            "authorization_endpoint": "https://avibe.bot/oauth/authorize",
+            "token_endpoint": "https://avibe.bot/oauth/token",
+            "jwks_uri": "https://avibe.bot/oauth/jwks.json",
+            "public_url": "https://alex.avibe.bot",
+            "redirect_uri": "https://alex.avibe.bot/auth/callback",
+            "tunnel_token": "tunnel-token",
+            "instance_secret": "instance-secret",
+        }
+
+    monkeypatch.setattr(remote_access, "_json_request", fake_request)
+    monkeypatch.setattr(remote_access, "start", lambda next_config: {"ok": True, "running": True})
+    monkeypatch.setattr(remote_access, "status", lambda next_config=None: {"ok": True, "running": True, "paired": True})
+    monkeypatch.setattr(remote_access, "report_runtime_status", lambda *args, **kwargs: {"ok": True})
+
+    result = remote_access.pair("vrp_test", "https://avibe.bot")
+
+    assert result["ok"] is True
+    assert captured == {
+        "url": "https://avibe.bot/api/v1/pairing/redeem",
+        "hostname": "avibe.bot",
+        "connect_host": "avibe.bot",
+        "requires_proxy": True,
+    }
+
+
+def test_pair_rejects_custom_proxy_only_dns_backend(monkeypatch) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.test:8080")
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("unresolved backend must not be requested")),
+    )
+
+    result = remote_access.pair("vrp_test", "https://custom-backend.example")
+
+    assert result == {"ok": False, "error": "pairing_backend_unresolvable"}
+
+
 def test_validated_backend_request_connects_to_pinned_ip_without_hostname_dns(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -453,6 +518,7 @@ def test_validated_backend_request_uses_https_proxy_connect_to_pinned_ip(monkeyp
             proxy_headers: dict[str, str] | None,
             timeout: float,
             context,
+            proxy_context=None,
         ):
             captured["proxy_host"] = proxy_host
             captured["proxy_port"] = proxy_port
@@ -506,6 +572,44 @@ def test_validated_backend_request_uses_https_proxy_connect_to_pinned_ip(monkeyp
     assert captured["proxy_headers"] == {"Proxy-Authorization": "Basic dXNlcjpwYXNz"}
     assert captured["headers"]["Host"] == "backend.test"
     assert captured["closed"] is True
+
+
+def test_validated_backend_connection_loads_requests_ca_bundle(monkeypatch, tmp_path) -> None:
+    ca_bundle = tmp_path / "corp-ca.pem"
+    ca_bundle.write_text("test ca", encoding="utf-8")
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(ca_bundle))
+    captured: dict[str, object] = {}
+
+    class FakeContext:
+        pass
+
+    class FakeConnection:
+        def __init__(self, host: str, port: int, *, server_hostname: str, timeout: float, context):
+            captured["host"] = host
+            captured["context"] = context
+
+    def fake_create_default_context(*, cafile=None, capath=None):
+        captured["cafile"] = cafile
+        captured["capath"] = capath
+        return FakeContext()
+
+    monkeypatch.setattr(remote_access.ssl, "create_default_context", fake_create_default_context)
+    monkeypatch.setattr(remote_access, "_PinnedHTTPSConnection", FakeConnection)
+    target = remote_access._ValidatedPairingBackend(
+        base_url="https://backend.test",
+        hostname="backend.test",
+        port=443,
+        host_header="backend.test",
+        connect_hosts=("93.184.216.34",),
+    )
+
+    connection = remote_access._validated_backend_connection("93.184.216.34", target, 3.0, None)
+
+    assert isinstance(connection, FakeConnection)
+    assert captured["host"] == "93.184.216.34"
+    assert captured["cafile"] == str(ca_bundle)
+    assert captured["capath"] is None
+    assert captured["context"].__class__ is FakeContext
 
 
 def test_json_request_disables_redirects(monkeypatch) -> None:

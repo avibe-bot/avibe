@@ -59,6 +59,7 @@ _BLOCKED_PAIRING_BACKEND_HOSTS = {
     "metadata",
     "metadata.google.internal",
 }
+_PROXY_RESOLVED_PAIRING_BACKEND_HOSTS = {"avibe.bot"}
 
 
 class BackendRequestError(Exception):
@@ -75,6 +76,7 @@ class _ValidatedPairingBackend:
     port: int
     host_header: str
     connect_hosts: tuple[str, ...]
+    requires_proxy: bool = False
 
     @property
     def connect_host(self) -> str:
@@ -722,6 +724,8 @@ def _json_request_to_validated_backend(
     request_path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
     body = json.dumps(payload).encode("utf-8")
     proxy_url = _validated_backend_proxy_url(url)
+    if connection_target.requires_proxy and not proxy_url:
+        raise RuntimeError("pairing_backend_proxy_required")
     last_network_error: Exception | None = None
     for connect_host in connection_target.connect_hosts:
         connection = _validated_backend_connection(connect_host, connection_target, timeout, proxy_url)
@@ -768,7 +772,7 @@ def _validated_backend_connection(
     timeout: float,
     proxy_url: str | None,
 ) -> http.client.HTTPConnection:
-    context = ssl.create_default_context()
+    context = _validated_backend_ssl_context()
     if proxy_url:
         proxy = urllib.parse.urlsplit(proxy_url)
         proxy_scheme = proxy.scheme.lower()
@@ -784,6 +788,7 @@ def _validated_backend_connection(
             proxy_headers=_proxy_tunnel_headers(proxy),
             timeout=timeout,
             context=context,
+            proxy_context=_validated_backend_ssl_context(),
         )
     return _PinnedHTTPSConnection(
         connect_host,
@@ -792,6 +797,15 @@ def _validated_backend_connection(
         timeout=timeout,
         context=context,
     )
+
+
+def _validated_backend_ssl_context() -> ssl.SSLContext:
+    ca_bundle = os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("CURL_CA_BUNDLE") or requests.certs.where()
+    if ca_bundle:
+        if Path(ca_bundle).is_dir():
+            return ssl.create_default_context(capath=ca_bundle)
+        return ssl.create_default_context(cafile=ca_bundle)
+    return ssl.create_default_context()
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
@@ -887,6 +901,12 @@ def _normalize_pairing_backend_url(raw_backend_url: str) -> tuple[_ValidatedPair
     if _pairing_backend_host_is_forbidden(normalized_hostname):
         return None, "pairing_backend_url_not_allowed"
 
+    netloc = f"[{normalized_hostname}]" if ":" in normalized_hostname else normalized_hostname
+    if port != 443:
+        netloc = f"{netloc}:{port}"
+    path = parsed.path.rstrip("/")
+    base_url = urllib.parse.urlunsplit(("https", netloc, path, "", "")).rstrip("/")
+
     try:
         literal_address = ipaddress.ip_address(normalized_hostname)
     except ValueError:
@@ -895,17 +915,25 @@ def _normalize_pairing_backend_url(raw_backend_url: str) -> tuple[_ValidatedPair
         addresses = (literal_address,)
 
     if not addresses:
+        if _pairing_backend_allows_proxy_name_resolution(base_url, normalized_hostname):
+            return (
+                _ValidatedPairingBackend(
+                    base_url=base_url,
+                    hostname=normalized_hostname,
+                    port=port,
+                    host_header=netloc,
+                    connect_hosts=(normalized_hostname,),
+                    requires_proxy=True,
+                ),
+                None,
+            )
         return None, "pairing_backend_unresolvable"
     if any(_pairing_backend_address_is_forbidden(address) for address in addresses):
         return None, "pairing_backend_url_not_allowed"
 
-    netloc = f"[{normalized_hostname}]" if ":" in normalized_hostname else normalized_hostname
-    if port != 443:
-        netloc = f"{netloc}:{port}"
-    path = parsed.path.rstrip("/")
     return (
         _ValidatedPairingBackend(
-            base_url=urllib.parse.urlunsplit(("https", netloc, path, "", "")).rstrip("/"),
+            base_url=base_url,
             hostname=normalized_hostname,
             port=port,
             host_header=netloc,
@@ -913,6 +941,15 @@ def _normalize_pairing_backend_url(raw_backend_url: str) -> tuple[_ValidatedPair
         ),
         None,
     )
+
+
+def _pairing_backend_allows_proxy_name_resolution(base_url: str, hostname: str) -> bool:
+    if hostname not in _PROXY_RESOLVED_PAIRING_BACKEND_HOSTS:
+        return False
+    try:
+        return _validated_backend_proxy_url(base_url) is not None
+    except RuntimeError:
+        return False
 
 
 def _resolve_pairing_backend_addresses(hostname: str, port: int) -> tuple[ipaddress._BaseAddress, ...]:
