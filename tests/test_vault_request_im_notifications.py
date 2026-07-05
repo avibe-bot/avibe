@@ -129,7 +129,7 @@ def test_notifies_im_session_with_platform_link_format(tmp_path: Path) -> None:
     assert context.thread_id == "1719990000.1"
     assert context.platform_specific["agent_session_id"] == "ses_im"
     assert "API_KEY" in emitted["text"]
-    assert "<https://desk.avibe.bot/u/team/vaults?request_id=vrq_123|Review in Avibe>" in emitted["text"]
+    assert "<https://desk.avibe.bot/u/team/vaults?request_id=vrq_123|Review on the web>" in emitted["text"]
 
 
 def test_notifies_wechat_with_plain_url_format(tmp_path: Path) -> None:
@@ -154,7 +154,7 @@ def test_notifies_wechat_with_plain_url_format(tmp_path: Path) -> None:
 
     assert len(controller.emitted) == 1
     text = controller.emitted[0]["text"]
-    assert "Review in Avibe (https://desk.avibe.bot/vaults?request_id=vrq_wx)" in text
+    assert "Review on the web (https://desk.avibe.bot/vaults?request_id=vrq_wx)" in text
 
 
 def test_provision_request_can_notify_from_secure_input_card(tmp_path: Path) -> None:
@@ -182,7 +182,7 @@ def test_provision_request_can_notify_from_secure_input_card(tmp_path: Path) -> 
     )
 
     assert result["sent"] is True
-    assert "Secret provision request" in controller.emitted[0]["text"]
+    assert "A secret to fill in" in controller.emitted[0]["text"]
     assert "NEW_TOKEN" in controller.emitted[0]["text"]
 
 

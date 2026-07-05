@@ -51,17 +51,17 @@
   },
   "vault": {
     "requestNotification": {
-      "title": "Vault review needed",
+      "title": "A secret request needs your OK",
       "requestLabel": "Request",
-      "secretLabel": "Vault item",
+      "secretLabel": "Secret",
       "sessionLabel": "Session",
-      "action": "Review in Avibe",
+      "action": "Review on the web",
       "noPublicLink": "Open Avibe Vaults in the web UI to review this request. A public Avibe link is not configured for this instance.",
       "guidance": "For security, approve, sign, or fill Vault requests only in the Avibe web UI.",
       "type": {
         "access": "Access request",
         "sign": "Signature request",
-        "provision": "Secret provision request"
+        "provision": "A secret to fill in"
       },
       "secretSet": "selected secrets",
       "secretNamesMore": "{names} +{count} more"
