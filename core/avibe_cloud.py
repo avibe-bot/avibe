@@ -17,6 +17,8 @@ test_native_session_lightweight_imports_do_not_require_sqlite``.
 
 from __future__ import annotations
 
+from urllib.parse import urlencode
+
 from config.v2_config import V2Config
 
 AVIBE_CLOUD_CONNECT_GUIDANCE = (
@@ -46,3 +48,22 @@ def avibe_cloud_url_available(config: V2Config | None = None) -> bool:
 
 def avibe_cloud_connect_guidance(config: V2Config | None = None) -> str | None:
     return None if avibe_cloud_url_available(config) else AVIBE_CLOUD_CONNECT_GUIDANCE
+
+
+def workbench_url(path: str, config: V2Config | None = None) -> str | None:
+    """Build a public Avibe Workbench URL when Avibe Cloud is configured."""
+
+    base = base_public_url(config)
+    if not base:
+        return None
+    normalized_path = "/" + str(path or "").lstrip("/")
+    return f"{base}{normalized_path}"
+
+
+def vault_request_url(request_id: str, config: V2Config | None = None) -> str | None:
+    """Public deep link to the Vaults page focused on one request."""
+
+    request_id = str(request_id or "").strip()
+    if not request_id:
+        return None
+    return workbench_url(f"/vaults?{urlencode({'request_id': request_id})}", config)

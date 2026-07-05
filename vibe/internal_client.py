@@ -302,6 +302,68 @@ async def reconcile_platforms(
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
+async def notify_vault_request_created(
+    request_payload: dict[str, Any],
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Ask the controller to send the IM degradation notice for a Vault request."""
+
+    target = (socket_path or default_socket_path()).expanduser().resolve()
+    if not target.exists():
+        raise InternalServerUnavailable(f"dispatch socket missing at {target}")
+    transport = httpx.AsyncHTTPTransport(uds=str(target))
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(timeout, connect=2.0),
+        ) as client:
+            resp = await client.post("/internal/vault/request-created", json={"request": request_payload})
+            if resp.status_code >= 400:
+                detail = await resp.aread()
+                raise InternalServerUnavailable(
+                    f"vault request notification returned {resp.status_code}: {detail!r}"
+                )
+    except InternalServerUnavailable:
+        raise
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+
+
+def notify_vault_request_created_sync(
+    request_payload: dict[str, Any],
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Synchronous wrapper for CLI/UI-server Vault request notifications."""
+
+    target = (socket_path or default_socket_path()).expanduser().resolve()
+    if not target.exists():
+        raise InternalServerUnavailable(f"dispatch socket missing at {target}")
+
+    transport = httpx.HTTPTransport(uds=str(target))
+    try:
+        with httpx.Client(
+            transport=transport,
+            base_url="http://localhost",
+            timeout=httpx.Timeout(timeout, connect=2.0),
+        ) as client:
+            resp = client.post("/internal/vault/request-created", json={"request": request_payload})
+            if resp.status_code >= 400:
+                raise InternalServerUnavailable(
+                    f"vault request notification returned {resp.status_code}: {resp.content!r}"
+                )
+    except InternalServerUnavailable:
+        raise
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
+
+
 async def cancel_dispatch(session_id: str, *, socket_path: Optional[Path] = None) -> dict[str, Any]:
     """Ask the controller to cancel a running ``dispatch_turn`` for
     ``session_id``.

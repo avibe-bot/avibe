@@ -10,6 +10,7 @@ round-trip shape of each call against a fake ASGI app via
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -127,6 +128,53 @@ def test_reconcile_platforms_missing_socket_raises_unavailable(tmp_path):
     sock = tmp_path / "missing.sock"
     with pytest.raises(internal_client.InternalServerUnavailable):
         asyncio.run(internal_client.reconcile_platforms(socket_path=sock))
+
+
+def test_notify_vault_request_created_round_trip(tmp_path):
+    app = FastAPI()
+    captured: dict = {}
+
+    @app.post("/internal/vault/request-created")
+    async def _notify(payload: dict):
+        captured["payload"] = payload
+        return {"ok": True, "queued": True}
+
+    sock = tmp_path / "dispatch.sock"
+    sock.touch()
+
+    async def _go():
+        fake_transport = httpx.ASGITransport(app=app)
+        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=fake_transport):
+            return await internal_client.notify_vault_request_created(
+                {"id": "vrq_1", "status": "pending"}, socket_path=sock
+            )
+
+    result = asyncio.run(_go())
+    assert captured["payload"] == {"request": {"id": "vrq_1", "status": "pending"}}
+    assert result["status_code"] == 200
+    assert result["body"] == {"ok": True, "queued": True}
+
+
+def test_notify_vault_request_created_sync_round_trip(tmp_path):
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["payload"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json={"ok": True, "queued": True})
+
+    sock = tmp_path / "dispatch.sock"
+    sock.touch()
+    fake_transport = httpx.MockTransport(handler)
+    with patch("vibe.internal_client.httpx.HTTPTransport", return_value=fake_transport):
+        result = internal_client.notify_vault_request_created_sync(
+            {"id": "vrq_1", "status": "pending"}, socket_path=sock
+        )
+
+    assert captured["path"] == "/internal/vault/request-created"
+    assert captured["payload"] == {"request": {"id": "vrq_1", "status": "pending"}}
+    assert result["status_code"] == 200
+    assert result["body"] == {"ok": True, "queued": True}
 
 
 def test_turn_state_os_error_raises_unavailable(tmp_path):
