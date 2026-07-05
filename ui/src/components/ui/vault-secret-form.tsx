@@ -348,11 +348,10 @@ export const VaultSecretForm: React.FC<{
     event.preventDefault();
     if (!canSubmit) return;
     let fileBytesToWipe: Uint8Array | null = null;
-    // Don't silently drop a half-typed chip the user can still see. Tags sit in the main
-    // body (always visible); allowed hosts live in the create-mode Advanced collapsible and
-    // are always visible in provision mode. Guard whichever is on screen — collapsing
-    // Advanced clears hostsPending, so a hidden host draft can never block submit.
-    const hostsVisible = isProvision || advancedOpen;
+    // Don't silently drop a half-typed chip the user can still see. Tags sit in the main body
+    // (always visible); allowed hosts live in the Advanced collapsible in BOTH modes, so a host
+    // draft only blocks submit while Advanced is open (collapsing clears hostsPending).
+    const hostsVisible = advancedOpen;
     if (tagsPending || (hostsVisible && hostsPending)) {
       setError(t('vaults.dialog.errors.pendingDraft'));
       return;
@@ -720,10 +719,43 @@ export const VaultSecretForm: React.FC<{
     </>
   );
 
+  // Advanced — collapsible proxy policy (allowed hosts + fetch auth). Shared by BOTH modes so the
+  // provide ($NAME) dialog hides/reveals these exactly like the create dialog; auto-opens for a
+  // spec that carries policy (see `advancedOpen` init) so an agent's prefilled hosts stay visible.
+  const advancedSection = (
+    <div className="flex flex-col overflow-hidden rounded-[10px] bg-surface-2">
+      <button
+        type="button"
+        onClick={() => {
+          setAdvancedOpen((open) => {
+            // Collapsing hides the allowed-hosts input — drop its pending-draft flag so a host
+            // draft the user can no longer see doesn't block submit.
+            if (open) setHostsPending(false);
+            return !open;
+          });
+        }}
+        aria-expanded={advancedOpen}
+        className="flex items-center gap-1.5 px-3 py-2.5 text-left"
+      >
+        <SlidersHorizontal className="size-3.5 text-muted" />
+        <span className="flex-1 text-xs font-semibold text-foreground">{t('vaults.dialog.advanced')}</span>
+        {!advancedOpen && (allowHosts.length > 0 || fetchAuthMode !== 'bearer') && (
+          <span className="size-1.5 rounded-full bg-mint" aria-hidden />
+        )}
+      </button>
+      {advancedOpen && (
+        <div className="flex flex-col gap-3 px-3 pb-3">
+          {allowHostsField}
+          {fetchAuthPolicyFields}
+        </div>
+      )}
+    </div>
+  );
+
   // ---- Provision ($NAME) mode — design.pen `F4N19` (SecureInputCard) ------------------
   // A provision fulfils a specific value the agent asked for, so kind stays fixed to static.
-  // Spec-derived metadata remains visible here so the user can confirm or adjust what the
-  // agent prefilled before anything is saved.
+  // The metadata below (protection tier, tags, Advanced proxy policy) uses the SAME field
+  // components and layout as create mode, so the two dialogs read and behave identically.
   if (isProvision) {
     return (
       <form className={cn('flex min-w-0 flex-col gap-4', className)} onSubmit={onSubmit}>
@@ -743,21 +775,6 @@ export const VaultSecretForm: React.FC<{
           <span className="text-[11px] text-muted-foreground">{t('vaults.dialog.provisionValueHelp')}</span>
         </label>
 
-        <div className="flex flex-col gap-1.5">
-          <span className={FIELD_LABEL}>{t('vaults.dialog.storeAs')}</span>
-          <div className="self-start">
-            <SegmentedRadio<VaultProtection>
-              value={protection}
-              onChange={setProtection}
-              ariaLabel={t('vaults.dialog.storeAs')}
-              options={[
-                { id: 'standard', label: t('vaults.dialog.standardProtection') },
-                { id: 'protected', label: t('vaults.dialog.protectedProtection') },
-              ]}
-            />
-          </div>
-        </div>
-
         <label className="flex flex-col gap-1.5">
           <span className={FIELD_LABEL}>{t('vaults.dialog.description')}</span>
           <Input
@@ -769,10 +786,11 @@ export const VaultSecretForm: React.FC<{
 
         {tagsField}
 
-        {/* Allowed hosts — a provisioned secret used for brokered HTTP fetch needs at least
-            one allowed host, else vibe/cli.py refuses the fetch as proxy_unbound. */}
-        {allowHostsField}
-        {fetchAuthPolicyFields}
+        {/* Protection tier + Advanced proxy policy — identical to create mode (allowed hosts for a
+            brokered-fetch secret live under Advanced, which auto-opens when a spec prefilled them). */}
+        {protectionCards}
+
+        {advancedSection}
 
         {gatingNotices}
 
@@ -947,34 +965,8 @@ export const VaultSecretForm: React.FC<{
       {/* Protection */}
       {protectionCards}
 
-      {/* Advanced — collapsible: proxy policy (allowed hosts + fetch auth). */}
-      <div className="flex flex-col overflow-hidden rounded-[10px] bg-surface-2">
-        <button
-          type="button"
-          onClick={() => {
-            setAdvancedOpen((open) => {
-              // Collapsing hides the allowed-hosts input — drop its pending-draft flag so a
-              // host draft the user can no longer see doesn't block submit.
-              if (open) setHostsPending(false);
-              return !open;
-            });
-          }}
-          aria-expanded={advancedOpen}
-          className="flex items-center gap-1.5 px-3 py-2.5 text-left"
-        >
-          <SlidersHorizontal className="size-3.5 text-muted" />
-          <span className="flex-1 text-xs font-semibold text-foreground">{t('vaults.dialog.advanced')}</span>
-          {!advancedOpen && (allowHosts.length > 0 || fetchAuthMode !== 'bearer') && (
-            <span className="size-1.5 rounded-full bg-mint" aria-hidden />
-          )}
-        </button>
-        {advancedOpen && (
-          <div className="flex flex-col gap-3 px-3 pb-3">
-            {allowHostsField}
-            {fetchAuthPolicyFields}
-          </div>
-        )}
-      </div>
+      {/* Advanced — collapsible proxy policy, shared with provide mode. */}
+      {advancedSection}
 
       {gatingNotices}
 
