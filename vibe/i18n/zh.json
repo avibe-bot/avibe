@@ -49,6 +49,24 @@
       "p2ReleaseUnavailable": "Avibe 托管 avault 安装器当前固定到 {pinned}，但 Vaults 需要 >= {required}。请手动安装兼容版本，或等待 P2 avault 发布版。"
     }
   },
+  "vault": {
+    "requestNotification": {
+      "title": "需要处理 Vault 请求",
+      "requestLabel": "请求",
+      "secretLabel": "Vault 项目",
+      "sessionLabel": "会话",
+      "action": "在 Avibe 中查看",
+      "noPublicLink": "请在 Web UI 打开 Avibe Vaults 处理此请求。当前实例尚未配置公开 Avibe 链接。",
+      "guidance": "出于安全原因，Vault 请求只能在 Avibe Web UI 中批准、签名或填写。",
+      "type": {
+        "access": "访问请求",
+        "sign": "签名请求",
+        "provision": "密钥创建请求"
+      },
+      "secretSet": "所选密钥",
+      "secretNamesMore": "{names} 另有 {count} 个"
+    }
+  },
   "error": {
     "channelNotEnabled": "此频道未启用。请前往控制面板启用它。",
     "unknownCommand": "未知命令：`/{command}`\n\n请使用 `@avibe /start` 访问所有机器人功能。",

@@ -49,6 +49,24 @@
       "p2ReleaseUnavailable": "Avibe's managed avault installer is pinned to {pinned}, but Vaults requires >= {required}. Install a compatible avault manually or wait for the P2 avault release."
     }
   },
+  "vault": {
+    "requestNotification": {
+      "title": "Vault review needed",
+      "requestLabel": "Request",
+      "secretLabel": "Vault item",
+      "sessionLabel": "Session",
+      "action": "Review in Avibe",
+      "noPublicLink": "Open Avibe Vaults in the web UI to review this request. A public Avibe link is not configured for this instance.",
+      "guidance": "For security, approve, sign, or fill Vault requests only in the Avibe web UI.",
+      "type": {
+        "access": "Access request",
+        "sign": "Signature request",
+        "provision": "Secret provision request"
+      },
+      "secretSet": "selected secrets",
+      "secretNamesMore": "{names} +{count} more"
+    }
+  },
   "error": {
     "channelNotEnabled": "This channel is not enabled. Please go to the control panel to enable it.",
     "unknownCommand": "Unknown command: `/{command}`\n\nPlease use `@avibe /start` to access all bot features.",

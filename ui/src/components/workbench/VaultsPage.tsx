@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { Clock, Globe, History, Inbox, KeyRound, Link2, Loader2, Plus, Puzzle, RefreshCw, ShieldCheck, Tag, Trash2, Wallet, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
@@ -192,10 +193,12 @@ const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke: (grant: Va
 };
 
 /** A compact pending-request row: who is asking, for what, with a Review action. */
+const requestReviewType = (request: VaultRequest) => (request.card as { request_type?: string } | null)?.request_type ?? request.request_type;
+
 const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultRequest) => void }> = ({ request: r, onReview }) => {
   const { t } = useTranslation();
   const card = (r.card ?? {}) as { request_type?: string; kind?: string; protection?: string; session_id?: string };
-  const type = card.request_type ?? r.request_type;
+  const type = requestReviewType(r);
   const isSign = type === 'sign';
   const isProvision = type === 'provision';
   const isProtected = card.protection === 'protected';
@@ -239,7 +242,11 @@ const RequestRow: React.FC<{ request: VaultRequest; onReview: (request: VaultReq
  * Best-effort — a requests fetch failure (e.g. an older backend without the route) must
  * not surface an error or blank the rest of the hub.
  */
-const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolved }) => {
+const PendingRequestsSection: React.FC<{
+  onResolved: () => void;
+  focusRequestId?: string | null;
+  onFocusRequestOpened?: () => void;
+}> = ({ onResolved, focusRequestId, onFocusRequestOpened }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -253,7 +260,7 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
       // spam global toasts on every 5s poll.
       const res = await api.getVaultRequests({ status: 'pending' }, { handleError: false });
       const pending = (res.requests ?? []).filter((r) => {
-        const type = (r.card as { request_type?: string } | null)?.request_type ?? r.request_type;
+        const type = requestReviewType(r);
         return type === 'access' || type === 'sign' || type === 'provision';
       });
       setRequests(pending);
@@ -343,6 +350,23 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
     return () => window.clearTimeout(timer);
   }, [requests, load]);
 
+  const openRequest = useCallback((request: VaultRequest) => {
+    const type = requestReviewType(request);
+    if (type === 'provision') {
+      setProvisioning(request);
+    } else {
+      setReviewing(request);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!focusRequestId) return;
+    const request = requests.find((r) => r.id === focusRequestId);
+    if (!request) return;
+    openRequest(request);
+    onFocusRequestOpened?.();
+  }, [focusRequestId, onFocusRequestOpened, openRequest, requests]);
+
   const handleOutcome = useCallback(
     (outcome: ApprovalOutcome) => {
       // Drop the row immediately so it doesn't linger behind the poll; the next load
@@ -392,14 +416,7 @@ const PendingRequestsSection: React.FC<{ onResolved: () => void }> = ({ onResolv
         <RequestRow
           key={r.id}
           request={r}
-          onReview={(request) => {
-            const type = (request.card as { request_type?: string } | null)?.request_type ?? request.request_type;
-            if (type === 'provision') {
-              setProvisioning(request);
-            } else {
-              setReviewing(request);
-            }
-          }}
+          onReview={openRequest}
         />
       ))}
       <VaultApprovalDialog request={reviewing} onResolved={handleOutcome} onClose={() => setReviewing(null)} />
@@ -448,6 +465,7 @@ export const VaultsPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [secrets, setSecrets] = useState<VaultSecret[]>([]);
   const [grants, setGrants] = useState<VaultGrant[]>([]);
   const [loading, setLoading] = useState(false);
@@ -459,6 +477,18 @@ export const VaultsPage: React.FC = () => {
   const [activeSkills, setActiveSkills] = useState<string[]>([]);
   const [now, setNow] = useState(() => Date.now());
   const [eventBridgeConnected, setEventBridgeConnected] = useState(false);
+  const focusRequestId = searchParams.get('request_id')?.trim() || null;
+
+  const clearFocusedRequest = useCallback(() => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('request_id');
+        return next;
+      },
+      { replace: true },
+    );
+  }, [setSearchParams]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -659,7 +689,7 @@ export const VaultsPage: React.FC = () => {
       {error && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>
       )}
-      <PendingRequestsSection onResolved={refresh} />
+      <PendingRequestsSection onResolved={refresh} focusRequestId={focusRequestId} onFocusRequestOpened={clearFocusedRequest} />
       {grants.length > 0 && (
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-2 px-1">

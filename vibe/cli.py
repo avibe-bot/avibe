@@ -4707,6 +4707,8 @@ def _publish_cli_vaults_updated(
 
     if request is None and grant is None and not secret_name:
         return
+    if scope == "request" and isinstance(request, dict):
+        _publish_cli_vault_request_notification(request)
     try:
         from core.inbox_events import VAULTS_UPDATED_EVENT, vaults_updated_payload
         from vibe import internal_client
@@ -4725,6 +4727,17 @@ def _publish_cli_vaults_updated(
         )
     except Exception:
         logger.debug("failed to publish CLI vault update event", exc_info=True)
+
+
+def _publish_cli_vault_request_notification(request: dict) -> None:
+    """Best-effort bridge for CLI-created Vault requests into IM notification delivery."""
+
+    try:
+        from vibe import internal_client
+
+        internal_client.notify_vault_request_created_sync(request, timeout=2.0)
+    except Exception:
+        logger.debug("failed to publish CLI vault request notification", exc_info=True)
 
 
 def _is_env_name(name: str) -> bool:

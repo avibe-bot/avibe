@@ -453,6 +453,24 @@ def create_app(controller: "Controller") -> FastAPI:
         bus.publish(event_type, data)
         return {"ok": True}
 
+    @app.post("/internal/vault/request-created")
+    async def _vault_request_created(request: Request) -> Any:
+        """Notify the originating IM session that a Vault request needs web review."""
+
+        payload = await _safe_json(request)
+        request_payload = payload.get("request")
+        if not isinstance(request_payload, dict):
+            return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_request"})
+        from core.vault_request_notifications import notify_vault_request_created
+
+        async def _runner() -> None:
+            result = await notify_vault_request_created(controller, request_payload)
+            if result.get("ok") is False:
+                logger.debug("vault request notification failed: %s", result)
+
+        asyncio.create_task(_runner(), name="vault-request-notification")
+        return {"ok": True, "queued": True}
+
     @app.post("/internal/cancel/{session_id}")
     async def _cancel(session_id: str) -> Any:
         """HTTP adapter: delegate Stop to the turn owner (FSM, Phase 1b) and map its

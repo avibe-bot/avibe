@@ -227,6 +227,38 @@ class BaseMarkdownFormatter(ABC):
 
         return self.format_message(*lines)
 
+    def format_vault_request_notification(
+        self,
+        *,
+        title: str,
+        request_label: str,
+        request_value: str,
+        secret_label: str,
+        secret_value: str,
+        session_label: str,
+        session_id: str,
+        action_label: str,
+        action_url: Optional[str],
+        no_link_text: str,
+        guidance: str,
+    ) -> str:
+        """Format a Vault request notification without inline approval controls."""
+
+        lines = [f"🔐 {self.format_bold(self.format_text(title))}", ""]
+        lines.append(self.format_definition_item(request_label, request_value))
+        if secret_value:
+            lines.append(self.format_definition_item(secret_label, secret_value))
+        if session_id:
+            lines.append(self.format_definition_item(session_label, session_id))
+        lines.append("")
+        if action_url:
+            lines.append(self.format_link(self.format_text(action_label), action_url))
+        elif no_link_text:
+            lines.append(self.format_text(no_link_text))
+        if guidance:
+            lines.append(self.format_text(guidance))
+        return self.format_message(*lines)
+
     # Convenience methods that combine formatting
     def format_tool_name(self, tool_name: str, emoji: str = "🔧") -> str:
         """Format tool name with emoji and styling"""

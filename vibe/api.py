@@ -1350,6 +1350,19 @@ def _publish_vaults_updated(
         logger.debug("vaults.updated publish failed", exc_info=True)
 
 
+def _notify_vault_request_created(request: dict | None) -> None:
+    """Best-effort bridge to the daemon-owned IM dispatcher for Vault request notices."""
+
+    if not isinstance(request, dict):
+        return
+    try:
+        from vibe import internal_client
+
+        internal_client.notify_vault_request_created_sync(request, timeout=2.0)
+    except Exception:
+        logger.debug("vault request notification bridge failed", exc_info=True)
+
+
 def _vault_api_error_from_avault(exc: "AvaultError", *, prefix: str) -> VaultApiError:
     message = str(exc)
     if "requires avault >=" in message:
@@ -1791,6 +1804,7 @@ def request_vault_access(payload: dict) -> dict:
         request_status=request.get("status"),
         secret_name=request.get("secret_name"),
     )
+    _notify_vault_request_created(request)
     return {"ok": True, "request": request}
 
 
@@ -1839,6 +1853,7 @@ def request_vault_sign(payload: dict) -> dict:
         request_status=request.get("status"),
         secret_name=request.get("secret_name"),
     )
+    _notify_vault_request_created(request)
     return {"ok": True, "request": request}
 
 
