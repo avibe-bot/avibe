@@ -217,6 +217,15 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
         formatter_class="FeishuFormatter",
         credential_fields=("app_id", "app_secret"),
         runtime_reconcile_fields=("app_id", "app_secret", "domain", "proxy_url"),
+        # NOTE: Feishu/Lark DOES support message deletion via the API
+        # (``im.v1.message.delete``), but recalling a bot message leaves a visible
+        # "此消息已撤回" ("this message was recalled") tombstone in the chat/thread —
+        # there is no silent-delete and no API flag to suppress it. So
+        # ``supports_message_deletion`` is deliberately left False: retiring the
+        # concise status bubble by recall would look worse than the bubble it
+        # removes. Instead the dispatcher collapses the bubble via an in-place edit
+        # (``✅ done · <time> · <tok>``), which leaves no tombstone, and the result
+        # is still delivered as a fresh (pushing) message. Do NOT set this True.
         capabilities=PlatformCapabilities(
             supports_channels=True,
             supports_threads=True,
