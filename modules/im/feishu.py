@@ -483,7 +483,12 @@ class FeishuBot(BaseIMClient):
         With ``subtext=None`` the card is byte-for-byte identical to before.
         """
         elements: list = []
-        if text:
+        # Keep the body markdown element for every legacy (subtext=None) call so
+        # a bare ``text=""`` (e.g. the settings-toggle keyboard-only edit) stays
+        # byte-for-byte identical. Only the footer-only concise bubble
+        # (text empty AND subtext set) drops the empty body so the note stands
+        # alone.
+        if text or subtext is None:
             elements.append({"tag": "markdown", "content": text})
         if buttons:
             for row in buttons:

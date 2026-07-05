@@ -91,6 +91,16 @@ class BuildCardJsonFooterTests(unittest.TestCase):
         # Explicit subtext=None is identical too.
         self.assertEqual(bot._build_card_json("hello"), bot._build_card_json("hello", subtext=None))
 
+    def test_empty_text_without_subtext_keeps_empty_body_element(self):
+        # The settings-toggle keyboard-only edit calls _build_card_json("",
+        # buttons, subtext=None); it must keep the (empty) markdown element so the
+        # card stays byte-for-byte identical to before this change.
+        bot = _make_bot()
+        buttons = [[{"text": "Toggle", "callback_data": "t"}]]
+        elements = _card_elements(bot._build_card_json("", buttons, subtext=None))
+        self.assertEqual(elements[0], {"tag": "markdown", "content": ""})
+        self.assertEqual([e["tag"] for e in elements], ["markdown", "button"])
+
     def test_footer_only_empty_body_renders_note_alone(self):
         bot = _make_bot()
         elements = _card_elements(bot._build_card_json("", subtext="⏳ working · 0s"))
@@ -137,6 +147,17 @@ class SendEditForwardsSubtextTests(unittest.IsolatedAsyncioTestCase):
         ctx = MessageContext(user_id="U1", channel_id="oc_chat", platform="lark")
         with self.assertRaises(ValueError):
             await bot.send_message(ctx, "", subtext=None)
+
+    async def test_thread_reply_forwards_subtext(self):
+        bot = _make_bot()
+        message = _stub_lark_client(bot)
+        ctx = MessageContext(user_id="U1", channel_id="oc_chat", platform="lark", thread_id="om_root")
+        await bot.send_message(ctx, "🔧 x", subtext="⏳ 5s")
+        # Thread reply goes through areply (reply_in_thread), not acreate.
+        message.acreate.assert_not_awaited()
+        content = json.loads(message.areply.await_args.args[0].request_body.content)
+        self.assertEqual(content["body"]["elements"][-1]["tag"], "note")
+        self.assertEqual(content["body"]["elements"][-1]["elements"][0]["content"], "⏳ 5s")
 
     async def test_edit_message_forwards_subtext(self):
         bot = _make_bot()
