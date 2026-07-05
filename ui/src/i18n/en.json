@@ -2398,7 +2398,7 @@
       "close": "Close",
       "ttlMinutes": "{{count}} min",
       "ttlHours": "{{count}} h",
-      "accessNote": "The secret is unlocked in your browser and handed only to the command you approve — it's never shown to the AI or the chat.",
+      "accessNote": "Unlocked in your browser — the secret's value is never shown to the AI or the chat.",
       "signNote": "The private key never leaves your browser — only the signature is returned.",
       "errors": {
         "failed": "Couldn't complete the approval. Please try again.",

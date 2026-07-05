@@ -2397,7 +2397,7 @@
       "close": "关闭",
       "ttlMinutes": "{{count}} 分钟",
       "ttlHours": "{{count}} 小时",
-      "accessNote": "密钥在你的浏览器里解锁，只交给你批准的那条命令使用——绝不会展示给 AI 或聊天。",
+      "accessNote": "在你的浏览器里解锁——密钥的值绝不会展示给 AI 或聊天。",
       "signNote": "私钥绝不会离开你的浏览器——只返回签名。",
       "errors": {
         "failed": "批准未能完成，请重试。",

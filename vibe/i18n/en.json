@@ -51,7 +51,7 @@
   },
   "vault": {
     "requestNotification": {
-      "title": "A secret request needs your OK",
+      "title": "A vault request needs your attention",
       "requestLabel": "Request",
       "secretLabel": "Secret",
       "sessionLabel": "Session",

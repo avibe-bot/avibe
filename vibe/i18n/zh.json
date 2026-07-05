@@ -51,7 +51,7 @@
   },
   "vault": {
     "requestNotification": {
-      "title": "有一个密钥请求等你确认",
+      "title": "有一个密钥请求需要你处理",
       "requestLabel": "请求",
       "secretLabel": "密钥",
       "sessionLabel": "会话",
