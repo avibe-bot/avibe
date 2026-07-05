@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FileText, Globe2, Play, RotateCw, Server, Square } from 'lucide-react';
+import { FileText, Globe2, Play, RotateCw, Server, Square, Tag } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
@@ -10,6 +10,7 @@ import { apiFetch } from '@/lib/apiFetch';
 import { SettingsPageShell } from './SettingsPageShell';
 import { CompactField, SettingsPanel, SettingsRow } from './SettingsPrimitives';
 import { Button } from '@/components/ui/button';
+import { applyAppTitle } from '@/lib/documentTitle';
 
 // Mirrors design.pen mHUcm (VR/CM/Service): two cards.
 // svcSec1: header [16, 20] + value rows [12, 20] with bottom borders.
@@ -30,6 +31,8 @@ export const SettingsServicePage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [uiSaving, setUiSaving] = useState(false);
   const [uiMessage, setUiMessage] = useState<string | null>(null);
+  const [nameSaving, setNameSaving] = useState(false);
+  const [nameMessage, setNameMessage] = useState<string | null>(null);
 
   useEffect(() => {
     api.getConfig().then(setConfig).catch(() => {});
@@ -57,7 +60,11 @@ export const SettingsServicePage: React.FC = () => {
         setup_host: config.ui?.setup_host || '127.0.0.1',
         setup_port: config.ui?.setup_port || 5123,
       };
-      await api.saveConfig({ ui: { ...(config.ui || {}), ...uiPayload } });
+      // Send ONLY host/port — not the whole config.ui. Spreading config.ui
+      // would persist any unsaved instance_name draft the user typed but
+      // didn't Save on that row. The backend deep-merges config saves, so
+      // instance_name and chat_message_font_size are preserved regardless.
+      await api.saveConfig({ ui: uiPayload });
       await apiFetch('/api/ui/reload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -118,6 +125,33 @@ export const SettingsServicePage: React.FC = () => {
       setUiMessage(t('common.saveFailed'));
     } finally {
       setUiSaving(false);
+    }
+  };
+
+  // The instance name only changes the browser tab title ("Avibe - <name>"),
+  // so it saves config without restarting the UI server and applies the new
+  // title immediately for live feedback.
+  const handleSaveInstanceName = async () => {
+    if (!config) return;
+    setNameSaving(true);
+    setNameMessage(null);
+    try {
+      const instanceName = (config.ui?.instance_name || '').trim();
+      // Persist ONLY the instance name. Spreading the shared (and possibly
+      // dirty) config.ui would also save unsaved Console server host/port
+      // edits — but without the /api/ui/reload + redirect that
+      // handleUiSaveRestart performs — so the running UI keeps the old bind
+      // while the next restart silently moves to the unsaved address. The
+      // backend deep-merges config saves, so host/port are preserved.
+      await api.saveConfig({ ui: { instance_name: instanceName } });
+      // Reflect the new title immediately. system_hostname is the read-only,
+      // server-computed fallback (unaffected by host/port edits).
+      applyAppTitle({ ui: { instance_name: instanceName, system_hostname: config.ui?.system_hostname } });
+      setNameMessage(t('common.saved'));
+    } catch {
+      setNameMessage(t('common.saveFailed'));
+    } finally {
+      setNameSaving(false);
     }
   };
 
@@ -244,6 +278,42 @@ export const SettingsServicePage: React.FC = () => {
               >
                 <RotateCw className={clsx('size-3.5', uiSaving && 'animate-spin')} strokeWidth={2.5} />
                 {uiSaving ? t('common.saving') : t('common.saveAndRestart')}
+              </Button>
+            </div>
+          }
+        />
+        <SettingsRow
+          title={
+            <span className="inline-flex items-center gap-2">
+              <Tag className="size-3.5 text-cyan" />
+              {t('settings.instanceNameTitle')}
+            </span>
+          }
+          description={nameMessage || t('settings.instanceNameHint')}
+          control={
+            <div className="grid grid-cols-[minmax(160px,220px)_auto] items-center gap-2">
+              <CompactField
+                aria-label={t('settings.instanceNameTitle')}
+                placeholder={config?.ui?.system_hostname || ''}
+                value={config?.ui?.instance_name || ''}
+                onChange={(event) => {
+                  const instanceName = event.target.value;
+                  setNameMessage(null);
+                  setConfig((prev: any) => ({
+                    ...(prev || {}),
+                    ui: { ...((prev && prev.ui) || {}), instance_name: instanceName },
+                  }));
+                }}
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() => void handleSaveInstanceName()}
+                disabled={nameSaving}
+                className="text-[12px]"
+              >
+                {nameSaving ? t('common.saving') : t('common.save')}
               </Button>
             </div>
           }

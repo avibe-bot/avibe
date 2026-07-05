@@ -48,6 +48,7 @@ const AppsTerminalPage = lazy(() =>
   import('./components/workbench/AppsTerminalPage').then((m) => ({ default: m.AppsTerminalPage })),
 );
 import { hasConfiguredPlatformCredentials } from './lib/platforms';
+import { applyAppTitle } from './lib/documentTitle';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Button } from './components/ui/button';
@@ -281,9 +282,29 @@ const AppsRouteFallback = () => {
   return <div className="grid min-h-[40vh] place-items-center text-[12px] text-muted">{t('common.loading')}</div>;
 };
 
+// Sets the browser tab title to "Avibe - <name>" from config (configured
+// instance name, else system hostname). Config is cached in ApiContext, so this
+// mount-time fetch is deduplicated with the AuthGuard's own config read.
+const DocumentTitle = () => {
+  const { getConfig } = useApi();
+  useEffect(() => {
+    let cancelled = false;
+    getConfig()
+      .then((config) => {
+        if (!cancelled) applyAppTitle(config);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [getConfig]);
+  return null;
+};
+
 function AppRoutes() {
   return (
     <>
+    <DocumentTitle />
     <WebPushNotificationNavigator />
     <Routes>
       <Route element={<AuthGuard><AppShell /></AuthGuard>}>

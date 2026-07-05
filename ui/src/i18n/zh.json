@@ -220,6 +220,8 @@
     "statusNow": "当前状态",
     "consoleServerTitle": "控制台服务",
     "consoleServerHint": "保存这些值只会重启 Web UI 服务，不会重启主服务。",
+    "instanceNameTitle": "实例名称",
+    "instanceNameHint": "显示在浏览器标签标题中（“Avibe - 名称”）。留空则使用系统 hostname。",
     "consoleServerRedirecting": "UI 服务地址已变更，正在跳转到 {{origin}}...",
     "consoleServerRelocated": "UI 服务现在监听 {{origin}}，请打开该地址继续。",
     "serviceNotesTitle": "运维说明",

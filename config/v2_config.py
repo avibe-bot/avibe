@@ -310,6 +310,10 @@ class UiConfig:
     setup_port: int = 5123
     open_browser: bool = True
     chat_message_font_size: int = DEFAULT_CHAT_MESSAGE_FONT_SIZE_PX
+    # Display name appended to the browser tab title ("Avibe - <name>"). When
+    # blank the UI falls back to the machine's system hostname (surfaced as the
+    # read-only ``system_hostname`` field in the /api/config payload).
+    instance_name: str = ""
 
 
 @dataclass

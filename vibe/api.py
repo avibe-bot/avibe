@@ -6,6 +6,7 @@ import os
 import platform
 import re
 import shutil
+import socket
 import ssl
 import stat
 import subprocess
@@ -920,6 +921,14 @@ def _project_secret_fields(payload: dict | None, fields: tuple[str, ...], *, inc
     return projected
 
 
+def _system_hostname() -> str:
+    """Best-effort system hostname for the browser-title fallback."""
+    try:
+        return socket.gethostname() or ""
+    except OSError:
+        return ""
+
+
 def config_to_payload(config: V2Config, *, include_secrets: bool = False) -> dict:
     from config.platform_registry import platform_descriptors
     from modules.agents.catalog import agent_backend_catalog_payload
@@ -963,7 +972,11 @@ def config_to_payload(config: V2Config, *, include_secrets: bool = False) -> dic
             _GATEWAY_SECRET_FIELDS,
             include_secrets=include_secrets,
         ),
-        "ui": config.ui.__dict__,
+        # ``system_hostname`` is a read-only, computed hint (not a stored config
+        # field): the UI uses it as the browser-title fallback when
+        # ``ui.instance_name`` is blank. It is dropped on save via
+        # ``_filter_dataclass_fields`` so it never persists.
+        "ui": {**config.ui.__dict__, "system_hostname": _system_hostname()},
         "remote_access": {
             "provider": config.remote_access.provider,
             "vibe_cloud": _vibe_cloud_payload(config, include_secrets),
