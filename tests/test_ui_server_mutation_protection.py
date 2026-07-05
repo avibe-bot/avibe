@@ -168,6 +168,7 @@ def test_config_post_allows_trusted_public_origin_from_proxy_when_remote_access_
         agents=AgentsConfig(),
     )
     config.remote_access.vibe_cloud.enabled = False
+    config.remote_access.vibe_cloud.public_url = "https://avibe.example.com"
     config.save()
     client = app.test_client()
     headers = csrf_headers(client, "http://127.0.0.1:15131")
