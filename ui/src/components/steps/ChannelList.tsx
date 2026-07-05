@@ -495,6 +495,11 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
         recordRefreshMeta(platform, result);
         if (result.ok) {
           setChannels(result.channels || []);
+          // Feishu's bot token can only ever list chats the bot already belongs
+          // to — there is no member-vs-all-workspace distinction like Slack, so
+          // "Browse All Groups" is simply a full re-discovery of the bot's
+          // groups. Deliberately do NOT flip browseAll here: the "showing all
+          // workspace groups" badge would be misleading for Lark.
           if (result.refreshing) scheduleRefreshFollowup(platform, isAll);
         }
       } else if (platform === 'telegram') {
@@ -1394,7 +1399,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
           {/* Browse all + Can't find hint — per-platform tabs only */}
           {pageTab !== 'all' && (
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-0.5">
-              {!['lark', 'telegram'].includes(pageTab) && (
+              {!['telegram'].includes(pageTab) && (
                 <Button
                   type="button"
                   variant="secondary"
@@ -1757,7 +1762,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
             >
               <RefreshCw size={14} className={loading ? 'animate-spin' : ''} /> {t('channelList.refreshList')}
             </Button>
-            {!browseAll && !['lark', 'telegram'].includes(platform) && (
+            {!browseAll && !['telegram'].includes(platform) && (
               <Button
                 type="button"
                 variant="secondary"
