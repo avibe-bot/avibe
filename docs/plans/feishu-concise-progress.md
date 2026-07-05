@@ -112,25 +112,21 @@ Footer text is composed in core (`_compose_status_message`) from existing
 i18n-safe pieces; no new user-facing strings in the Feishu adapter. Verify the
 `note` content carries no hardcoded English added in the adapter.
 
-## Expected v1 behavior difference (document, do not "fix")
+## Single-message finalize (implemented)
 
-Because Feishu does not declare `supports_message_deletion`,
-`_retire_status_bubble` (`message_dispatcher.py:891-911`) cannot delete the
-bubble. So at turn end Feishu shows **two persistent messages**: the collapsed
-status bubble (footer-only terminal marker `✅ done` / `⏹ stopped|failed`) AND
-the separate final-result message. Slack/Discord end with just the one final
-message (bubble deleted). This is intentional for v1 — testers should not file
-it as a bug. The bubble still self-updates in place during the turn (the
-concise value); only the terminal cleanup differs.
+Feishu can recall its own messages (`im.v1.message.delete`, verified live), so
+this closes the "two persistent messages" gap:
+
+- lark declares `supports_message_deletion=True`.
+- `FeishuBot.delete_message` overrides the base no-op to call `adelete`.
+- At turn end `_retire_status_bubble` (`message_dispatcher.py:891-911`) deletes
+  the status bubble; only the fresh final-answer message remains, and being a
+  new message it fires a push notification — matching Slack/Discord.
+- `delete_message` returns `False` on any failure, so the dispatcher falls back
+  to collapsing the bubble to a terminal marker (never left as "running").
 
 ## Out of scope / follow-up
 
-- **Push notification / single-message finalize parity:** achieving the
-  Slack/Discord "one final message" end state needs `delete_message` support on
-  Feishu (+ `supports_message_deletion`). Separate follow-up. Do NOT flip
-  `supports_message_deletion` in this change (leaving it false is safe:
-  `delete_message` defaults to a no-op, so a mistaken flip fails-soft, but keep
-  it off).
 - Per-channel progress style override (core already notes it can layer later).
 
 ## Risks / breakage surface

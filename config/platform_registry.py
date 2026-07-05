@@ -223,6 +223,7 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
             supports_buttons=True,
             supports_quick_replies=True,
             supports_message_editing=True,
+            supports_message_deletion=True,
             markdown_upload_returns_message_id=True,
             quick_reply_single_column=True,
             supports_reaction_indicator=True,

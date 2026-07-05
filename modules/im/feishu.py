@@ -732,6 +732,33 @@ class FeishuBot(BaseIMClient):
             logger.error("Error editing Feishu message %s: %s", message_id, exc)
             return False
 
+    async def delete_message(self, context: MessageContext, message_id: str) -> bool:
+        """Recall a message the bot previously sent (im.v1.message.delete).
+
+        Used to retire the concise status bubble at turn end so only the final
+        answer remains (single-message finalize, matching Slack/Discord). Returns
+        ``False`` on any failure so the dispatcher falls back to collapsing the
+        bubble to a terminal marker."""
+        self._ensure_client()
+        try:
+            from lark_oapi.api.im.v1 import DeleteMessageRequest
+
+            request = DeleteMessageRequest.builder().message_id(message_id).build()
+            response = await self._lark_client.im.v1.message.adelete(request)
+            if not response.success():
+                logger.warning(
+                    "Failed to delete Feishu message %s: code=%s msg=%s",
+                    message_id,
+                    response.code,
+                    response.msg,
+                )
+                return False
+            self._message_text_cache.pop(message_id, None)
+            return True
+        except Exception as exc:
+            logger.warning("Error deleting Feishu message %s: %s", message_id, exc)
+            return False
+
     def _remember_message_text(self, message_id: Optional[str], text: Optional[str]) -> None:
         if not message_id or text is None:
             return

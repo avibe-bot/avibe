@@ -106,11 +106,11 @@ class DeletionCapabilityTests(unittest.TestCase):
     def test_status_bubble_platforms_advertise_deletion(self):
         from config.platform_registry import get_platform_descriptor
 
-        for platform in ("slack", "discord"):
+        for platform in ("slack", "discord", "lark"):
             caps = get_platform_descriptor(platform).capabilities
             self.assertTrue(caps.supports_message_deletion, platform)
         # A non-deletion platform stays False (drives the collapse fallback).
-        self.assertFalse(get_platform_descriptor("lark").capabilities.supports_message_deletion)
+        self.assertFalse(get_platform_descriptor("wechat").capabilities.supports_message_deletion)
 
     def test_compose_status_content_truncates_body_to_fit_2000_limit(self):
         # Over-limit body is truncated so the footer survives within Discord's
