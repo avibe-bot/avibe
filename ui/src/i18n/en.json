@@ -2374,7 +2374,7 @@
     },
     "approval": {
       "accessTitle": "Agent wants to use a secret",
-      "accessSubtitle": "You decide whether the agent may use it. Its value is never shown to the agent or the chat.",
+      "accessSubtitle": "You decide whether the agent may use it. Its value is never shown to the AI or the chat.",
       "signTitle": "Agent wants to sign",
       "signSubtitle": "Each signature needs your approval — it can't be pre-approved.",
       "secret": "Secret",
