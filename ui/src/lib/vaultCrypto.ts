@@ -699,11 +699,13 @@ export function passkeyPrfSaltEntries(wrapMeta: string | WrapMeta): PasskeyPrfSa
 }
 
 function protectedRecordAad(context: ProtectedRecordContext): Uint8Array {
-  const out: number[] = [];
-  pushLengthPrefixed(out, utf8(validateSecretName(context.name)));
-  pushLengthPrefixed(out, utf8(context.scheme ?? WRAP_SCHEME));
-  pushLengthPrefixed(out, new Uint8Array([context.version ?? WRAP_META_VERSION]));
-  return new Uint8Array(out);
+  const name = utf8(validateSecretName(context.name));
+  const scheme = utf8(context.scheme ?? WRAP_SCHEME);
+  const out = new Uint8Array(name.length + scheme.length + 1);
+  out.set(name, 0);
+  out.set(scheme, name.length);
+  out[name.length + scheme.length] = context.version ?? WRAP_META_VERSION;
+  return out;
 }
 
 export function protectedRecordAadHex(context: ProtectedRecordContext): string {
@@ -1284,10 +1286,13 @@ export function packProtectedRecord(sealed: ProtectedSealed, vmkWrapMeta: string
   if ('dek_nonce' in meta || 'wrapped_dek' in meta) {
     throw new Error('vmk wrap_meta must not already carry a wrapped DEK');
   }
+  if ('scheme' in meta && meta.scheme !== WRAP_SCHEME) {
+    throw new Error('protected wrap_meta has unsupported scheme');
+  }
   return {
     ciphertext: sealed.ciphertext,
     nonce: sealed.nonce,
-    wrap_meta: JSON.stringify({ ...meta, dek_nonce: sealed.dek_nonce, wrapped_dek: sealed.wrapped_dek }),
+    wrap_meta: JSON.stringify({ ...meta, scheme: WRAP_SCHEME, dek_nonce: sealed.dek_nonce, wrapped_dek: sealed.wrapped_dek }),
   };
 }
 

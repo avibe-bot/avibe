@@ -89,7 +89,7 @@ function base64ToBase64Url(b64: string): string {
   return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-/** Strip a stored record's DEK fields back to the bare VMK wrap_meta ({v, copies}). */
+/** Strip a stored record's DEK fields back to the bare VMK wrap_meta ({v, copies, scheme?}). */
 function baseVmkWrapMeta(wrapMeta: string): string {
   const parsed = JSON.parse(wrapMeta) as Record<string, unknown>;
   delete parsed.dek_nonce;
