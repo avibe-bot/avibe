@@ -50,8 +50,9 @@ class UsesConciseStatusBubbleTests(unittest.TestCase):
         self.assertFalse(Controller.uses_concise_status_bubble(fake, _ctx("slack")))
 
     def test_non_editing_platform_false(self):
-        fake = self._fake("lark", "concise")
-        self.assertFalse(Controller.uses_concise_status_bubble(fake, _ctx("lark")))
+        # wechat has no status-bubble capability (lark gained it).
+        fake = self._fake("wechat", "concise")
+        self.assertFalse(Controller.uses_concise_status_bubble(fake, _ctx("wechat")))
 
 
 class ProcessingModeSuppressionTests(unittest.TestCase):

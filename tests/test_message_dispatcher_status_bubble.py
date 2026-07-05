@@ -186,9 +186,11 @@ class StatusBubbleProcessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(controller.im_client.edits, [])
 
     async def test_non_editing_platform_uses_verbose_append(self):
-        controller = _StubController(platform="lark")
+        # wechat has no status-bubble capability (lark gained it), so it stays on
+        # the verbose append path.
+        controller = _StubController(platform="wechat")
         d = _dispatcher(controller)
-        self.assertEqual(d._concise_progress_style(_ctx("lark")), "verbose")
+        self.assertEqual(d._concise_progress_style(_ctx("wechat")), "verbose")
 
     async def test_concise_toolcall_renders_despite_hidden_toolcall(self):
         # Regression: the concise status bubble is an ephemeral status line, not
@@ -662,9 +664,10 @@ class BeginStatusBubbleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(controller.im_client.edits, [])
 
     async def test_begin_noop_on_non_status_bubble_platform(self):
-        controller = _StubController(platform="lark")
+        # wechat lacks the status-bubble capability (lark gained it).
+        controller = _StubController(platform="wechat")
         d = _dispatcher(controller)
-        await d.begin_status_bubble(_ctx("lark"))
+        await d.begin_status_bubble(_ctx("wechat"))
         self.assertEqual(controller.im_client.sent, [])
         self.assertEqual(controller.im_client.edits, [])
 
