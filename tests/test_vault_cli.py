@@ -16,7 +16,7 @@ from unittest.mock import Mock
 import pytest
 
 from storage import vault_service
-from storage.models import vault_audit, vault_grants
+from storage.models import vault_audit, vault_grants, vault_requests
 from storage.vault_crypto import Sealed
 from vibe import cli
 
@@ -1818,7 +1818,8 @@ def test_export_is_deprecated_and_does_not_touch_db(capfd):
         assert vault_service.list_secrets(conn) == []
 
 
-def test_request_creates_pending(capfd):
+def test_request_creates_pending(capfd, monkeypatch):
+    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
     code = cli.cmd_vault_request(_ns(name="WANTED_KEY", reason="need it"))
     captured = capfd.readouterr()
     assert code == 0
@@ -1826,6 +1827,7 @@ def test_request_creates_pending(capfd):
     assert payload["secret_name"] == "WANTED_KEY"
     assert payload["status"] == "pending"
     assert payload["request_id"].startswith("vrq_")
+    assert "vibe vault await" in payload["message"]
 
 
 def test_request_accepts_spec_path(tmp_path, capfd):
@@ -1842,14 +1844,18 @@ def test_request_accepts_spec_path(tmp_path, capfd):
         encoding="utf-8",
     )
 
-    code = cli.cmd_vault_request(_ns(name="GITHUB_TOKEN", reason="need PR status", spec=str(spec_path)))
+    code = cli.cmd_vault_request(
+        _ns(name="GITHUB_TOKEN", reason="need PR status", spec=str(spec_path), session_id="ses_cli")
+    )
     payload = json.loads(capfd.readouterr().out)
 
     assert code == 0
     assert payload["request"]["card"]["spec"]["tags"] == ["github", "skill:github-pr-review"]
     assert payload["request"]["card"]["spec"]["policy"]["allowed_hosts"] == ["api.github.com"]
     assert payload["request"]["card"]["spec"]["links"] == {"skills": ["github-pr-review"]}
-    assert payload["request_id"] in payload["message"]
+    # Default (callback) mode: the agent is auto-resumed on resolution rather than told to poll a
+    # request id; the id stays in payload["request_id"]. The message still names the affordance.
+    assert "resumes automatically" in payload["message"]
     assert "Provide secret" in payload["message"]
     assert "Add secret" not in payload["message"]
 
@@ -1881,7 +1887,9 @@ def test_request_for_existing_secret_returns_fulfilled(tmp_path, capfd, monkeypa
 
 def test_request_wait_outputs_fulfilled_request(capfd, monkeypatch):
     def wait_mock(request_id, *, timeout, poll_interval=2.0):
-        return {"id": request_id, "status": "fulfilled", "request_type": "provision", "secret_name": "WAIT_KEY"}
+        with cli._open_vault_engine().begin() as conn:
+            vault_service.fulfill_pending_provision_requests_for_secret(conn, "WAIT_KEY")
+            return vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
 
     monkeypatch.setattr(cli, "_wait_for_provision", wait_mock)
 
@@ -1889,6 +1897,9 @@ def test_request_wait_outputs_fulfilled_request(capfd, monkeypatch):
     payload = json.loads(capfd.readouterr().out)
     assert payload["status"] == "fulfilled"
     assert payload["request"]["status"] == "fulfilled"
+    with cli._open_vault_engine().connect() as conn:
+        status = conn.execute(vault_requests.select().where(vault_requests.c.id == payload["request_id"])).mappings().one()
+    assert status["callback_status"] == "skipped"
 
 
 def test_request_wait_returns_denied_without_timeout(capfd, monkeypatch):
@@ -1901,6 +1912,46 @@ def test_request_wait_returns_denied_without_timeout(capfd, monkeypatch):
     payload = json.loads(capfd.readouterr().err)
     assert payload["code"] == "request_denied"
     assert payload["details"]["request_id"]
+
+
+@pytest.mark.parametrize(
+    ("terminal_status", "error_code"),
+    [
+        ("denied", "request_denied"),
+        ("expired", "request_expired"),
+        ("failed", "request_failed"),
+    ],
+)
+def test_request_wait_suppresses_callback_for_terminal_error_outcomes(
+    terminal_status, error_code, capfd, monkeypatch
+):
+    def wait_mock(request_id, *, timeout, poll_interval=2.0):
+        with cli._open_vault_engine().begin() as conn:
+            if terminal_status == "denied":
+                vault_service.deny_request(conn, request_id)
+            else:
+                conn.execute(
+                    vault_requests.update()
+                    .where(vault_requests.c.id == request_id)
+                    .values(
+                        status=terminal_status,
+                        decided_at="2026-01-01T00:00:00+00:00",
+                        callback_status="pending",
+                    )
+                )
+            return vault_service.get_request(conn, request_id, audience=vault_service.REQUEST_AUDIENCE_AGENT)
+
+    monkeypatch.setattr(cli, "_wait_for_provision", wait_mock)
+
+    assert cli.cmd_vault_request(_ns(name="WAIT_KEY", wait=30)) == 1
+    payload = json.loads(capfd.readouterr().err)
+
+    assert payload["code"] == error_code
+    request_id = payload["details"]["request_id"]
+    with cli._open_vault_engine().connect() as conn:
+        row = conn.execute(vault_requests.select().where(vault_requests.c.id == request_id)).mappings().one()
+    assert row["status"] == terminal_status
+    assert row["callback_status"] == "skipped"
 
 
 def test_wait_for_provision_returns_denied_request():

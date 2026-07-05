@@ -22,7 +22,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from config import paths
 from core.message_context import resolve_context_platform
 from modules.im import MessageContext
-from storage.db import create_sqlite_engine
+from storage.db import create_sqlite_engine, get_cached_sqlite_engine
 from storage.background import SQLiteBackgroundTaskStore
 from storage.models import agent_sessions, scope_settings, scopes
 from storage.pagination import PageRequest, PageResult, page_sequence
@@ -290,6 +290,40 @@ def resolve_session_id_target(session_id: str, *, db_path: Optional[Path] = None
         session_anchor=str(row["session_anchor"] or ""),
         metadata=session_metadata if isinstance(session_metadata, dict) else {},
         suppress_delivery=suppress_delivery,
+    )
+
+
+def enqueue_session_callback(
+    request_store: "TaskExecutionStore",
+    *,
+    session_id: str,
+    message: str,
+    source_actor: str,
+    parent_run_id: Optional[str] = None,
+) -> Optional["TaskExecutionRequest"]:
+    """Enqueue a callback turn into an existing agent session — the shared entry used by Agent
+    Run / watch / scheduled-task callbacks and vault-request auto-resume. Resolves the session's
+    agent/backend/model target and enqueues an ``agent_run`` with ``source_kind="callback"`` so
+    the running scheduler dispatches it. Returns ``None`` when there is nothing to send;
+    ``resolve_session_id_target`` raises for an unresolvable/archived session (caller handles).
+    """
+    session_id = (session_id or "").strip()
+    if not session_id or not (message or "").strip():
+        return None
+    target = resolve_session_id_target(session_id)
+    return request_store.enqueue_agent_run(
+        session_id=session_id,
+        session_key=target.session_key.to_key(),
+        message=message,
+        agent_name=target.agent_name,
+        agent_id=target.agent_id,
+        agent_backend=target.agent_backend,
+        model=target.model,
+        reasoning_effort=target.reasoning_effort,
+        session_policy="existing",
+        source_kind="callback",
+        source_actor=source_actor,
+        parent_run_id=parent_run_id,
     )
 
 
@@ -1565,6 +1599,10 @@ class ScheduledTaskService:
                     except Exception:
                         self._drain_dirty = True
                         raise
+                # Vault requests resolve via the web/API layer, which emits no run-store change,
+                # so sweep for owed auto-resume callbacks every tick — a cheap indexed lookup that
+                # no-ops when nothing is pending.
+                await self._drain_vault_callbacks()
                 await asyncio.sleep(2)
             except asyncio.CancelledError:
                 raise
@@ -1702,27 +1740,83 @@ class ScheduledTaskService:
             self.request_store.update_callback_status(run_id, status="sent", callback_run_id=callback_run.id)
             self._drain_dirty = True
 
+    async def _drain_vault_callbacks(self) -> None:
+        """Auto-resume the requesting session when a vault request reaches a terminal state.
+
+        Mirrors :meth:`_drain_callbacks` but for ``vault_requests`` (which resolve outside the run
+        store): each row marked ``callback_status='pending'`` is turned into one callback turn via
+        the shared :func:`enqueue_session_callback` entry, then marked ``sent``/``skipped``/
+        ``failed``. Delivery is at-least-once, matching the run-store callback drain: enqueue and
+        the ``sent`` mark are separate writes, so a crash between them re-sends on the next tick.
+        Per-row isolation keeps one bad row from aborting the batch or being retried forever.
+        """
+        if not self._owns_service_instance():
+            return
+        from storage import vault_service
+
+        # Runs every tick, so use the process-local cached engine (never dispose it) rather than
+        # allocating a fresh engine per sweep.
+        engine = get_cached_sqlite_engine(paths.get_sqlite_state_path())
+        try:
+            with engine.begin() as conn:
+                # Expiry is lazy (only on request reads), so proactively expire overdue pending
+                # requests here — otherwise an unattended timed-out request would never arm its
+                # callback until some unrelated read touched it. Both happen in one pass.
+                vault_service.expire_overdue_requests(conn)
+                pending = vault_service.list_pending_request_callbacks(conn)
+        except Exception as exc:
+            logger.error("Vault request callback sweep failed to load: %s", exc, exc_info=True)
+            return
+        for row in pending:
+            request_id = str(row.get("id") or "")
+            if not request_id:
+                continue
+            # Resolve + enqueue as one guarded step so a bad row is marked (not left to retry
+            # forever) and does not abort the rest of the batch.
+            status = "skipped"
+            try:
+                with engine.begin() as conn:
+                    ready = vault_service.request_callback_ready(conn, row)
+                if not ready:
+                    # Approved access grant not delivery-ready yet (protected relay in flight);
+                    # leave callback_status='pending' and retry on a later tick.
+                    continue
+                plan = vault_service.resolve_request_callback(row)
+                if plan is not None:
+                    enqueue_session_callback(
+                        self.request_store,
+                        session_id=plan.session_id,
+                        message=plan.message,
+                        source_actor=f"vault:{request_id}",
+                    )
+                    status = "sent"
+            except ValueError:
+                status = "skipped"  # session archived / not a valid target — nothing to resume
+            except Exception as exc:
+                logger.error("Vault request callback failed for %s: %s", request_id, exc, exc_info=True)
+                status = "failed"
+            try:
+                with engine.begin() as conn:
+                    vault_service.mark_request_callback(conn, request_id, status=status)
+            except Exception as exc:
+                # Leave callback_status='pending' → retried next tick (bounded, transient).
+                logger.error("Vault request callback mark failed for %s: %s", request_id, exc, exc_info=True)
+                continue
+            if status == "sent":
+                # A callback run was enqueued into the run store; drain it promptly.
+                self._drain_dirty = True
+
     def _enqueue_callback_run(self, run: dict[str, Any]) -> Optional[TaskExecutionRequest]:
         callback_session_id = str(run.get("callback_session_id") or "").strip()
         if not callback_session_id:
             return None
-        target_info = resolve_session_id_target(callback_session_id)
-        message = self._build_callback_message(run)
-        if not message.strip():
-            return None
-        return self.request_store.enqueue_agent_run(
+        run_id = str(run.get("id") or "")
+        return enqueue_session_callback(
+            self.request_store,
             session_id=callback_session_id,
-            session_key=target_info.session_key.to_key(),
-            message=message,
-            agent_name=target_info.agent_name,
-            agent_id=target_info.agent_id,
-            agent_backend=target_info.agent_backend,
-            model=target_info.model,
-            reasoning_effort=target_info.reasoning_effort,
-            session_policy="existing",
-            source_kind="callback",
-            source_actor=str(run.get("id") or ""),
-            parent_run_id=str(run.get("id") or "") or None,
+            message=self._build_callback_message(run),
+            source_actor=run_id,
+            parent_run_id=run_id or None,
         )
 
     def _build_callback_message(self, run: dict[str, Any]) -> str:

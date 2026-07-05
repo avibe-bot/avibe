@@ -510,7 +510,13 @@ vault_requests = Table(
     Column("created_at", String, nullable=False),
     Column("decided_at", String, nullable=True),
     Column("expires_at", String, nullable=True),
+    # Auto-resume callback bookkeeping: set to "pending" when a request transitions to a
+    # terminal state (approved/denied/fulfilled/failed/expired) so the daemon sweep enqueues
+    # exactly one callback turn to the requesting session, then "sent"/"skipped". NULL = no
+    # callback owed (e.g. rows created before this feature, or born-fulfilled).
+    Column("callback_status", String, nullable=True),
     Index("ix_vault_requests_status_created", "status", "created_at"),
+    Index("ix_vault_requests_callback_status", "callback_status", "decided_at"),
 )
 event.listen(
     vault_requests,

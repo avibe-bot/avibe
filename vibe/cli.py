@@ -4658,7 +4658,21 @@ def _vault_cli_requester(args) -> dict:
     skill = (getattr(args, "skill", None) or "").strip()
     if skill:
         requester["skill"] = skill
+    if _vault_callback_disabled(args):
+        # Opt out of auto-resume: the daemon sweep marks this request's callback "skipped".
+        requester["callback_disabled"] = True
     return requester
+
+
+def _vault_callback_disabled(args) -> bool:
+    """Whether this request opts out of the auto-resume callback at creation time.
+
+    Only explicit ``--no-callback``. ``--wait`` must NOT pre-disable it: a finite wait can time
+    out with the request still pending, and the agent must then still be auto-resumed when it
+    later resolves. The redundant callback for a wait that DOES observe fulfillment is suppressed
+    at that point instead (see ``cmd_vault_request``).
+    """
+    return bool(getattr(args, "no_callback", False))
 
 
 def _vault_cli_delivery(args, **fields) -> dict:
@@ -4967,7 +4981,7 @@ def cmd_vault_access(args):
             "vault_access_request",
             request_id=request["id"],
             request=request,
-            message="Request recorded. Wait for approval with: vibe vault await " + request["id"],
+            message=_vault_request_followup_message(args, request["id"], resolved_verb="approves or denies it"),
         )
         return 0
     except vault_service.SecretNotFoundError:
@@ -6007,6 +6021,16 @@ def cmd_vault_request(args):
         if wait_seconds:
             waited = _wait_for_provision(req["id"], timeout=float(wait_seconds))
             if waited:
+                # The wait delivered a terminal outcome synchronously, so suppress the
+                # now-redundant async auto-resume callback for this request (best-effort — a
+                # race with the ~2s sweep risks at most one benign duplicate resume). A wait
+                # that TIMES OUT skips this and leaves the callback armed, so a later resolution
+                # still wakes the agent.
+                try:
+                    with _open_vault_engine().begin() as conn:
+                        vault_service.mark_request_callback(conn, str(req["id"]), status="skipped")
+                except Exception:
+                    pass
                 if waited.get("status") == "denied":
                     _print_task_error(
                         TaskCliError(
@@ -6061,7 +6085,12 @@ def cmd_vault_request(args):
             secret_name=name,
             status="pending",
             request=req,
-            message=_vault_request_pending_message(name, req, has_spec=bool(spec)),
+            message=_vault_request_pending_message(
+                name,
+                req,
+                has_spec=bool(spec),
+                callback_enabled=not _vault_callback_disabled(args) and bool(_vault_cli_session_id(args)),
+            ),
         )
         return 0
     except TaskCliError as exc:
@@ -6112,7 +6141,7 @@ def cmd_vault_sign(args):
             "vault_sign_request",
             request_id=request["id"],
             request=request,
-            message="Request recorded. Wait for approval with: vibe vault await " + request["id"],
+            message=_vault_request_followup_message(args, request["id"], resolved_verb="approves or denies the signature"),
         )
         return 0
     except vault_service.SecretNotFoundError:
@@ -6197,17 +6226,45 @@ def cmd_vault_await(args):
         return 1
 
 
-def _vault_request_pending_message(name: str, request: dict[str, object], *, has_spec: bool) -> str:
+def _vault_request_followup_message(args, request_id: str, *, resolved_verb: str) -> str:
+    """Agent-facing follow-up for an access/sign request.
+
+    By default this Session auto-resumes when the request resolves, so the agent should just end
+    its turn. We deliberately do NOT suggest ``vault await`` here: with the callback armed, awaiting
+    would return the synchronous result AND still leave the callback to fire a second turn. To
+    block synchronously the agent must opt out at creation with ``--no-callback`` (then this points
+    at ``vault await``).
+    """
+    if _vault_callback_disabled(args) or not _vault_cli_session_id(args):
+        return f"Request recorded. Check the result yourself with: vibe vault await {request_id}"
+    return (
+        f"Request recorded. This Session resumes automatically once the user {resolved_verb} — "
+        f"end your turn now; you'll be woken with the outcome. (To block synchronously instead, "
+        f"re-issue the request with --no-callback.)"
+    )
+
+
+def _vault_request_pending_message(
+    name: str,
+    request: dict[str, object],
+    *,
+    has_spec: bool,
+    callback_enabled: bool = True,
+) -> str:
+    resume = (
+        " This Session resumes automatically once it is provided — you can end your turn now."
+        if callback_enabled
+        else f" Check back with: vibe vault await {request['id']}."
+    )
     if has_spec:
         return (
-            f"Recorded a request for '{name}'. The user fulfills request {request['id']} from the Vaults page pending "
-            f"requests list by opening its Provide secret row; that request-specific form preserves the requested "
-            f"tags, policy, and skill links. Then use: vibe vault run --env {name} -- <command>"
+            f"Recorded a request for '{name}'. The user provides it from the chat request card or the Vaults "
+            f"page 'Provide secret' row, whose request-specific form preserves the requested tags, policy, and "
+            f"skill links.{resume} Then use: vibe vault run --env {name} -- <command>"
         )
     return (
-        f"Recorded a request for '{name}'. The user fulfills it from the Vaults page pending requests list "
-        f"(Provide secret) or by adding a secret named {name}; saving it marks this request fulfilled. "
-        f"Then use: vibe vault run --env {name} -- <command>"
+        f"Recorded a request for '{name}'. The user provides it from the chat request card, the Vaults page "
+        f"'Provide secret' row, or by adding a secret named {name}.{resume} Then use: vibe vault run --env {name} -- <command>"
     )
 
 
@@ -10157,6 +10214,11 @@ def build_parser():
     vault_access_parser.add_argument("--skill", help="Skill requesting the secret")
     vault_access_parser.add_argument("--command", dest="operation_command", help="Command or operation shown to the user")
     vault_access_parser.add_argument("--egress", help="Egress description shown to the user")
+    vault_access_parser.add_argument(
+        "--no-callback",
+        action="store_true",
+        help="Don't auto-resume this Session when the request resolves (you'll re-check it yourself)",
+    )
     _add_json_noop(vault_access_parser)
 
     vault_sign_parser = vault_subparsers.add_parser(
@@ -10182,6 +10244,11 @@ def build_parser():
     vault_sign_parser.add_argument("--skill", help="Skill requesting the signature")
     vault_sign_parser.add_argument("--command", dest="operation_command", help="Operation shown to the user")
     vault_sign_parser.add_argument("--egress", help="Egress description shown to the user")
+    vault_sign_parser.add_argument(
+        "--no-callback",
+        action="store_true",
+        help="Don't auto-resume this Session when the signature resolves (you'll re-check it yourself)",
+    )
     _add_json_noop(vault_sign_parser)
 
     vault_await_parser = vault_subparsers.add_parser(
@@ -10271,6 +10338,11 @@ def build_parser():
     vault_request_parser.add_argument("--spec-json", help="Inline JSON object with non-secret creation hints")
     vault_request_parser.add_argument("--wait", type=float, metavar="SECONDS", help="Block until fulfilled, up to SECONDS")
     vault_request_parser.add_argument("--no-wait", action="store_true", help="Return immediately (default)")
+    vault_request_parser.add_argument(
+        "--no-callback",
+        action="store_true",
+        help="Don't auto-resume this Session when the secret is provided (you'll re-check it yourself)",
+    )
     _add_json_noop(vault_request_parser)
 
     show_parser = subparsers.add_parser(
