@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
 from importlib import import_module
-from typing import Any
+from typing import Any, Optional
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,12 @@ class PlatformCapabilities:
     supports_message_deletion: bool = False
     markdown_upload_returns_message_id: bool = False
     quick_reply_single_column: bool = False
+    # Max quick-reply buttons packed into one row before wrapping to the next.
+    # ``None`` means unlimited (all buttons on a single row). Ignored when
+    # ``quick_reply_single_column`` is set. Keeps wide-screen rows from
+    # overflowing and truncating button labels on platforms whose native
+    # wrapping (e.g. Lark's flow column_set) only kicks in on narrow screens.
+    quick_reply_max_per_row: Optional[int] = None
     supports_typing_indicator: bool = False
     typing_indicator_requires_clear: bool = False
     typing_indicator_best_effort: bool = False
@@ -225,8 +231,12 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
             supports_message_editing=True,
             markdown_upload_returns_message_id=True,
             # Lark cards lay quick replies out in a flow column_set that wraps to
-            # the next line when a row is full, so keep them multi-column.
+            # the next line when a row is full, so keep them multi-column. Cap at
+            # 3 per row: Lark's flow wrapping only triggers on narrow screens, so
+            # on wide desktop a longer row would compress and truncate labels. 3
+            # fits comfortably in the desktop card for typical (2-4) short labels.
             quick_reply_single_column=False,
+            quick_reply_max_per_row=3,
             supports_reaction_indicator=True,
             preferred_processing_indicator="reaction",
         ),
