@@ -1928,6 +1928,100 @@ def test_terminal_websocket_accepts_setup_host_from_trusted_proxy(monkeypatch, t
 
 
 @pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
+def test_terminal_websocket_accepts_trusted_public_origin_from_proxy_when_remote_access_disabled(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    monkeypatch.setenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, "https://avibe.example.com")
+    config = _save_config(tmp_path)
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+
+    accepted = False
+
+    async def fake_handle_websocket(websocket, session_id):
+        nonlocal accepted
+        accepted = True
+
+    monkeypatch.setattr(ui_server.get_terminal_service(), "handle_websocket", fake_handle_websocket)
+
+    with app.test_client().websocket_connect(
+        "/api/terminal/test",
+        headers={
+            "host": "127.0.0.1:5123",
+            "origin": "https://avibe.example.com",
+            "x-forwarded-proto": "https",
+            "x-forwarded-host": "avibe.example.com",
+            "x-forwarded-for": "203.0.113.10",
+            "x-vibe-test-remote-addr": "127.0.0.1",
+        },
+    ):
+        pass
+
+    assert accepted is True
+
+
+@pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
+def test_terminal_websocket_rejects_unlisted_public_origin_from_trusted_proxy(monkeypatch, tmp_path):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    config = _save_config(tmp_path)
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with app.test_client().websocket_connect(
+            "/api/terminal/test",
+            headers={
+                "host": "127.0.0.1:5123",
+                "origin": "https://avibe.example.com",
+                "x-forwarded-proto": "https",
+                "x-forwarded-host": "avibe.example.com",
+                "x-forwarded-for": "203.0.113.10",
+                "x-vibe-test-remote-addr": "127.0.0.1",
+            },
+        ):
+            pass
+
+    assert exc.value.code == 1008
+
+
+@pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
+def test_terminal_websocket_rejects_loopback_trusted_public_origin_when_remote_access_enabled(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    monkeypatch.setenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, "https://alex.avibe.bot")
+    config = _save_config(tmp_path)
+    config.remote_access.vibe_cloud.public_url = "https://alex.avibe.bot"
+    config.remote_access.vibe_cloud.enabled = True
+    config.save()
+
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with app.test_client().websocket_connect(
+            "/api/terminal/test",
+            headers={
+                "host": "127.0.0.1:5123",
+                "origin": "https://alex.avibe.bot",
+                "x-forwarded-proto": "https",
+                "x-forwarded-host": "alex.avibe.bot",
+                "x-forwarded-for": "203.0.113.10",
+                "x-vibe-test-remote-addr": "127.0.0.1",
+            },
+        ):
+            pass
+
+    assert exc.value.code == 1008
+
+
+@pytest.mark.skipif(not ui_server.TERMINAL_SUPPORTED, reason="terminal requires a POSIX pty")
 def test_terminal_websocket_rejects_remote_same_host_different_origin(monkeypatch, tmp_path):
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -2794,6 +2888,29 @@ def test_setup_host_trusts_forwarded_host_from_explicit_trusted_proxy(monkeypatc
             "X-Forwarded-Proto": "http",
             "X-Forwarded-Host": "192.168.2.3",
             "X-Forwarded-For": "192.168.2.5",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+
+
+def test_trusted_public_origin_can_come_from_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    config = _save_config(tmp_path)
+    config.remote_access.vibe_cloud.enabled = False
+    config.ui.trusted_public_origins = ["https://avibe.example.com"]
+    config.save()
+
+    response = app.test_client().get(
+        "/health",
+        base_url="http://127.0.0.1:5123",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        headers={
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Host": "avibe.example.com",
+            "X-Forwarded-For": "203.0.113.10",
         },
         follow_redirects=False,
     )

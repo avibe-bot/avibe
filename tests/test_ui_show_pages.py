@@ -18,7 +18,7 @@ from core.show_pages import (
 )
 from core.show_runtime import ShowRuntimeManager, _runtime_platform_tag, _safe_extract_tar, set_show_runtime_manager_for_tests
 from tests.test_ui_remote_access_auth import _mock_interface, _remote_peer, _save_config
-from vibe import remote_access
+from vibe import remote_access, ui_server
 from vibe.ui_server import app
 
 
@@ -2277,6 +2277,65 @@ def test_private_show_page_hmr_websocket_accepts_setup_host_local_peer(monkeypat
         set_show_runtime_manager_for_tests(None)
 
     assert manager.websocket_paths == ["/show/ses123/__vite_hmr"]
+
+
+def test_private_show_page_hmr_websocket_accepts_trusted_public_origin(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    monkeypatch.setenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, "https://avibe.example.com")
+    config = _save_config(tmp_path)
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    _create_show_page("ses123", "private")
+    manager = _FakeShowRuntimeManager()
+    set_show_runtime_manager_for_tests(manager)
+    try:
+        with app.test_client().websocket_connect(
+            "/show/ses123/__vite_hmr",
+            headers={
+                "host": "127.0.0.1:5123",
+                "origin": "https://avibe.example.com",
+                "x-forwarded-proto": "https",
+                "x-forwarded-host": "avibe.example.com",
+                "x-forwarded-for": "203.0.113.10",
+                "x-vibe-test-remote-addr": "127.0.0.1",
+            },
+            subprotocols=["vite-hmr"],
+        ) as websocket:
+            websocket.receive_text()
+    except Exception as exc:
+        assert getattr(exc, "code", None) == 1011
+    finally:
+        set_show_runtime_manager_for_tests(None)
+
+    assert manager.websocket_paths == ["/show/ses123/__vite_hmr"]
+
+
+def test_private_show_page_hmr_websocket_rejects_trusted_public_origin_mismatch(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    monkeypatch.setenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, "https://avibe.example.com")
+    config = _save_config(tmp_path)
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    _create_show_page("ses123", "private")
+
+    try:
+        with app.test_client().websocket_connect(
+            "/show/ses123/__vite_hmr",
+            headers={
+                "host": "127.0.0.1:5123",
+                "origin": "https://evil.example.com",
+                "x-forwarded-proto": "https",
+                "x-forwarded-host": "avibe.example.com",
+                "x-forwarded-for": "203.0.113.10",
+                "x-vibe-test-remote-addr": "127.0.0.1",
+            },
+            subprotocols=["vite-hmr"],
+        ):
+            raise AssertionError("websocket should not connect")
+    except Exception as exc:
+        assert getattr(exc, "code", None) == 1008
 
 
 def test_public_show_page_hmr_websocket_uses_share_path(monkeypatch, tmp_path):

@@ -122,6 +122,7 @@ def test_config_post_accepts_vendor_json_content_type(monkeypatch, tmp_path):
 
 def test_config_post_rejects_untrusted_forwarded_origin(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, "https://vibe.example")
     V2Config(
         mode="self_host",
         version="v2",
@@ -153,6 +154,146 @@ def test_config_post_rejects_untrusted_forwarded_origin(monkeypatch, tmp_path):
 
     assert response.status_code == 403
     assert response.get_json()["message"] == "Forbidden: invalid origin"
+
+
+def test_config_post_allows_trusted_public_origin_from_proxy_when_remote_access_disabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    monkeypatch.setenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, "https://avibe.example.com")
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+    )
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:15131")
+    headers["Origin"] = "https://avibe.example.com"
+    headers["X-Forwarded-Proto"] = "https"
+    headers["X-Forwarded-Host"] = "avibe.example.com"
+    headers["X-Forwarded-For"] = "203.0.113.10"
+
+    response = client.post(
+        "/api/config",
+        json={
+            "mode": "self_host",
+            "runtime": {"default_cwd": "/tmp/test"},
+            "agents": {
+                "default_backend": "opencode",
+                "opencode": {"enabled": True, "cli_path": "opencode"},
+                "claude": {"enabled": False, "cli_path": "claude"},
+                "codex": {"enabled": False, "cli_path": "codex"},
+            },
+        },
+        headers=headers,
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["mode"] == "self_host"
+
+
+def test_config_post_rejects_unlisted_public_origin_from_trusted_proxy(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+    )
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:15131")
+    headers["Origin"] = "https://avibe.example.com"
+    headers["X-Forwarded-Proto"] = "https"
+    headers["X-Forwarded-Host"] = "avibe.example.com"
+    headers["X-Forwarded-For"] = "203.0.113.10"
+
+    response = client.post(
+        "/api/config",
+        json={"mode": "self_host"},
+        headers=headers,
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error"] == "remote_access_host_mismatch"
+
+
+def test_config_post_rejects_host_only_trusted_public_origin_entry(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    monkeypatch.setenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, "avibe.example.com")
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+    )
+    config.remote_access.vibe_cloud.enabled = False
+    config.save()
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:15131")
+    headers["Origin"] = "https://avibe.example.com"
+    headers["X-Forwarded-Proto"] = "https"
+    headers["X-Forwarded-Host"] = "avibe.example.com"
+    headers["X-Forwarded-For"] = "203.0.113.10"
+
+    response = client.post(
+        "/api/config",
+        json={"mode": "self_host"},
+        headers=headers,
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["error"] == "remote_access_host_mismatch"
+
+
+def test_config_post_rejects_loopback_trusted_public_origin_when_remote_access_enabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    monkeypatch.setenv(ui_server.TRUSTED_PROXY_IPS_ENV, "127.0.0.1")
+    monkeypatch.setenv(ui_server.TRUSTED_PUBLIC_ORIGINS_ENV, "https://alex.avibe.bot")
+    config = V2Config(
+        mode="self_host",
+        version="v2",
+        slack=SlackConfig(bot_token=""),
+        runtime=RuntimeConfig(default_cwd="."),
+        agents=AgentsConfig(),
+        remote_access=RemoteAccessConfig(),
+    )
+    cloud = config.remote_access.vibe_cloud
+    cloud.enabled = True
+    cloud.public_url = "https://alex.avibe.bot"
+    cloud.session_secret = "session-secret"
+    config.save()
+    client = app.test_client()
+    headers = csrf_headers(client, "http://127.0.0.1:15131")
+    headers["Origin"] = "https://alex.avibe.bot"
+    headers["X-Forwarded-Proto"] = "https"
+    headers["X-Forwarded-Host"] = "alex.avibe.bot"
+    headers["X-Forwarded-For"] = "203.0.113.10"
+
+    response = client.post(
+        "/api/config",
+        json={"mode": "self_host"},
+        headers=headers,
+        base_url="http://127.0.0.1:15131",
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "remote_access_login_required"
 
 
 def test_config_post_allows_forwarded_origin_from_explicit_trusted_proxy(monkeypatch, tmp_path):

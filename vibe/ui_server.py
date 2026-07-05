@@ -138,6 +138,7 @@ REMOTE_OAUTH_DEVICE_COOKIE_NAME = "__Host-vibe_oauth_device"
 REMOTE_OAUTH_DEVICE_TTL_SECONDS = 180 * 24 * 60 * 60
 MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 TRUSTED_PROXY_IPS_ENV = "VIBE_UI_TRUSTED_PROXY_IPS"
+TRUSTED_PUBLIC_ORIGINS_ENV = "VIBE_UI_TRUSTED_PUBLIC_ORIGINS"
 LOG_SOURCES = (
     ("service", "vibe_remote.log", lambda: paths.get_logs_dir() / "vibe_remote.log"),
     ("service_stdout", "service_stdout.log", lambda: paths.get_runtime_dir() / "service_stdout.log"),
@@ -354,6 +355,20 @@ def _effective_normalized_host() -> str:
     return _normalized_host(_effective_request_host())
 
 
+def _trusted_forwarded_origin_identity() -> tuple[str, str, int | None] | None:
+    trusted_forwarded_host = _trusted_forwarded_host()
+    if trusted_forwarded_host is None:
+        return None
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower()
+    if forwarded_proto not in {"http", "https"}:
+        return None
+    return (
+        forwarded_proto,
+        _normalized_host(trusted_forwarded_host),
+        _origin_port(trusted_forwarded_host, forwarded_proto),
+    )
+
+
 def _trusted_forwarded_client_address() -> ipaddress._BaseAddress | None:
     if not _is_explicitly_trusted_proxy_peer():
         return None
@@ -415,6 +430,93 @@ def _forwarded_host_has_explicit_port(value: str) -> bool:
         return urlparse(f"//{value}").port is not None
     except ValueError:
         return False
+
+
+def _trusted_public_origin_entries(config: V2Config | None) -> list[str]:
+    values: list[str] = []
+    configured = getattr(getattr(config, "ui", None), "trusted_public_origins", None)
+    if isinstance(configured, str):
+        values.extend(configured.split(","))
+    elif isinstance(configured, (list, tuple, set)):
+        values.extend(str(value) for value in configured)
+    values.extend(os.environ.get(TRUSTED_PUBLIC_ORIGINS_ENV, "").split(","))
+    return [value.strip() for value in values if value and value.strip()]
+
+
+def _trusted_public_origin_entry_matches(
+    value: str,
+    *,
+    scheme: str,
+    host: str,
+    port: int | None,
+) -> bool:
+    parsed = urlparse(value)
+    try:
+        explicit_port = parsed.port
+    except ValueError:
+        logger.warning("Ignoring invalid %s entry: %s", TRUSTED_PUBLIC_ORIGINS_ENV, value)
+        return False
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        logger.warning("Ignoring invalid %s entry: %s", TRUSTED_PUBLIC_ORIGINS_ENV, value)
+        return False
+    entry_host = _normalized_host(parsed.hostname)
+    if entry_host != host:
+        return False
+    entry_scheme = parsed.scheme.lower()
+    return scheme == entry_scheme and port == (explicit_port or _origin_port(parsed.netloc, entry_scheme))
+
+
+def _trusted_public_origin_matches(
+    config: V2Config | None,
+    identity: tuple[str, str, int | None] | None,
+) -> bool:
+    if identity is None:
+        return False
+    scheme, host, port = identity
+    if not host:
+        return False
+    return any(
+        _trusted_public_origin_entry_matches(value, scheme=scheme, host=host, port=port)
+        for value in _trusted_public_origin_entries(config)
+    )
+
+
+def _trusted_public_origin_allowed_for_peer(
+    config: V2Config | None,
+    peer_address: ipaddress._BaseAddress | None,
+) -> bool:
+    if config is None:
+        return False
+    cloud = getattr(getattr(config, "remote_access", None), "vibe_cloud", None)
+    if not getattr(cloud, "enabled", False):
+        return True
+    if peer_address is not None and not peer_address.is_loopback:
+        return True
+    logger.warning(
+        "Ignoring %s for loopback trusted proxy while remote access is enabled; "
+        "use a non-loopback proxy peer, disable remote access, or enforce authentication before the proxy.",
+        TRUSTED_PUBLIC_ORIGINS_ENV,
+    )
+    return False
+
+
+def _trusted_public_origin_local_request(config: V2Config | None) -> bool:
+    if not _has_trusted_forwarded_metadata():
+        return False
+    if not _trusted_public_origin_matches(config, _trusted_forwarded_origin_identity()):
+        return False
+    return _trusted_public_origin_allowed_for_peer(
+        config,
+        _request_peer_address(),
+    )
 
 
 def _is_mutation_guard_exempt() -> bool:
@@ -1126,6 +1228,8 @@ def _is_local_request(config: V2Config | None = None) -> bool:
         return False
     if _has_trusted_forwarded_metadata() and _trusted_forwarded_host() is None:
         return False
+    if _trusted_public_origin_local_request(config):
+        return True
     if not _has_trusted_forwarded_metadata() and _is_loopback_peer() and _effective_loopback_host():
         return True
     if _is_trusted_docker_loopback_request():
@@ -2182,6 +2286,9 @@ async def websocket_echo(websocket: WebSocket):
 async def show_runtime_hmr_websocket(websocket: WebSocket, session_id: str):
     from core.show_pages import ShowPageStore
 
+    if not _show_runtime_hmr_origin_allowed(websocket):
+        await websocket.close(code=1008)
+        return
     if not _show_runtime_websocket_authorized(websocket):
         await websocket.close(code=1008)
         return
@@ -2320,6 +2427,13 @@ def _show_runtime_websocket_authorized(websocket: Any) -> bool:
     return _remote_access_websocket_session_payload(websocket, config) is not None
 
 
+def _show_runtime_hmr_origin_allowed(websocket: Any) -> bool:
+    config = _load_remote_access_config()
+    if not _websocket_trusted_public_origin_local_request(websocket, config):
+        return True
+    return _websocket_origin_matches_effective_request(websocket)
+
+
 def _remote_access_websocket_session_payload(websocket: Any, config: V2Config | None) -> dict[str, Any] | None:
     if config is None or _websocket_is_local_request(websocket, config):
         return None
@@ -2384,6 +2498,22 @@ def _terminal_origin_allowed(websocket: Any) -> bool:
     )
 
 
+def _websocket_origin_matches_effective_request(websocket: Any) -> bool:
+    origin = _request_origin(websocket.headers.get("origin"))
+    if not origin:
+        return False
+    parsed_origin = urlparse(origin)
+    if _normalized_host(parsed_origin.netloc) != _websocket_normalized_host(websocket):
+        return False
+    origin_port = _origin_port(parsed_origin.netloc, parsed_origin.scheme)
+    websocket_scheme = _websocket_effective_scheme(websocket)
+    request_port = _origin_port(_websocket_effective_request_host(websocket), websocket_scheme)
+    return origin_port == request_port and _terminal_origin_scheme_matches_socket(
+        parsed_origin.scheme,
+        websocket_scheme,
+    )
+
+
 def _origin_port(netloc: str | None, scheme: str | None) -> int | None:
     if not netloc:
         return None
@@ -2413,6 +2543,8 @@ def _websocket_is_local_request(websocket: Any, config: V2Config | None = None) 
         return False
     if _websocket_has_trusted_forwarded_metadata(websocket) and _websocket_trusted_forwarded_host(websocket) is None:
         return False
+    if _websocket_trusted_public_origin_local_request(websocket, config):
+        return True
     client_host = _websocket_client_host(websocket)
     if not _websocket_has_trusted_forwarded_metadata(websocket) and client_host == "testclient":
         return _is_loopback_host(websocket.headers.get("host"))
@@ -2540,6 +2672,24 @@ def _websocket_effective_scheme(websocket: Any) -> str:
     return websocket.url.scheme
 
 
+def _websocket_trusted_forwarded_origin_identity(websocket: Any) -> tuple[str, str, int | None] | None:
+    trusted_forwarded_host = _websocket_trusted_forwarded_host(websocket)
+    if trusted_forwarded_host is None:
+        return None
+    forwarded_proto = websocket.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower()
+    if forwarded_proto == "wss":
+        forwarded_proto = "https"
+    elif forwarded_proto == "ws":
+        forwarded_proto = "http"
+    if forwarded_proto not in {"http", "https"}:
+        return None
+    return (
+        forwarded_proto,
+        _normalized_host(trusted_forwarded_host),
+        _origin_port(trusted_forwarded_host, forwarded_proto),
+    )
+
+
 def _websocket_trusted_forwarded_client_address(websocket: Any) -> ipaddress._BaseAddress | None:
     if not _websocket_is_explicitly_trusted_proxy_peer(websocket):
         return None
@@ -2589,6 +2739,17 @@ def _websocket_is_private_peer(websocket: Any) -> bool:
 
 def _websocket_is_private_peer_address(address: ipaddress._BaseAddress | None) -> bool:
     return address is not None and _is_private_address(address)
+
+
+def _websocket_trusted_public_origin_local_request(websocket: Any, config: V2Config | None) -> bool:
+    if not _websocket_has_trusted_forwarded_metadata(websocket):
+        return False
+    if not _trusted_public_origin_matches(config, _websocket_trusted_forwarded_origin_identity(websocket)):
+        return False
+    return _trusted_public_origin_allowed_for_peer(
+        config,
+        _websocket_peer_address(websocket),
+    )
 
 
 def _websocket_peer_shares_setup_host_network(
