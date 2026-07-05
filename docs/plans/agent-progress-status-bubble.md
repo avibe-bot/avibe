@@ -124,6 +124,10 @@
 频道级 `progress_style`：`concise`（**Slack/Discord 首版直接默认**，见 §11 分叉2）/ `off`（仅 typing + 结果）。
 可调：`heartbeat_interval_ms`(默认 30000)、`no_output_hint_after_ms`(默认 180000，即 3min 触发"已 N 分钟无输出"提示)、`show_step_count`(默认关，先不显示步数保持最简)。状态条正文固定显示"当前动作"（已拍，见 §11）；footer 保留 ⏳ 沙漏。
 
+> **后续更新（2026-07）**：
+> - **飞书/Lark 也支持 concise 状态条**，见 [feishu-concise-progress.md](./feishu-concise-progress.md)。飞书卡片 schema 2.0 无 `note` 组件，footer 用 notation 字号 + 内联 `<font color='grey'>` 渲染；并借 `im.v1.message.delete` 撤回能力实现「收尾只留一条结果消息」，与 Slack/Discord 对齐。当前支持 concise 的平台为 **Slack / Discord / Lark**。
+> - **心跳间隔默认已改为 8s**（`agent_status_heartbeat_ms`，实现值此前为 15000，本节 30000 为更早的规划值）。全局生效，非按平台。
+
 ## 10. 实现顺序（最小切片）
 
 > P0 **先不带计时**（计时随 P1 心跳落地）——状态条 P0 阶段是静态动作标签（Nit N3）。
