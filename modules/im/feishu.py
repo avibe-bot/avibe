@@ -476,11 +476,14 @@ class FeishuBot(BaseIMClient):
         connections.
 
         ``subtext`` is the concise status-bubble footer (BaseIMClient contract).
-        When present it is rendered as a trailing ``note`` element — Feishu's
-        small de-emphasized secondary text, the analog of Slack's context block
-        / Discord's ``-#``. When ``text`` is empty (footer-only turn-start
-        bubble) the body markdown element is omitted so the note renders alone.
-        With ``subtext=None`` the card is byte-for-byte identical to before.
+        When present it is rendered as a trailing notation-sized markdown element
+        with an inline ``<font color='grey'>`` wrap — the analog of Slack's
+        context block / Discord's ``-#``. Card schema 2.0 dropped the ``note``
+        component, and its markdown component rejects a ``text_color`` property,
+        so grey must come from the inline font tag. When ``text`` is empty
+        (footer-only turn-start bubble) the body markdown element is omitted so
+        the footer renders alone. With ``subtext=None`` the card is byte-for-byte
+        identical to before.
         """
         elements: list = []
         # Keep the body markdown element for every legacy (subtext=None) call so
@@ -541,10 +544,16 @@ class FeishuBot(BaseIMClient):
                     )
 
         if subtext:
+            # Card schema 2.0 removed the ``note`` component. Its replacement is a
+            # notation-sized (smallest) markdown element; the grey de-emphasis
+            # must come from an inline ``<font color='grey'>`` tag, because the
+            # 2.0 markdown component rejects a ``text_color`` property. Both were
+            # verified against the live Feishu API.
             elements.append(
                 {
-                    "tag": "note",
-                    "elements": [{"tag": "plain_text", "content": subtext}],
+                    "tag": "markdown",
+                    "content": f"<font color='grey'>{subtext}</font>",
+                    "text_size": "notation",
                 }
             )
 

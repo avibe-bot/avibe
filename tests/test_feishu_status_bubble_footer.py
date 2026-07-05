@@ -1,13 +1,14 @@
 """Feishu concise status-bubble footer rendering (parity with Slack/Discord).
 
 The dispatcher hands adapters ``(body, footer)`` separately via the optional
-``subtext`` parameter. Feishu renders the footer as a trailing card ``note``
-element (small de-emphasized text), the analog of Slack's context block and
-Discord's ``-#``. These tests cover:
+``subtext`` parameter. Card schema 2.0 dropped the ``note`` component, so Feishu
+renders the footer as a trailing notation-sized grey ``markdown`` element (its
+documented replacement) — the analog of Slack's context block and Discord's
+``-#``. These tests cover:
 
-- the pure card builder (``_build_card_json``): note element iff ``subtext`` is
-  set, ``subtext=None`` is byte-identical to before, and footer-only (empty
-  body) renders the note alone;
+- the pure card builder (``_build_card_json``): footer element iff ``subtext``
+  is set, ``subtext=None`` is byte-identical to before, and footer-only (empty
+  body) renders the footer alone;
 - the send/edit/buttons paths forward ``subtext`` into the card;
 - the empty-body guard relaxation;
 - the lark platform capability flag.
@@ -35,6 +36,17 @@ from modules.im.feishu import FeishuBot
 
 def _card_elements(card_json: str) -> list:
     return json.loads(card_json)["body"]["elements"]
+
+
+def _footer_element(subtext: str) -> dict:
+    # Card schema 2.0 has no ``note``; the footer is a notation-sized markdown
+    # element with an inline grey font wrap (verified valid against the live
+    # Feishu API — ``text_color`` as a property is rejected).
+    return {"tag": "markdown", "content": f"<font color='grey'>{subtext}</font>", "text_size": "notation"}
+
+
+def _assert_is_footer(test, element: dict, subtext: str) -> None:
+    test.assertEqual(element, _footer_element(subtext))
 
 
 def _make_bot() -> FeishuBot:
@@ -65,19 +77,16 @@ def _stub_lark_client(bot: FeishuBot) -> types.SimpleNamespace:
 
 
 class BuildCardJsonFooterTests(unittest.TestCase):
-    def test_subtext_appends_note_element(self):
+    def test_subtext_appends_footer_element(self):
         bot = _make_bot()
         elements = _card_elements(bot._build_card_json("🔧 Read: feishu.py", subtext="⏳ 5s"))
-        # Body markdown first, footer note last.
+        # Body markdown first, footer last.
         self.assertEqual(elements[0], {"tag": "markdown", "content": "🔧 Read: feishu.py"})
-        self.assertEqual(
-            elements[-1],
-            {"tag": "note", "elements": [{"tag": "plain_text", "content": "⏳ 5s"}]},
-        )
+        _assert_is_footer(self, elements[-1], "⏳ 5s")
 
     def test_no_subtext_is_byte_identical_to_before(self):
         bot = _make_bot()
-        # The pre-change output was a single markdown element and no note.
+        # The pre-change output was a single markdown element and no footer.
         self.assertEqual(
             bot._build_card_json("hello"),
             json.dumps(
@@ -101,12 +110,11 @@ class BuildCardJsonFooterTests(unittest.TestCase):
         self.assertEqual(elements[0], {"tag": "markdown", "content": ""})
         self.assertEqual([e["tag"] for e in elements], ["markdown", "button"])
 
-    def test_footer_only_empty_body_renders_note_alone(self):
+    def test_footer_only_empty_body_renders_footer_alone(self):
         bot = _make_bot()
         elements = _card_elements(bot._build_card_json("", subtext="⏳ working · 0s"))
         self.assertEqual(len(elements), 1)
-        self.assertEqual(elements[0]["tag"], "note")
-        self.assertEqual(elements[0]["elements"][0]["content"], "⏳ working · 0s")
+        _assert_is_footer(self, elements[0], "⏳ working · 0s")
 
     def test_buttons_and_subtext_coexist(self):
         bot = _make_bot()
@@ -115,9 +123,8 @@ class BuildCardJsonFooterTests(unittest.TestCase):
         tags = [e["tag"] for e in elements]
         self.assertEqual(tags[0], "markdown")
         self.assertIn("button", tags)
-        # Footer note is last so it stays below the buttons.
-        self.assertEqual(elements[-1]["tag"], "note")
-        self.assertEqual(elements[-1]["elements"][0]["content"], "✅ done · 248k tok")
+        # Footer is last so it stays below the buttons.
+        _assert_is_footer(self, elements[-1], "✅ done · 248k tok")
 
 
 class SendEditForwardsSubtextTests(unittest.IsolatedAsyncioTestCase):
@@ -127,8 +134,7 @@ class SendEditForwardsSubtextTests(unittest.IsolatedAsyncioTestCase):
         ctx = MessageContext(user_id="U1", channel_id="oc_chat", platform="lark")
         await bot.send_message(ctx, "🔧 x", subtext="⏳ 5s")
         content = json.loads(message.acreate.await_args.args[0].request_body.content)
-        self.assertEqual(content["body"]["elements"][-1]["tag"], "note")
-        self.assertEqual(content["body"]["elements"][-1]["elements"][0]["content"], "⏳ 5s")
+        _assert_is_footer(self, content["body"]["elements"][-1], "⏳ 5s")
 
     async def test_send_message_footer_only_is_allowed(self):
         bot = _make_bot()
@@ -139,7 +145,7 @@ class SendEditForwardsSubtextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mid, "om_new")
         content = json.loads(message.acreate.await_args.args[0].request_body.content)
         self.assertEqual(len(content["body"]["elements"]), 1)
-        self.assertEqual(content["body"]["elements"][0]["tag"], "note")
+        _assert_is_footer(self, content["body"]["elements"][0], "⏳ working · 0s")
 
     async def test_send_message_empty_without_subtext_still_rejected(self):
         bot = _make_bot()
@@ -156,8 +162,7 @@ class SendEditForwardsSubtextTests(unittest.IsolatedAsyncioTestCase):
         # Thread reply goes through areply (reply_in_thread), not acreate.
         message.acreate.assert_not_awaited()
         content = json.loads(message.areply.await_args.args[0].request_body.content)
-        self.assertEqual(content["body"]["elements"][-1]["tag"], "note")
-        self.assertEqual(content["body"]["elements"][-1]["elements"][0]["content"], "⏳ 5s")
+        _assert_is_footer(self, content["body"]["elements"][-1], "⏳ 5s")
 
     async def test_edit_message_forwards_subtext(self):
         bot = _make_bot()
@@ -166,8 +171,7 @@ class SendEditForwardsSubtextTests(unittest.IsolatedAsyncioTestCase):
         ok = await bot.edit_message(ctx, "om_1", text="🔧 y", subtext="⏳ 9s")
         self.assertTrue(ok)
         content = json.loads(message.apatch.await_args.args[0].request_body.content)
-        self.assertEqual(content["body"]["elements"][-1]["tag"], "note")
-        self.assertEqual(content["body"]["elements"][-1]["elements"][0]["content"], "⏳ 9s")
+        _assert_is_footer(self, content["body"]["elements"][-1], "⏳ 9s")
 
     async def test_edit_message_collapse_marker_footer_only(self):
         bot = _make_bot()
@@ -178,7 +182,7 @@ class SendEditForwardsSubtextTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         content = json.loads(message.apatch.await_args.args[0].request_body.content)
         self.assertEqual(len(content["body"]["elements"]), 1)
-        self.assertEqual(content["body"]["elements"][0]["elements"][0]["content"], "✅ done")
+        _assert_is_footer(self, content["body"]["elements"][0], "✅ done")
 
     async def test_send_message_with_buttons_forwards_subtext(self):
         bot = _make_bot()
@@ -189,10 +193,9 @@ class SendEditForwardsSubtextTests(unittest.IsolatedAsyncioTestCase):
         await bot.send_message_with_buttons(ctx, "Final answer", keyboard, subtext="✅ done · 248k tok")
         content = json.loads(message.acreate.await_args.args[0].request_body.content)
         tags = [e["tag"] for e in content["body"]["elements"]]
-        # Both the buttons and the footer note survive (the regression codex flagged).
+        # Both the buttons and the footer survive (the regression codex flagged).
         self.assertIn("button", tags)
-        self.assertEqual(content["body"]["elements"][-1]["tag"], "note")
-        self.assertEqual(content["body"]["elements"][-1]["elements"][0]["content"], "✅ done · 248k tok")
+        _assert_is_footer(self, content["body"]["elements"][-1], "✅ done · 248k tok")
 
 
 class LarkCapabilityTests(unittest.TestCase):
