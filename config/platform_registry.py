@@ -224,7 +224,9 @@ PLATFORM_REGISTRY: dict[str, PlatformDescriptor] = {
             supports_quick_replies=True,
             supports_message_editing=True,
             markdown_upload_returns_message_id=True,
-            quick_reply_single_column=True,
+            # Lark cards lay quick replies out in a flow column_set that wraps to
+            # the next line when a row is full, so keep them multi-column.
+            quick_reply_single_column=False,
             supports_reaction_indicator=True,
             preferred_processing_indicator="reaction",
         ),

@@ -499,8 +499,9 @@ class FeishuBot(BaseIMClient):
                         columns.append(
                             {
                                 "tag": "column",
-                                "width": "weighted",
-                                "weight": 1,
+                                # ``auto`` sizes each column to its button so the
+                                # ``flow`` column_set can wrap to the next line.
+                                "width": "auto",
                                 "elements": [
                                     {
                                         "tag": "button",
@@ -516,7 +517,9 @@ class FeishuBot(BaseIMClient):
                     elements.append(
                         {
                             "tag": "column_set",
-                            "flex_mode": "none",
+                            # ``flow`` wraps columns to the next line when a row is
+                            # full, so quick replies stay readable on narrow screens.
+                            "flex_mode": "flow",
                             "background_style": "default",
                             "columns": columns,
                         }

@@ -218,5 +218,45 @@ class FeishuPostMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.on_message_callback.await_args.args[1], "scheduled follow-up context")
 
 
+class FeishuCardLayoutTests(unittest.TestCase):
+    def _make_bot(self) -> FeishuBot:
+        return FeishuBot(LarkConfig(app_id="app-id", app_secret="app-secret"))
+
+    def test_multi_button_row_uses_flow_column_set(self):
+        bot = self._make_bot()
+        card = json.loads(
+            bot._build_card_json(
+                "pick one",
+                [
+                    [
+                        {"text": "A", "callback_data": "quick_reply:A"},
+                        {"text": "B", "callback_data": "quick_reply:B"},
+                    ]
+                ],
+            )
+        )
+
+        column_set = card["body"]["elements"][1]
+        self.assertEqual(column_set["tag"], "column_set")
+        # ``flow`` lets a full row wrap to the next line on narrow screens, and
+        # ``auto`` widths size each column to its button so wrapping works.
+        self.assertEqual(column_set["flex_mode"], "flow")
+        self.assertEqual([c["width"] for c in column_set["columns"]], ["auto", "auto"])
+        self.assertNotIn("weight", column_set["columns"][0])
+
+    def test_single_button_row_fills_width(self):
+        bot = self._make_bot()
+        card = json.loads(
+            bot._build_card_json(
+                "confirm",
+                [[{"text": "OK", "callback_data": "quick_reply:OK"}]],
+            )
+        )
+
+        button = card["body"]["elements"][1]
+        self.assertEqual(button["tag"], "button")
+        self.assertEqual(button["width"], "fill")
+
+
 if __name__ == "__main__":
     unittest.main()
