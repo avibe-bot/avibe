@@ -949,8 +949,8 @@ class Controller:
 
     def get_heartbeat_interval_ms_for_context(self, context: MessageContext) -> int:
         _refresh_status_bubble_config(self)
-        value = getattr(self.config, "agent_status_heartbeat_ms", 15000)
-        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 15000
+        value = getattr(self.config, "agent_status_heartbeat_ms", 8000)
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 8000
 
     def get_no_output_hint_after_ms_for_context(self, context: MessageContext) -> int:
         _refresh_status_bubble_config(self)

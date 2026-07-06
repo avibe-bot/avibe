@@ -533,8 +533,8 @@ class ConsolidatedMessageDispatcher:
                 if value and value > 0:
                     return float(value) / 1000.0
             except Exception:
-                logger.debug("get_heartbeat_interval_ms_for_context failed; default 15s", exc_info=True)
-        return 15.0
+                logger.debug("get_heartbeat_interval_ms_for_context failed; default 8s", exc_info=True)
+        return 8.0
 
     def _no_output_hint_after_s(self, context: MessageContext) -> float:
         getter = getattr(self.controller, "get_no_output_hint_after_ms_for_context", None)
@@ -637,17 +637,20 @@ class ConsolidatedMessageDispatcher:
         backend_dead: bool = False,
         hourglass: str = "⏳",
         steps: int = 0,
+        force_duration: bool = False,
     ) -> str:
         elapsed = self._format_elapsed(elapsed_s)
         token_field = self._token_field(context)
         if done:
             # Terminal footer: a reason word with a marker (✅ clean "done", ⏹
-            # "stopped"/"failed"). Elapsed time is appended only when show_duration
-            # is on (matches result-message duration gating); the session token
-            # total is kept so the final bubble still reports usage.
+            # "stopped"/"failed") · elapsed · tokens. Elapsed time is appended when
+            # show_duration is on OR force_duration is set: the collapsed status
+            # bubble always summarises its own run time (that's the whole point of
+            # the residual marker), while the result-message footer keeps the
+            # show_duration gating so it doesn't double-surface the duration.
             marker = "✅" if reason == "done" else "⏹"
             footer = f"{marker} {self._t('status.' + reason)}"
-            if self._show_duration():
+            if force_duration or self._show_duration():
                 footer += f" · {elapsed}"
             if token_field:
                 footer += f" · {token_field}"
@@ -877,7 +880,11 @@ class ConsolidatedMessageDispatcher:
         if not bubble_id:
             return
         elapsed_s = self._now() - self._status_started_at.get(key, self._now())
-        marker = self._status_footer_text(context, elapsed_s=elapsed_s, done=True, reason=reason)
+        # The collapsed bubble is the turn's residual summary line, so always show
+        # the run time here (✅ done · 1m30s · 240k tok) regardless of show_duration.
+        marker = self._status_footer_text(
+            context, elapsed_s=elapsed_s, done=True, reason=reason, force_duration=True
+        )
         target_context = self._get_target_context(context)
         try:
             # Render the marker as the footer (empty body → footer-only bubble) so

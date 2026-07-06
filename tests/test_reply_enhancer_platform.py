@@ -53,7 +53,7 @@ class _StubIMClient:
 
 
 class _StubController:
-    def __init__(self, platform: str):
+    def __init__(self, platform: str, progress_style: str = "verbose"):
         self.config = type(
             "Config",
             (),
@@ -61,6 +61,15 @@ class _StubController:
         )()
         self.settings_manager = _StubSettingsManager()
         self.im_client = _StubIMClient()
+        # Process/assistant messages are gated by the progress style on
+        # status-bubble platforms (Slack/Discord/Lark). These content-transform
+        # tests exercise the verbose log-message delivery path, so default to
+        # "verbose" (lark's historical effective behavior before it gained the
+        # status-bubble capability).
+        self._progress_style = progress_style
+
+    def get_progress_style_for_context(self, context=None) -> str:
+        return self._progress_style
 
     @staticmethod
     def _get_settings_key(context: MessageContext) -> str:

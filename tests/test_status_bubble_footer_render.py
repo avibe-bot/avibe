@@ -109,7 +109,8 @@ class DeletionCapabilityTests(unittest.TestCase):
         for platform in ("slack", "discord"):
             caps = get_platform_descriptor(platform).capabilities
             self.assertTrue(caps.supports_message_deletion, platform)
-        # A non-deletion platform stays False (drives the collapse fallback).
+        # Lark recall leaves a "此消息已撤回" tombstone, so it stays False and the
+        # dispatcher collapses its bubble to a marker instead of deleting.
         self.assertFalse(get_platform_descriptor("lark").capabilities.supports_message_deletion)
 
     def test_compose_status_content_truncates_body_to_fit_2000_limit(self):

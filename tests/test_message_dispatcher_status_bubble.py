@@ -186,9 +186,11 @@ class StatusBubbleProcessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(controller.im_client.edits, [])
 
     async def test_non_editing_platform_uses_verbose_append(self):
-        controller = _StubController(platform="lark")
+        # wechat has no status-bubble capability (lark gained it), so it stays on
+        # the verbose append path.
+        controller = _StubController(platform="wechat")
         d = _dispatcher(controller)
-        self.assertEqual(d._concise_progress_style(_ctx("lark")), "verbose")
+        self.assertEqual(d._concise_progress_style(_ctx("wechat")), "verbose")
 
     async def test_concise_toolcall_renders_despite_hidden_toolcall(self):
         # Regression: the concise status bubble is an ephemeral status line, not
@@ -397,7 +399,8 @@ class StatusBubbleResultTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("msg-2", "Final answer", "✅ done"), controller.im_client.sent)
         self.assertEqual(controller.im_client.deletes, ["msg-1"])  # delete attempted
         # Delete returned False → fall back to collapsing the bubble to a marker.
-        self.assertIn(("msg-1", "", "✅ done"), controller.im_client.edits)
+        # The collapsed marker always carries the run time (force_duration).
+        self.assertIn(("msg-1", "", "✅ done · 0s"), controller.im_client.edits)
 
     async def test_result_without_prior_bubble_sends_normally(self):
         controller = _StubController(platform="slack")
@@ -548,6 +551,22 @@ class StatusBubbleResultTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(controller.im_client.sent), sends_before)  # no new bubble posted
         self.assertEqual(len(controller.im_client.edits), edits_before)
 
+    async def test_collapsed_marker_shows_run_time_even_without_show_duration(self):
+        # The collapsed bubble is the turn's residual summary line, so it always
+        # reports the run time (force_duration) — here 90s → "1:30" — even though
+        # show_duration is off. The fresh RESULT footer keeps the show_duration
+        # gating, so it stays time-less.
+        controller = _StubController(platform="slack", im_client=_EditClient(delete_result=False))
+        d = _dispatcher(controller)
+        ctx = _ctx()
+        with mock.patch("core.message_dispatcher.persist_agent_message"):
+            await d.emit_agent_message(ctx, "toolcall", "🔧 `Bash` `{}`")  # bubble msg-1
+            key = d._get_consolidated_message_key(ctx)
+            d._status_started_at[key] = 910.0  # 90s before the frozen now (1000.0)
+            await d.emit_agent_message(ctx, "result", "Final answer")
+        self.assertIn(("msg-1", "", "✅ done · 1:30"), controller.im_client.edits)
+        self.assertIn(("msg-2", "Final answer", "✅ done"), controller.im_client.sent)
+
     async def test_error_result_collapse_fallback_uses_failed_marker(self):
         # C4: on an is_error turn where the bubble delete fails, the collapse
         # fallback reflects the failure outcome (⏹ failed), NOT a hardcoded ✅ done.
@@ -559,8 +578,8 @@ class StatusBubbleResultTests(unittest.IsolatedAsyncioTestCase):
             result_id = await d.emit_agent_message(ctx, "result", "Failed answer", is_error=True)
         self.assertEqual(result_id, "msg-2")  # fresh result message
         self.assertEqual(controller.im_client.deletes, ["msg-1"])  # delete attempted (failed)
-        self.assertIn(("msg-1", "", "⏹ failed"), controller.im_client.edits)  # collapse fallback
-        self.assertNotIn(("msg-1", "", "✅ done"), controller.im_client.edits)
+        self.assertIn(("msg-1", "", "⏹ failed · 0s"), controller.im_client.edits)  # collapse fallback
+        self.assertNotIn(("msg-1", "", "✅ done · 0s"), controller.im_client.edits)
 
     async def test_result_teardown_drops_lock_dict_entry(self):
         # C6: after a turn ends, the per-key consolidated lock must be dropped from
@@ -662,9 +681,10 @@ class BeginStatusBubbleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(controller.im_client.edits, [])
 
     async def test_begin_noop_on_non_status_bubble_platform(self):
-        controller = _StubController(platform="lark")
+        # wechat lacks the status-bubble capability (lark gained it).
+        controller = _StubController(platform="wechat")
         d = _dispatcher(controller)
-        await d.begin_status_bubble(_ctx("lark"))
+        await d.begin_status_bubble(_ctx("wechat"))
         self.assertEqual(controller.im_client.sent, [])
         self.assertEqual(controller.im_client.edits, [])
 
@@ -680,7 +700,7 @@ class BeginStatusBubbleTests(unittest.IsolatedAsyncioTestCase):
             result_id = await d.emit_agent_message(ctx, "result", "", is_error=True)
         self.assertIsNone(result_id)  # empty result delivers nothing
         # is_error + non-silent → "failed": ⏹ failed marker, not ✅.
-        self.assertIn(("msg-1", "", "⏹ failed"), controller.im_client.edits)
+        self.assertIn(("msg-1", "", "⏹ failed · 0s"), controller.im_client.edits)
 
     async def test_silent_result_tidies_starting_bubble(self):
         controller = _StubController(platform="slack")
@@ -690,7 +710,7 @@ class BeginStatusBubbleTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch("core.message_dispatcher.persist_agent_message"):
             await d.emit_agent_message(ctx, "result", "🛑 stopped", level="silent")
         # Silent but NOT is_error → clean ✅ done marker.
-        self.assertIn(("msg-1", "", "✅ done"), controller.im_client.edits)
+        self.assertIn(("msg-1", "", "✅ done · 0s"), controller.im_client.edits)
 
     async def test_error_silent_result_tidies_starting_bubble_with_stop_marker(self):
         # A manually-stopped (silent + is_error) terminal collapses to ⏹ stopped.
@@ -700,7 +720,7 @@ class BeginStatusBubbleTests(unittest.IsolatedAsyncioTestCase):
         await d.begin_status_bubble(ctx)
         with mock.patch("core.message_dispatcher.persist_agent_message"):
             await d.emit_agent_message(ctx, "result", "", level="silent", is_error=True)
-        self.assertIn(("msg-1", "", "⏹ stopped"), controller.im_client.edits)
+        self.assertIn(("msg-1", "", "⏹ stopped · 0s"), controller.im_client.edits)
 
     async def test_error_result_posts_fresh_message_with_failed_footer(self):
         # A non-empty errored (non-silent) result is delivered as a fresh message

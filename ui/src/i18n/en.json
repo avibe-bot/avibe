@@ -1574,7 +1574,7 @@
     "replyEnhancementsHint": "Allow agents to add clickable quick-reply buttons at the end of result messages",
     "showPagesPrompt": "Show Page Guidance",
     "showPagesPromptHint": "Tell agents when and how to use visual Show Pages. The vibe show CLI remains available when this is off.",
-    "agentProgressStyle": "Progress display (Slack/Discord)",
+    "agentProgressStyle": "Progress display (Slack/Discord/Lark)",
     "agentProgressStyleHint": "How agent progress is shown: off, a single concise status bubble that becomes the result, or the verbose process log.",
     "agentProgressStyleConcise": "Concise",
     "agentProgressStyleVerbose": "Verbose",

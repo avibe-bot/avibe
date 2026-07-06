@@ -121,6 +121,10 @@ class FeishuBot(BaseIMClient):
         self._user_info_cache: Dict[str, Dict[str, Any]] = {}
         self._dm_chat_ids: set = set()
         self._message_text_cache: Dict[str, str] = {}
+        # Concise-status footer (subtext) per message, so removing quick-reply
+        # buttons can rebuild the card WITHOUT dropping the ✅ done · time · tok
+        # footer. Parallel to the body cache above.
+        self._message_footer_cache: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle / injection
@@ -374,11 +378,12 @@ class FeishuBot(BaseIMClient):
     ) -> str:
         """Send a text message to Feishu.
 
-        ``subtext`` (concise status-bubble footer) is part of the BaseIMClient
-        contract; Feishu has no native footer styling, so it is accepted and
-        ignored (no behavior change)."""
+        ``subtext`` (concise status-bubble footer) is rendered as a trailing
+        ``note`` element in the card (see ``_build_card_json``). When ``text`` is
+        empty but ``subtext`` is set (footer-only turn-start bubble) the send is
+        allowed and the note renders alone."""
         self._ensure_client()
-        if not text:
+        if not text and not subtext:
             raise ValueError("Feishu send_message requires non-empty text")
 
         from lark_oapi.api.im.v1 import (
@@ -386,27 +391,28 @@ class FeishuBot(BaseIMClient):
             CreateMessageRequestBody,
         )
 
-        body_builder = (
-            CreateMessageRequestBody.builder()
-            .receive_id(context.channel_id)
-            .msg_type("interactive")
-            .content(self._build_card_json(text))
-        )
-
-        # Thread reply
+        # Thread reply: the reply API path builds its own card, so avoid
+        # constructing an unused (and non-subtext-aware) request here.
         root_id = context.thread_id or reply_to
         if root_id:
-            body_builder = body_builder.uuid(f"{root_id}-{int(time.time() * 1000)}")
-
-        request = CreateMessageRequest.builder().receive_id_type("chat_id").request_body(body_builder.build()).build()
-
-        # If replying in thread, use reply API
-        if root_id:
-            message_id = await self._reply_message(root_id, text)
+            message_id = await self._reply_message(root_id, text, subtext=subtext)
             if self.settings_manager:
                 if self.sessions:
                     self.sessions.mark_thread_active(context.user_id, context.channel_id, root_id)
             return message_id
+
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(context.channel_id)
+                .msg_type("interactive")
+                .content(self._build_card_json(text, subtext=subtext))
+                .build()
+            )
+            .build()
+        )
 
         response = await self._lark_client.im.v1.message.acreate(request)
         if not response.success():
@@ -424,12 +430,13 @@ class FeishuBot(BaseIMClient):
                 self.sessions.mark_thread_active(context.user_id, context.channel_id, thread)
         return message_id
 
-    async def _reply_message(self, parent_id: str, text: str) -> str:
+    async def _reply_message(self, parent_id: str, text: str, subtext: Optional[str] = None) -> str:
         """Reply to an existing message as a topic (reply_in_thread).
 
         Using ``reply_in_thread=True`` keeps replies collapsed inside
         a topic, similar to Slack threads, instead of flooding the
-        main channel timeline.
+        main channel timeline. ``subtext`` renders the concise status-bubble
+        footer as a trailing ``note`` element.
         """
         self._ensure_client()
         from lark_oapi.api.im.v1 import (
@@ -443,7 +450,7 @@ class FeishuBot(BaseIMClient):
             .request_body(
                 ReplyMessageRequestBody.builder()
                 .msg_type("interactive")
-                .content(self._build_card_json(text))
+                .content(self._build_card_json(text, subtext=subtext))
                 .reply_in_thread(True)
                 .build()
             )
@@ -464,14 +471,32 @@ class FeishuBot(BaseIMClient):
         self,
         text: str,
         buttons: Optional[List[List[dict]]] = None,
+        subtext: Optional[str] = None,
     ) -> str:
         """Build interactive card JSON (v2) for a message with optional buttons.
 
         Uses JSON 2.0 card schema so that button callbacks are delivered via
         the ``card.action.trigger`` event, which supports WebSocket long
         connections.
+
+        ``subtext`` is the concise status-bubble footer (BaseIMClient contract).
+        When present it is rendered as a trailing notation-sized markdown element
+        with an inline ``<font color='grey'>`` wrap — the analog of Slack's
+        context block / Discord's ``-#``. Card schema 2.0 dropped the ``note``
+        component, and its markdown component rejects a ``text_color`` property,
+        so grey must come from the inline font tag. When ``text`` is empty
+        (footer-only turn-start bubble) the body markdown element is omitted so
+        the footer renders alone. With ``subtext=None`` the card is byte-for-byte
+        identical to before.
         """
-        elements: list = [{"tag": "markdown", "content": text}]
+        elements: list = []
+        # Keep the body markdown element for every legacy (subtext=None) call so
+        # a bare ``text=""`` (e.g. the settings-toggle keyboard-only edit) stays
+        # byte-for-byte identical. Only the footer-only concise bubble
+        # (text empty AND subtext set) drops the empty body so the note stands
+        # alone.
+        if text or subtext is None:
+            elements.append({"tag": "markdown", "content": text})
         if buttons:
             for row in buttons:
                 if len(row) == 1:
@@ -522,6 +547,20 @@ class FeishuBot(BaseIMClient):
                         }
                     )
 
+        if subtext:
+            # Card schema 2.0 removed the ``note`` component. Its replacement is a
+            # notation-sized (smallest) markdown element; the grey de-emphasis
+            # must come from an inline ``<font color='grey'>`` tag, because the
+            # 2.0 markdown component rejects a ``text_color`` property. Both were
+            # verified against the live Feishu API.
+            elements.append(
+                {
+                    "tag": "markdown",
+                    "content": f"<font color='grey'>{subtext}</font>",
+                    "text_size": "notation",
+                }
+            )
+
         card = {
             "schema": "2.0",
             "body": {
@@ -537,10 +576,15 @@ class FeishuBot(BaseIMClient):
         text: str,
         keyboard: InlineKeyboard,
         parse_mode: Optional[str] = None,
+        subtext: Optional[str] = None,
     ) -> str:
-        """Send a message with interactive card buttons."""
+        """Send a message with interactive card buttons.
+
+        ``subtext`` renders the concise status-bubble footer as a trailing
+        ``note`` element; the concise result path passes it alongside quick-reply
+        buttons, so it must be accepted here (parity with Slack/Discord)."""
         self._ensure_client()
-        if not text:
+        if not text and not subtext:
             raise ValueError("Feishu send_message_with_buttons requires non-empty text")
 
         from lark_oapi.api.im.v1 import (
@@ -561,13 +605,13 @@ class FeishuBot(BaseIMClient):
                 )
             button_rows.append(btn_row)
 
-        card_json = self._build_card_json(text, button_rows)
+        card_json = self._build_card_json(text, button_rows, subtext=subtext)
 
         # Thread reply
         root_id = context.thread_id
         if root_id:
             message_id = await self._reply_message_with_card(root_id, card_json)
-            self._remember_message_text(message_id, text)
+            self._remember_message_text(message_id, text, subtext=subtext)
             if self.settings_manager:
                 if self.sessions:
                     self.sessions.mark_thread_active(context.user_id, context.channel_id, root_id)
@@ -596,7 +640,7 @@ class FeishuBot(BaseIMClient):
             raise RuntimeError(f"Feishu send card failed: {response.msg}")
 
         message_id = response.data.message_id
-        self._remember_message_text(message_id, text)
+        self._remember_message_text(message_id, text, subtext=subtext)
         if self.settings_manager and context.thread_id:
             if self.sessions:
                 self.sessions.mark_thread_active(context.user_id, context.channel_id, context.thread_id)
@@ -642,8 +686,10 @@ class FeishuBot(BaseIMClient):
     ) -> bool:
         """Edit an existing Feishu message.
 
-        ``subtext`` is accepted for the BaseIMClient contract and ignored:
-        Feishu has no native de-emphasized footer styling (no behavior change)."""
+        ``subtext`` renders the concise status-bubble footer as a trailing
+        ``note`` element (see ``_build_card_json``). The status bubble edits its
+        body in place on each tool call and collapses to a footer-only marker at
+        turn end, so the footer must be carried through the patched card."""
         self._ensure_client()
         try:
             from lark_oapi.api.im.v1 import (
@@ -661,10 +707,10 @@ class FeishuBot(BaseIMClient):
                     button_rows.append(btn_row)
 
             if text is not None:
-                card_json = self._build_card_json(text, button_rows)
+                card_json = self._build_card_json(text, button_rows, subtext=subtext)
             elif keyboard is not None:
                 # Only updating buttons, need some fallback text
-                card_json = self._build_card_json("", button_rows)
+                card_json = self._build_card_json("", button_rows, subtext=subtext)
             else:
                 return True
 
@@ -684,19 +730,30 @@ class FeishuBot(BaseIMClient):
                 )
                 return False
             if text is not None:
-                self._remember_message_text(message_id, text)
+                self._remember_message_text(message_id, text, subtext=subtext)
             return True
         except Exception as exc:
             logger.error("Error editing Feishu message %s: %s", message_id, exc)
             return False
 
-    def _remember_message_text(self, message_id: Optional[str], text: Optional[str]) -> None:
+    def _remember_message_text(
+        self, message_id: Optional[str], text: Optional[str], subtext: Optional[str] = None
+    ) -> None:
         if not message_id or text is None:
             return
         self._message_text_cache[message_id] = text
         while len(self._message_text_cache) > 200:
             oldest_key = next(iter(self._message_text_cache))
             self._message_text_cache.pop(oldest_key, None)
+        # Track the footer so a later button-removal edit can re-apply it. A
+        # truthy subtext sets it; an explicit empty subtext clears it (the footer
+        # was removed); ``None`` leaves any known footer untouched.
+        if subtext:
+            self._message_footer_cache[message_id] = subtext
+            while len(self._message_footer_cache) > 200:
+                self._message_footer_cache.pop(next(iter(self._message_footer_cache)), None)
+        elif subtext is not None:
+            self._message_footer_cache.pop(message_id, None)
 
     async def _fetch_message_card_content(self, message_id: str) -> Optional[Dict[str, Any]]:
         """Fetch and parse card content JSON for an existing message."""
@@ -738,9 +795,18 @@ class FeishuBot(BaseIMClient):
             return None
 
     @staticmethod
-    def _extract_text_from_card_content(card_content: Dict[str, Any]) -> Optional[str]:
-        """Extract human-visible text from card content for button removal."""
+    def _extract_text_from_card_content(
+        card_content: Dict[str, Any],
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Extract ``(body, footer)`` from card content for button removal.
+
+        The concise status footer is a notation-sized grey markdown element (see
+        ``_build_card_json``); it must NOT be folded into the body, or removing
+        quick-reply buttons would duplicate/mangle it. It is captured separately
+        (with the ``<font color='grey'>`` wrapper stripped, since ``edit_message``
+        re-wraps the subtext) so the caller can re-apply it as ``subtext``."""
         collected_texts: list[str] = []
+        footer_texts: list[str] = []
 
         def _collect(node: Any) -> None:
             if isinstance(node, list):
@@ -758,7 +824,12 @@ class FeishuBot(BaseIMClient):
             if tag == "markdown":
                 markdown_content = node.get("content")
                 if isinstance(markdown_content, str) and markdown_content.strip():
-                    collected_texts.append(markdown_content)
+                    # A notation-sized markdown element is the concise footer;
+                    # keep it out of the body and unwrap the grey font tag.
+                    if node.get("text_size") == "notation":
+                        footer_texts.append(FeishuBot._strip_grey_font(markdown_content))
+                    else:
+                        collected_texts.append(markdown_content)
 
             text_obj = node.get("text")
             if isinstance(text_obj, dict):
@@ -779,10 +850,19 @@ class FeishuBot(BaseIMClient):
 
         _collect(card_content)
 
-        if not collected_texts:
-            return None
+        body = "\n\n".join(collected_texts) if collected_texts else None
+        footer = " ".join(f for f in footer_texts if f) or None
+        return body, footer
 
-        return "\n\n".join(collected_texts)
+    @staticmethod
+    def _strip_grey_font(content: str) -> str:
+        """Unwrap a ``<font color='grey'>…</font>`` footer back to its raw text."""
+        s = content.strip()
+        prefix = "<font color='grey'>"
+        suffix = "</font>"
+        if s.startswith(prefix) and s.endswith(suffix):
+            return s[len(prefix) : -len(suffix)]
+        return s
 
     async def remove_inline_keyboard(
         self,
@@ -798,6 +878,9 @@ class FeishuBot(BaseIMClient):
         card text before updating the card without buttons.
         """
         display_text = text
+        # Preserve the concise footer (✅ done · time · tok) so removing the
+        # quick-reply buttons doesn't strip it from the result message.
+        footer = self._message_footer_cache.get(message_id)
         if display_text is None:
             display_text = self._message_text_cache.get(message_id)
         if display_text is None:
@@ -805,12 +888,16 @@ class FeishuBot(BaseIMClient):
             if card_content is None:
                 logger.debug("Skip Feishu keyboard removal: unable to fetch card content for %s", message_id)
                 return False
-            display_text = self._extract_text_from_card_content(card_content)
+            display_text, extracted_footer = self._extract_text_from_card_content(card_content)
             if display_text is None:
                 logger.debug("Skip Feishu keyboard removal: unable to extract card text for %s", message_id)
                 return False
+            if footer is None:
+                footer = extracted_footer
 
-        return await self.edit_message(context, message_id, text=display_text, keyboard=None, parse_mode=parse_mode)
+        return await self.edit_message(
+            context, message_id, text=display_text, keyboard=None, subtext=footer, parse_mode=parse_mode
+        )
 
     # ------------------------------------------------------------------
     # Callbacks

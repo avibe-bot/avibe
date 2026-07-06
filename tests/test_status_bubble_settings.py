@@ -29,7 +29,7 @@ class ConfigParsingTests(unittest.TestCase):
     def test_defaults(self):
         cfg = V2Config.from_payload(_payload())
         self.assertEqual(cfg.agent_progress_style, "off")
-        self.assertEqual(cfg.agent_status_heartbeat_ms, 15000)
+        self.assertEqual(cfg.agent_status_heartbeat_ms, 8000)
         self.assertEqual(cfg.agent_status_no_output_ms, 180000)
 
     def test_valid_overrides(self):
@@ -53,12 +53,12 @@ class ConfigParsingTests(unittest.TestCase):
             )
         )
         self.assertEqual(cfg.agent_progress_style, "off")
-        self.assertEqual(cfg.agent_status_heartbeat_ms, 15000)
+        self.assertEqual(cfg.agent_status_heartbeat_ms, 8000)
         self.assertEqual(cfg.agent_status_no_output_ms, 180000)
 
     def test_bool_is_not_accepted_as_int(self):
         cfg = V2Config.from_payload(_payload(agent_status_heartbeat_ms=True))
-        self.assertEqual(cfg.agent_status_heartbeat_ms, 15000)
+        self.assertEqual(cfg.agent_status_heartbeat_ms, 8000)
 
     def test_out_of_range_int_falls_back_to_default(self):
         # Above the sane cap (heartbeat 1h / no-output 24h) → default, so a
@@ -66,7 +66,7 @@ class ConfigParsingTests(unittest.TestCase):
         cfg = V2Config.from_payload(
             _payload(agent_status_heartbeat_ms=10_000_000, agent_status_no_output_ms=10**12)
         )
-        self.assertEqual(cfg.agent_status_heartbeat_ms, 15000)
+        self.assertEqual(cfg.agent_status_heartbeat_ms, 8000)
         self.assertEqual(cfg.agent_status_no_output_ms, 180000)
 
     def test_save_load_round_trip(self):
@@ -104,13 +104,13 @@ class ControllerGetterTests(unittest.TestCase):
 
     def test_interval_getters_guard_bad_value(self):
         fake = self._fake(agent_status_heartbeat_ms=0, agent_status_no_output_ms=-1)
-        self.assertEqual(Controller.get_heartbeat_interval_ms_for_context(fake, None), 15000)
+        self.assertEqual(Controller.get_heartbeat_interval_ms_for_context(fake, None), 8000)
         self.assertEqual(Controller.get_no_output_hint_after_ms_for_context(fake, None), 180000)
 
     def test_interval_getters_reject_bool(self):
         # bool is an int subclass; the getter must not treat True as 1ms.
         fake = self._fake(agent_status_heartbeat_ms=True, agent_status_no_output_ms=False)
-        self.assertEqual(Controller.get_heartbeat_interval_ms_for_context(fake, None), 15000)
+        self.assertEqual(Controller.get_heartbeat_interval_ms_for_context(fake, None), 8000)
         self.assertEqual(Controller.get_no_output_hint_after_ms_for_context(fake, None), 180000)
 
 

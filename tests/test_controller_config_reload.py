@@ -163,4 +163,4 @@ def test_progress_style_getter_self_refreshes_from_disk(tmp_path, monkeypatch) -
 
     # No prior _refresh_config_from_disk call; the getter itself must pick it up.
     assert controller.get_progress_style_for_context(None) == "concise"
-    assert controller.get_heartbeat_interval_ms_for_context(None) == 15000
+    assert controller.get_heartbeat_interval_ms_for_context(None) == 8000

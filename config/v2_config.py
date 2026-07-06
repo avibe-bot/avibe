@@ -437,7 +437,7 @@ class V2Config:
     #   "off" (default) no process bubble, "concise" one self-updating bubble,
     #   "verbose" legacy append/split process log.
     agent_progress_style: str = DEFAULT_AGENT_PROGRESS_STYLE
-    agent_status_heartbeat_ms: int = 15000  # status-bubble elapsed-timer heartbeat
+    agent_status_heartbeat_ms: int = 8000  # status-bubble elapsed-timer heartbeat
     agent_status_no_output_ms: int = 180000  # "no output for N min" hint threshold
     # True once the user has finished the setup wizard. This is the explicit
     # gate for ``setup_state().needs_setup`` — it replaces the old heuristic
@@ -656,7 +656,7 @@ class V2Config:
 
         # Cap to sane upper bounds so a fat-fingered value can't silence the
         # heartbeat (heartbeat ≤ 1h, no-output hint ≤ 24h); out-of-range → default.
-        agent_status_heartbeat_ms = _positive_int(payload.get("agent_status_heartbeat_ms"), 15000, 3_600_000)
+        agent_status_heartbeat_ms = _positive_int(payload.get("agent_status_heartbeat_ms"), 8000, 3_600_000)
         agent_status_no_output_ms = _positive_int(payload.get("agent_status_no_output_ms"), 180000, 86_400_000)
 
         # ``setup_completed`` is the explicit setup gate. Read the stored value
