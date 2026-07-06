@@ -2344,7 +2344,7 @@
       "protection": "谁能解锁这条密钥？",
       "protectedProtection": "保护档",
       "standardProtection": "标准档",
-      "protectedHelp": "AI 无法私自使用。只能通过你的 Passkey 解密后才能使用（端到端加密）。就算电脑被偷也打不开，适合加密钱包及一切重要密钥。",
+      "protectedHelp": "AI 无法私自使用。只能在你的浏览器里用 Passkey 或密码解密后才能使用（端到端加密）。就算电脑被偷也打不开，适合加密钱包及一切重要密钥。",
       "standardHelp": "AI 可以自行使用。适合各类 API Key、环境变量和大多数密钥。",
       "alwaysAskSign": "每次签名都要我确认",
       "alwaysAskSignHelp": "标准档密钥默认可以自己签名。贵重密钥可以打开它——每次签名都要你在浏览器里亲自批准。",

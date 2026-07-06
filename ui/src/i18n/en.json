@@ -2345,7 +2345,7 @@
       "protection": "Who can unlock this secret?",
       "protectedProtection": "Protected",
       "standardProtection": "Standard",
-      "protectedHelp": "The agent can't use it on its own. It's unlocked only after you decrypt it with your passkey (end-to-end encrypted). Safe even if this computer is stolen — good for crypto wallets and any important secret.",
+      "protectedHelp": "The agent can't use it on its own. It's unlocked only after you decrypt it in your browser with your passkey or password (end-to-end encrypted). Safe even if this computer is stolen — good for crypto wallets and any important secret.",
       "standardHelp": "The agent can use it on its own. Good for API keys, environment variables, and most secrets.",
       "alwaysAskSign": "Ask me before every signature",
       "alwaysAskSignHelp": "Standard keys can sign on their own. For a high-value key, turn this on so every signature needs your approval in the browser.",
