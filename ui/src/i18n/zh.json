@@ -1800,6 +1800,7 @@
     "noConfig": "未配置模型或系统提示词",
     "empty": "还没有 Agent。先创建一个,再开始对话。",
     "noSearchMatch": "没有匹配的 Agent。",
+    "selectPrompt": "选择一个 Agent 查看配置。",
     "makeDefault": "设为默认",
     "deleteConfirm": "确认删除 Agent \"{{name}}\"？此操作不可撤销。",
     "deleteInUse": "Agent \"{{name}}\" 正被一个或多个频道使用,无法删除。",
@@ -2248,7 +2249,7 @@
     "rowActions": "更多操作",
     "edit": {
       "title": "编辑信息",
-      "subtitle": "只改元数据,不影响已发出的授权",
+      "subtitle": "普通信息不影响授权;Fetch 策略变化会重新审批",
       "lockedHint": "名称、类型、保护级别不可修改"
     },
     "protectedUnlock": {

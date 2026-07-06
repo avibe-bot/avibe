@@ -30,11 +30,13 @@ export function buildMetadataPatch(input: {
   allowHosts: string[];
   fetchAuthMode: FetchAuthMode;
   fetchAuthName: string;
+  preserveBearerAuth?: boolean;
 }): VaultMetadataPatch {
   const policy: Record<string, unknown> = {};
   if (input.allowHosts.length) policy.allowed_hosts = input.allowHosts;
   const authName = input.fetchAuthName.trim();
-  if (input.fetchAuthMode === 'header') policy.auth = { type: 'header', name: authName };
+  if (input.fetchAuthMode === 'bearer' && input.preserveBearerAuth) policy.auth = { type: 'bearer' };
+  else if (input.fetchAuthMode === 'header') policy.auth = { type: 'header', name: authName };
   else if (input.fetchAuthMode === 'query') policy.auth = { type: 'query', name: authName };
   return {
     description: input.description.trim() || null,

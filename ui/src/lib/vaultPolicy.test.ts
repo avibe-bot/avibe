@@ -24,8 +24,14 @@ describe('buildMetadataPatch', () => {
     expect(buildMetadataPatch({ ...base }).policy).toEqual({});
   });
 
-  it('bearer emits no auth; header/query emit typed auth with a trimmed name', () => {
+  it('bearer emits no auth unless preserving an explicit stored bearer policy', () => {
     expect(buildMetadataPatch({ ...base, fetchAuthMode: 'bearer', fetchAuthName: 'ignored' }).policy.auth).toBeUndefined();
+    expect(buildMetadataPatch({ ...base, fetchAuthMode: 'bearer', fetchAuthName: 'ignored', preserveBearerAuth: true }).policy.auth).toEqual({
+      type: 'bearer',
+    });
+  });
+
+  it('header/query emit typed auth with a trimmed name', () => {
     expect(buildMetadataPatch({ ...base, fetchAuthMode: 'header', fetchAuthName: ' X-Api-Key ' }).policy.auth).toEqual({
       type: 'header',
       name: 'X-Api-Key',

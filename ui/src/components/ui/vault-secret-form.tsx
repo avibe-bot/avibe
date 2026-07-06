@@ -419,7 +419,15 @@ export const VaultSecretForm: React.FC<{
         // Value-free metadata edit: the shared validation above already ran; PATCH
         // description / tags / policy. Only the visible fetch policy (allowed_hosts + auth) is
         // sent; the backend preserves internal keys such as always_ask.
-        const patch = buildMetadataPatch({ description, tags, allowHosts, fetchAuthMode, fetchAuthName });
+        const existingPolicy = (editSecret.policy ?? {}) as { auth?: { type?: FetchAuthMode } };
+        const patch = buildMetadataPatch({
+          description,
+          tags,
+          allowHosts,
+          fetchAuthMode,
+          fetchAuthName,
+          preserveBearerAuth: existingPolicy.auth?.type === 'bearer',
+        });
         const result = await api.updateVaultSecret(editSecret.name, patch, { handleError: false });
         if (!result.ok) {
           setError(result.message || t('vaults.dialog.errors.updateFailed'));

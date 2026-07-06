@@ -2249,7 +2249,7 @@
     "rowActions": "More actions",
     "edit": {
       "title": "Edit info",
-      "subtitle": "Metadata only — won't affect issued grants",
+      "subtitle": "Info edits keep grants; fetch policy changes require new approval",
       "lockedHint": "Name, kind and protection can't be changed"
     },
     "protectedUnlock": {
