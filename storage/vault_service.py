@@ -1445,7 +1445,6 @@ def update_secret_metadata(
     if not values:
         return _meta_payload(row)
 
-    values["updated_at"] = _now()
     conn.execute(vault_secrets.update().where(vault_secrets.c.name == secret_name).values(**values))
     audit(conn, "metadata-updated", secret_name=secret_name, delivery={"fields": fields})
     return _meta_payload(_require_row(conn, secret_name))

@@ -250,6 +250,7 @@ def test_update_secret_metadata_preserves_grants_and_internal_policy(monkeypatch
             .where(vault_secrets.c.name == "FETCH_TOKEN")
             .values(policy=json.dumps({"allowed_hosts": ["old.example.com"], "auth": {"type": "bearer"}, "always_ask": True}))
         )
+        original_updated_at = conn.execute(select(vault_secrets.c.updated_at).where(vault_secrets.c.name == "FETCH_TOKEN")).scalar_one()
 
     updated = api.update_vault_secret(
         "FETCH_TOKEN",
@@ -276,8 +277,53 @@ def test_update_secret_metadata_preserves_grants_and_internal_policy(monkeypatch
     with api._vault_engine().connect() as conn:
         grant_row = conn.execute(select(vault_service.vault_grants).where(vault_service.vault_grants.c.id == grant["id"])).mappings().one()
         assert grant_row["status"] == "active"
+        assert conn.execute(select(vault_secrets.c.updated_at).where(vault_secrets.c.name == "FETCH_TOKEN")).scalar_one() == original_updated_at
         events = conn.execute(select(vault_audit.c.event, vault_audit.c.secret_name)).all()
         assert ("metadata-updated", "FETCH_TOKEN") in events
+
+
+def test_update_secret_metadata_does_not_stale_pending_protected_grant(monkeypatch, avault_p2):
+    agent_grant = Mock(return_value={"granted": 1, "ttl_secs": 300})
+    monkeypatch.setattr(api, "avault_agent_grant", agent_grant)
+    monkeypatch.setattr(api, "validate_avault_agent_pubkey", Mock())
+
+    api.create_vault_secret(
+        {
+            "name": "PENDING_PROTECTED",
+            "protection": "protected",
+            "sealed": {"ciphertext": "ct-protected", "nonce": "n-protected", "wrap_meta": "wm-protected"},
+            "tags": ["old"],
+        }
+    )
+    requested = api.request_vault_access({"name": "PENDING_PROTECTED", "session_id": "ses_1"})
+    request_id = requested["request"]["id"]
+    grant_id = requested["request"]["card"]["grant_options"][0]["grant_id"]
+
+    api.update_vault_secret("PENDING_PROTECTED", {"description": "Edited while pending", "tags": ["new"]})
+
+    hydrated = api.get_vault_request(request_id, audience=vault_service.REQUEST_AUDIENCE_UI)
+    unlock_material = hydrated["request"]["card"]["grant_options"][0]["unlock_material"]
+    assert unlock_material[0]["name"] == "PENDING_PROTECTED"
+
+    fulfilled = api.fulfill_vault_access_request(
+        request_id,
+        {
+            "grant_id": grant_id,
+            "session_id": "ses_1",
+            "agent_pubkey": {"public_key": "pk", "fingerprint": "fp"},
+            "deks": [
+                {
+                    "name": "PENDING_PROTECTED",
+                    "dek_blindbox": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+                    "approval": {"nonce": "bm9uY2UtMTIzNDU2", "expires_at_unix": 4102444800},
+                }
+            ],
+        },
+    )
+
+    assert fulfilled["ok"] is True
+    assert fulfilled["grant"]["id"] == grant_id
+    assert fulfilled["grant"]["member_snapshot"] == ["PENDING_PROTECTED"]
 
 
 def test_update_secret_metadata_rejects_secret_material(monkeypatch):
