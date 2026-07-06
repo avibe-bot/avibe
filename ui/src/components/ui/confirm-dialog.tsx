@@ -45,20 +45,28 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
 }) => {
   const { t } = useTranslation();
   const [remaining, setRemaining] = React.useState(0);
+  const [counting, setCounting] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
 
   // Restart the hold countdown each time the dialog opens and tick it down to zero.
   React.useEffect(() => {
     if (!open || holdSeconds <= 0) {
+      setCounting(false);
       setRemaining(0);
       return;
     }
     setRemaining(holdSeconds);
+    setCounting(true);
     const id = setInterval(() => setRemaining((n) => Math.max(0, n - 1)), 1000);
     return () => clearInterval(id);
   }, [open, holdSeconds]);
 
-  const locked = remaining > 0;
+  // Lock from the very first render when a hold is required — before the effect above runs
+  // (`counting` still false) — so the destructive button can't be clicked/keyboard-activated in
+  // the frame before the countdown starts. Once counting, the remaining seconds govern.
+  const locked = open && holdSeconds > 0 && (!counting || remaining > 0);
+  // On that first pre-effect frame show the full hold instead of a spurious "(0)".
+  const displayRemaining = counting ? remaining : holdSeconds;
   const confirmText = confirmLabel ?? t('common.confirm');
 
   const handleConfirm = async () => {
@@ -95,7 +103,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
             disabled={locked || busy}
           >
             {busy ? <Loader2 className="size-4 animate-spin" /> : null}
-            {locked ? `${confirmText} (${remaining})` : confirmText}
+            {locked ? `${confirmText} (${displayRemaining})` : confirmText}
           </Button>
         </DialogFooter>
       </DialogContent>
