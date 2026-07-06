@@ -8455,10 +8455,35 @@ def _with_show_event_write_cookie(response: Response, session_id: str, *, enable
     return response
 
 
-def stop_show_runtime_on_shutdown() -> None:
-    from core.show_runtime import stop_show_runtime_manager
+async def sweep_orphan_show_runtime_servers_on_startup() -> None:
+    """Reap a Show Runtime server left bound to the workspace root by a prior UI
+    server process that died without running its shutdown hook (SIGKILL / crash).
 
+    The Node ``cli.js`` runtime is a child of THIS UI server process. On a hard
+    death it is reparented to init and keeps serving stale code on its old port
+    (avibe#813). ``vibe`` only spawns a new UI server when no healthy one exists,
+    so at startup any runtime still on the root is an orphan and safe to sweep.
+
+    Offloaded to a thread so the psutil scan + terminate/kill never blocks the
+    event loop (and thus /health readiness) during startup."""
+    from core.show_runtime import sweep_orphan_show_runtime_servers
+
+    try:
+        await asyncio.to_thread(sweep_orphan_show_runtime_servers)
+    except Exception:
+        logger.debug("startup show runtime orphan sweep skipped", exc_info=True)
+
+
+def stop_show_runtime_on_shutdown() -> None:
+    from core.show_runtime import stop_show_runtime_manager, sweep_orphan_show_runtime_servers
+
+    # Stop the tracked child (its process group, incl. esbuild workers), then sweep
+    # the workspace root so any untracked stray from an earlier respawn is reaped too.
     stop_show_runtime_manager()
+    try:
+        sweep_orphan_show_runtime_servers()
+    except Exception:
+        logger.debug("shutdown show runtime orphan sweep skipped", exc_info=True)
 
 
 @app.route("/show/<session_id>")
@@ -8830,6 +8855,7 @@ async def _stop_startup_dependency_reconcile() -> None:
             logger.debug("startup dependency reconcile shutdown raised", exc_info=True)
 
 
+app.add_event_handler("startup", sweep_orphan_show_runtime_servers_on_startup)
 app.add_event_handler("startup", _start_startup_dependency_reconcile)
 app.add_event_handler("shutdown", _stop_startup_dependency_reconcile)
 app.add_event_handler("shutdown", stop_show_runtime_on_shutdown)

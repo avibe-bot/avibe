@@ -150,6 +150,12 @@ class ShowRuntimeManager:
             self.runtime_dir.mkdir(parents=True, exist_ok=True)
             self.workspace_root.mkdir(parents=True, exist_ok=True)
             self.cache_root.mkdir(parents=True, exist_ok=True)
+            # Reap any orphaned runtime server still bound to this workspace root before
+            # spawning ours, so there is a single writer (avibe#813). self.stop() above
+            # already released our own tracked child; anything left is a stray from a
+            # prior avibe instance that died without reaping it (SIGKILL / crash). Run it
+            # off the event loop: the psutil scan + terminate/kill can block for seconds.
+            await asyncio.to_thread(self._sweep_orphan_runtime_servers)
             with self.stdout_path.open("w", encoding="utf-8") as stdout, self.stderr_path.open(
                 "w", encoding="utf-8"
             ) as stderr:
@@ -299,6 +305,14 @@ class ShowRuntimeManager:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             signal_process_tree(process, KILL_SIGNAL, logger, "show runtime")
+
+    def _sweep_orphan_runtime_servers(self) -> None:
+        """Best-effort reap of stray runtime servers bound to our workspace root."""
+        keep_pid = self._process.pid if self._process else None
+        try:
+            sweep_orphan_show_runtime_servers(self.workspace_root, keep_pid=keep_pid)
+        except Exception:  # pragma: no cover - defensive; sweeping must never block spawn
+            logger.debug("Orphan show runtime sweep skipped", exc_info=True)
 
     async def _resolve_managed_command(self) -> list[str] | None:
         if self._command_explicit and self.command != _RUNTIME_BIN:
@@ -1007,6 +1021,89 @@ def get_show_runtime_manager() -> ShowRuntimeManager:
 def stop_show_runtime_manager() -> None:
     if _manager is not None:
         _manager.stop()
+
+
+def _is_runtime_server_cmdline(cmdline: list[str], workspace_root: str) -> bool:
+    """True if ``cmdline`` is a Show Runtime server bound to ``workspace_root``.
+
+    Requires the exact ``--workspace-root <workspace_root>`` arg pair AND a runtime
+    signature (the always-present ``--fallback-delay-seconds`` flag, the ``cli.js``
+    entrypoint, the managed bin, or a ``show-runtime`` path token), so an unrelated
+    process that merely mentions the path is never matched.
+    """
+    if not cmdline:
+        return False
+    bound = any(
+        token == "--workspace-root" and index + 1 < len(cmdline) and cmdline[index + 1] == workspace_root
+        for index, token in enumerate(cmdline)
+    )
+    if not bound:
+        return False
+    return any(
+        token == "--fallback-delay-seconds"
+        or token.endswith("cli.js")
+        or token.endswith(_RUNTIME_BIN)
+        or "show-runtime" in token
+        for token in cmdline
+    )
+
+
+def sweep_orphan_show_runtime_servers(
+    workspace_root: Path | str | None = None,
+    *,
+    keep_pid: int | None = None,
+) -> list[int]:
+    """Terminate any Show Runtime server still bound to ``workspace_root``.
+
+    A prior avibe instance that died without reaping its child (SIGKILL / crash —
+    ``atexit`` does not run) leaves a Node ``cli.js`` orphan reparented to init, still
+    listening on its old port and able to warm/mutate this workspace root with stale
+    in-memory templates (avibe-bot/avibe#813). The single-service-instance lock makes
+    this process the only legitimate owner of the root, so any *other* process bound to
+    it is an orphan and safe to reap.
+
+    Best-effort and spawn-agnostic: complements the runtime's own parent-death self-exit
+    (vibe-show-runtime#30) by also clearing orphans from builds that predate that
+    backstop. Returns the pids swept (for logging/tests).
+    """
+    root = str(workspace_root) if workspace_root is not None else str(paths.get_show_pages_dir())
+    try:
+        import psutil
+    except Exception:  # pragma: no cover - psutil is a hard dependency in practice
+        return []
+
+    own_pid = os.getpid()
+    swept: list[int] = []
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            pid = proc.info.get("pid")
+            if pid is None or pid == own_pid or (keep_pid is not None and pid == keep_pid):
+                continue
+            if not _is_runtime_server_cmdline(proc.info.get("cmdline") or [], root):
+                continue
+            victims = proc.children(recursive=True)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        except Exception:  # pragma: no cover - never let a stray psutil error block callers
+            logger.debug("Failed to inspect process while sweeping show runtime orphans", exc_info=True)
+            continue
+        victims.append(proc)
+        logger.warning(
+            "Sweeping orphaned show runtime server pid=%s bound to workspace_root=%s", pid, root
+        )
+        for victim in victims:
+            try:
+                victim.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        _gone, alive = psutil.wait_procs(victims, timeout=3)
+        for victim in alive:
+            try:
+                victim.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        swept.append(pid)
+    return swept
 
 
 async def prewarm_show_runtime() -> ShowRuntimeResult:
