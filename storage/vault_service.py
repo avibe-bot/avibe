@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import uuid
 from dataclasses import dataclass
@@ -73,6 +74,9 @@ PROVISION_SPEC_ALLOWED_KEYS = {
 }
 PROVISION_SPEC_ALLOWED_POLICY_KEYS = {"allowed_hosts", "auth"}
 PROVISION_SPEC_ALLOWED_AUTH_KEYS = {"type", "name"}
+FETCH_AUTH_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+FETCH_AUTH_QUERY_NAME_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
+FORBIDDEN_FETCH_AUTH_HEADER_NAMES = frozenset({"host"})
 _UNSET = object()
 
 
@@ -434,12 +438,22 @@ def _optional_string(value: Any, *, field: str) -> str | None:
     return stripped or None
 
 
-def _normalize_fetch_policy(policy: Any, *, field: str = "policy") -> dict[str, Any]:
+def _validate_fetch_auth_name(auth_type: str, auth_name: str, *, field: str) -> None:
+    if auth_type == "header":
+        if auth_name.strip().lower() in FORBIDDEN_FETCH_AUTH_HEADER_NAMES:
+            raise VaultServiceError(f"{field} cannot be {auth_name!r}")
+        if not FETCH_AUTH_HEADER_NAME_RE.fullmatch(auth_name):
+            raise VaultServiceError(f"{field} must be a valid HTTP header name")
+    elif auth_type == "query" and not FETCH_AUTH_QUERY_NAME_RE.fullmatch(auth_name):
+        raise VaultServiceError(f"{field} must be a valid query parameter name")
+
+
+def _normalize_fetch_policy(policy: Any, *, field: str = "policy", allowed_extra_keys: set[str] | None = None) -> dict[str, Any]:
     if policy is None:
         return {}
     if not isinstance(policy, dict):
         raise VaultServiceError(f"{field} must be an object")
-    extra_policy_keys = set(policy) - PROVISION_SPEC_ALLOWED_POLICY_KEYS
+    extra_policy_keys = set(policy) - PROVISION_SPEC_ALLOWED_POLICY_KEYS - (allowed_extra_keys or set())
     if extra_policy_keys:
         raise VaultServiceError(f"unsupported {field} fields: {', '.join(sorted(extra_policy_keys))}")
     normalized_policy: dict[str, Any] = {}
@@ -464,6 +478,7 @@ def _normalize_fetch_policy(policy: Any, *, field: str = "policy") -> dict[str, 
         if auth_type in {"header", "query"}:
             if not auth_name:
                 raise VaultServiceError(f"{field}.auth.name is required for header/query auth")
+            _validate_fetch_auth_name(auth_type, auth_name, field=f"{field}.auth.name")
             normalized_auth["name"] = auth_name
         elif auth_name:
             normalized_auth["name"] = auth_name
@@ -1401,12 +1416,13 @@ def update_secret_metadata(
     description: Any = _UNSET,
     tags: Any = _UNSET,
     policy: Any = _UNSET,
+    cache: VaultGrantRuntimeCache = GRANT_RUNTIME_CACHE,
 ) -> dict[str, Any]:
     """Update value-free metadata only.
 
-    This deliberately does not expire active grants: grants are scoped to a frozen
-    secret set, not to tags or display metadata. Secret value rotation and
-    classification changes have separate mutation paths.
+    Tags and display metadata deliberately do not expire active grants: grants are
+    scoped to a frozen secret set, not to selectors. Fetch policy is an
+    authorization boundary, so policy changes expire relevant requests/grants.
     """
 
     row = _require_row(conn, secret_name)
@@ -1429,7 +1445,19 @@ def update_secret_metadata(
         fields.append("tags")
 
     if policy is not _UNSET:
+        if policy is None:
+            policy = {}
+        if not isinstance(policy, dict):
+            raise VaultServiceError("policy must be an object")
         existing_policy = _secret_policy(row)
+        internal_policy_keys = set(existing_policy) - PROVISION_SPEC_ALLOWED_POLICY_KEYS
+        incoming_internal_keys = set(policy) - PROVISION_SPEC_ALLOWED_POLICY_KEYS
+        unsupported_internal_keys = incoming_internal_keys - internal_policy_keys
+        if unsupported_internal_keys:
+            raise VaultServiceError(f"unsupported policy fields: {', '.join(sorted(unsupported_internal_keys))}")
+        changed_internal_keys = [key for key in sorted(incoming_internal_keys) if policy.get(key) != existing_policy.get(key)]
+        if changed_internal_keys:
+            raise VaultServiceError(f"policy.{changed_internal_keys[0]} is read-only")
         # Preserve internal policy keys such as always_ask; metadata editing owns
         # only the user-visible fetch policy fields.
         preserved_policy = {
@@ -1437,10 +1465,18 @@ def update_secret_metadata(
             for key, value in existing_policy.items()
             if key not in PROVISION_SPEC_ALLOWED_POLICY_KEYS
         }
-        normalized_policy = _normalize_fetch_policy(policy, field="policy")
+        existing_visible_policy = _normalize_fetch_policy(
+            existing_policy,
+            field="policy",
+            allowed_extra_keys=internal_policy_keys,
+        )
+        normalized_policy = _normalize_fetch_policy(policy, field="policy", allowed_extra_keys=internal_policy_keys)
         next_policy = {**preserved_policy, **normalized_policy}
         values["policy"] = json.dumps(next_policy) if next_policy else None
         fields.append("policy")
+        if normalized_policy != existing_visible_policy:
+            _expire_pending_requests_for_secret(conn, secret_name, reason="request-expired-policy-changed")
+            _expire_active_grants_for_secret(conn, secret_name, cache=cache, reason="grant-expired-policy-changed")
 
     if not values:
         return _meta_payload(row)

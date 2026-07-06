@@ -5057,11 +5057,19 @@ def _vault_edit_payload_from_args(args, *, current: dict, help_command: str) -> 
     if getattr(args, "clear_tags", False):
         payload["tags"] = []
     elif getattr(args, "tag", None) or getattr(args, "skill", None):
-        tags = _split_vault_metadata_values(getattr(args, "tag", None))
-        tags.extend(
-            skill if skill.startswith("skill:") else f"skill:{skill}"
-            for skill in _split_vault_metadata_values(getattr(args, "skill", None))
+        current_tags = [str(tag) for tag in current.get("tags") or [] if isinstance(tag, str) and tag]
+        current_plain_tags = [tag for tag in current_tags if not tag.startswith("skill:")]
+        current_skill_tags = [tag for tag in current_tags if tag.startswith("skill:")]
+        tags = _split_vault_metadata_values(getattr(args, "tag", None)) if getattr(args, "tag", None) else current_plain_tags
+        skill_tags = (
+            [
+                skill if skill.startswith("skill:") else f"skill:{skill}"
+                for skill in _split_vault_metadata_values(getattr(args, "skill", None))
+            ]
+            if getattr(args, "skill", None)
+            else current_skill_tags
         )
+        tags.extend(skill_tags)
         payload["tags"] = tags
 
     policy_requested = any(

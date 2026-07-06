@@ -256,6 +256,22 @@ def test_edit_updates_value_free_metadata(capfd):
     }
 
 
+def test_edit_preserves_untouched_tag_classes(capfd):
+    _create_standard_secret("EDIT_TAG_CLASSES", tags=["old", "skill:legacy"])
+
+    code = cli.cmd_vault_edit(_ns(name="EDIT_TAG_CLASSES", tag=["prod"]))
+
+    assert code == 0
+    payload = json.loads(capfd.readouterr().out)
+    assert payload["secret"]["tags"] == ["prod", "skill:legacy"]
+
+    code = cli.cmd_vault_edit(_ns(name="EDIT_TAG_CLASSES", skill=["github-review"]))
+
+    assert code == 0
+    payload = json.loads(capfd.readouterr().out)
+    assert payload["secret"]["tags"] == ["prod", "skill:github-review"]
+
+
 def test_edit_metadata_json_rejects_secret_material(capfd):
     _create_standard_secret("EDIT_SAFE")
 
