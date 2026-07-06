@@ -223,6 +223,80 @@ def test_create_with_policy_persists_allowed_hosts(monkeypatch):
     assert secret["policy"]["allowed_hosts"] == ["api.github.com"]
 
 
+def test_update_secret_metadata_preserves_grants_and_internal_policy(monkeypatch):
+    published = []
+    monkeypatch.setattr("vibe.sse_broker.broker.publish", lambda event_type, data: published.append((event_type, data)))
+    monkeypatch.setattr("vibe.internal_client.publish_event_sync", lambda *args, **kwargs: None)
+
+    with api._vault_engine().begin() as conn:
+        vault_service.create_secret(
+            conn,
+            name="FETCH_TOKEN",
+            protection="protected",
+            sealed=_sealed("fetch"),
+            tags=["old", "skill:legacy"],
+            description="Old description",
+            policy={"allowed_hosts": ["old.example.com"], "auth": {"type": "bearer"}},
+        )
+        request = vault_service.create_access_request(
+            conn,
+            source_selector={"tags": ["old"]},
+            requester={"source": "test", "session_id": "ses_1"},
+            delivery={"session_id": "ses_1", "mode": "run"},
+        )
+        grant = _grant_from_request(conn, request, session_id="ses_1")
+        conn.execute(
+            vault_secrets.update()
+            .where(vault_secrets.c.name == "FETCH_TOKEN")
+            .values(policy=json.dumps({"allowed_hosts": ["old.example.com"], "auth": {"type": "bearer"}, "always_ask": True}))
+        )
+
+    updated = api.update_vault_secret(
+        "FETCH_TOKEN",
+        {
+            "description": "New description",
+            "tags": ["prod", "skill:github"],
+            "policy": {
+                "allowed_hosts": ["https://api.github.com/repos/avibe-bot/avibe"],
+                "auth": {"type": "header", "name": "X-GitHub-Token"},
+            },
+        },
+    )
+
+    assert updated["ok"] is True
+    secret = updated["secret"]
+    assert secret["description"] == "New description"
+    assert secret["tags"] == ["prod", "skill:github"]
+    assert secret["policy"] == {
+        "always_ask": True,
+        "allowed_hosts": ["api.github.com"],
+        "auth": {"type": "header", "name": "X-GitHub-Token"},
+    }
+    assert ("vaults.updated", {"scope": "secret", "secret_name": "FETCH_TOKEN"}) in published
+    with api._vault_engine().connect() as conn:
+        grant_row = conn.execute(select(vault_service.vault_grants).where(vault_service.vault_grants.c.id == grant["id"])).mappings().one()
+        assert grant_row["status"] == "active"
+        events = conn.execute(select(vault_audit.c.event, vault_audit.c.secret_name)).all()
+        assert ("metadata-updated", "FETCH_TOKEN") in events
+
+
+def test_update_secret_metadata_rejects_secret_material(monkeypatch):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed()))
+    api.create_vault_secret(
+        {
+            "name": "NO_VALUE_PATCH",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        }
+    )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.update_vault_secret("NO_VALUE_PATCH", {"tags": ["prod"], "value": "plaintext"})
+
+    assert exc.value.code == "secret_material_rejected"
+
+
 def test_create_with_links_persists_skill_link(monkeypatch):
     from unittest.mock import Mock
 

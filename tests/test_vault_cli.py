@@ -224,6 +224,48 @@ def test_vault_sign_command_flag_does_not_shadow_root_command():
     assert cli._vault_cli_delivery(args)["command"] == "wallet sign"
 
 
+def test_edit_updates_value_free_metadata(capfd):
+    _create_standard_secret(
+        "EDIT_ME",
+        tags=["old"],
+        description="old description",
+        policy={"allowed_hosts": ["old.example.com"], "auth": {"type": "bearer"}, "always_ask": True},
+    )
+
+    code = cli.cmd_vault_edit(
+        _ns(
+            name="EDIT_ME",
+            description="new description",
+            tag=["prod,deploy"],
+            skill=["github-review"],
+            allow_host=["https://api.github.com/repos"],
+            fetch_auth="header",
+            auth_name="X-GitHub-Token",
+        )
+    )
+
+    assert code == 0
+    payload = json.loads(capfd.readouterr().out)
+    secret = payload["secret"]
+    assert secret["description"] == "new description"
+    assert secret["tags"] == ["prod", "deploy", "skill:github-review"]
+    assert secret["policy"] == {
+        "always_ask": True,
+        "allowed_hosts": ["api.github.com"],
+        "auth": {"type": "header", "name": "X-GitHub-Token"},
+    }
+
+
+def test_edit_metadata_json_rejects_secret_material(capfd):
+    _create_standard_secret("EDIT_SAFE")
+
+    code = cli.cmd_vault_edit(_ns(name="EDIT_SAFE", metadata_json='{"tags":["prod"],"value":"plaintext"}'))
+
+    assert code == 1
+    payload = json.loads(capfd.readouterr().err)
+    assert payload["code"] == "secret_material_rejected"
+
+
 def test_discover_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
     _create_standard_secret("STANDARD_KEY")
     with cli._open_vault_engine().begin() as conn:
