@@ -13,7 +13,7 @@ import pytest
 
 from vibe import ui_server
 from core import file_browser_service as fs
-from core.file_browser_service import FileBrowserError
+from core.file_browser_service import ConflictError, FileBrowserError
 from tests.ui_server_test_helpers import csrf_headers
 from vibe.ui_server import app
 
@@ -609,6 +609,64 @@ def test_upload_uses_stable_directory_after_validation(tmp_path, monkeypatch):
     assert result["path"] == str(upload_dir / "safe.bin")
     assert (moved_upload_dir / "safe.bin").read_bytes() == b"safe"
     assert not (attacker_dir / "safe.bin").exists()
+
+
+def test_upload_create_only_falls_back_when_hard_links_unsupported(tmp_path, monkeypatch):
+    # FAT/exFAT/SMB-style filesystems refuse os.link; create-only publish must degrade to
+    # the guarded replace instead of failing the upload outright.
+    def refuse_link(*args, **kwargs):
+        raise OSError(errno.EOPNOTSUPP, "Operation not supported")
+
+    monkeypatch.setattr(fs.os, "link", refuse_link)
+
+    result = fs.upload_file(str(tmp_path), io.BytesIO(b"payload"), filename="fallback.bin")
+    uploaded = tmp_path / "fallback.bin"
+    assert result["path"] == str(uploaded)
+    assert uploaded.read_bytes() == b"payload"
+    assert not list(tmp_path.glob(f"{fs._WRITE_TEMP_PREFIX}*.tmp"))
+
+    # The fallback still refuses to replace an existing target (create-only contract).
+    with pytest.raises(ConflictError) as exc:
+        fs.upload_file(str(tmp_path), io.BytesIO(b"other"), filename="fallback.bin")
+    assert exc.value.code == "exists"
+    assert uploaded.read_bytes() == b"payload"
+    assert not list(tmp_path.glob(f"{fs._WRITE_TEMP_PREFIX}*.tmp"))
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="requires POSIX non-root permissions")
+def test_upload_permission_denied_maps_to_403(tmp_path):
+    read_only = tmp_path / "readonly"
+    read_only.mkdir()
+    read_only.chmod(0o555)
+    try:
+        with pytest.raises(FileBrowserError) as exc:
+            fs.upload_file(str(read_only), io.BytesIO(b"x"), filename="denied.bin")
+        assert exc.value.code == "permission_denied"
+        assert exc.value.status_code == 403
+        assert list(read_only.iterdir()) == []
+    finally:
+        read_only.chmod(0o755)
+
+
+def test_upload_works_without_directory_fd(tmp_path, monkeypatch):
+    # Platforms that cannot open a directory fd (native Windows) degrade to path-based
+    # operation; the upload and its create-only contract must still work there.
+    monkeypatch.setattr(fs, "_open_stable_upload_directory", lambda directory: None)
+
+    result = fs.upload_file(str(tmp_path), io.BytesIO(b"portable"), filename="nofd.bin")
+    uploaded = tmp_path / "nofd.bin"
+    assert result["path"] == str(uploaded)
+    assert uploaded.read_bytes() == b"portable"
+    assert result["mtime"] == fs._mtime_seconds(uploaded.stat())
+
+    with pytest.raises(ConflictError) as exc:
+        fs.upload_file(str(tmp_path), io.BytesIO(b"clash"), filename="nofd.bin")
+    assert exc.value.code == "exists"
+
+    replaced = fs.upload_file(str(tmp_path), io.BytesIO(b"replaced"), filename="nofd.bin", overwrite=True)
+    assert replaced["size"] == len(b"replaced")
+    assert uploaded.read_bytes() == b"replaced"
+    assert not list(tmp_path.glob(f"{fs._WRITE_TEMP_PREFIX}*.tmp"))
 
 
 def test_upload_file_size_cap_cleans_temp_and_target(tmp_path, monkeypatch):

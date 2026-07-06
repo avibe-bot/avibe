@@ -60,6 +60,8 @@ _WRITE_LOCKS_MUTEX = threading.Lock()
 _WRITE_LOCKS: dict[str, threading.Lock] = {}
 _WRITE_TEMP_PREFIX = ".avibe-write-"
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
+_NO_REPLACE_UNSUPPORTED_ERRNOS = {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}
+_HARD_LINK_UNSUPPORTED_ERRNOS = {errno.EPERM, errno.EXDEV, errno.ENOTSUP, errno.EOPNOTSUPP}
 
 
 class FileBrowserError(Exception):
@@ -274,6 +276,32 @@ def _remove_created_hard_link(target: Path, source: Path) -> None:
 
 
 def _glibc_renameat2_noreplace(source: Path, target: Path) -> None:
+    _glibc_renameat2_noreplace_between(
+        _AT_FDCWD,
+        os.fsencode(source),
+        _AT_FDCWD,
+        os.fsencode(target),
+        str(target),
+    )
+
+
+def _glibc_renameat2_noreplace_at(dir_fd: int, source_name: str, target_name: str) -> None:
+    _glibc_renameat2_noreplace_between(
+        dir_fd,
+        os.fsencode(source_name),
+        dir_fd,
+        os.fsencode(target_name),
+        target_name,
+    )
+
+
+def _glibc_renameat2_noreplace_between(
+    source_dir_fd: int,
+    source_name: bytes,
+    target_dir_fd: int,
+    target_name: bytes,
+    target_for_error: str,
+) -> None:
     if sys.platform != "linux":
         raise AttributeError("renameat2 is only available on Linux")
     libc = ctypes.CDLL(None, use_errno=True)
@@ -287,17 +315,17 @@ def _glibc_renameat2_noreplace(source: Path, target: Path) -> None:
     ]
     renameat2.restype = ctypes.c_int
     result = renameat2(
-        _AT_FDCWD,
-        os.fsencode(source),
-        _AT_FDCWD,
-        os.fsencode(target),
+        source_dir_fd,
+        source_name,
+        target_dir_fd,
+        target_name,
         _RENAME_NOREPLACE,
     )
     if result != 0:
         err = ctypes.get_errno()
         if err == errno.EEXIST:
-            raise FileExistsError(err, os.strerror(err), str(target))
-        raise OSError(err, os.strerror(err), str(target))
+            raise FileExistsError(err, os.strerror(err), target_for_error)
+        raise OSError(err, os.strerror(err), target_for_error)
 
 
 def _warn_rename_noreplace_fallback() -> None:
@@ -690,7 +718,7 @@ def _resolve_upload_directory(raw_dir: str) -> Path:
     except FileNotFoundError as exc:
         raise NotFoundError("Destination directory not found") from exc
     except PermissionError as exc:
-        raise FileBrowserError("fs_error", "Permission denied", 400) from exc
+        raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
     except OSError as exc:
         raise FileBrowserError("fs_error", str(exc), 400) from exc
     if not stat.S_ISDIR(stat_result.st_mode):
@@ -698,17 +726,28 @@ def _resolve_upload_directory(raw_dir: str) -> Path:
     return directory
 
 
-def _open_stable_upload_directory(directory: Path) -> int:
+def _open_stable_upload_directory(directory: Path) -> int | None:
+    """Pin the validated destination directory with an fd where the platform can.
+
+    The fd keeps the whole streaming window (validate → temp → publish) inside the
+    directory inode that was validated, so a writable-parent swap cannot redirect the
+    upload. On platforms that cannot open a directory fd (native Windows), return
+    ``None`` — the upload then operates path-based with no-follow re-checks, the same
+    stability level as the sibling list/write/rename mutations there.
+    """
     try:
         expected = directory.lstat()
     except FileNotFoundError as exc:
         raise NotFoundError("Destination directory not found") from exc
     except PermissionError as exc:
-        raise FileBrowserError("fs_error", "Permission denied", 400) from exc
+        raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
     except OSError as exc:
         raise FileBrowserError("fs_error", str(exc), 400) from exc
     if not stat.S_ISDIR(expected.st_mode):
         raise FileBrowserError("not_dir", "Destination is not a directory", 400)
+
+    if os.name != "posix":
+        return None
 
     flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
@@ -726,7 +765,7 @@ def _open_stable_upload_directory(directory: Path) -> int:
             raise FileBrowserError("not_dir", "Destination is not a directory", 400)
         return fd
     except PermissionError as exc:
-        raise FileBrowserError("fs_error", "Permission denied", 400) from exc
+        raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
     except OSError as exc:
         if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
             raise FileBrowserError("not_dir", "Destination is not a directory", 400) from exc
@@ -737,13 +776,25 @@ def _open_stable_upload_directory(directory: Path) -> int:
         raise
 
 
-def _validate_upload_target_at(dir_fd: int, target_name: str, *, overwrite: bool) -> int | None:
+# Errnos meaning "this filesystem cannot hard-link" (FAT/exFAT, SMB/CIFS, some NFS):
+# fall back to the guarded non-atomic publish below. EPERM is included because CIFS
+# reports link refusal as EPERM; a genuine permission problem then surfaces from the
+# fallback's replace with the right error anyway.
+_LINK_UNSUPPORTED_ERRNOS = {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EPERM}
+
+
+def _upload_entry_ref(dir_fd: int | None, directory: Path, name: str) -> str:
+    """Name to pass to os.* alongside ``dir_fd``: relative when pinned, absolute when not."""
+    return name if dir_fd is not None else str(directory / name)
+
+
+def _validate_upload_target_at(dir_fd: int | None, directory: Path, target_name: str, *, overwrite: bool) -> int | None:
     try:
-        stat_result = os.stat(target_name, dir_fd=dir_fd, follow_symlinks=False)
+        stat_result = os.stat(_upload_entry_ref(dir_fd, directory, target_name), dir_fd=dir_fd, follow_symlinks=False)
     except FileNotFoundError:
         return None
     except PermissionError as exc:
-        raise FileBrowserError("fs_error", "Permission denied", 400) from exc
+        raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
     except OSError as exc:
         raise FileBrowserError("fs_error", str(exc), 400) from exc
     if not overwrite or not stat.S_ISREG(stat_result.st_mode):
@@ -751,48 +802,69 @@ def _validate_upload_target_at(dir_fd: int, target_name: str, *, overwrite: bool
     return stat.S_IMODE(stat_result.st_mode)
 
 
-def _create_upload_temp_at(dir_fd: int) -> tuple[int, str]:
+def _create_upload_temp_at(dir_fd: int | None, directory: Path) -> tuple[int, str]:
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     for _ in range(100):
         temp_name = f"{_WRITE_TEMP_PREFIX}{uuid.uuid4().hex}.tmp"
         try:
-            return os.open(temp_name, flags, 0o666, dir_fd=dir_fd), temp_name
+            return os.open(_upload_entry_ref(dir_fd, directory, temp_name), flags, 0o666, dir_fd=dir_fd), temp_name
         except FileExistsError:
             continue
         except PermissionError as exc:
-            raise FileBrowserError("fs_error", "Permission denied", 400) from exc
+            raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
         except OSError as exc:
             raise FileBrowserError("fs_error", str(exc), 400) from exc
     raise FileBrowserError("fs_error", "Could not reserve upload temp file", 400)
 
 
-def _publish_upload_temp_at(dir_fd: int, temp_name: str, target_name: str, *, overwrite: bool) -> None:
+def _publish_upload_temp_at(
+    dir_fd: int | None, directory: Path, temp_name: str, target_name: str, *, overwrite: bool
+) -> None:
+    temp_ref = _upload_entry_ref(dir_fd, directory, temp_name)
+    target_ref = _upload_entry_ref(dir_fd, directory, target_name)
     if overwrite:
-        os.replace(temp_name, target_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        os.replace(temp_ref, target_ref, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         return
+    # Create-only publish ladder, mirroring _os_rename_noreplace's policy: hard link is
+    # the atomic no-replace primitive where the filesystem has one; where it doesn't
+    # (FAT/exFAT/SMB), degrade to a guarded check+replace with the same warning the
+    # rename fallback emits. renameat2(RENAME_NOREPLACE) is not a useful middle rung
+    # here: filesystems that refuse link() refuse its flags too.
     try:
-        os.link(temp_name, target_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
+        os.link(temp_ref, target_ref, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
     except FileExistsError as exc:
         raise ConflictError("exists", "Destination already exists") from exc
-    _unlink_upload_temp_after_link(dir_fd, temp_name, target_name)
+    except OSError as exc:
+        if exc.errno not in _LINK_UNSUPPORTED_ERRNOS:
+            raise
+        _warn_rename_noreplace_fallback()
+        try:
+            os.stat(target_ref, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise ConflictError("exists", "Destination already exists") from exc
+        os.replace(temp_ref, target_ref, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        return
+    _unlink_upload_temp_after_link(dir_fd, directory, temp_name, target_name)
 
 
-def _unlink_upload_temp_after_link(dir_fd: int, temp_name: str, target_name: str) -> None:
+def _unlink_upload_temp_after_link(dir_fd: int | None, directory: Path, temp_name: str, target_name: str) -> None:
     try:
-        os.unlink(temp_name, dir_fd=dir_fd)
+        os.unlink(_upload_entry_ref(dir_fd, directory, temp_name), dir_fd=dir_fd)
     except OSError:
-        _remove_created_upload_link_at(dir_fd, temp_name, target_name)
+        _remove_created_upload_link_at(dir_fd, directory, temp_name, target_name)
         raise
 
 
-def _remove_created_upload_link_at(dir_fd: int, temp_name: str, target_name: str) -> None:
+def _remove_created_upload_link_at(dir_fd: int | None, directory: Path, temp_name: str, target_name: str) -> None:
     try:
-        temp_stat = os.stat(temp_name, dir_fd=dir_fd, follow_symlinks=False)
-        target_stat = os.stat(target_name, dir_fd=dir_fd, follow_symlinks=False)
+        temp_stat = os.stat(_upload_entry_ref(dir_fd, directory, temp_name), dir_fd=dir_fd, follow_symlinks=False)
+        target_stat = os.stat(_upload_entry_ref(dir_fd, directory, target_name), dir_fd=dir_fd, follow_symlinks=False)
         if (temp_stat.st_dev, temp_stat.st_ino) == (target_stat.st_dev, target_stat.st_ino):
-            os.unlink(target_name, dir_fd=dir_fd)
+            os.unlink(_upload_entry_ref(dir_fd, directory, target_name), dir_fd=dir_fd)
     except OSError:
         logger.debug("Failed to remove rollback upload hard link after temp unlink failure", exc_info=True)
 
@@ -810,16 +882,16 @@ def upload_file(
     target = directory / target_name
     dir_fd = _open_stable_upload_directory(directory)
     try:
-        _validate_upload_target_at(dir_fd, target_name, overwrite=overwrite)
+        _validate_upload_target_at(dir_fd, directory, target_name, overwrite=overwrite)
 
         def _upload() -> dict[str, Any]:
             with _write_lock_for(target):
-                current_mode = _validate_upload_target_at(dir_fd, target_name, overwrite=overwrite)
+                current_mode = _validate_upload_target_at(dir_fd, directory, target_name, overwrite=overwrite)
                 fd = -1
                 temp_name = ""
                 size = 0
                 try:
-                    fd, temp_name = _create_upload_temp_at(dir_fd)
+                    fd, temp_name = _create_upload_temp_at(dir_fd, directory)
                     if current_mode is not None and hasattr(os, "fchmod"):
                         os.fchmod(fd, current_mode)
                     with os.fdopen(fd, "wb") as handle:
@@ -836,13 +908,18 @@ def upload_file(
                             size += len(chunk)
                         handle.flush()
                         os.fsync(handle.fileno())
-                    _publish_upload_temp_at(dir_fd, temp_name, target_name, overwrite=overwrite)
+                    _publish_upload_temp_at(dir_fd, directory, temp_name, target_name, overwrite=overwrite)
                     temp_name = ""
-                    try:
-                        os.fsync(dir_fd)
-                    except OSError:
-                        pass
-                    stat_result = os.stat(target_name, dir_fd=dir_fd, follow_symlinks=False)
+                    if dir_fd is not None:
+                        try:
+                            os.fsync(dir_fd)
+                        except OSError:
+                            pass
+                    else:
+                        _fsync_dir(directory)
+                    stat_result = os.stat(
+                        _upload_entry_ref(dir_fd, directory, target_name), dir_fd=dir_fd, follow_symlinks=False
+                    )
                     return {
                         "name": target.name,
                         "path": str(target),
@@ -852,7 +929,7 @@ def upload_file(
                 except FileExistsError as exc:
                     raise ConflictError("exists", "Destination already exists") from exc
                 except PermissionError as exc:
-                    raise FileBrowserError("fs_error", "Permission denied", 400) from exc
+                    raise FileBrowserError("permission_denied", "Permission denied", 403) from exc
                 except OSError as exc:
                     raise FileBrowserError("fs_error", str(exc), 400) from exc
                 finally:
@@ -860,13 +937,16 @@ def upload_file(
                         os.close(fd)
                     if temp_name:
                         try:
-                            os.unlink(temp_name, dir_fd=dir_fd)
+                            os.unlink(_upload_entry_ref(dir_fd, directory, temp_name), dir_fd=dir_fd)
                         except FileNotFoundError:
                             pass
+                        except OSError:
+                            logger.debug("Failed to clean up upload temp file", exc_info=True)
 
         return _run_mutation("upload", target, _upload, overwrite=overwrite)
     finally:
-        os.close(dir_fd)
+        if dir_fd is not None:
+            os.close(dir_fd)
 
 
 def rename_path(raw_path: str, new_name: str) -> dict[str, Any]:
